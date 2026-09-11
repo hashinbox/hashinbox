@@ -40,9 +40,11 @@ impl DatabasePath {
                 "failed to resolve redb database parent directory: {error}"
             ))
         })?;
-        let resolved = canonical_parent.join(file_name);
+        Self::from_resolved_file(canonical_parent.join(file_name))
+    }
 
-        let initialize = match fs::metadata(&resolved) {
+    fn from_resolved_file(path: PathBuf) -> Result<Self, Error> {
+        let initialize = match fs::metadata(&path) {
             Ok(metadata) if metadata.is_dir() => {
                 return Err(Error::invalid_request(
                     "redb database path must be a file, not a directory",
@@ -62,10 +64,7 @@ impl DatabasePath {
             }
         };
 
-        Ok(Self {
-            path: resolved,
-            initialize,
-        })
+        Ok(Self { path, initialize })
     }
 }
 

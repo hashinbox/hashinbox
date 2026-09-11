@@ -75,49 +75,12 @@ impl Redb {
             ));
         }
 
-        let path = path.as_ref().to_path_buf();
-        let (command_tx, command_rx) = mpsc::channel(command_queue_capacity);
-        let (startup_tx, startup_rx) = std_mpsc::sync_channel(1);
-        let worker = thread::Builder::new()
-            .name("storage-redb-owner".to_owned())
-            .spawn(move || {
-                let backend = match Backend::open(&path) {
-                    Ok(backend) => backend,
-                    Err(error) => {
-                        drop(startup_tx.send(Err(error)));
-                        return;
-                    }
-                };
-                if startup_tx.send(Ok(())).is_ok() {
-                    backend.run(command_rx);
-                }
-            })
-            .map_err(|error| unavailable(format!("failed to spawn redb owner thread: {error}")))?;
-
-        match startup_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
-                inner: Arc::new(WorkerHandle {
-                    command_tx: Some(command_tx),
-                    worker: Some(worker),
-                }),
-            }),
-            Ok(Err(error)) => {
-                drop(command_tx);
-                drop(worker.join());
-                Err(error)
-            }
-            Err(error) => {
-                drop(command_tx);
-                let detail = if worker.join().is_err() {
-                    "the owner thread panicked during startup"
-                } else {
-                    "the owner thread exited during startup"
-                };
-                Err(unavailable(format!(
-                    "failed to receive redb startup result: {error}; {detail}"
-                )))
-            }
-        }
+        Ok(Self {
+            inner: Arc::new(WorkerHandle::open(
+                path.as_ref().to_path_buf(),
+                command_queue_capacity,
+            )?),
+        })
     }
 
     fn command_sender(&self) -> Result<mpsc::Sender<Command>, Error> {
@@ -246,6 +209,51 @@ impl Store for Redb {
                 unavailable("redb owner thread stopped before commit returned a result")
             })?
         })
+    }
+}
+
+impl WorkerHandle {
+    fn open(path: PathBuf, command_queue_capacity: usize) -> Result<Self, Error> {
+        let (command_tx, command_rx) = mpsc::channel(command_queue_capacity);
+        let (startup_tx, startup_rx) = std_mpsc::sync_channel(1);
+        let worker = thread::Builder::new()
+            .name("storage-redb-owner".to_owned())
+            .spawn(move || {
+                let backend = match Backend::open(&path) {
+                    Ok(backend) => backend,
+                    Err(error) => {
+                        drop(startup_tx.send(Err(error)));
+                        return;
+                    }
+                };
+                if startup_tx.send(Ok(())).is_ok() {
+                    backend.run(command_rx);
+                }
+            })
+            .map_err(|error| unavailable(format!("failed to spawn redb owner thread: {error}")))?;
+
+        match startup_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                command_tx: Some(command_tx),
+                worker: Some(worker),
+            }),
+            Ok(Err(error)) => {
+                drop(command_tx);
+                drop(worker.join());
+                Err(error)
+            }
+            Err(error) => {
+                drop(command_tx);
+                let detail = if worker.join().is_err() {
+                    "the owner thread panicked during startup"
+                } else {
+                    "the owner thread exited during startup"
+                };
+                Err(unavailable(format!(
+                    "failed to receive redb startup result: {error}; {detail}"
+                )))
+            }
+        }
     }
 }
 
@@ -421,3 +429,49 @@ mod store_test;
 #[cfg(test)]
 #[path = "backend/recovery_test.rs"]
 mod recovery_test;
+
+#[cfg(test)]
+mod tests {
+    use redb::ReadableDatabase;
+
+    use super::*;
+
+    #[test]
+    fn zero_capacity_is_rejected_before_path_validation() {
+        for path in ["", "relative.redb"] {
+            let error = Redb::open_with_queue_capacity(path, 0)
+                .err()
+                .expect("invalid queue capacity");
+            assert_eq!(error.kind, storage::ErrorKind::InvalidRequest);
+            assert_eq!(
+                error.message,
+                "redb command queue capacity must be greater than zero"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_startup_releases_the_file_without_changing_foreign_data() {
+        const FOREIGN: TableDefinition<&str, &str> = TableDefinition::new("foreign");
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("foreign.redb");
+        let database = Database::create(&path).expect("foreign database");
+        let transaction = database.begin_write().expect("foreign transaction");
+        {
+            let mut table = transaction.open_table(FOREIGN).expect("foreign table");
+            table.insert("sentinel", "preserved").expect("foreign row");
+        }
+        transaction.commit().expect("foreign commit");
+        drop(database);
+
+        let error = Redb::open(&path).err().expect("foreign format rejected");
+        assert_eq!(error.kind, storage::ErrorKind::CorruptData);
+        let reopened = Database::open(&path).expect("startup failure releases file lock");
+        let read = reopened.begin_read().expect("read foreign database");
+        let table = read.open_table(FOREIGN).expect("foreign table remains");
+        assert_eq!(
+            table.get("sentinel").expect("foreign row").unwrap().value(),
+            "preserved"
+        );
+    }
+}

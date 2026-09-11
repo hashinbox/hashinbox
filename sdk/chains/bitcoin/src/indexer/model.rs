@@ -195,8 +195,25 @@ impl Transaction {
                 "Bitcoin transaction ID does not match its consensus bytes",
             ));
         }
-        let coinbase = native.is_coinbase();
+        Self::parse_verbose(
+            object,
+            txid,
+            &native,
+            block_height,
+            network,
+            same_block_outputs,
+        )
+    }
 
+    fn parse_verbose(
+        object: &Map<String, Value>,
+        id: TransactionId,
+        native: &NativeTransaction,
+        block_height: BlockHeight,
+        network: Network,
+        same_block_outputs: &BTreeMap<Outpoint, PreviousOutput>,
+    ) -> Result<Self, ParseError> {
+        let coinbase = native.is_coinbase();
         let input_values = object
             .get("vin")
             .and_then(Value::as_array)
@@ -218,7 +235,6 @@ impl Transaction {
                 same_block_outputs,
             )?);
         }
-
         let output_values = object
             .get("vout")
             .and_then(Value::as_array)
@@ -229,56 +245,59 @@ impl Transaction {
             ));
         }
         let mut outputs = Vec::with_capacity(output_values.len());
-        for (position, (output, native_output)) in
-            output_values.iter().zip(&native.output).enumerate()
-        {
-            let object = output
-                .as_object()
-                .ok_or_else(|| ParseError::new("Bitcoin transaction output must be an object"))?;
-            let output_index = required_u64(object, "n", "Bitcoin output index")?;
-            if usize::try_from(output_index).ok() != Some(position) {
-                return Err(ParseError::new(
-                    "Bitcoin transaction output index does not match its position",
-                ));
-            }
-            let value = Satoshi::from_block_json(
-                object
-                    .get("value")
-                    .ok_or_else(|| ParseError::new("Bitcoin output value is missing"))?,
-                "Bitcoin output value",
-            )?;
-            if native_output.value.to_sat() != value.0 {
-                return Err(ParseError::new(
-                    "Bitcoin output value does not match its consensus bytes",
-                ));
-            }
-            let script = object
-                .get("scriptPubKey")
-                .and_then(Value::as_object)
-                .ok_or_else(|| ParseError::new("Bitcoin output scriptPubKey is missing"))?;
-            let hex = script
-                .get("hex")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ParseError::new("Bitcoin scriptPubKey hex is missing or invalid"))?;
-            let bytes = Vec::<u8>::from_hex(hex)
-                .map_err(|_| ParseError::new("Bitcoin scriptPubKey hex is invalid"))?;
-            let script = ScriptBuf::from_bytes(bytes);
-            if native_output.script_pubkey != script {
-                return Err(ParseError::new(
-                    "Bitcoin output script does not match its consensus bytes",
-                ));
-            }
-            outputs.push(Output {
-                value,
-                script_pubkey: script.into_bytes(),
-            });
+        for (index, (output, expected)) in output_values.iter().zip(&native.output).enumerate() {
+            outputs.push(Output::parse(output, expected, index)?);
         }
-
         Ok(Self {
-            id: txid,
+            id,
             inputs,
             outputs,
             coinbase,
+        })
+    }
+}
+
+impl Output {
+    fn parse(output: &Value, native: &bitcoin::TxOut, position: usize) -> Result<Self, ParseError> {
+        let object = output
+            .as_object()
+            .ok_or_else(|| ParseError::new("Bitcoin transaction output must be an object"))?;
+        let output_index = required_u64(object, "n", "Bitcoin output index")?;
+        if usize::try_from(output_index).ok() != Some(position) {
+            return Err(ParseError::new(
+                "Bitcoin transaction output index does not match its position",
+            ));
+        }
+        let value = Satoshi::from_block_json(
+            object
+                .get("value")
+                .ok_or_else(|| ParseError::new("Bitcoin output value is missing"))?,
+            "Bitcoin output value",
+        )?;
+        if native.value.to_sat() != value.0 {
+            return Err(ParseError::new(
+                "Bitcoin output value does not match its consensus bytes",
+            ));
+        }
+        let script = object
+            .get("scriptPubKey")
+            .and_then(Value::as_object)
+            .ok_or_else(|| ParseError::new("Bitcoin output scriptPubKey is missing"))?;
+        let hex = script
+            .get("hex")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ParseError::new("Bitcoin scriptPubKey hex is missing or invalid"))?;
+        let bytes = Vec::<u8>::from_hex(hex)
+            .map_err(|_| ParseError::new("Bitcoin scriptPubKey hex is invalid"))?;
+        let script = ScriptBuf::from_bytes(bytes);
+        if native.script_pubkey != script {
+            return Err(ParseError::new(
+                "Bitcoin output script does not match its consensus bytes",
+            ));
+        }
+        Ok(Self {
+            value,
+            script_pubkey: script.into_bytes(),
         })
     }
 }
@@ -442,6 +461,178 @@ mod tests {
     use bitcoin::hex::DisplayHex;
 
     use super::*;
+
+    #[test]
+    fn transaction_projection_preserves_consensus_checks_and_error_precedence() {
+        let native = NativeTransaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![
+                bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(10),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x6a]),
+                },
+                bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(20),
+                    script_pubkey: ScriptBuf::new(),
+                },
+            ],
+        };
+        let original = serde_json::json!({
+            "txid": native.compute_txid().to_string(),
+            "hex": consensus::serialize(&native).to_lower_hex_string(),
+            "vin": [{"coinbase": "00"}],
+            "vout": [
+                {
+                    "n": 0,
+                    "value": "0.00000010".parse::<serde_json::Number>().unwrap(),
+                    "scriptPubKey": {"hex": "6a"},
+                },
+                {
+                    "n": 1,
+                    "value": "0.00000020".parse::<serde_json::Number>().unwrap(),
+                    "scriptPubKey": {"hex": ""},
+                },
+            ],
+        });
+        let parsed = Transaction::parse(
+            &original,
+            BlockHeight(10),
+            Network::Regtest,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(parsed.id, TransactionId::from(native.compute_txid()));
+        assert!(parsed.coinbase);
+        assert_eq!(
+            parsed.inputs,
+            vec![Input {
+                previous_output: None
+            }]
+        );
+        assert_eq!(
+            parsed.outputs,
+            vec![
+                Output {
+                    value: Satoshi(10),
+                    script_pubkey: vec![0x6a]
+                },
+                Output {
+                    value: Satoshi(20),
+                    script_pubkey: vec![]
+                },
+            ]
+        );
+
+        for (path, invalid, message) in [
+            (
+                "/txid",
+                serde_json::json!("00".repeat(32)),
+                "Bitcoin transaction ID does not match its consensus bytes",
+            ),
+            (
+                "/hex",
+                serde_json::json!("ff"),
+                "Bitcoin transaction consensus bytes are invalid",
+            ),
+            (
+                "/vin",
+                Value::Null,
+                "Bitcoin transaction inputs must be an array",
+            ),
+            (
+                "/vin",
+                serde_json::json!([]),
+                "Bitcoin transaction input count does not match its consensus bytes",
+            ),
+            (
+                "/vin/0",
+                Value::Null,
+                "Bitcoin transaction input must be an object",
+            ),
+            (
+                "/vout",
+                Value::Null,
+                "Bitcoin transaction outputs must be an array",
+            ),
+            (
+                "/vout",
+                serde_json::json!([]),
+                "Bitcoin transaction output count does not match its consensus bytes",
+            ),
+            (
+                "/vout/0",
+                Value::Null,
+                "Bitcoin transaction output must be an object",
+            ),
+            (
+                "/vout/0/n",
+                serde_json::json!(1),
+                "Bitcoin transaction output index does not match its position",
+            ),
+            (
+                "/vout/0/value",
+                serde_json::json!(0),
+                "Bitcoin output value does not match its consensus bytes",
+            ),
+            (
+                "/vout/0/scriptPubKey",
+                Value::Null,
+                "Bitcoin output scriptPubKey is missing",
+            ),
+            (
+                "/vout/0/scriptPubKey/hex",
+                serde_json::json!("6b"),
+                "Bitcoin output script does not match its consensus bytes",
+            ),
+        ] {
+            let mut transaction = original.clone();
+            // Earlier transaction/input/output errors must win over the later output.
+            transaction["vout"][1]["value"] = serde_json::json!(0);
+            *transaction.pointer_mut(path).unwrap() = invalid;
+            let error = Transaction::parse(
+                &transaction,
+                BlockHeight(10),
+                Network::Regtest,
+                &BTreeMap::new(),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), message, "{path}");
+        }
+
+        let mut transaction = original;
+        transaction["vout"][0]["n"] = serde_json::json!(1);
+        transaction["vout"][0]["value"] = serde_json::json!(0);
+        transaction["vout"][0]["scriptPubKey"] = Value::Null;
+        for (field, restored, message) in [
+            (
+                "n",
+                serde_json::json!(0),
+                "Bitcoin transaction output index does not match its position",
+            ),
+            (
+                "value",
+                serde_json::json!("0.00000010".parse::<serde_json::Number>().unwrap()),
+                "Bitcoin output value does not match its consensus bytes",
+            ),
+        ] {
+            let error = Transaction::parse(
+                &transaction,
+                BlockHeight(10),
+                Network::Regtest,
+                &BTreeMap::new(),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), message);
+            transaction["vout"][0][field] = restored;
+        }
+    }
 
     #[test]
     fn genesis_parent_rules_preserve_identity_validation_order() {
