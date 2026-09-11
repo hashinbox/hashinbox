@@ -15,7 +15,6 @@ members = [
     "packages/storage/redb",
     "packages/json-rpc",
     "packages/http",
-    "packages/design-lint",
 ]
 exclude = ["old", "reference"]
 resolver = "3"

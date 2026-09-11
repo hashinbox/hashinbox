@@ -29,19 +29,9 @@ allow = true
 description = "Repository entry points for agent guidance, architecture, and usage."
 
 [[rules.layout]]
-target = ["{apps,sdk,packages}/**/README.md", "packages/*/{PROVENANCE,ADOPTION}.md"]
+target = "{apps,sdk,packages}/**/README.md"
 allow = true
-description = "Crate usage, third-party provenance, and adoption evidence beside the owning package."
-
-[[rules.layout]]
-target = "lint/examples/*.md"
-allow = true
-description = "Reviewed positive and negative design examples."
-
-[[rules.layout]]
-target = "lint/{errors,check}/*.md"
-allow = true
-description = "Existing flat generated lint-review case documents."
+description = "Crate usage documentation beside the owning package."
 
 [[rules.layout]]
 target = "tests/kurtosis/*/README.md"
