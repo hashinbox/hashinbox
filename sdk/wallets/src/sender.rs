@@ -156,7 +156,8 @@ mod tests {
         assert_eq!(failure.source.ambiguous_transaction_id, None);
         assert_eq!(
             failure.to_string(),
-            "transaction 4 failed after 2 accepted transaction(s): item submission outcome is unknown"
+            "transaction 4 failed after 2 accepted transaction(s): item submission \
+            outcome is unknown"
         );
     }
 

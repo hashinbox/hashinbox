@@ -40,7 +40,9 @@ impl ResolvedOutput {
     }
 }
 
-// design-lint: allow unclassified-free-function -- shared Bitcoin RPC-to-consensus conversion verifies JSON bytes against an independent expected txid and preserves source retryability without RPC policy on transaction IDs
+// shared Bitcoin RPC-to-consensus conversion verifies JSON bytes against an independent expected
+// txid and preserves source retryability without RPC policy on transaction IDs
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn decode_consensus_transaction(
     object: &Map<String, Value>,
     expected_id: TransactionId,
@@ -58,7 +60,9 @@ pub(super) fn decode_consensus_transaction(
     Ok(transaction)
 }
 
-// design-lint: allow unclassified-free-function -- Bitcoin RPC boundary compares independent foreign JSON and consensus input claims before prevout acquisition, preserving coinbase and outpoint validation order and source retryability
+// Bitcoin RPC boundary compares independent foreign JSON and consensus input claims before prevout
+// acquisition, preserving coinbase and outpoint validation order and source retryability
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn validate_input_claims(
     value: &Value,
     transaction: &Transaction,
@@ -137,7 +141,8 @@ impl RequiredPrevouts {
         }
         if transaction_ids.contains(&previous_id) {
             return Err(source_error(
-                "Bitcoin block transaction spends an output that was not created earlier in the block",
+                "Bitcoin block transaction spends an output that was not created \
+                 earlier in the block",
                 true,
             ));
         }
@@ -162,7 +167,8 @@ impl RequiredPrevouts {
         if self.count >= MAX_EXTERNAL_PREVOUTS_PER_BLOCK {
             return Err(source_error(
                 format!(
-                    "Bitcoin block exceeds the {MAX_EXTERNAL_PREVOUTS_PER_BLOCK} external-prevout safety bound"
+                    "Bitcoin block exceeds the {MAX_EXTERNAL_PREVOUTS_PER_BLOCK} \
+                     external-prevout safety bound"
                 ),
                 false,
             ));

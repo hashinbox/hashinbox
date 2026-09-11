@@ -1,7 +1,7 @@
 use std::{io, path::PathBuf};
 
-use super::{Diagnostic, Markdown, Reporter};
-use crate::{Finding, Location, Related, Review, Severity, Summary};
+use super::{Markdown, Printer, Reporter};
+use crate::{Finding, Location, RelatedLocation, Review, Severity, Summary};
 
 pub(super) fn example(severity: Severity) -> Finding {
     let location = Location {
@@ -20,7 +20,7 @@ pub(super) fn example(severity: Severity) -> Finding {
     };
     finding.message = "review the owner".into();
     finding.help = "use the existing domain receiver".into();
-    finding.related.push(Related {
+    finding.related.push(RelatedLocation {
         label: "call site".into(),
         location: Location {
             path: PathBuf::from("src/api.rs"),
@@ -39,7 +39,7 @@ pub(super) fn example(severity: Severity) -> Finding {
 
 #[test]
 fn diagnostics_render_both_severities_and_all_evidence() {
-    let mut reporter = Diagnostic::new(Vec::new());
+    let mut reporter = Printer::new(Vec::new());
     reporter
         .finding(&example(Severity::Warning))
         .expect("warning");
@@ -110,7 +110,7 @@ impl io::Write for BrokenOutput {
 #[test]
 fn reporter_output_errors_propagate() {
     let finding = example(Severity::Error);
-    assert!(Diagnostic::new(BrokenOutput).finding(&finding).is_err());
+    assert!(Printer::new(BrokenOutput).finding(&finding).is_err());
     assert!(Markdown::new(BrokenOutput).finding(&finding).is_err());
 }
 
@@ -153,7 +153,7 @@ fn all_reporters_display_project_relative_locations_for_each_scan_scope() {
         let workspace =
             crate::source::Workspace::load(vec![scan], &crate::Policy::default().source)
                 .expect("workspace");
-        let mut diagnostic = Diagnostic::new(Vec::new());
+        let mut diagnostic = Printer::new(Vec::new());
         diagnostic.begin(&workspace).expect("diagnostic context");
         diagnostic.finding(&finding).expect("diagnostic finding");
         let mut markdown = Markdown::new(Vec::new());

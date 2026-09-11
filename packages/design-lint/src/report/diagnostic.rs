@@ -10,12 +10,12 @@ use crate::{
 };
 
 /// Emits compiler-style diagnostics and summaries.
-pub struct Diagnostic<Output = io::Stderr> {
+pub struct Printer<Output = io::Stderr> {
     output: Output,
     roots: Vec<PathBuf>,
 }
 
-impl<Output> Diagnostic<Output> {
+impl<Output> Printer<Output> {
     /// Creates a diagnostic reporter with an injected output.
     pub fn new(output: Output) -> Self {
         Self {
@@ -30,13 +30,13 @@ impl<Output> Diagnostic<Output> {
     }
 }
 
-impl Default for Diagnostic<io::Stderr> {
+impl Default for Printer<io::Stderr> {
     fn default() -> Self {
         Self::new(io::stderr())
     }
 }
 
-impl<Output: Write> Diagnostic<Output> {
+impl<Output: Write> Printer<Output> {
     fn render(&mut self, finding: &Finding) -> io::Result<()> {
         writeln!(
             self.output,
@@ -78,7 +78,7 @@ impl<Output: Write> Diagnostic<Output> {
     }
 }
 
-impl<Output: Write> Reporter for Diagnostic<Output> {
+impl<Output: Write> Reporter for Printer<Output> {
     fn begin(&mut self, workspace: &crate::source::Workspace) -> Result<()> {
         self.roots.clone_from(&workspace.policy_roots);
         Ok(())

@@ -238,7 +238,8 @@ async fn schema_initializer_matches_catalog_keys_and_ownership() {
                           definition.indisprimary::text AS is_primary,
                           definition.indisunique::text AS is_unique,
                           (
-                              SELECT STRING_AGG(indexed_attribute.attname, ',' ORDER BY index_key.ordinality)
+                              SELECT STRING_AGG(indexed_attribute.attname, ',' ORDER BY \
+                              index_key.ordinality)
                               FROM UNNEST(definition.indkey)
                                    WITH ORDINALITY AS index_key(attnum, ordinality)
                               JOIN pg_attribute indexed_attribute
@@ -635,7 +636,8 @@ async fn concurrent_first_commits_are_serialized_by_scope() {
             (Ok(BlockOutcome::Applied), Ok(BlockOutcome::AlreadyApplied))
                 | (Ok(BlockOutcome::AlreadyApplied), Ok(BlockOutcome::Applied))
         ),
-        "one writer must apply and the serialized replay must be idempotent: {first_outcome:?}, {second_outcome:?}"
+        "one writer must apply and the serialized replay must be idempotent: \
+        {first_outcome:?}, {second_outcome:?}"
     );
     assert_eq!(tip(&repository, &scope).await, Some(first));
     assert_eq!(history(&repository, &scope, "receiver").await, ["funding"]);

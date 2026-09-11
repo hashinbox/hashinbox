@@ -56,7 +56,9 @@ impl Network {
     }
 }
 
-// design-lint: allow unclassified-free-function -- public Bitcoin wire adapter delegates reversed hash display order to the native parser and preserves RPC errors while returning a foreign neutral BlockHash
+// public Bitcoin wire adapter delegates reversed hash display order to the native parser and
+// preserves RPC errors while returning a foreign neutral BlockHash
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub fn parse_bitcoin_block_hash(value: &str) -> Result<BlockHash, SourceError> {
     value
         .parse::<NativeBlockHash>()
@@ -64,7 +66,9 @@ pub fn parse_bitcoin_block_hash(value: &str) -> Result<BlockHash, SourceError> {
         .map_err(|_| source_error("Bitcoin RPC returned an invalid block hash", true))
 }
 
-// design-lint: allow unclassified-free-function -- public Bitcoin wire adapter validates a foreign neutral BlockHash and delegates reversed display order to the native hash type; neither foreign type is an owned receiver
+// public Bitcoin wire adapter validates a foreign neutral BlockHash and delegates reversed display
+// order to the native hash type; neither foreign type is an owned receiver
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub fn format_bitcoin_block_hash(hash: &BlockHash) -> Result<String, SourceError> {
     let bytes: [u8; 32] = hash
         .0
@@ -74,7 +78,9 @@ pub fn format_bitcoin_block_hash(hash: &BlockHash) -> Result<String, SourceError
     Ok(NativeBlockHash::from_byte_array(bytes).to_string())
 }
 
-// design-lint: allow unclassified-free-function -- shared Bitcoin RPC boundary validates foreign RawJson object results and preserves per-method SourceError context without wrapping foreign JSON types
+// shared Bitcoin RPC boundary validates foreign RawJson object results and preserves per-method
+// SourceError context without wrapping foreign JSON types
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn parse_object(
     raw: &RawJson,
     context: &'static str,

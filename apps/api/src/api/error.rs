@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
-pub struct ErrorBody {
+#[schema(as = ErrorBody)]
+pub struct Body {
     pub message: String,
     /// Definitely acknowledged transaction IDs before an ordered batch failed.
     /// Present only when that accepted prefix is non-empty.
@@ -26,7 +27,7 @@ pub struct ErrorBody {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum ErrorKind {
+enum Kind {
     InvalidRequest,
     NotFound,
     Conflict,
@@ -36,17 +37,17 @@ enum ErrorKind {
 }
 
 #[derive(Debug)]
-pub struct ApiError {
-    kind: ErrorKind,
+pub struct Error {
+    kind: Kind,
     message: String,
     transaction_ids: Vec<String>,
     failed_index: Option<usize>,
     ambiguous_transaction_id: Option<String>,
 }
 
-impl ApiError {
+impl Error {
     pub fn invalid_request(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::InvalidRequest, message)
+        Self::new(Kind::InvalidRequest, message)
     }
 
     pub fn invalid_json(_error: JsonRejection) -> Self {
@@ -61,14 +62,14 @@ impl ApiError {
     }
 
     pub fn invalid_response(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::InvalidResponse, message)
+        Self::new(Kind::InvalidResponse, message)
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::NotFound, message)
+        Self::new(Kind::NotFound, message)
     }
 
-    fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+    fn new(kind: Kind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
@@ -79,7 +80,7 @@ impl ApiError {
     }
 }
 
-impl From<wallets::Error> for ApiError {
+impl From<wallets::Error> for Error {
     fn from(error: wallets::Error) -> Self {
         let wallets::Error {
             kind,
@@ -92,15 +93,15 @@ impl From<wallets::Error> for ApiError {
             | wallets::ErrorKind::InvalidAddress
             | wallets::ErrorKind::InvalidAmount
             | wallets::ErrorKind::InvalidBatch
-            | wallets::ErrorKind::AddressMismatch => ErrorKind::InvalidRequest,
-            wallets::ErrorKind::Duplicate | wallets::ErrorKind::Conflict => ErrorKind::Conflict,
-            wallets::ErrorKind::NotFound => ErrorKind::NotFound,
-            wallets::ErrorKind::Transaction => ErrorKind::Transaction,
+            | wallets::ErrorKind::AddressMismatch => Kind::InvalidRequest,
+            wallets::ErrorKind::Duplicate | wallets::ErrorKind::Conflict => Kind::Conflict,
+            wallets::ErrorKind::NotFound => Kind::NotFound,
+            wallets::ErrorKind::Transaction => Kind::Transaction,
             wallets::ErrorKind::Unavailable
             | wallets::ErrorKind::SourceBusy
             | wallets::ErrorKind::Generation
             | wallets::ErrorKind::Balance
-            | wallets::ErrorKind::History => ErrorKind::Unavailable,
+            | wallets::ErrorKind::History => Kind::Unavailable,
         };
         let mut response = Self::new(kind, message);
         response.ambiguous_transaction_id = ambiguous_transaction_id.map(|id| id.to_string());
@@ -108,7 +109,7 @@ impl From<wallets::Error> for ApiError {
     }
 }
 
-impl From<wallets::SendError> for ApiError {
+impl From<wallets::SendError> for Error {
     fn from(error: wallets::SendError) -> Self {
         let mut response = Self::from(error.source);
         response.transaction_ids = error
@@ -122,23 +123,23 @@ impl From<wallets::SendError> for ApiError {
     }
 }
 
-impl IntoResponse for ApiError {
+impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = if self.ambiguous_transaction_id.is_some() {
             StatusCode::SERVICE_UNAVAILABLE
         } else {
             match self.kind {
-                ErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
-                ErrorKind::NotFound => StatusCode::NOT_FOUND,
-                ErrorKind::Conflict => StatusCode::CONFLICT,
-                ErrorKind::Transaction => StatusCode::UNPROCESSABLE_ENTITY,
-                ErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-                ErrorKind::InvalidResponse => StatusCode::INTERNAL_SERVER_ERROR,
+                Kind::InvalidRequest => StatusCode::BAD_REQUEST,
+                Kind::NotFound => StatusCode::NOT_FOUND,
+                Kind::Conflict => StatusCode::CONFLICT,
+                Kind::Transaction => StatusCode::UNPROCESSABLE_ENTITY,
+                Kind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+                Kind::InvalidResponse => StatusCode::INTERNAL_SERVER_ERROR,
             }
         };
         (
             status,
-            Json(ErrorBody {
+            Json(Body {
                 message: self.message,
                 transaction_ids: self.transaction_ids,
                 failed_index: self.failed_index,

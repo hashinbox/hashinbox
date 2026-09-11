@@ -7,7 +7,7 @@ use syn::{
 
 use crate::{
     Result,
-    model::{Finding, Related, Review},
+    model::{Finding, RelatedLocation, Review},
     policy::Policy,
     rule::production::test_only,
     source::Workspace,
@@ -94,7 +94,7 @@ fn definitions(workspace: &Workspace) -> BTreeMap<(String, String), TypeFacts> {
 }
 
 struct DefinitionCollector<'a, 'b> {
-    source: &'a crate::source::SourceFile,
+    source: &'a crate::source::File,
     types: &'b mut BTreeMap<(String, String), TypeFacts>,
     duplicate: &'b mut BTreeSet<(String, String)>,
     test_scope: bool,
@@ -166,7 +166,7 @@ fn collect_methods(workspace: &Workspace, types: &mut BTreeMap<(String, String),
 }
 
 struct MethodCollector<'a, 'b> {
-    source: &'a crate::source::SourceFile,
+    source: &'a crate::source::File,
     types: &'b mut BTreeMap<(String, String), TypeFacts>,
     test_scope: bool,
 }
@@ -257,23 +257,27 @@ fn finding(facts: TypeFacts) -> Option<Finding> {
         .collect::<Vec<_>>();
     let mut finding = Finding::warning("god-object-growth", facts.name.clone(), facts.location);
     finding.message = format!(
-        "`{}` owns {} inherent methods across {} distinct field capabilities; `{}` coordinates unrelated groups",
+        "`{}` owns {} inherent methods across {} distinct field capabilities; `{}` \
+            coordinates unrelated groups",
         facts.name,
         facts.methods.len(),
         clusters.len(),
         crossing.1.name,
     );
-    finding.help = "extract the field-owned capabilities and their workflows; keep the root responsible only for construction and declarative cross-capability wiring".into();
+    finding.help =
+        "extract the field-owned capabilities and their workflows; keep the root responsible \
+        only for construction and declarative cross-capability wiring"
+            .into();
     finding.related = clusters
         .iter()
         .map(|cluster| {
             let representative = cluster.methods[0];
-            Related {
+            RelatedLocation {
                 label: describe_cluster(cluster, &facts.methods),
                 location: facts.methods[representative].location.clone(),
             }
         })
-        .chain(std::iter::once(Related {
+        .chain(std::iter::once(RelatedLocation {
             label: format!("cross-capability workflow `{}`", crossing.1.name),
             location: crossing.1.location.clone(),
         }))
@@ -452,8 +456,13 @@ impl<'ast> Visit<'ast> for MethodAnalysis<'_> {
 
 fn receiver_field(expression: &Expr) -> Option<String> {
     match expression {
-        Expr::Field(field) if matches!(field.base.as_ref(), Expr::Path(path) if path.path.is_ident("self")) =>
-        {
+        Expr::Field(field) => {
+            let Expr::Path(path) = field.base.as_ref() else {
+                return None;
+            };
+            if !path.path.is_ident("self") {
+                return None;
+            }
             let Member::Named(field) = &field.member else {
                 return None;
             };

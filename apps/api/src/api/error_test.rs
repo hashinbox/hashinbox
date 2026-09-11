@@ -4,7 +4,7 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use wallets::{Error, ErrorKind, SendError};
 
-use super::ApiError;
+use super::Error as HttpError;
 
 fn ambiguous_error(message: &str, id: &str) -> Error {
     Error {
@@ -14,7 +14,7 @@ fn ambiguous_error(message: &str, id: &str) -> Error {
     }
 }
 
-async fn projection(error: ApiError) -> (StatusCode, Value) {
+async fn projection(error: HttpError) -> (StatusCode, Value) {
     let response = error.into_response();
     let status = response.status();
     let bytes = response

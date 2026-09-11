@@ -38,7 +38,7 @@ pub(super) fn excluded_name(name: &str) -> bool {
     .any(|word| name == *word || name.ends_with(&format!("_{word}")))
 }
 
-pub(super) fn state_name(name: &str) -> bool {
+pub(super) fn stateful_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     [
         "state",

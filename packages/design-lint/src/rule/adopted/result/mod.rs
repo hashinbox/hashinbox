@@ -4,10 +4,10 @@ use syn::{Expr, ImplItemFn, ItemFn, Pat, ReturnType, Stmt, Type, spanned::Spanne
 
 use crate::{
     Result,
-    model::{Finding, Location, Related},
+    model::{Finding, Location, RelatedLocation},
     policy::Policy,
     rule::{production::test_only, syntax::type_name},
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 /// Reports discarded fallible results when syntax proves the expression is a `Result`.
@@ -106,15 +106,15 @@ impl Signatures {
     }
 
     fn function(&self, name: &str) -> Option<Location> {
-        result_span(self.functions.get(name))
+        declaration_span(self.functions.get(name))
     }
 
     fn method(&self, owner: &str, name: &str) -> Option<Location> {
-        result_span(self.methods.get(&(owner.to_owned(), name.to_owned())))
+        declaration_span(self.methods.get(&(owner.to_owned(), name.to_owned())))
     }
 }
 
-fn result_span(declaration: Option<&Declaration>) -> Option<Location> {
+fn declaration_span(declaration: Option<&Declaration>) -> Option<Location> {
     match declaration {
         Some(Declaration::Result(location)) => Some(location.clone()),
         Some(Declaration::Ambiguous) | None => None,
@@ -123,7 +123,7 @@ fn result_span(declaration: Option<&Declaration>) -> Option<Location> {
 
 struct SignatureCollector<'a> {
     signatures: &'a mut Signatures,
-    source: &'a SourceFile,
+    source: &'a File,
     test_scope: bool,
     owner: Option<String>,
 }
@@ -184,25 +184,25 @@ impl<'ast> Visit<'ast> for SignatureCollector<'_> {
 fn returns_result(output: &ReturnType) -> bool {
     match output {
         ReturnType::Default => false,
-        ReturnType::Type(_, ty) => result_type(ty),
+        ReturnType::Type(_, ty) => is_fallible(ty),
     }
 }
 
-fn result_type(ty: &Type) -> bool {
+fn is_fallible(ty: &Type) -> bool {
     match ty {
         Type::Path(path) => path
             .path
             .segments
             .last()
             .is_some_and(|part| part.ident == "Result"),
-        Type::Group(group) => result_type(&group.elem),
-        Type::Paren(paren) => result_type(&paren.elem),
+        Type::Group(group) => is_fallible(&group.elem),
+        Type::Paren(paren) => is_fallible(&paren.elem),
         _ => false,
     }
 }
 
 struct Discards<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     signatures: &'a Signatures,
     findings: &'a mut Vec<Finding>,
     test_scope: bool,
@@ -222,7 +222,7 @@ impl Discards<'_> {
             "propagate with `?`, handle every outcome, or log the error with actionable context"
                 .into();
         if let Proof::Declaration(location) = proof {
-            finding.related.push(Related {
+            finding.related.push(RelatedLocation {
                 label: "workspace declaration proves this returns Result".into(),
                 location,
             });
@@ -255,7 +255,10 @@ impl Discards<'_> {
                     None => self.signatures.function(&name).map(Proof::Declaration),
                 }
             }
-            Expr::MethodCall(call) if matches!(call.receiver.as_ref(), Expr::Path(path) if path.path.is_ident("self")) => {
+            Expr::MethodCall(call)
+                if matches!(call.receiver.as_ref(), Expr::Path(path)
+                    if path.path.is_ident("self")) =>
+            {
                 self.signatures
                     .method(self.owner.as_deref()?, &call.method.to_string())
                     .map(Proof::Declaration)

@@ -33,10 +33,10 @@ pub(in crate::transaction) async fn sign(
         .iter()
         .map(|_| signer)
         .collect::<Vec<_>>();
-    sign_each(network, transaction, &signers).await
+    each(network, transaction, &signers).await
 }
 
-pub(in crate::transaction) async fn sign_each<S: Signer + ?Sized>(
+pub(in crate::transaction) async fn each<S: Signer + ?Sized>(
     network: Network,
     transaction: UnsignedTransaction,
     signers: &[&S],
@@ -141,7 +141,8 @@ impl<S: Signer + ?Sized> InputSigner<'_, S> {
             .verify_ecdsa(&message, &signature, &public_key.0)
             .map_err(|_| {
                 ChainError::signing(format!(
-                    "Bitcoin signer returned an ECDSA signature that failed cryptographic verification for input {input_index}"
+                    "Bitcoin signer returned an ECDSA signature that failed \
+                     cryptographic verification for input {input_index}"
                 ))
             })?;
         let signature = bitcoin::ecdsa::Signature {
@@ -213,7 +214,8 @@ impl<S: Signer + ?Sized> InputSigner<'_, S> {
         secp.verify_schnorr(&signature, &message, output_key.as_x_only_public_key())
             .map_err(|_| {
                 ChainError::signing(format!(
-                    "Bitcoin signer returned a Schnorr signature that failed cryptographic verification for input {input_index}"
+                    "Bitcoin signer returned a Schnorr signature that failed \
+                     cryptographic verification for input {input_index}"
                 ))
             })?;
         let signature = bitcoin::taproot::Signature {
@@ -302,9 +304,10 @@ mod tests {
             assert_eq!(requests[0].encoding, encoding);
             assert_eq!(requests[0].public_key_format, public_key_format);
             assert_eq!(requests[0].key_tweak, key_tweak);
-            assert!(
-                matches!(&requests[0].payload, SignablePayload::Digest(digest) if digest.bytes.len() == 32)
-            );
+            assert!(matches!(
+                &requests[0].payload,
+                SignablePayload::Digest(digest) if digest.bytes.len() == 32
+            ));
         }
     }
 }

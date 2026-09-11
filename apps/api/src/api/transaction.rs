@@ -11,7 +11,7 @@ use super::{
     State as HttpState,
     contract::{AddressInput, WalletPath},
     cursor::HistoryCursor,
-    error::{ApiError, ErrorBody},
+    error::{Body, Error},
 };
 
 pub fn routes() -> OpenApiRouter<HttpState> {
@@ -21,19 +21,19 @@ pub fn routes() -> OpenApiRouter<HttpState> {
         .routes(routes!(send_all))
 }
 
-enum TransactionQuery {
+enum SubmitQuery {
     AbsentOrEmpty,
 }
 
-impl<S> FromRequestParts<S> for TransactionQuery
+impl<S> FromRequestParts<S> for SubmitQuery
 where
     S: Send + Sync,
 {
-    type Rejection = ApiError;
+    type Rejection = Error;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         if parts.uri.query().is_some_and(|query| !query.is_empty()) {
-            return Err(ApiError::invalid_request(
+            return Err(Error::invalid_request(
                 "transaction query parameters are not supported",
             ));
         }
@@ -261,7 +261,7 @@ pub struct TransactionPage {
 }
 
 impl TryFrom<wallets::History> for TransactionPage {
-    type Error = ApiError;
+    type Error = Error;
 
     fn try_from(history: wallets::History) -> Result<Self, Self::Error> {
         let next_cursor = history
@@ -288,11 +288,11 @@ pub struct HistoryQuery {
 }
 
 impl TryFrom<HistoryQuery> for wallets::HistoryRequest {
-    type Error = ApiError;
+    type Error = Error;
 
     fn try_from(query: HistoryQuery) -> Result<Self, Self::Error> {
         if query.limit == 0 || query.limit > 1_000 {
-            return Err(ApiError::invalid_request(
+            return Err(Error::invalid_request(
                 "history limit must be between 1 and 1000",
             ));
         }
@@ -320,11 +320,12 @@ impl HistoryQuery {
     params(WalletPath, HistoryQuery),
     responses(
         (status = 200, body = TransactionPage),
-        (status = 400, body = ErrorBody),
-        (status = 404, body = ErrorBody),
-        (status = 409, description = "Cursor checkpoint is no longer canonical", body = ErrorBody),
-        (status = 500, body = ErrorBody),
-        (status = 503, body = ErrorBody)
+        (status = 400, body = Body),
+        (status = 404, body = Body),
+        (status = 409, description = "Cursor checkpoint is no longer canonical",
+            body = Body),
+        (status = 500, body = Body),
+        (status = 503, body = Body)
     ),
     tag = "transactions"
 )]
@@ -332,7 +333,7 @@ async fn read(
     State(state): State<HttpState>,
     Path(path): Path<WalletPath>,
     Query(query): Query<HistoryQuery>,
-) -> Result<Json<TransactionPage>, ApiError> {
+) -> Result<Json<TransactionPage>, Error> {
     let request = query.try_into()?;
     Ok(Json(
         state.wallets.history(&path.id, request).await?.try_into()?,
@@ -347,13 +348,13 @@ pub struct SendFunds {
 }
 
 impl TryFrom<SendFunds> for (wallets::AddressText, base::Decimal) {
-    type Error = ApiError;
+    type Error = Error;
 
     fn try_from(request: SendFunds) -> Result<Self, Self::Error> {
         let amount = request
             .amount
             .parse()
-            .map_err(|_| ApiError::invalid_request("amount must be an exact base-10 decimal"))?;
+            .map_err(|_| Error::invalid_request("amount must be an exact base-10 decimal"))?;
         Ok((request.destination.into(), amount))
     }
 }
@@ -366,25 +367,29 @@ pub struct Submission {
 #[utoipa::path(
     post,
     path = "/v1/wallets/{id}/transactions",
-    description = "Submits one transfer through the wallet's configured asset family. The native SOL integration is reserved for this shared route; no Solana-only transaction route is defined. A 202 response means submitted, not confirmed.",
+    description = "Submits one transfer through the wallet's configured asset family. The native \
+        SOL integration is reserved for this shared route; no Solana-only transaction route is \
+        defined. A 202 response means submitted, not confirmed.",
     params(WalletPath),
     request_body = SendFunds,
     responses(
         (status = 202, description = "Transaction submitted", body = Submission),
-        (status = 400, body = ErrorBody),
-        (status = 404, body = ErrorBody),
-        (status = 422, body = ErrorBody),
-        (status = 503, description = "Transaction unavailable or exact-envelope submission outcome ambiguous; ambiguous_transaction_id is present only for an unknown outcome", body = ErrorBody)
+        (status = 400, body = Body),
+        (status = 404, body = Body),
+        (status = 422, body = Body),
+        (status = 503, description = "Transaction unavailable or exact-envelope submission \
+            outcome ambiguous; ambiguous_transaction_id is present only for an unknown outcome",
+            body = Body)
     ),
     tag = "transactions"
 )]
 async fn send(
     State(state): State<HttpState>,
     Path(path): Path<WalletPath>,
-    _query: TransactionQuery,
+    _query: SubmitQuery,
     request: Result<Json<SendFunds>, JsonRejection>,
-) -> Result<(StatusCode, Json<Submission>), ApiError> {
-    let Json(request) = request.map_err(ApiError::invalid_json)?;
+) -> Result<(StatusCode, Json<Submission>), Error> {
+    let Json(request) = request.map_err(Error::invalid_json)?;
     let (destination, amount) = request.try_into()?;
     let id = state.wallets.send(&path.id, destination, amount).await?;
     Ok((
@@ -412,11 +417,11 @@ pub struct TransferRequest {
 }
 
 impl TryFrom<TransferRequest> for Vec<wallets::WalletTransfer<String>> {
-    type Error = ApiError;
+    type Error = Error;
 
     fn try_from(request: TransferRequest) -> Result<Self, Self::Error> {
         if request.transfers.len() > wallets::MAX_TRANSFERS {
-            return Err(ApiError::invalid_request(format!(
+            return Err(Error::invalid_request(format!(
                 "at most {} transfers are allowed",
                 wallets::MAX_TRANSFERS
             )));
@@ -427,7 +432,7 @@ impl TryFrom<TransferRequest> for Vec<wallets::WalletTransfer<String>> {
             .enumerate()
             .map(|(failed_index, transfer)| {
                 let amount = transfer.amount.parse().map_err(|_| {
-                    ApiError::invalid_batch(failed_index, "amount must be an exact base-10 decimal")
+                    Error::invalid_batch(failed_index, "amount must be an exact base-10 decimal")
                 })?;
                 Ok(wallets::WalletTransfer {
                     wallet: transfer.wallet_id,
@@ -448,23 +453,37 @@ pub struct TransferResponse {
 #[utoipa::path(
     post,
     path = "/v1/transactions",
-    description = "Submits one ordered exact-asset batch through the configured wallet family. The native SOL integration is reserved for this shared route; no Solana-only transaction route is defined. Requests mixing wallet families are rejected before any transaction is submitted. Bitcoin may group occurrences into one transaction. Ethereum reserves consecutive nonces per sender and prepares the whole batch before submitting exact envelopes in request order. Definitely acknowledged transaction IDs are returned only when a non-empty prefix was accepted, and a failed index is returned only when one original occurrence truthfully failed.",
+    description = "Submits one ordered exact-asset batch through the configured wallet family. \
+        The native SOL integration is reserved for this shared route; no Solana-only transaction \
+        route is defined. Requests mixing wallet families are rejected before any transaction is \
+        submitted. Bitcoin may group occurrences into one transaction. Ethereum reserves \
+        consecutive nonces per sender and prepares the whole batch before submitting exact \
+        envelopes in request order. Definitely acknowledged transaction IDs are returned only \
+        when a non-empty prefix was accepted, and a failed index is returned only when one \
+        original occurrence truthfully failed.",
     request_body = TransferRequest,
     responses(
         (status = 202, description = "Asset batch submitted", body = TransferResponse),
-        (status = 400, body = ErrorBody),
-        (status = 404, body = ErrorBody),
-        (status = 422, description = "Definite batch failure; transaction_ids is present only for a definitely acknowledged prefix and failed_index only for a truthful item-scoped failure", body = ErrorBody),
-        (status = 503, description = "Batch unavailable or exact-envelope submission outcome ambiguous; transaction_ids is present only for a definitely acknowledged prefix, failed_index only for a truthful item-scoped failure, and ambiguous_transaction_id only for an unknown outcome", body = ErrorBody)
+        (status = 400, body = Body),
+        (status = 404, body = Body),
+        (status = 422, description = "Definite batch failure; transaction_ids is present only for \
+            a definitely acknowledged prefix and failed_index only for a truthful item-scoped \
+            failure",
+            body = Body),
+        (status = 503, description = "Batch unavailable or exact-envelope submission outcome \
+            ambiguous; transaction_ids is present only for a definitely acknowledged prefix, \
+            failed_index only for a truthful item-scoped failure, and ambiguous_transaction_id \
+            only for an unknown outcome",
+            body = Body)
     ),
     tag = "transactions"
 )]
 async fn send_all(
     State(state): State<HttpState>,
-    _query: TransactionQuery,
+    _query: SubmitQuery,
     request: Result<Json<TransferRequest>, JsonRejection>,
-) -> Result<(StatusCode, Json<TransferResponse>), ApiError> {
-    let Json(request) = request.map_err(ApiError::invalid_json)?;
+) -> Result<(StatusCode, Json<TransferResponse>), Error> {
+    let Json(request) = request.map_err(Error::invalid_json)?;
     let transaction_ids = state
         .wallets
         .send_all(request.try_into()?)

@@ -13,10 +13,10 @@ use super::wire::map_json_rpc_error;
 /// owns framing, correlation, and batch ordering; account, block, and
 /// transaction semantics stay in their focused adapters.
 pub struct Client<C> {
-    inner: Arc<ClientState<C>>,
+    inner: Arc<State<C>>,
 }
 
-struct ClientState<C> {
+struct State<C> {
     transport: C,
 }
 
@@ -32,7 +32,7 @@ impl<C> Client<C> {
     #[must_use]
     pub fn new(transport: C) -> Self {
         Self {
-            inner: Arc::new(ClientState { transport }),
+            inner: Arc::new(State { transport }),
         }
     }
 }

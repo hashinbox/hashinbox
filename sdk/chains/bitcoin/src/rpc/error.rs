@@ -28,12 +28,16 @@ impl CallFailure {
     }
 }
 
-// design-lint: allow unclassified-free-function -- Bitcoin RPC translation between foreign JSON-RPC and indexing errors preserves source text and retryability without adding chain policy to either generic crate
+// Bitcoin RPC translation between foreign JSON-RPC and indexing errors preserves source text and
+// retryability without adding chain policy to either generic crate
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn map_json_rpc_error(error: Error) -> SourceError {
     source_error(error.to_string(), error.is_retryable())
 }
 
-// design-lint: allow unclassified-free-function -- shared Bitcoin RPC and block-source boundary constructs foreign SourceError while each caller retains its own validation message and retryability policy
+// shared Bitcoin RPC and block-source boundary constructs foreign SourceError while each caller
+// retains its own validation message and retryability policy
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(crate) fn source_error(message: impl Into<String>, retryable: bool) -> SourceError {
     SourceError {
         message: message.into(),

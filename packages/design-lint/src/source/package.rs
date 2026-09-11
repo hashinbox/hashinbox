@@ -39,36 +39,36 @@ pub(super) fn manifests(files: &BTreeSet<PathBuf>) -> Result<BTreeMap<PathBuf, t
             output.insert(root, manifest);
         }
         for (root, manifest) in &output {
-            for table in tables(manifest) {
-                for kind in ["dependencies", "build-dependencies", "dev-dependencies"] {
-                    let Some(dependencies) = table.get(kind).and_then(toml::Value::as_table) else {
-                        continue;
-                    };
-                    for (alias, entry) in dependencies {
-                        if let Some(path) = local_path(alias, entry, root, &output)? {
-                            for ancestor in path.ancestors() {
-                                let manifest = ancestor.join("Cargo.toml");
-                                if !output.contains_key(ancestor) && manifest.is_file() {
-                                    paths.insert(manifest);
-                                }
-                            }
-                        }
-                    }
-                }
+            let entries = dependencies(manifest).flat_map(|(_, entries)| entries);
+            for (alias, entry) in entries {
+                let Some(path) = local_path(alias, entry, root, &output)? else {
+                    continue;
+                };
+                let discovered = path
+                    .ancestors()
+                    .filter(|ancestor| !output.contains_key(*ancestor))
+                    .map(|ancestor| ancestor.join("Cargo.toml"))
+                    .filter(|manifest| manifest.is_file());
+                paths.extend(discovered);
             }
         }
     }
     Ok(output)
 }
 
-fn tables(manifest: &toml::Value) -> impl Iterator<Item = &toml::Value> {
-    std::iter::once(manifest).chain(
+fn dependencies(manifest: &toml::Value) -> impl Iterator<Item = (&'static str, &toml::Table)> {
+    let tables = std::iter::once(manifest).chain(
         manifest
             .get("target")
             .and_then(toml::Value::as_table)
             .into_iter()
             .flat_map(|table| table.values()),
-    )
+    );
+    tables.flat_map(|table| {
+        ["dependencies", "build-dependencies", "dev-dependencies"]
+            .into_iter()
+            .filter_map(move |kind| Some((kind, table.get(kind)?.as_table()?)))
+    })
 }
 
 pub(super) fn inventory(manifests: &BTreeMap<PathBuf, toml::Value>) -> Result<Vec<Package>> {
@@ -86,20 +86,17 @@ pub(super) fn inventory(manifests: &BTreeMap<PathBuf, toml::Value>) -> Result<Ve
         let manifest = &manifests[root];
         let mut all = BTreeSet::new();
         let mut build = BTreeSet::new();
-        for table in tables(manifest) {
-            for kind in ["dependencies", "build-dependencies", "dev-dependencies"] {
-                let Some(dependencies) = table.get(kind).and_then(toml::Value::as_table) else {
+        for (kind, dependencies) in dependencies(manifest) {
+            for (alias, entry) in dependencies {
+                let Some(path) = local_path(alias, entry, root, manifests)? else {
                     continue;
                 };
-                for (alias, entry) in dependencies {
-                    if let Some(path) = local_path(alias, entry, root, manifests)?
-                        && let Some(target) = names.get(&path)
-                    {
-                        all.insert(target.clone());
-                        if kind != "dev-dependencies" {
-                            build.insert(target.clone());
-                        }
-                    }
+                let Some(target) = names.get(&path) else {
+                    continue;
+                };
+                all.insert(target.clone());
+                if kind != "dev-dependencies" {
+                    build.insert(target.clone());
                 }
             }
         }

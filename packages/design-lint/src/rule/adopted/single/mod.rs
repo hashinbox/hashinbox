@@ -4,9 +4,9 @@ use syn::{ItemFn, ItemMod, spanned::Spanned, visit::Visit};
 
 use crate::{
     Policy, Result,
-    model::{Finding, Related},
+    model::{Finding, RelatedLocation},
     rule::references::References,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 pub(crate) const ID: &str = "single-use-free-function";
@@ -61,17 +61,17 @@ pub(crate) fn check(workspace: &Workspace, _policy: &Policy) -> Result<Vec<Findi
             if counts.get(&definition.name) != Some(&1) {
                 return None;
             }
+            let is_external = |reference: &&&crate::rule::references::Reference| {
+                reference
+                    .context
+                    .as_ref()
+                    .is_none_or(|context| context.name != definition.name)
+            };
             let external = uses
                 .get(definition.name.as_str())
                 .into_iter()
                 .flatten()
-                .filter(|reference| {
-                    reference
-                        .context
-                        .as_ref()
-                        .map(|context| context.name.as_str())
-                        != Some(definition.name.as_str())
-                })
+                .filter(is_external)
                 .collect::<Vec<_>>();
             (external.len() == 1).then(|| definition.finding(ID, external[0]))
         })
@@ -86,8 +86,11 @@ impl Definition {
     fn finding(self, rule: &'static str, usage: &crate::rule::references::Reference) -> Finding {
         let mut finding = Finding::warning(rule, &self.name, self.location);
         finding.message = format!("private free function `{}` has one use", self.name);
-        finding.help = "inline it at the use site, or document a deliberate section boundary using an exact reasoned design-lint allow comment after review".into();
-        finding.related.push(Related {
+        finding.help =
+            "inline it at the use site, or document a deliberate section boundary using an \
+            exact reasoned design-lint allow comment after review"
+                .into();
+        finding.related.push(RelatedLocation {
             label: usage.context.as_ref().map_or_else(
                 || "sole use".into(),
                 |context| format!("sole use in `{}`\n{}", context.name, context.source),
@@ -99,7 +102,7 @@ impl Definition {
 }
 
 struct Definitions<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     test_scope: bool,
     values: Vec<Definition>,
 }

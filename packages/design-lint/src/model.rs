@@ -32,12 +32,12 @@ pub struct Finding {
     pub message: String,
     pub help: String,
     pub location: Location,
-    pub related: Vec<Related>,
+    pub related: Vec<RelatedLocation>,
     pub review: Option<Review>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Related {
+pub struct RelatedLocation {
     pub label: String,
     pub location: Location,
 }

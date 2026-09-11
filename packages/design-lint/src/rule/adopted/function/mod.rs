@@ -7,7 +7,7 @@ use syn::{
 
 use crate::{
     Policy, Result,
-    model::{Finding, Related, Review},
+    model::{Finding, RelatedLocation, Review},
     rule::references::References,
     source::Workspace,
 };
@@ -84,7 +84,7 @@ impl Candidate {
     fn finding<'a>(
         self,
         rule: &'static str,
-        source: &crate::source::SourceFile,
+        source: &crate::source::File,
         usages: impl Iterator<Item = &'a crate::rule::references::Reference>,
         ambiguous: bool,
     ) -> Finding {
@@ -95,10 +95,11 @@ impl Candidate {
             self.arguments,
             if self.arguments == 1 { "" } else { "s" }
         );
-        finding.help =
-            "move behavior to its meaningful owner, or document an exact reasoned design-lint allow exception after reviewing ownership".into();
+        finding.help = "move behavior to its meaningful owner, or document an exact reasoned \
+                design-lint allow exception after reviewing ownership"
+            .into();
         finding.related = usages
-            .map(|usage| Related {
+            .map(|usage| RelatedLocation {
                 label: usage.context.as_ref().map_or_else(
                     || "usage at module scope".into(),
                     |context| format!("usage in `{}`\n{}", context.name, context.source),
@@ -109,7 +110,10 @@ impl Candidate {
         let review = Review {
             metadata: vec![
                 ("Arguments".into(), self.arguments.to_string()),
-                ("Framework-shaped signature".into(), self.framework_signature.to_string()),
+                (
+                    "Framework-shaped signature".into(),
+                    self.framework_signature.to_string(),
+                ),
                 (
                     "Usage resolution".into(),
                     if ambiguous {
@@ -126,7 +130,9 @@ impl Candidate {
                 "Do related functions share this value and its invariants?".into(),
                 "Would a wrapper collect cohesive behavior, or only hide one helper?".into(),
                 "Is this a complete low-level algorithm that should remain free?".into(),
-                "If this has a framework-shaped signature, is it a thin handler in the application boundary with a precise reviewed exception?".into(),
+                "If this has a framework-shaped signature, is it a thin handler in the \
+                    application boundary with a precise reviewed exception?"
+                    .into(),
             ],
         };
         finding.review = Some(review);

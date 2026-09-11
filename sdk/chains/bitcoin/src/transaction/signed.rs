@@ -95,7 +95,8 @@ impl SignedTransaction {
         let computed_id = Id::from(transaction.compute_txid());
         if computed_id != expected_id {
             return Err(ChainError::invalid_transaction(format!(
-                "signed Bitcoin transaction ID mismatch: expected {expected_id}, computed {computed_id}"
+                "signed Bitcoin transaction ID mismatch: expected {expected_id}, \
+                 computed {computed_id}"
             )));
         }
         Ok(Self {

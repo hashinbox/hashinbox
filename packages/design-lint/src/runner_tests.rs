@@ -31,11 +31,11 @@ impl Rule for Probe {
     }
 }
 #[derive(Default)]
-struct Collected {
+struct Report {
     findings: Vec<Finding>,
     began: bool,
 }
-impl Reporter for Collected {
+impl Reporter for Report {
     fn begin(&mut self, _: &Workspace) -> Result<()> {
         self.began = true;
         Ok(())
@@ -83,7 +83,7 @@ fn registry_runs_rules_in_registration_order() {
             calls: calls.clone(),
         });
     let summaries = Linter::new(Policy::default(), registry)
-        .run(vec![fixture.path().to_owned()], &mut Collected::default())
+        .run(vec![fixture.path().to_owned()], &mut Report::default())
         .unwrap();
     assert_eq!(*calls.borrow(), ["second", "first"]);
     assert_eq!(
@@ -112,7 +112,7 @@ fn invalid_registry_fails_before_source_loading_or_execution() {
         assert!(registry.validate().is_err());
         let linter = Linter::new(Policy::default(), registry);
         for path in ["valid.rs", "invalid.rs"] {
-            let mut reporter = Collected::default();
+            let mut reporter = Report::default();
             let error = linter
                 .run(vec![fixture.path().join(path)], &mut reporter)
                 .unwrap_err();
@@ -212,7 +212,7 @@ fn review_evidence_never_hides_errors_or_warnings() {
             severity,
             fail: false,
         });
-        let mut reporter = Collected::default();
+        let mut reporter = Report::default();
         let summary = Linter::new(Policy::default(), registry)
             .run(vec![fixture.path().to_owned()], &mut reporter)
             .unwrap();
@@ -268,7 +268,7 @@ fn only_reasoned_comments_suppress_adopted_findings() {
         let fixture = Fixture::new(&[("src/lib.rs", &text)]);
         let mut policy = Policy::default();
         policy.rules.enabled.push("struct-noun-naming".into());
-        let mut reporter = Collected::default();
+        let mut reporter = Report::default();
         Linter::standard_with_policy(policy)
             .unwrap()
             .run(vec![fixture.path().to_owned()], &mut reporter)

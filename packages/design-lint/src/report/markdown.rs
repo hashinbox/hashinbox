@@ -86,7 +86,8 @@ pub(super) fn render(
 ) -> io::Result<()> {
     writeln!(
         output,
-        "## `{}`\n\n- [ ] Reviewed\n- Rule: `{}`\n- Severity: `{}`\n- Location: `{}:{}:{}`\n- Decision:\n\n{}\n\nHelp: {}\n",
+        "## `{}`\n\n- [ ] Reviewed\n- Rule: `{}`\n- Severity: `{}`\n- Location: \
+            `{}:{}:{}`\n- Decision:\n\n{}\n\nHelp: {}\n",
         finding.subject,
         finding.rule,
         finding.severity.as_str(),

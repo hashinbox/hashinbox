@@ -20,22 +20,25 @@ pub(super) fn collect(text: &str, syntax: &syn::File) -> Vec<(usize, String)> {
 
 fn mask_literals(tokens: TokenStream, text: &str, output: &mut [u8]) {
     for token in tokens {
-        match token {
-            TokenTree::Group(group) => mask_literals(group.stream(), text, output),
-            TokenTree::Literal(literal) => {
-                let span = literal.span();
-                if let (Some(start), Some(end)) = (
-                    byte_offset(text, span.start()),
-                    byte_offset(text, span.end()),
-                ) {
-                    for byte in &mut output[start..end] {
-                        if *byte != b'\n' && *byte != b'\r' {
-                            *byte = b' ';
-                        }
-                    }
-                }
+        let literal = match token {
+            TokenTree::Group(group) => {
+                mask_literals(group.stream(), text, output);
+                continue;
             }
-            _ => {}
+            TokenTree::Literal(literal) => literal,
+            _ => continue,
+        };
+        let span = literal.span();
+        let (Some(start), Some(end)) = (
+            byte_offset(text, span.start()),
+            byte_offset(text, span.end()),
+        ) else {
+            continue;
+        };
+        for byte in &mut output[start..end] {
+            if *byte != b'\n' && *byte != b'\r' {
+                *byte = b' ';
+            }
         }
     }
 }

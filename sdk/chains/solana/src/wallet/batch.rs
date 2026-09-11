@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
-use wallets::{Error, ErrorKind, MAX_TRANSFERS, SendError, SendFuture, Sender, Transfer};
+use wallets::{Error, ErrorKind, MAX_TRANSFERS, SendError, SendFuture, Transfer};
 
 use crate::{Address, Lamport, NativeDestination};
 
 use super::{NativeSender, NativeTransfer, provider::Keys};
 
-pub(super) struct BatchSender {
+pub(super) struct Sender {
     sender: Arc<dyn NativeSender>,
     keys: Arc<Keys>,
 }
 
-impl BatchSender {
+impl Sender {
     pub(super) fn new(sender: Arc<dyn NativeSender>, keys: Arc<Keys>) -> Self {
         Self { sender, keys }
     }
@@ -62,7 +62,7 @@ impl BatchSender {
     }
 }
 
-impl Sender for BatchSender {
+impl wallets::Sender for Sender {
     fn send<'a>(&'a self, transfers: Vec<Transfer>) -> SendFuture<'a> {
         Box::pin(async move {
             if transfers.is_empty() {
@@ -107,7 +107,7 @@ mod tests {
     use wallets::{AddressText, Provider, SecretBytes};
 
     use crate::{
-        AssetKind, RpcClient, Seed, WalletConfig, WalletProvider, rpc::test_support::Scripted,
+        AssetKind, RpcClient, Seed, WalletConfig, WalletProvider, rpc::test_support::Script,
     };
 
     use super::*;
@@ -180,21 +180,21 @@ mod tests {
         }
     }
 
-    fn family() -> (WalletProvider<Scripted>, Arc<Native>) {
+    fn family() -> (WalletProvider<Script>, Arc<Native>) {
         let sender = Arc::new(Native::default());
         let provider = WalletProvider::new(
             WalletConfig::new("localnet", AssetKind::Native).expect("asset"),
-            RpcClient::new(Scripted::new([])),
+            RpcClient::new(Script::new([])),
             Arc::new(Index),
             sender.clone(),
         );
         (provider, sender)
     }
 
-    fn guarded_family() -> WalletProvider<Scripted> {
+    fn guarded_family() -> WalletProvider<Script> {
         WalletProvider::new(
             WalletConfig::new("localnet", AssetKind::Native).expect("asset"),
-            RpcClient::new(Scripted::new([])),
+            RpcClient::new(Script::new([])),
             Arc::new(Index),
             Arc::new(Guarded::default()),
         )

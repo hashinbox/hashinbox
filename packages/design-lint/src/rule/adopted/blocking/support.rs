@@ -17,7 +17,7 @@ pub(super) fn test_attributes(attributes: &[syn::Attribute]) -> bool {
             .any(|attribute| attribute.path().is_ident("test"))
 }
 
-pub(super) fn blocking_fs_function(name: &str) -> bool {
+pub(super) fn filesystem_operation(name: &str) -> bool {
     matches!(
         name,
         "canonicalize"
@@ -173,13 +173,13 @@ pub(super) fn call_is_blocking_boundary(
 }
 
 pub(super) fn contains_await(statement: &Stmt) -> bool {
-    struct Await(bool);
-    impl<'ast> Visit<'ast> for Await {
+    struct Suspension(bool);
+    impl<'ast> Visit<'ast> for Suspension {
         fn visit_expr_await(&mut self, _: &'ast syn::ExprAwait) {
             self.0 = true;
         }
     }
-    let mut visitor = Await(false);
+    let mut visitor = Suspension(false);
     visitor.visit_stmt(statement);
     visitor.0
 }

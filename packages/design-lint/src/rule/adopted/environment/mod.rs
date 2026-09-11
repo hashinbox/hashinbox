@@ -8,8 +8,8 @@ use syn::{
 
 use crate::{
     Policy, Result,
-    model::{Finding, Related},
-    source::{SourceFile, Workspace},
+    model::{Finding, RelatedLocation},
+    source::{File, Workspace},
 };
 
 pub(crate) const ID: &str = "environment-variable-access";
@@ -51,7 +51,7 @@ pub(crate) fn check(workspace: &Workspace, policy: &Policy) -> Result<Vec<Findin
 }
 
 struct Accesses<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     allowed: bool,
     aliases: HashMap<String, Vec<String>>,
     modules: Vec<String>,
@@ -61,7 +61,7 @@ struct Accesses<'a> {
 }
 
 impl<'a> Accesses<'a> {
-    fn new(source: &'a SourceFile, allowed: bool) -> Self {
+    fn new(source: &'a File, allowed: bool) -> Self {
         Self {
             source,
             allowed,
@@ -104,10 +104,14 @@ impl<'a> Accesses<'a> {
             self.source.location(span),
         );
         finding.message = format!(
-            "ambient process input `{operation}` is read outside the application composition root or an explicit platform adapter"
+            "ambient process input `{operation}` is read outside the application \
+                composition root or an explicit platform adapter"
         );
-        finding.help = "capture environment and host paths at composition, validate them into typed configuration, and inject the owned value through a domain capability".to_owned();
-        finding.related.push(Related {
+        finding.help =
+            "capture environment and host paths at composition, validate them into typed \
+            configuration, and inject the owned value through a domain capability"
+                .to_owned();
+        finding.related.push(RelatedLocation {
             label: format!(
                 "enclosing `{}` in crate `{}`, module `{}`",
                 context.0,
@@ -132,8 +136,12 @@ impl<'a> Accesses<'a> {
         finding.message = format!(
             "ambient configuration/state global `{name}` hides process-wide input and lifecycle"
         );
-        finding.help = "construct this state explicitly at composition and pass an owned configuration or capability to consumers; retain globals only for immutable constants or registries whose process-wide identity is the contract".to_owned();
-        finding.related.push(Related {
+        finding.help =
+            "construct this state explicitly at composition and pass an owned configuration \
+            or capability to consumers; retain globals only for immutable constants or \
+            registries whose process-wide identity is the contract"
+                .to_owned();
+        finding.related.push(RelatedLocation {
             label: format!("configuration/state evidence: `{}`", type_text(&item.ty)),
             location: self.source.location(item.ty.span()),
         });
@@ -223,29 +231,43 @@ impl<'ast> Visit<'ast> for Accesses<'_> {
 }
 
 fn ambient_call(path: &[String]) -> bool {
-    matches!(
-        path,
-        [std, env, operation]
-            if std == "std"
-                && env == "env"
-                && matches!(
-                    operation.as_str(),
-                    "var" | "var_os" | "vars" | "vars_os" | "set_var" | "remove_var"
-                        | "current_dir" | "current_exe" | "temp_dir"
-                )
-    ) || matches!(
-        path,
-        [dirs, operation]
-            if dirs == "dirs"
-                && matches!(
-                    operation.as_str(),
-                    "home_dir" | "audio_dir" | "cache_dir" | "config_dir" | "config_local_dir"
-                        | "data_dir" | "data_local_dir" | "desktop_dir" | "document_dir"
-                        | "download_dir" | "executable_dir" | "font_dir" | "picture_dir"
-                        | "preference_dir" | "public_dir" | "runtime_dir" | "state_dir"
-                        | "template_dir" | "video_dir"
-                )
-    )
+    match path {
+        [std, env, operation] if std == "std" && env == "env" => matches!(
+            operation.as_str(),
+            "var"
+                | "var_os"
+                | "vars"
+                | "vars_os"
+                | "set_var"
+                | "remove_var"
+                | "current_dir"
+                | "current_exe"
+                | "temp_dir"
+        ),
+        [dirs, operation] if dirs == "dirs" => matches!(
+            operation.as_str(),
+            "home_dir"
+                | "audio_dir"
+                | "cache_dir"
+                | "config_dir"
+                | "config_local_dir"
+                | "data_dir"
+                | "data_local_dir"
+                | "desktop_dir"
+                | "document_dir"
+                | "download_dir"
+                | "executable_dir"
+                | "font_dir"
+                | "picture_dir"
+                | "preference_dir"
+                | "public_dir"
+                | "runtime_dir"
+                | "state_dir"
+                | "template_dir"
+                | "video_dir"
+        ),
+        _ => false,
+    }
 }
 
 fn ambient_global(item: &ItemStatic, accesses: &Accesses<'_>) -> bool {
@@ -336,7 +358,7 @@ fn collect_use(tree: &UseTree, prefix: Vec<String>, aliases: &mut HashMap<String
     }
 }
 
-fn filesystem_modules(source: &SourceFile) -> Vec<String> {
+fn filesystem_modules(source: &File) -> Vec<String> {
     let Some(root) = source
         .path
         .ancestors()

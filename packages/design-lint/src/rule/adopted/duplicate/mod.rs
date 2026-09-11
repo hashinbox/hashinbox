@@ -5,10 +5,10 @@ use syn::{Fields, ItemMod, ItemStruct, spanned::Spanned, visit::Visit};
 
 use crate::{
     Result,
-    model::{Finding, Related, Review},
+    model::{Finding, RelatedLocation, Review},
     policy::Policy,
     rule::production::test_only,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 /// Reports related structs that repeat at least three identically typed fields.
@@ -68,7 +68,7 @@ struct Definition {
 
 struct Structs<'a> {
     package: &'a str,
-    source: &'a SourceFile,
+    source: &'a File,
     modules: Vec<String>,
     test_scope: bool,
     definitions: Vec<Definition>,
@@ -124,7 +124,7 @@ impl Visit<'_> for Structs<'_> {
     }
 }
 
-fn normalized(source: &SourceFile, span: Span) -> String {
+fn normalized(source: &File, span: Span) -> String {
     source
         .excerpt(span)
         .split_whitespace()
@@ -170,8 +170,11 @@ impl Pair {
             "`{}` and `{}` repeat a possible entity basis",
             self.first.name, self.second.name
         );
-        finding.help = "extract a shared base entity and compose specialization, or prove the fields have different semantics".into();
-        finding.related.push(Related {
+        finding.help =
+            "extract a shared base entity and compose specialization, or prove the fields \
+            have different semantics"
+                .into();
+        finding.related.push(RelatedLocation {
             label: format!("second struct; common fields: {fields}"),
             location: self.second.location,
         });
@@ -207,13 +210,14 @@ fn compare(definitions: Vec<Definition>) -> Vec<Pair> {
                     .map(|(name, ty)| (name.clone(), ty.clone()))
                     .collect::<Vec<_>>();
                 common.sort();
-                if common.len() >= 3 {
-                    pairs.push(Pair {
-                        first: first.clone(),
-                        second: second.clone(),
-                        common,
-                    });
+                if common.len() < 3 {
+                    continue;
                 }
+                pairs.push(Pair {
+                    first: first.clone(),
+                    second: second.clone(),
+                    common,
+                });
             }
         }
     }

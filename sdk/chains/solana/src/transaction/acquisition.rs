@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::SourceCoordinator;
-use super::source::SourceLeases;
+use super::source::Leases;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedTransfer {
@@ -125,8 +125,16 @@ impl Cancellation {
         future: impl Future<Output = Result<T, crate::Error>>,
     ) -> Result<T, SendError> {
         tokio::select! {
-            result = future => result.map_err(|_| SendError::operation(WalletErrorKind::Unavailable, "Solana account acquisition failed")),
-            () = self.cancelled() => Err(SendError::operation(WalletErrorKind::Unavailable, "Solana account acquisition was cancelled")),
+            result = future => result.map_err(|_| {
+                SendError::operation(
+                    WalletErrorKind::Unavailable,
+                    "Solana account acquisition failed",
+                )
+            }),
+            () = self.cancelled() => Err(SendError::operation(
+                WalletErrorKind::Unavailable,
+                "Solana account acquisition was cancelled",
+            )),
         }
     }
 }
@@ -136,7 +144,7 @@ pub struct AcquiredAccounts {
     transfers: Vec<ResolvedTransfer>,
     balances: Vec<Lamport>,
     destinations: Vec<Address>,
-    leases: SourceLeases,
+    leases: Leases,
 }
 
 impl AcquiredAccounts {
@@ -167,7 +175,7 @@ impl AcquiredAccounts {
         Vec<ResolvedTransfer>,
         Vec<Lamport>,
         Vec<Address>,
-        SourceLeases,
+        Leases,
     ) {
         (
             self.floor,
@@ -329,7 +337,7 @@ mod tests {
     use serde_json::json;
     use solana_keypair::{Keypair, Signer as _};
 
-    use crate::rpc::test_support::Scripted;
+    use crate::rpc::test_support::Script;
 
     use super::*;
 
@@ -451,7 +459,13 @@ mod tests {
         data: &str,
         space: u64,
     ) -> serde_json::Value {
-        json!({"lamports":lamports,"owner":owner.to_string(),"executable":executable,"data":[data,"base64"],"space":space})
+        json!({
+            "lamports": lamports,
+            "owner": owner.to_string(),
+            "executable": executable,
+            "data": [data, "base64"],
+            "space": space,
+        })
     }
 
     #[tokio::test]
@@ -460,13 +474,19 @@ mod tests {
         let destination = address(8);
         let other = address(9);
         let system = Address::from_bytes([0; 32]);
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             ("getHealth", json!([]), json!("ok")),
             ("getSlot", json!([{"commitment":"confirmed"}]), json!(10)),
             (
                 "getMultipleAccounts",
-                json!([[source.to_string(),destination.to_string(),other.to_string()], {"encoding":"base64","commitment":"confirmed","minContextSlot":10}]),
-                json!({"context":{"slot":11},"value":[account(&system,20,false,"",0),null,account(&system,30,false,"",0)]}),
+                json!([
+                    [source.to_string(), destination.to_string(), other.to_string()],
+                    {"encoding": "base64", "commitment": "confirmed", "minContextSlot": 10},
+                ]),
+                json!({
+                    "context": {"slot": 11},
+                    "value": [account(&system,20,false,"",0), null, account(&system,30,false,"",0)],
+                }),
             ),
             (
                 "getSlot",
@@ -518,7 +538,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_destination_and_self_transfer_before_rpc_and_releases_leases() {
         let source = address(7);
-        let rpc = Scripted::new([]);
+        let rpc = Script::new([]);
         let sources = SourceCoordinator::default();
         let acquirer = Acquirer::new(RpcClient::new(rpc.clone()), sources.clone());
         for (destination, kind, message) in [
@@ -571,7 +591,7 @@ mod tests {
         let source = address(7);
         let destination = address(8);
         let sources = SourceCoordinator::default();
-        let failure = Acquirer::new(RpcClient::new(Scripted::new([])), sources.clone())
+        let failure = Acquirer::new(RpcClient::new(Script::new([])), sources.clone())
             .acquire(
                 Batch::new(vec![ResolvedTransfer::new(
                     4,
@@ -599,13 +619,19 @@ mod tests {
         let destination = address(8);
         let second_destination = address(10);
         let unsupported_owner = address(9);
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             ("getHealth", json!([]), json!("ok")),
             ("getSlot", json!([{"commitment":"confirmed"}]), json!(1)),
             (
                 "getMultipleAccounts",
-                json!([[source.to_string(),destination.to_string(),second_destination.to_string()], {"encoding":"base64","commitment":"confirmed","minContextSlot":1}]),
-                json!({"context":{"slot":1},"value":[account(&unsupported_owner,1,false,"",0),null,null]}),
+                json!([
+                    [source.to_string(), destination.to_string(), second_destination.to_string()],
+                    {"encoding": "base64", "commitment": "confirmed", "minContextSlot": 1},
+                ]),
+                json!({
+                    "context": {"slot": 1},
+                    "value": [account(&unsupported_owner,1,false,"",0), null, null],
+                }),
             ),
             (
                 "getSlot",
@@ -643,7 +669,7 @@ mod tests {
         let cancellation = Cancellation::default();
         cancellation.cancel();
         let sources = SourceCoordinator::default();
-        let failure = Acquirer::new(RpcClient::new(Scripted::new([])), sources.clone())
+        let failure = Acquirer::new(RpcClient::new(Script::new([])), sources.clone())
             .acquire(
                 Batch::new(vec![transfer(0, &source, &destination)]).unwrap(),
                 &cancellation,
@@ -678,12 +704,16 @@ mod tests {
             expected.push(destination.to_string());
         }
         assert_eq!(expected.len(), 100);
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             ("getHealth", json!([]), json!("ok")),
             ("getSlot", json!([{"commitment":"confirmed"}]), json!(10)),
             (
                 "getMultipleAccounts",
-                json!([expected, {"encoding":"base64","commitment":"confirmed","minContextSlot":10}]),
+                json!([expected, {
+                    "encoding": "base64",
+                    "commitment": "confirmed",
+                    "minContextSlot": 10,
+                }]),
                 json!({"context":{"slot":11},"value":vec![serde_json::Value::Null;100]}),
             ),
             (
@@ -819,7 +849,7 @@ mod tests {
         let source = address(7);
         let destination = address(8);
         let system = Address::from_bytes([0; 32]);
-        let successful = Scripted::new([
+        let successful = Script::new([
             ("getHealth", json!([]), json!("ok")),
             (
                 "getSlot",
@@ -828,7 +858,10 @@ mod tests {
             ),
             (
                 "getMultipleAccounts",
-                json!([[source.to_string(),destination.to_string()], {"encoding":"base64","commitment":"confirmed","minContextSlot":u64::MAX}]),
+                json!([
+                    [source.to_string(), destination.to_string()],
+                    {"encoding": "base64", "commitment": "confirmed", "minContextSlot": u64::MAX},
+                ]),
                 json!({"context":{"slot":u64::MAX},"value":[account(&system,1,false,"",0),null]}),
             ),
             (
@@ -847,7 +880,7 @@ mod tests {
         assert_eq!(acquired.floor(), u64::MAX);
         drop(acquired);
 
-        let failed = Scripted::new([
+        let failed = Script::new([
             ("getHealth", json!([]), json!("ok")),
             (
                 "getSlot",
@@ -856,7 +889,10 @@ mod tests {
             ),
             (
                 "getMultipleAccounts",
-                json!([[source.to_string(),destination.to_string()], {"encoding":"base64","commitment":"confirmed","minContextSlot":u64::MAX}]),
+                json!([
+                    [source.to_string(), destination.to_string()],
+                    {"encoding": "base64", "commitment": "confirmed", "minContextSlot": u64::MAX},
+                ]),
                 json!({"context":{"slot":u64::MAX},"value":[account(&system,1,false,"",0),null]}),
             ),
             (

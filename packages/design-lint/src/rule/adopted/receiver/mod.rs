@@ -3,7 +3,7 @@ use syn::{FnArg, ImplItemFn, ItemImpl, ItemTrait, TraitItem, TraitItemFn, visit:
 use crate::{
     Policy, Result,
     model::{Finding, Review},
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 use crate::rule::syntax::type_name;
@@ -46,7 +46,7 @@ pub(crate) fn check(workspace: &Workspace, _policy: &Policy) -> Result<Vec<Findi
 
 struct Visitor<'a> {
     rule: &'static str,
-    source: &'a SourceFile,
+    source: &'a File,
     findings: &'a mut Vec<Finding>,
 }
 
@@ -90,22 +90,26 @@ impl Visitor<'_> {
             "method `{method_name}` repeats receiver namespace `{namespace}` as a {position}"
         );
         finding.help = format!(
-            "prefer `{namespace}::{suggested}` when the repeated words mean the receiver itself; retain them only when they name a distinct domain concept"
+            "prefer `{namespace}::{suggested}` when the repeated words mean the receiver \
+                itself; retain them only when they name a distinct domain concept"
         );
         let review = Review {
-        metadata: vec![
-            ("Receiver namespace".into(), namespace.into()),
-            ("Receiver tokens".into(), namespace_tokens.join(", ")),
-            ("Method tokens".into(), method_tokens.join(", ")),
-            ("Repeated position".into(), position.into()),
-            ("Candidate name".into(), suggested),
-        ],
-        questions: vec![
-            "Does the repeated token denote the receiver itself or a genuinely different domain concept?"
-                .into(),
-            "Will the shorter method remain unambiguous at every call site and re-export boundary?".into(),
-            "Have all callers and documentation been updated together?".into(),
-        ],
+            metadata: vec![
+                ("Receiver namespace".into(), namespace.into()),
+                ("Receiver tokens".into(), namespace_tokens.join(", ")),
+                ("Method tokens".into(), method_tokens.join(", ")),
+                ("Repeated position".into(), position.into()),
+                ("Candidate name".into(), suggested),
+            ],
+            questions: vec![
+                "Does the repeated token denote the receiver itself or a genuinely different \
+                domain concept?"
+                    .into(),
+                "Will the shorter method remain unambiguous at every call site and re-export \
+                boundary?"
+                    .into(),
+                "Have all callers and documentation been updated together?".into(),
+            ],
             ..Review::default()
         };
         finding.review = Some(review);

@@ -246,7 +246,9 @@ impl ValidatedAddresses {
     }
 }
 
-// design-lint: allow unclassified-free-function -- shared Bitcoin block and transaction interpretation boundary classifies multiple native invariant failures as nonretryable foreign IndexError::InvalidBlock
+// shared Bitcoin block and transaction interpretation boundary classifies multiple native invariant
+// failures as nonretryable foreign IndexError::InvalidBlock
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn invalid_block(message: impl ToString) -> IndexError {
     IndexError::new(IndexErrorKind::InvalidBlock, message.to_string(), false)
 }

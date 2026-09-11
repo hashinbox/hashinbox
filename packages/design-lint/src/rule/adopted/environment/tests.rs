@@ -34,7 +34,7 @@ fn findings_in(package_name: &str, source: &str, relative: &str) -> Vec<Finding>
     check(&fixture.workspace(), &Policy::default()).expect("check fixture")
 }
 
-fn environment_findings(source: &str, relative: &str) -> Vec<Finding> {
+fn access_findings(source: &str, relative: &str) -> Vec<Finding> {
     findings_in("fixture", source, relative)
 }
 
@@ -49,7 +49,7 @@ fn selected_findings(source: &str, relative: &str) -> Vec<Finding> {
 
 #[test]
 fn resolves_std_env_aliases_and_host_path_apis() {
-    let values = environment_findings(
+    let values = access_findings(
         r#"
 use std::env::{self as process_environment, current_dir as cwd, var as read};
 use std::env as host;
@@ -69,7 +69,7 @@ fn load() {
 
 #[test]
 fn resolves_renamed_dirs_crate_without_matching_similar_names() {
-    let values = environment_findings(
+    let values = access_findings(
         r#"
 use dirs as locations;
 use dirs::config_dir as preferences;
@@ -88,11 +88,11 @@ fn load() {
 fn permits_test_scopes_and_explicitly_selected_sources() {
     for relative in ["src/adapter/host.rs", "build.rs"] {
         let text = "fn load() { let _ = std::env::var(\"A\"); }";
-        assert_eq!(environment_findings(text, relative).len(), 1);
+        assert_eq!(access_findings(text, relative).len(), 1);
         assert!(selected_findings(text, relative).is_empty());
     }
     assert!(
-        environment_findings(
+        access_findings(
             "#[test] fn load() { let _ = std::env::var(\"A\"); }",
             "src/lib.rs"
         )
@@ -101,10 +101,9 @@ fn permits_test_scopes_and_explicitly_selected_sources() {
 }
 
 #[test]
-fn role_words_outside_an_adapter_boundary_do_not_suppress_environment_findings() {
+fn role_words_outside_an_adapter_boundary_do_not_suppress_environment_access_findings() {
     for relative in ["src/domain/host.rs", "src/model/linux.rs"] {
-        let values =
-            environment_findings("fn load() { let _ = std::env::current_dir(); }", relative);
+        let values = access_findings("fn load() { let _ = std::env::current_dir(); }", relative);
         assert_eq!(values.len(), 1, "{relative} must not be an adapter");
     }
     let values = findings_in(
@@ -124,14 +123,14 @@ fn role_names_need_an_explicit_source_selector() {
         "src/host.rs",
     ] {
         let text = "fn load() { let _ = std::env::current_exe(); }";
-        assert_eq!(environment_findings(text, relative).len(), 1);
+        assert_eq!(access_findings(text, relative).len(), 1);
         assert!(selected_findings(text, relative).is_empty());
     }
 }
 
 #[test]
 fn configuration_globals_require_semantic_evidence() {
-    let values = environment_findings(
+    let values = access_findings(
         r#"
 use std::sync::{Mutex, OnceLock};
 struct AppConfig;

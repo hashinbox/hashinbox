@@ -251,7 +251,9 @@ impl IndexBlockInterpreter for BlockInterpreter {
     }
 }
 
-// design-lint: allow unclassified-free-function -- Ethereum indexing adapter validates foreign canonical-address chain identity and preserves Alloy address syntax with contextual IndexError
+// Ethereum indexing adapter validates foreign canonical-address chain identity and preserves Alloy
+// address syntax with contextual IndexError
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn parse_canonical_address(address: &CanonicalAddress) -> Result<[u8; 20], IndexError> {
     if address.scope.chain != *CHAIN_ID {
         return Err(IndexError::new(
@@ -273,7 +275,9 @@ fn parse_canonical_address(address: &CanonicalAddress) -> Result<[u8; 20], Index
         })
 }
 
-// design-lint: allow unclassified-free-function -- lossless Ethereum indexer boundary conversion from Alloy U256 to shared scale-zero Decimal for native amounts, token units, and fees
+// lossless Ethereum indexer boundary conversion from Alloy U256 to shared scale-zero Decimal for
+// native amounts, token units, and fees
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn atomic_decimal(value: U256) -> Decimal {
     Decimal::from_atomic(BigUint::from_bytes_be(&value.to_be_bytes::<32>()), 0)
 }

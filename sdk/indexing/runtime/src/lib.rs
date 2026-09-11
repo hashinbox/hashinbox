@@ -112,15 +112,16 @@ pub async fn run(
             changed
         });
 
-        if wait {
-            tokio::select! {
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() {
-                        return Ok(());
-                    }
+        if !wait {
+            continue;
+        }
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(());
                 }
-                () = tokio::time::sleep(interval) => {}
             }
+            () = tokio::time::sleep(interval) => {}
         }
     }
 }

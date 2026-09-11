@@ -246,7 +246,7 @@ once, under Rust 1.85:
   real second-owner slices: singular one-shot `rpc/client.rs`; private
   `transaction/lifetime.rs`; canonical 32-byte
   `transaction/operations/memo.rs`; structural `wallet/account.rs`; scoped
-  `indexer/interpreter.rs`; and bounded `indexer/source/budget.rs`. Later steps
+  `indexer/interpreter/mod.rs`; and bounded `indexer/source/budget.rs`. Later steps
   extend those owners rather than recreate them. Do not land empty/filler
   `mod.rs` directories or weaken design lint. Before completion, run an
   immediate Rust-1.85 locked package check, dependency-tree/MSRV audit, design

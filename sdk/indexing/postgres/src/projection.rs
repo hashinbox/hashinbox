@@ -10,7 +10,8 @@ use crate::{
 };
 
 const WRITE_HISTORY: &str = "\
-INSERT INTO payments_history (chain, network, address, height, transaction_id, status, failure_reason,
+INSERT INTO payments_history (chain, network, address, height, transaction_id, status, \
+failure_reason,
                      block_position, block_hash, block_parent_position, block_parent,
                      block_timestamp, fee_asset, fee_amount, fee_payer)
 SELECT $1, $2, entry.address, $3, entry.transaction_id, entry.status, entry.failure_reason,
@@ -20,7 +21,8 @@ FROM UNNEST($9::text[], $10::text[], $11::text[], $12::text[], $13::text[], $14:
      AS entry(address, transaction_id, status, failure_reason, fee_asset, fee_amount, fee_payer)";
 
 const WRITE_MOVEMENT: &str = "\
-INSERT INTO payments_movement (chain, network, address, height, transaction_id, ordinal, kind, movement_id,
+INSERT INTO payments_movement (chain, network, address, height, transaction_id, ordinal, \
+kind, movement_id,
                       asset_chain, asset, amount, from_address, to_address)
 SELECT $1, $2, entry.address, $3, entry.transaction_id, entry.ordinal, entry.kind,
        entry.movement_id, entry.asset_chain, entry.asset, entry.amount::numeric,
@@ -31,7 +33,8 @@ FROM UNNEST($4::text[], $5::text[], $6::int4[], $7::text[], $8::text[], $9::text
               from_address, to_address)";
 
 const WRITE_CREATED: &str = "\
-INSERT INTO payments_output (chain, network, transaction_id, output_index, address, asset_chain, asset,
+INSERT INTO payments_output (chain, network, transaction_id, output_index, address, \
+asset_chain, asset,
                     amount, evidence, created_at, coinbase)
 SELECT $1, $2, entry.transaction_id, entry.output_index, entry.address, entry.asset_chain,
        entry.asset, entry.amount::numeric, entry.evidence, $3, entry.coinbase
@@ -231,7 +234,9 @@ async fn spend(
         .map_err(crate::store)
 }
 
-// design-lint: allow unclassified-free-function -- shared PostgreSQL write-error translation between foreign error types; SQLSTATE policy belongs to this adapter
+// shared PostgreSQL write-error translation between foreign error types; SQLSTATE policy belongs to
+// this adapter
+// design-lint: allow unclassified-free-function -- backend projection write algorithm
 fn conflict_aware(error: tokio_postgres::Error) -> IndexError {
     let unique = error
         .code()

@@ -68,17 +68,20 @@ impl Repository {
         rows.iter()
             .map(|entry| {
                 let start: i64 = entry.try_get("start_height").map_err(crate::store)?;
+                let id = entry.try_get("id").map_err(crate::store)?;
+                let address = CanonicalAddress {
+                    scope: scope.clone(),
+                    value: entry.try_get("address").map_err(crate::store)?,
+                };
+                let start_position = BlockPosition(
+                    u64::try_from(start)
+                        .map_err(|_| row::store("stored start position is negative"))?,
+                );
                 Ok(RegisteredAddress {
-                    id: entry.try_get("id").map_err(crate::store)?,
+                    id,
                     filter: AddressFilter {
-                        address: CanonicalAddress {
-                            scope: scope.clone(),
-                            value: entry.try_get("address").map_err(crate::store)?,
-                        },
-                        start_position: BlockPosition(
-                            u64::try_from(start)
-                                .map_err(|_| row::store("stored start position is negative"))?,
-                        ),
+                        address,
+                        start_position,
                     },
                     material: entry.try_get("secret").map_err(crate::store)?,
                 })

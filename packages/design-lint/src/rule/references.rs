@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use syn::{ImplItemFn, ItemFn, spanned::Spanned, visit::Visit};
 
-use crate::{Location, source::SourceFile};
+use crate::{Location, source::File};
 
 #[derive(Clone)]
 pub struct Context {
@@ -18,13 +18,13 @@ pub struct Reference {
 }
 
 pub struct References<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     context: Option<Rc<Context>>,
     pub values: Vec<Reference>,
 }
 
 impl<'a> References<'a> {
-    pub fn new(source: &'a SourceFile) -> Self {
+    pub fn new(source: &'a File) -> Self {
         Self {
             source,
             context: None,

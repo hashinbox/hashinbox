@@ -1,6 +1,4 @@
-#[path = "interpreter_movement.rs"]
 mod movement;
-#[path = "interpreter_wire.rs"]
 mod wire;
 
 use std::collections::BTreeSet;
@@ -136,11 +134,12 @@ impl IndexBlockInterpreter for Interpreter {
     }
 }
 
-// design-lint: allow unclassified-free-function -- shared Solana block, transaction and movement validation maps native invariant failures to nonretryable foreign IndexError::InvalidBlock
+// shared Solana block, transaction and movement validation maps native invariant failures to
+// nonretryable foreign IndexError::InvalidBlock
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn invalid_block(message: impl Into<String>) -> IndexError {
     IndexError::new(IndexErrorKind::InvalidBlock, message, false)
 }
 
 #[cfg(test)]
-#[path = "interpreter_test.rs"]
 mod tests;

@@ -67,7 +67,8 @@ fn keeps_intentional_public_cfg_and_used_namespaces() {
     write(
         &root,
         "src/lib.rs",
-        "pub mod public;\nmod configured;\nmod private_api;\nmod used;\nfn consume(_: used::Value) {}",
+        "pub mod public;\nmod configured;\nmod private_api;\nmod used;\nfn consume(_: \
+            used::Value) {}",
     );
     for module in ["public", "used"] {
         write(

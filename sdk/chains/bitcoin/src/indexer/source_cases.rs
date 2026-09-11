@@ -185,30 +185,31 @@ fn external_prevouts_are_resolved_once_into_bounded_parsed_facts() {
         ]
     );
     let historical_id = TransactionId::from(previous.compute_txid());
+    let expected = previous
+        .output
+        .iter()
+        .enumerate()
+        .map(|(index, output)| {
+            Some(PreviousOutput {
+                outpoint: Outpoint {
+                    transaction_id: historical_id,
+                    output_index: u32::try_from(index).expect("test index must fit u32"),
+                },
+                value: Satoshi(output.value.to_sat()),
+                address: crate::Address::from_script_for_network(
+                    &output.script_pubkey,
+                    Network::Regtest,
+                ),
+            })
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         transactions[0]
             .inputs
             .iter()
             .map(|input| input.previous_output.clone())
             .collect::<Vec<_>>(),
-        previous
-            .output
-            .iter()
-            .enumerate()
-            .map(|(index, output)| {
-                Some(PreviousOutput {
-                    outpoint: Outpoint {
-                        transaction_id: historical_id,
-                        output_index: u32::try_from(index).expect("test index must fit u32"),
-                    },
-                    value: Satoshi(output.value.to_sat()),
-                    address: crate::Address::from_script_for_network(
-                        &output.script_pubkey,
-                        Network::Regtest,
-                    ),
-                })
-            })
-            .collect::<Vec<_>>()
+        expected
     );
     assert!(previous.output[2].script_pubkey.len() > MAX_COMPACT_PREVOUT_JSON_BYTES);
 
@@ -463,7 +464,12 @@ fn canonical_header_keeps_request_identity_and_complete_coordinates() {
             reply_for(
                 "getblockheader",
                 json!([hash(2), true]),
-                json!({"height": height, "hash": hash(2).to_uppercase(), "previousblockhash": hash(3), "time": 100}),
+                json!({
+                    "height": height,
+                    "hash": hash(2).to_uppercase(),
+                    "previousblockhash": hash(3),
+                    "time": 100,
+                }),
             ),
         ]);
         let client = ScriptedClient::new(replies);

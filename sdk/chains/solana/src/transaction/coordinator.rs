@@ -59,14 +59,11 @@ where
                 let source = transfer.source().clone();
                 let signer = transfer.signer();
                 if signer.address() != &source {
-                    return Err(SendError::item(
-                        index,
-                        Vec::new(),
-                        WalletError::new(
-                            WalletErrorKind::AddressMismatch,
-                            "Solana signer does not own the source address",
-                        ),
-                    ));
+                    let source = WalletError::new(
+                        WalletErrorKind::AddressMismatch,
+                        "Solana signer does not own the source address",
+                    );
+                    return Err(SendError::item(index, Vec::new(), source));
                 }
                 keys.entry(source.clone()).or_insert(signer);
                 Ok(ResolvedTransfer::new(

@@ -6,9 +6,9 @@ use syn::{
 };
 
 use crate::{
-    model::{Finding, Related, Review},
+    model::{Finding, RelatedLocation, Review},
     rule::production::test_only,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 use super::ID;
@@ -62,14 +62,18 @@ impl Trait {
         let proof = if implementations.is_empty() {
             "the private empty trait has no implementations or uses"
         } else {
-            "the private empty trait is implemented only by unconstrained blanket implementations and is never used as a bound or trait object"
+            "the private empty trait is implemented only by unconstrained blanket \
+                implementations and is never used as a bound or trait object"
         };
         let mut finding = Finding::warning(ID, self.name.clone(), self.location);
         finding.message = format!("marker trait `{}` is ceremonial: {proof}", self.name);
-        finding.help = "remove the trait, or give it a selective compile-time tagging/sealing contract that consumers actually use".into();
+        finding.help =
+            "remove the trait, or give it a selective compile-time tagging/sealing contract \
+            that consumers actually use"
+                .into();
         finding.related = implementations
             .iter()
-            .map(|implementation| Related {
+            .map(|implementation| RelatedLocation {
                 label: "unconstrained blanket implementation".into(),
                 location: implementation.location.clone(),
             })
@@ -100,7 +104,7 @@ struct Implementation {
 }
 
 struct Collector<'a, 'db> {
-    source: &'a SourceFile,
+    source: &'a File,
     test_scope: bool,
     database: &'db mut Database,
 }

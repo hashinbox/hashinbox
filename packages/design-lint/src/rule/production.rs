@@ -5,9 +5,9 @@ use syn::{
     Attribute, ForeignItem, ImplItem, Item, Meta, TraitItem, spanned::Spanned, visit::Visit,
 };
 
-use crate::source::SourceFile;
+use crate::source::File;
 
-pub(super) fn text(source: &SourceFile) -> String {
+pub(super) fn text(source: &File) -> String {
     let mut visitor = RangeVisitor::default();
     visitor.visit_file(&source.syntax);
     let offsets = LineOffsets::new(&source.text);
@@ -27,7 +27,7 @@ pub(super) fn text(source: &SourceFile) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-pub(super) fn line_count(source: &SourceFile) -> usize {
+pub(super) fn line_count(source: &File) -> usize {
     let mut visitor = RangeVisitor::default();
     visitor.visit_file(&source.syntax);
     let offsets = LineOffsets::new(&source.text);
@@ -332,14 +332,18 @@ fn test_only_line(text: &str, line: &Range<usize>, ranges: &[Range<usize>]) -> b
     let touches_test = ranges
         .iter()
         .any(|range| range.start < line.end && line.start < range.end);
-    touches_test
-        && text[line.clone()]
-            .char_indices()
-            .all(|(offset, character)| {
-                character.is_whitespace()
-                    || ranges.iter().any(|range| {
-                        let start = line.start + offset;
-                        range.start <= start && start + character.len_utf8() <= range.end
-                    })
+    if !touches_test {
+        return false;
+    }
+    text[line.clone()]
+        .char_indices()
+        .all(|(offset, character)| {
+            if character.is_whitespace() {
+                return true;
+            }
+            ranges.iter().any(|range| {
+                let start = line.start + offset;
+                range.start <= start && start + character.len_utf8() <= range.end
             })
+        })
 }

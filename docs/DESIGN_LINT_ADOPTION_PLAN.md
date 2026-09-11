@@ -83,7 +83,7 @@ src/
   main.rs                 CLI and exit behavior
   policy/                 Repository policy and boundary selectors
   source/                 Workspace, source text/spans, package/test identity
-  model.rs                Finding, Location, Related, Review, Severity, Summary
+  model.rs                Finding, Location, RelatedLocation, Review, Severity, Summary
   rule/
     mod.rs                Rule, Registry, named rule exports
     repository.rs         Existing repository rules and dependency graph
@@ -93,7 +93,7 @@ src/
     references.rs         Shared syntactic reference evidence
     syntax.rs             Small shared syntax operations
     production.rs         One authoritative test/production classifier
-  report/                 Diagnostic, Markdown, and case reporters
+  report/                 Printer, Markdown, and case reporters
 ```
 
 These are ownership boundaries, not a request to create empty directories or
@@ -271,7 +271,7 @@ so the implementation can be reviewed against the approved plan.
 | DL-01 | Record donor revision, copied-file inventory, and MIT notice | Implementation start | Provenance covers each copied source/test file |
 | DL-02 | Capture fixtures and CLI results for all existing 11 checks | DL-01 | Accepted/rejected outcomes, severities, and exit behavior recorded |
 | DL-03 | Introduce one ordered Registry with named SDK and donor rule registration | DL-02 | Same existing findings; duplicate IDs rejected; explicit-registry library execution available; Rule remains three methods |
-| DL-04 | Extend Finding with Related/Review evidence and Warning severity | DL-03 | Existing errors still count; Rule/Finding/Summary severities agree; metadata alone never suppresses an error |
+| DL-04 | Extend Finding with RelatedLocation/Review evidence and Warning severity | DL-03 | Existing errors still count; Rule/Finding/Summary severities agree; metadata alone never suppresses an error |
 | DL-05 | Extend diagnostic and Markdown reporters | DL-04 | Related locations and warnings render; error and warning exit behavior verified |
 | DL-06 | Extend case reports with context and safe deterministic file identity | DL-04 | Owned generated files identified; replacement staged; previous output, `.gitkeep`, and unrelated sentinels survive pre-replacement failure |
 | DL-07 | Enrich the existing source model with exact excerpts and package/module identity | DL-03 | One parser/source model; Unicode and multiline spans verified |

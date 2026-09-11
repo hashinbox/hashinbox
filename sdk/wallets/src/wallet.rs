@@ -668,7 +668,8 @@ mod tests {
             error,
             Error::new(
                 crate::ErrorKind::History,
-                "indexed amount is not a non-negative integer: amount has more than 0 fractional digits"
+                "indexed amount is not a non-negative integer: amount has more than \
+                0 fractional digits"
             )
         );
     }
@@ -696,7 +697,8 @@ mod tests {
             (
                 Ok(asset("native", 8)),
                 Error::history(
-                    "indexed amount is not a non-negative integer: amount has more than 0 fractional digits",
+                    "indexed amount is not a non-negative integer: amount has more \
+                    than 0 fractional digits",
                 ),
             ),
         ] {
@@ -744,28 +746,25 @@ mod tests {
             }),
         };
 
-        let history = History::from_index(
-            TransactionPage {
+        let page = TransactionPage {
+            checkpoint: Some(block(7)),
+            transactions: vec![transaction],
+            next: Some(HistoryCursor {
                 checkpoint: Some(block(7)),
-                transactions: vec![transaction],
-                next: Some(HistoryCursor {
-                    checkpoint: Some(block(7)),
-                    position: HistoryPosition {
-                        height: BlockHeight(7),
-                        transaction: TransactionRef {
-                            scope: scope(),
-                            value: "next".to_owned(),
-                        },
+                position: HistoryPosition {
+                    height: BlockHeight(7),
+                    transaction: TransactionRef {
+                        scope: scope(),
+                        value: "next".to_owned(),
                     },
-                }),
-            },
-            &scope(),
-            |value| match value.asset.as_str() {
-                "token" => Ok(asset("token", 6)),
-                "native" => Ok(asset("native", 18)),
-                _ => unreachable!("fixture uses known assets"),
-            },
-        )
+                },
+            }),
+        };
+        let history = History::from_index(page, &scope(), |value| match value.asset.as_str() {
+            "token" => Ok(asset("token", 6)),
+            "native" => Ok(asset("native", 18)),
+            _ => unreachable!("fixture uses known assets"),
+        })
         .expect("exact atomic amounts must convert");
 
         assert_eq!(

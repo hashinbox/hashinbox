@@ -7,10 +7,10 @@ use syn::{
 
 use crate::{
     Result,
-    model::{Finding, Related, Review},
+    model::{Finding, RelatedLocation, Review},
     policy::Policy,
     rule::production::test_only,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 #[cfg(test)]
@@ -141,18 +141,26 @@ impl Definition {
             self.methods.len(),
             clusters.len()
         );
-        finding.help = "split the contract into the smallest real capabilities implemented and consumed independently; retain a composition trait only when callers require the complete set".into();
+        finding.help =
+            "split the contract into the smallest real capabilities implemented and consumed \
+            independently; retain a composition trait only when callers require the complete \
+            set"
+            .into();
         finding.related = self
             .methods
             .iter()
-            .map(|method| Related {
+            .map(|method| RelatedLocation {
                 label: format!("method `{}`: {}", method.name, method.signature),
                 location: method.location.clone(),
             })
-            .chain(implementations.iter().map(|implementation| Related {
-                label: format!("implemented by `{}`", implementation.owner),
-                location: implementation.location.clone(),
-            }))
+            .chain(
+                implementations
+                    .iter()
+                    .map(|implementation| RelatedLocation {
+                        label: format!("implemented by `{}`", implementation.owner),
+                        location: implementation.location.clone(),
+                    }),
+            )
             .collect();
 
         let mut review = Review::default();
@@ -186,7 +194,8 @@ impl Definition {
                 .into(),
         );
         review.questions.push(
-            "Are these operations one cohesive protocol/state machine despite their different verbs and types?"
+            "Are these operations one cohesive protocol/state machine despite their \
+                different verbs and types?"
                 .into(),
         );
         finding.review = Some(review);
@@ -195,7 +204,7 @@ impl Definition {
 }
 
 struct Collector<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     modules: Vec<String>,
     test_scope: bool,
     definitions: Vec<Definition>,
@@ -260,7 +269,7 @@ impl Visit<'_> for Collector<'_> {
     }
 }
 
-fn method(method: &TraitItemFn, source: &SourceFile) -> Method {
+fn method(method: &TraitItemFn, source: &File) -> Method {
     let name = method.sig.ident.to_string();
     let mut types = method
         .sig
@@ -284,7 +293,7 @@ fn method(method: &TraitItemFn, source: &SourceFile) -> Method {
     }
 }
 
-fn normalized(source: &SourceFile, span: proc_macro2::Span) -> String {
+fn normalized(source: &File, span: proc_macro2::Span) -> String {
     source
         .excerpt(span)
         .split_whitespace()
@@ -292,7 +301,7 @@ fn normalized(source: &SourceFile, span: proc_macro2::Span) -> String {
         .join(" ")
 }
 
-fn excluded_trait(item: &ItemTrait, source: &SourceFile) -> bool {
+fn excluded_trait(item: &ItemTrait, source: &File) -> bool {
     item.unsafety.is_some()
         || generated(&item.attrs, &source.text)
         || item.supertraits.iter().any(|bound| {
@@ -437,7 +446,7 @@ fn signature_types(method: &Method) -> BTreeSet<String> {
         .collect()
 }
 
-fn type_words(source: &SourceFile, span: proc_macro2::Span) -> impl Iterator<Item = String> {
+fn type_words(source: &File, span: proc_macro2::Span) -> impl Iterator<Item = String> {
     words(&source.excerpt(span))
 }
 

@@ -91,7 +91,7 @@ enum BroadcastAction {
 }
 
 #[derive(Default)]
-struct TransactionStub {
+struct Endpoint {
     contexts: Mutex<Vec<(Address, u64)>>,
     broadcasts: Mutex<Vec<SignedTransaction>>,
     actions: Mutex<VecDeque<BroadcastAction>>,
@@ -99,7 +99,7 @@ struct TransactionStub {
     known_ids: Mutex<Vec<TransactionId>>,
 }
 
-impl TransactionStub {
+impl Endpoint {
     fn actions(&self, actions: impl IntoIterator<Item = BroadcastAction>) {
         self.actions
             .lock()
@@ -115,7 +115,7 @@ impl TransactionStub {
     }
 }
 
-impl Transactions for TransactionStub {
+impl Transactions for Endpoint {
     fn build_context<'a>(
         &'a self,
         request: &'a TransferRequest,
@@ -211,10 +211,7 @@ fn token_transfer(from: &Address, token: &Address, amount: u128) -> TransferRequ
     )
 }
 
-fn coordinator(
-    accounts: Arc<AccountStub>,
-    transactions: Arc<TransactionStub>,
-) -> TransactionCoordinator {
+fn coordinator(accounts: Arc<AccountStub>, transactions: Arc<Endpoint>) -> TransactionCoordinator {
     TransactionCoordinator::new(accounts, transactions)
 }
 
@@ -225,7 +222,7 @@ async fn prepares_a_b_a_with_consecutive_per_sender_nonces_before_broadcast() {
     let accounts = Arc::new(AccountStub::default());
     accounts.set_nonce(signer_a.address.clone(), 5);
     accounts.set_nonce(signer_b.address.clone(), 9);
-    let transactions = Arc::new(TransactionStub::default());
+    let transactions = Arc::new(Endpoint::default());
     let coordinator = coordinator(accounts, transactions.clone());
 
     let mut batch = coordinator
@@ -272,7 +269,7 @@ async fn aggregate_overspend_reports_first_threshold_crossing_without_broadcast(
     let signer = signer(3);
     let accounts = Arc::new(AccountStub::default());
     accounts.set_native_balance(signer.address.clone(), 10);
-    let transactions = Arc::new(TransactionStub::default());
+    let transactions = Arc::new(Endpoint::default());
     let coordinator = coordinator(accounts, transactions.clone());
 
     let result = coordinator
@@ -304,7 +301,7 @@ async fn cumulative_token_amount_and_native_gas_fail_before_any_broadcast() {
     let accounts = Arc::new(AccountStub::default());
     accounts.set_native_balance(signer.address.clone(), 2);
     accounts.set_token_balance(signer.address.clone(), token.clone(), 10);
-    let transactions = Arc::new(TransactionStub::default());
+    let transactions = Arc::new(Endpoint::default());
     let coordinator = coordinator(accounts.clone(), transactions.clone());
     let preparations = || {
         vec![
@@ -357,7 +354,7 @@ async fn ambiguous_submission_reconciles_and_replays_the_exact_envelope() {
     let signer = signer(4);
     let accounts = Arc::new(AccountStub::default());
     accounts.set_nonce(signer.address.clone(), 5);
-    let transactions = Arc::new(TransactionStub::default());
+    let transactions = Arc::new(Endpoint::default());
     transactions.actions([BroadcastAction::Ambiguous, BroadcastAction::Accept]);
     transactions.known([Ok(false)]);
     let coordinator = coordinator(accounts, transactions.clone());
@@ -407,7 +404,7 @@ async fn known_recovery_accepts_without_rebroadcast_and_advances_the_nonce_floor
     let signer = signer(4);
     let accounts = Arc::new(AccountStub::default());
     accounts.set_nonce(signer.address.clone(), 5);
-    let transactions = Arc::new(TransactionStub::default());
+    let transactions = Arc::new(Endpoint::default());
     transactions.actions([BroadcastAction::Ambiguous]);
     transactions.known([Ok(true)]);
     let coordinator = coordinator(accounts, transactions.clone());
@@ -472,7 +469,7 @@ async fn known_recovery_accepts_without_rebroadcast_and_advances_the_nonce_floor
 async fn recovery_lookup_failure_preserves_the_message_local_id_and_exact_replay() {
     let signer = signer(4);
     let accounts = Arc::new(AccountStub::default());
-    let transactions = Arc::new(TransactionStub::default());
+    let transactions = Arc::new(Endpoint::default());
     transactions.actions([BroadcastAction::Ambiguous, BroadcastAction::Accept]);
     transactions.known([
         Err(SourceError {
@@ -534,7 +531,7 @@ async fn new_same_sender_preparation_recovers_old_envelope_before_nonce_plus_one
     let signer = signer(8);
     let accounts = Arc::new(AccountStub::default());
     accounts.set_nonce(signer.address.clone(), 5);
-    let transactions = Arc::new(TransactionStub::default());
+    let transactions = Arc::new(Endpoint::default());
     transactions.actions([
         BroadcastAction::Ambiguous,
         BroadcastAction::Accept,
@@ -601,7 +598,7 @@ async fn terminal_initial_rejection_releases_the_nonce_for_reuse() {
     let signer = signer(9);
     let accounts = Arc::new(AccountStub::default());
     accounts.set_nonce(signer.address.clone(), 5);
-    let transactions = Arc::new(TransactionStub::default());
+    let transactions = Arc::new(Endpoint::default());
     transactions.actions([BroadcastAction::Reject]);
     let coordinator = coordinator(accounts, transactions.clone());
     let rejected = coordinator
@@ -647,7 +644,7 @@ async fn terminal_initial_rejection_releases_the_nonce_for_reuse() {
 async fn cancellation_after_submission_starts_retains_unknown_for_exact_recovery() {
     let signer = signer(5);
     let accounts = Arc::new(AccountStub::default());
-    let transactions = Arc::new(TransactionStub::default());
+    let transactions = Arc::new(Endpoint::default());
     transactions.actions([BroadcastAction::Pending, BroadcastAction::Accept]);
     transactions.known([Ok(false)]);
     let coordinator = coordinator(accounts, transactions.clone());
@@ -685,7 +682,7 @@ async fn concurrent_same_sender_operations_never_reuse_a_nonce() {
     let signer = Arc::new(signer(6));
     let accounts = Arc::new(AccountStub::default());
     accounts.set_nonce(signer.address.clone(), 5);
-    let transactions = Arc::new(TransactionStub::default());
+    let transactions = Arc::new(Endpoint::default());
     let coordinator = coordinator(accounts, transactions.clone());
     let (prepared, prepared_rx) = tokio::sync::oneshot::channel();
     let release = Arc::new(tokio::sync::Notify::new());

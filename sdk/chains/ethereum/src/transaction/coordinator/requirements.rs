@@ -53,13 +53,11 @@ impl Requirements {
                 .max_fee_per_gas
                 .checked_mul_u64(draft.context.gas_limit)
                 .ok_or_else(|| {
-                    PreparationError::new(
-                        index,
-                        ChainError::new(
-                            ChainErrorKind::FeeUnavailable,
-                            "Ethereum aggregate maximum fee overflows U256",
-                        ),
-                    )
+                    let source = ChainError::new(
+                        ChainErrorKind::FeeUnavailable,
+                        "Ethereum aggregate maximum fee overflows U256",
+                    );
+                    PreparationError::new(index, source)
                 })?;
             let native = if request.erc20_transfer().is_none() {
                 fee.checked_add(&request.value())
@@ -67,13 +65,11 @@ impl Requirements {
                 Some(fee)
             }
             .ok_or_else(|| {
-                PreparationError::new(
-                    index,
-                    ChainError::new(
-                        ChainErrorKind::InsufficientFunds,
-                        "Ethereum aggregate native requirement overflows U256",
-                    ),
-                )
+                let source = ChainError::new(
+                    ChainErrorKind::InsufficientFunds,
+                    "Ethereum aggregate native requirement overflows U256",
+                );
+                PreparationError::new(index, source)
             })?;
             add(
                 &mut values,
@@ -117,13 +113,11 @@ fn add(
         .entry((source, asset))
         .or_insert_with(|| (Wei::ZERO, Vec::new()));
     entry.0 = entry.0.checked_add(&amount).ok_or_else(|| {
-        PreparationError::new(
-            index,
-            ChainError::new(
-                ChainErrorKind::InsufficientFunds,
-                "Ethereum aggregate asset requirement overflows U256",
-            ),
-        )
+        let source = ChainError::new(
+            ChainErrorKind::InsufficientFunds,
+            "Ethereum aggregate asset requirement overflows U256",
+        );
+        PreparationError::new(index, source)
     })?;
     entry.1.push((index, amount));
     Ok(())

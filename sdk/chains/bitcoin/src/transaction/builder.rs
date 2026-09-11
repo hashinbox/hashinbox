@@ -158,9 +158,12 @@ impl BatchBuilder {
         signers: &'a [&'a S],
     ) -> TransactionFuture<'a, Result<super::SignedTransaction, ChainError>> {
         Box::pin(async move {
-            let unsigned =
-                super::operations::build_grouped(self.network, self.groups.clone(), self.fee_rate)?;
-            super::operations::sign_each(self.network, unsigned, signers).await
+            let unsigned = super::operations::build::grouped(
+                self.network,
+                self.groups.clone(),
+                self.fee_rate,
+            )?;
+            super::operations::sign::each(self.network, unsigned, signers).await
         })
     }
 }
@@ -205,7 +208,7 @@ impl Builder {
     ) -> TransactionFuture<'a, Result<super::SignedTransaction, ChainError>> {
         Box::pin(async move {
             let unsigned = self.request.clone().build(self.network)?;
-            super::operations::sign_each(self.network, unsigned, signers).await
+            super::operations::sign::each(self.network, unsigned, signers).await
         })
     }
 }
@@ -383,7 +386,7 @@ mod tests {
             drain_wallet: true,
         };
 
-        let grouped = crate::transaction::operations::build_grouped(
+        let grouped = crate::transaction::operations::build::grouped(
             Network::Regtest,
             vec![Funding {
                 available: request.available.clone(),
@@ -555,7 +558,7 @@ mod tests {
             },
         ];
 
-        let transaction = crate::transaction::operations::build_grouped(
+        let transaction = crate::transaction::operations::build::grouped(
             Network::Regtest,
             groups,
             FeeRate::new(1_000),
@@ -616,7 +619,7 @@ mod tests {
             },
         ];
 
-        let error = crate::transaction::operations::build_grouped(
+        let error = crate::transaction::operations::build::grouped(
             Network::Regtest,
             groups,
             FeeRate::new(1_000),
@@ -681,7 +684,7 @@ mod tests {
         };
         let mut distinct = group.clone();
         distinct.available[0].output_index = 3;
-        let built = crate::transaction::operations::build_grouped(
+        let built = crate::transaction::operations::build::grouped(
             Network::Regtest,
             vec![group.clone(), distinct],
             FeeRate::new(1_000),
@@ -702,7 +705,7 @@ mod tests {
         ] {
             let mut second = group.clone();
             second.recipients[0].value = Satoshi(amount);
-            let error = crate::transaction::operations::build_grouped(
+            let error = crate::transaction::operations::build::grouped(
                 Network::Regtest,
                 vec![group.clone(), second],
                 FeeRate::new(1_000),

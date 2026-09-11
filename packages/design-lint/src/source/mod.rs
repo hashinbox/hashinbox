@@ -14,7 +14,7 @@ pub use scope::snake_case;
 
 use crate::{LintError, Location, Result, policy::Source as SourcePolicy};
 
-pub struct SourceFile {
+pub struct File {
     pub path: PathBuf,
     pub text: String,
     pub syntax: syn::File,
@@ -29,17 +29,17 @@ pub use package::Package;
 pub struct Workspace {
     pub roots: Vec<PathBuf>,
     pub(crate) policy_roots: Vec<PathBuf>,
-    pub sources: Vec<SourceFile>,
+    pub sources: Vec<File>,
     pub packages: Vec<Package>,
     pub directories: Vec<PathBuf>,
 }
 
 impl Workspace {
-    pub fn production(&self) -> impl Iterator<Item = &SourceFile> {
+    pub fn production(&self) -> impl Iterator<Item = &File> {
         self.sources.iter().filter(|source| !source.test)
     }
 
-    pub fn sources(&self) -> &[SourceFile] {
+    pub fn sources(&self) -> &[File] {
         &self.sources
     }
     pub fn paths(&self) -> &[PathBuf] {
@@ -66,16 +66,15 @@ impl Workspace {
         let policy_roots = roots
             .iter()
             .map(|root| {
+                let nearest = root
+                    .ancestors()
+                    .find(|ancestor| manifests.contains_key(*ancestor));
                 root.ancestors()
-                    .find(|ancestor| {
-                        manifests
-                            .get(*ancestor)
-                            .is_some_and(|manifest| manifest.get("workspace").is_some())
+                    .find_map(|ancestor| {
+                        manifests.get(ancestor)?.get("workspace")?;
+                        Some(ancestor)
                     })
-                    .or_else(|| {
-                        root.ancestors()
-                            .find(|ancestor| manifests.contains_key(*ancestor))
-                    })
+                    .or(nearest)
                     .unwrap_or(root)
                     .to_owned()
             })
@@ -106,7 +105,7 @@ impl Workspace {
             let domain = scope::domain(&path, owner);
             let test = scope::test_path(&path) || crate::rule::production::test_only(&syntax.attrs);
             let exceptions = exception::collect(&text, &syntax);
-            sources.push(SourceFile {
+            sources.push(File {
                 path,
                 text,
                 syntax,
@@ -127,7 +126,7 @@ impl Workspace {
     }
 }
 
-impl SourceFile {
+impl File {
     pub fn excerpt(&self, span: Span) -> String {
         let start = span.start();
         let end = span.end();

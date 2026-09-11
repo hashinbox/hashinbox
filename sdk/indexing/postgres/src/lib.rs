@@ -50,7 +50,9 @@ const RETAINED_BLOCK: &str = "SELECT block_position AS position, height, block_h
                               block_timestamp AS timestamp FROM payments_journal \
                               WHERE chain = $1 AND network = $2 AND height = $3";
 
-// design-lint: allow unclassified-free-function -- public PostgreSQL factory validates connection configuration and constructs a foreign pool for process-wide injection without making scope-bound repositories own connection creation
+// public PostgreSQL factory validates connection configuration and constructs a foreign pool for
+// process-wide injection without making scope-bound repositories own connection creation
+// design-lint: allow unclassified-free-function -- foreign PostgreSQL type boundary
 /// Builds a connection pool from a libpq-style URL.
 ///
 /// TLS is not configured: this is intended for a database reached over a
@@ -98,7 +100,9 @@ pub fn pool_for_schema(url: &str, max_size: usize, schema: &str) -> Result<Pool,
     build_pool(config, max_size)
 }
 
-// design-lint: allow unclassified-free-function -- constructs foreign pool types for both public factories; repositories receive the completed pool by injection
+// constructs foreign pool types for both public factories; repositories receive the completed pool
+// by injection
+// design-lint: allow unclassified-free-function -- foreign PostgreSQL type boundary
 fn build_pool(config: tokio_postgres::Config, max_size: usize) -> Result<Pool, IndexError> {
     let manager = Manager::from_config(
         config,
@@ -253,17 +257,23 @@ impl Blocks for Repository {
     }
 }
 
-// design-lint: allow unclassified-free-function -- shared PostgreSQL pool, schema and repository input validation maps caller context to nonretryable InvalidRequest before storage access
+// shared PostgreSQL pool, schema and repository input validation maps caller context to
+// nonretryable InvalidRequest before storage access
+// design-lint: allow unclassified-free-function -- foreign PostgreSQL type boundary
 fn invalid(message: impl Into<String>) -> IndexError {
     IndexError::new(IndexErrorKind::InvalidRequest, message, false)
 }
 
-// design-lint: allow unclassified-free-function -- PostgreSQL driver-to-IndexError translation between foreign types preserves display text and retryable Store classification across query and transaction boundaries
+// PostgreSQL driver-to-IndexError translation between foreign types preserves display text and
+// retryable Store classification across query and transaction boundaries
+// design-lint: allow unclassified-free-function -- foreign PostgreSQL type boundary
 fn store(error: tokio_postgres::Error) -> IndexError {
     IndexError::new(IndexErrorKind::Store, error.to_string(), true)
 }
 
-// design-lint: allow unclassified-free-function -- PostgreSQL pool acquisition translates foreign errors to retryable Store errors for repository access and startup validation while preserving native display context
+// PostgreSQL pool acquisition translates foreign errors to retryable Store errors for repository
+// access and startup validation while preserving native display context
+// design-lint: allow unclassified-free-function -- foreign PostgreSQL type boundary
 fn unavailable(error: deadpool_postgres::PoolError) -> IndexError {
     IndexError::new(IndexErrorKind::Store, error.to_string(), true)
 }

@@ -340,18 +340,19 @@ async fn absent_or_present_condition_conflicts_preserve_batch_and_version() -> R
             "version condition failed in namespace `records` because the key is missing",
         ),
     ] {
+        let batch = WriteBatch {
+            conditions: vec![condition],
+            operations: vec![
+                Operation::Delete {
+                    namespace: records.clone(),
+                    key: primary.clone(),
+                },
+                put(&records, &missing, "must-not-commit"),
+                put(&other_namespace, &side_effect, "must-not-commit"),
+            ],
+        };
         let error = storage
-            .commit(WriteBatch {
-                conditions: vec![condition],
-                operations: vec![
-                    Operation::Delete {
-                        namespace: records.clone(),
-                        key: primary.clone(),
-                    },
-                    put(&records, &missing, "must-not-commit"),
-                    put(&other_namespace, &side_effect, "must-not-commit"),
-                ],
-            })
+            .commit(batch)
             .await
             .expect_err("conditions must inspect the state before any batch operation");
 

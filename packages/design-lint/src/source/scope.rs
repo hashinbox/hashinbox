@@ -1,4 +1,4 @@
-use super::{Package, SourceFile};
+use super::{File, Package};
 use crate::rule::production::test_only;
 use std::path::Path;
 use std::{
@@ -50,7 +50,7 @@ pub fn snake_case(value: &str) -> String {
 }
 
 /// Propagate proven test-only ownership through Rust module declarations.
-pub(super) fn classify(sources: &mut [SourceFile]) {
+pub(super) fn classify(sources: &mut [File]) {
     let indices = sources
         .iter()
         .enumerate()

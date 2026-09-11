@@ -216,13 +216,15 @@ fn openapi_publishes_exact_transaction_contracts() {
     );
     assert_eq!(
         document.pointer(
-            "/paths/~1v1~1wallets~1{id}~1transactions/post/requestBody/content/application~1json/schema/$ref"
+            "/paths/~1v1~1wallets~1{id}~1transactions/post/requestBody/content/\
+            application~1json/schema/$ref"
         ),
         Some(&serde_json::json!("#/components/schemas/SendFunds")),
     );
     assert_eq!(
         document.pointer(
-            "/paths/~1v1~1transactions/post/requestBody/content/application~1json/schema/$ref"
+            "/paths/~1v1~1transactions/post/requestBody/content/\
+            application~1json/schema/$ref"
         ),
         Some(&serde_json::json!("#/components/schemas/TransferRequest")),
     );

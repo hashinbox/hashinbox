@@ -76,17 +76,13 @@ impl Backend {
                     } => {
                         let physical_key = encode_physical_key(&namespace, &key)?;
                         let frame = StoredRecord::new(value, next_version)?.encode()?;
-                        (
-                            data.insert(physical_key.as_slice(), frame.as_slice()),
-                            "failed to write redb data record",
-                        )
+                        let result = data.insert(physical_key.as_slice(), frame.as_slice());
+                        (result, "failed to write redb data record")
                     }
                     Operation::Delete { namespace, key } => {
                         let physical_key = encode_physical_key(&namespace, &key)?;
-                        (
-                            data.remove(physical_key.as_slice()),
-                            "failed to delete redb data record",
-                        )
+                        let result = data.remove(physical_key.as_slice());
+                        (result, "failed to delete redb data record")
                     }
                 };
                 drop(result.map_err(|error| storage_error(error, context))?);
@@ -144,8 +140,12 @@ impl Backend {
     }
 }
 
-// design-lint: allow single-use-free-function -- isolates redb-specific Missing and Version checks before any batch mutation in the same write transaction
-// design-lint: allow unclassified-free-function -- transaction-local algorithm evaluates foreign storage conditions against the redb table before any batch mutation
+// isolates redb-specific Missing and Version checks before any batch mutation in the same write
+// transaction
+// transaction-local algorithm evaluates foreign storage conditions against the redb table before
+// any batch mutation
+// design-lint: allow single-use-free-function -- transaction-local condition checks
+// design-lint: allow unclassified-free-function -- transaction-local condition checks
 fn evaluate_condition(
     data: &impl ReadableTable<&'static [u8], &'static [u8]>,
     condition: &Condition,
@@ -172,13 +172,13 @@ fn evaluate_condition(
             let physical_key = encode_physical_key(namespace, key)?;
             let raw = data
                 .get(physical_key.as_slice())
-                .map_err(|error| storage_error(error, "failed to evaluate redb condition"))?
-                .ok_or_else(|| {
-                    Error::conflict(format!(
-                        "version condition failed in namespace `{}` because the key is missing",
-                        namespace.0
-                    ))
-                })?;
+                .map_err(|error| storage_error(error, "failed to evaluate redb condition"))?;
+            let Some(raw) = raw else {
+                return Err(Error::conflict(format!(
+                    "version condition failed in namespace `{}` because the key is missing",
+                    namespace.0
+                )));
+            };
             let actual = StoredValue::from(StoredRecord::try_from(raw.value())?);
             if actual.version != *expected {
                 return Err(Error::conflict(format!(

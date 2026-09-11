@@ -264,7 +264,8 @@ mod tests {
         assert!(!error.retryable);
         assert_eq!(
             error.message,
-            "Ethereum RPC eth_estimateGas returned an invalid response: gas limit with margin exceeds u64"
+            "Ethereum RPC eth_estimateGas returned an invalid response: gas limit with \
+             margin exceeds u64"
         );
     }
 

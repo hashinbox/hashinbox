@@ -8,9 +8,9 @@ pub mod rule;
 pub mod source;
 
 pub use error::{LintError, Result};
-pub use model::{Finding, Location, Related, Review, Severity, Summary};
+pub use model::{Finding, Location, RelatedLocation, Review, Severity, Summary};
 pub use policy::{Boundaries, Policy, Rules, Rust, SourceSelector};
-pub use report::{Cases, Diagnostic, Markdown, Reporter};
+pub use report::{Cases, Markdown, Printer, Reporter};
 pub use rule::{Registry, Rule};
 use source::Workspace;
 use std::path::PathBuf;
@@ -33,23 +33,23 @@ pub(crate) fn standard_rules() -> Registry {
         .register(rule::ForbiddenPath)
         .register(rule::EmptyDirectory)
         .register(rule::ChainLayout)
-        .register(rule::SingleFileDirectory)
-        .register(rule::TraitMethodCount)
+        .register(rule::DirectorySize)
+        .register(rule::TraitSize)
         .register(rule::EmptyStruct)
-        .register(rule::StructWordCount)
-        .register(rule::SelfConstructorStatic)
+        .register(rule::NameLength)
+        .register(rule::ConstructorReceiver)
         .register(rule::ReceiverRepetition)
-        .register(rule::CatchAllModule)
+        .register(rule::ModuleNaming)
         .register(rule::StructNaming)
         .register(rule::FreeFunction)
         .register(rule::SingleUse)
-        .register(rule::DeepControlFlow)
+        .register(rule::ControlDepth)
         .register(rule::EnvironmentAccess)
         .register(rule::PlatformCommand)
         .register(rule::IgnoredResult)
         .register(rule::AsyncBlocking)
         .register(rule::BooleanState)
-        .register(rule::FiniteStateString)
+        .register(rule::StringState)
         .register(rule::GodObject)
         .register(rule::AccessorBloat)
         .register(rule::DuplicateEntity)
@@ -85,14 +85,15 @@ impl Linter {
                     rule.id()
                 )));
             }
-            if rule::adopted::contains(rule.id()) {
-                findings.retain(|finding| {
-                    !workspace.sources().iter().any(|source| {
-                        source.path == finding.location.path
-                            && source.suppressed(rule.id(), finding.location.line)
-                    })
-                });
-            }
+            findings.retain(|finding| {
+                if !rule::adopted::contains(rule.id()) {
+                    return true;
+                }
+                !workspace.sources().iter().any(|source| {
+                    source.path == finding.location.path
+                        && source.suppressed(rule.id(), finding.location.line)
+                })
+            });
             findings.sort_by(|left, right| {
                 (
                     &left.location.path,

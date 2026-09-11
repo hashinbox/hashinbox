@@ -7,25 +7,25 @@ use syn::{
 
 use crate::{
     Result,
-    model::{Finding, Related, Review},
+    model::{Finding, RelatedLocation, Review},
     policy::Policy,
     rule::production::test_only,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 mod syntax;
 use syntax::{
-    excluded_name, is_self, pattern_literals, peel, preserves_unknown, state_name, string_literal,
-    string_type, type_name,
+    excluded_name, is_self, pattern_literals, peel, preserves_unknown, stateful_name,
+    string_literal, string_type, type_name,
 };
 
 /// Finds closed state vocabularies represented as string literals.
 pub(crate) const ID: &str = "string-backed-finite-state";
 
 /// Reports strings used as closed state vocabularies.
-pub struct FiniteStateString;
+pub struct StringState;
 
-impl crate::Rule for FiniteStateString {
+impl crate::Rule for StringState {
     fn id(&self) -> &'static str {
         ID
     }
@@ -100,7 +100,7 @@ enum EvidenceKind {
 }
 
 struct Strings<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     concepts: &'a mut BTreeMap<Concept, Evidence>,
     scope: Vec<String>,
     owner: Option<String>,
@@ -122,7 +122,7 @@ impl Strings<'_> {
             return None;
         }
         let name = path.path.segments.first()?.ident.to_string();
-        (!excluded_name(&name) && state_name(&name)).then(|| Concept {
+        (!excluded_name(&name) && stateful_name(&name)).then(|| Concept {
             package: self.source.package.clone(),
             identity: format!("{}::{}", self.source.path.display(), self.scope.join("::")),
             owner: self.scope.join("::"),
@@ -136,7 +136,7 @@ impl Strings<'_> {
             return None;
         };
         let name = member.to_string();
-        if excluded_name(&name) || !state_name(&name) {
+        if excluded_name(&name) || !stateful_name(&name) {
             return None;
         }
         let owner = self.owner.as_ref()?;
@@ -168,7 +168,7 @@ impl Strings<'_> {
 
     fn record_field(&mut self, owner: &str, name: &str, literal: &Expr, kind: EvidenceKind) {
         if excluded_name(name)
-            || !state_name(name)
+            || !stateful_name(name)
             || !self
                 .string_fields
                 .contains(&(owner.to_owned(), name.to_owned()))
@@ -195,7 +195,7 @@ impl Strings<'_> {
         let Some(name) = name.strip_prefix("set_") else {
             return;
         };
-        if excluded_name(name) || !state_name(name) {
+        if excluded_name(name) || !stateful_name(name) {
             return;
         }
         let Some((value, span)) = string_literal(literal) else {
@@ -395,14 +395,14 @@ fn finding(rule: &'static str, concept: Concept, evidence: Evidence) -> Option<F
         concept.name,
         evidence.literals.len()
     );
-    finding.help =
-        "model the closed vocabulary as an enum; serialize or parse strings only at wire/storage boundaries"
-            .into();
+    finding.help = "model the closed vocabulary as an enum; serialize or parse strings only at \
+            wire/storage boundaries"
+        .into();
     finding.related = locations
         .into_iter()
         .skip(1)
         .take(12)
-        .map(|(value, location)| Related {
+        .map(|(value, location)| RelatedLocation {
             label: format!("`{value}` is another value for this {}", concept.kind),
             location,
         })

@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub use cases::Cases;
-pub use diagnostic::Diagnostic;
+pub use diagnostic::Printer;
 pub use markdown::Markdown;
 
 fn display_path(path: &Path, roots: &[PathBuf]) -> PathBuf {

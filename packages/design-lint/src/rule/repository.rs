@@ -39,7 +39,8 @@ pub(super) fn dependencies(workspace: &Workspace, policy: &Policy) -> Result<Vec
                     format!("{} -> {}", package.name, target.name),
                     manifest_location(package),
                     "concrete chain crate may not depend on a sibling concrete chain crate",
-                    "move shared values or capabilities to base, indexing, or wallets; compose concrete chains only in apps",
+                    "move shared values or capabilities to base, indexing, or wallets; \
+                    compose concrete chains only in apps",
                 ));
                 continue;
             }
@@ -49,9 +50,20 @@ pub(super) fn dependencies(workspace: &Workspace, policy: &Policy) -> Result<Vec
             let Some(to) = policy.dependency.layer(&target.name, &target.root) else {
                 continue;
             };
-            if !from.may_depend_on.contains(&to.name) {
-                output.push(finding("dependency-direction", format!("{} -> {}", package.name, target.name), manifest_location(package), format!("layer `{}` may not depend on layer `{}`", from.name, to.name), "move the implementation to its owning layer or invert the dependency through an approved reusable trait"));
+            if from.may_depend_on.contains(&to.name) {
+                continue;
             }
+            output.push(finding(
+                "dependency-direction",
+                format!("{} -> {}", package.name, target.name),
+                manifest_location(package),
+                format!(
+                    "layer `{}` may not depend on layer `{}`",
+                    from.name, to.name
+                ),
+                "move the implementation to its owning layer or invert the dependency \
+                    through an approved reusable trait",
+            ));
         }
     }
     if let Some(cycle) = cycle(&workspace.packages, ignored) {
@@ -146,24 +158,35 @@ pub(super) fn vocabulary(workspace: &Workspace, policy: &Policy) -> Result<Vec<F
             {
                 continue;
             }
-            for (line, text) in production_lines(&production::text(source)).enumerate() {
-                for word in words(text) {
-                    if owner
-                        .words
-                        .iter()
-                        .any(|forbidden| forbidden.eq_ignore_ascii_case(&word))
-                    {
-                        let location = Location {
-                            path: source.path.clone(),
-                            line: line + 1,
-                            column: 1,
-                            source: text.trim().to_owned(),
-                        };
-                        if !source.suppressed("owned-vocabulary", line + 1) {
-                            output.push(finding("owned-vocabulary", word.clone(), location, format!("chain-owned word `{word}` appears outside its owning chain"), "use a chain-neutral term or move the code to the concrete chain/application boundary"));
-                        }
-                    }
+            let text = production::text(source);
+            let words = production_lines(&text)
+                .enumerate()
+                .flat_map(|(line, text)| {
+                    words(text).into_iter().map(move |word| (line, text, word))
+                });
+            for (line, text, word) in words {
+                if !owner
+                    .words
+                    .iter()
+                    .any(|forbidden| forbidden.eq_ignore_ascii_case(&word))
+                    || source.suppressed("owned-vocabulary", line + 1)
+                {
+                    continue;
                 }
+                let location = Location {
+                    path: source.path.clone(),
+                    line: line + 1,
+                    column: 1,
+                    source: text.trim().to_owned(),
+                };
+                output.push(finding(
+                    "owned-vocabulary",
+                    word.clone(),
+                    location,
+                    format!("chain-owned word `{word}` appears outside its owning chain"),
+                    "use a chain-neutral term or move the code to the concrete \
+                    chain/application boundary",
+                ));
             }
         }
     }
@@ -186,22 +209,23 @@ pub(super) fn file_length(workspace: &Workspace, policy: &Policy) -> Result<Vec<
         .production()
         .filter_map(|source| {
             let count = production::line_count(source);
-            (count > policy.repository.maximum_rust_lines).then(|| {
-                finding(
-                    "file-length",
-                    source
-                        .path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("source"),
-                    source.location(Span::call_site()),
-                    format!(
-                        "Rust source contains {count} production lines; maximum is {}",
-                        policy.repository.maximum_rust_lines
-                    ),
-                    "split the file by cohesive domain ownership",
-                )
-            })
+            if count <= policy.repository.maximum_rust_lines {
+                return None;
+            }
+            Some(finding(
+                "file-length",
+                source
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("source"),
+                source.location(Span::call_site()),
+                format!(
+                    "Rust source contains {count} production lines; maximum is {}",
+                    policy.repository.maximum_rust_lines
+                ),
+                "split the file by cohesive domain ownership",
+            ))
         })
         .collect())
 }
@@ -270,12 +294,21 @@ pub(super) fn single_file_directories(
             .collect::<Vec<_>>();
         if files.len() == 1 {
             let only = &files[0];
+            let name = only
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("source");
             output.push(finding(
                 "single-file-directory",
-                format!("{}/{}", directory.display(), only.file_name().and_then(|name| name.to_str()).unwrap_or("source")),
+                format!("{}/{}", directory.display(), name),
                 path_location(only),
-                format!("source directory `{}` contains only `{}`", directory.display(), only.file_name().and_then(|name| name.to_str()).unwrap_or("source")),
-                "keep the module beside its parent or add a second cohesive implementation file that justifies the directory",
+                format!(
+                    "source directory `{}` contains only `{}`",
+                    directory.display(),
+                    name
+                ),
+                "keep the module beside its parent or add a second cohesive \
+                    implementation file that justifies the directory",
             ));
         }
     }
@@ -302,26 +335,25 @@ pub(super) fn chain_layout(workspace: &Workspace, policy: &Policy) -> Result<Vec
                     continue;
                 }
                 let file_form = chain.join(format!("{required}.rs"));
-                let (location, message) = if file_form.is_file() {
-                    (
-                        file_form.clone(),
-                        format!(
-                            "chain `{name}` uses `{}` but the shared topology requires directory `{required}` with `{required}/mod.rs`",
-                            relative(&chain, &file_form)
-                        ),
-                    )
+                let uses_file = file_form.is_file();
+                let actual = relative(&chain, &file_form);
+                let message = format!(
+                    "chain `{name}` uses `{actual}` but the shared topology requires \
+                    directory `{required}` with `{required}/mod.rs`"
+                );
+                let message = if uses_file {
+                    message
                 } else {
-                    (
-                        expected.clone(),
-                        format!("chain `{name}` is missing required directory `{required}`"),
-                    )
+                    format!("chain `{name}` is missing required directory `{required}`")
                 };
+                let location = if uses_file { file_form } else { expected };
                 output.push(finding(
                     "chain-layout",
                     format!("{name}/{required}"),
                     path_location(&location),
                     message,
-                    "use the common chain directory topology; keep protocol differences in files within those directories",
+                    "use the common chain directory topology; keep protocol differences \
+                    in files within those directories",
                 ));
             }
             for required in &policy.repository.chain_skeleton {
@@ -336,21 +368,25 @@ pub(super) fn chain_layout(workspace: &Workspace, policy: &Policy) -> Result<Vec
                     .strip_suffix("/mod.rs")
                     .map(|module| chain.join(format!("{module}.rs")))
                     .filter(|path| path.is_file());
-                let (location, message) = if let Some(actual) = file_form {
-                    (
-                        actual.clone(),
-                        format!(
-                            "chain `{name}` uses `{}` but the shared chain layout requires `{required}`",
-                            relative(&chain, &actual)
-                        ),
-                    )
+                let actual = relative(&chain, file_form.as_ref().unwrap_or(&expected));
+                let message = format!(
+                    "chain `{name}` uses `{actual}` but the shared chain layout \
+                    requires `{required}`"
+                );
+                let message = if file_form.is_some() {
+                    message
                 } else {
-                    (
-                        expected.clone(),
-                        format!("chain `{name}` is missing required path `{required}`"),
-                    )
+                    format!("chain `{name}` is missing required path `{required}`")
                 };
-                output.push(finding("chain-layout", format!("{name}/{required}"), path_location(&location), message, "use the common chain skeleton; keep protocol-specific additions below those ownership boundaries"));
+                let location = file_form.unwrap_or(expected);
+                output.push(finding(
+                    "chain-layout",
+                    format!("{name}/{required}"),
+                    path_location(&location),
+                    message,
+                    "use the common chain skeleton; keep protocol-specific additions below \
+                    those ownership boundaries",
+                ));
             }
             let expected = policy
                 .repository
@@ -360,15 +396,17 @@ pub(super) fn chain_layout(workspace: &Workspace, policy: &Policy) -> Result<Vec
                 .collect::<BTreeSet<_>>();
             for directory in nested_directories(&chain.join("src"))? {
                 let relative = relative(&chain, &directory);
-                if !expected.contains(relative.as_str()) {
-                    output.push(finding(
-                        "chain-layout",
-                        format!("{name}/{relative}"),
-                        path_location(&directory),
-                        format!("chain `{name}` has unexpected nested directory `{relative}`"),
-                        "move protocol-owned files into the common chain directories; do not add another architectural layer",
-                    ));
+                if expected.contains(relative.as_str()) {
+                    continue;
                 }
+                output.push(finding(
+                    "chain-layout",
+                    format!("{name}/{relative}"),
+                    path_location(&directory),
+                    format!("chain `{name}` has unexpected nested directory `{relative}`"),
+                    "move protocol-owned files into the common chain directories; do \
+                    not add another architectural layer",
+                ));
             }
         }
     }

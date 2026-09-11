@@ -138,7 +138,8 @@ fn fixture(name: &str, split: &str) -> String {
             "fn terminal_{index}(&self) {{ self.terminal.call(); }}"
         ));
     }
-    let run = "fn run(&mut self) { if self.settings.ready() { self.workspaces.call(); self.terminal.call(); } }";
+    let run = "fn run(&mut self) { if self.settings.ready() { self.workspaces.call(); \
+        self.terminal.call(); } }";
     let impls = if split.is_empty() {
         format!(
             "impl {name} {{ {}{}{}{run} }}",

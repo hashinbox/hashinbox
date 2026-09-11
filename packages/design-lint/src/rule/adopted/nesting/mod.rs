@@ -4,15 +4,15 @@ use syn::{Expr, ImplItemFn, ItemFn, spanned::Spanned, visit::Visit};
 use crate::{
     Policy, Result,
     model::Finding,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 pub(crate) const ID: &str = "deep-control-flow";
 
 /// Reports deeply nested control flow.
-pub struct DeepControlFlow;
+pub struct ControlDepth;
 
-impl crate::Rule for DeepControlFlow {
+impl crate::Rule for ControlDepth {
     fn id(&self) -> &'static str {
         ID
     }
@@ -43,7 +43,7 @@ pub(crate) fn check(workspace: &Workspace, _policy: &Policy) -> Result<Vec<Findi
 }
 
 struct Functions<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     findings: &'a mut Vec<Finding>,
 }
 
@@ -68,7 +68,7 @@ impl Functions<'_> {
         );
         finding.help =
             "use early returns, extract receiver behavior, or model the nested state".to_owned();
-        finding.related.push(crate::model::Related {
+        finding.related.push(crate::model::RelatedLocation {
             label: "function".to_owned(),
             location: self.source.location(span),
         });

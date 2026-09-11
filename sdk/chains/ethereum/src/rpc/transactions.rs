@@ -229,7 +229,8 @@ where
                     Ok(true) => Ok(computed),
                     Ok(false) => Err(ambiguous_submission(
                         &computed,
-                        "Ethereum RPC reported an already-known transaction but did not expose the matching hash",
+                        "Ethereum RPC reported an already-known transaction but did \
+                         not expose the matching hash",
                     )),
                     Err(error) => Err(ambiguous_submission(&computed, error)),
                 };
@@ -243,7 +244,8 @@ where
             if returned != computed {
                 return Err(ambiguous_submission(
                     &computed,
-                    "Ethereum submission response hash differs from the exact signed envelope; outcome is ambiguous",
+                    "Ethereum submission response hash differs from the exact signed \
+                     envelope; outcome is ambiguous",
                 ));
             }
             Ok(returned)
@@ -312,12 +314,10 @@ where
             Ok(raw) => raw,
             Err(error) => {
                 if let Some(code) = error.execution_revert_code() {
-                    return Err(ChainError::new(
-                        ChainErrorKind::Rejected,
-                        format!(
-                            "Ethereum ERC-20 transfer simulation was rejected with code {code}"
-                        ),
-                    ));
+                    let message = format!(
+                        "Ethereum ERC-20 transfer simulation was rejected with code {code}"
+                    );
+                    return Err(ChainError::new(ChainErrorKind::Rejected, message));
                 }
                 return Err(ChainError::from_rpc(error.into_source("eth_call")));
             }
@@ -430,7 +430,9 @@ where
     }
 }
 
-// design-lint: allow unclassified-free-function -- RPC boundary adapter adds Ethereum ambiguity context and the exact local transaction ID to uncertain submission failures without client state
+// RPC boundary adapter adds Ethereum ambiguity context and the exact local transaction ID to
+// uncertain submission failures without client state
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn ambiguous_submission(id: &TransactionId, error: impl std::fmt::Display) -> TransactionError {
     TransactionError::new(
         TransactionErrorKind::Unavailable,

@@ -81,13 +81,14 @@ struct Wallet;
 fn reasoned_sdk_exception_retains_protocol_vocabulary() {
     let fixture = Fixture::new(&[(
         "src/lib.rs",
-        "// design-lint: allow struct-noun-naming -- external protocol vocabulary\nstruct Selected;\n",
+        "// design-lint: allow struct-noun-naming -- external protocol vocabulary\nstruct \
+            Selected;\n",
     )]);
     let registry = crate::Registry::new().register(super::StructNaming);
     let summaries = crate::Linter::new(Policy::default(), registry)
         .run(
             vec![fixture.path().to_owned()],
-            &mut crate::Diagnostic::new(Vec::new()),
+            &mut crate::Printer::new(Vec::new()),
         )
         .expect("lint fixture");
     assert_eq!(summaries[0].findings, 0);

@@ -416,15 +416,21 @@ impl indexing::Outputs for Repository {
     }
 }
 
-// design-lint: allow unclassified-free-function -- private PostgreSQL output cursor encoder pairs transaction and index bytes for decode_position without exposing backend framing on the opaque indexing cursor
+// private PostgreSQL output cursor encoder pairs transaction and index bytes for decode_position
+// without exposing backend framing on the opaque indexing cursor
+// design-lint: allow unclassified-free-function -- backend-owned cursor encoding
 /// An output cursor is the output's identity, not a rendering of it: the page
 /// query compares it as a row value so the index can supply the order.
 fn encode_position(transaction: &str, index: u32) -> Vec<u8> {
     format!("{transaction}\u{0}{index}").into_bytes()
 }
 
-// design-lint: allow single-use-free-function -- decodes the private PostgreSQL output cursor format paired with encode_position, keeping parsing separate from page queries
-// design-lint: allow unclassified-free-function -- private PostgreSQL output cursor parser keeps backend row-key bytes and Store errors out of the opaque chain-neutral OutputCursor
+// decodes the private PostgreSQL output cursor format paired with encode_position, keeping parsing
+// separate from page queries
+// private PostgreSQL output cursor parser keeps backend row-key bytes and Store errors out of the
+// opaque chain-neutral OutputCursor
+// design-lint: allow single-use-free-function -- private cursor parser paired with encoder
+// design-lint: allow unclassified-free-function -- private PostgreSQL cursor decoding
 fn decode_position(position: &[u8]) -> Result<(String, i32), IndexError> {
     let text =
         std::str::from_utf8(position).map_err(|_| row::store("output cursor is not valid"))?;

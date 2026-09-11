@@ -7,20 +7,20 @@ use json_rpc::{BoxFuture, Call, CallResult, Error, ErrorKind, RawJson};
 use serde_json::Value;
 
 #[derive(Clone)]
-pub struct Scripted(Arc<Mutex<VecDeque<Expected>>>);
+pub struct Script(Arc<Mutex<VecDeque<Exchange>>>);
 
-struct Expected {
+struct Exchange {
     method: &'static str,
     params: Value,
     result: Value,
 }
 
-impl Scripted {
+impl Script {
     pub fn new<const N: usize>(values: [(&'static str, Value, Value); N]) -> Self {
         Self(Arc::new(Mutex::new(
             values
                 .into_iter()
-                .map(|(method, params, result)| Expected {
+                .map(|(method, params, result)| Exchange {
                     method,
                     params,
                     result,
@@ -41,7 +41,7 @@ impl Scripted {
     }
 }
 
-impl json_rpc::Client for Scripted {
+impl json_rpc::Client for Script {
     fn request<'a>(
         &'a self,
         method: &'a str,
@@ -99,7 +99,7 @@ mod tests {
 
     #[tokio::test]
     async fn owns_order_parameters_count_and_unexpected_call_failure() {
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             ("first", json!([1]), json!(2)),
             ("second", json!({}), json!(3)),
         ]);
@@ -200,7 +200,8 @@ mod tests {
             let request = read_request(&mut stream);
             observed_send.send(request).unwrap();
             released.recv_timeout(Duration::from_secs(2)).unwrap();
-            // Release follows confirmed cancellation; close without replying to the abandoned request.
+            // Release follows confirmed cancellation; close without replying to the abandoned
+            // request.
             drop(stream);
         });
         Held {
@@ -240,7 +241,15 @@ mod tests {
 
     fn write_response(stream: &mut std::net::TcpStream, value: &Value) {
         let body = serde_json::to_vec(value).unwrap();
-        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
         stream.write_all(&body).unwrap();
     }
 }

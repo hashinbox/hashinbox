@@ -282,10 +282,10 @@ fn different_database_format_fails_closed() -> Result<(), Error> {
                 let mut meta = transaction
                     .open_table(META_TABLE)
                     .map_err(|error| other(format!("test metadata table failed: {error}")))?;
-                drop(
-                    meta.insert(DATABASE_FORMAT_KEY, marker)
-                        .map_err(|error| other(format!("test marker write failed: {error}")))?,
-                );
+                let previous = meta
+                    .insert(DATABASE_FORMAT_KEY, marker)
+                    .map_err(|error| other(format!("test marker write failed: {error}")))?;
+                drop(previous);
             }
             transaction
                 .commit()

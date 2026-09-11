@@ -1,10 +1,12 @@
 use alloy_primitives::{Address as AlloyAddress, U256};
-// design-lint: allow owned-vocabulary -- Alloy's standard Solidity ABI macro import belongs to this Ethereum adapter
+// Alloy's standard Solidity ABI macro import belongs to this Ethereum adapter
+// design-lint: allow owned-vocabulary -- See the boundary rationale above.
 use alloy_sol_types::{SolCall, sol};
 
 use crate::{Address, TransferIntent, TransferRequest, Wei};
 
-// design-lint: allow owned-vocabulary -- Alloy's standard Solidity ABI declaration macro belongs to this Ethereum adapter
+// Alloy's standard Solidity ABI declaration macro belongs to this Ethereum adapter
+// design-lint: allow owned-vocabulary -- See the boundary rationale above.
 sol! {
     interface Erc20 {
         function balanceOf(address account) external view returns (uint256);
@@ -13,7 +15,9 @@ sol! {
     }
 }
 
-// design-lint: allow unclassified-free-function -- shared ERC-20 balanceOf ABI encoding adapts SDK addresses through Alloy without adding token-call behavior to Address
+// shared ERC-20 balanceOf ABI encoding adapts SDK addresses through Alloy without adding token-call
+// behavior to Address
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(crate) fn balance_of(address: &Address) -> Vec<u8> {
     Erc20::balanceOfCall {
         account: AlloyAddress::from(address.0),
@@ -40,7 +44,9 @@ impl TransferRequest {
     }
 }
 
-// design-lint: allow unclassified-free-function -- strict ERC-20 balanceOf return decoding bridges Alloy ABI words and Wei for balance reads and token admission without adding token-call policy to amounts
+// strict ERC-20 balanceOf return decoding bridges Alloy ABI words and Wei for balance reads and
+// token admission without adding token-call policy to amounts
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(crate) fn decode_balance(word: &[u8]) -> Result<Wei, &'static str> {
     let value = Erc20::balanceOfCall::abi_decode_returns_validate(word)
         .map_err(|_| "invalid balanceOf ABI word")?;
@@ -50,7 +56,9 @@ pub(crate) fn decode_balance(word: &[u8]) -> Result<Wei, &'static str> {
     Ok(Wei(value.to_be_bytes()))
 }
 
-// design-lint: allow unclassified-free-function -- strict ERC-20 decimals return decoding owns canonical uint8 ABI validation separately from configured-token admission policy
+// strict ERC-20 decimals return decoding owns canonical uint8 ABI validation separately from
+// configured-token admission policy
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(crate) fn decode_decimals(word: &[u8]) -> Result<u8, &'static str> {
     let value = Erc20::decimalsCall::abi_decode_returns_validate(word)
         .map_err(|_| "invalid decimals ABI word")?;
@@ -60,7 +68,9 @@ pub(crate) fn decode_decimals(word: &[u8]) -> Result<u8, &'static str> {
     Ok(value)
 }
 
-// design-lint: allow unclassified-free-function -- strict ERC-20 transfer return decoding validates the canonical ABI boolean separately from preflight policy requiring true
+// strict ERC-20 transfer return decoding validates the canonical ABI boolean separately from
+// preflight policy requiring true
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(crate) fn decode_transfer(word: &[u8]) -> Result<bool, &'static str> {
     let value = Erc20::transferCall::abi_decode_returns_validate(word)
         .map_err(|_| "invalid transfer ABI word")?;

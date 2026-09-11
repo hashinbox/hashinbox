@@ -5,15 +5,15 @@ use syn::{ItemMod, visit::Visit};
 use crate::{
     Policy, Result,
     model::{Finding, Location, Review},
-    source::{SourceFile, Workspace, snake_case},
+    source::{File, Workspace, snake_case},
 };
 
 pub(crate) const ID: &str = "catch-all-module-name";
 
 /// Detects catch-all module names.
-pub struct CatchAllModule;
+pub struct ModuleNaming;
 
-impl crate::Rule for CatchAllModule {
+impl crate::Rule for ModuleNaming {
     fn id(&self) -> &'static str {
         ID
     }
@@ -84,7 +84,7 @@ pub(crate) fn check(workspace: &Workspace, policy: &Policy) -> Result<Vec<Findin
 struct ModuleVisitor<'a> {
     rule: &'static str,
     forbidden: &'a [String],
-    source: &'a SourceFile,
+    source: &'a File,
     source_paths: &'a BTreeSet<std::path::PathBuf>,
     findings: &'a mut Vec<Finding>,
 }
@@ -115,7 +115,7 @@ impl<'ast> Visit<'ast> for ModuleVisitor<'_> {
 }
 
 fn module_source_paths(
-    source: &SourceFile,
+    source: &File,
     item: &ItemMod,
     name: &str,
 ) -> impl Iterator<Item = std::path::PathBuf> {
@@ -174,7 +174,7 @@ fn file_module_name(path: &std::path::Path) -> Option<String> {
 }
 
 struct OverriddenModules<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     paths: &'a mut BTreeSet<std::path::PathBuf>,
 }
 
@@ -198,33 +198,39 @@ impl<'ast> Visit<'ast> for OverriddenModules<'_> {
 
 fn finding(
     rule: &'static str,
-    source: &SourceFile,
+    source: &File,
     name: String,
     location: Location,
     declaration: &str,
 ) -> Finding {
     let mut finding = Finding::error(rule, name.clone(), location);
     finding.message = format!(
-        "{declaration} `{name}` is a catch-all name that describes convenience or reuse, not ownership"
+        "{declaration} `{name}` is a catch-all name that describes convenience or reuse, \
+            not ownership"
     );
-    finding.help = "rename the module for the entity, capability, algorithm, fixture domain, or external mechanism it owns; split unrelated contents before renaming".to_owned();
+    finding.help =
+        "rename the module for the entity, capability, algorithm, fixture domain, or external \
+        mechanism it owns; split unrelated contents before renaming"
+            .to_owned();
     let review = Review {
-    metadata: vec![
-        ("domain".to_owned(), source.domain.clone()),
-        ("package".to_owned(), source.package.clone()),
-        ("module".to_owned(), name),
-        ("declaration".to_owned(), declaration.to_owned()),
-        (
-            "scope".to_owned(),
-            if source.test { "test" } else { "production" }.to_owned(),
-        ),
-    ],
-    questions: vec![
-        "Which single entity, capability, algorithm, fixture domain, or external mechanism owns these items?"
-            .to_owned(),
-        "Does the module mix unrelated responsibilities that must be split before it can receive a precise name?"
-            .to_owned(),
-    ],
+        metadata: vec![
+            ("domain".to_owned(), source.domain.clone()),
+            ("package".to_owned(), source.package.clone()),
+            ("module".to_owned(), name),
+            ("declaration".to_owned(), declaration.to_owned()),
+            (
+                "scope".to_owned(),
+                if source.test { "test" } else { "production" }.to_owned(),
+            ),
+        ],
+        questions: vec![
+            "Which single entity, capability, algorithm, fixture domain, or external \
+            mechanism owns these items?"
+                .to_owned(),
+            "Does the module mix unrelated responsibilities that must be split before it can \
+            receive a precise name?"
+                .to_owned(),
+        ],
         ..Review::default()
     };
     finding.review = Some(review);

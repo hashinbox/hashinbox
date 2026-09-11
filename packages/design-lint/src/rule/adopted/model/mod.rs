@@ -8,10 +8,10 @@ use syn::{
 
 use crate::{
     Result,
-    model::{Finding, Related, Review},
+    model::{Finding, RelatedLocation, Review},
     policy::Policy,
     rule::production::test_only,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 #[cfg(test)]
@@ -190,7 +190,7 @@ impl Conversion {
 }
 
 struct Collector<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     test_scope: bool,
     aliases: HashMap<String, String>,
     definitions: Vec<Definition>,
@@ -199,7 +199,7 @@ struct Collector<'a> {
 }
 
 impl<'a> Collector<'a> {
-    fn new(source: &'a SourceFile, aliases: HashMap<String, String>) -> Self {
+    fn new(source: &'a File, aliases: HashMap<String, String>) -> Self {
         Self {
             source,
             test_scope: false,
@@ -375,13 +375,16 @@ fn finding(
         "`{}` appears to duplicate the owned `{}` model across a wire boundary",
         wire.name, domain.name
     );
-    finding.help = "keep one owner for the model, or document the distinct wire contract and map only boundary-specific fields".into();
-    finding.related.push(Related {
+    finding.help =
+        "keep one owner for the model, or document the distinct wire contract and map only \
+        boundary-specific fields"
+            .into();
+    finding.related.push(RelatedLocation {
         label: format!("candidate owning model; matching fields: {fields}"),
         location: domain.location.clone(),
     });
     if let Some(conversion) = conversion {
-        finding.related.push(Related {
+        finding.related.push(RelatedLocation {
             label: format!(
                 "existing {} conversion copies between the models",
                 conversion.kind
@@ -407,7 +410,8 @@ fn finding(
         "Is this a copied domain entity, or a deliberately narrower transport projection?".into(),
     );
     review.questions.push(
-        "Can the protocol reuse the owned model or compose a stable shared value without leaking transport policy?"
+        "Can the protocol reuse the owned model or compose a stable shared value without \
+            leaking transport policy?"
             .into(),
     );
     finding.review = Some(review);

@@ -1,7 +1,7 @@
 use super::Policy;
 use crate::{
     LintError, Result,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 use serde::Deserialize;
 use std::{
@@ -56,7 +56,7 @@ pub struct SourceSelector {
     pub path: Option<String>,
 }
 impl SourceSelector {
-    pub fn matches(&self, source: &SourceFile, workspace: &Workspace) -> bool {
+    pub fn matches(&self, source: &File, workspace: &Workspace) -> bool {
         (self.package.is_some() || self.path.is_some())
             && self
                 .package

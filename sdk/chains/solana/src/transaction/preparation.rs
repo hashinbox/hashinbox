@@ -4,7 +4,7 @@ use wallets::{Error as WalletError, ErrorKind as WalletErrorKind, SendError};
 
 use crate::{Address, Error, ErrorKind, Key, Lamport, Memo, Message, RpcClient};
 
-use super::source::SourceLeases;
+use super::source::Leases;
 use super::{AcquiredAccounts, Cancellation, Envelope};
 
 type MemoFactory = dyn Fn() -> Result<Memo, Error> + Send + Sync;
@@ -17,7 +17,7 @@ pub struct Preparer<C> {
 pub struct PreparedBatch {
     floor: u64,
     envelopes: Vec<Envelope>,
-    leases: SourceLeases,
+    leases: Leases,
 }
 
 impl PreparedBatch {
@@ -31,12 +31,12 @@ impl PreparedBatch {
         &self.envelopes
     }
 
-    pub(super) fn into_parts(self) -> (u64, Vec<Envelope>, SourceLeases) {
+    pub(super) fn into_parts(self) -> (u64, Vec<Envelope>, Leases) {
         (self.floor, self.envelopes, self.leases)
     }
 
     #[cfg(test)]
-    pub(super) fn fixture(floor: u64, envelopes: Vec<Envelope>, leases: SourceLeases) -> Self {
+    pub(super) fn fixture(floor: u64, envelopes: Vec<Envelope>, leases: Leases) -> Self {
         Self {
             floor,
             envelopes,
@@ -196,9 +196,15 @@ where
                     WalletErrorKind::Transaction,
                     "Solana transaction simulation failed",
                 )),
-                Err(_) => Err(SendError::operation(WalletErrorKind::Unavailable, "Solana transaction simulation is unavailable")),
+                Err(_) => Err(SendError::operation(
+                    WalletErrorKind::Unavailable,
+                    "Solana transaction simulation is unavailable",
+                )),
             },
-            () = cancellation.cancelled() => Err(SendError::operation(WalletErrorKind::Unavailable, "Solana transaction preparation was cancelled")),
+            () = cancellation.cancelled() => Err(SendError::operation(
+                WalletErrorKind::Unavailable,
+                "Solana transaction preparation was cancelled",
+            )),
         }
     }
 
@@ -274,8 +280,16 @@ impl Cancellation {
         future: impl std::future::Future<Output = Result<T, Error>>,
     ) -> Result<T, SendError> {
         tokio::select! {
-            result = future => result.map_err(|_| SendError::operation(WalletErrorKind::Unavailable, "Solana transaction preparation failed")),
-            () = self.cancelled() => Err(SendError::operation(WalletErrorKind::Unavailable, "Solana transaction preparation was cancelled")),
+            result = future => result.map_err(|_| {
+                SendError::operation(
+                    WalletErrorKind::Unavailable,
+                    "Solana transaction preparation failed",
+                )
+            }),
+            () = self.cancelled() => Err(SendError::operation(
+                WalletErrorKind::Unavailable,
+                "Solana transaction preparation was cancelled",
+            )),
         }
     }
 }
@@ -291,7 +305,7 @@ mod tests {
     use solana_hash::Hash;
 
     use crate::{
-        Acquirer, Batch, ResolvedTransfer, Seed, SourceCoordinator, rpc::test_support::Scripted,
+        Acquirer, Batch, ResolvedTransfer, Seed, SourceCoordinator, rpc::test_support::Script,
     };
 
     use super::*;
@@ -337,9 +351,15 @@ mod tests {
                 "Solana transaction simulation is unavailable",
             ),
         ] {
-            let rpc = Scripted::one(
+            let rpc = Script::one(
                 "simulateTransaction",
-                json!([STANDARD.encode(envelope.signed_bytes()), {"encoding":"base64","commitment":"confirmed","sigVerify":true,"replaceRecentBlockhash":false,"minContextSlot":10}]),
+                json!([STANDARD.encode(envelope.signed_bytes()), {
+                    "encoding": "base64",
+                    "commitment": "confirmed",
+                    "sigVerify": true,
+                    "replaceRecentBlockhash": false,
+                    "minContextSlot": 10,
+                }]),
                 response,
             );
             let error = Preparer::new(RpcClient::new(rpc.clone()))
@@ -517,12 +537,15 @@ mod tests {
             "data":["","base64"],
             "space":0
         });
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             ("getHealth", json!([]), json!("ok")),
             ("getSlot", json!([{"commitment":"confirmed"}]), json!(5)),
             (
                 "getMultipleAccounts",
-                json!([[source.to_string(),destination.to_string()], {"encoding":"base64","commitment":"confirmed","minContextSlot":5}]),
+                json!([
+                    [source.to_string(), destination.to_string()],
+                    {"encoding": "base64", "commitment": "confirmed", "minContextSlot": 5},
+                ]),
                 json!({"context":{"slot":5},"value":[account,null]}),
             ),
             (
@@ -533,16 +556,31 @@ mod tests {
             (
                 "getLatestBlockhash",
                 json!([{"commitment":"confirmed","minContextSlot":6}]),
-                json!({"context":{"slot":7},"value":{"blockhash":lifetime.blockhash().to_string(),"lastValidBlockHeight":44}}),
+                json!({
+                    "context": {"slot": 7},
+                    "value": {
+                        "blockhash": lifetime.blockhash().to_string(),
+                        "lastValidBlockHeight": 44,
+                    },
+                }),
             ),
             (
                 "getFeeForMessage",
-                json!([STANDARD.encode(&message_bytes), {"commitment":"confirmed","minContextSlot":7}]),
+                json!([STANDARD.encode(&message_bytes), {
+                    "commitment": "confirmed",
+                    "minContextSlot": 7,
+                }]),
                 json!({"context":{"slot":8},"value":5}),
             ),
             (
                 "simulateTransaction",
-                json!([STANDARD.encode(expected.signed_bytes()), {"encoding":"base64","commitment":"confirmed","sigVerify":true,"replaceRecentBlockhash":false,"minContextSlot":8}]),
+                json!([STANDARD.encode(expected.signed_bytes()), {
+                    "encoding": "base64",
+                    "commitment": "confirmed",
+                    "sigVerify": true,
+                    "replaceRecentBlockhash": false,
+                    "minContextSlot": 8,
+                }]),
                 json!({"context":{"slot":9},"value":{"err":null}}),
             ),
         ]);

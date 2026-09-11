@@ -7,10 +7,10 @@ use syn::{
 
 use crate::{
     Result,
-    model::{Finding, Related, Review},
+    model::{Finding, RelatedLocation, Review},
     policy::Policy,
     rule::{production::test_only, syntax::type_name},
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 #[cfg(test)]
@@ -75,7 +75,7 @@ struct Construction {
 }
 
 struct Collector<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     modules: Vec<String>,
     test_scope: bool,
     definitions: BTreeMap<String, Definition>,
@@ -84,7 +84,7 @@ struct Collector<'a> {
 }
 
 impl<'a> Collector<'a> {
-    fn new(source: &'a SourceFile) -> Self {
+    fn new(source: &'a File) -> Self {
         Self {
             source,
             modules: Vec::new(),
@@ -124,10 +124,13 @@ impl<'a> Collector<'a> {
                     "`{}` coordinates boolean fields as mutually exclusive state: {fields}",
                     definition.name
                 );
-                finding.help = "replace the related booleans with a named enum or composed state entity; keep independent capabilities as booleans".into();
+                finding.help =
+                    "replace the related booleans with a named enum or composed state entity; \
+                    keep independent capabilities as booleans"
+                        .into();
                 finding.related = evidence
                     .iter()
-                    .map(|item| Related {
+                    .map(|item| RelatedLocation {
                         label: item.label.clone(),
                         location: item.location.clone(),
                     })
@@ -143,11 +146,14 @@ impl<'a> Collector<'a> {
                         .join("; "),
                 ));
                 review.questions.push(
-                    "Do these flags represent one closed state rather than independent capabilities?"
+                    "Do these flags represent one closed state rather than independent \
+                        capabilities?"
                         .into(),
                 );
                 review.questions.push(
-                    "Can invalid combinations be removed with an enum or specialized state value?".into(),
+                    "Can invalid combinations be removed with an enum or specialized \
+                        state value?"
+                        .into(),
                 );
                 finding.review = Some(review);
                 Some(finding)
@@ -311,18 +317,19 @@ impl Visit<'_> for Collector<'_> {
                 .filter(|field| assignments.values.get(*field) == Some(&true))
                 .count();
             if coordinated.len() >= 3 && true_count == 1 {
+                let evidence = Evidence {
+                    label: format!(
+                        "method `{}` coordinates {} boolean state fields",
+                        method.sig.ident,
+                        coordinated.len()
+                    ),
+                    location: self.source.location(method.span()),
+                    fields: coordinated,
+                };
                 self.transitions
                     .entry(key.clone())
                     .or_default()
-                    .push(Evidence {
-                        label: format!(
-                            "method `{}` coordinates {} boolean state fields",
-                            method.sig.ident,
-                            coordinated.len()
-                        ),
-                        location: self.source.location(method.span()),
-                        fields: coordinated,
-                    });
+                    .push(evidence);
             }
             let mut exclusions = Exclusions::default();
             exclusions.visit_block(&method.block);
@@ -333,17 +340,18 @@ impl Visit<'_> for Collector<'_> {
                 .filter(|field| definition.fields.contains(field))
                 .collect::<BTreeSet<_>>();
             if excluded_fields.len() >= 3 && exclusions.pairs.len() >= 2 {
+                let evidence = Evidence {
+                    label: format!(
+                        "method `{}` rejects mutually active boolean fields",
+                        method.sig.ident
+                    ),
+                    location: self.source.location(method.span()),
+                    fields: excluded_fields,
+                };
                 self.transitions
                     .entry(key.clone())
                     .or_default()
-                    .push(Evidence {
-                        label: format!(
-                            "method `{}` rejects mutually active boolean fields",
-                            method.sig.ident
-                        ),
-                        location: self.source.location(method.span()),
-                        fields: excluded_fields,
-                    });
+                    .push(evidence);
             }
         }
     }

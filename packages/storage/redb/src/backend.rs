@@ -400,7 +400,9 @@ impl Backend {
     }
 }
 
-// design-lint: allow unclassified-free-function -- shared native redb factory preserves cache and error policy for initial create-or-open and recovery open-only without constructing a backend state wrapper
+// shared native redb factory preserves cache and error policy for initial create-or-open and
+// recovery open-only without constructing a backend state wrapper
+// design-lint: allow unclassified-free-function -- backend-owned storage boundary
 fn open_database(path: &Path, initialize: bool) -> Result<Database, Error> {
     let mut builder = Database::builder();
     builder.set_cache_size(DATABASE_CACHE_BYTES);

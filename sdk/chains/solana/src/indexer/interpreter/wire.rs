@@ -283,7 +283,9 @@ impl Transaction {
     }
 }
 
-// design-lint: allow single-use-free-function -- decodes and validates a complete set of inner-instruction groups against outer-instruction and account-key bounds as a distinct section of transaction decoding
+// decodes and validates a complete set of inner-instruction groups against outer-instruction and
+// account-key bounds as a distinct section of transaction decoding
+// design-lint: allow single-use-free-function -- See the boundary rationale above.
 fn parse_inner(
     groups: Vec<InnerWire>,
     outer_count: usize,

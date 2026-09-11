@@ -4,8 +4,8 @@ use syn::{Attribute, Item, ItemMod, UseTree, Visibility, spanned::Spanned, visit
 
 use crate::{
     Policy,
-    model::{Finding, Related, Review},
-    source::{SourceFile, Workspace},
+    model::{Finding, RelatedLocation, Review},
+    source::{File, Workspace},
 };
 
 use super::ID;
@@ -18,7 +18,7 @@ pub(super) fn findings(workspace: &Workspace, policy: &Policy) -> Vec<Finding> {
         .collect()
 }
 
-fn required_module(source: &SourceFile, workspace: &Workspace, policy: &Policy) -> bool {
+fn required_module(source: &File, workspace: &Workspace, policy: &Policy) -> bool {
     workspace.packages.iter().any(|package| {
         let Some(parent) = package.root.parent() else {
             return false;
@@ -48,7 +48,7 @@ fn required_module(source: &SourceFile, workspace: &Workspace, policy: &Policy) 
     })
 }
 
-fn candidate(source: &SourceFile, workspace: &Workspace) -> Option<Finding> {
+fn candidate(source: &File, workspace: &Workspace) -> Option<Finding> {
     if source.path.file_name()?.to_str()? != "mod.rs"
         || !source.syntax.attrs.is_empty()
         || source.syntax.items.len() < 2
@@ -116,42 +116,47 @@ fn candidate(source: &SourceFile, workspace: &Workspace) -> Option<Finding> {
 
     let mut finding = Finding::warning(ID, module_name.clone(), source.location(child.span()));
     finding.message = format!(
-        "private module `{module_name}` contains only child `{child_name}` and transparent re-exports"
+        "private module `{module_name}` contains only child `{child_name}` and \
+            transparent re-exports"
     );
-    finding.help = "flatten the child into the parent module unless this namespace owns a documented public, platform, generation, FFI, cfg, or privacy contract".into();
+    finding.help =
+        "flatten the child into the parent module unless this namespace owns a documented \
+        public, platform, generation, FFI, cfg, or privacy contract"
+            .into();
     finding.related = vec![
-        Related {
+        RelatedLocation {
             label: "private parent declaration".into(),
             location: declaration.source.location(declaration.item.span()),
         },
-        Related {
+        RelatedLocation {
             label: "sole child implementation".into(),
             location: child_source.location(child_source.syntax.span()),
         },
     ];
     let review = Review {
         metadata: vec![
-        (
-            "Category".into(),
-            "single-child transparent namespace".into(),
-        ),
-        ("Child".into(), child_name),
-        (
-            "Re-exports".into(),
-            uses.iter()
-                .map(|item| source.excerpt(item.span()))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        (
-            "Qualified external uses".into(),
-            "none found in the owning workspace".into(),
-        ),
+            (
+                "Category".into(),
+                "single-child transparent namespace".into(),
+            ),
+            ("Child".into(), child_name),
+            (
+                "Re-exports".into(),
+                uses.iter()
+                    .map(|item| source.excerpt(item.span()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            (
+                "Qualified external uses".into(),
+                "none found in the owning workspace".into(),
+            ),
         ],
         questions: vec![
-        "Does this namespace enforce any visibility or compatibility contract not visible in the source?"
-            .into(),
-        "Can the child file replace mod.rs without changing supported paths?".into(),
+            "Does this namespace enforce any visibility or compatibility contract not visible \
+            in the source?"
+                .into(),
+            "Can the child file replace mod.rs without changing supported paths?".into(),
         ],
         ..Review::default()
     };
@@ -160,12 +165,12 @@ fn candidate(source: &SourceFile, workspace: &Workspace) -> Option<Finding> {
 }
 
 struct Declaration<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     item: &'a ItemMod,
 }
 
 fn parent_declaration<'a>(
-    source: &SourceFile,
+    source: &File,
     workspace: &'a Workspace,
     module_name: &str,
 ) -> Option<Declaration<'a>> {
@@ -200,7 +205,7 @@ fn crate_visible(visibility: &Visibility) -> bool {
     restricted.path.is_ident("crate")
 }
 
-fn child_path(source: &SourceFile, child: &ItemMod) -> Option<PathBuf> {
+fn child_path(source: &File, child: &ItemMod) -> Option<PathBuf> {
     let directory = source.path.parent()?;
     let file = directory.join(format!("{}.rs", child.ident));
     if file.is_file() {
@@ -250,7 +255,7 @@ fn item_attrs(item: &Item) -> &[Attribute] {
     }
 }
 
-fn has_qualified_use(source: &SourceFile, module: &str) -> bool {
+fn has_qualified_use(source: &File, module: &str) -> bool {
     struct Paths<'a> {
         module: &'a str,
         found: bool,

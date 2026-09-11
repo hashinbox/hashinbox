@@ -4,9 +4,9 @@ use syn::spanned::Spanned;
 
 use crate::{Policy, test_support::Fixture};
 
-use super::{SourceFile, Workspace};
+use super::{File, Workspace};
 
-fn source<'a>(workspace: &'a Workspace, suffix: &str) -> &'a SourceFile {
+fn source<'a>(workspace: &'a Workspace, suffix: &str) -> &'a File {
     workspace
         .sources()
         .iter()
@@ -16,7 +16,8 @@ fn source<'a>(workspace: &'a Workspace, suffix: &str) -> &'a SourceFile {
 
 #[test]
 fn excerpts_use_exact_unicode_character_spans_and_multiline_text() {
-    let text = "struct Café { résumé: String }\nfn render() -> String {\n    \"ქართული é\".to_owned()\n}\n";
+    let text = "struct Café { résumé: String }\nfn render() -> String {\n    \"ქართული \
+        é\".to_owned()\n}\n";
     let fixture = Fixture::new(&[("src/lib.rs", text)]);
     let workspace = fixture.workspace();
     let source = source(&workspace, "src/lib.rs");
@@ -148,7 +149,9 @@ fn dependency_fixture() -> Fixture {
     Fixture::new(&[
         (
             "Cargo.toml",
-            "[workspace]\nmembers=['consumer','domain','common','builder','dev','target','target-build','target-dev']\n[workspace.dependencies]\ninherited={package='common-library',path='common'}\n",
+            "[workspace]\nmembers=['consumer','domain','common','builder','dev',\
+        'target','target-build','target-dev']\n[workspace.dependencies]\n\
+        inherited={package='common-library',path='common'}\n",
         ),
         (
             "consumer/Cargo.toml",
@@ -174,7 +177,8 @@ target_dev={path='../target-dev'}
         ("consumer/src/lib.rs", "pub struct Consumer;"),
         (
             "domain/Cargo.toml",
-            "[package]\nname='domain-library'\nversion='0.0.0'\n[dependencies]\ncommon={package='common-library',path='../common'}\n",
+            "[package]\nname='domain-library'\nversion='0.0.0'\n[dependencies]\n\
+        common={package='common-library',path='../common'}\n",
         ),
         ("domain/src/lib.rs", "pub struct Domain;"),
         (
@@ -373,7 +377,8 @@ fn nested_workspace_cannot_fall_back_to_outer_dependency_definitions() {
         ),
         (
             "nested/Cargo.toml",
-            "[workspace]\n[package]\nname='nested'\nversion='0.0.0'\n[dependencies]\nouter.workspace=true",
+            "[workspace]\n[package]\nname='nested'\nversion='0.0.0'\n[dependencies]\n\
+        outer.workspace=true",
         ),
         ("nested/src/lib.rs", "pub struct Value(u8);"),
     ]);

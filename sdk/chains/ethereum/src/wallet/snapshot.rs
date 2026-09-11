@@ -97,7 +97,9 @@ fn decode(
     Ok((destination, amount))
 }
 
-// design-lint: allow unclassified-free-function -- shared Ethereum snapshot adapter maps heterogeneous validation failures to InvalidSnapshot without changing their messages or inventing transaction ambiguity
+// shared Ethereum snapshot adapter maps heterogeneous validation failures to InvalidSnapshot
+// without changing their messages or inventing transaction ambiguity
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn invalid(error: impl std::fmt::Display) -> TransactionError {
     TransactionError::new(TransactionErrorKind::InvalidSnapshot, error.to_string())
 }
@@ -231,7 +233,11 @@ mod tests {
             ),
             (
                 "token variant",
-                serde_json::json!({ "kind": "erc20", "token": Address([0xab; 20]).to_string(), "decimals": 18 }),
+                serde_json::json!({
+                    "kind": "erc20",
+                    "token": Address([0xab; 20]).to_string(),
+                    "decimals": 18,
+                }),
             ),
         ] {
             let mut value = snapshot(&wallet).value().clone();
@@ -262,11 +268,19 @@ mod tests {
         for (case, asset) in [
             (
                 "token contract",
-                serde_json::json!({ "kind": "erc20", "token": Address([0xcd; 20]).to_string(), "decimals": 6 }),
+                serde_json::json!({
+                    "kind": "erc20",
+                    "token": Address([0xcd; 20]).to_string(),
+                    "decimals": 6,
+                }),
             ),
             (
                 "token casing",
-                serde_json::json!({ "kind": "erc20", "token": format!("0x{}", "AB".repeat(20)), "decimals": 6 }),
+                serde_json::json!({
+                    "kind": "erc20",
+                    "token": format!("0x{}","AB".repeat(20)),
+                    "decimals": 6,
+                }),
             ),
             (
                 "decimals",

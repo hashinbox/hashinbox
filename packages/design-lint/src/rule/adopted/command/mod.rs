@@ -7,8 +7,8 @@ use syn::{
 
 use crate::{
     Policy, Result,
-    model::{Finding, Related},
-    source::{SourceFile, Workspace},
+    model::{Finding, RelatedLocation},
+    source::{File, Workspace},
 };
 
 pub(crate) const ID: &str = "platform-command-boundary";
@@ -50,17 +50,17 @@ pub(crate) fn check(workspace: &Workspace, policy: &Policy) -> Result<Vec<Findin
 }
 
 struct Commands<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     allowed: bool,
     aliases: HashMap<String, Vec<String>>,
     modules: Vec<String>,
     test_depth: usize,
-    staged: HashMap<String, Staged>,
+    staged: HashMap<String, Shell>,
     findings: Vec<Finding>,
 }
 
 impl<'a> Commands<'a> {
-    fn new(source: &'a SourceFile, allowed: bool) -> Self {
+    fn new(source: &'a File, allowed: bool) -> Self {
         Self {
             source,
             allowed,
@@ -107,10 +107,15 @@ impl<'a> Commands<'a> {
             self.source.location(call.span()),
         );
         finding.message = format!(
-            "host process construction `{command}::new` is outside an application composition or platform-adapter boundary"
+            "host process construction `{command}::new` is outside an application \
+                composition or platform-adapter boundary"
         );
-        finding.help = "define a domain-owned capability and move executable discovery, flags, and process lifecycle into an explicit adapter; keep guest process specifications as typed data".to_owned();
-        finding.related.push(Related {
+        finding.help =
+            "define a domain-owned capability and move executable discovery, flags, and \
+            process lifecycle into an explicit adapter; keep guest process specifications as \
+            typed data"
+                .to_owned();
+        finding.related.push(RelatedLocation {
             label: format!(
                 "resolved crate `{}`, module `{}`",
                 self.source.package,
@@ -131,10 +136,15 @@ impl<'a> Commands<'a> {
             self.source.location(expression.span()),
         );
         finding.message = format!(
-            "shell `{shell}` receives a dynamically constructed program or script, allowing data to be interpreted as command syntax"
+            "shell `{shell}` receives a dynamically constructed program or script, \
+                allowing data to be interpreted as command syntax"
         );
-        finding.help = "invoke the target executable directly with separately parameterized arguments, or use a native/typed API; never interpolate data into shell or interpreter source".to_owned();
-        finding.related.push(Related {
+        finding.help =
+            "invoke the target executable directly with separately parameterized arguments, \
+            or use a native/typed API; never interpolate data into shell or interpreter \
+            source"
+                .to_owned();
+        finding.related.push(RelatedLocation {
             label: "dynamic shell invocation is unsafe even in tests and build scripts".to_owned(),
             location: self.source.location(expression.span()),
         });
@@ -173,28 +183,33 @@ impl<'a> Commands<'a> {
             false
         };
         self.staged.insert(name, command.clone());
-        if unsafe_script {
-            let shell = command.shell;
-            let mut finding = Finding::error(
-                "platform-command-boundary",
-                format!("{shell} interpolated script"),
-                self.source.location(expression.span()),
-            );
-            finding.message = format!(
-                "staged shell `{shell}` receives a dynamically constructed program or script, allowing data to be interpreted as command syntax"
-            );
-            finding.help = "invoke the target executable directly with separately parameterized arguments, or use a native/typed API; never interpolate data into shell or interpreter source".to_owned();
-            finding.related.push(Related {
-                label: "resolved through a command binding in the same lexical scope".to_owned(),
-                location: self.source.location(expression.span()),
-            });
-            self.findings.push(finding);
+        if !unsafe_script {
+            return;
         }
+        let shell = command.shell;
+        let mut finding = Finding::error(
+            "platform-command-boundary",
+            format!("{shell} interpolated script"),
+            self.source.location(expression.span()),
+        );
+        finding.message = format!(
+            "staged shell `{shell}` receives a dynamically constructed program or \
+                    script, allowing data to be interpreted as command syntax"
+        );
+        finding.help = "invoke the target executable directly with separately parameterized \
+                arguments, or use a native/typed API; never interpolate data into shell or \
+                interpreter source"
+            .to_owned();
+        finding.related.push(RelatedLocation {
+            label: "resolved through a command binding in the same lexical scope".to_owned(),
+            location: self.source.location(expression.span()),
+        });
+        self.findings.push(finding);
     }
 }
 
 #[derive(Clone)]
-struct Staged {
+struct Shell {
     shell: String,
     armed: bool,
 }
@@ -260,30 +275,32 @@ impl<'ast> Visit<'ast> for Commands<'_> {
     }
 
     fn visit_local(&mut self, local: &'ast Local) {
-        if let (Pat::Ident(binding), Some(initializer)) = (&local.pat, &local.init) {
-            self.staged.remove(&binding.ident.to_string());
-            if let Expr::Call(call) = initializer.expr.as_ref() {
-                if self.command_path(call).is_some()
-                    && let Some(shell) = call
-                        .args
-                        .first()
-                        .and_then(string_literal)
-                        .filter(|program| shell_program(program))
-                {
-                    self.staged.insert(
-                        binding.ident.to_string(),
-                        Staged {
-                            shell,
-                            armed: false,
-                        },
-                    );
-                }
-            } else if let Expr::Path(alias) = initializer.expr.as_ref()
-                && let Some(original) = alias.path.get_ident().map(ToString::to_string)
-                && let Some(command) = self.staged.get(&original).cloned()
+        let (Pat::Ident(binding), Some(initializer)) = (&local.pat, &local.init) else {
+            syn::visit::visit_local(self, local);
+            return;
+        };
+        self.staged.remove(&binding.ident.to_string());
+        if let Expr::Call(call) = initializer.expr.as_ref() {
+            if self.command_path(call).is_some()
+                && let Some(shell) = call
+                    .args
+                    .first()
+                    .and_then(string_literal)
+                    .filter(|program| shell_program(program))
             {
-                self.staged.insert(binding.ident.to_string(), command);
+                self.staged.insert(
+                    binding.ident.to_string(),
+                    Shell {
+                        shell,
+                        armed: false,
+                    },
+                );
             }
+        } else if let Expr::Path(alias) = initializer.expr.as_ref()
+            && let Some(original) = alias.path.get_ident().map(ToString::to_string)
+            && let Some(command) = self.staged.get(&original).cloned()
+        {
+            self.staged.insert(binding.ident.to_string(), command);
         }
         syn::visit::visit_local(self, local);
     }
@@ -328,7 +345,7 @@ fn collect_use(tree: &UseTree, prefix: Vec<String>, aliases: &mut HashMap<String
     }
 }
 
-fn filesystem_modules(source: &SourceFile) -> Vec<String> {
+fn filesystem_modules(source: &File) -> Vec<String> {
     let components = source
         .path
         .components()
@@ -375,13 +392,13 @@ fn shell_chain(expression: &ExprMethodCall, commands: &Commands<'_>) -> Option<S
     if !dynamic_script {
         return None;
     }
-    let (call, program) = command_root(receiver)?;
+    let (call, program) = invocation_root(receiver)?;
     commands.command_path(call)?;
     let program = string_literal(program)?;
     shell_program(&program).then_some(program)
 }
 
-fn command_root(expression: &Expr) -> Option<(&ExprCall, &Expr)> {
+fn invocation_root(expression: &Expr) -> Option<(&ExprCall, &Expr)> {
     let Expr::Call(call) = expression else {
         return None;
     };

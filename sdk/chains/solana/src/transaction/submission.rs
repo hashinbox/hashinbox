@@ -254,7 +254,7 @@ mod tests {
 
     use crate::{
         Address, BlockhashLifetime, Key, Lamport, Memo, Message, ResolvedTransfer, Seed,
-        SourceCoordinator, rpc::test_support::Scripted,
+        SourceCoordinator, rpc::test_support::Script,
     };
 
     use super::*;
@@ -356,7 +356,7 @@ mod tests {
             outcome: Err(super::super::RegistrationError::Closed),
             tasks: Arc::new(Mutex::new(Vec::new())),
         });
-        let rpc = Scripted::one(
+        let rpc = Script::one(
             "getBlockHeight",
             json!([{"commitment":"confirmed", "minContextSlot":11}]),
             json!(44),
@@ -399,7 +399,7 @@ mod tests {
         let prepared = prepared(&coordinator);
         let source = prepared.envelopes()[0].source().clone();
         let transfer = ResolvedTransfer::new(0, source, String::new(), Lamport::from_atomic(1));
-        let rpc = Scripted::one(
+        let rpc = Script::one(
             "getBlockHeight",
             json!([{"commitment":"confirmed", "minContextSlot":11}]),
             json!(44),
@@ -437,7 +437,7 @@ mod tests {
         let coordinator = SourceCoordinator::default();
         let prepared = prepared(&coordinator);
         let envelope = prepared.envelopes()[0].clone();
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             (
                 "getBlockHeight",
                 json!([{"commitment":"confirmed", "minContextSlot":11}]),
@@ -445,7 +445,13 @@ mod tests {
             ),
             (
                 "sendTransaction",
-                json!([STANDARD.encode(envelope.signed_bytes()), {"encoding":"base64","skipPreflight":false,"preflightCommitment":"confirmed","minContextSlot":11,"maxRetries":0}]),
+                json!([STANDARD.encode(envelope.signed_bytes()), {
+                    "encoding": "base64",
+                    "skipPreflight": false,
+                    "preflightCommitment": "confirmed",
+                    "minContextSlot": 11,
+                    "maxRetries": 0,
+                }]),
                 json!(envelope.id().as_str()),
             ),
         ]);
@@ -502,7 +508,13 @@ mod tests {
         let send = || {
             (
                 "sendTransaction",
-                json!([STANDARD.encode(envelope.signed_bytes()), {"encoding":"base64","skipPreflight":false,"preflightCommitment":"confirmed","minContextSlot":11,"maxRetries":0}]),
+                json!([STANDARD.encode(envelope.signed_bytes()), {
+                    "encoding": "base64",
+                    "skipPreflight": false,
+                    "preflightCommitment": "confirmed",
+                    "minContextSlot": 11,
+                    "maxRetries": 0,
+                }]),
                 json!(mismatch.clone()),
             )
         };
@@ -520,11 +532,17 @@ mod tests {
                 json!(44),
             )
         };
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             height(),
             (
                 "sendTransaction",
-                json!([STANDARD.encode(first.signed_bytes()), {"encoding":"base64","skipPreflight":false,"preflightCommitment":"confirmed","minContextSlot":11,"maxRetries":0}]),
+                json!([STANDARD.encode(first.signed_bytes()), {
+                    "encoding": "base64",
+                    "skipPreflight": false,
+                    "preflightCommitment": "confirmed",
+                    "minContextSlot": 11,
+                    "maxRetries": 0,
+                }]),
                 json!(first.id().as_str()),
             ),
             height(),
@@ -592,7 +610,15 @@ mod tests {
         let absent = json!({"context":{"slot":15},"value":[null]});
         for (status, height, observed) in [
             (
-                json!({"context":{"slot":15},"value":[{"slot":12,"confirmations":null,"err":{"InstructionError":[0,"Custom"]},"confirmationStatus":"finalized"}]}),
+                json!({
+                    "context": {"slot": 15},
+                    "value": [{
+                        "slot": 12,
+                        "confirmations": null,
+                        "err": {"InstructionError": [0, "Custom"]},
+                        "confirmationStatus": "finalized",
+                    }],
+                }),
                 None,
                 true,
             ),
@@ -605,7 +631,13 @@ mod tests {
             let envelope = envelopes[0].clone();
             let send = (
                 "sendTransaction",
-                json!([STANDARD.encode(envelope.signed_bytes()), {"encoding":"base64","skipPreflight":false,"preflightCommitment":"confirmed","minContextSlot":floor,"maxRetries":0}]),
+                json!([STANDARD.encode(envelope.signed_bytes()), {
+                    "encoding": "base64",
+                    "skipPreflight": false,
+                    "preflightCommitment": "confirmed",
+                    "minContextSlot": floor,
+                    "maxRetries": 0,
+                }]),
                 json!(Signature::from([8; 64]).to_string()),
             );
             let status = (
@@ -615,7 +647,7 @@ mod tests {
             );
             let sentinel = ("getHealth", json!([]), json!("ok"));
             let rpc = match height {
-                Some(height) => Scripted::new([
+                Some(height) => Script::new([
                     send,
                     status,
                     (
@@ -625,7 +657,7 @@ mod tests {
                     ),
                     sentinel,
                 ]),
-                None => Scripted::new([send, status, sentinel]),
+                None => Script::new([send, status, sentinel]),
             };
             let client = RpcClient::new(rpc.clone());
             let outcome = run(client.clone(), floor, envelopes, leases.guard()).await;
@@ -702,10 +734,16 @@ mod tests {
                 )
                 .expect("second envelope"),
             );
-            let rpc = Scripted::new([
+            let rpc = Script::new([
                 (
                     "sendTransaction",
-                    json!([STANDARD.encode(first.signed_bytes()), {"encoding":"base64","skipPreflight":false,"preflightCommitment":"confirmed","minContextSlot":floor,"maxRetries":0}]),
+                    json!([STANDARD.encode(first.signed_bytes()), {
+                        "encoding": "base64",
+                        "skipPreflight": false,
+                        "preflightCommitment": "confirmed",
+                        "minContextSlot": floor,
+                        "maxRetries": 0,
+                    }]),
                     json!(first.id().as_str()),
                 ),
                 (
@@ -751,7 +789,7 @@ mod tests {
         let coordinator = SourceCoordinator::default();
         let prepared = prepared(&coordinator);
         let envelope = prepared.envelopes()[0].clone();
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             (
                 "getBlockHeight",
                 json!([{"commitment":"confirmed", "minContextSlot":11}]),
@@ -759,7 +797,13 @@ mod tests {
             ),
             (
                 "sendTransaction",
-                json!([STANDARD.encode(envelope.signed_bytes()), {"encoding":"base64","skipPreflight":false,"preflightCommitment":"confirmed","minContextSlot":11,"maxRetries":0}]),
+                json!([STANDARD.encode(envelope.signed_bytes()), {
+                    "encoding": "base64",
+                    "skipPreflight": false,
+                    "preflightCommitment": "confirmed",
+                    "minContextSlot": 11,
+                    "maxRetries": 0,
+                }]),
                 json!(envelope.id().as_str()),
             ),
         ]);

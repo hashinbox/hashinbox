@@ -69,8 +69,12 @@ impl DatabasePath {
     }
 }
 
-// design-lint: allow single-use-free-function -- complete lexical path normalization with root-escape checks stays separate from filesystem canonicalization and database-file validation
-// design-lint: allow unclassified-free-function -- complete lexical absolute-path normalization keeps root-escape checks separate from filesystem canonicalization and database-file validation
+// complete lexical path normalization with root-escape checks stays separate from filesystem
+// canonicalization and database-file validation
+// complete lexical absolute-path normalization keeps root-escape checks separate from filesystem
+// canonicalization and database-file validation
+// design-lint: allow single-use-free-function -- lexical absolute-path normalization
+// design-lint: allow unclassified-free-function -- lexical absolute-path normalization
 fn normalized_absolute_path(path: &Path) -> Result<PathBuf, Error> {
     if path.as_os_str().is_empty() {
         return Err(Error::invalid_request("redb path must not be empty"));

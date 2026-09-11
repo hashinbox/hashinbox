@@ -67,12 +67,12 @@ fn reports_framework_signature_as_evidence_without_exempting_it() {
 #[test]
 fn proc_macros_and_nested_test_items_are_excluded() {
     let values = findings(
-        r#"
-#[proc_macro] pub fn derive(input: TokenStream) -> TokenStream { input }
-#[proc_macro_attribute] pub fn decorate(attr: TokenStream, item: TokenStream) -> TokenStream { item }
-#[test] fn sample() { fn nested(value: usize) {} }
-fn parse(value: usize) {}
-"#,
+        "\n\
+        #[proc_macro] pub fn derive(input: TokenStream) -> TokenStream { input }\n\
+        #[proc_macro_attribute] pub fn decorate(attr: TokenStream, item: \
+        TokenStream) -> TokenStream { item }\n\
+        #[test] fn sample() { fn nested(value: usize) {} }\n\
+        fn parse(value: usize) {}\n",
         ID,
     );
     assert_eq!(values.len(), 1);
@@ -107,13 +107,15 @@ fn ambiguous_names_keep_reference_evidence_in_the_same_file() {
 fn thin_handler_can_have_a_reasoned_sdk_exception() {
     let fixture = Fixture::new(&[(
         "src/lib.rs",
-        "// design-lint: allow unclassified-free-function -- Axum owns this extractor signature\nasync fn create(State(wallets): State<Wallets>) { wallets.generate().await; }\n",
+        "// design-lint: allow unclassified-free-function -- Axum owns this extractor \
+            signature\nasync fn create(State(wallets): State<Wallets>) { \
+            wallets.generate().await; }\n",
     )]);
     let registry = crate::Registry::new().register(super::FreeFunction);
     let summaries = crate::Linter::new(Policy::default(), registry)
         .run(
             vec![fixture.path().to_owned()],
-            &mut crate::Diagnostic::new(Vec::new()),
+            &mut crate::Printer::new(Vec::new()),
         )
         .expect("lint fixture");
     assert_eq!(summaries[0].findings, 0);

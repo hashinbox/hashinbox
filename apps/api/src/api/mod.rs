@@ -35,7 +35,9 @@ impl State {
     }
 }
 
-// design-lint: allow unclassified-free-function -- application HTTP composition assembles resource routes and one OpenAPI contract while applying authentication and limits only to protected routes
+// application HTTP composition assembles resource routes and one OpenAPI contract while applying
+// authentication and limits only to protected routes
+// design-lint: allow unclassified-free-function -- application-owned HTTP route composition
 pub fn router(
     state: State,
     config: &http_support::server::Config,
@@ -60,5 +62,4 @@ pub fn router(
 }
 
 #[cfg(test)]
-#[path = "api_test.rs"]
 mod tests;

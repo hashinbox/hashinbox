@@ -3,10 +3,9 @@
 pub(crate) mod adopted;
 mod registry;
 pub use adopted::{
-    AccessorBloat, AsyncBlocking, BooleanState, CatchAllModule, CeremonialStructure,
-    DeepControlFlow, DuplicateEntity, EnvironmentAccess, FiniteStateString, FreeFunction,
-    GodObject, IgnoredResult, ModelDuplication, PlatformCommand, ReceiverRepetition, SingleUse,
-    StructNaming,
+    AccessorBloat, AsyncBlocking, BooleanState, CeremonialStructure, ControlDepth, DuplicateEntity,
+    EnvironmentAccess, FreeFunction, GodObject, IgnoredResult, ModelDuplication, ModuleNaming,
+    PlatformCommand, ReceiverRepetition, SingleUse, StringState, StructNaming,
 };
 pub use registry::Registry;
 pub(crate) mod production;
@@ -127,9 +126,9 @@ impl Rule for ChainLayout {
 }
 
 /// Rejects source directories containing only one Rust file.
-pub struct SingleFileDirectory;
+pub struct DirectorySize;
 
-impl Rule for SingleFileDirectory {
+impl Rule for DirectorySize {
     fn id(&self) -> &'static str {
         "single-file-directory"
     }
@@ -144,9 +143,9 @@ impl Rule for SingleFileDirectory {
 }
 
 /// Limits each capability trait to three methods.
-pub struct TraitMethodCount;
+pub struct TraitSize;
 
-impl Rule for TraitMethodCount {
+impl Rule for TraitSize {
     fn id(&self) -> &'static str {
         "trait-method-count"
     }
@@ -178,9 +177,9 @@ impl Rule for EmptyStruct {
 }
 
 /// Limits semantic words in struct names.
-pub struct StructWordCount;
+pub struct NameLength;
 
-impl Rule for StructWordCount {
+impl Rule for NameLength {
     fn id(&self) -> &'static str {
         "struct-word-count"
     }
@@ -195,9 +194,9 @@ impl Rule for StructWordCount {
 }
 
 /// Requires Self-returning constructors to be associated functions.
-pub struct SelfConstructorStatic;
+pub struct ConstructorReceiver;
 
-impl Rule for SelfConstructorStatic {
+impl Rule for ConstructorReceiver {
     fn id(&self) -> &'static str {
         "self-constructor-static"
     }

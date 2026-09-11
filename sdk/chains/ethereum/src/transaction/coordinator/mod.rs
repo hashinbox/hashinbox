@@ -6,9 +6,7 @@ use indexing::SourceError;
 use super::{BuildContext, SignedTransaction, TransactionBuilder, TransactionId, TransferRequest};
 use crate::{Accounts, Address, AssetKind, ChainError, ChainErrorKind, Transactions};
 
-#[path = "coordinator_requirements.rs"]
 mod requirements;
-#[path = "coordinator_state.rs"]
 mod state;
 
 use requirements::{RequiredAsset, Requirements};
@@ -75,13 +73,11 @@ impl TransactionCoordinator {
                 .await
                 .map_err(|source| PreparationError::new(index, source))?;
             if context.chain_id != preparation.expected_chain_id {
-                return Err(PreparationError::new(
-                    index,
-                    ChainError::new(
-                        ChainErrorKind::Divergent,
-                        "Ethereum RPC chain ID does not match the wallet network",
-                    ),
-                ));
+                let source = ChainError::new(
+                    ChainErrorKind::Divergent,
+                    "Ethereum RPC chain ID does not match the wallet network",
+                );
+                return Err(PreparationError::new(index, source));
             }
             drafts.push(Draft {
                 preparation,
@@ -138,23 +134,19 @@ impl TransactionCoordinator {
                 }
                 Admission::Recover { id, index } => (id, index),
                 Admission::Exhausted(index) => {
-                    return Err(PreparationError::new(
-                        index,
-                        ChainError::new(
-                            ChainErrorKind::Other,
-                            "Ethereum transaction coordinator exhausted operation identifiers",
-                        ),
-                    ));
+                    let source = ChainError::new(
+                        ChainErrorKind::Other,
+                        "Ethereum transaction coordinator exhausted operation identifiers",
+                    );
+                    return Err(PreparationError::new(index, source));
                 }
             };
             self.submit(None, id).await.map_err(|source| {
-                PreparationError::new(
-                    index,
-                    ChainError::new(
-                        ChainErrorKind::RpcUnavailable,
-                        format!("Ethereum sender is blocked by an ambiguous transaction: {source}"),
-                    ),
-                )
+                let source = ChainError::new(
+                    ChainErrorKind::RpcUnavailable,
+                    format!("Ethereum sender is blocked by an ambiguous transaction: {source}"),
+                );
+                PreparationError::new(index, source)
             })?;
         }
     }
@@ -208,23 +200,19 @@ impl TransactionCoordinator {
             .enumerate()
             .map(|(index, preparation)| {
                 let nonce = next.get_mut(preparation.request.from()).ok_or_else(|| {
-                    PreparationError::new(
-                        index,
-                        ChainError::new(
-                            ChainErrorKind::Other,
-                            "Ethereum sender was not admitted for nonce assignment",
-                        ),
-                    )
+                    let source = ChainError::new(
+                        ChainErrorKind::Other,
+                        "Ethereum sender was not admitted for nonce assignment",
+                    );
+                    PreparationError::new(index, source)
                 })?;
                 let assigned = *nonce;
                 *nonce = nonce.checked_add(1).ok_or_else(|| {
-                    PreparationError::new(
-                        index,
-                        ChainError::new(
-                            ChainErrorKind::InvalidTransaction,
-                            "Ethereum transaction nonce overflows u64",
-                        ),
-                    )
+                    let source = ChainError::new(
+                        ChainErrorKind::InvalidTransaction,
+                        "Ethereum transaction nonce overflows u64",
+                    );
+                    PreparationError::new(index, source)
                 })?;
                 Ok(assigned)
             })
@@ -260,13 +248,11 @@ impl TransactionCoordinator {
             insufficient = Some(insufficient.map_or(index, |current: usize| current.min(index)));
         }
         if let Some(index) = insufficient {
-            return Err(PreparationError::new(
-                index,
-                ChainError::new(
-                    ChainErrorKind::InsufficientFunds,
-                    "Ethereum aggregate batch balance is insufficient",
-                ),
-            ));
+            let source = ChainError::new(
+                ChainErrorKind::InsufficientFunds,
+                "Ethereum aggregate batch balance is insufficient",
+            );
+            return Err(PreparationError::new(index, source));
         }
         Ok(())
     }
@@ -444,7 +430,9 @@ struct PreparedEntry {
     signed: SignedTransaction,
 }
 
-// design-lint: allow unclassified-free-function -- coordinator claim and acceptance boundaries construct foreign SourceError values with explicit retryability while preserving exact envelope and nonce error context
+// coordinator claim and acceptance boundaries construct foreign SourceError values with explicit
+// retryability while preserving exact envelope and nonce error context
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn source_error(message: impl Into<String>, retryable: bool) -> SourceError {
     SourceError {
         message: message.into(),
@@ -452,7 +440,9 @@ fn source_error(message: impl Into<String>, retryable: bool) -> SourceError {
     }
 }
 
-// design-lint: allow unclassified-free-function -- coordinator claim and acceptance errors share a context-specific conversion between foreign errors that preserves retryability and excludes an ambiguous transaction ID
+// coordinator claim and acceptance errors share a context-specific conversion between foreign
+// errors that preserves retryability and excludes an ambiguous transaction ID
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn definite_submission_error(error: SourceError) -> TransactionError {
     let kind = if error.retryable {
         TransactionErrorKind::Unavailable
@@ -462,7 +452,9 @@ fn definite_submission_error(error: SourceError) -> TransactionError {
     TransactionError::new(kind, error.message)
 }
 
-// design-lint: allow unclassified-free-function -- shared coordinator uncertainty mapping preserves the original error message and exact local envelope ID without changing claim state
+// shared coordinator uncertainty mapping preserves the original error message and exact local
+// envelope ID without changing claim state
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn ambiguous_submission_error(
     id: &TransactionId,
     error: impl std::fmt::Display,
@@ -472,5 +464,4 @@ fn ambiguous_submission_error(
 }
 
 #[cfg(test)]
-#[path = "coordinator_test.rs"]
 mod tests;

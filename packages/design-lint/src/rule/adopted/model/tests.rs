@@ -294,8 +294,11 @@ pub struct ApiImage {
 
 #[test]
 fn sdk_alias_dependency_connects_wallet_library_to_http_copy() {
-    let owner = "#[derive(serde::Serialize)] pub struct Wallet { pub id: u64, pub address: String, pub chain: String }";
-    let adapter = "#[derive(serde::Serialize)] pub struct ApiWallet { pub id: u64, pub address: String, pub chain: String }";
+    let owner = "#[derive(serde::Serialize)] pub struct Wallet { pub id: u64, pub address: String, \
+        pub chain: String }";
+    let adapter = "#[derive(serde::Serialize)] pub struct ApiWallet { pub id: u64, pub \
+        address: String, \
+        pub chain: String }";
     let fixture = crate::test_support::Fixture::new(&[
         (
             "sdk/wallets/Cargo.toml",
@@ -304,7 +307,8 @@ fn sdk_alias_dependency_connects_wallet_library_to_http_copy() {
         ("sdk/wallets/src/lib.rs", owner),
         (
             "apps/api/Cargo.toml",
-            "[package]\nname='api'\nversion='0.0.0'\n[dependencies]\nwallet_api={package='wallets',path='../../sdk/wallets'}\n",
+            "[package]\nname='api'\nversion='0.0.0'\n[dependencies]\n\
+        wallet_api={package='wallets',path='../../sdk/wallets'}\n",
         ),
         ("apps/api/src/lib.rs", adapter),
     ]);

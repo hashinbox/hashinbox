@@ -475,7 +475,9 @@ fn required_quantity_u64(
     u64::try_from(value).map_err(|_| ParseError::new(format!("Ethereum {label} exceeds u64")))
 }
 
-// design-lint: allow unclassified-free-function -- shared indexing quantity decoder preserves field context and established native U256 parsing semantics across transaction fields and source chain-ID checks
+// shared indexing quantity decoder preserves field context and established native U256 parsing
+// semantics across transaction fields and source chain-ID checks
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn parse_quantity(value: &str, label: &str) -> Result<U256, ParseError> {
     let digits = value
         .strip_prefix("0x")
@@ -649,8 +651,10 @@ mod tests {
     #[test]
     fn address_and_hash_fields_keep_alloy_syntax_and_contextual_errors() {
         for prefix in ["", "0x", "0X"] {
-            let value = json!({"address": format!("{prefix}{}", "aB".repeat(20)),
-                               "hash": format!("{prefix}{}", "aB".repeat(32))});
+            let value = json!({
+                "address": format!("{prefix}{}", "aB".repeat(20)),
+                "hash": format!("{prefix}{}", "aB".repeat(32)),
+            });
             let object = value.as_object().unwrap();
             assert_eq!(
                 required_address(object, "address", "sender").unwrap(),

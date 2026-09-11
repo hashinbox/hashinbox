@@ -28,7 +28,8 @@ SELECT pg_advisory_xact_lock(hashtextextended(
 /// Locks the scope's checkpoint for the rest of the transaction.
 const LOCK_CHECKPOINT: &str = "SELECT position, height, hash, parent_position, \
                                parent_hash AS parent, block_timestamp AS timestamp \
-                               FROM payments_checkpoint WHERE chain = $1 AND network = $2 FOR UPDATE";
+                               FROM payments_checkpoint WHERE chain = $1 AND network = $2 \
+                               FOR UPDATE";
 
 const JOURNALLED_HASH: &str =
     "SELECT block_hash FROM payments_journal WHERE chain = $1 AND network = $2 AND height = $3";
@@ -48,7 +49,8 @@ INSERT INTO payments_journal (chain, network, height, block_position, block_hash
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
 
 const MOVE_CHECKPOINT: &str = "\
-INSERT INTO payments_checkpoint (chain, network, position, height, hash, parent_position, parent_hash,
+INSERT INTO payments_checkpoint (chain, network, position, height, hash, parent_position, \
+parent_hash,
                         block_timestamp)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (chain, network) DO UPDATE SET position = EXCLUDED.position,

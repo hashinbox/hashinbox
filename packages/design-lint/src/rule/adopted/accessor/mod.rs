@@ -8,9 +8,9 @@ use syn::{
 
 use crate::{
     Result,
-    model::{Finding, Related, Review},
+    model::{Finding, RelatedLocation, Review},
     policy::Policy,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 #[cfg(test)]
@@ -83,7 +83,7 @@ impl Definitions {
         definitions
     }
 
-    fn insert(&mut self, source: &SourceFile, item: &ItemStruct) {
+    fn insert(&mut self, source: &File, item: &ItemStruct) {
         let key = (source.package.clone(), item.ident.to_string());
         if self.structures.contains_key(&key) {
             self.ambiguous.insert(key);
@@ -93,15 +93,14 @@ impl Definitions {
             .fields
             .iter()
             .filter_map(|field| {
-                field.ident.as_ref().map(|name| {
-                    (
-                        name.to_string(),
-                        Field {
-                            visibility: visibility(&field.vis),
-                            location: source.location(field.span()),
-                        },
-                    )
-                })
+                let name = field.ident.as_ref()?;
+                Some((
+                    name.to_string(),
+                    Field {
+                        visibility: visibility(&field.vis),
+                        location: source.location(field.span()),
+                    },
+                ))
             })
             .collect();
         self.structures.insert(
@@ -141,7 +140,7 @@ struct Candidate<'a> {
     contract: String,
 }
 
-fn inspect_source(source: &SourceFile, definitions: &Definitions, findings: &mut Vec<Finding>) {
+fn inspect_source(source: &File, definitions: &Definitions, findings: &mut Vec<Finding>) {
     for item in &source.syntax.items {
         let Item::Impl(item) = item else {
             continue;
@@ -151,7 +150,7 @@ fn inspect_source(source: &SourceFile, definitions: &Definitions, findings: &mut
 }
 
 fn inspect_impl(
-    source: &SourceFile,
+    source: &File,
     definitions: &Definitions,
     item: &ItemImpl,
     findings: &mut Vec<Finding>,
@@ -243,16 +242,13 @@ fn getter(expression: &Expr) -> Option<(String, Shape)> {
             let Expr::Field(field) = strip(&reference.expr) else {
                 return None;
             };
-            self_field(field).map(|name| {
-                (
-                    name,
-                    if reference.mutability.is_some() {
-                        Shape::MutableReference
-                    } else {
-                        Shape::SharedReference
-                    },
-                )
-            })
+            let name = self_field(field)?;
+            let shape = if reference.mutability.is_some() {
+                Shape::MutableReference
+            } else {
+                Shape::SharedReference
+            };
+            Some((name, shape))
         }
         Expr::MethodCall(call)
             if call.method == "clone"
@@ -279,21 +275,18 @@ fn setter(method: &syn::ImplItemFn, expression: &Expr) -> Option<(String, String
     let Expr::Path(value) = strip(&assign.right) else {
         return None;
     };
-    let (argument, argument_type) =
-        method
-            .sig
-            .inputs
-            .iter()
-            .find_map(|argument| match argument {
-                FnArg::Typed(argument) => match argument.pat.as_ref() {
-                    Pat::Ident(name) => Some((
-                        name.ident.to_string(),
-                        argument.ty.to_token_stream().to_string(),
-                    )),
-                    _ => None,
-                },
-                FnArg::Receiver(_) => None,
-            })?;
+    let (argument, argument_type) = method.sig.inputs.iter().find_map(|argument| {
+        let FnArg::Typed(argument) = argument else {
+            return None;
+        };
+        let Pat::Ident(name) = argument.pat.as_ref() else {
+            return None;
+        };
+        Some((
+            name.ident.to_string(),
+            argument.ty.to_token_stream().to_string(),
+        ))
+    })?;
     (method.sig.inputs.len() == 2
         && value.path.is_ident(&argument)
         && matches!(method.sig.output, syn::ReturnType::Default))
@@ -314,7 +307,7 @@ fn self_field(field: &syn::ExprField) -> Option<String> {
 }
 
 fn exposed_finding(
-    source: &SourceFile,
+    source: &File,
     owner: &str,
     candidate: &Candidate<'_>,
     field: &Field,
@@ -329,40 +322,43 @@ fn exposed_finding(
         source.location(candidate.method.span()),
     );
     finding.message = format!(
-        "`{method}` only forwards `{owner}.{field_name}`, which callers can already access with equal or broader visibility"
+        "`{method}` only forwards `{owner}.{field_name}`, which callers can already \
+            access with equal or broader visibility"
     );
     finding.help = format!(
-        "remove the zero-contract accessor or make `{field_name}` private when the method intentionally defines the stable API boundary"
+        "remove the zero-contract accessor or make `{field_name}` private when the method \
+            intentionally defines the stable API boundary"
     );
-    finding.related.push(Related {
+    finding.related.push(RelatedLocation {
         label: "already exposed field".into(),
         location: field.location.clone(),
     });
-    let review = Review {
+    let method_visibility = visibility(&candidate.method.vis);
+    finding.review = Some(Review {
         metadata: vec![
-        ("Owner".into(), owner.into()),
-        ("Method".into(), method),
-        ("Field".into(), field_name.clone()),
-        ("Field visibility".into(), field.visibility.clone()),
-        (
-            "Method visibility".into(),
-            visibility(&candidate.method.vis),
-        ),
-        ("Forwarding shape".into(), format!("{:?}", candidate.access)),
+            ("Owner".into(), owner.into()),
+            ("Method".into(), method),
+            ("Field".into(), field_name.clone()),
+            ("Field visibility".into(), field.visibility.clone()),
+            ("Method visibility".into(), method_visibility),
+            ("Forwarding shape".into(), format!("{:?}", candidate.access)),
         ],
         questions: vec![
-        "Is direct field access already part of the same or a broader API surface?".into(),
-        "Should the field become private because this accessor intentionally preserves representation or mutation policy?".into(),
-        "Does compatibility require retaining this method, and is that contract documented explicitly?".into(),
+            "Is direct field access already part of the same or a broader API surface?".into(),
+            "Should the field become private because this accessor intentionally preserves \
+            representation or mutation policy?"
+                .into(),
+            "Does compatibility require retaining this method, and is that contract \
+            documented explicitly?"
+                .into(),
         ],
         ..Review::default()
-    };
-    finding.review = Some(review);
+    });
     finding
 }
 
 fn duplicate_finding(
-    source: &SourceFile,
+    source: &File,
     owner: &str,
     left: &Candidate<'_>,
     right: &Candidate<'_>,
@@ -380,7 +376,7 @@ fn duplicate_finding(
     finding.help =
         "keep one canonical accessor unless a documented compatibility contract requires both"
             .into();
-    finding.related.push(Related {
+    finding.related.push(RelatedLocation {
         label: "identical accessor".into(),
         location: source.location(left.method.span()),
     });

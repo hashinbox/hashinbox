@@ -164,7 +164,8 @@ where
         if decimals != expected_decimals {
             return Err(source_error(
                 format!(
-                    "Ethereum ERC-20 token decimals {decimals} do not match configured decimals {expected_decimals}"
+                    "Ethereum ERC-20 token decimals {decimals} do not match configured \
+                     decimals {expected_decimals}"
                 ),
                 false,
             ));

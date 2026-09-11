@@ -7,9 +7,9 @@ use syn::{
 };
 
 use crate::{
-    model::{Finding, Related, Review},
+    model::{Finding, RelatedLocation, Review},
     rule::production::test_only,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 use super::ID;
@@ -53,7 +53,7 @@ impl Database {
         database
     }
 
-    fn structure(&mut self, source: &SourceFile, item: &ItemStruct) {
+    fn structure(&mut self, source: &File, item: &ItemStruct) {
         let name = item.ident.to_string();
         let key = (source.package.clone(), name.clone());
         if self.wrappers.contains_key(&key) {
@@ -88,7 +88,7 @@ impl Database {
         );
     }
 
-    fn implementation(&mut self, source: &SourceFile, item: &ItemImpl) {
+    fn implementation(&mut self, source: &File, item: &ItemImpl) {
         if test_only(&item.attrs) {
             return;
         }
@@ -178,20 +178,24 @@ impl Wrapper {
 
         let mut finding = Finding::warning(ID, self.name.clone(), self.location.clone());
         finding.message = format!(
-            "`{}` only wraps local `{}` and forwards {} methods with identical names and signatures",
+            "`{}` only wraps local `{}` and forwards {} methods with identical names and \
+                signatures",
             self.name,
             self.inner,
             self.methods.len()
         );
-        finding.help = "use the inner entity directly unless the wrapper owns a real invariant, translation, synchronization, instrumentation, adapter boundary, or compatibility contract".into();
+        finding.help = "use the inner entity directly unless the wrapper owns a real invariant, \
+            translation, synchronization, instrumentation, adapter boundary, or compatibility \
+            contract"
+            .into();
         finding.related = self
             .methods
             .iter()
-            .map(|method| Related {
+            .map(|method| RelatedLocation {
                 label: format!("transparent forwarder `{}`", method.name),
                 location: method.location.clone(),
             })
-            .chain(inner_methods.iter().map(|method| Related {
+            .chain(inner_methods.iter().map(|method| RelatedLocation {
                 label: format!("identical inner method `{}::{}`", self.inner, method.name),
                 location: method.location.clone(),
             }))
@@ -236,7 +240,7 @@ struct Forwarder {
     location: crate::Location,
 }
 
-fn forwarder(source: &SourceFile, method: &syn::ImplItemFn, field: &Member) -> Option<Forwarder> {
+fn forwarder(source: &File, method: &syn::ImplItemFn, field: &Member) -> Option<Forwarder> {
     let [Stmt::Expr(expression, _)] = method.block.stmts.as_slice() else {
         return None;
     };
@@ -380,20 +384,21 @@ fn boundary_attrs(attributes: &[syn::Attribute]) -> bool {
             return true;
         };
         derives.iter().any(|derive| {
-            !derive.segments.last().is_some_and(|segment| {
-                matches!(
-                    segment.ident.to_string().as_str(),
-                    "Debug"
-                        | "Clone"
-                        | "Copy"
-                        | "Eq"
-                        | "PartialEq"
-                        | "Ord"
-                        | "PartialOrd"
-                        | "Hash"
-                        | "Default"
-                )
-            })
+            let Some(segment) = derive.segments.last() else {
+                return true;
+            };
+            !matches!(
+                segment.ident.to_string().as_str(),
+                "Debug"
+                    | "Clone"
+                    | "Copy"
+                    | "Eq"
+                    | "PartialEq"
+                    | "Ord"
+                    | "PartialOrd"
+                    | "Hash"
+                    | "Default"
+            )
         })
     })
 }

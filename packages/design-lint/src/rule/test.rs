@@ -100,7 +100,8 @@ fn api_rules_reject_only_requested_shapes() {
         ("Cargo.toml", "[package]\nname='sample'\nversion='0.0.0'"),
         (
             "src/lib.rs",
-            "trait Large { fn a(&self); fn b(&self); fn c(&self); fn d(&self); } struct Empty; struct ThreeWordRecord { x: u8 } struct RecordV2 { x: u8 }",
+            "trait Large { fn a(&self); fn b(&self); fn c(&self); fn d(&self); } struct \
+                Empty; struct ThreeWordRecord { x: u8 } struct RecordV2 { x: u8 }",
         ),
     ]);
     let policy = Policy::default();
@@ -127,7 +128,9 @@ fn api_rules_reject_only_requested_shapes() {
 
 #[test]
 fn constructor_suppression_requires_reason() {
-    let source = "struct Value(u8); impl Value {\n// design-lint: allow self-constructor-static -- consuming parser convention\nfn parse(self) -> Result<Self, ()> { Ok(self) }\n\n\nfn new(self) -> Self { self }\n}";
+    let source = "struct Value(u8); impl Value {\n// design-lint: allow self-constructor-static -- \
+        consuming parser convention\nfn parse(self) -> Result<Self, ()> { Ok(self) }\n\n\nfn \
+        new(self) -> Self { self }\n}";
     let (root, workspace) = fixture(&[
         ("Cargo.toml", "[package]\nname='sample'\nversion='0.0.0'"),
         ("src/lib.rs", source),
@@ -170,7 +173,9 @@ fn solana_vocabulary_allows_only_owners_and_reasoned_alloy_suppressions() {
         ),
         (
             "sdk/chains/ethereum/src/lib.rs",
-            "// design-lint: allow owned-vocabulary -- standard Alloy Solidity ABI import\nuse alloy_sol_types::sol;\n// design-lint: allow owned-vocabulary -- standard Alloy Solidity ABI invocation\nsol! {}",
+            "// design-lint: allow owned-vocabulary -- standard Alloy Solidity ABI \
+                import\nuse alloy_sol_types::sol;\n// design-lint: allow owned-vocabulary -- \
+                standard Alloy Solidity ABI invocation\nsol! {}",
         ),
         (
             "sdk/indexing/src/lib.rs",
@@ -351,7 +356,8 @@ fn file_length_counts_production_after_inline_test_module() {
 
 #[test]
 fn file_length_ignores_proven_test_only_items() {
-    let source = "fn production() {}\n#[cfg(all(test, unix))]\nfn platform_test() {}\n#[test]\nfn direct_test() {}\n";
+    let source = "fn production() {}\n#[cfg(all(test, unix))]\nfn platform_test() {}\n#[test]\nfn \
+        direct_test() {}\n";
     let (root, workspace) = fixture(&[
         ("Cargo.toml", "[package]\nname='sample'\nversion='0.0.0'"),
         ("src/lib.rs", source),
@@ -581,7 +587,8 @@ fn crate_source_root_with_only_lib_is_allowed() {
 
 #[test]
 fn unicode_test_masking_keeps_exact_production_text_and_lines() {
-    let text = "const CAFÉ: &str = \"ქართული\"; #[cfg(test)] struct BitcoinFixture;\n#[cfg(test)] mod tests {\n const TEXT: &str = \"é\";\n}\npub struct EthereumValue;\n";
+    let text = "const CAFÉ: &str = \"ქართული\"; #[cfg(test)] struct BitcoinFixture;\n#[cfg(test)] \
+        mod tests {\n const TEXT: &str = \"é\";\n}\npub struct EthereumValue;\n";
     let (root, workspace) = fixture(&[("src/lib.rs", text)]);
     let source = &workspace.sources()[0];
     let masked = super::production::text(source);

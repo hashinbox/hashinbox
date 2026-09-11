@@ -14,9 +14,9 @@ enum Stage {
     Joined,
 }
 
-pub(crate) struct ShutdownOrder(Stage);
+pub(crate) struct Order(Stage);
 
-impl ShutdownOrder {
+impl Order {
     #[must_use]
     pub(crate) const fn new() -> Self {
         Self(Stage::Running)
@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn accepts_only_the_complete_evidence_preserving_order() {
-        let mut order = ShutdownOrder::new();
+        let mut order = Order::new();
         order.not_ready().expect("not ready");
         order.stop_admission().expect("admission stopped");
         order.close_registrar().expect("registrar closed");
@@ -78,10 +78,10 @@ mod tests {
 
     #[test]
     fn rejects_every_skipped_or_repeated_stage() {
-        let mut skipped = ShutdownOrder::new();
+        let mut skipped = Order::new();
         assert!(skipped.stop_admission().is_err());
 
-        let mut repeated = ShutdownOrder::new();
+        let mut repeated = Order::new();
         repeated.not_ready().expect("first transition");
         assert!(repeated.not_ready().is_err());
     }

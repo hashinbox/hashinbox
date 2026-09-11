@@ -1,0 +1,312 @@
+# Payment-SDK policy for the Linter MCP server.
+# Derived from linter://configs/rust.toml; preserves the preset's semantic checks and limits.
+# Requirements and ownership: docs/SYSTEM_REQUIREMENTS.md, then ARCHITECTURE.md.
+# Findings are a review baseline; source is not grandfathered by its current shape.
+
+[files]
+# Excluded research and non-source output; all first-party workspace crates remain checked.
+exclude = ["**/.git", "**/target", "**/vendor", "**/generated", "old", "reference"]
+
+[[rules.layout]]
+target = "."
+mode = "permissive"
+
+files.required = ["Cargo.toml", "Cargo.lock", "linter.toml", "AGENTS.md", "ARCHITECTURE.md", "docs/SYSTEM_REQUIREMENTS.md"]
+
+[[rules.layout]]
+target = ["**/*.md", "**/*.markdown"]
+allow = false
+case_sensitive = false
+
+[[rules.layout]]
+target = ["docs/*.md", "docs/adr/*.md", "docs/reviews/*.md"]
+allow = true
+description = "Canonical requirements, design decisions, implementation evidence, and source reviews."
+
+[[rules.layout]]
+target = ["AGENTS.md", "ARCHITECTURE.md", "README.md"]
+allow = true
+description = "Repository entry points for agent guidance, architecture, and usage."
+
+[[rules.layout]]
+target = ["{apps,sdk,packages}/**/README.md", "packages/*/{PROVENANCE,ADOPTION}.md"]
+allow = true
+description = "Crate usage, third-party provenance, and adoption evidence beside the owning package."
+
+[[rules.layout]]
+target = "lint/examples/*.md"
+allow = true
+description = "Reviewed positive and negative design examples."
+
+[[rules.layout]]
+target = "lint/{errors,check}/*.md"
+allow = true
+description = "Existing flat generated lint-review case documents."
+
+[[rules.layout]]
+target = "tests/kurtosis/*/README.md"
+allow = true
+description = "Runbooks for owned local chain fixtures."
+
+[[rules.layout]]
+target = [
+    "**/{test,tests}.rs",
+    "**/*{_,.,-}{test,tests}.rs",
+    "**/{test,tests}{_,.,-}*.rs",
+    "**/{test,tests}/**/*.rs",
+]
+allow = false
+case_sensitive = false
+
+[[rules.layout]]
+target = ["**/*{Test,Tests}.rs"]
+allow = false
+
+[[rules.layout]]
+target = ["tests/**/*.rs", "apps/*/tests/**/*.rs", "packages/*/tests/**/*.rs", "packages/*/*/tests/**/*.rs", "sdk/*/tests/**/*.rs", "sdk/*/*/tests/**/*.rs"]
+allow = true
+description = "Crate integration tests and repository-wide test cases."
+
+[[rules."rust/file-length"]]
+target = "**/*.rs"
+max_lines = 500
+
+[[rules.filename]]
+target = "**/src/**/*.rs"
+kind = "file"
+case = "snake_case"
+max_words = 2
+reject_numbered_fragments = true
+
+[[rules.filename]]
+target = "**/src/**"
+kind = "directory"
+case = "snake_case"
+max_words = 1
+
+[[rules."forbidden-words"]]
+target = "**/src/**"
+words = ["common", "core", "helper", "helpers", "misc", "shared", "util", "utils"]
+
+[[rules."redundant-parent-name"]]
+target = "**/src/**/*.{rs,c,h}"
+ignored_names = ["mod", "lib", "main", "index"]
+
+[[rules."line-width"]]
+target = "**/*.{rs,c,h}"
+max_columns = 100
+tab_width = 4
+
+[[rules."rust/max-indent"]]
+target = "**/*.rs"
+max_columns = 20
+tab_width = 4
+
+[[rules."rust/function-length"]]
+target = "**/*.rs"
+max_lines = 50
+
+[[rules."rust/method-length"]]
+target = "**/*.rs"
+max_lines = 50
+
+[[rules."rust/nesting"]]
+target = "**/*.rs"
+max_depth = 2
+ignore_guard_clauses = true
+
+[[rules."rust/struct-noun-naming"]]
+target = "**/*.rs"
+
+[[rules."rust/duplicate-entity-base"]]
+target = "**/*.rs"
+min_shared_fields = 3
+
+[[rules."rust/wire-domain-model-duplication"]]
+target = "**/*.rs"
+min_shared_fields = 3
+min_overlap_percent = 75
+
+[[rules."rust/boolean-state-cluster"]]
+target = "**/*.rs"
+min_fields = 3
+
+[[rules."rust/string-backed-finite-state"]]
+target = "**/*.rs"
+min_variants = 3
+
+[[rules."rust/trait-method-count"]]
+target = "**/*.rs"
+max_methods = 3
+
+[[rules."rust/struct-word-count"]]
+target = "**/*.rs"
+max_words = 2
+
+[[rules."rust/empty-struct"]]
+target = "**/*.rs"
+
+[[rules."rust/module-name"]]
+target = "**/*.rs"
+forbidden_words = ["common", "core", "helper", "helpers", "misc", "shared", "util", "utils"]
+
+[[rules."markdown/examples"]]
+target = "**/*.md"
+min_cases = 0
+
+[[rules."rust/path-module-flattening"]]
+target = "**/*.rs"
+max_child_domains = 1
+
+[[rules."rust/receiver-name-repetition"]]
+target = "**/*.rs"
+
+[[rules."rust/self-constructor-static"]]
+target = "**/*.rs"
+
+[[rules."rust/redundant-module-prefix"]]
+target = "**/*.rs"
+
+[[rules."rust/god-object-growth"]]
+target = "**/*.rs"
+excluded_suffixes = ["Builder"]
+
+[[rules."rust/detached-constructor"]]
+target = "**/*.rs"
+
+[[rules."rust/redundant-accessor"]]
+target = "**/*.rs"
+
+[[rules."rust/unsafe-boundary"]]
+target = "**/*.rs"
+
+[[rules."rust/free-function"]]
+target = "**/*.rs"
+mode = "receiver"
+boundary_derives = ["clap::Parser", "clap::Args", "Parser", "Args"]
+
+[[rules."rust/redundant-namespace"]]
+target = "**/*.rs"
+
+[[rules."rust/single-use-free-function"]]
+target = "**/*.rs"
+
+[[rules."rust/provisional-diagnostic"]]
+target = "**/*.rs"
+terms = ["temporary", "diagnostic"]
+
+[[rules."rust/dependency-cycles"]]
+target = "**"
+
+[[rules."rust/redundant-marker"]]
+target = "**/*.rs"
+
+[[rules."rust/async-blocking-operation"]]
+target = "**/*.rs"
+scope = "production"
+
+# Library, application, and protocol structure are separate from naming rules.
+[[rules.layout]]
+target = ["packages/*", "packages/*/redb", "sdk/chains/*", "sdk/{indexing,wallets}", "sdk/indexing/{postgres,redb,runtime}"]
+mode = "permissive"
+files.required = ["Cargo.toml", "src/lib.rs"]
+
+[[rules.layout]]
+target = "apps/*"
+mode = "permissive"
+files.required = ["Cargo.toml", "src/main.rs"]
+
+# Base is a chain-neutral library; only the accepted concrete chains own this skeleton.
+[[rules.layout]]
+target = "sdk/chains/{bitcoin,ethereum,solana}"
+mode = "permissive"
+files.required = [
+    "src/address.rs",
+    "src/batch.rs",
+    "src/error.rs",
+    "src/indexer/mod.rs",
+    "src/indexer/source/mod.rs",
+    "src/rpc/mod.rs",
+    "src/transaction/mod.rs",
+    "src/transaction/operations/mod.rs",
+    "src/wallet/mod.rs",
+]
+
+[[rules.layout]]
+target = ["apps/indexer", "apps/wallet", "sdk/deposits", "sdk/indexing/http"]
+allow = false
+
+# Empty source files/directories and one-file child modules do not define a domain.
+[[rules.layout]]
+target = "{apps,sdk,packages}/**/src/**"
+files.allow_empty = false
+directories.allow_empty = false
+directories.allow_single_file = false
+
+[[rules."shared-affix"]]
+target = "**/src/**/*.rs"
+max_prefix = 2
+max_suffix = 2
+
+# Cargo layers also cover build, dev, optional, and target-specific local dependencies.
+# Package discovery, unlike structural layout, selects only actual Cargo packages.
+[[rules."rust/layers"]]
+name = "packages"
+target = "packages/**"
+dependencies = ["packages"]
+
+[[rules."rust/layers"]]
+name = "base"
+target = "sdk/chains/base"
+dependencies = ["packages"]
+
+[[rules."rust/layers"]]
+name = "indexing"
+target = "sdk/indexing"
+dependencies = ["packages", "base"]
+
+[[rules."rust/layers"]]
+name = "wallets"
+target = "sdk/wallets"
+dependencies = ["packages", "base", "indexing"]
+
+# Persistence adapters and the driver have the same dependency boundary; no peer edges.
+[[rules."rust/layers"]]
+name = "indexing-integrations"
+target = "sdk/indexing/*"
+dependencies = ["packages", "base", "indexing"]
+
+# The selector API has no exclusion for base, so list the accepted concrete-chain set.
+# Not allowing "chains" here forbids dependencies between concrete chains.
+[[rules."rust/layers"]]
+name = "chains"
+target = ["sdk/chains/bitcoin", "sdk/chains/ethereum", "sdk/chains/solana"]
+dependencies = ["packages", "base", "indexing", "wallets"]
+
+[[rules."rust/layers"]]
+name = "apps"
+target = "apps/*"
+dependencies = ["packages", "base", "indexing", "wallets", "indexing-integrations", "chains"]
+
+# Read ambient configuration at application configuration or owned benchmark entry points.
+[[rules."rust/environment-variable-access"]]
+target = "**/*.rs"
+scope = "production"
+allowed_targets = [
+    "apps/api/src/config.rs",
+    "apps/api/src/config/postgres.rs",
+    "sdk/indexing/postgres/examples/bench.rs",
+    "sdk/indexing/redb/examples/bench.rs",
+]
+functions = [
+    "std::env::var",
+    "std::env::var_os",
+    "std::env::vars",
+    "std::env::vars_os",
+    "std::env::set_var",
+    "std::env::remove_var",
+    "std::env::current_dir",
+    "std::env::current_exe",
+    "std::env::temp_dir",
+]
+macros = ["env", "option_env", "std::env", "std::option_env"]

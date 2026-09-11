@@ -29,19 +29,19 @@ pub struct SourceConfig {
 impl SourceConfig {
     pub fn validate(&self) -> Result<(), SourceError> {
         if self.scope.chain.0 != "ethereum" {
-            return Err(source_error(
+            return Err(self::error(
                 "Ethereum index source scope must use the ethereum chain ID",
                 false,
             ));
         }
         if self.scope.network.trim().is_empty() {
-            return Err(source_error(
+            return Err(self::error(
                 "Ethereum index source network slug must not be empty",
                 false,
             ));
         }
         if self.expected_genesis_hash.0.len() != 32 {
-            return Err(source_error(
+            return Err(self::error(
                 "configured Ethereum genesis hash must be 32 bytes",
                 false,
             ));
@@ -91,11 +91,11 @@ where
             .await?;
         let chain_id: String = chain_id.deserialize().map_err(map_json_rpc_error)?;
         let chain_id = parse_quantity(&chain_id, "chain ID")
-            .map_err(|error| source_error(error.to_string(), false))?;
+            .map_err(|error| self::error(error.to_string(), false))?;
         let chain_id = u64::try_from(chain_id)
-            .map_err(|_| source_error("Ethereum chain ID exceeds u64", false))?;
+            .map_err(|_| self::error("Ethereum chain ID exceeds u64", false))?;
         if chain_id != self.config.expected_chain_id {
-            return Err(source_error(
+            return Err(self::error(
                 "Ethereum RPC chain ID does not match configuration",
                 false,
             ));
@@ -109,15 +109,15 @@ where
             .map_err(map_json_rpc_error)?
             .is_null()
         {
-            return Err(source_error(
+            return Err(self::error(
                 "Ethereum RPC does not expose the genesis block",
                 false,
             ));
         }
         let genesis = ParsedBlock::parse(raw_genesis.as_bytes(), Some(BlockHeight(0)), false)
-            .map_err(|error| source_error(error.to_string(), false))?;
+            .map_err(|error| self::error(error.to_string(), false))?;
         if genesis.reference.hash != self.config.expected_genesis_hash {
-            return Err(source_error(
+            return Err(self::error(
                 "Ethereum RPC genesis hash does not match configuration",
                 false,
             ));
@@ -142,13 +142,13 @@ where
             .map_err(map_json_rpc_error)?
             .is_null()
         {
-            return Err(source_error(
+            return Err(self::error(
                 "Ethereum RPC does not currently expose the requested block",
                 true,
             ));
         }
         let parsed = ParsedBlock::parse(raw.as_bytes(), expected_height, full_transactions)
-            .map_err(|error| source_error(error.to_string(), true))?;
+            .map_err(|error| self::error(error.to_string(), true))?;
         Ok((raw, parsed))
     }
 
@@ -157,7 +157,7 @@ where
         let (raw_block, parsed) = self.fetch_block(tag, Some(height), true).await?;
         let raw_receipts = self.fetch_receipts(&parsed).await?;
         ParsedReceipt::parse_all(&raw_receipts, &parsed)
-            .map_err(|error| source_error(error.to_string(), true))?;
+            .map_err(|error| self::error(error.to_string(), true))?;
         Ok(Block {
             reference: parsed.reference,
             raw_block: raw_block.into_bytes(),
@@ -236,7 +236,7 @@ where
                     .map_err(map_json_rpc_error)?
                     .is_null()
                 {
-                    return Err(source_error(
+                    return Err(self::error(
                         "Ethereum transaction receipt is temporarily unavailable",
                         true,
                     ));
@@ -290,7 +290,7 @@ where
     ) -> BoxFuture<'a, Result<Vec<Self::Block>, SourceError>> {
         Box::pin(async move {
             if limit == 0 || start > end {
-                return Err(source_error(
+                return Err(self::error(
                     "Ethereum block range requires ordered positions and a positive limit",
                     false,
                 ));
@@ -327,7 +327,7 @@ where
                 return Ok(None);
             }
             let block = ParsedBlock::parse(raw.as_bytes(), Some(height), false)
-                .map_err(|error| source_error(error.to_string(), true))?;
+                .map_err(|error| self::error(error.to_string(), true))?;
             Ok(Some(block.reference))
         })
     }
@@ -343,7 +343,7 @@ impl CallFailure {
     fn remote(failure: Failure) -> Self {
         Self {
             remote_code: Some(failure.code),
-            error: source_error(
+            error: self::error(
                 format!(
                     "Ethereum JSON-RPC request failed with code {}",
                     failure.code
@@ -361,13 +361,17 @@ impl CallFailure {
     }
 }
 
-// design-lint: allow unclassified-free-function -- Ethereum indexing RPC translation between foreign JSON-RPC and SourceError types preserves transport retryability and display context at the chain boundary
+// Ethereum indexing RPC translation between foreign JSON-RPC and SourceError types preserves
+// transport retryability and display context at the chain boundary
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn map_json_rpc_error(error: Error) -> SourceError {
-    source_error(error.to_string(), error.is_retryable())
+    self::error(error.to_string(), error.is_retryable())
 }
 
-// design-lint: allow unclassified-free-function -- Ethereum indexing boundary constructs foreign SourceError values while each validation and RPC call site retains its explicit message and retryability policy
-fn source_error(message: impl Into<String>, retryable: bool) -> SourceError {
+// Ethereum indexing boundary constructs foreign SourceError values while each validation and RPC
+// call site retains its explicit message and retryability policy
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
+fn error(message: impl Into<String>, retryable: bool) -> SourceError {
     SourceError {
         message: message.into(),
         retryable,

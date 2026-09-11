@@ -82,9 +82,7 @@ fn transaction_json(transaction: &Transaction, previous: &[Option<PreviousEviden
                     "generated": previous.coinbase,
                     "height": previous.height,
                     "value": btc_number(previous.value),
-                    "scriptPubKey": {
-                        "hex": previous.script.as_bytes().to_lower_hex_string()
-                    }
+                    "scriptPubKey": {"hex": previous.script.as_bytes().to_lower_hex_string()}
                 }
             }),
         })

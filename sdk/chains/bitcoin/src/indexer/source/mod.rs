@@ -173,7 +173,8 @@ where
             .ok_or_else(|| {
                 source_error(
                     format!(
-                        "Bitcoin previous transaction {transaction_id} disappeared during block ingestion"
+                        "Bitcoin previous transaction {transaction_id} disappeared \
+                         during block ingestion"
                     ),
                     true,
                 )

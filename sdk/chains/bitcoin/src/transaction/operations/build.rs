@@ -151,7 +151,7 @@ impl BuildRequest {
     }
 }
 
-pub(in crate::transaction) fn build_grouped(
+pub(in crate::transaction) fn grouped(
     network: Network,
     mut groups: Vec<Funding>,
     fee_rate: FeeRate,
@@ -246,8 +246,11 @@ pub(in crate::transaction) fn build_grouped(
     Ok(UnsignedTransaction::from_selected(available, recipients))
 }
 
-// design-lint: allow single-use-free-function -- isolates deterministic source-ordered fee allocation from grouped transaction assembly
-// design-lint: allow unclassified-free-function -- deterministic allocation across source-ordered surpluses; no individual source or fee-rate value owns the aggregate policy
+// isolates deterministic source-ordered fee allocation from grouped transaction assembly
+// design-lint: allow single-use-free-function -- See the boundary rationale above.
+// deterministic allocation across source-ordered surpluses; no individual source or fee-rate value
+// owns the aggregate policy
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn allocate_fee(surplus: &[u64], fee: u64) -> Result<Vec<u64>, ChainError> {
     let mut remaining_fee = fee;
     let remaining = surplus
@@ -400,7 +403,7 @@ mod tests {
                 change_address,
             })
             .collect();
-            let transaction = build_grouped(Network::Regtest, groups, FeeRate::new(1_000))
+            let transaction = grouped(Network::Regtest, groups, FeeRate::new(1_000))
                 .expect("each source must fund its own recipient and allocated fee");
 
             assert_eq!(
@@ -461,7 +464,7 @@ mod tests {
                 drain_wallet: true,
             }
             .build(Network::Regtest);
-            let grouped = build_grouped(
+            let grouped = grouped(
                 Network::Regtest,
                 vec![Funding {
                     available,

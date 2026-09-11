@@ -163,7 +163,9 @@ impl Signer for Key {
     }
 }
 
-// design-lint: allow unclassified-free-function -- Solana Signer adapter constructs foreign base errors from caller-selected kinds and redacted messages without moving signing policy into base
+// Solana Signer adapter constructs foreign base errors from caller-selected kinds and redacted
+// messages without moving signing policy into base
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn signer_error(kind: SignerErrorKind, message: impl Into<String>) -> SignerError {
     SignerError {
         kind,

@@ -93,7 +93,7 @@ impl Transaction {
         addresses: &ValidatedAddresses,
         all_spent_outpoints: &mut BTreeSet<Outpoint>,
     ) -> Result<InterpretedTransaction, IndexError> {
-        let mut facts = TransactionFacts::new(self, block_height, network, scope, addresses)?;
+        let mut facts = Facts::new(self, block_height, network, scope, addresses)?;
         for (index, input) in self.inputs.iter().enumerate() {
             facts.input(input, index, all_spent_outpoints)?;
         }
@@ -104,7 +104,7 @@ impl Transaction {
     }
 }
 
-struct TransactionFacts<'a> {
+struct Facts<'a> {
     scope: &'a indexing::IndexScope,
     addresses: &'a ValidatedAddresses,
     transaction_id: TransactionId,
@@ -122,7 +122,7 @@ struct TransactionFacts<'a> {
     tracked_spends: Vec<UtxoKey>,
 }
 
-impl<'a> TransactionFacts<'a> {
+impl<'a> Facts<'a> {
     fn new(
         transaction: &Transaction,
         block_height: indexing::BlockHeight,

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use solana_hash::Hash;
 
 use super::*;
-use crate::rpc::test_support::Scripted;
+use crate::rpc::test_support::Script;
 
 fn hash(byte: u8) -> String {
     Hash::new_from_array([byte; 32]).to_string()
@@ -49,7 +49,7 @@ fn full(slot: u64, value: Value) -> (&'static str, Value, Value) {
 
 #[tokio::test]
 async fn finds_a_complete_tip_below_empty_finalized_slots() {
-    let rpc = Scripted::new([
+    let rpc = Script::new([
         (
             "getSlot",
             json!([{"commitment":"finalized"}]),
@@ -72,7 +72,7 @@ async fn finds_a_complete_tip_below_empty_finalized_slots() {
 
 #[tokio::test]
 async fn fetches_sparse_ranges_in_order_and_truncates_by_block_count() {
-    let rpc = Scripted::new([
+    let rpc = Script::new([
         ("getSlot", json!([{"commitment":"finalized"}]), json!(107)),
         ("getFirstAvailableBlock", json!([]), json!(1)),
         enumeration(1, 107, 107, json!([1, 100, 103, 107])),
@@ -101,7 +101,7 @@ async fn fetches_sparse_ranges_in_order_and_truncates_by_block_count() {
 
 #[tokio::test]
 async fn returns_empty_above_the_proved_tip_without_range_enumeration() {
-    let rpc = Scripted::new([
+    let rpc = Script::new([
         ("getSlot", json!([{"commitment":"finalized"}]), json!(10)),
         ("getFirstAvailableBlock", json!([]), json!(1)),
         enumeration(1, 10, 10, json!([7])),
@@ -122,7 +122,7 @@ async fn returns_empty_above_the_proved_tip_without_range_enumeration() {
 
 #[tokio::test]
 async fn rejects_pruning_that_moves_past_the_required_start() {
-    let rpc = Scripted::new([
+    let rpc = Script::new([
         ("getSlot", json!([{"commitment":"finalized"}]), json!(107)),
         ("getFirstAvailableBlock", json!([]), json!(1)),
         enumeration(1, 107, 107, json!([100, 107])),
@@ -142,7 +142,7 @@ async fn rejects_pruning_that_moves_past_the_required_start() {
 
 #[tokio::test]
 async fn proves_omission_only_with_both_pruning_witnesses_and_older_tip() {
-    let rpc = Scripted::new([
+    let rpc = Script::new([
         ("getSlot", json!([{"commitment":"finalized"}]), json!(10)),
         ("getFirstAvailableBlock", json!([]), json!(1)),
         enumeration(7, 7, 10, json!([])),
@@ -155,7 +155,7 @@ async fn proves_omission_only_with_both_pruning_witnesses_and_older_tip() {
 
 #[tokio::test]
 async fn returns_a_changed_complete_canonical_block() {
-    let rpc = Scripted::new([
+    let rpc = Script::new([
         ("getSlot", json!([{"commitment":"finalized"}]), json!(10)),
         ("getFirstAvailableBlock", json!([]), json!(1)),
         enumeration(7, 7, 10, json!([7])),
@@ -175,7 +175,7 @@ async fn returns_a_changed_complete_canonical_block() {
 
 #[tokio::test]
 async fn refuses_same_slot_omission_and_late_pruning() {
-    let same_slot = Scripted::new([
+    let same_slot = Script::new([
         ("getSlot", json!([{"commitment":"finalized"}]), json!(7)),
         ("getFirstAvailableBlock", json!([]), json!(1)),
         enumeration(7, 7, 7, json!([])),
@@ -189,7 +189,7 @@ async fn refuses_same_slot_omission_and_late_pruning() {
     );
     same_slot.assert_finished();
 
-    let pruned = Scripted::new([
+    let pruned = Script::new([
         ("getSlot", json!([{"commitment":"finalized"}]), json!(10)),
         ("getFirstAvailableBlock", json!([]), json!(1)),
         enumeration(7, 7, 10, json!([])),
@@ -209,7 +209,7 @@ async fn refuses_same_slot_omission_and_late_pruning() {
 
 #[tokio::test]
 async fn deadline_and_enumeration_budget_fail_retryably() {
-    let rpc = RpcClient::new(Scripted::new([]));
+    let rpc = RpcClient::new(Script::new([]));
     let mut expired = Attempt {
         rpc: &rpc,
         deadline: Instant::now() - Duration::from_millis(1),
@@ -236,7 +236,7 @@ async fn rejects_broken_produced_height_or_parent_sequence() {
         block(103, 3, 99, 3, 2),
         block(103, 3, 100, 3, 9),
     ] {
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             ("getSlot", json!([{"commitment":"finalized"}]), json!(103)),
             ("getFirstAvailableBlock", json!([]), json!(1)),
             enumeration(1, 103, 103, json!([1, 100, 103])),
@@ -259,7 +259,7 @@ async fn rejects_broken_produced_height_or_parent_sequence() {
 async fn validates_parent_connections_across_sparse_enumeration_windows() {
     for parent in [100, 99] {
         let second = block(10_103, 3, parent, 3, 2);
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             (
                 "getSlot",
                 json!([{"commitment":"finalized"}]),
@@ -300,7 +300,7 @@ async fn validates_parent_connections_across_sparse_enumeration_windows() {
 
 #[tokio::test]
 async fn within_preserves_rpc_error_messages_and_retryability() {
-    let rpc = RpcClient::new(Scripted::new([]));
+    let rpc = RpcClient::new(Script::new([]));
     let attempt = Attempt::new(&rpc);
     for (kind, retryable) in [
         (ErrorKind::InvalidBatch, false),
@@ -334,7 +334,7 @@ async fn within_preserves_rpc_error_messages_and_retryability() {
 
 #[tokio::test]
 async fn within_preserves_successful_values() {
-    let rpc = RpcClient::new(Scripted::new([]));
+    let rpc = RpcClient::new(Script::new([]));
     let attempt = Attempt::new(&rpc);
     let value = attempt
         .within(std::future::ready(Ok(vec![3, 100, 107])))
@@ -346,7 +346,7 @@ async fn within_preserves_successful_values() {
 
 #[tokio::test]
 async fn within_times_out_a_pending_future_at_the_existing_deadline() {
-    let rpc = RpcClient::new(Scripted::new([]));
+    let rpc = RpcClient::new(Script::new([]));
     let deadline = Instant::now() - Duration::from_millis(1);
     let attempt = Attempt {
         rpc: &rpc,
@@ -374,7 +374,7 @@ async fn within_times_out_a_pending_future_at_the_existing_deadline() {
 
 #[test]
 fn deadline_guard_is_strict_and_does_not_reset_attempt_state() {
-    let rpc = RpcClient::new(Scripted::new([]));
+    let rpc = RpcClient::new(Script::new([]));
     let deadline = Instant::now();
     let attempt = Attempt {
         rpc: &rpc,
@@ -401,7 +401,7 @@ fn deadline_guard_is_strict_and_does_not_reset_attempt_state() {
 
 #[tokio::test]
 async fn expired_attempt_rejects_before_spending_enumeration_budget_or_rpc() {
-    let scripted = Scripted::new([]);
+    let scripted = Script::new([]);
     let rpc = RpcClient::new(scripted.clone());
     let deadline = Instant::now() - Duration::from_nanos(1);
     for enumerations in [0, MAX_ENUMERATIONS] {
@@ -425,7 +425,7 @@ async fn expired_attempt_rejects_before_spending_enumeration_budget_or_rpc() {
 #[tokio::test]
 async fn selected_anchor_accepts_retention_equality_but_retries_later_pruning() {
     for closing in [7, 8] {
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             ("getSlot", json!([{"commitment":"finalized"}]), json!(10)),
             ("getFirstAvailableBlock", json!([]), json!(1)),
             enumeration(1, 10, 10, json!([7])),
@@ -449,7 +449,7 @@ async fn selected_anchor_accepts_retention_equality_but_retries_later_pruning() 
 
 #[tokio::test]
 async fn canonical_retention_equality_succeeds_and_opening_pruning_precedes_tip_check() {
-    let rpc = Scripted::new([
+    let rpc = Script::new([
         ("getSlot", json!([{"commitment":"finalized"}]), json!(10)),
         ("getFirstAvailableBlock", json!([]), json!(7)),
         enumeration(7, 7, 10, json!([7])),
@@ -464,7 +464,7 @@ async fn canonical_retention_equality_succeeds_and_opening_pruning_precedes_tip_
     assert_eq!(result.position, BlockPosition(7));
     rpc.assert_finished();
 
-    let pruned = Scripted::new([
+    let pruned = Script::new([
         ("getSlot", json!([{"commitment":"finalized"}]), json!(6)),
         ("getFirstAvailableBlock", json!([]), json!(8)),
     ]);

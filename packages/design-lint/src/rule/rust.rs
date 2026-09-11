@@ -7,7 +7,7 @@ use syn::{
 use super::{finding, production::test_only};
 use crate::{
     Finding, Policy, Result,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 pub(super) fn traits(workspace: &Workspace, policy: &Policy) -> Result<Vec<Finding>> {
@@ -57,7 +57,7 @@ fn check(workspace: &Workspace, _policy: &Policy, rule: ApiRule) -> Result<Vec<F
 }
 
 struct ApiVisitor<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     output: &'a mut Vec<Finding>,
     inherent: bool,
     rule: ApiRule,
@@ -163,7 +163,17 @@ impl<'ast> Visit<'ast> for ApiVisitor<'_> {
             && receiver
             && returns_self(&item.sig.output)
         {
-            self.push("self-constructor-static", item.sig.ident.to_string(), item.sig.ident.span(), format!("constructor `{}` returns Self but takes a receiver", item.sig.ident), "make it an associated function without self; suppress only when mutation/conversion semantics require a receiver");
+            self.push(
+                "self-constructor-static",
+                item.sig.ident.to_string(),
+                item.sig.ident.span(),
+                format!(
+                    "constructor `{}` returns Self but takes a receiver",
+                    item.sig.ident
+                ),
+                "make it an associated function without self; suppress only when \
+                mutation/conversion semantics require a receiver",
+            );
         }
         syn::visit::visit_impl_item_fn(self, item);
     }
@@ -181,7 +191,18 @@ fn returns_self(output: &ReturnType) -> bool {
     };
     match value.as_ref() {
         Type::Path(path) if path.path.is_ident("Self") => true,
-        Type::Path(path) => path.path.segments.last().is_some_and(|segment| matches!(&segment.arguments, PathArguments::AngleBracketed(arguments) if arguments.args.iter().any(|argument| matches!(argument, GenericArgument::Type(Type::Path(path)) if path.path.is_ident("Self"))))),
+        Type::Path(path) => {
+            let Some(segment) = path.path.segments.last() else {
+                return false;
+            };
+            let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                return false;
+            };
+            arguments.args.iter().any(|argument| {
+                matches!(argument, GenericArgument::Type(Type::Path(path))
+                    if path.path.is_ident("Self"))
+            })
+        }
         _ => false,
     }
 }

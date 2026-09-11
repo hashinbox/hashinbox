@@ -144,16 +144,14 @@ impl BlockData {
                     return Err(ParseError::new("Bitcoin output index exceeds u32"));
                 };
                 let script = ScriptBuf::from_bytes(output.script_pubkey.clone());
+                let outpoint = Outpoint {
+                    transaction_id: transaction.id,
+                    output_index,
+                };
                 same_block_outputs.insert(
-                    Outpoint {
-                        transaction_id: transaction.id,
-                        output_index,
-                    },
+                    outpoint,
                     PreviousOutput {
-                        outpoint: Outpoint {
-                            transaction_id: transaction.id,
-                            output_index,
-                        },
+                        outpoint,
                         value: output.value,
                         address: crate::Address::from_script_for_network(&script, network),
                     },
@@ -371,12 +369,10 @@ impl PreviousOutput {
         {
             Value::Null => None,
             Value::String(address) => {
-                let canonical =
-                    crate::Address::parse_for_network(address, network).map_err(|_| {
-                        ParseError::new(
-                            "Bitcoin compact prevout address is invalid or wrong-network",
-                        )
-                    })?;
+                let parsed = crate::Address::parse_for_network(address, network);
+                let canonical = parsed.map_err(|_| {
+                    ParseError::new("Bitcoin compact prevout address is invalid or wrong-network")
+                })?;
                 if canonical.encoded() != address {
                     return Err(ParseError::new(
                         "Bitcoin compact prevout address is not canonical",

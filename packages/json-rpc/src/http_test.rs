@@ -654,7 +654,8 @@ fn write_json_response(
     let body = serde_json::to_vec(response).expect("response must encode");
     write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+        Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(&body)
@@ -681,7 +682,10 @@ fn remote_failure_conversion_preserves_explicit_null_and_raw_data_bytes() {
 
     for raw in [
         "null",
-        r#"{ "amount": 1.2300, "large": 18446744073709551616, "tag": "\u0061", "items": [true, null] }"#,
+        concat!(
+            r#"{ "amount": 1.2300, "large": 18446744073709551616, "tag": "\u0061""#,
+            r#", "items": [true, null] }"#,
+        ),
         r#"[ 1, "two", false ]"#,
         r#""remote data""#,
     ] {

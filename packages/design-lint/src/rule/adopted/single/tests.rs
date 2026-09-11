@@ -54,13 +54,14 @@ fn callback_reference_is_reported_with_context() {
 fn deliberate_section_boundary_uses_reasoned_sdk_exception() {
     let fixture = Fixture::new(&[(
         "src/lib.rs",
-        "fn main() { section(); }\n// design-lint: allow single-use-free-function -- deliberate semantic section in the startup sequence\nfn section() {}\n",
+        "fn main() { section(); }\n// design-lint: allow single-use-free-function -- \
+            deliberate semantic section in the startup sequence\nfn section() {}\n",
     )]);
     let registry = crate::Registry::new().register(super::SingleUse);
     let summaries = crate::Linter::new(Policy::default(), registry)
         .run(
             vec![fixture.path().to_owned()],
-            &mut crate::Diagnostic::new(Vec::new()),
+            &mut crate::Printer::new(Vec::new()),
         )
         .expect("lint fixture");
     assert_eq!(summaries[0].findings, 0);

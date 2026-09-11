@@ -7,10 +7,10 @@ use syn::{
 
 use crate::{
     Result,
-    model::{Finding, Related},
+    model::{Finding, RelatedLocation},
     policy::Policy,
     rule::production::test_only,
-    source::{SourceFile, Workspace},
+    source::{File, Workspace},
 };
 
 mod support;
@@ -51,7 +51,7 @@ pub(crate) fn check(workspace: &Workspace, _policy: &Policy) -> Result<Vec<Findi
 }
 
 struct Blocking<'a> {
-    source: &'a SourceFile,
+    source: &'a File,
     aliases: HashMap<String, Vec<String>>,
     async_depth: usize,
     exempt_depth: usize,
@@ -62,7 +62,7 @@ struct Blocking<'a> {
 }
 
 impl<'a> Blocking<'a> {
-    fn new(source: &'a SourceFile) -> Self {
+    fn new(source: &'a File) -> Self {
         Self {
             source,
             aliases: HashMap::new(),
@@ -100,7 +100,7 @@ impl<'a> Blocking<'a> {
         );
         finding.message = format!("{kind} `{subject}` can block the async executor thread");
         finding.help = help.to_owned();
-        finding.related.push(Related {
+        finding.related.push(RelatedLocation {
             label: format!(
                 "proven inside an async lexical scope in crate `{}`",
                 self.source.package
@@ -124,7 +124,7 @@ impl<'a> Blocking<'a> {
             );
         } else if path.first().is_some_and(|part| part == "std")
             && path.get(1).is_some_and(|part| part == "fs")
-            && (path.get(2).is_some_and(|name| blocking_fs_function(name))
+            && (path.get(2).is_some_and(|name| filesystem_operation(name))
                 || matches!(
                     path.as_slice(),
                     [_, _, kind, operation]
@@ -135,7 +135,8 @@ impl<'a> Blocking<'a> {
                 call.span(),
                 "synchronous filesystem operation",
                 path.join("::"),
-                "use the runtime's async filesystem API or isolate the complete operation with `spawn_blocking`",
+                "use the runtime's async filesystem API or isolate the complete operation \
+                    with `spawn_blocking`",
             );
         }
     }
@@ -162,7 +163,8 @@ impl<'a> Blocking<'a> {
                 call.span(),
                 "synchronous process operation",
                 format!("std::process::Command::{method}"),
-                "use `tokio::process::Command` or isolate the complete process lifecycle with `spawn_blocking`",
+                "use `tokio::process::Command` or isolate the complete process lifecycle \
+                    with `spawn_blocking`",
             );
             return;
         }
@@ -173,7 +175,8 @@ impl<'a> Blocking<'a> {
                 call.span(),
                 "blocking lock acquisition",
                 method,
-                "use an async-aware lock when contention may span executor work, or acquire the synchronous lock outside async execution",
+                "use an async-aware lock when contention may span executor work, or \
+                    acquire the synchronous lock outside async execution",
             );
         } else if method == "open"
             && fs_open_options_constructor(&call.receiver, |path| self.resolve(path))
@@ -182,7 +185,8 @@ impl<'a> Blocking<'a> {
                 call.span(),
                 "synchronous filesystem operation",
                 "std::fs::OpenOptions::open".to_owned(),
-                "use `tokio::fs::OpenOptions` or isolate the complete operation with `spawn_blocking`",
+                "use `tokio::fs::OpenOptions` or isolate the complete operation with \
+                    `spawn_blocking`",
             );
         }
     }
@@ -274,7 +278,9 @@ impl<'a> Blocking<'a> {
                 lock.span(),
                 "synchronous lock guard held across await",
                 name,
-                "narrow the guard's lexical lifetime or explicitly drop it before awaiting; use an async-aware lock only when the protected design requires it",
+                "narrow the guard's lexical lifetime or explicitly drop it before \
+                    awaiting; use an async-aware lock only when the protected design requires \
+                    it",
             );
         }
     }

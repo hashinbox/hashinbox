@@ -1,7 +1,7 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use clap::Parser;
-use design_lint::{Cases, Diagnostic, Linter, Markdown, Policy, Reporter, Result, Severity};
+use design_lint::{Cases, Linter, Markdown, Policy, Printer, Reporter, Result, Severity};
 
 #[derive(Debug, Parser)]
 #[command(disable_version_flag = true)]
@@ -49,7 +49,7 @@ impl Arguments {
 
         let cases = matches!(output, Output::Cases(_));
         let mut reporter: Box<dyn Reporter> = match output {
-            Output::Diagnostic => Box::new(Diagnostic::default()),
+            Output::Diagnostic => Box::new(Printer::default()),
             Output::Markdown => Box::new(Markdown::default()),
             Output::Cases(root) => Box::new(Cases::new(root)),
         };

@@ -6,7 +6,7 @@ use wordnet_lemmatizer::{Lemmatizer, Pos};
 use crate::{
     Policy, Result,
     model::{Finding, Review},
-    source::{SourceFile, Workspace, snake_case},
+    source::{File, Workspace, snake_case},
 };
 
 pub(crate) const ID: &str = "struct-noun-naming";
@@ -50,7 +50,7 @@ pub(crate) fn check(workspace: &Workspace, _policy: &Policy) -> Result<Vec<Findi
 
 struct Names<'a> {
     rule: &'static str,
-    source: &'a SourceFile,
+    source: &'a File,
     test_scope: bool,
     findings: &'a mut Vec<Finding>,
     language: &'a dyn Language,
@@ -60,7 +60,10 @@ impl Names<'_> {
     fn push(&mut self, name: &syn::Ident, span: Span, kind: &str, reason: &str) {
         let mut finding = Finding::error(self.rule, name.to_string(), self.source.location(span));
         finding.message = format!("`{name}` violates the noun/struct rule: {reason}");
-        finding.help = "choose a precise noun for the struct, or document a reviewed exception with an exact reasoned design-lint allow comment".into();
+        finding.help =
+            "choose a precise noun for the struct, or document a reviewed exception with an \
+            exact reasoned design-lint allow comment"
+                .into();
         let mut review = Review::default();
         review.metadata.push(("Kind".into(), kind.into()));
         review

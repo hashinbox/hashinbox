@@ -233,9 +233,13 @@ trait Runtime {
 
 #[test]
 fn four_method_sdk_trait_is_left_to_the_existing_strict_gate() {
-    assert!(findings(
-        "trait Wallet { fn address(&self); fn history(&self); fn transfer(&self); fn balance(&self); }",
-    ).is_empty());
+    assert!(
+        findings(
+            "trait Wallet { fn address(&self); fn history(&self); fn transfer(&self); fn \
+            balance(&self); }",
+        )
+        .is_empty()
+    );
 }
 
 #[test]

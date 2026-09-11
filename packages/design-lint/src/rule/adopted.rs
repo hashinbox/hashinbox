@@ -20,7 +20,7 @@ mod state;
 pub use accessor::AccessorBloat;
 pub use blocking::AsyncBlocking;
 pub use boolean::BooleanState;
-pub use catchall::CatchAllModule;
+pub use catchall::ModuleNaming;
 pub use ceremony::CeremonialStructure;
 pub use command::PlatformCommand;
 pub use duplicate::DuplicateEntity;
@@ -28,12 +28,12 @@ pub use environment::EnvironmentAccess;
 pub use function::FreeFunction;
 pub use model::ModelDuplication;
 pub use naming::StructNaming;
-pub use nesting::DeepControlFlow;
+pub use nesting::ControlDepth;
 pub use object::GodObject;
 pub use receiver::ReceiverRepetition;
 pub use result::IgnoredResult;
 pub use single::SingleUse;
-pub use state::FiniteStateString;
+pub use state::StringState;
 
 pub(crate) const IDS: [&str; 17] = [
     receiver::ID,

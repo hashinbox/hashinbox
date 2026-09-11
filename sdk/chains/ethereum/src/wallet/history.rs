@@ -329,38 +329,35 @@ mod tests {
             },
         });
         let config = config(AssetKind::Native, crate::ETH.decimals);
-        let history = present(
-            &config,
-            &address(1),
-            TransactionPage {
-                checkpoint: checkpoint.clone(),
-                transactions: vec![
-                    transaction(
-                        "mixed",
-                        TransactionStatus::Included {
-                            block: block(12),
-                            confirmations: 1,
-                        },
-                        vec![
-                            movement("native", asset("native")),
-                            movement("token", asset(Address([7; 20]).to_string())),
-                        ],
-                        Some(address(1)),
-                    ),
-                    transaction(
-                        "token-only",
-                        TransactionStatus::Included {
-                            block: block(11),
-                            confirmations: 2,
-                        },
-                        vec![movement("token", asset(Address([7; 20]).to_string()))],
-                        Some(address(1)),
-                    ),
-                ],
-                next: next.clone(),
-            },
-        )
-        .expect("same-chain unrelated assets are valid before projection");
+        let page = TransactionPage {
+            checkpoint: checkpoint.clone(),
+            transactions: vec![
+                transaction(
+                    "mixed",
+                    TransactionStatus::Included {
+                        block: block(12),
+                        confirmations: 1,
+                    },
+                    vec![
+                        movement("native", asset("native")),
+                        movement("token", asset(Address([7; 20]).to_string())),
+                    ],
+                    Some(address(1)),
+                ),
+                transaction(
+                    "token-only",
+                    TransactionStatus::Included {
+                        block: block(11),
+                        confirmations: 2,
+                    },
+                    vec![movement("token", asset(Address([7; 20]).to_string()))],
+                    Some(address(1)),
+                ),
+            ],
+            next: next.clone(),
+        };
+        let history = present(&config, &address(1), page)
+            .expect("same-chain unrelated assets are valid before projection");
 
         assert_eq!(history.checkpoint, checkpoint);
         assert_eq!(history.next, next);
@@ -395,44 +392,41 @@ mod tests {
     fn fee_only_failure_is_visible_only_to_its_payer() {
         let wallet = address(1);
         let config = config(AssetKind::Erc20(Address([7; 20])), 6);
-        let history = present(
-            &config,
-            &wallet,
-            TransactionPage {
-                checkpoint: Some(block(5)),
-                transactions: vec![
-                    transaction(
-                        "ours",
-                        TransactionStatus::Failed {
-                            block: block(5),
-                            reason: Some("reverted".to_owned()),
-                        },
-                        Vec::new(),
-                        Some(wallet.clone()),
-                    ),
-                    transaction(
-                        "theirs",
-                        TransactionStatus::Failed {
-                            block: block(5),
-                            reason: Some("reverted".to_owned()),
-                        },
-                        Vec::new(),
-                        Some(address(2)),
-                    ),
-                    transaction(
-                        "included-fee-only",
-                        TransactionStatus::Included {
-                            block: block(5),
-                            confirmations: 1,
-                        },
-                        Vec::new(),
-                        Some(wallet.clone()),
-                    ),
-                ],
-                next: None,
-            },
-        )
-        .expect("valid fee-only failures must project");
+        let page = TransactionPage {
+            checkpoint: Some(block(5)),
+            transactions: vec![
+                transaction(
+                    "ours",
+                    TransactionStatus::Failed {
+                        block: block(5),
+                        reason: Some("reverted".to_owned()),
+                    },
+                    Vec::new(),
+                    Some(wallet.clone()),
+                ),
+                transaction(
+                    "theirs",
+                    TransactionStatus::Failed {
+                        block: block(5),
+                        reason: Some("reverted".to_owned()),
+                    },
+                    Vec::new(),
+                    Some(address(2)),
+                ),
+                transaction(
+                    "included-fee-only",
+                    TransactionStatus::Included {
+                        block: block(5),
+                        confirmations: 1,
+                    },
+                    Vec::new(),
+                    Some(wallet.clone()),
+                ),
+            ],
+            next: None,
+        };
+        let history =
+            present(&config, &wallet, page).expect("valid fee-only failures must project");
 
         assert_eq!(history.transactions.len(), 1);
         assert_eq!(history.transactions[0].transaction_id.value, "ours");
