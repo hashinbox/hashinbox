@@ -45,13 +45,11 @@ impl TransactionCoordinator {
         preparations: Vec<Preparation<'_>>,
     ) -> Result<PreparedBatch, PreparationError> {
         if preparations.is_empty() {
-            return Err(PreparationError::new(
-                0,
-                ChainError::new(
-                    ChainErrorKind::InvalidTransaction,
-                    "Ethereum transaction batch is empty",
-                ),
-            ));
+            let source = ChainError::new(
+                ChainErrorKind::InvalidTransaction,
+                "Ethereum transaction batch is empty",
+            );
+            return Err(PreparationError::new(0, source));
         }
 
         let mut senders = BTreeMap::new();
@@ -66,41 +64,20 @@ impl TransactionCoordinator {
         let nonces = self.nonces(&preparations, &senders).await?;
         let mut drafts = Vec::with_capacity(preparations.len());
         for (index, (preparation, nonce)) in preparations.into_iter().zip(nonces).enumerate() {
-            let context = self
-                .core
-                .transactions
-                .build_context(&preparation.request, nonce)
+            let draft = Draft::prepare(preparation, nonce, self.core.transactions.as_ref())
                 .await
                 .map_err(|source| PreparationError::new(index, source))?;
-            if context.chain_id != preparation.expected_chain_id {
-                let source = ChainError::new(
-                    ChainErrorKind::Divergent,
-                    "Ethereum RPC chain ID does not match the wallet network",
-                );
-                return Err(PreparationError::new(index, source));
-            }
-            drafts.push(Draft {
-                preparation,
-                context,
-            });
+            drafts.push(draft);
         }
         self.ensure_aggregate_balances(&drafts).await?;
 
         let mut entries = Vec::with_capacity(drafts.len());
         for (index, draft) in drafts.into_iter().enumerate() {
-            let source = draft.preparation.request.from().clone();
-            let nonce = draft.context.nonce;
-            let request = draft.preparation.request.clone();
-            let signed = draft
-                .preparation
-                .sign(TransactionBuilder::new(request, draft.context))
+            let entry = draft
+                .sign()
                 .await
                 .map_err(|source| PreparationError::new(index, source))?;
-            entries.push(PreparedEntry {
-                source,
-                nonce,
-                signed,
-            });
+            entries.push(entry);
         }
 
         self.core
@@ -158,40 +135,10 @@ impl TransactionCoordinator {
     ) -> Result<Vec<u64>, PreparationError> {
         let mut next = BTreeMap::new();
         for (source, first_index) in senders {
-            let pending = self
-                .core
-                .accounts
-                .nonce(source.clone())
-                .await
-                .map_err(|error| {
-                    PreparationError::new(*first_index, ChainError::from_rpc(error))
-                })?;
             let start = self
-                .core
-                .floor(source)
-                .map_or(pending, |floor| floor.max(pending));
-            let count = preparations
-                .iter()
-                .filter(|preparation| preparation.request.from() == source)
-                .count();
-            let count = u64::try_from(count).map_err(|_| {
-                PreparationError::new(
-                    *first_index,
-                    ChainError::new(
-                        ChainErrorKind::InvalidTransaction,
-                        "Ethereum transaction count exceeds u64",
-                    ),
-                )
-            })?;
-            start.checked_add(count).ok_or_else(|| {
-                PreparationError::new(
-                    *first_index,
-                    ChainError::new(
-                        ChainErrorKind::InvalidTransaction,
-                        "Ethereum batch nonce range overflows u64",
-                    ),
-                )
-            })?;
+                .nonce_start(source, preparations)
+                .await
+                .map_err(|source| PreparationError::new(*first_index, source))?;
             next.insert(source.clone(), start);
         }
 
@@ -217,6 +164,40 @@ impl TransactionCoordinator {
                 Ok(assigned)
             })
             .collect()
+    }
+
+    async fn nonce_start(
+        &self,
+        source: &Address,
+        preparations: &[Preparation<'_>],
+    ) -> Result<u64, ChainError> {
+        let pending = self
+            .core
+            .accounts
+            .nonce(source.clone())
+            .await
+            .map_err(ChainError::from_rpc)?;
+        let start = self
+            .core
+            .floor(source)
+            .map_or(pending, |floor| floor.max(pending));
+        let count = preparations
+            .iter()
+            .filter(|preparation| preparation.request.from() == source)
+            .count();
+        let count = u64::try_from(count).map_err(|_| {
+            ChainError::new(
+                ChainErrorKind::InvalidTransaction,
+                "Ethereum transaction count exceeds u64",
+            )
+        })?;
+        start.checked_add(count).ok_or_else(|| {
+            ChainError::new(
+                ChainErrorKind::InvalidTransaction,
+                "Ethereum batch nonce range overflows u64",
+            )
+        })?;
+        Ok(start)
     }
 
     async fn ensure_aggregate_balances(
@@ -422,6 +403,43 @@ impl PreparedBatch {
 struct Draft<'a> {
     preparation: Preparation<'a>,
     context: BuildContext,
+}
+
+impl<'a> Draft<'a> {
+    async fn prepare(
+        preparation: Preparation<'a>,
+        nonce: u64,
+        transactions: &dyn Transactions,
+    ) -> Result<Self, ChainError> {
+        let context = transactions
+            .build_context(&preparation.request, nonce)
+            .await?;
+        if context.chain_id != preparation.expected_chain_id {
+            return Err(ChainError::new(
+                ChainErrorKind::Divergent,
+                "Ethereum RPC chain ID does not match the wallet network",
+            ));
+        }
+        Ok(Self {
+            preparation,
+            context,
+        })
+    }
+
+    async fn sign(self) -> Result<PreparedEntry, ChainError> {
+        let source = self.preparation.request.from().clone();
+        let nonce = self.context.nonce;
+        let request = self.preparation.request.clone();
+        let signed = self
+            .preparation
+            .sign(TransactionBuilder::new(request, self.context))
+            .await?;
+        Ok(PreparedEntry {
+            source,
+            nonce,
+            signed,
+        })
+    }
 }
 
 struct PreparedEntry {

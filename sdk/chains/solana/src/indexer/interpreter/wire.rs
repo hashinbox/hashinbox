@@ -40,6 +40,71 @@ impl AccountKey {
 }
 
 #[derive(Debug)]
+struct AccountKeys(Vec<AccountKey>);
+
+impl AccountKeys {
+    fn parse_static(texts: Vec<String>, header: &HeaderWire) -> Result<Self, IndexError> {
+        let required = usize::from(header.num_required_signatures);
+        let readonly_signed = usize::from(header.num_readonly_signed_accounts);
+        let readonly_unsigned = usize::from(header.num_readonly_unsigned_accounts);
+        let static_count = texts.len();
+        let mut keys = Vec::with_capacity(static_count);
+        for (index, text) in texts.into_iter().enumerate() {
+            let writable = if index < required {
+                index < required - readonly_signed
+            } else {
+                index < static_count - readonly_unsigned
+            };
+            keys.push(AccountKey::parse(&text, writable)?);
+        }
+
+        Ok(Self(keys))
+    }
+
+    fn with_loaded(
+        mut self,
+        version: Version,
+        loaded: Option<LoadedWire>,
+    ) -> Result<Self, IndexError> {
+        match (version, loaded) {
+            (Version::Legacy, Some(loaded))
+                if !loaded.writable.is_empty() || !loaded.readonly.is_empty() =>
+            {
+                return Err(invalid_block(
+                    "legacy Solana transaction contains loaded addresses",
+                ));
+            }
+            (Version::Legacy, _) => {}
+            (Version::Zero, Some(loaded)) => {
+                for text in loaded.writable {
+                    self.0.push(AccountKey::parse(&text, true)?);
+                }
+                for text in loaded.readonly {
+                    self.0.push(AccountKey::parse(&text, false)?);
+                }
+            }
+            (Version::Zero, None) => {
+                return Err(invalid_block(
+                    "version-zero Solana transaction is missing loaded addresses",
+                ));
+            }
+        }
+        if self.0.len() > usize::from(u8::MAX) + 1 {
+            return Err(invalid_block(
+                "Solana transaction resolves more than 256 account keys",
+            ));
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        if self.0.iter().any(|key| !unique.insert(key.address.clone())) {
+            return Err(invalid_block(
+                "Solana transaction resolves duplicate account keys",
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct Instruction {
     pub program: usize,
     pub accounts: Vec<usize>,
@@ -91,83 +156,20 @@ impl Transactions {
 }
 
 impl Transaction {
-    fn parse(wire: TransactionWire) -> Result<Self, IndexError> {
+    fn parse(mut wire: TransactionWire) -> Result<Self, IndexError> {
         let version = Version::parse(&wire.version)?;
+        wire.transaction.message.header.validate(
+            wire.transaction.message.account_keys.len(),
+            wire.transaction.signatures.len(),
+        )?;
+        wire.transaction.validate_signatures()?;
         let message = wire.transaction.message;
-        let required = usize::from(message.header.num_required_signatures);
-        let readonly_signed = usize::from(message.header.num_readonly_signed_accounts);
-        let readonly_unsigned = usize::from(message.header.num_readonly_unsigned_accounts);
-        let static_count = message.account_keys.len();
-        if required == 0
-            || required > static_count
-            || readonly_signed >= required
-            || readonly_unsigned > static_count - required
-            || wire.transaction.signatures.len() != required
-        {
-            return Err(invalid_block(
-                "Solana transaction has incoherent signer or message-header cardinality",
-            ));
-        }
-
-        let mut canonical_signatures = Vec::with_capacity(required);
-        for text in wire.transaction.signatures {
-            let signature = Signature::from_str(&text)
-                .map_err(|_| invalid_block("Solana transaction contains a malformed signature"))?;
-            if signature.to_string() != text {
-                return Err(invalid_block(
-                    "Solana transaction contains a non-canonical signature",
-                ));
-            }
-            canonical_signatures.push(text);
-        }
-
-        let mut keys = Vec::with_capacity(static_count);
-        for (index, text) in message.account_keys.into_iter().enumerate() {
-            let writable = if index < required {
-                index < required - readonly_signed
-            } else {
-                index < static_count - readonly_unsigned
-            };
-            keys.push(AccountKey::parse(&text, writable)?);
-        }
+        let keys = AccountKeys::parse_static(message.account_keys, &message.header)?;
 
         let meta = wire
             .meta
             .ok_or_else(|| invalid_block("Solana transaction metadata is missing"))?;
-        match (version, meta.loaded_addresses) {
-            (Version::Legacy, Some(loaded))
-                if !loaded.writable.is_empty() || !loaded.readonly.is_empty() =>
-            {
-                return Err(invalid_block(
-                    "legacy Solana transaction contains loaded addresses",
-                ));
-            }
-            (Version::Legacy, _) => {}
-            (Version::Zero, Some(loaded)) => {
-                for text in loaded.writable {
-                    keys.push(AccountKey::parse(&text, true)?);
-                }
-                for text in loaded.readonly {
-                    keys.push(AccountKey::parse(&text, false)?);
-                }
-            }
-            (Version::Zero, None) => {
-                return Err(invalid_block(
-                    "version-zero Solana transaction is missing loaded addresses",
-                ));
-            }
-        }
-        if keys.len() > usize::from(u8::MAX) + 1 {
-            return Err(invalid_block(
-                "Solana transaction resolves more than 256 account keys",
-            ));
-        }
-        let mut unique = std::collections::BTreeSet::new();
-        if keys.iter().any(|key| !unique.insert(key.address.clone())) {
-            return Err(invalid_block(
-                "Solana transaction resolves duplicate account keys",
-            ));
-        }
+        let keys = keys.with_loaded(version, meta.loaded_addresses)?.0;
         if meta.pre_balances.len() != keys.len() || meta.post_balances.len() != keys.len() {
             return Err(invalid_block(
                 "Solana transaction balances do not match resolved account keys",
@@ -188,7 +190,7 @@ impl Transaction {
             .ok_or_else(|| invalid_block("Solana transaction has no writable fee payer"))?;
 
         Ok(Self {
-            signature: canonical_signatures.remove(0),
+            signature: wire.transaction.signatures.remove(0),
             keys,
             instructions,
             inner,
@@ -349,6 +351,22 @@ struct SignedWire {
     message: MessageWire,
 }
 
+impl SignedWire {
+    fn validate_signatures(&self) -> Result<(), IndexError> {
+        for text in &self.signatures {
+            let signature = Signature::from_str(text)
+                .map_err(|_| invalid_block("Solana transaction contains a malformed signature"))?;
+            if signature.to_string() != *text {
+                return Err(invalid_block(
+                    "Solana transaction contains a non-canonical signature",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MessageWire {
@@ -363,6 +381,26 @@ struct HeaderWire {
     num_required_signatures: u8,
     num_readonly_signed_accounts: u8,
     num_readonly_unsigned_accounts: u8,
+}
+
+impl HeaderWire {
+    fn validate(&self, static_count: usize, signature_count: usize) -> Result<(), IndexError> {
+        let required = usize::from(self.num_required_signatures);
+        let readonly_signed = usize::from(self.num_readonly_signed_accounts);
+        let readonly_unsigned = usize::from(self.num_readonly_unsigned_accounts);
+        if required == 0
+            || required > static_count
+            || readonly_signed >= required
+            || readonly_unsigned > static_count - required
+            || signature_count != required
+        {
+            return Err(invalid_block(
+                "Solana transaction has incoherent signer or message-header cardinality",
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]

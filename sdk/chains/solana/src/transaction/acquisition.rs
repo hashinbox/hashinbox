@@ -233,28 +233,9 @@ where
             .cloned()
             .collect::<Vec<_>>();
 
-        cancellation.race_acquisition(self.rpc.health()).await?;
-        cancellation.ensure()?;
-        let opening = cancellation
-            .race_acquisition(self.rpc.slot(RpcCommitment::Confirmed, None))
-            .await?;
-        cancellation.ensure()?;
-        let context = cancellation
-            .race_acquisition(
-                self.rpc
-                    .accounts(&query, RpcCommitment::Confirmed, Some(opening)),
-            )
-            .await?;
-        cancellation.ensure()?;
-        let closing = cancellation
-            .race_acquisition(self.rpc.slot(RpcCommitment::Confirmed, Some(context.slot)))
-            .await?;
-        cancellation.ensure()?;
+        let (closing, accounts) = self.witness(&query, cancellation).await?;
 
-        let observed = query
-            .into_iter()
-            .zip(context.value)
-            .collect::<BTreeMap<_, _>>();
+        let observed = query.into_iter().zip(accounts).collect::<BTreeMap<_, _>>();
         let balances = classify(items, &destinations, &observed)?;
         cancellation.ensure()?;
         Ok(AcquiredAccounts {
@@ -264,6 +245,32 @@ where
             destinations,
             leases,
         })
+    }
+
+    async fn witness(
+        &self,
+        query: &[Address],
+        cancellation: &Cancellation,
+    ) -> Result<(u64, Vec<Option<AccountSnapshot>>), SendError> {
+        cancellation.race_acquisition(self.rpc.health()).await?;
+        cancellation.ensure()?;
+        let opening = cancellation
+            .race_acquisition(self.rpc.slot(RpcCommitment::Confirmed, None))
+            .await?;
+        cancellation.ensure()?;
+        let context = cancellation
+            .race_acquisition(
+                self.rpc
+                    .accounts(query, RpcCommitment::Confirmed, Some(opening)),
+            )
+            .await?;
+        cancellation.ensure()?;
+        let closing = cancellation
+            .race_acquisition(self.rpc.slot(RpcCommitment::Confirmed, Some(context.slot)))
+            .await?;
+        cancellation.ensure()?;
+
+        Ok((closing, context.value))
     }
 }
 

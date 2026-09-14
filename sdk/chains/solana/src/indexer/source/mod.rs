@@ -154,7 +154,8 @@ where
         limit: usize,
     ) -> Result<Vec<Block>, SourceError> {
         let tip = self.complete_tip().await?;
-        if start > tip.block.reference().position {
+        let tip_position = tip.block.reference().position.0;
+        if start.0 > tip_position {
             return Ok(Vec::new());
         }
         if tip.lower_bound > start.0 {
@@ -164,27 +165,15 @@ where
             ));
         }
 
-        let bounded_end = end.0.min(tip.block.reference().position.0);
+        let bounded_end = end.0.min(tip_position);
         let mut cursor = start.0;
         let mut blocks = Vec::with_capacity(limit.min(64));
         while cursor <= bounded_end && blocks.len() < limit {
             self.ensure_before_deadline(Instant::now())?;
             let remaining = limit - blocks.len();
-            let width = u64::try_from(remaining)
-                .unwrap_or(u64::MAX)
-                .clamp(DESCENDING_WINDOW, MAX_FORWARD_WINDOW);
-            let window_end = cursor.saturating_add(width - 1).min(bounded_end);
-            let slots = self
-                .enumerate(cursor, window_end, tip.block.reference().position.0)
+            let (window_end, slots) = self
+                .forward_window(cursor, bounded_end, remaining, tip_position)
                 .await?;
-            if window_end == tip.block.reference().position.0
-                && slots.last().copied() != Some(window_end)
-            {
-                return Err(self::error(
-                    "Solana range enumeration omitted its previously proved tip",
-                    true,
-                ));
-            }
 
             self.extend_blocks(slots.into_iter().take(remaining), &mut blocks)
                 .await?;
@@ -204,6 +193,28 @@ where
             ));
         }
         Ok(blocks)
+    }
+
+    async fn forward_window(
+        &mut self,
+        start: u64,
+        end: u64,
+        remaining: usize,
+        tip: u64,
+    ) -> Result<(u64, Vec<u64>), SourceError> {
+        let width = u64::try_from(remaining)
+            .unwrap_or(u64::MAX)
+            .clamp(DESCENDING_WINDOW, MAX_FORWARD_WINDOW);
+        let window_end = start.saturating_add(width - 1).min(end);
+        let slots = self.enumerate(start, window_end, tip).await?;
+        if window_end == tip && slots.last().copied() != Some(window_end) {
+            return Err(self::error(
+                "Solana range enumeration omitted its previously proved tip",
+                true,
+            ));
+        }
+
+        Ok((window_end, slots))
     }
 
     async fn extend_blocks(

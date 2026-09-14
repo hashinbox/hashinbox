@@ -520,3 +520,79 @@ fn instruction_conversion_preserves_account_order_duplicates_and_opaque_data() {
     assert_eq!(inner.accounts, [1, 0]);
     assert_eq!(inner.data, "opaque_2");
 }
+
+#[cfg(test)]
+#[test]
+fn transaction_validation_preserves_header_signature_key_and_metadata_precedence() {
+    let mut value = baseline(42);
+    value["version"] = json!(1);
+    value["transaction"]["message"]["header"]["numRequiredSignatures"] = json!(0);
+    value["transaction"]["signatures"] = json!(["invalid"]);
+    value["transaction"]["message"]["accountKeys"][0] = json!("invalid");
+    value["meta"] = Value::Null;
+    for (path, replacement, expected) in [
+        (
+            "/version",
+            json!(1),
+            "Solana block contains an unsupported transaction version",
+        ),
+        (
+            "/version",
+            json!("legacy"),
+            "Solana transaction has incoherent signer or message-header cardinality",
+        ),
+        (
+            "/transaction/message/header/numRequiredSignatures",
+            json!(1),
+            "Solana transaction contains a malformed signature",
+        ),
+        (
+            "/transaction/signatures",
+            json!([signature(42)]),
+            "Solana transaction contains a malformed canonical address",
+        ),
+        (
+            "/transaction/message/accountKeys/0",
+            json!(address(1)),
+            "Solana transaction metadata is missing",
+        ),
+    ] {
+        *value.pointer_mut(path).unwrap() = replacement;
+        let error = inspect(vec![value.clone()], &[selected(2)]).unwrap_err();
+        assert_eq!(error.kind, IndexErrorKind::InvalidBlock);
+        assert_eq!(error.message, expected);
+        assert!(!error.retryable);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn validates_every_signature_and_resolved_key_invariant_before_balances() {
+    let mut signatures = baseline(43);
+    signatures["transaction"]["message"]["header"]["numRequiredSignatures"] = json!(2);
+    signatures["transaction"]["signatures"] = json!([signature(43), "invalid"]);
+    let mut duplicate = baseline(43);
+    duplicate["version"] = json!(0);
+    duplicate["meta"]["loadedAddresses"] = json!({"writable":[address(1)],"readonly":[]});
+    let mut oversized = duplicate.clone();
+    oversized["meta"]["loadedAddresses"]["writable"] = json!(vec![address(1); 254]);
+    for (mut value, expected) in [
+        (
+            signatures,
+            "Solana transaction contains a malformed signature",
+        ),
+        (
+            duplicate,
+            "Solana transaction resolves duplicate account keys",
+        ),
+        (
+            oversized,
+            "Solana transaction resolves more than 256 account keys",
+        ),
+    ] {
+        value["meta"]["preBalances"] = json!([]);
+        let error = inspect(vec![value], &[selected(2)]).unwrap_err();
+        assert_eq!(error.message, expected);
+        assert!(!error.retryable);
+    }
+}

@@ -67,6 +67,36 @@ impl Interpreter {
             })
             .collect()
     }
+
+    fn observation(
+        &self,
+        transaction: &wire::Transaction,
+        movements: Movements,
+    ) -> ObservationDraft {
+        ObservationDraft {
+            scope: self.scope.clone(),
+            transaction_id: TransactionRef {
+                scope: self.scope.clone(),
+                value: transaction.signature().to_owned(),
+            },
+            status: if transaction.succeeded() {
+                ObservationDraftStatus::Included
+            } else {
+                ObservationDraftStatus::Failed {
+                    reason: Some("Solana transaction execution failed".to_owned()),
+                }
+            },
+            movements: movements.into_values(&self.scope, &self.asset),
+            fee: Some(NetworkFee {
+                asset: self.asset.clone(),
+                amount: base::Decimal::from_atomic(transaction.fee().into(), 0),
+                payer: Some(CanonicalAddress {
+                    scope: self.scope.clone(),
+                    value: transaction.fee_payer().to_string(),
+                }),
+            }),
+        }
+    }
 }
 
 impl IndexBlockInterpreter for Interpreter {
@@ -101,29 +131,7 @@ impl IndexBlockInterpreter for Interpreter {
                 continue;
             }
 
-            observations.push(ObservationDraft {
-                scope: self.scope.clone(),
-                transaction_id: TransactionRef {
-                    scope: self.scope.clone(),
-                    value: transaction.signature().to_owned(),
-                },
-                status: if transaction.succeeded() {
-                    ObservationDraftStatus::Included
-                } else {
-                    ObservationDraftStatus::Failed {
-                        reason: Some("Solana transaction execution failed".to_owned()),
-                    }
-                },
-                movements: movements.into_values(&self.scope, &self.asset),
-                fee: Some(NetworkFee {
-                    asset: self.asset.clone(),
-                    amount: base::Decimal::from_atomic(transaction.fee().into(), 0),
-                    payer: Some(CanonicalAddress {
-                        scope: self.scope.clone(),
-                        value: transaction.fee_payer().to_string(),
-                    }),
-                }),
-            });
+            observations.push(self.observation(transaction, movements));
         }
 
         Ok(InterpretedBlock {

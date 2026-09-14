@@ -47,6 +47,56 @@ fn full(slot: u64, value: Value) -> (&'static str, Value, Value) {
     )
 }
 
+#[cfg(test)]
+#[tokio::test]
+async fn range_tip_omission_precedes_fetching_even_when_limit_is_already_available() {
+    let rpc = Script::new([
+        ("getSlot", json!([{"commitment":"finalized"}]), json!(107)),
+        ("getFirstAvailableBlock", json!([]), json!(1)),
+        enumeration(1, 107, 107, json!([107])),
+        full(107, block(107, 4, 103, 4, 3)),
+        ("getFirstAvailableBlock", json!([]), json!(1)),
+        enumeration(100, 107, 107, json!([100])),
+    ]);
+    let source = Source::new(RpcClient::new(rpc.clone()));
+    let error = source
+        .blocks(BlockPosition(100), BlockPosition(107), 1)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "Solana range enumeration omitted its previously proved tip"
+    );
+    assert!(error.retryable);
+    rpc.assert_finished();
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn closing_retention_is_checked_after_fetching_the_requested_block_limit() {
+    let rpc = Script::new([
+        ("getSlot", json!([{"commitment":"finalized"}]), json!(107)),
+        ("getFirstAvailableBlock", json!([]), json!(1)),
+        enumeration(1, 107, 107, json!([107])),
+        full(107, block(107, 4, 103, 4, 3)),
+        ("getFirstAvailableBlock", json!([]), json!(1)),
+        enumeration(100, 107, 107, json!([100, 107])),
+        full(100, block(100, 2, 1, 2, 1)),
+        ("getFirstAvailableBlock", json!([]), json!(101)),
+    ]);
+    let source = Source::new(RpcClient::new(rpc.clone()));
+    let error = source
+        .blocks(BlockPosition(100), BlockPosition(107), 1)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "Solana required position was pruned during source acquisition"
+    );
+    assert!(!error.retryable);
+    rpc.assert_finished();
+}
+
 #[tokio::test]
 async fn finds_a_complete_tip_below_empty_finalized_slots() {
     let rpc = Script::new([

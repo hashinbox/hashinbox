@@ -23,6 +23,8 @@ enum BalanceKey {
 struct AccountStub {
     nonces: Mutex<BTreeMap<Address, u64>>,
     balances: Mutex<BTreeMap<BalanceKey, Wei>>,
+    nonce_reads: Mutex<Vec<Address>>,
+    balance_reads: Mutex<Vec<BalanceKey>>,
 }
 
 impl AccountStub {
@@ -60,6 +62,7 @@ impl Accounts for AccountStub {
                 AssetKind::Native => BalanceKey::Native(address),
                 AssetKind::Erc20(token) => BalanceKey::Token(address, token.clone()),
             };
+            self.balance_reads.lock().unwrap().push(key.clone());
             Ok(self
                 .balances
                 .lock()
@@ -72,6 +75,7 @@ impl Accounts for AccountStub {
 
     fn nonce<'a>(&'a self, address: Address) -> BoxFuture<'a, Result<u64, SourceError>> {
         Box::pin(async move {
+            self.nonce_reads.lock().unwrap().push(address.clone());
             Ok(self
                 .nonces
                 .lock()
@@ -213,6 +217,187 @@ fn token_transfer(from: &Address, token: &Address, amount: u128) -> TransferRequ
 
 fn coordinator(accounts: Arc<AccountStub>, transactions: Arc<Endpoint>) -> TransactionCoordinator {
     TransactionCoordinator::new(accounts, transactions)
+}
+
+#[cfg(test)]
+mod characterization {
+    use super::*;
+
+    struct UnusedSigner;
+
+    impl base::Signer for UnusedSigner {
+        fn sign<'a>(&'a self, _request: base::SignRequest) -> base::SignFuture<'a> {
+            panic!("invalid preparation must fail before signing")
+        }
+    }
+
+    #[tokio::test]
+    async fn nonce_overflow_reports_first_occurrence_before_contexts_or_later_sender_reads() {
+        let first = Address([0xff; 20]);
+        let second = Address([1; 20]);
+        for (exhausted, failed_index, expected_reads) in [
+            (first.clone(), 0, vec![first.clone()]),
+            (second.clone(), 1, vec![first.clone(), second.clone()]),
+        ] {
+            let accounts = Arc::new(AccountStub::default());
+            accounts.set_nonce(exhausted, u64::MAX);
+            let transactions = Arc::new(Endpoint::default());
+            let coordinator = coordinator(accounts.clone(), transactions.clone());
+            let error = coordinator
+                .prepare_batch(vec![
+                    Preparation::signer(transfer(&first, 1), CHAIN_ID, &UnusedSigner),
+                    Preparation::signer(transfer(&second, 1), CHAIN_ID, &UnusedSigner),
+                    Preparation::signer(transfer(&first, 1), CHAIN_ID, &UnusedSigner),
+                ])
+                .await
+                .err()
+                .expect("nonce range must overflow");
+            assert_eq!(error.index, failed_index);
+            assert_eq!(error.source.kind, ChainErrorKind::InvalidTransaction);
+            assert_eq!(
+                error.source.message,
+                "Ethereum batch nonce range overflows u64"
+            );
+            assert_eq!(*accounts.nonce_reads.lock().unwrap(), expected_reads);
+            assert!(accounts.balance_reads.lock().unwrap().is_empty());
+            assert!(transactions.contexts.lock().unwrap().is_empty());
+            assert!(transactions.broadcasts.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn context_and_aggregate_failures_precede_signing_and_release_sender_admission() {
+        let source = Address([1; 20]);
+        let accounts = Arc::new(AccountStub::default());
+        accounts.set_native_balance(source.clone(), 3);
+        let transactions = Arc::new(Endpoint::default());
+        let coordinator = coordinator(accounts.clone(), transactions.clone());
+        for (expected_chain, expected_kind, expected_index, message) in [
+            (
+                CHAIN_ID + 1,
+                ChainErrorKind::Divergent,
+                1,
+                "Ethereum RPC chain ID does not match the wallet network",
+            ),
+            (
+                CHAIN_ID,
+                ChainErrorKind::InsufficientFunds,
+                1,
+                "Ethereum aggregate batch balance is insufficient",
+            ),
+        ] {
+            let error = coordinator
+                .prepare_batch(vec![
+                    Preparation::signer(transfer(&source, 1), CHAIN_ID, &UnusedSigner),
+                    Preparation::signer(transfer(&source, 1), expected_chain, &UnusedSigner),
+                ])
+                .await
+                .err()
+                .expect("preflight must fail");
+            assert_eq!(error.index, expected_index);
+            assert_eq!(error.source.kind, expected_kind);
+            assert_eq!(error.source.message, message);
+            let contexts = transactions.contexts.lock().unwrap();
+            assert_eq!(
+                &contexts[contexts.len() - 2..],
+                &[(source.clone(), 0), (source.clone(), 1)]
+            );
+            assert_eq!(
+                accounts.balance_reads.lock().unwrap().len(),
+                usize::from(expected_chain == CHAIN_ID)
+            );
+            assert!(transactions.broadcasts.lock().unwrap().is_empty());
+        }
+    }
+
+    fn draft(request: TransferRequest, fee: Wei, gas_limit: u64) -> Draft<'static> {
+        Draft {
+            preparation: Preparation::signer(request, CHAIN_ID, &UnusedSigner),
+            context: BuildContext {
+                chain_id: CHAIN_ID,
+                nonce: 0,
+                gas_limit,
+                max_fee_per_gas: fee,
+                max_priority_fee_per_gas: Wei::ZERO,
+            },
+        }
+    }
+
+    #[test]
+    fn aggregate_requirements_preserve_native_token_contributions_and_failure_indices() {
+        let source = Address([1; 20]);
+        let token = Address([2; 20]);
+        let drafts = [
+            draft(transfer(&source, 7), Wei::from_u128(2), 3),
+            draft(token_transfer(&source, &token, 11), Wei::from_u128(3), 2),
+            draft(transfer(&source, 5), Wei::from_u128(2), 1),
+        ];
+        let requirements = Requirements::from_drafts(&drafts).unwrap();
+        assert_eq!(requirements.values.len(), 2);
+        let native = &requirements.values[0];
+        assert_eq!(native.source, source);
+        assert!(native.asset == RequiredAsset::Native);
+        assert_eq!(native.amount, Wei::from_u128(26));
+        assert_eq!(native.first_index(), 0);
+        assert_eq!(native.failure_index(&Wei::from_u128(12)), 0);
+        assert_eq!(native.failure_index(&Wei::from_u128(18)), 1);
+        assert_eq!(native.failure_index(&Wei::from_u128(25)), 2);
+        let erc20 = &requirements.values[1];
+        assert_eq!(erc20.source, source);
+        assert!(erc20.asset == RequiredAsset::Erc20(token));
+        assert_eq!(erc20.amount, Wei::from_u128(11));
+        assert_eq!(erc20.first_index(), 1);
+    }
+
+    #[test]
+    fn aggregate_overflow_keeps_the_original_item_and_exact_error_class() {
+        let source = Address([1; 20]);
+        let token = Address([2; 20]);
+        let max = Wei([255; 32]);
+        let maximum_token_transfer =
+            TransferRequest::erc20(source.clone(), token.clone(), Address([3; 20]), max.clone());
+        for (drafts, kind, message) in [
+            (
+                vec![
+                    draft(transfer(&source, 0), Wei::ZERO, 1),
+                    draft(transfer(&source, 0), max.clone(), 2),
+                ],
+                ChainErrorKind::FeeUnavailable,
+                "Ethereum aggregate maximum fee overflows U256",
+            ),
+            (
+                vec![
+                    draft(transfer(&source, 0), Wei::ZERO, 1),
+                    draft(transfer(&source, 1), max.clone(), 1),
+                ],
+                ChainErrorKind::InsufficientFunds,
+                "Ethereum aggregate native requirement overflows U256",
+            ),
+            (
+                vec![
+                    draft(transfer(&source, 0), max.clone(), 1),
+                    draft(transfer(&source, 1), Wei::ZERO, 1),
+                ],
+                ChainErrorKind::InsufficientFunds,
+                "Ethereum aggregate asset requirement overflows U256",
+            ),
+            (
+                vec![
+                    draft(maximum_token_transfer, Wei::ZERO, 1),
+                    draft(token_transfer(&source, &token, 1), Wei::ZERO, 1),
+                ],
+                ChainErrorKind::InsufficientFunds,
+                "Ethereum aggregate asset requirement overflows U256",
+            ),
+        ] {
+            let error = Requirements::from_drafts(&drafts)
+                .err()
+                .expect("sum must overflow");
+            assert_eq!(error.index, 1);
+            assert_eq!(error.source.kind, kind);
+            assert_eq!(error.source.message, message);
+        }
+    }
 }
 
 #[tokio::test]

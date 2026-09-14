@@ -48,29 +48,9 @@ impl Requirements {
         let mut values = RequirementsByAsset::new();
         for (index, draft) in drafts.iter().enumerate() {
             let request = &draft.preparation.request;
-            let fee = draft
-                .context
-                .max_fee_per_gas
-                .checked_mul_u64(draft.context.gas_limit)
-                .ok_or_else(|| {
-                    let source = ChainError::new(
-                        ChainErrorKind::FeeUnavailable,
-                        "Ethereum aggregate maximum fee overflows U256",
-                    );
-                    PreparationError::new(index, source)
-                })?;
-            let native = if request.erc20_transfer().is_none() {
-                fee.checked_add(&request.value())
-            } else {
-                Some(fee)
-            }
-            .ok_or_else(|| {
-                let source = ChainError::new(
-                    ChainErrorKind::InsufficientFunds,
-                    "Ethereum aggregate native requirement overflows U256",
-                );
-                PreparationError::new(index, source)
-            })?;
+            let native = draft
+                .native_requirement()
+                .map_err(|source| PreparationError::new(index, source))?;
             add(
                 &mut values,
                 request.from().clone(),
@@ -99,6 +79,32 @@ impl Requirements {
             .collect::<Vec<_>>();
         values.sort_by_key(Requirement::first_index);
         Ok(Self { values })
+    }
+}
+
+impl Draft<'_> {
+    fn native_requirement(&self) -> Result<Wei, ChainError> {
+        let fee = self
+            .context
+            .max_fee_per_gas
+            .checked_mul_u64(self.context.gas_limit)
+            .ok_or_else(|| {
+                ChainError::new(
+                    ChainErrorKind::FeeUnavailable,
+                    "Ethereum aggregate maximum fee overflows U256",
+                )
+            })?;
+        let native = if self.preparation.request.erc20_transfer().is_none() {
+            fee.checked_add(&self.preparation.request.value())
+        } else {
+            Some(fee)
+        };
+        native.ok_or_else(|| {
+            ChainError::new(
+                ChainErrorKind::InsufficientFunds,
+                "Ethereum aggregate native requirement overflows U256",
+            )
+        })
     }
 }
 
