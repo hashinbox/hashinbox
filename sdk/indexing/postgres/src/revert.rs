@@ -1,6 +1,8 @@
 //! Reorg reversal: removes an orphaned tip using only the rollback journal.
 
+use deadpool_postgres::Transaction;
 use indexing::{BlockRef, IndexError, IndexErrorKind, IndexScope};
+use tokio_postgres::Row;
 
 use crate::{Repository, row, write::move_checkpoint};
 
@@ -57,12 +59,41 @@ impl Repository {
             ));
         }
         let height = row::as_i64(expected_tip.height.0, "block height")?;
+        let entry = self
+            .rollback_entry(&transaction, height, expected_tip)
+            .await?;
+
+        self.revert_projections(&transaction, height).await?;
+        let previous = self.restore_checkpoint(&transaction, &entry).await?;
+        // journal_output cascades with the journal row.
+        let statement = transaction
+            .prepare_cached(DROP_JOURNAL)
+            .await
+            .map_err(crate::store)?;
+        transaction
+            .execute(&statement, &[&scope.chain.0, &scope.network, &height])
+            .await
+            .map_err(crate::store)?;
+
+        transaction.commit().await.map_err(crate::store)?;
+        Ok(previous)
+    }
+
+    async fn rollback_entry(
+        &self,
+        transaction: &Transaction<'_>,
+        height: i64,
+        expected_tip: &BlockRef,
+    ) -> Result<Row, IndexError> {
         let statement = transaction
             .prepare_cached(JOURNAL_ENTRY)
             .await
             .map_err(crate::store)?;
         let entry = transaction
-            .query_opt(&statement, &[&scope.chain.0, &scope.network, &height])
+            .query_opt(
+                &statement,
+                &[&self.scope.chain.0, &self.scope.network, &height],
+            )
             .await
             .map_err(crate::store)?
             .ok_or_else(|| {
@@ -78,60 +109,63 @@ impl Repository {
                 "rollback journal does not match the canonical tip",
             ));
         }
+        Ok(entry)
+    }
 
+    async fn revert_projections(
+        &self,
+        transaction: &Transaction<'_>,
+        height: i64,
+    ) -> Result<(), IndexError> {
         // Everything the block wrote except its spends is identified by the
         // block's height, so it is deleted by predicate rather than recorded in
         // the journal. Movements go first: nothing cascades them any more.
-        for sql in [DELETE_MOVEMENT, DELETE_HISTORY, DELETE_CREATED] {
+        // Spent outputs then come back from the journal.
+        for sql in [
+            DELETE_MOVEMENT,
+            DELETE_HISTORY,
+            DELETE_CREATED,
+            RESTORE_SPENT,
+        ] {
             let statement = transaction
                 .prepare_cached(sql)
                 .await
                 .map_err(crate::store)?;
             transaction
-                .execute(&statement, &[&scope.chain.0, &scope.network, &height])
+                .execute(
+                    &statement,
+                    &[&self.scope.chain.0, &self.scope.network, &height],
+                )
                 .await
                 .map_err(crate::store)?;
         }
-        // Spent outputs are not recoverable, so they come back from the journal.
-        let statement = transaction
-            .prepare_cached(RESTORE_SPENT)
-            .await
-            .map_err(crate::store)?;
-        transaction
-            .execute(&statement, &[&scope.chain.0, &scope.network, &height])
-            .await
-            .map_err(crate::store)?;
+        Ok(())
+    }
 
+    async fn restore_checkpoint(
+        &self,
+        transaction: &Transaction<'_>,
+        entry: &Row,
+    ) -> Result<Option<BlockRef>, IndexError> {
         let previous_height: Option<i64> =
             entry.try_get("previous_height").map_err(crate::store)?;
         let previous = match previous_height {
             None => None,
-            Some(_) => Some(row::block(&entry, "previous_")?),
+            Some(_) => Some(row::block(entry, "previous_")?),
         };
         match &previous {
-            Some(block) => move_checkpoint(&transaction, scope, block).await?,
+            Some(block) => move_checkpoint(transaction, &self.scope, block).await?,
             None => {
                 let statement = transaction
                     .prepare_cached(DROP_CHECKPOINT)
                     .await
                     .map_err(crate::store)?;
                 transaction
-                    .execute(&statement, &[&scope.chain.0, &scope.network])
+                    .execute(&statement, &[&self.scope.chain.0, &self.scope.network])
                     .await
                     .map_err(crate::store)?;
             }
         }
-        // journal_output cascades with the journal row.
-        let statement = transaction
-            .prepare_cached(DROP_JOURNAL)
-            .await
-            .map_err(crate::store)?;
-        transaction
-            .execute(&statement, &[&scope.chain.0, &scope.network, &height])
-            .await
-            .map_err(crate::store)?;
-
-        transaction.commit().await.map_err(crate::store)?;
         Ok(previous)
     }
 }

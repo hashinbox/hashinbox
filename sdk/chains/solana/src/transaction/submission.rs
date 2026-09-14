@@ -64,24 +64,7 @@ where
                 "Solana submission requires at least one envelope",
             )
         })?;
-        let height = tokio::select! {
-            result = self.rpc.block_height(floor) => result.map_err(|_| definite(
-                first.index(),
-                Vec::new(),
-                "Solana block height is unavailable before registration",
-            ))?,
-            () = cancellation.cancelled() => return Err(SendError::operation(
-                WalletErrorKind::Unavailable,
-                "Solana submission registration was cancelled",
-            )),
-        };
-        if height > first.lifetime().last_valid_block_height() {
-            return Err(definite(
-                first.index(),
-                Vec::new(),
-                "Solana transaction lifetime expired before registration",
-            ));
-        }
+        self.ensure_lifetime(first, floor, cancellation).await?;
         let guarded = leases.guard();
         let (result_send, result_wait) = tokio::sync::oneshot::channel();
         let rpc = self.rpc.clone();
@@ -112,6 +95,33 @@ where
                 "Solana submission result waiter was cancelled",
             )),
         }
+    }
+
+    async fn ensure_lifetime(
+        &self,
+        envelope: &Envelope,
+        floor: u64,
+        cancellation: &Cancellation,
+    ) -> Result<(), SendError> {
+        let height = tokio::select! {
+            result = self.rpc.block_height(floor) => result.map_err(|_| definite(
+                envelope.index(),
+                Vec::new(),
+                "Solana block height is unavailable before registration",
+            ))?,
+            () = cancellation.cancelled() => return Err(SendError::operation(
+                WalletErrorKind::Unavailable,
+                "Solana submission registration was cancelled",
+            )),
+        };
+        if height > envelope.lifetime().last_valid_block_height() {
+            return Err(definite(
+                envelope.index(),
+                Vec::new(),
+                "Solana transaction lifetime expired before registration",
+            ));
+        }
+        Ok(())
     }
 
     async fn register(
@@ -347,6 +357,85 @@ mod tests {
         .expect("message");
         let envelope = Envelope::sign(source, 0, message, 11, lifetime, &key).expect("envelope");
         PreparedBatch::fixture(11, vec![envelope], leases)
+    }
+
+    #[tokio::test]
+    async fn cancellation_precedes_empty_batch_validation_and_releases_the_lease() {
+        for cancelled in [false, true] {
+            let coordinator = SourceCoordinator::default();
+            let (floor, _, leases) = prepared(&coordinator).into_parts();
+            let empty = PreparedBatch::fixture(floor, Vec::new(), leases);
+            let cancellation = Cancellation::default();
+            if cancelled {
+                cancellation.cancel();
+            }
+            let rpc = Script::new([]);
+            let registrar = Arc::new(Registrar {
+                outcome: Err(super::super::RegistrationError::Closed),
+                tasks: Arc::new(Mutex::new(Vec::new())),
+            });
+            let error = Submitter::fixture(RpcClient::new(rpc.clone()), registrar)
+                .submit(empty, &cancellation)
+                .await
+                .unwrap_err();
+            let (kind, message) = if cancelled {
+                (
+                    WalletErrorKind::Unavailable,
+                    "Solana account acquisition was cancelled",
+                )
+            } else {
+                (
+                    WalletErrorKind::InvalidBatch,
+                    "Solana submission requires at least one envelope",
+                )
+            };
+            assert_eq!(error.source.kind, kind);
+            assert_eq!(error.source.message, message);
+            assert_eq!(error.failed_index, None);
+            assert!(error.accepted.is_empty());
+            assert_eq!(error.ambiguous_transaction_id, None);
+            drop(prepared(&coordinator));
+            rpc.assert_finished();
+        }
+    }
+
+    #[tokio::test]
+    async fn first_lifetime_validation_precedes_registration_and_preserves_error_scope() {
+        for (height, index, message) in [
+            (
+                json!(null),
+                Some(0),
+                "Solana block height is unavailable before registration",
+            ),
+            (
+                json!(45),
+                Some(0),
+                "Solana transaction lifetime expired before registration",
+            ),
+            (json!(44), None, "Solana submission registration failed"),
+        ] {
+            let coordinator = SourceCoordinator::default();
+            let rpc = Script::one(
+                "getBlockHeight",
+                json!([{"commitment":"confirmed", "minContextSlot":11}]),
+                height,
+            );
+            let registrar = Arc::new(Registrar {
+                outcome: Err(super::super::RegistrationError::Closed),
+                tasks: Arc::new(Mutex::new(Vec::new())),
+            });
+            let error = Submitter::fixture(RpcClient::new(rpc.clone()), registrar)
+                .submit(prepared(&coordinator), &Cancellation::default())
+                .await
+                .unwrap_err();
+            assert_eq!(error.source.kind, WalletErrorKind::Unavailable);
+            assert_eq!(error.source.message, message);
+            assert_eq!(error.failed_index, index);
+            assert!(error.accepted.is_empty());
+            assert_eq!(error.ambiguous_transaction_id, None);
+            drop(prepared(&coordinator));
+            rpc.assert_finished();
+        }
     }
 
     #[tokio::test]

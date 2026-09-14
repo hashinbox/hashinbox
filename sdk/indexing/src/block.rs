@@ -13,6 +13,36 @@ pub struct InterpretedBlock {
     pub outputs: OutputChanges,
 }
 
+impl InterpretedBlock {
+    fn validate_connection(&self, checkpoint: Option<&BlockRef>) -> Result<(), IndexError> {
+        if let Some(checkpoint) = checkpoint {
+            let next = checkpoint.height.0.checked_add(1).ok_or_else(|| {
+                IndexError::new(
+                    IndexErrorKind::InvalidBlock,
+                    "checkpoint height is exhausted",
+                    false,
+                )
+            })?;
+            if self.block.height != BlockHeight(next)
+                || self.block.position <= checkpoint.position
+                || self.block.parent.as_ref()
+                    != Some(&BlockParent {
+                        position: checkpoint.position,
+                        hash: checkpoint.hash.clone(),
+                    })
+            {
+                return Err(IndexError::new(
+                    IndexErrorKind::CannotConnect,
+                    "block does not connect to the checkpoint",
+                    true,
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// A validated canonical block transition supplied to persistent storage.
 ///
 /// Storage compares `expected_checkpoint`, derives rollback data from its own
@@ -41,29 +71,7 @@ impl BlockAddition {
                 false,
             ));
         }
-        if let Some(checkpoint) = &expected_checkpoint {
-            let next = checkpoint.height.0.checked_add(1).ok_or_else(|| {
-                IndexError::new(
-                    IndexErrorKind::InvalidBlock,
-                    "checkpoint height is exhausted",
-                    false,
-                )
-            })?;
-            if interpreted.block.height != BlockHeight(next)
-                || interpreted.block.position <= checkpoint.position
-                || interpreted.block.parent.as_ref()
-                    != Some(&BlockParent {
-                        position: checkpoint.position,
-                        hash: checkpoint.hash.clone(),
-                    })
-            {
-                return Err(IndexError::new(
-                    IndexErrorKind::CannotConnect,
-                    "block does not connect to the checkpoint",
-                    true,
-                ));
-            }
-        }
+        interpreted.validate_connection(expected_checkpoint.as_ref())?;
 
         interpreted
             .outputs
@@ -393,5 +401,141 @@ mod tests {
         .expect_err("duplicate output identity");
 
         assert_eq!(error.kind, IndexErrorKind::InvalidBlock);
+    }
+
+    #[test]
+    fn addition_validation_preserves_retention_connection_output_and_transaction_order() {
+        let own_scope = scope();
+        let key = output_key(&own_scope, "spent");
+        let invalid = InterpretedBlock {
+            block: block(2),
+            transactions: vec![draft(&own_scope, "-1".parse().unwrap())],
+            outputs: OutputChanges {
+                spent: vec![key.clone(), key],
+                ..OutputChanges::default()
+            },
+        };
+        for (retention, checkpoint, message, kind, retryable) in [
+            (
+                0,
+                block(u64::MAX),
+                "rollback retention must be greater than zero",
+                IndexErrorKind::InvalidRequest,
+                false,
+            ),
+            (
+                1,
+                block(u64::MAX),
+                "checkpoint height is exhausted",
+                IndexErrorKind::InvalidBlock,
+                false,
+            ),
+            (
+                1,
+                block(0),
+                "block does not connect to the checkpoint",
+                IndexErrorKind::CannotConnect,
+                true,
+            ),
+            (
+                1,
+                block(1),
+                "block contains overlapping or duplicate output changes",
+                IndexErrorKind::InvalidBlock,
+                false,
+            ),
+        ] {
+            let error = BlockAddition::new(
+                own_scope.clone(),
+                Some(checkpoint),
+                retention,
+                invalid.clone(),
+            )
+            .unwrap_err();
+            assert_eq!(error, IndexError::new(kind, message, retryable));
+        }
+    }
+
+    #[test]
+    fn duplicate_transaction_precedes_its_validation_but_not_the_first_draft() {
+        let own_scope = scope();
+        let valid = draft(&own_scope, Decimal::zero());
+        let mut invalid = valid.clone();
+        invalid.scope.network = "other".into();
+        for (transactions, kind, message) in [
+            (
+                vec![valid.clone(), invalid.clone()],
+                IndexErrorKind::InvalidBlock,
+                "block contains a duplicate transaction",
+            ),
+            (
+                vec![invalid, valid],
+                IndexErrorKind::ScopeMismatch,
+                "transaction belongs to another scope",
+            ),
+        ] {
+            let interpreted = InterpretedBlock {
+                block: block(1),
+                transactions,
+                outputs: OutputChanges::default(),
+            };
+            let error = BlockAddition::new(own_scope.clone(), None, 1, interpreted).unwrap_err();
+            assert_eq!(error, IndexError::new(kind, message, false));
+        }
+    }
+
+    #[test]
+    fn canonical_validation_preserves_scope_status_movement_and_fee_order() {
+        let own_scope = scope();
+        let mut value = draft(&own_scope, "-1".parse().unwrap());
+        value.scope.network = "other".into();
+        value.status = ObservationDraftStatus::Failed {
+            reason: Some("failed".into()),
+        };
+        value.fee = Some(NetworkFee {
+            asset: asset(&own_scope),
+            amount: "-1".parse().unwrap(),
+            payer: None,
+        });
+        let error = value.clone().canonical(&own_scope, &block(1)).unwrap_err();
+        assert_eq!(
+            error,
+            IndexError::new(
+                IndexErrorKind::ScopeMismatch,
+                "transaction belongs to another scope",
+                false,
+            )
+        );
+        value.scope = own_scope.clone();
+        for message in [
+            "failed transaction contains movements",
+            "transaction contains an invalid movement",
+            "transaction contains an invalid network fee",
+        ] {
+            let error = value.clone().canonical(&own_scope, &block(1)).unwrap_err();
+            assert_eq!(
+                error,
+                IndexError::new(IndexErrorKind::InvalidBlock, message, false)
+            );
+            if matches!(value.status, ObservationDraftStatus::Failed { .. }) {
+                value.status = ObservationDraftStatus::Included;
+            } else {
+                value.movements.clear();
+            }
+        }
+        value.status = ObservationDraftStatus::Failed {
+            reason: Some("failed".into()),
+        };
+        value.fee.as_mut().unwrap().amount = Decimal::from(7_u64);
+        let canonical = value.clone().canonical(&own_scope, &block(1)).unwrap();
+        assert_eq!(canonical.fee, value.fee);
+        assert_eq!(
+            canonical.status,
+            crate::CanonicalStatus::Failed {
+                block: block(1),
+                reason: Some("failed".into()),
+            }
+        );
+        assert!(canonical.movements.is_empty());
     }
 }

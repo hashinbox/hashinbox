@@ -583,6 +583,49 @@ fn malformed_source_parent_is_retryable_before_interpretation_or_commit() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn checkpoint_exhaustion_follows_parent_validation_and_precedes_interpretation() {
+    for parent_present in [false, true] {
+        let own_scope = scope("exhausted-checkpoint");
+        let mut checkpoint = block(BlockHeight(1));
+        checkpoint.height = BlockHeight(u64::MAX);
+        let mut next = block(BlockHeight(2));
+        if !parent_present {
+            next.parent = None;
+        }
+        let repository = Repository::default();
+        repository.state.lock().unwrap().checkpoint = Some(checkpoint.clone());
+        let interpreter = Interpreter::default();
+        let service = Service::new(
+            Source::sparse([checkpoint.clone(), next]),
+            interpreter.clone(),
+            repository.clone(),
+            config(own_scope.clone()),
+        );
+        let error = block_on(service.sync(&Vec::<AddressFilter>::new())).unwrap_err();
+        let expected = if parent_present {
+            IndexError::new(
+                IndexErrorKind::InvalidBlock,
+                "checkpoint height is exhausted",
+                false,
+            )
+        } else {
+            IndexError::new(
+                IndexErrorKind::CannotConnect,
+                "non-genesis block is missing its parent",
+                true,
+            )
+        };
+        assert_eq!(error, expected);
+        assert!(interpreter.inspections().is_empty());
+        assert_eq!(
+            block_on(repository.get(BlockSelector::Tip(own_scope))).unwrap(),
+            Some(checkpoint),
+        );
+    }
+}
+
 #[test]
 fn sparse_sync_reconciles_a_retained_reorg_by_native_position() {
     let own_scope = scope("sparse-reorg");

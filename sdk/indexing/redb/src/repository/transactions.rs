@@ -40,30 +40,40 @@ impl Transactions for Repository {
                 })
                 .await
                 .map_err(Self::storage_error)?;
-            let has_more = page.next.is_some();
-            let transactions = page
-                .entries
-                .into_iter()
-                .map(|(_, stored)| {
-                    Self::decode::<record::TransactionRecord>(&stored.value.0)?.into_domain()
-                })
-                .collect::<Result<Vec<_>, IndexError>>()?;
-            self.ensure_checkpoint(&checkpoint).await?;
-            let next = transactions
-                .last()
-                .filter(|_| has_more)
-                .map(|transaction| HistoryCursor {
-                    checkpoint: checkpoint.clone(),
-                    position: indexing::HistoryPosition {
-                        height: transaction.block().height,
-                        transaction: transaction.transaction_id.clone(),
-                    },
-                });
-            Ok(CanonicalPage {
-                checkpoint,
-                transactions,
-                next,
+            self.history_page(checkpoint, page).await
+        })
+    }
+}
+
+impl Repository {
+    async fn history_page(
+        &self,
+        checkpoint: Option<BlockRef>,
+        page: ::storage::ScanPage,
+    ) -> Result<CanonicalPage, IndexError> {
+        let has_more = page.next.is_some();
+        let transactions = page
+            .entries
+            .into_iter()
+            .map(|(_, stored)| {
+                Self::decode::<record::TransactionRecord>(&stored.value.0)?.into_domain()
             })
+            .collect::<Result<Vec<_>, IndexError>>()?;
+        self.ensure_checkpoint(&checkpoint).await?;
+        let next = transactions
+            .last()
+            .filter(|_| has_more)
+            .map(|transaction| HistoryCursor {
+                checkpoint: checkpoint.clone(),
+                position: indexing::HistoryPosition {
+                    height: transaction.block().height,
+                    transaction: transaction.transaction_id.clone(),
+                },
+            });
+        Ok(CanonicalPage {
+            checkpoint,
+            transactions,
+            next,
         })
     }
 }

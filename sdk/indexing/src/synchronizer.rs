@@ -298,48 +298,11 @@ where
         plan: &mut crate::SyncPlan,
     ) -> Result<BlockRef, IndexError> {
         let block = source_block.block_ref();
-        if block.position == BlockPosition(0) {
-            if block.parent.is_some() {
-                return Err(IndexError::cannot_connect(
-                    "genesis block must not have a parent",
-                ));
-            }
-        } else if block.parent.is_none() {
-            return Err(IndexError::cannot_connect(
-                "non-genesis block is missing its parent",
-            ));
-        }
-        if let Some(tip) = &checkpoint {
-            let expected_height = tip.height.checked_successor().ok_or_else(|| {
-                IndexError::new(
-                    IndexErrorKind::InvalidBlock,
-                    "checkpoint height is exhausted",
-                    false,
-                )
-            })?;
-            if block.position <= tip.position
-                || block.height != expected_height
-                || block.parent.as_ref()
-                    != Some(&BlockParent {
-                        position: tip.position,
-                        hash: tip.hash.clone(),
-                    })
-            {
-                return Err(IndexError::cannot_connect(
-                    "source block does not connect to the checkpoint",
-                ));
-            }
-        }
+        self.validate_source(&block, checkpoint.as_ref())?;
         let interpreted = self.interpreter.inspect(&source_block, addresses)?;
         self.validate_block(&block, &interpreted)?;
-        if self
-            .source
-            .canonical_at(block.position)
-            .await
-            .map_err(IndexError::from)?
-            .as_ref()
-            != Some(&block)
-        {
+        let canonical = self.source.canonical_at(block.position).await?;
+        if canonical.as_ref() != Some(&block) {
             return Err(IndexError::cannot_connect(
                 "source block changed before commit",
             ));
@@ -373,6 +336,46 @@ where
                 .await;
         }
         Ok(block)
+    }
+
+    fn validate_source(
+        &self,
+        block: &BlockRef,
+        checkpoint: Option<&BlockRef>,
+    ) -> Result<(), IndexError> {
+        if block.position == BlockPosition(0) {
+            if block.parent.is_some() {
+                return Err(IndexError::cannot_connect(
+                    "genesis block must not have a parent",
+                ));
+            }
+        } else if block.parent.is_none() {
+            return Err(IndexError::cannot_connect(
+                "non-genesis block is missing its parent",
+            ));
+        }
+        if let Some(tip) = checkpoint {
+            let expected_height = tip.height.checked_successor().ok_or_else(|| {
+                IndexError::new(
+                    IndexErrorKind::InvalidBlock,
+                    "checkpoint height is exhausted",
+                    false,
+                )
+            })?;
+            if block.position <= tip.position
+                || block.height != expected_height
+                || block.parent.as_ref()
+                    != Some(&BlockParent {
+                        position: tip.position,
+                        hash: tip.hash.clone(),
+                    })
+            {
+                return Err(IndexError::cannot_connect(
+                    "source block does not connect to the checkpoint",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn validate_block(

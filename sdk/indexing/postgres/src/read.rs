@@ -8,10 +8,10 @@ use std::collections::HashMap;
 
 use deadpool_postgres::Transaction;
 use indexing::{
-    AssetId, CanonicalPage, CanonicalStatus, CanonicalTransaction, ChainId, HistoryCursor,
-    HistoryPosition, HistoryQuery, IndexError, IndexErrorKind, MovementId, MovementKind,
-    NetworkFee, OutputCursor, OutputPage, OutputRequest, TransactionRef, Transactions,
-    ValueMovement,
+    AssetId, BlockRef, CanonicalAddress, CanonicalPage, CanonicalStatus, CanonicalTransaction,
+    ChainId, HistoryCursor, HistoryPosition, HistoryQuery, IndexError, IndexErrorKind, IndexScope,
+    MovementId, MovementKind, NetworkFee, OutputCursor, OutputPage, OutputRequest, TransactionRef,
+    Transactions, ValueMovement,
 };
 use tokio_postgres::{IsolationLevel, Row};
 
@@ -58,15 +58,7 @@ impl Repository {
         &self,
         request: HistoryQuery,
     ) -> Result<CanonicalPage, IndexError> {
-        self.check_scope(&request.scope)?;
-        self.check_address(&request.address)?;
-        if request.limit == 0 || request.limit > MAX_PAGE {
-            return Err(IndexError::new(
-                IndexErrorKind::InvalidRequest,
-                "page limit must be between one and one thousand",
-                false,
-            ));
-        }
+        self.check_page(&request.scope, &request.address, request.limit)?;
         let mut client = self.client().await?;
         let transaction = client
             .build_transaction()
@@ -75,19 +67,46 @@ impl Repository {
             .start()
             .await
             .map_err(crate::store)?;
-        let checkpoint = self.checkpoint_in(&transaction).await?;
-        if request
-            .after
-            .as_ref()
-            .is_some_and(|cursor| cursor.checkpoint != checkpoint)
-        {
-            return Err(IndexError::new(
-                IndexErrorKind::Conflict,
-                "history changed during pagination",
-                true,
-            ));
-        }
+        let conflict = "history changed during pagination";
+        let expected = request.after.as_ref().map(|cursor| &cursor.checkpoint);
+        let checkpoint = self
+            .page_checkpoint(&transaction, expected, conflict)
+            .await?;
 
+        let rows = self.history_rows(&transaction, &request).await?;
+        let has_more = rows.len() > request.limit;
+        let page = &rows[..rows.len().min(request.limit)];
+        let movements = self.page_movements(&transaction, &request, page).await?;
+        let transactions = self.history_transactions(&request, page, movements)?;
+
+        // The checkpoint must not have moved while the page was assembled, or
+        // the page would mix two views of canonical history.
+        self.page_checkpoint(&transaction, Some(&checkpoint), conflict)
+            .await?;
+        let next = transactions
+            .last()
+            .filter(|_| has_more)
+            .map(|last| HistoryCursor {
+                checkpoint: checkpoint.clone(),
+                position: HistoryPosition {
+                    height: last.block().height,
+                    transaction: last.transaction_id.clone(),
+                },
+            });
+        let page = CanonicalPage {
+            checkpoint,
+            transactions,
+            next,
+        };
+        transaction.commit().await.map_err(crate::store)?;
+        Ok(page)
+    }
+
+    async fn history_rows(
+        &self,
+        transaction: &Transaction<'_>,
+        request: &HistoryQuery,
+    ) -> Result<Vec<Row>, IndexError> {
         // One extra row reveals whether another page exists without a count.
         let limit = i64::try_from(request.limit.saturating_add(1))
             .map_err(|_| row::store("page limit exceeds the query range"))?;
@@ -102,7 +121,7 @@ impl Repository {
             .prepare_cached(HISTORY_PAGE)
             .await
             .map_err(crate::store)?;
-        let rows = transaction
+        transaction
             .query(
                 &statement,
                 &[
@@ -115,12 +134,15 @@ impl Repository {
                 ],
             )
             .await
-            .map_err(crate::store)?;
+            .map_err(crate::store)
+    }
 
-        let has_more = rows.len() > request.limit;
-        let page = &rows[..rows.len().min(request.limit)];
-        let mut movements = self.page_movements(&transaction, &request, page).await?;
-
+    fn history_transactions(
+        &self,
+        request: &HistoryQuery,
+        page: &[Row],
+        mut movements: HashMap<Position, Vec<ValueMovement>>,
+    ) -> Result<Vec<CanonicalTransaction>, IndexError> {
         let mut transactions = Vec::with_capacity(page.len());
         for entry in page {
             let height: i64 = entry.try_get("height").map_err(crate::store)?;
@@ -128,36 +150,9 @@ impl Repository {
             let owned = movements
                 .remove(&(height, transaction_id.clone()))
                 .unwrap_or_default();
-            transactions.push(self.canonical(&request, entry, transaction_id, owned)?);
+            transactions.push(self.canonical(request, entry, transaction_id, owned)?);
         }
-
-        // The checkpoint must not have moved while the page was assembled, or
-        // the page would mix two views of canonical history.
-        if self.checkpoint_in(&transaction).await? != checkpoint {
-            return Err(IndexError::new(
-                IndexErrorKind::Conflict,
-                "history changed during pagination",
-                true,
-            ));
-        }
-        let next = has_more
-            .then(|| {
-                transactions.last().map(|last| HistoryCursor {
-                    checkpoint: checkpoint.clone(),
-                    position: HistoryPosition {
-                        height: last.block().height,
-                        transaction: last.transaction_id.clone(),
-                    },
-                })
-            })
-            .flatten();
-        let page = CanonicalPage {
-            checkpoint,
-            transactions,
-            next,
-        };
-        transaction.commit().await.map_err(crate::store)?;
-        Ok(page)
+        Ok(transactions)
     }
 
     /// Reads the movements of every transaction on a page in one query, keyed
@@ -264,12 +259,6 @@ impl Repository {
         let amount = row::decimal(&amount)?;
         let from: Option<String> = entry.try_get("from_address").map_err(crate::store)?;
         let to: Option<String> = entry.try_get("to_address").map_err(crate::store)?;
-        let address = |value: Option<String>| {
-            value.map(|value| indexing::CanonicalAddress {
-                scope: self.scope.clone(),
-                value,
-            })
-        };
         let required = |value: Option<indexing::CanonicalAddress>| {
             value.ok_or_else(|| row::store("stored movement is missing a required endpoint"))
         };
@@ -278,34 +267,41 @@ impl Repository {
                 id,
                 asset,
                 amount,
-                from: required(address(from))?,
-                to: required(address(to))?,
+                from: required(self.movement_address(from))?,
+                to: required(self.movement_address(to))?,
             },
             "input" => ValueMovement::Input {
                 id,
                 asset,
                 amount,
-                owner: address(from),
+                owner: self.movement_address(from),
             },
             "output" => ValueMovement::Output {
                 id,
                 asset,
                 amount,
-                owner: address(to),
+                owner: self.movement_address(to),
             },
             "mint" => ValueMovement::Mint {
                 id,
                 asset,
                 amount,
-                to: required(address(to))?,
+                to: required(self.movement_address(to))?,
             },
             "burn" => ValueMovement::Burn {
                 id,
                 asset,
                 amount,
-                from: required(address(from))?,
+                from: required(self.movement_address(from))?,
             },
             _ => return Err(row::store("stored movement kind is unknown")),
+        })
+    }
+
+    fn movement_address(&self, value: Option<String>) -> Option<CanonicalAddress> {
+        value.map(|value| CanonicalAddress {
+            scope: self.scope.clone(),
+            value,
         })
     }
 
@@ -313,15 +309,7 @@ impl Repository {
         &self,
         request: OutputRequest,
     ) -> Result<OutputPage, IndexError> {
-        self.check_scope(&request.scope)?;
-        self.check_address(&request.address)?;
-        if request.limit == 0 || request.limit > MAX_PAGE {
-            return Err(IndexError::new(
-                IndexErrorKind::InvalidRequest,
-                "page limit must be between one and one thousand",
-                false,
-            ));
-        }
+        self.check_page(&request.scope, &request.address, request.limit)?;
         let mut client = self.client().await?;
         let transaction = client
             .build_transaction()
@@ -330,18 +318,41 @@ impl Repository {
             .start()
             .await
             .map_err(crate::store)?;
-        let checkpoint = self.checkpoint_in(&transaction).await?;
-        if request
-            .after
-            .as_ref()
-            .is_some_and(|cursor| cursor.checkpoint != checkpoint)
-        {
-            return Err(IndexError::new(
-                IndexErrorKind::Conflict,
-                "outputs changed during pagination",
-                true,
-            ));
-        }
+        let conflict = "outputs changed during pagination";
+        let expected = request.after.as_ref().map(|cursor| &cursor.checkpoint);
+        let checkpoint = self
+            .page_checkpoint(&transaction, expected, conflict)
+            .await?;
+        let rows = self.output_rows(&transaction, &request).await?;
+        let has_more = rows.len() > request.limit;
+        let outputs = rows
+            .iter()
+            .take(request.limit)
+            .map(|entry| row::output(&request.scope, entry))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.page_checkpoint(&transaction, Some(&checkpoint), conflict)
+            .await?;
+        let next = outputs
+            .last()
+            .filter(|_| has_more)
+            .map(|last| OutputCursor {
+                checkpoint: checkpoint.clone(),
+                position: encode_position(&last.id.transaction.value, last.id.index),
+            });
+        let page = OutputPage {
+            checkpoint,
+            outputs,
+            next,
+        };
+        transaction.commit().await.map_err(crate::store)?;
+        Ok(page)
+    }
+
+    async fn output_rows(
+        &self,
+        transaction: &Transaction<'_>,
+        request: &OutputRequest,
+    ) -> Result<Vec<Row>, IndexError> {
         let (after_transaction, after_index) = match &request.after {
             Some(cursor) => decode_position(&cursor.position)?,
             None => (String::new(), -1),
@@ -352,7 +363,7 @@ impl Repository {
             .prepare_cached(OUTPUT_PAGE)
             .await
             .map_err(crate::store)?;
-        let rows = transaction
+        transaction
             .query(
                 &statement,
                 &[
@@ -365,36 +376,38 @@ impl Repository {
                 ],
             )
             .await
-            .map_err(crate::store)?;
+            .map_err(crate::store)
+    }
 
-        let has_more = rows.len() > request.limit;
-        let outputs = rows
-            .iter()
-            .take(request.limit)
-            .map(|entry| row::output(&request.scope, entry))
-            .collect::<Result<Vec<_>, _>>()?;
-        if self.checkpoint_in(&transaction).await? != checkpoint {
+    fn check_page(
+        &self,
+        scope: &IndexScope,
+        address: &CanonicalAddress,
+        limit: usize,
+    ) -> Result<(), IndexError> {
+        self.check_scope(scope)?;
+        self.check_address(address)?;
+        if limit == 0 || limit > MAX_PAGE {
             return Err(IndexError::new(
-                IndexErrorKind::Conflict,
-                "outputs changed during pagination",
-                true,
+                IndexErrorKind::InvalidRequest,
+                "page limit must be between one and one thousand",
+                false,
             ));
         }
-        let next = has_more
-            .then(|| {
-                outputs.last().map(|last| OutputCursor {
-                    checkpoint: checkpoint.clone(),
-                    position: encode_position(&last.id.transaction.value, last.id.index),
-                })
-            })
-            .flatten();
-        let page = OutputPage {
-            checkpoint,
-            outputs,
-            next,
-        };
-        transaction.commit().await.map_err(crate::store)?;
-        Ok(page)
+        Ok(())
+    }
+
+    async fn page_checkpoint(
+        &self,
+        transaction: &Transaction<'_>,
+        expected: Option<&Option<BlockRef>>,
+        message: &'static str,
+    ) -> Result<Option<BlockRef>, IndexError> {
+        let checkpoint = self.checkpoint_in(transaction).await?;
+        if expected.is_some_and(|expected| *expected != checkpoint) {
+            return Err(IndexError::new(IndexErrorKind::Conflict, message, true));
+        }
+        Ok(checkpoint)
     }
 }
 
