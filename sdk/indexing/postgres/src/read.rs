@@ -262,39 +262,40 @@ impl Repository {
         let required = |value: Option<indexing::CanonicalAddress>| {
             value.ok_or_else(|| row::store("stored movement is missing a required endpoint"))
         };
-        Ok(match kind.as_str() {
-            "transfer" => ValueMovement::Transfer {
+        let kind = row::movement_kind(&kind)
+            .ok_or_else(|| row::store("stored movement kind is unknown"))?;
+        Ok(match kind {
+            MovementKind::Transfer => ValueMovement::Transfer {
                 id,
                 asset,
                 amount,
                 from: required(self.movement_address(from))?,
                 to: required(self.movement_address(to))?,
             },
-            "input" => ValueMovement::Input {
+            MovementKind::Input => ValueMovement::Input {
                 id,
                 asset,
                 amount,
                 owner: self.movement_address(from),
             },
-            "output" => ValueMovement::Output {
+            MovementKind::Output => ValueMovement::Output {
                 id,
                 asset,
                 amount,
                 owner: self.movement_address(to),
             },
-            "mint" => ValueMovement::Mint {
+            MovementKind::Mint => ValueMovement::Mint {
                 id,
                 asset,
                 amount,
                 to: required(self.movement_address(to))?,
             },
-            "burn" => ValueMovement::Burn {
+            MovementKind::Burn => ValueMovement::Burn {
                 id,
                 asset,
                 amount,
                 from: required(self.movement_address(from))?,
             },
-            _ => return Err(row::store("stored movement kind is unknown")),
         })
     }
 
@@ -454,18 +455,6 @@ fn decode_position(position: &[u8]) -> Result<(String, i32), IndexError> {
         .parse::<i32>()
         .map_err(|_| row::store("output cursor is not valid"))?;
     Ok((transaction.to_owned(), index))
-}
-
-/// Unused today but kept so the movement mapper can name every variant.
-#[allow(dead_code)]
-const fn kinds() -> [MovementKind; 5] {
-    [
-        MovementKind::Transfer,
-        MovementKind::Input,
-        MovementKind::Output,
-        MovementKind::Mint,
-        MovementKind::Burn,
-    ]
 }
 
 #[cfg(test)]

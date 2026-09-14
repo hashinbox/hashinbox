@@ -106,7 +106,7 @@ where
             let value: String = raw.deserialize().map_err(map_json_rpc_error)?;
             let word = parse_fixed_data::<32>(&value, "ERC-20 balance result")
                 .map_err(|message| invalid_rpc_response("eth_call", message))?;
-            erc20::decode_balance(&word)
+            Wei::from_erc20_balance(&word)
                 .map_err(|_| invalid_rpc_response("eth_call", "invalid balanceOf result"))
         })
     }
@@ -162,7 +162,7 @@ where
         self.erc20_word(token, erc20::balance_of(&Address([0; 20])), block)
             .await
             .and_then(|word| {
-                erc20::decode_balance(&word).map_err(|_| {
+                Wei::from_erc20_balance(&word).map_err(|_| {
                     invalid_rpc_response("eth_call", "invalid ERC-20 balanceOf result")
                 })
             })?;

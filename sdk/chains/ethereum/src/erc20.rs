@@ -44,16 +44,15 @@ impl TransferRequest {
     }
 }
 
-// strict ERC-20 balanceOf return decoding bridges Alloy ABI words and Wei for balance reads and
-// token admission without adding token-call policy to amounts
-// design-lint: allow unclassified-free-function -- See the boundary rationale above.
-pub(crate) fn decode_balance(word: &[u8]) -> Result<Wei, &'static str> {
-    let value = Erc20::balanceOfCall::abi_decode_returns_validate(word)
-        .map_err(|_| "invalid balanceOf ABI word")?;
-    if Erc20::balanceOfCall::abi_encode_returns(&value) != word {
-        return Err("non-canonical balanceOf ABI word");
+impl Wei {
+    pub(crate) fn from_erc20_balance(word: &[u8]) -> Result<Self, &'static str> {
+        let value = Erc20::balanceOfCall::abi_decode_returns_validate(word)
+            .map_err(|_| "invalid balanceOf ABI word")?;
+        if Erc20::balanceOfCall::abi_encode_returns(&value) != word {
+            return Err("non-canonical balanceOf ABI word");
+        }
+        Ok(Self(value.to_be_bytes()))
     }
-    Ok(Wei(value.to_be_bytes()))
 }
 
 // strict ERC-20 decimals return decoding owns canonical uint8 ABI validation separately from
@@ -139,7 +138,7 @@ mod tests {
     fn typed_results_require_canonical_words() {
         let mut amount = [0_u8; 32];
         amount[31] = 7;
-        assert_eq!(decode_balance(&amount), Ok(Wei::from_u128(7)));
+        assert_eq!(Wei::from_erc20_balance(&amount), Ok(Wei::from_u128(7)));
 
         let mut decimals = [0_u8; 32];
         decimals[31] = 6;
@@ -157,11 +156,11 @@ mod tests {
     fn return_decoders_reject_truncation_and_trailing_words() {
         for length in [0, 31, 33, 64] {
             let bytes = vec![0; length];
-            assert!(decode_balance(&bytes).is_err());
+            assert!(Wei::from_erc20_balance(&bytes).is_err());
             assert!(decode_decimals(&bytes).is_err());
             assert!(decode_transfer(&bytes).is_err());
         }
-        assert_eq!(decode_balance(&[255; 32]), Ok(Wei([255; 32])));
+        assert_eq!(Wei::from_erc20_balance(&[255; 32]), Ok(Wei([255; 32])));
         assert_eq!(decode_transfer(&[0; 32]), Ok(false));
         let mut word = [0; 32];
         word[31] = 255;
@@ -170,6 +169,19 @@ mod tests {
         word[0] = 1;
         assert!(decode_decimals(&word).is_err());
         assert!(decode_transfer(&word).is_err());
+    }
+
+    #[test]
+    fn balance_decoder_preserves_zero_and_distinguishes_invalid_from_noncanonical_words() {
+        assert_eq!(Wei::from_erc20_balance(&[0; 32]), Ok(Wei::ZERO));
+        for (length, message) in [
+            (0, "invalid balanceOf ABI word"),
+            (31, "invalid balanceOf ABI word"),
+            (33, "non-canonical balanceOf ABI word"),
+            (64, "non-canonical balanceOf ABI word"),
+        ] {
+            assert_eq!(Wei::from_erc20_balance(&vec![0; length]), Err(message));
+        }
     }
 
     fn hex(value: &str) -> Vec<u8> {

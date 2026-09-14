@@ -2,8 +2,8 @@
 
 use indexing::{
     AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, CanonicalAddress,
-    ChainId, Decimal, IndexError, IndexErrorKind, IndexScope, IndexedOutput, OutputId,
-    TransactionRef,
+    ChainId, Decimal, IndexError, IndexErrorKind, IndexScope, IndexedOutput, MovementKind,
+    OutputId, TransactionRef,
 };
 use tokio_postgres::Row;
 
@@ -23,6 +23,20 @@ pub(crate) fn decimal(encoded: &str) -> Result<Decimal, IndexError> {
         return Err(store("stored amount is not canonical"));
     }
     Ok(value)
+}
+
+/// Decode the PostgreSQL movement tag without exposing storage spelling on the domain enum.
+// linter:disable rust/string-backed-finite-state -- SQL text parser returns domain MovementKind;
+// the reader uses exhaustive enum matching and does not retain a string-backed movement state.
+pub(crate) fn movement_kind(encoded: &str) -> Option<MovementKind> {
+    match encoded {
+        "transfer" => Some(MovementKind::Transfer),
+        "input" => Some(MovementKind::Input),
+        "output" => Some(MovementKind::Output),
+        "mint" => Some(MovementKind::Mint),
+        "burn" => Some(MovementKind::Burn),
+        _ => None,
+    }
 }
 
 // PostgreSQL signed height decoding is shared by block and output rows and maps negative stored
@@ -135,6 +149,33 @@ pub(crate) fn store(message: impl Into<String>) -> IndexError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn movement_tags_decode_to_the_existing_domain_kinds() {
+        for (encoded, expected) in [
+            ("transfer", MovementKind::Transfer),
+            ("input", MovementKind::Input),
+            ("output", MovementKind::Output),
+            ("mint", MovementKind::Mint),
+            ("burn", MovementKind::Burn),
+        ] {
+            assert_eq!(movement_kind(encoded), Some(expected));
+        }
+    }
+
+    #[test]
+    fn unknown_movement_tags_are_rejected_without_normalization() {
+        for encoded in [
+            "",
+            "unknown",
+            "Transfer",
+            " transfer",
+            "transfer ",
+            "mint\0",
+        ] {
+            assert_eq!(movement_kind(encoded), None);
+        }
+    }
 
     #[test]
     fn stored_positions_preserve_nonnegative_values_and_reject_negative_data() {
