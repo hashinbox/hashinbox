@@ -423,12 +423,1021 @@ fn open_database(path: &Path, initialize: bool) -> Result<Database, Error> {
 }
 
 #[cfg(test)]
-#[path = "backend/store_test.rs"]
-mod store_test;
+mod store_test {
+    use std::{path::PathBuf, task::Poll};
+
+    use super::*;
+    use storage::{Condition, ErrorKind, Operation, Version};
+    use tempfile::TempDir;
+
+    fn namespace(name: &str) -> Namespace {
+        Namespace(name.to_owned())
+    }
+
+    fn key(value: &str) -> Key {
+        Key(value.as_bytes().to_vec())
+    }
+
+    fn value(value: &str) -> storage::Value {
+        storage::Value(value.as_bytes().to_vec())
+    }
+
+    fn database_path(directory: &TempDir) -> PathBuf {
+        directory.path().join("database.redb")
+    }
+
+    fn put(namespace: &Namespace, key: &Key, value: &str) -> Operation {
+        Operation::Put {
+            namespace: namespace.clone(),
+            key: key.clone(),
+            value: self::value(value),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_scan_bounds_preserve_errors_and_leave_the_store_usable() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let storage = Redb::open(database_path(&directory))?;
+        let records = namespace("records");
+        for (limit, after, message) in [
+            (0, None, "scan limit must be greater than zero"),
+            (usize::MAX, None, "scan limit is too large"),
+            (
+                1,
+                Some(key("other")),
+                "scan continuation key does not match the requested prefix",
+            ),
+        ] {
+            let error = storage
+                .scan(ScanRequest {
+                    namespace: records.clone(),
+                    prefix: b"entry/".to_vec(),
+                    after,
+                    limit,
+                })
+                .await
+                .expect_err("invalid scan bounds");
+            assert_eq!(error.kind, ErrorKind::InvalidRequest);
+            assert_eq!(error.message, message);
+        }
+        let committed = storage
+            .commit(WriteBatch {
+                conditions: Vec::new(),
+                operations: vec![put(&records, &key("entry/1"), "stored")],
+            })
+            .await?;
+        assert_eq!(committed.version, Version(1));
+        assert_eq!(
+            storage
+                .get(&records, &key("entry/1"))
+                .await?
+                .map(|stored| stored.value),
+            Some(value("stored"))
+        );
+        assert_eq!(storage.reopen_count_for_test().await?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_enqueue_does_not_cancel_the_accepted_commit() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let storage = Redb::open(database_path(&directory))?;
+        let records = namespace("cancelled-request");
+        let record_key = key("accepted-write");
+        let release = storage.hold_owner_for_test().await?;
+        let mut commit = storage.commit(WriteBatch {
+            conditions: Vec::new(),
+            operations: vec![put(&records, &record_key, "durable")],
+        });
+
+        std::future::poll_fn(|context| match commit.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(_) => panic!("owner hold must keep the accepted commit pending"),
+        })
+        .await;
+        drop(commit);
+        release
+            .send(())
+            .map_err(|_| other("failed to release redb owner test hold"))?;
+
+        let stored = storage.get(&records, &record_key).await?;
+        assert_eq!(stored.map(|stored| stored.value), Some(value("durable")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ambiguous_commit_successful_reopen_does_not_replay() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let storage = Redb::open(database_path(&directory))?;
+        let records = namespace("records");
+        let primary = key("primary");
+        storage.fail_after_next_commit_for_test().await?;
+
+        let error = storage
+            .commit(WriteBatch {
+                conditions: vec![],
+                operations: vec![put(&records, &primary, "persisted-once")],
+            })
+            .await
+            .expect_err("the injected post-persistence result must be ambiguous");
+
+        assert_eq!(error.kind, ErrorKind::Unavailable);
+        assert_eq!(storage.reopen_count_for_test().await?, 1);
+        assert_eq!(
+            storage.get(&records, &primary).await?,
+            Some(StoredValue {
+                value: value("persisted-once"),
+                version: Version(1),
+            })
+        );
+        assert_eq!(storage.reopen_count_for_test().await?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_recovers_after_ambiguous_commit_reopen_failure() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let storage = Redb::open(database_path(&directory))?;
+        let records = namespace("records");
+        let primary = key("primary");
+        storage.fail_after_next_commit_for_test().await?;
+        storage.fail_next_reopen_for_test().await?;
+
+        let error = storage
+            .commit(WriteBatch {
+                conditions: vec![],
+                operations: vec![put(&records, &primary, "persisted-once")],
+            })
+            .await
+            .expect_err("the injected post-persistence result must be ambiguous");
+
+        assert_eq!(error.kind, ErrorKind::Unavailable);
+        assert_eq!(storage.reopen_count_for_test().await?, 0);
+        assert_eq!(
+            storage.get(&records, &primary).await?,
+            Some(StoredValue {
+                value: value("persisted-once"),
+                version: Version(1),
+            })
+        );
+        assert_eq!(storage.reopen_count_for_test().await?, 1);
+        let page = storage
+            .scan(ScanRequest {
+                namespace: records.clone(),
+                prefix: b"primary".to_vec(),
+                after: None,
+                limit: 1,
+            })
+            .await?;
+        assert_eq!(
+            page.entries,
+            vec![(
+                primary.clone(),
+                StoredValue {
+                    value: value("persisted-once"),
+                    version: Version(1),
+                }
+            )]
+        );
+        assert_eq!(page.next, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_get_and_paginated_scan_are_ordered() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let storage = Redb::open(database_path(&directory))?;
+        let observations = namespace("observations");
+        let other_namespace = namespace("other");
+
+        let result = storage
+            .commit(WriteBatch {
+                conditions: vec![],
+                operations: vec![
+                    put(&observations, &key("tx/a"), "a"),
+                    put(&observations, &key("tx/b"), "b"),
+                    put(&observations, &key("tx/c"), "c"),
+                    put(&other_namespace, &key("tx/a"), "isolated"),
+                ],
+            })
+            .await?;
+        assert_eq!(result.version, Version(1));
+        assert_eq!(
+            storage.get(&observations, &key("tx/b")).await?,
+            Some(StoredValue {
+                value: value("b"),
+                version: Version(1),
+            })
+        );
+
+        let first = storage
+            .scan(ScanRequest {
+                namespace: observations.clone(),
+                prefix: b"tx/".to_vec(),
+                after: None,
+                limit: 2,
+            })
+            .await?;
+        assert_eq!(
+            first
+                .entries
+                .iter()
+                .map(|(entry_key, _)| entry_key.clone())
+                .collect::<Vec<_>>(),
+            vec![key("tx/a"), key("tx/b")]
+        );
+        assert_eq!(first.next, Some(key("tx/b")));
+
+        let second = storage
+            .scan(ScanRequest {
+                namespace: observations,
+                prefix: b"tx/".to_vec(),
+                after: first.next,
+                limit: 2,
+            })
+            .await?;
+        assert_eq!(
+            second
+                .entries
+                .iter()
+                .map(|(entry_key, _)| entry_key.clone())
+                .collect::<Vec<_>>(),
+            vec![key("tx/c")]
+        );
+        assert_eq!(second.next, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_condition_rejects_the_complete_batch() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let storage = Redb::open(database_path(&directory))?;
+        let records = namespace("records");
+        let primary = key("primary");
+        let side_effect = key("side-effect");
+
+        storage
+            .commit(WriteBatch {
+                conditions: vec![Condition::Missing {
+                    namespace: records.clone(),
+                    key: primary.clone(),
+                }],
+                operations: vec![put(&records, &primary, "v1")],
+            })
+            .await?;
+        storage
+            .commit(WriteBatch {
+                conditions: vec![Condition::Version {
+                    namespace: records.clone(),
+                    key: primary.clone(),
+                    expected: Version(1),
+                }],
+                operations: vec![put(&records, &primary, "v2")],
+            })
+            .await?;
+
+        let error = storage
+            .commit(WriteBatch {
+                conditions: vec![Condition::Version {
+                    namespace: records.clone(),
+                    key: primary.clone(),
+                    expected: Version(1),
+                }],
+                operations: vec![
+                    put(&records, &primary, "stale"),
+                    put(&records, &side_effect, "must-not-commit"),
+                ],
+            })
+            .await
+            .expect_err("a stale compare-and-swap must fail");
+        assert_eq!(error.kind, ErrorKind::Conflict);
+        assert_eq!(storage.get(&records, &side_effect).await?, None);
+        assert_eq!(
+            storage.get(&records, &primary).await?,
+            Some(StoredValue {
+                value: value("v2"),
+                version: Version(2),
+            })
+        );
+
+        let next = storage
+            .commit(WriteBatch {
+                conditions: vec![Condition::Missing {
+                    namespace: records.clone(),
+                    key: side_effect.clone(),
+                }],
+                operations: vec![put(&records, &side_effect, "committed")],
+            })
+            .await?;
+        assert_eq!(next.version, Version(3));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn absent_or_present_condition_conflicts_preserve_batch_and_version() -> Result<(), Error>
+    {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let storage = Redb::open(database_path(&directory))?;
+        let records = namespace("records");
+        let other_namespace = namespace("other");
+        let primary = key("primary");
+        let missing = key("missing");
+        let side_effect = key("side-effect");
+        storage
+            .commit(WriteBatch {
+                conditions: vec![],
+                operations: vec![put(&records, &primary, "original")],
+            })
+            .await?;
+
+        for (condition, message) in [
+            (
+                Condition::Missing {
+                    namespace: records.clone(),
+                    key: primary.clone(),
+                },
+                "missing condition failed in namespace `records` because the key exists",
+            ),
+            (
+                Condition::Version {
+                    namespace: records.clone(),
+                    key: missing.clone(),
+                    expected: Version(2),
+                },
+                "version condition failed in namespace `records` because the key is missing",
+            ),
+        ] {
+            let batch = WriteBatch {
+                conditions: vec![condition],
+                operations: vec![
+                    Operation::Delete {
+                        namespace: records.clone(),
+                        key: primary.clone(),
+                    },
+                    put(&records, &missing, "must-not-commit"),
+                    put(&other_namespace, &side_effect, "must-not-commit"),
+                ],
+            };
+            let error = storage
+                .commit(batch)
+                .await
+                .expect_err("conditions must inspect the state before any batch operation");
+
+            assert_eq!(error.kind, ErrorKind::Conflict);
+            assert_eq!(error.message, message);
+            assert_eq!(storage.get(&records, &missing).await?, None);
+            assert_eq!(storage.get(&other_namespace, &side_effect).await?, None);
+            assert_eq!(
+                storage.get(&records, &primary).await?,
+                Some(StoredValue {
+                    value: value("original"),
+                    version: Version(1),
+                })
+            );
+        }
+
+        let next = storage
+            .commit(WriteBatch {
+                conditions: vec![Condition::Missing {
+                    namespace: records.clone(),
+                    key: missing.clone(),
+                }],
+                operations: vec![put(&records, &missing, "committed")],
+            })
+            .await?;
+        assert_eq!(next.version, Version(2));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_compare_and_swap_has_one_winner() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let storage = Redb::open(database_path(&directory))?;
+        let records = namespace("records");
+        let primary = key("primary");
+        storage
+            .commit(WriteBatch {
+                conditions: vec![],
+                operations: vec![put(&records, &primary, "v1")],
+            })
+            .await?;
+
+        let first = storage.clone();
+        let second = storage.clone();
+        let [first_batch, second_batch] = ["first", "second"].map(|replacement| WriteBatch {
+            conditions: vec![Condition::Version {
+                namespace: records.clone(),
+                key: primary.clone(),
+                expected: Version(1),
+            }],
+            operations: vec![put(&records, &primary, replacement)],
+        });
+
+        let (first_result, second_result) =
+            tokio::join!(first.commit(first_batch), second.commit(second_batch));
+        let successes = usize::from(first_result.is_ok()) + usize::from(second_result.is_ok());
+        let conflicts = usize::from(matches!(
+            first_result,
+            Err(Error {
+                kind: ErrorKind::Conflict,
+                ..
+            })
+        )) + usize::from(matches!(
+            second_result,
+            Err(Error {
+                kind: ErrorKind::Conflict,
+                ..
+            })
+        ));
+        assert_eq!(successes, 1);
+        assert_eq!(conflicts, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mixed_operations_preserve_input_order_and_one_commit_version() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let storage = Redb::open(database_path(&directory))?;
+        let records = namespace("records");
+        let primary = key("primary");
+        let removed = key("removed");
+        let result = storage
+            .commit(WriteBatch {
+                conditions: vec![Condition::Missing {
+                    namespace: records.clone(),
+                    key: primary.clone(),
+                }],
+                operations: vec![
+                    put(&records, &primary, "first"),
+                    put(&records, &primary, "replaced"),
+                    Operation::Delete {
+                        namespace: records.clone(),
+                        key: primary.clone(),
+                    },
+                    put(&records, &primary, "last"),
+                    put(&records, &removed, "temporary"),
+                    Operation::Delete {
+                        namespace: records.clone(),
+                        key: removed.clone(),
+                    },
+                ],
+            })
+            .await?;
+
+        assert_eq!(result.version, Version(1));
+        assert_eq!(
+            storage.get(&records, &primary).await?,
+            Some(StoredValue {
+                value: value("last"),
+                version: Version(1),
+            })
+        );
+        assert_eq!(storage.get(&records, &removed).await?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_removes_the_value() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let storage = Redb::open(database_path(&directory))?;
+        let records = namespace("records");
+        let primary = key("primary");
+        storage
+            .commit(WriteBatch {
+                conditions: vec![],
+                operations: vec![put(&records, &primary, "v1")],
+            })
+            .await?;
+
+        let result = storage
+            .commit(WriteBatch {
+                conditions: vec![Condition::Version {
+                    namespace: records.clone(),
+                    key: primary.clone(),
+                    expected: Version(1),
+                }],
+                operations: vec![Operation::Delete {
+                    namespace: records.clone(),
+                    key: primary.clone(),
+                }],
+            })
+            .await?;
+
+        assert_eq!(result.version, Version(2));
+        assert_eq!(storage.get(&records, &primary).await?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persisted_values_and_global_version_survive_reopen() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database = database_path(&directory);
+        let records = namespace("records");
+        let primary = key("primary");
+        {
+            let storage = Redb::open(&database)?;
+            storage
+                .commit(WriteBatch {
+                    conditions: vec![],
+                    operations: vec![put(&records, &primary, "v1")],
+                })
+                .await?;
+        }
+
+        let reopened = Redb::open(&database)?;
+        assert_eq!(
+            reopened.get(&records, &primary).await?,
+            Some(StoredValue {
+                value: value("v1"),
+                version: Version(1),
+            })
+        );
+        let result = reopened
+            .commit(WriteBatch {
+                conditions: vec![],
+                operations: vec![put(&records, &key("second"), "v2")],
+            })
+            .await?;
+        assert_eq!(result.version, Version(2));
+        Ok(())
+    }
+}
 
 #[cfg(test)]
-#[path = "backend/recovery_test.rs"]
-mod recovery_test;
+mod recovery_test {
+    use std::{fs, path::Path, process::Command};
+
+    use super::*;
+    use redb::{Durability, TableDefinition};
+    use storage::{ErrorKind, Operation, Version};
+    use tempfile::TempDir;
+
+    use crate::codec::{GlobalVersion, StoredRecord, encode_physical_key};
+
+    const CRASH_CHILD_PATH_ENV: &str = "STORAGE_REDB_CRASH_CHILD_PATH";
+
+    fn namespace(name: &str) -> Namespace {
+        Namespace(name.to_owned())
+    }
+
+    fn key(value: &str) -> Key {
+        Key(value.as_bytes().to_vec())
+    }
+
+    fn value(value: &str) -> storage::Value {
+        storage::Value(value.as_bytes().to_vec())
+    }
+
+    fn put(namespace: &Namespace, key: &Key, value: &str) -> Operation {
+        Operation::Put {
+            namespace: namespace.clone(),
+            key: key.clone(),
+            value: self::value(value),
+        }
+    }
+
+    fn create_raw(path: &Path) -> Result<Database, Error> {
+        Database::create(path)
+            .map_err(|error| other(format!("test database create failed: {error}")))
+    }
+
+    fn open_raw(path: &Path) -> Result<Database, Error> {
+        Database::open(path).map_err(|error| other(format!("test database open failed: {error}")))
+    }
+
+    #[tokio::test]
+    async fn closed_database_file_can_be_copied_and_reopened() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("database.redb");
+        let backup_path = directory.path().join("backup.redb");
+        let records = namespace("records");
+        let snapshot_key = key("snapshot");
+        {
+            let storage = Redb::open(&database_path)?;
+            storage
+                .commit(WriteBatch {
+                    conditions: vec![],
+                    operations: vec![put(&records, &snapshot_key, "captured")],
+                })
+                .await?;
+        }
+
+        let copied = fs::copy(&database_path, &backup_path)
+            .map_err(|error| other(format!("cold database copy failed: {error}")))?;
+        assert!(copied > 0);
+        let backup = Redb::open(&backup_path)?;
+        assert_eq!(
+            backup.get(&records, &snapshot_key).await?,
+            Some(StoredValue {
+                value: value("captured"),
+                version: Version(1),
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn second_open_is_rejected_by_file_lock() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("database.redb");
+        let storage = Redb::open(&database_path)?;
+
+        let second_open = match Redb::open(&database_path) {
+            Ok(_) => panic!("redb must enforce one writable owner per file"),
+            Err(error) => error,
+        };
+        assert_eq!(second_open.kind, ErrorKind::Unavailable);
+
+        drop(storage);
+        let _reopened = Redb::open(&database_path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn populated_database_without_format_marker_is_rejected() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("database.redb");
+        let records = namespace("records");
+        let primary = key("primary");
+        {
+            let db = create_raw(&database_path)?;
+            let mut transaction = db
+                .begin_write()
+                .map_err(|error| other(format!("test transaction failed: {error}")))?;
+            transaction
+                .set_durability(Durability::Immediate)
+                .map_err(|error| other(format!("test durability failed: {error}")))?;
+            {
+                let mut data = transaction
+                    .open_table(DATA_TABLE)
+                    .map_err(|error| other(format!("test data table failed: {error}")))?;
+                let mut meta = transaction
+                    .open_table(META_TABLE)
+                    .map_err(|error| other(format!("test metadata table failed: {error}")))?;
+                let physical_key = encode_physical_key(&records, &primary)?;
+                let stored = StoredRecord::new(value("stored-value"), Version(1))?.encode()?;
+                drop(
+                    data.insert(physical_key.as_slice(), stored.as_slice())
+                        .map_err(|error| other(format!("test data write failed: {error}")))?,
+                );
+                let version = GlobalVersion::new(Version(1))?.encode()?;
+                drop(
+                    meta.insert(GLOBAL_VERSION_KEY, version.as_slice())
+                        .map_err(|error| other(format!("test metadata write failed: {error}")))?,
+                );
+            }
+            transaction
+                .commit()
+                .map_err(|error| other(format!("test commit failed: {error}")))?;
+        }
+
+        let open_error = match Redb::open(&database_path) {
+            Ok(_) => panic!("a populated database without a format marker must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(open_error.kind, ErrorKind::CorruptData);
+        Ok(())
+    }
+
+    #[test]
+    fn populated_database_without_global_version_is_rejected() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("database.redb");
+        let records = namespace("records");
+        let primary = key("primary");
+        {
+            let db = create_raw(&database_path)?;
+            let mut transaction = db
+                .begin_write()
+                .map_err(|error| other(format!("test transaction failed: {error}")))?;
+            transaction
+                .set_durability(Durability::Immediate)
+                .map_err(|error| other(format!("test durability failed: {error}")))?;
+            {
+                let mut data = transaction
+                    .open_table(DATA_TABLE)
+                    .map_err(|error| other(format!("test data table failed: {error}")))?;
+                let mut meta = transaction
+                    .open_table(META_TABLE)
+                    .map_err(|error| other(format!("test metadata table failed: {error}")))?;
+                let physical_key = encode_physical_key(&records, &primary)?;
+                let stored = StoredRecord::new(value("stored-value"), Version(1))?.encode()?;
+                drop(
+                    data.insert(physical_key.as_slice(), stored.as_slice())
+                        .map_err(|error| other(format!("test data write failed: {error}")))?,
+                );
+                drop(
+                    meta.insert(DATABASE_FORMAT_KEY, super::format::DATABASE_FORMAT)
+                        .map_err(|error| other(format!("test marker write failed: {error}")))?,
+                );
+            }
+            transaction
+                .commit()
+                .map_err(|error| other(format!("test commit failed: {error}")))?;
+        }
+
+        let error = match Redb::open(&database_path) {
+            Ok(_) => panic!("populated data without a global version must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, ErrorKind::CorruptData);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_initialized_database_without_global_version_reopens() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("database.redb");
+        drop(Redb::open(&database_path)?);
+
+        let reopened = Redb::open(&database_path)?;
+        drop(reopened);
+        Ok(())
+    }
+
+    #[test]
+    fn database_with_only_a_foreign_table_is_rejected() -> Result<(), Error> {
+        const FOREIGN_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("foreign");
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("database.redb");
+        {
+            let db = create_raw(&database_path)?;
+            let transaction = db
+                .begin_write()
+                .map_err(|error| other(format!("test transaction failed: {error}")))?;
+            {
+                let mut foreign = transaction
+                    .open_table(FOREIGN_TABLE)
+                    .map_err(|error| other(format!("test foreign table failed: {error}")))?;
+                drop(
+                    foreign
+                        .insert(b"key".as_slice(), b"value".as_slice())
+                        .map_err(|error| other(format!("test foreign write failed: {error}")))?,
+                );
+            }
+            transaction
+                .commit()
+                .map_err(|error| other(format!("test commit failed: {error}")))?;
+        }
+
+        let error = match Redb::open(&database_path) {
+            Ok(_) => panic!("a redb file without this adapter's tables must not be adopted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, ErrorKind::CorruptData, "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn incompatible_table_type_is_rejected() -> Result<(), Error> {
+        const WRONG_DATA_TABLE: TableDefinition<u64, u64> = TableDefinition::new("data");
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("database.redb");
+        {
+            let db = create_raw(&database_path)?;
+            let transaction = db
+                .begin_write()
+                .map_err(|error| other(format!("test transaction failed: {error}")))?;
+            {
+                let mut data = transaction
+                    .open_table(WRONG_DATA_TABLE)
+                    .map_err(|error| other(format!("test wrong table failed: {error}")))?;
+                drop(
+                    data.insert(1, 2)
+                        .map_err(|error| other(format!("test wrong write failed: {error}")))?,
+                );
+                let mut meta = transaction
+                    .open_table(META_TABLE)
+                    .map_err(|error| other(format!("test metadata table failed: {error}")))?;
+                drop(
+                    meta.insert(DATABASE_FORMAT_KEY, super::format::DATABASE_FORMAT)
+                        .map_err(|error| other(format!("test marker write failed: {error}")))?,
+                );
+            }
+            transaction
+                .commit()
+                .map_err(|error| other(format!("test commit failed: {error}")))?;
+        }
+
+        let error = match Redb::open(&database_path) {
+            Ok(_) => panic!("an incompatible data table type must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, ErrorKind::CorruptData);
+        Ok(())
+    }
+
+    #[test]
+    fn different_database_format_fails_closed() -> Result<(), Error> {
+        for marker in [
+            b"".as_slice(),
+            b"w3-storage-red".as_slice(),
+            b"w3-storage-redb-extra".as_slice(),
+            b"another-database-format".as_slice(),
+        ] {
+            let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+            let database_path = directory.path().join("database.redb");
+            {
+                let storage = Redb::open(&database_path)?;
+                drop(storage);
+            }
+            {
+                let db = open_raw(&database_path)?;
+                let transaction = db
+                    .begin_write()
+                    .map_err(|error| other(format!("test transaction failed: {error}")))?;
+                {
+                    let mut meta = transaction
+                        .open_table(META_TABLE)
+                        .map_err(|error| other(format!("test metadata table failed: {error}")))?;
+                    let previous = meta
+                        .insert(DATABASE_FORMAT_KEY, marker)
+                        .map_err(|error| other(format!("test marker write failed: {error}")))?;
+                    drop(previous);
+                }
+                transaction
+                    .commit()
+                    .map_err(|error| other(format!("test commit failed: {error}")))?;
+            }
+
+            let error = match Redb::open(&database_path) {
+                Ok(_) => panic!("a different database format must fail closed"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind, ErrorKind::CorruptData);
+            assert_eq!(
+                error.message,
+                "database format is not supported by this adapter"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_persisted_frame_is_reported_as_corruption() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("database.redb");
+        let records = namespace("records");
+        let primary = key("primary");
+        {
+            let storage = Redb::open(&database_path)?;
+            drop(storage);
+        }
+        {
+            let db = open_raw(&database_path)?;
+            let transaction = db
+                .begin_write()
+                .map_err(|error| other(format!("test transaction failed: {error}")))?;
+            {
+                let mut data = transaction
+                    .open_table(DATA_TABLE)
+                    .map_err(|error| other(format!("test data table failed: {error}")))?;
+                let mut meta = transaction
+                    .open_table(META_TABLE)
+                    .map_err(|error| other(format!("test metadata table failed: {error}")))?;
+                let physical_key = encode_physical_key(&records, &primary)?;
+                drop(
+                    data.insert(physical_key.as_slice(), b"invalid".as_slice())
+                        .map_err(|error| other(format!("test malformed write failed: {error}")))?,
+                );
+                let version = GlobalVersion::new(Version(1))?.encode()?;
+                drop(
+                    meta.insert(GLOBAL_VERSION_KEY, version.as_slice())
+                        .map_err(|error| other(format!("test metadata write failed: {error}")))?,
+                );
+            }
+            transaction
+                .commit()
+                .map_err(|error| other(format!("test commit failed: {error}")))?;
+        }
+
+        let reopened = Redb::open(&database_path)?;
+        let error = reopened
+            .get(&records, &primary)
+            .await
+            .expect_err("a malformed value frame must be rejected");
+        assert_eq!(error.kind, ErrorKind::CorruptData);
+        Ok(())
+    }
+
+    #[test]
+    fn relative_path_is_rejected() {
+        let error = match Redb::open("relative-index.redb") {
+            Ok(_) => panic!("storage must not resolve ambient process paths"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+    }
+
+    #[test]
+    fn directory_path_is_rejected() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let error = match Redb::open(directory.path()) {
+            Ok(_) => panic!("a database directory must not be treated as a redb file"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_parent_directory_is_rejected() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("missing").join("database.redb");
+        let error = match Redb::open(database_path) {
+            Ok(_) => panic!("the adapter must not create database parent directories"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        Ok(())
+    }
+
+    #[test]
+    fn foreign_file_is_rejected() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("database.redb");
+        fs::write(&database_path, b"this is not a redb database")
+            .map_err(|error| other(format!("test foreign file write failed: {error}")))?;
+
+        let error = match Redb::open(&database_path) {
+            Ok(_) => panic!("an arbitrary existing file must not be adopted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, ErrorKind::CorruptData, "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn zero_queue_capacity_is_rejected() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("database.redb");
+
+        let error = match Redb::open_with_queue_capacity(database_path, 0) {
+            Ok(_) => panic!("a zero-capacity queue cannot provide bounded command delivery"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, ErrorKind::InvalidRequest);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forced_process_exit_preserves_immediate_commit() -> Result<(), Error> {
+        let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
+        let database_path = directory.path().join("database.redb");
+        let output = Command::new(
+            std::env::current_exe()
+                .map_err(|error| other(format!("test executable failed: {error}")))?,
+        )
+        .arg("--exact")
+        .arg("backend::recovery_test::forced_exit_writer_helper")
+        .arg("--nocapture")
+        .env(CRASH_CHILD_PATH_ENV, &database_path)
+        .output()
+        .map_err(|error| other(format!("failed to start forced-exit child: {error}")))?;
+        if !output.status.success() {
+            return Err(other(format!(
+                "forced-exit child failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        let storage = Redb::open(&database_path)?;
+        assert_eq!(
+            storage
+                .get(&namespace("crash-recovery"), &key("committed"))
+                .await?,
+            Some(StoredValue {
+                value: value("durable"),
+                version: Version(1),
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn forced_exit_writer_helper() {
+        let Some(path) = std::env::var_os(CRASH_CHILD_PATH_ENV) else {
+            return;
+        };
+        let storage = Redb::open(path).expect("forced-exit child must open redb");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("forced-exit child must create a runtime");
+        runtime
+            .block_on(storage.commit(WriteBatch {
+                conditions: vec![],
+                operations: vec![put(
+                    &namespace("crash-recovery"),
+                    &key("committed"),
+                    "durable",
+                )],
+            }))
+            .expect("forced-exit child commit must return");
+        std::process::exit(0);
+    }
+}
 
 #[cfg(test)]
 mod tests {
