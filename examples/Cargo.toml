@@ -1,0 +1,23 @@
+[package]
+name = "payment-examples"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+chain-bitcoin = { path = "../sdk/chains/bitcoin" }
+wallets = { path = "../sdk/wallets" }
+indexing = { path = "../sdk/indexing" }
+indexing-redb = { path = "../sdk/indexing/redb" }
+storage-redb = { path = "../packages/storage/redb" }
+indexing-runtime = { path = "../sdk/indexing/runtime" }
+
+tokio = { workspace = true, features = ["sync", "signal"] }
+
+[[bin]]
+name = "bitcoin_wallet"
+path = "bitcoin_wallet.rs"
+
+[lints]
+workspace = true

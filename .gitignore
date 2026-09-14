@@ -27,6 +27,7 @@ logs/
 *.db
 *.sqlite
 *.sqlite3
+.data
 
 # Recoverable previous design and local upstream research material
 /old
