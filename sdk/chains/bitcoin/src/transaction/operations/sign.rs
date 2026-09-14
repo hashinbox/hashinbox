@@ -1,6 +1,6 @@
 use base::{
     Digest, KeyTweak, PublicKeyFormat, SignRequest, SignablePayload, SignatureEncoding,
-    SignatureScheme, Signer,
+    SignatureScheme, SignedPayload, Signer,
 };
 use bitcoin::{
     Address as NativeAddress, Amount, CompressedPublicKey, ScriptBuf, Transaction, TxOut, Witness,
@@ -8,7 +8,9 @@ use bitcoin::{
     hashes::Hash,
     key::{TapTweak, XOnlyPublicKey},
     secp256k1::{Message, Secp256k1, ecdsa, schnorr},
-    sighash::{Prevouts, SighashCache},
+    sighash::{
+        EcdsaSighashType, Prevouts, SegwitV0Sighash, SighashCache, TapSighash, TapSighashType,
+    },
 };
 
 use crate::{ChainError, Network};
@@ -116,6 +118,17 @@ impl<S: Signer + ?Sized> InputSigner<'_, S> {
             })
             .await
             .map_err(|error| ChainError::signing(format!("Bitcoin signing failed: {error}")))?;
+        self.p2wpkh_witness(input_index, signed, sighash, sighash_type)
+    }
+
+    fn p2wpkh_witness(
+        &self,
+        input_index: usize,
+        signed: SignedPayload,
+        sighash: SegwitV0Sighash,
+        sighash_type: EcdsaSighashType,
+    ) -> Result<Witness, ChainError> {
+        let script = &self.prevouts[input_index].script_pubkey;
         let public_key =
             CompressedPublicKey::from_slice(&signed.public_key.bytes).map_err(|error| {
                 ChainError::signing(format!("invalid compressed Bitcoin public key: {error}"))
@@ -187,6 +200,16 @@ impl<S: Signer + ?Sized> InputSigner<'_, S> {
             })
             .await
             .map_err(|error| ChainError::signing(format!("Bitcoin signing failed: {error}")))?;
+        self.p2tr_witness(input_index, signed, sighash, sighash_type)
+    }
+
+    fn p2tr_witness(
+        &self,
+        input_index: usize,
+        signed: SignedPayload,
+        sighash: TapSighash,
+        sighash_type: TapSighashType,
+    ) -> Result<Witness, ChainError> {
         let signature = signed.signature;
         let public_key = XOnlyPublicKey::from_slice(&signed.public_key.bytes).map_err(|error| {
             ChainError::signing(format!("invalid x-only Bitcoin public key: {error}"))
@@ -235,6 +258,293 @@ mod tests {
 
     use super::*;
     use crate::{ChainErrorKind, Satoshi, SpendSource};
+
+    struct RecordingSigner {
+        requests: Mutex<Vec<SignRequest>>,
+        response: base::SignedPayload,
+    }
+
+    impl Signer for RecordingSigner {
+        fn sign<'a>(&'a self, request: SignRequest) -> SignFuture<'a> {
+            self.requests.lock().unwrap().push(request);
+            Box::pin(async { Ok(self.response.clone()) })
+        }
+    }
+
+    struct SigningCase {
+        transaction: Transaction,
+        prevouts: Vec<TxOut>,
+        input: Input,
+        mode: SighashType,
+        taproot: bool,
+        request: SignRequest,
+        response: base::SignedPayload,
+        witness: Witness,
+        wrong_signature: Vec<u8>,
+        wrong_key: Vec<u8>,
+    }
+
+    impl SigningCase {
+        fn new(taproot: bool, mode: SighashType) -> Self {
+            let secp = Secp256k1::new();
+            let secret = bitcoin::secp256k1::SecretKey::from_slice(&[1; 32]).unwrap();
+            let other = bitcoin::secp256k1::SecretKey::from_slice(&[2; 32]).unwrap();
+            let pair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret);
+            let other_pair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &other);
+            let public = CompressedPublicKey(pair.public_key());
+            let internal = pair.x_only_public_key().0;
+            let address = if taproot {
+                NativeAddress::p2tr(&secp, internal, None, Network::Regtest.native())
+            } else {
+                NativeAddress::p2wpkh(&public, Network::Regtest.native())
+            };
+            let input = Input {
+                utxo: SpendSource {
+                    transaction_id: [4; 32],
+                    output_index: 1,
+                    value: Satoshi(20_000),
+                    script_pubkey: address.script_pubkey().into_bytes(),
+                    satisfaction_weight: 0,
+                },
+                sequence: 7,
+            };
+            let mut first = input.clone();
+            first.utxo.transaction_id = [3; 32];
+            first.utxo.value = Satoshi(10_000);
+            let unsigned = UnsignedTransaction {
+                version: 2,
+                lock_time: 11,
+                inputs: vec![first, input.clone()],
+                outputs: Vec::new(),
+                sighash_type: mode,
+            };
+            let transaction = unsigned.native(Network::Regtest).unwrap();
+            let prevouts = unsigned
+                .inputs
+                .iter()
+                .map(|input| TxOut {
+                    value: Amount::from_sat(input.utxo.value.0),
+                    script_pubkey: ScriptBuf::from_bytes(input.utxo.script_pubkey.clone()),
+                })
+                .collect::<Vec<_>>();
+            let mut cache = SighashCache::new(&transaction);
+            let digest = if taproot {
+                cache
+                    .taproot_key_spend_signature_hash(1, &Prevouts::All(&prevouts), mode.taproot())
+                    .unwrap()
+                    .to_byte_array()
+            } else {
+                cache
+                    .p2wpkh_signature_hash(
+                        1,
+                        &prevouts[1].script_pubkey,
+                        prevouts[1].value,
+                        mode.ecdsa().unwrap(),
+                    )
+                    .unwrap()
+                    .to_byte_array()
+            };
+            let message = Message::from_digest(digest);
+            let wrong_message = Message::from_digest([9; 32]);
+            let (bytes, wrong_signature, public_key, wrong_key, scheme, encoding, format, tweak) =
+                if taproot {
+                    let tweaked = pair.tap_tweak(&secp, None).to_keypair();
+                    (
+                        secp.sign_schnorr_no_aux_rand(&message, &tweaked)
+                            .as_ref()
+                            .to_vec(),
+                        secp.sign_schnorr_no_aux_rand(&wrong_message, &tweaked)
+                            .as_ref()
+                            .to_vec(),
+                        internal.serialize().to_vec(),
+                        other_pair.x_only_public_key().0.serialize().to_vec(),
+                        SignatureScheme::SchnorrSecp256k1,
+                        SignatureEncoding::Raw,
+                        PublicKeyFormat::XOnly,
+                        Some(KeyTweak::TaggedHashAdd {
+                            tag: b"TapTweak".to_vec(),
+                            suffix: Vec::new(),
+                        }),
+                    )
+                } else {
+                    (
+                        secp.sign_ecdsa(&message, &secret).serialize_der().to_vec(),
+                        secp.sign_ecdsa(&wrong_message, &secret)
+                            .serialize_der()
+                            .to_vec(),
+                        public.to_bytes().to_vec(),
+                        other_pair.public_key().serialize().to_vec(),
+                        SignatureScheme::EcdsaSecp256k1,
+                        SignatureEncoding::Der,
+                        PublicKeyFormat::Compressed,
+                        None,
+                    )
+                };
+            let mut witness_signature = bytes.clone();
+            if !taproot || mode != SighashType::TaprootDefault {
+                witness_signature.push(mode.taproot() as u8);
+            }
+            let witness = if taproot {
+                Witness::from_slice(&[witness_signature])
+            } else {
+                Witness::from_slice(&[witness_signature, public_key.clone()])
+            };
+            Self {
+                transaction,
+                prevouts,
+                input,
+                mode,
+                taproot,
+                witness,
+                wrong_signature,
+                wrong_key,
+                request: SignRequest {
+                    payload: SignablePayload::Digest(Digest {
+                        bytes: digest.to_vec(),
+                    }),
+                    scheme,
+                    encoding,
+                    public_key_format: format,
+                    key_tweak: tweak,
+                },
+                response: base::SignedPayload {
+                    signature: base::Signature {
+                        scheme,
+                        encoding,
+                        bytes,
+                    },
+                    public_key: base::PublicKey {
+                        curve: base::Curve::Secp256k1,
+                        format,
+                        bytes: public_key,
+                    },
+                },
+            }
+        }
+
+        fn sign(&self, signer: &dyn Signer) -> Result<Witness, ChainError> {
+            let signing = InputSigner {
+                transaction: &self.transaction,
+                prevouts: &self.prevouts,
+                sighash_type: self.mode,
+                network: Network::Regtest,
+                signer,
+            };
+            if self.taproot {
+                block_on(signing.sign_p2tr_input(1))
+            } else {
+                block_on(signing.sign_p2wpkh_input(1, &self.input))
+            }
+        }
+    }
+
+    #[test]
+    fn input_signing_preserves_exact_requests_and_witness_sighash_bytes() {
+        for (taproot, mode) in [
+            (false, SighashType::All),
+            (false, SighashType::NoneAnyoneCanPay),
+            (true, SighashType::TaprootDefault),
+            (true, SighashType::All),
+            (true, SighashType::NoneAnyoneCanPay),
+        ] {
+            let case = SigningCase::new(taproot, mode);
+            let signer = RecordingSigner {
+                requests: Mutex::new(Vec::new()),
+                response: case.response.clone(),
+            };
+            assert_eq!(case.sign(&signer).unwrap(), case.witness);
+            assert_eq!(*signer.requests.lock().unwrap(), vec![case.request]);
+        }
+    }
+
+    #[test]
+    fn invalid_input_sighashes_fail_before_calling_the_signer() {
+        for (taproot, mode, message) in [
+            (
+                false,
+                SighashType::TaprootDefault,
+                "Taproot default sighash cannot sign a P2WPKH input",
+            ),
+            (
+                true,
+                SighashType::Single,
+                "could not compute Taproot input sighash:",
+            ),
+        ] {
+            let mut case = SigningCase::new(taproot, SighashType::All);
+            case.mode = mode;
+            let signer = RecordingSigner {
+                requests: Mutex::new(Vec::new()),
+                response: case.response.clone(),
+            };
+            let error = case.sign(&signer).unwrap_err();
+            assert_eq!(error.kind, ChainErrorKind::InvalidTransaction);
+            assert!(error.message.starts_with(message), "{}", error.message);
+            assert!(signer.requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn input_signing_preserves_key_signature_and_verification_error_order() {
+        for taproot in [false, true] {
+            let case = SigningCase::new(taproot, SighashType::All);
+            let mut malformed_key = case.response.clone();
+            malformed_key.public_key.bytes.clear();
+            malformed_key.signature.scheme = SignatureScheme::Ed25519;
+            let mut wrong_key = malformed_key.clone();
+            wrong_key.public_key.bytes = case.wrong_key.clone();
+            let mut wrong_scheme = malformed_key.clone();
+            wrong_scheme.public_key = case.response.public_key.clone();
+            wrong_scheme.signature.bytes.clear();
+            let mut wrong_encoding = case.response.clone();
+            wrong_encoding.signature.encoding = SignatureEncoding::Compact;
+            wrong_encoding.signature.bytes.clear();
+            let mut malformed_signature = case.response.clone();
+            malformed_signature.signature.bytes.clear();
+            let mut unverified = case.response.clone();
+            unverified.signature.bytes = case.wrong_signature.clone();
+            let (key_error, ownership, incompatible, malformed, verification) = if taproot {
+                (
+                    "invalid x-only Bitcoin public key:",
+                    "Bitcoin Taproot input 1 does not belong to its signing key",
+                    "Bitcoin signer returned an incompatible Schnorr signature",
+                    "invalid raw Bitcoin Schnorr signature:",
+                    "Bitcoin signer returned a Schnorr signature that failed \
+                     cryptographic verification for input 1",
+                )
+            } else {
+                (
+                    "invalid compressed Bitcoin public key:",
+                    "Bitcoin input 1 does not belong to its signing key",
+                    "Bitcoin signer returned an incompatible ECDSA signature",
+                    "invalid DER Bitcoin signature:",
+                    "Bitcoin signer returned an ECDSA signature that failed \
+                     cryptographic verification for input 1",
+                )
+            };
+            for (response, message) in [
+                (malformed_key, key_error),
+                (wrong_key, ownership),
+                (wrong_scheme, incompatible),
+                (wrong_encoding, incompatible),
+                (malformed_signature, malformed),
+                (unverified, verification),
+            ] {
+                let signer = RecordingSigner {
+                    requests: Mutex::new(Vec::new()),
+                    response,
+                };
+                let error = case.sign(&signer).unwrap_err();
+                assert_eq!(error.kind, ChainErrorKind::Signer);
+                if message.ends_with(':') {
+                    assert!(error.message.starts_with(message), "{}", error.message);
+                } else {
+                    assert_eq!(error.message, message);
+                }
+                assert_eq!(*signer.requests.lock().unwrap(), vec![case.request.clone()]);
+            }
+        }
+    }
 
     struct FailingSigner {
         requests: Mutex<Vec<SignRequest>>,

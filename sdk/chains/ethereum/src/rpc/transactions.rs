@@ -101,95 +101,10 @@ where
             }
 
             let estimated_gas_limit = self.estimate_gas(Value::Object(transaction)).await?;
-            if estimated_gas_limit == 0 {
-                return Err(ChainError::from_rpc(invalid_rpc_response(
-                    "eth_estimateGas",
-                    "estimated gas limit is zero",
-                )));
-            }
-            let gas_limit = limits
-                .gas_limit_with_margin(estimated_gas_limit)
-                .map_err(ChainError::from_rpc)?;
-            if gas_limit > limits.max_gas_limit() {
-                return Err(ChainError::new(
-                    ChainErrorKind::FeeUnavailable,
-                    "Ethereum estimated gas limit exceeds the configured ceiling",
-                ));
-            }
-
-            let max_priority_fee_per_gas = self
-                .rpc_wei("eth_maxPriorityFeePerGas", json!([]))
-                .await
-                .map_err(ChainError::from_rpc)?;
-            if &max_priority_fee_per_gas > limits.max_priority_fee_per_gas() {
-                return Err(ChainError::new(
-                    ChainErrorKind::FeeUnavailable,
-                    "Ethereum priority fee exceeds the configured ceiling",
-                ));
-            }
-            let latest_block = self
-                .request_result("eth_getBlockByNumber", json!(["latest", false]))
-                .await
-                .map_err(ChainError::from_rpc)?;
-            let latest_block: Value = latest_block
-                .deserialize()
-                .map_err(map_json_rpc_error)
-                .map_err(ChainError::from_rpc)?;
-            let base_fee = latest_block
-                .get("baseFeePerGas")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    ChainError::from_rpc(invalid_rpc_response(
-                        "eth_getBlockByNumber",
-                        "latest block has no EIP-1559 baseFeePerGas",
-                    ))
-                })?;
-            let base_fee = Wei::from_quantity(base_fee)
-                .map_err(|message| invalid_rpc_response("eth_getBlockByNumber", message))
-                .map_err(ChainError::from_rpc)?;
-            let max_fee_per_gas = base_fee
-                .checked_mul_u64(2)
-                .and_then(|fee| fee.checked_add(&max_priority_fee_per_gas))
-                .ok_or_else(|| {
-                    ChainError::from_rpc(invalid_rpc_response(
-                        "eth_getBlockByNumber",
-                        "fee calculation overflowed U256",
-                    ))
-                })?;
-            if &max_fee_per_gas > limits.max_fee_per_gas() {
-                return Err(ChainError::new(
-                    ChainErrorKind::FeeUnavailable,
-                    "Ethereum max fee per gas exceeds the configured ceiling",
-                ));
-            }
-            if max_fee_per_gas < max_priority_fee_per_gas {
-                return Err(ChainError::from_rpc(invalid_rpc_response(
-                    "eth_getBlockByNumber",
-                    "calculated max fee is below the priority fee",
-                )));
-            }
-            let total_fee = max_fee_per_gas.checked_mul_u64(gas_limit).ok_or_else(|| {
-                ChainError::new(
-                    ChainErrorKind::FeeUnavailable,
-                    "Ethereum maximum transaction fee overflowed U256",
-                )
-            })?;
-            if &total_fee > limits.max_total_fee() {
-                return Err(ChainError::new(
-                    ChainErrorKind::FeeUnavailable,
-                    "Ethereum maximum transaction fee exceeds the configured ceiling",
-                ));
-            }
-
+            let context = self.fee_context(limits, estimated_gas_limit, nonce).await?;
+            let total_fee = limits.total_fee(context.gas_limit, &context.max_fee_per_gas)?;
             self.ensure_native_funds(request, &total_fee).await?;
-
-            Ok(BuildContext {
-                chain_id: self.expected_chain_id,
-                nonce,
-                gas_limit,
-                max_fee_per_gas,
-                max_priority_fee_per_gas,
-            })
+            Ok(context)
         })
     }
 
@@ -225,15 +140,7 @@ where
                 }
             };
             let Some(raw) = raw else {
-                return match self.confirm_known_transaction(&computed).await {
-                    Ok(true) => Ok(computed),
-                    Ok(false) => Err(ambiguous_submission(
-                        &computed,
-                        "Ethereum RPC reported an already-known transaction but did \
-                         not expose the matching hash",
-                    )),
-                    Err(error) => Err(ambiguous_submission(&computed, error)),
-                };
+                return self.confirmed_submission(computed).await;
             };
             let returned: String = raw
                 .deserialize()
@@ -264,6 +171,67 @@ impl<C> Methods<C>
 where
     C: Transport,
 {
+    async fn confirmed_submission(
+        &self,
+        computed: TransactionId,
+    ) -> Result<TransactionId, TransactionError> {
+        match self.confirm_known_transaction(&computed).await {
+            Ok(true) => Ok(computed),
+            Ok(false) => Err(ambiguous_submission(
+                &computed,
+                "Ethereum RPC reported an already-known transaction but did \
+                 not expose the matching hash",
+            )),
+            Err(error) => Err(ambiguous_submission(&computed, error)),
+        }
+    }
+
+    async fn fee_context(
+        &self,
+        limits: &Limits,
+        estimated: u64,
+        nonce: u64,
+    ) -> Result<BuildContext, ChainError> {
+        let gas_limit = limits.gas_limit(estimated)?;
+        let max_priority_fee_per_gas = self
+            .rpc_wei("eth_maxPriorityFeePerGas", json!([]))
+            .await
+            .map_err(ChainError::from_rpc)?;
+        limits.validate_priority_fee(&max_priority_fee_per_gas)?;
+        let base_fee = self.latest_base_fee().await?;
+        let max_fee_per_gas = limits.max_fee(&base_fee, &max_priority_fee_per_gas)?;
+        Ok(BuildContext {
+            chain_id: self.expected_chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+        })
+    }
+
+    async fn latest_base_fee(&self) -> Result<Wei, ChainError> {
+        let latest_block = self
+            .request_result("eth_getBlockByNumber", json!(["latest", false]))
+            .await
+            .map_err(ChainError::from_rpc)?;
+        let latest_block: Value = latest_block
+            .deserialize()
+            .map_err(map_json_rpc_error)
+            .map_err(ChainError::from_rpc)?;
+        let base_fee = latest_block
+            .get("baseFeePerGas")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ChainError::from_rpc(invalid_rpc_response(
+                    "eth_getBlockByNumber",
+                    "latest block has no EIP-1559 baseFeePerGas",
+                ))
+            })?;
+        Wei::from_quantity(base_fee)
+            .map_err(|message| invalid_rpc_response("eth_getBlockByNumber", message))
+            .map_err(ChainError::from_rpc)
+    }
+
     async fn verify_transaction_chain_id(&self) -> Result<(), ChainError> {
         let actual = self
             .rpc_u64("eth_chainId", json!([]))
@@ -439,4 +407,291 @@ fn ambiguous_submission(id: &TransactionId, error: impl std::fmt::Display) -> Tr
         format!("Ethereum submission outcome is ambiguous: {error}"),
     )
     .with_ambiguous_transaction_id(BaseTransactionId::new(id.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
+
+    use futures_executor::block_on;
+    use json_rpc::{Call, CallResult, Error, Failure, RawJson};
+
+    use super::*;
+    use crate::Address;
+
+    struct Step {
+        method: &'static str,
+        params: Value,
+        response: Result<CallResult, Error>,
+    }
+
+    impl Step {
+        fn value(method: &'static str, params: Value, value: Value) -> Self {
+            Self {
+                method,
+                params,
+                response: Ok(Ok(RawJson::from_serializable(&value).unwrap())),
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct Script(Arc<Mutex<VecDeque<Step>>>);
+
+    impl Script {
+        fn new(steps: Vec<Step>) -> Self {
+            Self(Arc::new(Mutex::new(steps.into())))
+        }
+
+        fn take(&self, method: &str, params: Value) -> Result<CallResult, Error> {
+            let step = self.0.lock().unwrap().pop_front().expect("unexpected RPC");
+            assert_eq!(method, step.method);
+            assert_eq!(params, step.params);
+            step.response
+        }
+
+        fn exhausted(&self) {
+            assert!(self.0.lock().unwrap().is_empty(), "missing RPC");
+        }
+    }
+
+    impl Transport for Script {
+        fn request<'a>(
+            &'a self,
+            method: &'a str,
+            params: Value,
+        ) -> BoxFuture<'a, Result<CallResult, Error>> {
+            assert_ne!(
+                method, "eth_sendRawTransaction",
+                "submission must be once-only"
+            );
+            Box::pin(async move { self.take(method, params) })
+        }
+
+        fn request_once<'a>(
+            &'a self,
+            method: &'a str,
+            params: Value,
+        ) -> BoxFuture<'a, Result<CallResult, Error>> {
+            assert_eq!(method, "eth_sendRawTransaction");
+            Box::pin(async move { self.take(method, params) })
+        }
+
+        fn batch<'a>(&'a self, _calls: Vec<Call>) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+            panic!("transaction RPCs remain sequential")
+        }
+    }
+
+    fn limits() -> Limits {
+        Limits::new(
+            1024,
+            0,
+            10,
+            Wei::from_u128(100),
+            Wei::from_u128(10),
+            Wei::from_u128(100),
+        )
+        .unwrap()
+    }
+
+    fn native() -> TransferRequest {
+        TransferRequest::native_atomic(Address([1; 20]), Address([2; 20]), Wei::from_u128(7))
+    }
+
+    fn preparation_steps() -> Vec<Step> {
+        let transaction = json!({"from": Address([1; 20]).to_string(),
+            "to": Address([2; 20]).to_string(), "value": "0x7", "data": "0x"});
+        vec![
+            Step::value("eth_chainId", json!([]), json!("0x7a69")),
+            Step::value("eth_estimateGas", json!([transaction]), json!("0x2")),
+            Step::value("eth_maxPriorityFeePerGas", json!([]), json!("0x2")),
+            Step::value(
+                "eth_getBlockByNumber",
+                json!(["latest", false]),
+                json!({"baseFeePerGas": "0x3"}),
+            ),
+            Step::value(
+                "eth_getBalance",
+                json!([Address([1; 20]).to_string(), "pending"]),
+                json!("0xffff"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn fee_failures_stop_before_later_observations_and_keep_exact_errors() {
+        for (length, replacement, kind, message) in [
+            (
+                2,
+                json!("0x0"),
+                ChainErrorKind::RpcUnavailable,
+                "Ethereum RPC eth_estimateGas returned an invalid response: \
+                 estimated gas limit is zero",
+            ),
+            (
+                2,
+                json!("0xb"),
+                ChainErrorKind::FeeUnavailable,
+                "Ethereum estimated gas limit exceeds the configured ceiling",
+            ),
+            (
+                3,
+                json!("0xb"),
+                ChainErrorKind::FeeUnavailable,
+                "Ethereum priority fee exceeds the configured ceiling",
+            ),
+            (
+                4,
+                json!({}),
+                ChainErrorKind::RpcUnavailable,
+                "Ethereum RPC eth_getBlockByNumber returned an invalid response: \
+                 latest block has no EIP-1559 baseFeePerGas",
+            ),
+            (
+                4,
+                json!({"baseFeePerGas": "0x32"}),
+                ChainErrorKind::FeeUnavailable,
+                "Ethereum max fee per gas exceeds the configured ceiling",
+            ),
+            (
+                4,
+                json!({"baseFeePerGas": "0x31"}),
+                ChainErrorKind::FeeUnavailable,
+                "Ethereum maximum transaction fee exceeds the configured ceiling",
+            ),
+        ] {
+            let mut steps = preparation_steps();
+            steps.truncate(length);
+            steps[length - 1].response = Ok(Ok(RawJson::from_serializable(&replacement).unwrap()));
+            let script = Script::new(steps);
+            let methods = Methods::with_client(script.clone(), 31_337, limits()).unwrap();
+            let error = block_on(methods.build_context(&native(), 99)).unwrap_err();
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.message, message);
+            script.exhausted();
+        }
+    }
+
+    #[test]
+    fn prepared_fees_preserve_reserved_nonce_without_a_nonce_lookup() {
+        let script = Script::new(preparation_steps());
+        let methods = Methods::with_client(script.clone(), 31_337, limits()).unwrap();
+        assert_eq!(
+            block_on(methods.build_context(&native(), u64::MAX)).unwrap(),
+            BuildContext {
+                chain_id: 31_337,
+                nonce: u64::MAX,
+                gas_limit: 2,
+                max_fee_per_gas: Wei::from_u128(8),
+                max_priority_fee_per_gas: Wei::from_u128(2),
+            }
+        );
+        script.exhausted();
+    }
+
+    #[test]
+    fn fee_overflows_fail_before_the_native_balance_read() {
+        for (base_fee, kind, message) in [
+            (
+                format!("0x{}", "ff".repeat(32)),
+                ChainErrorKind::RpcUnavailable,
+                "Ethereum RPC eth_getBlockByNumber returned an invalid response: \
+                 fee calculation overflowed U256",
+            ),
+            (
+                format!("0x7{}", "f".repeat(63)),
+                ChainErrorKind::FeeUnavailable,
+                "Ethereum maximum transaction fee overflowed U256",
+            ),
+        ] {
+            let mut steps = preparation_steps();
+            steps.truncate(4);
+            steps[2].response = Ok(Ok(RawJson::from_serializable(&json!("0x1")).unwrap()));
+            let latest = json!({"baseFeePerGas": base_fee});
+            steps[3].response = Ok(Ok(RawJson::from_serializable(&latest).unwrap()));
+            let script = Script::new(steps);
+            let limits = Limits::new(
+                1024,
+                0,
+                10,
+                Wei([255; 32]),
+                Wei::from_u128(10),
+                Wei([255; 32]),
+            )
+            .unwrap();
+            let methods = Methods::with_client(script.clone(), 31_337, limits).unwrap();
+            let error = block_on(methods.build_context(&native(), 99)).unwrap_err();
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.message, message);
+            script.exhausted();
+        }
+    }
+
+    #[test]
+    fn already_known_uses_one_submission_and_one_lookup_without_rebroadcast() {
+        let envelope = vec![2, 3, 4];
+        let id = TransactionId(keccak256(&envelope).0);
+        for visible in [true, false] {
+            let known = if visible {
+                json!({"hash": id.to_string()})
+            } else {
+                Value::Null
+            };
+            let submission = Step {
+                method: "eth_sendRawTransaction",
+                params: json!([hex::encode_prefixed(&envelope)]),
+                response: Ok(Err(Failure {
+                    code: -32_000,
+                    message: "already known".into(),
+                    data: None,
+                })),
+            };
+            let script = Script::new(vec![
+                submission,
+                Step::value("eth_getTransactionByHash", json!([id.to_string()]), known),
+            ]);
+            let methods = Methods::with_client(script.clone(), 31_337, limits()).unwrap();
+            let result = block_on(methods.broadcast(SignedTransaction {
+                id: id.clone(),
+                envelope: envelope.clone(),
+            }));
+            if visible {
+                assert_eq!(result.unwrap(), id);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind, TransactionErrorKind::Unavailable);
+                assert_eq!(
+                    error.ambiguous_transaction_id,
+                    Some(BaseTransactionId::new(id.to_string()))
+                );
+                assert_eq!(
+                    error.message,
+                    "Ethereum submission outcome is ambiguous: Ethereum RPC \
+                    reported an already-known transaction but did not expose the matching hash"
+                );
+            }
+            script.exhausted();
+        }
+    }
+
+    #[test]
+    fn malformed_local_hash_never_reaches_submission() {
+        let script = Script::new(vec![]);
+        let methods = Methods::with_client(script.clone(), 31_337, limits()).unwrap();
+        let error = block_on(methods.broadcast(SignedTransaction {
+            id: TransactionId([0; 32]),
+            envelope: vec![2, 3, 4],
+        }))
+        .unwrap_err();
+        assert_eq!(error.kind, TransactionErrorKind::InvalidTransaction);
+        assert_eq!(
+            error.message,
+            "signed Ethereum envelope hash does not match its transaction ID"
+        );
+        assert_eq!(error.ambiguous_transaction_id, None);
+        script.exhausted();
+    }
 }

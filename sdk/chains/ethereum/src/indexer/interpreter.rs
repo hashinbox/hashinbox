@@ -182,6 +182,26 @@ impl BlockInterpreter {
     }
 }
 
+impl ParsedReceipt {
+    fn fee(&self, payer: [u8; 20], scope: &IndexScope) -> Result<NetworkFee, IndexError> {
+        let fee_amount = self
+            .effective_gas_price
+            .checked_mul(U256::from(self.gas_used))
+            .ok_or_else(|| {
+                IndexError::new(
+                    IndexErrorKind::InvalidBlock,
+                    "Ethereum receipt fee exceeds 256-bit atomic units",
+                    false,
+                )
+            })?;
+        Ok(NetworkFee {
+            asset: (*NATIVE_ASSET).clone(),
+            amount: atomic_decimal(fee_amount),
+            payer: Some(payer.canonical(scope)),
+        })
+    }
+}
+
 impl IndexBlockInterpreter for BlockInterpreter {
     type Block = Block;
 
@@ -203,21 +223,7 @@ impl IndexBlockInterpreter for BlockInterpreter {
             .map_err(ParseError::into_invalid_block)?;
         let mut transactions = Vec::new();
         for (transaction, receipt) in parsed.transactions.iter().zip(&receipts) {
-            let fee_amount = receipt
-                .effective_gas_price
-                .checked_mul(U256::from(receipt.gas_used))
-                .ok_or_else(|| {
-                    IndexError::new(
-                        IndexErrorKind::InvalidBlock,
-                        "Ethereum receipt fee exceeds 256-bit atomic units",
-                        false,
-                    )
-                })?;
-            let fee = NetworkFee {
-                asset: (*NATIVE_ASSET).clone(),
-                amount: atomic_decimal(fee_amount),
-                payer: Some(transaction.from.canonical(&self.scope)),
-            };
+            let fee = receipt.fee(transaction.from, &self.scope)?;
             let movements = if receipt.succeeded {
                 Movements::successful(transaction, receipt, &self.scope)?
             } else {
@@ -227,17 +233,17 @@ impl IndexBlockInterpreter for BlockInterpreter {
                 continue;
             }
 
-            let transaction_id = transaction.hash.canonical(&self.scope);
+            let status = if receipt.succeeded {
+                ObservationDraftStatus::Included
+            } else {
+                ObservationDraftStatus::Failed {
+                    reason: Some("ethereum receipt status is zero".to_owned()),
+                }
+            };
             transactions.push(ObservationDraft {
                 scope: self.scope.clone(),
-                transaction_id,
-                status: if receipt.succeeded {
-                    ObservationDraftStatus::Included
-                } else {
-                    ObservationDraftStatus::Failed {
-                        reason: Some("ethereum receipt status is zero".to_owned()),
-                    }
-                },
+                transaction_id: transaction.hash.canonical(&self.scope),
+                status,
                 movements: movements.into_vec(),
                 fee: Some(fee),
             });
@@ -313,6 +319,65 @@ impl Canonicalize for [u8; 32] {
 impl ParseError {
     fn into_invalid_block(self) -> IndexError {
         IndexError::new(IndexErrorKind::InvalidBlock, self.to_string(), false)
+    }
+}
+
+#[cfg(test)]
+mod fee_tests {
+    use super::*;
+    use alloy_primitives::{Address, B256};
+    use alloy_rpc_types_eth::{Block as RpcBlock, BlockTransactions};
+    use serde_json::{Value, json};
+
+    #[test]
+    fn fee_overflow_precedes_address_filters_for_successful_and_failed_receipts() {
+        let scope = IndexScope {
+            chain: (*CHAIN_ID).clone(),
+            network: "test".to_owned(),
+        };
+        let interpreter = BlockInterpreter::new(scope.clone()).unwrap();
+        let native = RpcBlock::<Value> {
+            transactions: BlockTransactions::Full(vec![json!({
+                "hash": B256::from([0xcc; 32]).to_string(),
+                "from": Address::from([0x11; 20]).to_string(),
+                "to": Address::from([0x22; 20]).to_string(),
+                "value": "0x0", "transactionIndex": "0x0",
+                "blockHash": B256::ZERO.to_string(), "blockNumber": "0x0",
+            })]),
+            ..Default::default()
+        };
+        let raw_block = serde_json::to_vec(&native).unwrap();
+        let parsed = ParsedBlock::parse(&raw_block, None, true).unwrap();
+        let mut receipt = json!({
+            "transactionHash": B256::from([0xcc; 32]).to_string(),
+            "transactionIndex": "0x0", "blockHash": B256::ZERO.to_string(),
+            "blockNumber": "0x0", "from": Address::from([0x11; 20]).to_string(),
+            "to": Address::from([0x22; 20]).to_string(), "contractAddress": null,
+            "gasUsed": "0x2", "effectiveGasPrice": format!("0x{:x}", U256::MAX), "logs": [],
+        });
+        let malformed = CanonicalAddress {
+            scope: scope.clone(),
+            value: "invalid".to_owned(),
+        };
+        let mut foreign = malformed.clone();
+        foreign.scope.network = "foreign".to_owned();
+        for status in ["0x0", "0x1"] {
+            receipt["status"] = json!(status);
+            let block = Block {
+                reference: parsed.reference.clone(),
+                raw_block: raw_block.clone(),
+                raw_receipts: vec![serde_json::to_vec(&receipt).unwrap()],
+            };
+            for filters in [vec![], vec![malformed.clone()], vec![foreign.clone()]] {
+                let error = interpreter.inspect(&block, &filters).unwrap_err();
+                assert_eq!(error.kind, IndexErrorKind::InvalidBlock);
+                assert_eq!(
+                    error.message,
+                    "Ethereum receipt fee exceeds 256-bit atomic units"
+                );
+                assert!(!error.retryable);
+            }
+        }
     }
 }
 

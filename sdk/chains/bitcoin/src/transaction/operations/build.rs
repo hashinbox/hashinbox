@@ -16,6 +16,34 @@ impl BuildRequest {
         mut self,
         network: Network,
     ) -> Result<UnsignedTransaction, ChainError> {
+        self.validate()?;
+        let recipient_scripts = self
+            .recipients
+            .iter()
+            .map(|output| checked_output(network, output, self.drain_wallet))
+            .collect::<Result<Vec<_>, ChainError>>()?;
+        let change_script = self.change_address.script_pubkey_for_network(network)?;
+
+        if self.drain_wallet {
+            return self.drain(&recipient_scripts);
+        }
+        self.available.sort_by(|left, right| {
+            right
+                .value
+                .cmp(&left.value)
+                .then_with(|| left.transaction_id.cmp(&right.transaction_id))
+                .then_with(|| left.output_index.cmp(&right.output_index))
+        });
+
+        let recipient_total = self.recipients.iter().try_fold(0_u64, |total, output| {
+            total.checked_add(output.value.0).ok_or_else(|| {
+                ChainError::invalid_transaction("Bitcoin recipient amount overflowed u64")
+            })
+        })?;
+        self.select(recipient_scripts, change_script, recipient_total)
+    }
+
+    fn validate(&self) -> Result<(), ChainError> {
         if self.available.is_empty() {
             return Err(ChainError::insufficient_funds(
                 "Bitcoin transfer has no available UTXOs",
@@ -51,62 +79,48 @@ impl BuildRequest {
             }
         }
 
-        let recipient_scripts = self
-            .recipients
-            .iter()
-            .map(|output| checked_output(network, output, self.drain_wallet))
-            .collect::<Result<Vec<_>, ChainError>>()?;
-        let change_script = self.change_address.script_pubkey_for_network(network)?;
+        Ok(())
+    }
 
-        if self.drain_wallet {
-            if self.recipients.len() != 1 {
-                return Err(ChainError::invalid_transaction(
-                    "Bitcoin drain transfer requires exactly one recipient",
-                ));
-            }
-            self.available.sort_by(SpendSource::compare_outpoint);
-            let selected_total = self
-                .available
-                .iter()
-                .try_fold(0_u64, |total, utxo| total.checked_add(utxo.value.0))
-                .ok_or_else(|| {
-                    ChainError::invalid_transaction("Bitcoin selected input amount overflowed u64")
-                })?;
-            let fee = predicted_fee(&self.available, &recipient_scripts, self.fee_rate)?;
-            let value = selected_total.checked_sub(fee).ok_or_else(|| {
-                ChainError::insufficient_funds(
-                    "Bitcoin UTXOs cannot cover the drain transaction fee",
-                )
-            })?;
-            let minimum = recipient_scripts[0].minimal_non_dust().to_sat();
-            if value < minimum {
-                return Err(ChainError::insufficient_funds(format!(
-                    "Bitcoin drain output is dust: minimum is {minimum} satoshis"
-                )));
-            }
-            self.recipients[0].value = Satoshi(value);
-            return Ok(UnsignedTransaction::from_selected(
-                self.available,
-                self.recipients,
+    fn drain(mut self, recipient_scripts: &[ScriptBuf]) -> Result<UnsignedTransaction, ChainError> {
+        if self.recipients.len() != 1 {
+            return Err(ChainError::invalid_transaction(
+                "Bitcoin drain transfer requires exactly one recipient",
             ));
         }
-
-        self.available.sort_by(|left, right| {
-            right
-                .value
-                .cmp(&left.value)
-                .then_with(|| left.transaction_id.cmp(&right.transaction_id))
-                .then_with(|| left.output_index.cmp(&right.output_index))
-        });
-
-        let recipient_total = self.recipients.iter().try_fold(0_u64, |total, output| {
-            total.checked_add(output.value.0).ok_or_else(|| {
-                ChainError::invalid_transaction("Bitcoin recipient amount overflowed u64")
-            })
+        self.available.sort_by(SpendSource::compare_outpoint);
+        let selected_total = self
+            .available
+            .iter()
+            .try_fold(0_u64, |total, utxo| total.checked_add(utxo.value.0))
+            .ok_or_else(|| {
+                ChainError::invalid_transaction("Bitcoin selected input amount overflowed u64")
+            })?;
+        let fee = predicted_fee(&self.available, recipient_scripts, self.fee_rate)?;
+        let value = selected_total.checked_sub(fee).ok_or_else(|| {
+            ChainError::insufficient_funds("Bitcoin UTXOs cannot cover the drain transaction fee")
         })?;
+        let minimum = recipient_scripts[0].minimal_non_dust().to_sat();
+        if value < minimum {
+            return Err(ChainError::insufficient_funds(format!(
+                "Bitcoin drain output is dust: minimum is {minimum} satoshis"
+            )));
+        }
+        self.recipients[0].value = Satoshi(value);
+        Ok(UnsignedTransaction::from_selected(
+            self.available,
+            self.recipients,
+        ))
+    }
+
+    fn select(
+        self,
+        recipient_scripts: Vec<ScriptBuf>,
+        change_script: ScriptBuf,
+        recipient_total: u64,
+    ) -> Result<UnsignedTransaction, ChainError> {
         let mut selected = Vec::new();
         let mut selected_total = 0_u64;
-        let mut final_outputs = None;
 
         for utxo in self.available {
             selected_total = selected_total.checked_add(utxo.value.0).ok_or_else(|| {
@@ -138,16 +152,12 @@ impl BuildRequest {
                     value: Satoshi(change),
                 });
             }
-            final_outputs = Some(outputs);
-            break;
+            return Ok(UnsignedTransaction::from_selected(selected, outputs));
         }
 
-        let outputs = final_outputs.ok_or_else(|| {
-            ChainError::insufficient_funds(format!(
-                "insufficient Bitcoin funds for {recipient_total} satoshis plus network fee"
-            ))
-        })?;
-        Ok(UnsignedTransaction::from_selected(selected, outputs))
+        Err(ChainError::insufficient_funds(format!(
+            "insufficient Bitcoin funds for {recipient_total} satoshis plus network fee"
+        )))
     }
 }
 
@@ -316,6 +326,113 @@ fn predicted_fee(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drain_keeps_fee_insufficiency_and_exact_dust_threshold() {
+        let script = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([7; 20]));
+        let address = crate::Address::from_script_for_network(&script, Network::Regtest).unwrap();
+        for (value, message) in [
+            (
+                109,
+                Some("Bitcoin UTXOs cannot cover the drain transaction fee"),
+            ),
+            (
+                403,
+                Some("Bitcoin drain output is dust: minimum is 294 satoshis"),
+            ),
+            (404, None),
+        ] {
+            let source = SpendSource {
+                transaction_id: [1; 32],
+                output_index: 2,
+                value: Satoshi(value),
+                script_pubkey: script.clone().into_bytes(),
+                satisfaction_weight: 109,
+            };
+            let result = BuildRequest {
+                available: vec![source.clone()],
+                recipients: vec![Output::from_atomic(address.clone(), Satoshi(0))],
+                change_address: address.clone(),
+                fee_rate: FeeRate::new(1_000),
+                drain_wallet: true,
+            }
+            .build(Network::Regtest);
+            if let Some(message) = message {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind, ChainErrorKind::InsufficientFunds);
+                assert_eq!(error.message, message);
+            } else {
+                let transaction = result.unwrap();
+                assert_eq!(transaction.inputs[0].utxo, source);
+                assert_eq!(
+                    transaction.outputs,
+                    [Output::from_atomic(address.clone(), Satoshi(294))]
+                );
+                let native = transaction.native(Network::Regtest).unwrap();
+                assert_eq!(
+                    native.output,
+                    [TxOut {
+                        value: Amount::from_sat(294),
+                        script_pubkey: script.clone()
+                    }]
+                );
+                assert_eq!(
+                    native.input[0].previous_output,
+                    OutPoint::new(Txid::from_byte_array([1; 32]), 2)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn script_and_address_validation_precedes_drain_recipient_count() {
+        let script = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([7; 20]));
+        let address = crate::Address::from_script_for_network(&script, Network::Regtest).unwrap();
+        let invalid_recipient = crate::Address::from_encoded("1BitcoinEaterAddressDontSendf59kuE");
+        let invalid_change = crate::Address::from_encoded("invalid");
+        let expected = [
+            ChainError::invalid_transaction("Bitcoin wallet supports P2WPKH and P2TR inputs only"),
+            invalid_recipient
+                .script_pubkey_for_network(Network::Regtest)
+                .unwrap_err(),
+            invalid_change
+                .script_pubkey_for_network(Network::Regtest)
+                .unwrap_err(),
+            ChainError::invalid_transaction(
+                "Bitcoin drain transfer requires exactly one recipient",
+            ),
+        ];
+        for (stage, expected) in expected.into_iter().enumerate() {
+            let recipient = if stage < 2 {
+                invalid_recipient.clone()
+            } else {
+                address.clone()
+            };
+            let script_pubkey = if stage == 0 {
+                vec![0x51]
+            } else {
+                script.clone().into_bytes()
+            };
+            let request = BuildRequest {
+                available: vec![SpendSource {
+                    transaction_id: [1; 32],
+                    output_index: 0,
+                    value: Satoshi(1_000),
+                    script_pubkey,
+                    satisfaction_weight: 109,
+                }],
+                recipients: vec![Output::from_atomic(recipient, Satoshi(0)); 2],
+                change_address: if stage < 3 {
+                    invalid_change.clone()
+                } else {
+                    address.clone()
+                },
+                fee_rate: FeeRate::new(1_000),
+                drain_wallet: true,
+            };
+            assert_eq!(request.build(Network::Regtest), Err(expected));
+        }
+    }
 
     #[test]
     fn normal_change_keeps_the_dust_boundary_and_donates_smaller_remainders() {

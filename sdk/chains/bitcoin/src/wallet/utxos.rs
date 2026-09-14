@@ -82,12 +82,9 @@ impl IndexUtxos {
                 ));
             }
             for output in page.outputs {
-                let Some(output) =
-                    self.unspent(output, &canonical, &expected_script, checkpoint, seen)?
-                else {
-                    continue;
-                };
-                outputs.push(output);
+                let output =
+                    self.unspent(output, &canonical, &expected_script, checkpoint, seen)?;
+                outputs.extend(output);
             }
             let Some(next) = page.next else {
                 break;
@@ -121,43 +118,14 @@ impl IndexUtxos {
                 false,
             ));
         }
-        let transaction_id = output
-            .id
-            .transaction
-            .value
-            .parse::<TransactionId>()
-            .map_err(|_| {
-                source_error(
-                    "indexed output has an invalid Bitcoin transaction ID",
-                    false,
-                )
-            })?;
-        let value = Satoshi::from_indexed_amount(&output.amount)?;
-        let confirmations = checkpoint
-            .height
-            .0
-            .checked_sub(output.created_at.0)
-            .and_then(|depth| depth.checked_add(1))
-            .ok_or_else(|| {
-                source_error(
-                    "indexed output was created after the canonical checkpoint",
-                    false,
-                )
-            })?;
-        if output.coinbase && confirmations < COINBASE_MATURITY {
+        let output = UnspentOutput::from_indexed(output, checkpoint)?;
+        if output.coinbase && output.confirmations < COINBASE_MATURITY {
             return Ok(None);
         }
-        if !seen.insert((transaction_id.0, output.id.index)) {
+        if !seen.insert((output.transaction_id, output.output_index)) {
             return Err(source_error("indexed output is duplicated", false));
         }
-        Ok(Some(UnspentOutput {
-            transaction_id: transaction_id.0,
-            output_index: output.id.index,
-            value,
-            script_pubkey: output.evidence,
-            confirmations,
-            coinbase: output.coinbase,
-        }))
+        Ok(Some(output))
     }
 }
 
@@ -196,6 +164,42 @@ fn validate_cursor(
         ));
     }
     Ok(())
+}
+
+impl UnspentOutput {
+    fn from_indexed(output: IndexedOutput, checkpoint: &BlockRef) -> Result<Self, SourceError> {
+        let transaction_id = output
+            .id
+            .transaction
+            .value
+            .parse::<TransactionId>()
+            .map_err(|_| {
+                source_error(
+                    "indexed output has an invalid Bitcoin transaction ID",
+                    false,
+                )
+            })?;
+        let value = Satoshi::from_indexed_amount(&output.amount)?;
+        let confirmations = checkpoint
+            .height
+            .0
+            .checked_sub(output.created_at.0)
+            .and_then(|depth| depth.checked_add(1))
+            .ok_or_else(|| {
+                source_error(
+                    "indexed output was created after the canonical checkpoint",
+                    false,
+                )
+            })?;
+        Ok(Self {
+            transaction_id: transaction_id.0,
+            output_index: output.id.index,
+            value,
+            script_pubkey: output.evidence,
+            confirmations,
+            coinbase: output.coinbase,
+        })
+    }
 }
 
 impl Satoshi {
@@ -239,6 +243,105 @@ mod tests {
         ) -> BoxFuture<'a, Result<OutputPage, IndexError>> {
             Box::pin(async { Err(self.0.clone()) })
         }
+    }
+
+    #[test]
+    fn output_validation_order_precedes_duplicate_claims() {
+        let scope = IndexScope {
+            chain: (*CHAIN_ID).clone(),
+            network: "mainnet".to_owned(),
+        };
+        let address = Address::from_encoded("1BitcoinEaterAddressDontSendf59kuE");
+        let canonical = CanonicalAddress {
+            scope: scope.clone(),
+            value: address.encoded().to_owned(),
+        };
+        let script = address
+            .script_pubkey_for_network(Network::Mainnet)
+            .unwrap()
+            .into_bytes();
+        let reader = IndexUtxos::new(
+            scope.clone(),
+            Network::Mainnet,
+            Arc::new(ScriptedOutputs(Mutex::new(VecDeque::new()))),
+        )
+        .unwrap();
+        let transaction = indexing::TransactionRef {
+            scope,
+            value: TransactionId([7; 32]).to_string(),
+        };
+        let valid = IndexedOutput {
+            id: indexing::OutputId {
+                transaction,
+                index: 3,
+            },
+            address: canonical.clone(),
+            asset: (*NATIVE_ASSET).clone(),
+            amount: Decimal::from(100_000_u64),
+            evidence: script.clone(),
+            created_at: indexing::BlockHeight(1),
+            coinbase: false,
+        };
+        let messages = [
+            "indexed output does not belong to the requested Bitcoin address and asset",
+            "indexed output locking script does not match its Bitcoin address",
+            "indexed output has an invalid Bitcoin transaction ID",
+            "amount has more than 0 fractional digits",
+            "indexed output was created after the canonical checkpoint",
+        ];
+        let mut seen = BTreeSet::new();
+        for (stage, message) in messages.into_iter().enumerate() {
+            let mut output = valid.clone();
+            if stage == 0 {
+                output.asset.asset = "token".to_owned();
+            }
+            if stage <= 1 {
+                output.evidence.clear();
+            }
+            if stage <= 2 {
+                output.id.transaction.value = "invalid".to_owned();
+            }
+            if stage <= 3 {
+                output.amount = "1.1".parse().unwrap();
+            }
+            output.created_at = indexing::BlockHeight(11);
+            let error = reader
+                .unspent(output, &canonical, &script, &checkpoint(10), &mut seen)
+                .unwrap_err();
+            assert_eq!(error.message, message);
+            assert!(!error.retryable);
+            assert!(seen.is_empty());
+        }
+        let mut overflow = valid.clone();
+        overflow.created_at = indexing::BlockHeight(0);
+        let error = reader
+            .unspent(
+                overflow,
+                &canonical,
+                &script,
+                &checkpoint(u64::MAX),
+                &mut seen,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.message,
+            "indexed output was created after the canonical checkpoint"
+        );
+        assert!(!error.retryable);
+        assert!(seen.is_empty());
+        let output = reader
+            .unspent(valid, &canonical, &script, &checkpoint(10), &mut seen)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                output.transaction_id,
+                output.output_index,
+                output.confirmations
+            ),
+            ([7; 32], 3, 10)
+        );
+        assert_eq!(seen, BTreeSet::from([([7; 32], 3)]));
     }
 
     #[test]
