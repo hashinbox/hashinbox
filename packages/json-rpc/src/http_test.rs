@@ -312,6 +312,7 @@ async fn request_rejects_invalid_parameters_before_http() {
     }
 }
 
+// linter:disable rust/function-length -- Test-only raw-byte and endpoint-isolation contract.
 #[tokio::test]
 async fn request_preserves_raw_results_and_call_failures_without_failover() {
     const RAW: &str = r#"{ "amount": 1.2300, "large": 18446744073709551616, "tag": "\u0061" }"#;

@@ -28,7 +28,7 @@ async fn projection(error: HttpError) -> (StatusCode, Value) {
 }
 
 #[tokio::test]
-async fn ambiguity_and_definite_failures_project_only_truthful_metadata() {
+async fn ambiguous_failures_preserve_reconciliation_metadata() {
     let (status, body) =
         projection(ambiguous_error("single ambiguous", "single-local").into()).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -71,7 +71,10 @@ async fn ambiguity_and_definite_failures_project_only_truthful_metadata() {
             "ambiguous_transaction_id": "grouped-local"
         })
     );
+}
 
+#[tokio::test]
+async fn definite_operation_failures_omit_submission_metadata() {
     for (error, status, body) in [
         (
             Error::new(ErrorKind::Transaction, "definite single").into(),
@@ -89,6 +92,19 @@ async fn ambiguity_and_definite_failures_project_only_truthful_metadata() {
             json!({"message": "operation failure"}),
         ),
         (
+            SendError::operation(ErrorKind::SourceBusy, "single source is busy").into(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"message": "single source is busy"}),
+        ),
+    ] {
+        assert_eq!(projection(error).await, (status, body));
+    }
+}
+
+#[tokio::test]
+async fn definite_batch_failures_preserve_only_known_submission_metadata() {
+    for (error, status, body) in [
+        (
             SendError::item(
                 3,
                 Vec::new(),
@@ -97,11 +113,6 @@ async fn ambiguity_and_definite_failures_project_only_truthful_metadata() {
             .into(),
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"message": "source is busy", "failed_index": 3}),
-        ),
-        (
-            SendError::operation(ErrorKind::SourceBusy, "single source is busy").into(),
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"message": "single source is busy"}),
         ),
         (
             SendError::item(

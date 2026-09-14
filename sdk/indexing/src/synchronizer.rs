@@ -127,9 +127,31 @@ where
         {
             checkpoint = self.reconcile(local, &mut plan).await?;
         }
+        checkpoint = self.catch_up(&observed_tip, checkpoint, &mut plan).await?;
+        let caught_up = checkpoint
+            .as_ref()
+            .is_some_and(|value| value.position >= observed_tip.position);
+        Ok(SyncStatus {
+            scope: self.config.scope.clone(),
+            checkpoint,
+            observed_tip: Some(observed_tip),
+            phase: if caught_up {
+                SyncPhase::Ready
+            } else {
+                SyncPhase::CatchingUp
+            },
+        })
+    }
+
+    async fn catch_up(
+        &self,
+        observed_tip: &BlockRef,
+        mut checkpoint: Option<BlockRef>,
+        plan: &mut crate::SyncPlan,
+    ) -> Result<Option<BlockRef>, IndexError> {
         let mut applied = 0_usize;
         if checkpoint.is_none() {
-            (checkpoint, applied) = self.initialize_checkpoint(&observed_tip, &mut plan).await?;
+            (checkpoint, applied) = self.initialize_checkpoint(observed_tip, plan).await?;
         }
 
         if applied < self.config.batch_size
@@ -156,24 +178,12 @@ where
                 let position = source_block.block_ref().position;
                 let addresses = plan.active_addresses(position);
                 checkpoint = Some(
-                    self.apply(source_block, &addresses, checkpoint, &mut plan)
+                    self.apply(source_block, &addresses, checkpoint, plan)
                         .await?,
                 );
             }
         }
-        let caught_up = checkpoint
-            .as_ref()
-            .is_some_and(|value| value.position >= observed_tip.position);
-        Ok(SyncStatus {
-            scope: self.config.scope.clone(),
-            checkpoint,
-            observed_tip: Some(observed_tip),
-            phase: if caught_up {
-                SyncPhase::Ready
-            } else {
-                SyncPhase::CatchingUp
-            },
-        })
+        Ok(checkpoint)
     }
 
     async fn initialize_checkpoint(
@@ -398,9 +408,35 @@ where
         tip: BlockRef,
         plan: &mut crate::SyncPlan,
     ) -> Result<Option<BlockRef>, IndexError> {
+        let ancestor = self.common_ancestor(&tip).await?;
+
+        let mut permit = plan.begin()?;
+        permit.start();
+        let mut current = Some(tip);
+        while current
+            .as_ref()
+            .is_some_and(|value| value.height > ancestor.height)
+        {
+            let expected_tip = current.clone().ok_or_else(|| {
+                IndexError::new(IndexErrorKind::Store, "checkpoint disappeared", false)
+            })?;
+            current = self
+                .repository
+                .remove(self.config.scope.clone(), expected_tip)
+                .await?;
+            permit.persist(current.clone())?;
+        }
+        permit.complete(current.clone())?;
+        if let Some(checkpoint) = &current {
+            plan.advance(checkpoint.clone());
+        }
+        Ok(current)
+    }
+
+    async fn common_ancestor(&self, tip: &BlockRef) -> Result<BlockRef, IndexError> {
         let oldest = BlockHeight(tip.height.0.saturating_sub(self.config.reorg_retention));
         let mut height = tip.height;
-        let ancestor = loop {
+        loop {
             let local = self
                 .repository
                 .get(BlockSelector::Height {
@@ -432,28 +468,6 @@ where
                 "reorg exceeds rollback journal; rescan required",
                 false,
             )
-        })?;
-
-        let mut permit = plan.begin()?;
-        permit.start();
-        let mut current = Some(tip);
-        while current
-            .as_ref()
-            .is_some_and(|value| value.height > ancestor.height)
-        {
-            let expected_tip = current.clone().ok_or_else(|| {
-                IndexError::new(IndexErrorKind::Store, "checkpoint disappeared", false)
-            })?;
-            current = self
-                .repository
-                .remove(self.config.scope.clone(), expected_tip)
-                .await?;
-            permit.persist(current.clone())?;
-        }
-        permit.complete(current.clone())?;
-        if let Some(checkpoint) = &current {
-            plan.advance(checkpoint.clone());
-        }
-        Ok(current)
+        })
     }
 }

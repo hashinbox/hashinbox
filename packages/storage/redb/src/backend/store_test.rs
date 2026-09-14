@@ -177,6 +177,7 @@ async fn read_recovers_after_ambiguous_commit_reopen_failure() -> Result<(), Err
     Ok(())
 }
 
+// linter:disable rust/function-length -- Test-only page continuation and namespace isolation.
 #[tokio::test]
 async fn put_get_and_paginated_scan_are_ordered() -> Result<(), Error> {
     let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
@@ -242,6 +243,7 @@ async fn put_get_and_paginated_scan_are_ordered() -> Result<(), Error> {
     Ok(())
 }
 
+// linter:disable rust/function-length -- Test-only stale writes share one atomic version history.
 #[tokio::test]
 async fn stale_condition_rejects_the_complete_batch() -> Result<(), Error> {
     let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
@@ -307,6 +309,7 @@ async fn stale_condition_rejects_the_complete_batch() -> Result<(), Error> {
     Ok(())
 }
 
+// linter:disable rust/function-length -- Test-only rejected batches share one version history.
 #[tokio::test]
 async fn absent_or_present_condition_conflicts_preserve_batch_and_version() -> Result<(), Error> {
     let directory = TempDir::new().map_err(|error| other(error.to_string()))?;
@@ -397,22 +400,14 @@ async fn concurrent_compare_and_swap_has_one_winner() -> Result<(), Error> {
 
     let first = storage.clone();
     let second = storage.clone();
-    let first_batch = WriteBatch {
+    let [first_batch, second_batch] = ["first", "second"].map(|replacement| WriteBatch {
         conditions: vec![Condition::Version {
             namespace: records.clone(),
             key: primary.clone(),
             expected: Version(1),
         }],
-        operations: vec![put(&records, &primary, "first")],
-    };
-    let second_batch = WriteBatch {
-        conditions: vec![Condition::Version {
-            namespace: records.clone(),
-            key: primary.clone(),
-            expected: Version(1),
-        }],
-        operations: vec![put(&records, &primary, "second")],
-    };
+        operations: vec![put(&records, &primary, replacement)],
+    });
 
     let (first_result, second_result) =
         tokio::join!(first.commit(first_batch), second.commit(second_batch));

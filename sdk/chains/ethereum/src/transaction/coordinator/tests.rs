@@ -484,54 +484,45 @@ async fn cumulative_token_amount_and_native_gas_fail_before_any_broadcast() {
     let signer = signer(7);
     let token = Address([0x77; 20]);
     let accounts = Arc::new(AccountStub::default());
-    accounts.set_native_balance(signer.address.clone(), 2);
-    accounts.set_token_balance(signer.address.clone(), token.clone(), 10);
     let transactions = Arc::new(Endpoint::default());
     let coordinator = coordinator(accounts.clone(), transactions.clone());
-    let preparations = || {
-        vec![
-            Preparation::signer(
-                token_transfer(&signer.address, &token, 6),
-                CHAIN_ID,
-                &signer,
-            ),
-            Preparation::signer(
-                token_transfer(&signer.address, &token, 6),
-                CHAIN_ID,
-                &signer,
-            ),
-        ]
-    };
-
-    let token_error = match coordinator.prepare_batch(preparations()).await {
-        Err(error) => error,
-        Ok(_) => panic!("cumulative token amount must exceed the token balance"),
-    };
-    assert_eq!(token_error.index, 1);
-    assert_eq!(token_error.source.kind, ChainErrorKind::InsufficientFunds);
-    assert!(
-        transactions
-            .broadcasts
-            .lock()
-            .expect("broadcast lock must be healthy")
-            .is_empty()
-    );
-
-    accounts.set_token_balance(signer.address.clone(), token.clone(), 12);
-    accounts.set_native_balance(signer.address.clone(), 1);
-    let gas_error = match coordinator.prepare_batch(preparations()).await {
-        Err(error) => error,
-        Ok(_) => panic!("cumulative maximum gas must exceed the native balance"),
-    };
-    assert_eq!(gas_error.index, 1);
-    assert_eq!(gas_error.source.kind, ChainErrorKind::InsufficientFunds);
-    assert!(
-        transactions
-            .broadcasts
-            .lock()
-            .expect("broadcast lock must be healthy")
-            .is_empty()
-    );
+    for (token_balance, native_balance, failure) in [
+        (
+            10,
+            2,
+            "cumulative token amount must exceed the token balance",
+        ),
+        (
+            12,
+            1,
+            "cumulative maximum gas must exceed the native balance",
+        ),
+    ] {
+        accounts.set_token_balance(signer.address.clone(), token.clone(), token_balance);
+        accounts.set_native_balance(signer.address.clone(), native_balance);
+        let preparations = (0..2)
+            .map(|_| {
+                Preparation::signer(
+                    token_transfer(&signer.address, &token, 6),
+                    CHAIN_ID,
+                    &signer,
+                )
+            })
+            .collect();
+        let error = match coordinator.prepare_batch(preparations).await {
+            Err(error) => error,
+            Ok(_) => panic!("{failure}"),
+        };
+        assert_eq!(error.index, 1);
+        assert_eq!(error.source.kind, ChainErrorKind::InsufficientFunds);
+        assert!(
+            transactions
+                .broadcasts
+                .lock()
+                .expect("broadcast lock must be healthy")
+                .is_empty()
+        );
+    }
 }
 
 #[tokio::test]
@@ -862,6 +853,7 @@ async fn cancellation_after_submission_starts_retains_unknown_for_exact_recovery
     assert_eq!(broadcasts.as_slice(), [signed.clone(), signed]);
 }
 
+// linter:disable rust/function-length -- Test-only race binds task order, completion, and nonces.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_same_sender_operations_never_reuse_a_nonce() {
     let signer = Arc::new(signer(6));

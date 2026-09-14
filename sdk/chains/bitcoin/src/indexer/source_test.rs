@@ -193,6 +193,7 @@ fn transaction_result(transaction: &Transaction, inputs: Vec<Value>) -> Value {
     })
 }
 
+// linter:disable rust/function-length -- Test-only fixture binds consensus prevout identities.
 fn external_prevout_block() -> (Value, Transaction, Transaction, Transaction) {
     let previous = Transaction {
         version: Version::ONE,

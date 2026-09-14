@@ -161,6 +161,36 @@ impl BuildRequest {
     }
 }
 
+impl Funding {
+    fn surplus(&mut self) -> Result<u64, ChainError> {
+        if self.available.is_empty() || self.recipients.is_empty() {
+            return Err(ChainError::invalid_transaction(
+                "each Bitcoin grouped source needs inputs and recipients",
+            ));
+        }
+        self.available.sort_by(SpendSource::compare_outpoint);
+        let input = self
+            .available
+            .iter()
+            .try_fold(0_u64, |total, utxo| total.checked_add(utxo.value.0))
+            .ok_or_else(|| {
+                ChainError::invalid_transaction("Bitcoin selected input amount overflowed u64")
+            })?;
+        let output = self
+            .recipients
+            .iter()
+            .try_fold(0_u64, |sum, value| sum.checked_add(value.value.0))
+            .ok_or_else(|| {
+                ChainError::invalid_transaction("Bitcoin recipient amount overflowed u64")
+            })?;
+        input.checked_sub(output).ok_or_else(|| {
+            ChainError::insufficient_funds(
+                "a Bitcoin grouped source cannot fund its requested outputs",
+            )
+        })
+    }
+}
+
 pub(in crate::transaction) fn grouped(
     network: Network,
     mut groups: Vec<Funding>,
@@ -176,31 +206,7 @@ pub(in crate::transaction) fn grouped(
     let mut surplus = Vec::with_capacity(groups.len());
     let mut change = Vec::with_capacity(groups.len());
     for group in &mut groups {
-        if group.available.is_empty() || group.recipients.is_empty() {
-            return Err(ChainError::invalid_transaction(
-                "each Bitcoin grouped source needs inputs and recipients",
-            ));
-        }
-        group.available.sort_by(SpendSource::compare_outpoint);
-        let input = group
-            .available
-            .iter()
-            .try_fold(0_u64, |total, utxo| total.checked_add(utxo.value.0))
-            .ok_or_else(|| {
-                ChainError::invalid_transaction("Bitcoin selected input amount overflowed u64")
-            })?;
-        let output = group
-            .recipients
-            .iter()
-            .try_fold(0_u64, |sum, value| sum.checked_add(value.value.0))
-            .ok_or_else(|| {
-                ChainError::invalid_transaction("Bitcoin recipient amount overflowed u64")
-            })?;
-        surplus.push(input.checked_sub(output).ok_or_else(|| {
-            ChainError::insufficient_funds(
-                "a Bitcoin grouped source cannot fund its requested outputs",
-            )
-        })?);
+        surplus.push(group.surplus()?);
         change.push(group.change_address.script_pubkey_for_network(network)?);
         available.append(&mut group.available);
         recipients.append(&mut group.recipients);
@@ -218,21 +224,39 @@ pub(in crate::transaction) fn grouped(
         .iter()
         .map(|output| checked_output(network, output, false))
         .collect::<Result<Vec<_>, _>>()?;
+    let remaining = allocate_change(&available, &recipient_scripts, &surplus, &change, fee_rate)?;
+    for (group, value) in groups.iter().zip(remaining) {
+        if let Some(value) = value {
+            recipients.push(Output::from_atomic(group.change_address.clone(), value));
+        }
+    }
+    Ok(UnsignedTransaction::from_selected(available, recipients))
+}
+
+// Allocate fees in source order; a change output removed as dust stays removed
+// even when the smaller transaction lowers the next fee estimate.
+fn allocate_change(
+    available: &[SpendSource],
+    recipient_scripts: &[ScriptBuf],
+    surplus: &[u64],
+    change: &[ScriptBuf],
+    fee_rate: FeeRate,
+) -> Result<Vec<Option<Satoshi>>, ChainError> {
     let mut active = surplus
         .iter()
-        .zip(&change)
+        .zip(change)
         .map(|(value, script)| *value >= script.minimal_non_dust().to_sat())
         .collect::<Vec<_>>();
     let remaining = loop {
-        let mut scripts = recipient_scripts.clone();
+        let mut scripts = recipient_scripts.to_vec();
         scripts.extend(
             change
                 .iter()
                 .zip(&active)
                 .filter_map(|(script, active)| active.then_some(script.clone())),
         );
-        let fee = predicted_fee(&available, &scripts, fee_rate)?;
-        let remaining = allocate_fee(&surplus, fee)?;
+        let fee = predicted_fee(available, &scripts, fee_rate)?;
+        let remaining = allocate_fee(surplus, fee)?;
         let next = remaining
             .iter()
             .zip(change.iter().zip(&active))
@@ -245,15 +269,11 @@ pub(in crate::transaction) fn grouped(
         }
         active = next;
     };
-    for ((group, value), keep) in groups.iter().zip(remaining).zip(active) {
-        if keep {
-            recipients.push(Output::from_atomic(
-                group.change_address.clone(),
-                Satoshi(value),
-            ));
-        }
-    }
-    Ok(UnsignedTransaction::from_selected(available, recipients))
+    Ok(remaining
+        .into_iter()
+        .zip(active)
+        .map(|(value, keep)| keep.then_some(Satoshi(value)))
+        .collect())
 }
 
 // isolates deterministic source-ordered fee allocation from grouped transaction assembly
@@ -326,6 +346,57 @@ fn predicted_fee(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_validates_sources_before_duplicate_inputs_and_recipient_addresses() {
+        let script = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([7; 20]));
+        let address = crate::Address::from_script_for_network(&script, Network::Regtest).unwrap();
+        let invalid = crate::Address::from_encoded("invalid");
+        let source = SpendSource {
+            transaction_id: [1; 32],
+            output_index: 0,
+            value: Satoshi(1_000),
+            script_pubkey: script.into_bytes(),
+            satisfaction_weight: 109,
+        };
+        let expected = [
+            ChainError::insufficient_funds(
+                "a Bitcoin grouped source cannot fund its requested outputs",
+            ),
+            invalid
+                .script_pubkey_for_network(Network::Regtest)
+                .unwrap_err(),
+            ChainError::invalid_transaction("Bitcoin transfer contains a duplicate UTXO"),
+            invalid
+                .script_pubkey_for_network(Network::Regtest)
+                .unwrap_err(),
+        ];
+        for (stage, expected) in expected.into_iter().enumerate() {
+            let mut second = source.clone();
+            second.output_index = u32::from(stage == 3);
+            let first = Funding {
+                available: vec![source.clone()],
+                recipients: vec![Output::from_atomic(
+                    address.clone(),
+                    Satoshi(if stage == 0 { 1_001 } else { 1_000 }),
+                )],
+                change_address: if stage < 2 {
+                    invalid.clone()
+                } else {
+                    address.clone()
+                },
+            };
+            let second = Funding {
+                available: vec![second],
+                recipients: vec![Output::from_atomic(invalid.clone(), Satoshi(1_000))],
+                change_address: address.clone(),
+            };
+            assert_eq!(
+                grouped(Network::Regtest, vec![first, second], FeeRate::new(1_000)),
+                Err(expected),
+            );
+        }
+    }
 
     #[test]
     fn drain_keeps_fee_insufficiency_and_exact_dust_threshold() {

@@ -29,6 +29,8 @@ struct Source {
     blocks: Arc<Mutex<BTreeMap<BlockPosition, TestBlock>>>,
     tip_calls: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<BlockHeight>>>,
+    canonical_requests: Arc<Mutex<Vec<BlockPosition>>>,
+    canonical_failure: Arc<Mutex<Option<BlockPosition>>>,
     /// Runs while the tip is being observed, standing in for anything that can
     /// happen during that round trip — such as a wallet being created.
     during_tip: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -46,6 +48,8 @@ impl Source {
             blocks: Arc::new(Mutex::new(blocks)),
             tip_calls: Arc::new(AtomicUsize::new(0)),
             requests: Arc::new(Mutex::new(Vec::new())),
+            canonical_requests: Arc::new(Mutex::new(Vec::new())),
+            canonical_failure: Arc::new(Mutex::new(None)),
             during_tip: None,
         }
     }
@@ -60,6 +64,8 @@ impl Source {
             )),
             tip_calls: Arc::new(AtomicUsize::new(0)),
             requests: Arc::new(Mutex::new(Vec::new())),
+            canonical_requests: Arc::new(Mutex::new(Vec::new())),
+            canonical_failure: Arc::new(Mutex::new(None)),
             during_tip: None,
         }
     }
@@ -139,6 +145,15 @@ impl BlockSource for Source {
         &'a self,
         position: BlockPosition,
     ) -> BoxFuture<'a, Result<Option<BlockRef>, SourceError>> {
+        self.canonical_requests.lock().unwrap().push(position);
+        if *self.canonical_failure.lock().unwrap() == Some(position) {
+            return Box::pin(async {
+                Err(SourceError {
+                    message: "canonical lookup unavailable".into(),
+                    retryable: true,
+                })
+            });
+        }
         let block = self
             .blocks
             .lock()
@@ -672,6 +687,82 @@ fn sparse_sync_reports_reorg_beyond_retention() {
     let error = block_on(service.sync(&filters)).expect_err("deep sparse reorg");
 
     assert_eq!(error.kind, IndexErrorKind::ReorgTooDeep);
+}
+
+#[cfg(test)]
+#[test]
+fn ancestor_lookup_outage_preserves_checkpoint_and_allows_a_retry() {
+    let own_scope = scope("ancestor-outage");
+    let source = Source::sparse(sparse_chain());
+    let repository = Repository::default();
+    let service = Service::new(
+        source.clone(),
+        Interpreter::default(),
+        repository.clone(),
+        config(own_scope.clone()),
+    );
+    let filters = vec![AddressFilter {
+        address: address(&own_scope, "owner"),
+        start_position: BlockPosition(100),
+    }];
+    block_on(service.sync(&filters)).unwrap();
+    source.replace(replacement_chain());
+    source.canonical_requests.lock().unwrap().clear();
+    *source.canonical_failure.lock().unwrap() = Some(BlockPosition(103));
+
+    let error = block_on(service.sync(&filters)).unwrap_err();
+    assert_eq!(
+        error,
+        IndexError::new(IndexErrorKind::Source, "canonical lookup unavailable", true,)
+    );
+    assert_eq!(
+        *source.canonical_requests.lock().unwrap(),
+        [BlockPosition(107), BlockPosition(107), BlockPosition(103)]
+    );
+    assert_eq!(
+        block_on(repository.get(BlockSelector::Tip(own_scope))).unwrap(),
+        Some(sparse_chain()[3].clone())
+    );
+
+    *source.canonical_failure.lock().unwrap() = None;
+    let retry = block_on(service.sync(&filters)).unwrap();
+    assert_eq!(retry[0].phase, SyncPhase::Ready);
+    assert_eq!(retry[0].checkpoint, Some(replacement_chain()[3].clone()));
+}
+
+#[cfg(test)]
+#[test]
+fn ancestor_at_retention_boundary_uses_produced_height_and_native_position() {
+    let own_scope = scope("ancestor-boundary");
+    let source = Source::sparse(sparse_chain());
+    let service = Service::new(
+        source.clone(),
+        Interpreter::default(),
+        Repository::default(),
+        bounded_config(own_scope.clone(), 2, 100),
+    );
+    let filters = vec![AddressFilter {
+        address: address(&own_scope, "owner"),
+        start_position: BlockPosition(100),
+    }];
+    block_on(service.sync(&filters)).unwrap();
+    source.replace(replacement_chain());
+    source.canonical_requests.lock().unwrap().clear();
+
+    let status = block_on(service.sync(&filters)).unwrap();
+    assert_eq!(status[0].phase, SyncPhase::Ready);
+    assert_eq!(status[0].checkpoint, Some(replacement_chain()[3].clone()));
+    assert_eq!(
+        *source.canonical_requests.lock().unwrap(),
+        [
+            BlockPosition(107),
+            BlockPosition(107),
+            BlockPosition(103),
+            BlockPosition(100),
+            BlockPosition(104),
+            BlockPosition(108),
+        ]
+    );
 }
 
 #[test]
