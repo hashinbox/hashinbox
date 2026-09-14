@@ -207,7 +207,7 @@ mod tests {
 
     use crate::{
         Address, BlockhashLifetime, Key, Lamport, Memo, Message, ResolvedTransfer, Seed,
-        rpc::test_support::Scripted,
+        rpc::test_support::Script,
     };
 
     use super::*;
@@ -299,10 +299,20 @@ mod tests {
     async fn status_presence_releases_exactly_the_ambiguous_source() {
         let (envelope, key) = envelope();
         let id = envelope.id().clone();
-        let rpc = Scripted::one(
+        let rpc = Script::one(
             "getSignatureStatuses",
             json!([[id.as_str()], {"searchTransactionHistory":true}]),
-            json!({"context":{"slot":15},"value":[{"slot":12,"confirmations":null,"err":null,"confirmationStatus":"finalized"}]}),
+            json!({
+                "context": {"slot": 15},
+                "value": [
+                    {
+                        "slot": 12,
+                        "confirmations": null,
+                        "err": null,
+                        "confirmationStatus": "finalized",
+                    },
+                ],
+            }),
         );
         let source = SourceCoordinator::default();
         let transfer = ResolvedTransfer::new(
@@ -341,7 +351,7 @@ mod tests {
     async fn terminal_absence_requires_expiry_coverage_and_one_stable_exhausted_scan() {
         let (envelope, _) = envelope();
         let id = envelope.id().clone();
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             (
                 "getSignatureStatuses",
                 json!([[id.as_str()], {"searchTransactionHistory":true}]),
@@ -378,7 +388,7 @@ mod tests {
     async fn checkpoint_conflict_keeps_absence_unresolved_without_height_rpc() {
         let (envelope, _) = envelope();
         let id = envelope.id().clone();
-        let rpc = Scripted::one(
+        let rpc = Script::one(
             "getSignatureStatuses",
             json!([[id.as_str()], {"searchTransactionHistory":true}]),
             json!({"context":{"slot":15},"value":[null]}),

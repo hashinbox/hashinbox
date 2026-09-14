@@ -670,13 +670,10 @@ fn receipt(
         .as_ref()
         .map(|transfer| {
             let topic_address = |address: &str| {
-                format!(
-                    "0x{}{}",
-                    "00".repeat(12),
-                    address
-                        .strip_prefix("0x")
-                        .expect("fixture address must start with 0x")
-                )
+                let address = address
+                    .strip_prefix("0x")
+                    .expect("fixture address must start with 0x");
+                format!("0x{}{}", "00".repeat(12), address)
             };
             json!({
                 "address": transfer.contract,

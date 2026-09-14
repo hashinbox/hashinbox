@@ -81,7 +81,10 @@ where
         let wire = self
             .request::<ContextWire<Option<u64>>>(
                 "getFeeForMessage",
-                json!([STANDARD.encode(message), {"commitment":"confirmed", "minContextSlot":floor}]),
+                json!([STANDARD.encode(message), {
+                    "commitment": "confirmed",
+                    "minContextSlot": floor,
+                }]),
             )
             .await?;
         wire.require_floor(Some(floor))?;
@@ -203,7 +206,7 @@ mod tests {
     use solana_hash::Hash;
     use solana_signature::Signature;
 
-    use crate::rpc::test_support::Scripted;
+    use crate::rpc::test_support::Script;
 
     use super::*;
 
@@ -211,7 +214,7 @@ mod tests {
     async fn context_floor_precedes_fee_simulation_and_status_semantics() {
         let id = TransactionId::new(Signature::from([7; 64]).to_string());
         for slot in [3, 4] {
-            let rpc = Scripted::new([
+            let rpc = Script::new([
                 (
                     "getFeeForMessage",
                     json!([STANDARD.encode([]), {"commitment":"confirmed", "minContextSlot":4}]),
@@ -219,7 +222,13 @@ mod tests {
                 ),
                 (
                     "simulateTransaction",
-                    json!([STANDARD.encode([]), {"encoding":"base64","commitment":"confirmed","sigVerify":true,"replaceRecentBlockhash":false,"minContextSlot":4}]),
+                    json!([STANDARD.encode([]), {
+                        "encoding": "base64",
+                        "commitment": "confirmed",
+                        "sigVerify": true,
+                        "replaceRecentBlockhash": false,
+                        "minContextSlot": 4,
+                    }]),
                     json!({"context":{"slot":slot},"value":{"err":{"x":1}}}),
                 ),
                 (
@@ -265,11 +274,14 @@ mod tests {
         let blockhash = Hash::new_from_array([9; 32]).to_string();
         let message = [1, 2, 3];
         let transaction = [4, 5, 6];
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             (
                 "getLatestBlockhash",
                 json!([{"commitment":"confirmed", "minContextSlot":7}]),
-                json!({"context":{"slot":8},"value":{"blockhash":blockhash,"lastValidBlockHeight":99}}),
+                json!({
+                    "context": {"slot": 8},
+                    "value": {"blockhash": blockhash, "lastValidBlockHeight": 99},
+                }),
             ),
             (
                 "getFeeForMessage",
@@ -278,7 +290,13 @@ mod tests {
             ),
             (
                 "simulateTransaction",
-                json!([STANDARD.encode(transaction), {"encoding":"base64","commitment":"confirmed","sigVerify":true,"replaceRecentBlockhash":false,"minContextSlot":9}]),
+                json!([STANDARD.encode(transaction), {
+                    "encoding": "base64",
+                    "commitment": "confirmed",
+                    "sigVerify": true,
+                    "replaceRecentBlockhash": false,
+                    "minContextSlot": 9,
+                }]),
                 json!({"context":{"slot":10},"value":{"err":null,"logs":[]}}),
             ),
             (
@@ -307,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_null_fee_failed_simulation_and_low_context() {
-        let null_fee = Client::new(Scripted::one(
+        let null_fee = Client::new(Script::one(
             "getFeeForMessage",
             json!([STANDARD.encode([]), {"commitment":"confirmed", "minContextSlot":4}]),
             json!({"context":{"slot":4},"value":null}),
@@ -316,19 +334,31 @@ mod tests {
             null_fee.fee_for_message(&[], 4).await.unwrap_err().kind(),
             ErrorKind::MalformedRpc
         );
-        let failed = Client::new(Scripted::one(
+        let failed = Client::new(Script::one(
             "simulateTransaction",
-            json!([STANDARD.encode([]), {"encoding":"base64","commitment":"confirmed","sigVerify":true,"replaceRecentBlockhash":false,"minContextSlot":4}]),
+            json!([STANDARD.encode([]), {
+                "encoding": "base64",
+                "commitment": "confirmed",
+                "sigVerify": true,
+                "replaceRecentBlockhash": false,
+                "minContextSlot": 4,
+            }]),
             json!({"context":{"slot":4},"value":{"err":{"InstructionError":[0,"x"]}}}),
         ));
         assert_eq!(
             failed.simulate(&[], 4).await.unwrap_err().kind(),
             ErrorKind::Simulation
         );
-        let low = Client::new(Scripted::one(
+        let low = Client::new(Script::one(
             "getLatestBlockhash",
             json!([{"commitment":"confirmed", "minContextSlot":4}]),
-            json!({"context":{"slot":3},"value":{"blockhash":Hash::new_from_array([1;32]).to_string(),"lastValidBlockHeight":9}}),
+            json!({
+                "context": {"slot": 3},
+                "value": {
+                    "blockhash": Hash::new_from_array([1;32]).to_string(),
+                    "lastValidBlockHeight": 9,
+                },
+            }),
         ));
         assert_eq!(
             low.latest_blockhash(4).await.unwrap_err().kind(),
@@ -341,9 +371,15 @@ mod tests {
         let signature = Signature::from([7; 64]).to_string();
         let local = TransactionId::new(signature.clone());
         let bytes = [8, 9];
-        let rpc = Scripted::one(
+        let rpc = Script::one(
             "sendTransaction",
-            json!([STANDARD.encode(bytes), {"encoding":"base64","skipPreflight":false,"preflightCommitment":"confirmed","minContextSlot":11,"maxRetries":0}]),
+            json!([STANDARD.encode(bytes), {
+                "encoding": "base64",
+                "skipPreflight": false,
+                "preflightCommitment": "confirmed",
+                "minContextSlot": 11,
+                "maxRetries": 0,
+            }]),
             json!(signature),
         );
         Client::new(rpc.clone())
@@ -358,9 +394,15 @@ mod tests {
             "malformed".to_owned(),
             String::new(),
         ] {
-            let rpc = Scripted::one(
+            let rpc = Script::one(
                 "sendTransaction",
-                json!([STANDARD.encode(bytes), {"encoding":"base64","skipPreflight":false,"preflightCommitment":"confirmed","minContextSlot":11,"maxRetries":0}]),
+                json!([STANDARD.encode(bytes), {
+                    "encoding": "base64",
+                    "skipPreflight": false,
+                    "preflightCommitment": "confirmed",
+                    "minContextSlot": 11,
+                    "maxRetries": 0,
+                }]),
                 json!(returned),
             );
             let error = Client::new(rpc.clone())
@@ -378,7 +420,7 @@ mod tests {
     async fn reads_exactly_one_coherent_historical_status() {
         let id = TransactionId::new(Signature::from([7; 64]).to_string());
         let params = json!([[id.as_str()], {"searchTransactionHistory":true}]);
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             (
                 "getSignatureStatuses",
                 params.clone(),
@@ -387,7 +429,15 @@ mod tests {
             (
                 "getSignatureStatuses",
                 params,
-                json!({"context":{"slot":15},"value":[{"slot":12,"confirmations":null,"err":{"x":1},"confirmationStatus":"finalized"}]}),
+                json!({
+                    "context": {"slot": 15},
+                    "value": [{
+                        "slot": 12,
+                        "confirmations": null,
+                        "err": {"x": 1},
+                        "confirmationStatus": "finalized",
+                    }],
+                }),
             ),
         ]);
         let client = Client::new(rpc.clone());
@@ -424,10 +474,13 @@ mod tests {
                 "Solana RPC getLatestBlockhash returned malformed data",
             ),
         ] {
-            let rpc = Scripted::one(
+            let rpc = Script::one(
                 "getLatestBlockhash",
                 json!([{"commitment":"confirmed", "minContextSlot":4}]),
-                json!({"context":{"slot":slot},"value":{"blockhash":"bad","lastValidBlockHeight":9}}),
+                json!({
+                    "context": {"slot": slot},
+                    "value": {"blockhash": "bad", "lastValidBlockHeight": 9},
+                }),
             );
             let error = Client::new(rpc.clone())
                 .latest_blockhash(4)
@@ -450,7 +503,7 @@ mod tests {
             json!([{"slot":12,"confirmations":1,"err":null,"confirmationStatus":"finalized"}]),
             json!([{"slot":12,"confirmations":null,"err":null,"confirmationStatus":"unknown"}]),
         ] {
-            let rpc = Scripted::one(
+            let rpc = Script::one(
                 "getSignatureStatuses",
                 json!([[id.as_str()], {"searchTransactionHistory":true}]),
                 json!({"context":{"slot":15},"value":value}),

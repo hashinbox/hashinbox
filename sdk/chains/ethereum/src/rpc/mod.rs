@@ -693,7 +693,8 @@ mod tests {
         assert_eq!(error.ambiguous_transaction_id, Some(local_id));
         assert_eq!(
             error.message,
-            "Ethereum submission outcome is ambiguous: Ethereum JSON-RPC eth_sendRawTransaction failed with code -32000"
+            "Ethereum submission outcome is ambiguous: Ethereum JSON-RPC \
+             eth_sendRawTransaction failed with code -32000"
         );
         assert!(!error.message.contains("Bearer secret"));
     }
@@ -836,7 +837,8 @@ mod tests {
         );
         assert_eq!(
             error.message,
-            "Ethereum submission outcome is ambiguous: Ethereum RPC reported an already-known transaction but did not expose the matching hash"
+            "Ethereum submission outcome is ambiguous: Ethereum RPC reported an \
+             already-known transaction but did not expose the matching hash"
         );
         assert_eq!(
             client.requests(),

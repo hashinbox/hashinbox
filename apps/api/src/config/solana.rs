@@ -8,14 +8,14 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SolanaConfig {
+pub(crate) struct Config {
     network: String,
     genesis_hash: String,
     rpc: RpcConfig,
     sync: SyncConfig,
 }
 
-impl SolanaConfig {
+impl Config {
     pub(super) fn validate(&self) -> Result<(), AnyError> {
         chain_solana::WalletConfig::new(self.network.as_str(), chain_solana::AssetKind::Native)?;
         self.genesis_hash.parse::<chain_solana::GenesisHash>()?;
@@ -62,7 +62,9 @@ impl SolanaConfig {
     }
 }
 
-// design-lint: allow duplicate-entity-base -- this closed wire schema requires a singular endpoint and explicit bounds; the Bitcoin/Ethereum failover schema uses ordered endpoints and defaults its bounds
+// this closed wire schema requires a singular endpoint and explicit bounds; the Bitcoin/Ethereum
+// failover schema uses ordered endpoints and defaults its bounds
+// design-lint: allow duplicate-entity-base -- distinct required wire fields
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RpcConfig {
@@ -86,7 +88,9 @@ impl RpcConfig {
     }
 }
 
-// design-lint: allow duplicate-entity-base -- this closed wire schema requires every synchronization field; Bitcoin/Ethereum default polling and batch size, so sharing Deserialize would change accepted input
+// this closed wire schema requires every synchronization field; Bitcoin/Ethereum default polling
+// and batch size, so sharing Deserialize would change accepted input
+// design-lint: allow duplicate-entity-base -- distinct required wire fields
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SyncConfig {
@@ -130,11 +134,17 @@ mod tests {
                 "duplicate field `endpoint`",
             ),
             (
-                r#"{"endpoint":"a","timeout_seconds":1,"timeout_seconds":2,"max_response_bytes":8192}"#,
+                concat!(
+                    r#"{"endpoint":"a","timeout_seconds":1,"timeout_seconds":2,"#,
+                    r#""max_response_bytes":8192}"#,
+                ),
                 "duplicate field `timeout_seconds`",
             ),
             (
-                r#"{"endpoint":"a","endpoints":["b"],"timeout_seconds":1,"max_response_bytes":8192}"#,
+                concat!(
+                    r#"{"endpoint":"a","endpoints":["b"],"timeout_seconds":1,"#,
+                    r#""max_response_bytes":8192}"#,
+                ),
                 "unknown field `endpoints`",
             ),
             (
@@ -171,23 +181,38 @@ mod tests {
                 "missing field `batch_size`",
             ),
             (
-                r#"{"confirmation_depth":1,"reorg_retention":10,"poll_millis":17,"poll_millis":18,"batch_size":7}"#,
+                concat!(
+                    r#"{"confirmation_depth":1,"reorg_retention":10,"poll_millis":17,"#,
+                    r#""poll_millis":18,"batch_size":7}"#,
+                ),
                 "duplicate field `poll_millis`",
             ),
             (
-                r#"{"confirmation_depth":1,"reorg_retention":10,"poll_millis":17,"batch_size":7,"batch_size":8}"#,
+                concat!(
+                    r#"{"confirmation_depth":1,"reorg_retention":10,"poll_millis":17,"#,
+                    r#""batch_size":7,"batch_size":8}"#,
+                ),
                 "duplicate field `batch_size`",
             ),
             (
-                r#"{"confirmation_depth":1,"reorg_retention":10,"poll_millis":17,"batch_size":7,"retry":false}"#,
+                concat!(
+                    r#"{"confirmation_depth":1,"reorg_retention":10,"poll_millis":17,"#,
+                    r#""batch_size":7,"retry":false}"#,
+                ),
                 "unknown field `retry`",
             ),
             (
-                r#"{"confirmation_depth":1,"reorg_retention":10,"poll_millis":null,"batch_size":7}"#,
+                concat!(
+                    r#"{"confirmation_depth":1,"reorg_retention":10,"poll_millis":null,"#,
+                    r#""batch_size":7}"#,
+                ),
                 "invalid type: null",
             ),
             (
-                r#"{"confirmation_depth":1,"reorg_retention":10,"poll_millis":17,"batch_size":"7"}"#,
+                concat!(
+                    r#"{"confirmation_depth":1,"reorg_retention":10,"poll_millis":17,"#,
+                    r#""batch_size":"7"}"#,
+                ),
                 "invalid type: string",
             ),
         ] {
@@ -201,7 +226,7 @@ mod tests {
 
     #[test]
     fn configured_values_reach_runtime_and_rpc_errors_still_precede_sync_errors() {
-        let mut config: SolanaConfig = serde_json::from_value(json!({
+        let mut config: Config = serde_json::from_value(json!({
             "network": "localnet",
             "genesis_hash": "11111111111111111111111111111111",
             "rpc": {

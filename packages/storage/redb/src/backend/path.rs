@@ -40,9 +40,11 @@ impl DatabasePath {
                 "failed to resolve redb database parent directory: {error}"
             ))
         })?;
-        let resolved = canonical_parent.join(file_name);
+        Self::from_resolved_file(canonical_parent.join(file_name))
+    }
 
-        let initialize = match fs::metadata(&resolved) {
+    fn from_resolved_file(path: PathBuf) -> Result<Self, Error> {
+        let initialize = match fs::metadata(&path) {
             Ok(metadata) if metadata.is_dir() => {
                 return Err(Error::invalid_request(
                     "redb database path must be a file, not a directory",
@@ -62,15 +64,16 @@ impl DatabasePath {
             }
         };
 
-        Ok(Self {
-            path: resolved,
-            initialize,
-        })
+        Ok(Self { path, initialize })
     }
 }
 
-// design-lint: allow single-use-free-function -- complete lexical path normalization with root-escape checks stays separate from filesystem canonicalization and database-file validation
-// design-lint: allow unclassified-free-function -- complete lexical absolute-path normalization keeps root-escape checks separate from filesystem canonicalization and database-file validation
+// complete lexical path normalization with root-escape checks stays separate from filesystem
+// canonicalization and database-file validation
+// complete lexical absolute-path normalization keeps root-escape checks separate from filesystem
+// canonicalization and database-file validation
+// design-lint: allow single-use-free-function -- lexical absolute-path normalization
+// design-lint: allow unclassified-free-function -- lexical absolute-path normalization
 fn normalized_absolute_path(path: &Path) -> Result<PathBuf, Error> {
     if path.as_os_str().is_empty() {
         return Err(Error::invalid_request("redb path must not be empty"));

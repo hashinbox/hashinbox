@@ -3,7 +3,9 @@
 use indexing_runtime::SyncState;
 use tokio::sync::watch;
 
-// design-lint: allow unclassified-free-function -- application-owned async bridge projects synchronization watch updates into HTTP readiness and retry diagnostics under tracked task supervision
+// application readiness bridge watch updates into HTTP readiness and
+// retry diagnostics under tracked task supervision
+// design-lint: allow unclassified-free-function -- application readiness bridge
 /// Publishes readiness and reports why synchronization is retrying.
 ///
 /// A retryable failure repeats indefinitely, so without this the only signal

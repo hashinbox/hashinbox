@@ -1,7 +1,9 @@
 use redb::{CommitError, DatabaseError, StorageError, TableError, TransactionError};
 use storage::{Error, ErrorKind};
 
-// design-lint: allow unclassified-free-function -- redb database-open error translation between foreign types keeps backend-specific corruption and availability policy in this adapter
+// redb database-open error translation between foreign types keeps backend-specific corruption and
+// availability policy in this adapter
+// design-lint: allow unclassified-free-function -- backend-owned storage boundary
 pub(super) fn database_error(error: DatabaseError) -> Error {
     match error {
         DatabaseError::DatabaseAlreadyOpen => {
@@ -21,7 +23,9 @@ pub(super) fn database_error(error: DatabaseError) -> Error {
     }
 }
 
-// design-lint: allow unclassified-free-function -- redb transaction-error translation between foreign types preserves local borrow conflicts and nested storage classification with caller context
+// redb transaction-error translation between foreign types preserves local borrow conflicts and
+// nested storage classification with caller context
+// design-lint: allow unclassified-free-function -- backend-owned storage boundary
 pub(super) fn transaction_error(error: TransactionError, context: &str) -> Error {
     match error {
         TransactionError::Storage(error) => storage_error(error, context),
@@ -33,7 +37,9 @@ pub(super) fn transaction_error(error: TransactionError, context: &str) -> Error
     }
 }
 
-// design-lint: allow unclassified-free-function -- redb table-error translation between foreign types distinguishes stored schema incompatibility from local borrow conflicts and preserves operation context
+// redb table-error translation between foreign types distinguishes stored schema incompatibility
+// from local borrow conflicts and preserves operation context
+// design-lint: allow unclassified-free-function -- backend-owned storage boundary
 pub(super) fn table_error(error: TableError, context: &str) -> Error {
     match error {
         TableError::Storage(error) => storage_error(error, context),
@@ -51,14 +57,18 @@ pub(super) fn table_error(error: TableError, context: &str) -> Error {
     }
 }
 
-// design-lint: allow unclassified-free-function -- shared redb commit-error adapter between foreign types preserves unknown persistence outcomes for format and batch commits
+// shared redb commit-error adapter between foreign types preserves unknown persistence outcomes for
+// format and batch commits
+// design-lint: allow unclassified-free-function -- backend-owned storage boundary
 pub(super) fn commit_error(error: CommitError) -> Error {
     // A failed commit can have persisted before the error became observable.
     // The caller must treat the outcome as unknown and reconcile via CAS.
     unavailable(format!("redb atomic commit outcome is unknown: {error}"))
 }
 
-// design-lint: allow unclassified-free-function -- redb operation-error translation between foreign types preserves caller context and corruption, size, and availability policy separately from ambiguous commits
+// redb operation-error translation between foreign types preserves caller context and corruption,
+// size, and availability policy separately from ambiguous commits
+// design-lint: allow unclassified-free-function -- backend-owned storage boundary
 pub(super) fn storage_error(error: StorageError, context: &str) -> Error {
     match error {
         StorageError::Corrupted(detail) => Error::corrupt_data(format!("{context}: {detail}")),
@@ -76,7 +86,9 @@ pub(super) fn storage_error(error: StorageError, context: &str) -> Error {
     }
 }
 
-// design-lint: allow unclassified-free-function -- redb owner-thread, filesystem and native-error boundaries construct foreign availability errors while preserving caller context and unknown commit outcomes
+// redb owner-thread, filesystem and native-error boundaries construct foreign availability errors
+// while preserving caller context and unknown commit outcomes
+// design-lint: allow unclassified-free-function -- backend-owned storage boundary
 pub(super) fn unavailable(message: impl Into<String>) -> Error {
     Error {
         kind: ErrorKind::Unavailable,

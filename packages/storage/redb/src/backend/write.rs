@@ -67,35 +67,7 @@ impl Backend {
                 message: "global storage version is exhausted".into(),
             })?);
 
-            for operation in batch.operations {
-                let (result, context) = match operation {
-                    Operation::Put {
-                        namespace,
-                        key,
-                        value,
-                    } => {
-                        let physical_key = encode_physical_key(&namespace, &key)?;
-                        let frame = StoredRecord::new(value, next_version)?.encode()?;
-                        (
-                            data.insert(physical_key.as_slice(), frame.as_slice()),
-                            "failed to write redb data record",
-                        )
-                    }
-                    Operation::Delete { namespace, key } => {
-                        let physical_key = encode_physical_key(&namespace, &key)?;
-                        (
-                            data.remove(physical_key.as_slice()),
-                            "failed to delete redb data record",
-                        )
-                    }
-                };
-                drop(result.map_err(|error| storage_error(error, context))?);
-            }
-            let encoded_version = GlobalVersion::new(next_version)?.encode()?;
-            drop(
-                meta.insert(GLOBAL_VERSION_KEY, encoded_version.as_slice())
-                    .map_err(|error| storage_error(error, "failed to write redb global version"))?,
-            );
+            apply_operations(&mut data, &mut meta, batch.operations, next_version)?;
         }
 
         transaction.commit().map_err(commit_error)?;
@@ -144,8 +116,48 @@ impl Backend {
     }
 }
 
-// design-lint: allow single-use-free-function -- isolates redb-specific Missing and Version checks before any batch mutation in the same write transaction
-// design-lint: allow unclassified-free-function -- transaction-local algorithm evaluates foreign storage conditions against the redb table before any batch mutation
+// Apply the ordered storage operations inside the caller's redb transaction;
+// the same commit version belongs to every inserted record and the metadata.
+fn apply_operations(
+    data: &mut redb::Table<'_, &[u8], &[u8]>,
+    meta: &mut redb::Table<'_, &[u8], &[u8]>,
+    operations: Vec<Operation>,
+    version: Version,
+) -> Result<(), Error> {
+    for operation in operations {
+        let (result, context) = match operation {
+            Operation::Put {
+                namespace,
+                key,
+                value,
+            } => {
+                let physical_key = encode_physical_key(&namespace, &key)?;
+                let frame = StoredRecord::new(value, version)?.encode()?;
+                let result = data.insert(physical_key.as_slice(), frame.as_slice());
+                (result, "failed to write redb data record")
+            }
+            Operation::Delete { namespace, key } => {
+                let physical_key = encode_physical_key(&namespace, &key)?;
+                let result = data.remove(physical_key.as_slice());
+                (result, "failed to delete redb data record")
+            }
+        };
+        drop(result.map_err(|error| storage_error(error, context))?);
+    }
+    let encoded_version = GlobalVersion::new(version)?.encode()?;
+    drop(
+        meta.insert(GLOBAL_VERSION_KEY, encoded_version.as_slice())
+            .map_err(|error| storage_error(error, "failed to write redb global version"))?,
+    );
+    Ok(())
+}
+
+// isolates redb-specific Missing and Version checks before any batch mutation in the same write
+// transaction
+// transaction-local algorithm evaluates foreign storage conditions against the redb table before
+// any batch mutation
+// design-lint: allow single-use-free-function -- transaction-local condition checks
+// design-lint: allow unclassified-free-function -- transaction-local condition checks
 fn evaluate_condition(
     data: &impl ReadableTable<&'static [u8], &'static [u8]>,
     condition: &Condition,
@@ -172,13 +184,13 @@ fn evaluate_condition(
             let physical_key = encode_physical_key(namespace, key)?;
             let raw = data
                 .get(physical_key.as_slice())
-                .map_err(|error| storage_error(error, "failed to evaluate redb condition"))?
-                .ok_or_else(|| {
-                    Error::conflict(format!(
-                        "version condition failed in namespace `{}` because the key is missing",
-                        namespace.0
-                    ))
-                })?;
+                .map_err(|error| storage_error(error, "failed to evaluate redb condition"))?;
+            let Some(raw) = raw else {
+                return Err(Error::conflict(format!(
+                    "version condition failed in namespace `{}` because the key is missing",
+                    namespace.0
+                )));
+            };
             let actual = StoredValue::from(StoredRecord::try_from(raw.value())?);
             if actual.version != *expected {
                 return Err(Error::conflict(format!(
@@ -194,6 +206,23 @@ fn evaluate_condition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_batches_advance_the_version_and_survive_reopen() -> Result<(), Error> {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("empty-batches.redb");
+        let mut backend = Backend::open(&path)?;
+        for expected in [Version(1), Version(2)] {
+            assert_eq!(backend.commit(WriteBatch::default())?.version, expected);
+            assert_eq!(backend.global_version()?, expected);
+        }
+        drop(backend);
+
+        let mut reopened = Backend::open(&path)?;
+        assert_eq!(reopened.global_version()?, Version(2));
+        assert_eq!(reopened.commit(WriteBatch::default())?.version, Version(3));
+        Ok(())
+    }
 
     #[test]
     fn exhausted_version_rejects_commit_without_writing_or_wrapping() -> Result<(), Error> {

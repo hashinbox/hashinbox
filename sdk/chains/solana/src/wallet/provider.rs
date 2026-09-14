@@ -13,7 +13,7 @@ use wallets::{
 
 use crate::{Address, Lamport, NativeDestination, RpcClient, WalletConfig};
 
-use super::{Key, NativeSender, NativeTransfer, batch::BatchSender};
+use super::{Key, NativeSender, NativeTransfer, batch};
 
 pub struct WalletProvider<C> {
     config: WalletConfig,
@@ -42,7 +42,7 @@ impl<C> WalletProvider<C> {
 
     #[must_use]
     pub fn transactions(&self) -> Arc<dyn wallets::Sender> {
-        Arc::new(BatchSender::new(
+        Arc::new(batch::Sender::new(
             Arc::clone(&self.sender),
             Arc::clone(&self.keys),
         ))
@@ -253,7 +253,7 @@ mod tests {
     };
     use wallets::{AddressEncoding, HistoryRequest, Provider as _};
 
-    use crate::{AssetKind, Seed, rpc::test_support::Scripted};
+    use crate::{AssetKind, Seed, rpc::test_support::Script};
 
     use super::*;
 
@@ -351,10 +351,10 @@ mod tests {
     }
 
     fn provider(
-        rpc: Scripted,
+        rpc: Script,
         history: Arc<HistoryFixture>,
         sender: Arc<SenderFixture>,
-    ) -> WalletProvider<Scripted> {
+    ) -> WalletProvider<Script> {
         let history_contract: Arc<dyn IndexHistory> = history;
         let sender_contract: Arc<dyn NativeSender> = sender;
         WalletProvider::new(
@@ -368,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn imported_and_generated_wallets_share_canonical_public_capabilities() {
         let provider = provider(
-            Scripted::new([]),
+            Script::new([]),
             Arc::new(HistoryFixture::default()),
             Arc::new(SenderFixture::default()),
         );
@@ -391,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_import_and_maps_rng_failure_without_secret_output() {
         let provider = provider(
-            Scripted::new([]),
+            Script::new([]),
             Arc::new(HistoryFixture::default()),
             Arc::new(SenderFixture::default()),
         );
@@ -419,7 +419,7 @@ mod tests {
     #[tokio::test]
     async fn reads_exact_finalized_balance_without_inventing_a_checkpoint() {
         let address = key(7).address().clone();
-        let rpc = Scripted::one(
+        let rpc = Script::one(
             "getBalance",
             serde_json::json!([address.to_string(), {"commitment":"finalized"}]),
             serde_json::json!({"context":{"slot":41},"value":u64::MAX}),
@@ -449,7 +449,7 @@ mod tests {
             next: None,
         }));
         let provider = provider(
-            Scripted::new([]),
+            Script::new([]),
             Arc::clone(&history),
             Arc::new(SenderFixture::default()),
         );
@@ -509,7 +509,7 @@ mod tests {
                 failure: Mutex::new(Some(failure)),
             });
             let provider = provider(
-                Scripted::new([]),
+                Script::new([]),
                 Arc::new(HistoryFixture::default()),
                 Arc::clone(&sender),
             );
@@ -527,7 +527,7 @@ mod tests {
     async fn validates_public_inputs_then_delegates_once_to_the_native_sender() {
         let sender = Arc::new(SenderFixture::default());
         let provider = provider(
-            Scripted::new([]),
+            Script::new([]),
             Arc::new(HistoryFixture::default()),
             Arc::clone(&sender),
         );

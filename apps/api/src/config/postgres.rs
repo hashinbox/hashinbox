@@ -6,13 +6,13 @@ use super::AnyError;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PostgresConfig {
+pub(crate) struct Config {
     url_env: String,
     schema: String,
     max_connections: usize,
 }
 
-impl PostgresConfig {
+impl Config {
     pub(super) fn validate(&self) -> Result<(), AnyError> {
         if self.url_env.trim().is_empty() {
             return Err("PostgreSQL URL environment name must not be empty".into());
@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn resolves_only_the_named_environment_without_disclosing_credentials() {
-        let config = PostgresConfig {
+        let config = Config {
             url_env: "PAYMENT_DATABASE_URL".to_owned(),
             schema: "payment".to_owned(),
             max_connections: 8,

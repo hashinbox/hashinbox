@@ -203,7 +203,9 @@ impl TryFrom<&[OutputKey]> for SpendKeys {
     }
 }
 
-// design-lint: allow unclassified-free-function -- checked PostgreSQL INT4 output-index conversion is shared by created and spent column arrays and preserves the same storage-range error
+// checked PostgreSQL INT4 output-index conversion is shared by created and spent column arrays and
+// preserves the same storage-range error
+// design-lint: allow unclassified-free-function -- backend row encoding for batch writes
 fn index(value: u32) -> Result<i32, IndexError> {
     i32::try_from(value).map_err(|_| row::store("output index exceeds the storage range"))
 }

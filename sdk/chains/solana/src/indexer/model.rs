@@ -104,7 +104,9 @@ impl fmt::Display for ParseError {
     }
 }
 
-// design-lint: allow unclassified-free-function -- Solana block hash adapter preserves native decoding, canonical re-encoding checks and field-specific errors before returning a foreign neutral BlockHash
+// Solana block hash adapter preserves native decoding, canonical re-encoding checks and field-
+// specific errors before returning a foreign neutral BlockHash
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn parse_hash(text: &str, field: &'static str) -> Result<BlockHash, ParseError> {
     let hash = Hash::from_str(text)
         .map_err(|_| ParseError::new(format!("Solana {field} is not a canonical hash")))?;

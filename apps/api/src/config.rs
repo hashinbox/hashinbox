@@ -8,9 +8,6 @@ use indexing::BlockHash;
 use payment_api::WalletAsset;
 use serde::{Deserialize, de};
 
-pub(crate) use postgres::PostgresConfig;
-pub(crate) use solana::SolanaConfig;
-
 pub(crate) type AnyError = Box<dyn Error + Send + Sync>;
 
 #[derive(Deserialize)]
@@ -20,7 +17,7 @@ pub(crate) struct Config {
     bearer_token_env: String,
     #[serde(default)]
     tls_terminated_upstream: bool,
-    pub(crate) postgres: PostgresConfig,
+    pub(crate) postgres: postgres::Config,
     pub(crate) indexes: IndexConfig,
     #[serde(default)]
     pub(crate) wallets: Vec<ConfiguredWallet>,
@@ -129,7 +126,7 @@ pub(crate) struct IndexConfig {
     #[serde(default)]
     pub(crate) ethereum: Option<EthereumConfig>,
     #[serde(default)]
-    pub(crate) solana: Option<SolanaConfig>,
+    pub(crate) solana: Option<solana::Config>,
 }
 
 impl IndexConfig {
@@ -151,7 +148,7 @@ impl IndexConfig {
             .iter()
             .map(|config| config.sync.poll_millis)
             .chain(self.ethereum.iter().map(|config| config.sync.poll_millis))
-            .chain(self.solana.iter().map(SolanaConfig::poll_millis))
+            .chain(self.solana.iter().map(solana::Config::poll_millis))
             .min()
             .unwrap_or(1_000);
         Duration::from_millis(millis)

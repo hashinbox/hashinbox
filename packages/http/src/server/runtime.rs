@@ -60,7 +60,9 @@ struct ReadinessState {
     health: HealthState,
 }
 
-// design-lint: allow unclassified-free-function -- Axum owns the State extractor signature; this handler maps one shared health observation to detail-free HTTP status without adding responses to HealthState
+// Axum owns the State extractor signature; this handler maps one shared health observation to
+// detail-free HTTP status without adding responses to HealthState
+// design-lint: allow unclassified-free-function -- foreign transport runtime boundary
 async fn readiness(State(state): State<ReadinessState>) -> Response {
     if state.health.is_ready() {
         StatusCode::NO_CONTENT.into_response()
@@ -69,7 +71,9 @@ async fn readiness(State(state): State<ReadinessState>) -> Response {
     }
 }
 
-// design-lint: allow single-use-free-function -- Axum registers this State/Request/Next callback once for every protected request; the named middleware keeps authentication rejection and continuation separate from router assembly
+// Axum registers this State/Request/Next callback once for every protected request; the named
+// middleware keeps authentication rejection and continuation separate from router assembly
+// design-lint: allow single-use-free-function -- foreign transport runtime boundary
 async fn require_bearer(
     State(token): State<BearerToken>,
     request: Request,
@@ -104,7 +108,9 @@ pub fn service_router(
     Ok(protected.merge(health_routes))
 }
 
-// design-lint: allow unclassified-free-function -- public HTTP adapter composes application-supplied Axum routes with validated authentication and body-limit layers while preserving middleware order and application-owned health routes
+// public HTTP adapter composes application-supplied Axum routes with validated authentication and
+// body-limit layers while preserving middleware order and application-owned health routes
+// design-lint: allow unclassified-free-function -- foreign transport runtime boundary
 /// Applies configured authentication and request limits without adding routes.
 /// Applications that own their health resources use this to keep middleware
 /// outside handlers while generating one complete transport contract.

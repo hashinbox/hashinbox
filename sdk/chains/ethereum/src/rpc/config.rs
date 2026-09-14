@@ -3,7 +3,7 @@ use std::{fmt, time::Duration};
 use indexing::SourceError;
 use json_rpc::Retry;
 
-use crate::Wei;
+use crate::{ChainError, ChainErrorKind, Wei};
 
 use super::{error::BuildError, wire::invalid_rpc_response};
 
@@ -81,6 +81,76 @@ impl Limits {
         estimated.checked_add(margin).ok_or_else(|| {
             invalid_rpc_response("eth_estimateGas", "gas limit with margin exceeds u64")
         })
+    }
+
+    pub(super) fn gas_limit(&self, estimated: u64) -> Result<u64, ChainError> {
+        if estimated == 0 {
+            return Err(ChainError::from_rpc(invalid_rpc_response(
+                "eth_estimateGas",
+                "estimated gas limit is zero",
+            )));
+        }
+        let gas_limit = self
+            .gas_limit_with_margin(estimated)
+            .map_err(ChainError::from_rpc)?;
+        if gas_limit > self.max_gas_limit {
+            return Err(ChainError::new(
+                ChainErrorKind::FeeUnavailable,
+                "Ethereum estimated gas limit exceeds the configured ceiling",
+            ));
+        }
+        Ok(gas_limit)
+    }
+
+    pub(super) fn validate_priority_fee(&self, fee: &Wei) -> Result<(), ChainError> {
+        if fee > &self.max_priority_fee_per_gas {
+            return Err(ChainError::new(
+                ChainErrorKind::FeeUnavailable,
+                "Ethereum priority fee exceeds the configured ceiling",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn max_fee(&self, base: &Wei, priority: &Wei) -> Result<Wei, ChainError> {
+        let max_fee = base
+            .checked_mul_u64(2)
+            .and_then(|fee| fee.checked_add(priority))
+            .ok_or_else(|| {
+                ChainError::from_rpc(invalid_rpc_response(
+                    "eth_getBlockByNumber",
+                    "fee calculation overflowed U256",
+                ))
+            })?;
+        if max_fee > self.max_fee_per_gas {
+            return Err(ChainError::new(
+                ChainErrorKind::FeeUnavailable,
+                "Ethereum max fee per gas exceeds the configured ceiling",
+            ));
+        }
+        if &max_fee < priority {
+            return Err(ChainError::from_rpc(invalid_rpc_response(
+                "eth_getBlockByNumber",
+                "calculated max fee is below the priority fee",
+            )));
+        }
+        Ok(max_fee)
+    }
+
+    pub(super) fn total_fee(&self, gas_limit: u64, fee: &Wei) -> Result<Wei, ChainError> {
+        let total_fee = fee.checked_mul_u64(gas_limit).ok_or_else(|| {
+            ChainError::new(
+                ChainErrorKind::FeeUnavailable,
+                "Ethereum maximum transaction fee overflowed U256",
+            )
+        })?;
+        if total_fee > self.max_total_fee {
+            return Err(ChainError::new(
+                ChainErrorKind::FeeUnavailable,
+                "Ethereum maximum transaction fee exceeds the configured ceiling",
+            ));
+        }
+        Ok(total_fee)
     }
 
     #[must_use]
@@ -264,7 +334,8 @@ mod tests {
         assert!(!error.retryable);
         assert_eq!(
             error.message,
-            "Ethereum RPC eth_estimateGas returned an invalid response: gas limit with margin exceeds u64"
+            "Ethereum RPC eth_estimateGas returned an invalid response: gas limit with \
+             margin exceeds u64"
         );
     }
 

@@ -46,7 +46,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::rpc::test_support::Scripted;
+    use crate::rpc::test_support::Script;
 
     const ZERO: &str = "11111111111111111111111111111111";
     const MEMO: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
@@ -54,7 +54,7 @@ mod tests {
     #[tokio::test]
     async fn verifies_genesis_and_exact_finalized_executable_memo() {
         let account = account(true, 41, json!(["", "base64"]));
-        let script = Scripted::new([
+        let script = Script::new([
             ("getGenesisHash", json!([]), json!(ZERO)),
             ("getSlot", json!([{"commitment":"finalized"}]), json!(41)),
             (
@@ -79,7 +79,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_genesis_stops_before_the_memo_probe() {
-        let script = Scripted::one("getGenesisHash", json!([]), json!(ZERO));
+        let script = Script::one("getGenesisHash", json!([]), json!(ZERO));
         let client = Client::new(script.clone());
         let expected = solana_hash::Hash::new_from_array([7; 32]).to_string();
 
@@ -114,7 +114,7 @@ mod tests {
                 ErrorKind::BelowFloor,
             ),
         ] {
-            let script = Scripted::new([
+            let script = Script::new([
                 ("getSlot", json!([{"commitment":"finalized"}]), json!(41)),
                 (
                     "getAccountInfo",

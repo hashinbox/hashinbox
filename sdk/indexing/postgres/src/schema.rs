@@ -169,17 +169,22 @@ payments_checkpoint.payments_checkpoint_pkey:true:true:chain,network
 payments_history.payments_history_by_height:false:false:chain,network,height
 payments_history.payments_history_pkey:true:true:chain,network,address,height,transaction_id
 payments_journal.payments_journal_pkey:true:true:chain,network,height
-payments_journal_output.payments_journal_output_pkey:true:true:chain,network,height,transaction_id,output_index
+payments_journal_output.payments_journal_output_pkey:true:true:chain,network,height,\
+transaction_id,output_index
 payments_movement.payments_movement_by_height:false:false:chain,network,height
-payments_movement.payments_movement_pkey:true:true:chain,network,address,height,transaction_id,ordinal
-payments_output.payments_output_by_address_identity:false:false:chain,network,address,transaction_id,output_index
+payments_movement.payments_movement_pkey:true:true:chain,network,address,height,\
+transaction_id,ordinal
+payments_output.payments_output_by_address_identity:false:false:chain,network,address,\
+transaction_id,output_index
 payments_output.payments_output_by_height:false:false:chain,network,created_at
 payments_output.payments_output_pkey:true:true:chain,network,transaction_id,output_index
 payments_wallet.payments_wallet_by_scope:false:false:chain,network
 payments_wallet.payments_wallet_chain_network_address_key:false:true:chain,network,address
 payments_wallet.payments_wallet_pkey:true:true:id";
 
-// design-lint: allow unclassified-free-function -- public startup algorithm validates the deployment-owned shared schema through one read-only repeatable-read transaction on an injected foreign pool independently of scope-bound repositories
+// public startup algorithm validates the deployment-owned shared schema through one read-only
+// repeatable-read transaction on an injected foreign pool independently of scope-bound repositories
+// design-lint: allow unclassified-free-function -- read-only deployment schema validation
 /// Checks that a pool resolves to the configured compatible schema.
 ///
 /// Validation uses one read-only repeatable-read transaction and never creates,
@@ -226,6 +231,16 @@ pub async fn validate_schema(pool: &Pool, expected_schema: &str) -> Result<(), I
     )
     .await?;
 
+    require_indexes(&transaction, &schema).await?;
+    require_journal_cascade(&transaction, &schema).await?;
+
+    transaction.commit().await.map_err(store)
+}
+
+async fn require_indexes(
+    transaction: &tokio_postgres::Transaction<'_>,
+    schema: &str,
+) -> Result<(), IndexError> {
     let mut actual_indexes = BTreeSet::new();
     for row in transaction.query(INDEXES, &[]).await.map_err(store)? {
         let table: String = row.try_get(0).map_err(store)?;
@@ -243,7 +258,13 @@ pub async fn validate_schema(pool: &Pool, expected_schema: &str) -> Result<(), I
             "PostgreSQL schema {schema} has incompatible indexes"
         )));
     }
+    Ok(())
+}
 
+async fn require_journal_cascade(
+    transaction: &tokio_postgres::Transaction<'_>,
+    schema: &str,
+) -> Result<(), IndexError> {
     let cascade: Option<bool> = transaction
         .query_opt(JOURNAL_CASCADE, &[])
         .await
@@ -256,8 +277,7 @@ pub async fn validate_schema(pool: &Pool, expected_schema: &str) -> Result<(), I
             "PostgreSQL schema {schema} has incompatible journal cascade"
         )));
     }
-
-    transaction.commit().await.map_err(store)
+    Ok(())
 }
 
 async fn require_signature(

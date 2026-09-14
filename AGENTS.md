@@ -79,7 +79,6 @@ change or claim development in-process custody is production custody.
 | `sdk/indexing/postgres` | Physical home for the deployment-owned shared-schema history; production indexing repository implementation |
 | `sdk/indexing/redb` | Embedded/test indexing repository implementation and all redb record/key encoding |
 | `packages/*` | Generic crypto, HTTP, JSON-RPC, and storage mechanics usable outside blockchain projects |
-| `packages/design-lint` | Architecture and Rust API checks configured by `lint.toml` |
 
 Dependency rules:
 
@@ -99,7 +98,7 @@ Dependency rules:
   schema, pool, or repository. Handlers receive abstractions and do not open
   storage or construct dependencies per request.
 
-Concrete chain crates keep this design-lint-enforced skeleton:
+Concrete chain crates keep this skeleton, configured in `linter.toml`:
 
 ```text
 src/address.rs
@@ -410,72 +409,47 @@ registry query surface is removed.
 Every addition must answer: which domain/folder owns it, is it close to that
 owner, and does the public API remain simple for callers?
 
-## Design-lint workflow
+## MCP design-linter workflow
 
-`packages/design-lint` enforces `lint.toml`: dependency direction, owned chain
-vocabulary, small traits, meaningful structs, concise names, associated
-constructors, the production-only line limit, forbidden paths, non-empty
-directories, and concrete-chain layout.
+Use only the Linter MCP plugin and its `linter:software-design` skill for design
+review. The local linter sources have been removed. Do not restore or recreate
+an in-repository linter, invoke its former Cargo commands, or use its legacy
+configuration, generated case queues, or suppression directives. This rule
+supersedes older documents and remembered local-linter workflows.
 
-```bash
-cargo run --locked -p design-lint -- --policy lint.toml check .
-cargo run --locked -p design-lint -- --policy lint.toml --markdown .
-cargo run --locked -p design-lint -- --policy lint.toml --cases lint .
-```
+Read the plugin skill before design work. Preserve the existing `linter.toml`;
+it is the project policy for MCP checks. Call `mcp__linter__check` with the
+absolute repository root as `root`. Inspect both findings and each configured
+rule's status: an unconfigured rule is not a pass, and an analysis failure is
+not a clean result. MCP does not replace compilation, tests, rustfmt, or Clippy.
 
-Diagnostic mode fails on findings; Markdown emits a review; cases refreshes
-`lint/errors/` while retaining `.gitkeep` and currently clears generated files
-from both `lint/errors/` and `lint/check/`. A generated case is evidence, not
-source of truth.
+Start from a fresh MCP report after source or configuration changes. Before
+editing, state the requested batch and its actual source owners. Review the
+finding's rule, path, evidence, current source, callers, sibling behavior,
+manifests, and tests. Findings are design-review signals, not proof of runtime
+bugs; verify test-only scope and external protocol or framework boundaries.
 
-Resolving `lint/errors/` starts with subagents. Assign each a small disjoint
-batch from one crate/domain and never overlap source files. Before editing,
-each must read `AGENTS.md`, `lint/examples/positive.md`, and
-`lint/examples/negative.md` completely, then report exactly:
+For independent work, assign small, disjoint batches to subagents. Every agent
+must read this guide and the plugin skill and preserve other agents' edits.
+Prefer existing receivers or collections, standard conversions, associated
+constructors, intentional inline code, or a genuine algorithm. Do not create
+wrappers or split methods mechanically just to satisfy a numerical limit.
+Report each case as `refactored`, `exception proposed`, or `blocked`, with its
+owner, API impact, reasoning, files, and focused tests.
 
-```text
-Read positive.md in full: yes
-Read negative.md in full: yes
-```
+Subagents implement; the lead reviews every diff and approves any exception.
+If no safe design is justified, leave the finding visible and explain the
+missing evidence. A justified exception must use the MCP plugin's actual
+syntax, an exact rule ID, and a concrete reason on the affected item. Do not
+translate obsolete local-linter directives into MCP suppressions automatically.
+Never add blanket suppressions, weaken limits, broaden exclusions, or change
+policy merely to empty the report.
 
-Reject work missing either confirmation. Each agent then verifies current
-source, uses, callers, sibling behavior, models, manifest, and tests; identifies
-meaning, invariants, effects, and owner; searches for cohesive behavior and
-closed primitive state; and prefers an existing receiver/collection, standard
-trait/conversion, constructor, inlining, or genuine algorithm. Report every
-case as `refactored`, `exception proposed`, or `blocked`, with owner, API,
-reasoning, files, and focused tests.
-
-Subagents implement; they do not approve suppression. If no safe final design
-is justified, leave source unsuppressed and report evidence, owners considered,
-and what is missing. The manager reviews every diff and applies only an exact,
-narrow exception when warranted:
-
-```rust,ignore
-// design-lint: allow self-constructor-static -- conventional consuming conversion
-fn from_parts(self, parts: Parts) -> Self {
-    // ...
-}
-```
-
-A rule name and concrete reason are mandatory. Never use nonexistent
-`hl_design` macros, mass-allow findings, weaken `lint.toml`, or add speculative
-rules to empty the queue. A new rule needs an explicit invariant, a prevented
-failure, and focused positive/negative tests. Update the example documents only
-after explicit user approval of the pattern or rejection; silence and “next”
-are not approval.
-
-After each batch, inspect the diff and focused tests. After integration, run:
-
-```bash
-cargo test --locked -p design-lint
-cargo run --locked -p design-lint -- --policy lint.toml --cases lint .
-cargo run --locked -p design-lint -- --policy lint.toml check .
-```
-
-Resolved cases must disappear, remaining violations stay flat in
-`lint/errors/`, `.gitkeep` remains, and no unrelated case or source change is
-lost.
+After each batch, review the diff and focused behavioral tests. After
+integration, rerun MCP and confirm that selected findings disappeared without
+introducing unrelated findings. Report configured-rule completion, remaining
+findings, and blocked verification honestly. Keep user-requested batch limits;
+do not proceed into another category or commit without authorization.
 
 ## Change workflow and validation
 
@@ -492,9 +466,11 @@ cargo check --locked --workspace --all-targets
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo doc --locked --workspace --no-deps
-cargo run --locked -p design-lint -- check .
 git diff --check
 ```
+
+Also run the Linter MCP `check` tool with the absolute repository root and
+report configured-rule statuses and findings.
 
 For Markdown-only changes, `git diff --check` plus path and terminology review
 is enough. Public API, Cargo, transaction, signing, persistence, or

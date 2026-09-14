@@ -441,29 +441,9 @@ where
         let mut family = None;
         let mut transfers = Vec::with_capacity(requests.len());
         for (index, request) in requests.into_iter().enumerate() {
-            if request.amount <= Decimal::zero() {
-                return Err(SendError::item(
-                    index,
-                    Vec::new(),
-                    Error::new(ErrorKind::InvalidAmount, "amount must be positive"),
-                ));
-            }
             let entry = self
-                .entry(&request.wallet)
+                .transfer_entry(&request, family.as_ref())
                 .map_err(|error| SendError::item(index, Vec::new(), error))?;
-            let family_mismatch = family
-                .as_ref()
-                .is_some_and(|expected| expected != &entry.info.family);
-            if family_mismatch {
-                return Err(SendError::item(
-                    index,
-                    Vec::new(),
-                    Error::new(
-                        ErrorKind::Unsupported,
-                        "all transfers must use the same wallet family",
-                    ),
-                ));
-            }
             family = Some(entry.info.family.clone());
             transfers.push(Transfer {
                 wallet: entry.wallet,
@@ -482,6 +462,27 @@ where
                 SendError::operation(ErrorKind::Unsupported, "wallet family is not configured")
             })?;
         Ok((sender, transfers))
+    }
+
+    fn transfer_entry(
+        &self,
+        request: &WalletTransfer<I>,
+        family: Option<&F>,
+    ) -> Result<Entry<I, F>, Error> {
+        if request.amount <= Decimal::zero() {
+            return Err(Error::new(
+                ErrorKind::InvalidAmount,
+                "amount must be positive",
+            ));
+        }
+        let entry = self.entry(&request.wallet)?;
+        if family.is_some_and(|expected| expected != &entry.info.family) {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "all transfers must use the same wallet family",
+            ));
+        }
+        Ok(entry)
     }
 
     fn entry(&self, id: &I) -> Result<Entry<I, F>, Error> {

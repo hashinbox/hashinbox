@@ -21,7 +21,9 @@ pub(crate) struct GlobalVersion {
     version: u64,
 }
 
-// design-lint: allow unclassified-free-function -- shared redb namespace-prefix encoding preserves checked length framing for physical keys and scans without adding backend byte policy to Namespace
+// shared redb namespace-prefix encoding preserves checked length framing for physical keys and
+// scans without adding backend byte policy to Namespace
+// design-lint: allow unclassified-free-function -- backend-owned storage boundary
 pub(crate) fn namespace_prefix(namespace: &Namespace) -> Result<Vec<u8>, Error> {
     let namespace_bytes = namespace.0.as_bytes();
     let namespace_len = u32::try_from(namespace_bytes.len()).map_err(|_| {
@@ -39,7 +41,9 @@ pub(crate) fn namespace_prefix(namespace: &Namespace) -> Result<Vec<u8>, Error> 
     Ok(encoded)
 }
 
-// design-lint: allow unclassified-free-function -- adapter-owned physical key encoding combines foreign Namespace and Key values without leaking the redb wire format into neutral storage
+// adapter-owned physical key encoding combines foreign Namespace and Key values without leaking the
+// redb wire format into neutral storage
+// design-lint: allow unclassified-free-function -- backend-owned storage boundary
 pub(crate) fn encode_physical_key(namespace: &Namespace, key: &Key) -> Result<Vec<u8>, Error> {
     let mut encoded = namespace_prefix(namespace)?;
     encoded.len().checked_add(key.0.len()).ok_or_else(|| {
@@ -49,7 +53,9 @@ pub(crate) fn encode_physical_key(namespace: &Namespace, key: &Key) -> Result<Ve
     Ok(encoded)
 }
 
-// design-lint: allow unclassified-free-function -- adapter-owned physical key parsing validates the requested foreign Namespace before producing a backend-neutral Key
+// adapter-owned physical key parsing validates the requested foreign Namespace before producing a
+// backend-neutral Key
+// design-lint: allow unclassified-free-function -- backend-owned storage boundary
 pub(crate) fn decode_physical_key(
     physical: &[u8],
     expected_namespace: &Namespace,
@@ -140,7 +146,8 @@ impl TryFrom<&[u8]> for StoredRecord {
         }
         if declared_payload_len != actual_payload_len {
             return Err(Error::corrupt_data(format!(
-                "storage value record payload length is {declared_payload_len}, actual length is {actual_payload_len}"
+                "storage value record payload length is {declared_payload_len}, \
+                actual length is {actual_payload_len}"
             )));
         }
 
@@ -521,7 +528,8 @@ mod tests {
             (
                 MAX_STORED_PAYLOAD_BYTES as u64,
                 format!(
-                    "storage value record payload length is {MAX_STORED_PAYLOAD_BYTES}, actual length is 0"
+                    "storage value record payload length is \
+                    {MAX_STORED_PAYLOAD_BYTES}, actual length is 0"
                 ),
             ),
             (

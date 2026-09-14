@@ -414,14 +414,10 @@ impl Broadcaster for Wallet {
                         error.to_string(),
                     )
                 })?;
-            let signed =
-                SignedTransaction::from_envelope(id, prepared.envelope().as_bytes().to_vec())
-                    .map_err(|error| {
-                        TransactionError::new(
-                            TransactionErrorKind::InvalidTransaction,
-                            error.to_string(),
-                        )
-                    })?;
+            let envelope = prepared.envelope().as_bytes().to_vec();
+            let signed = SignedTransaction::from_envelope(id, envelope).map_err(|error| {
+                TransactionError::new(TransactionErrorKind::InvalidTransaction, error.to_string())
+            })?;
             let id = self.coordinator.broadcast(signed).await?;
             Ok(BroadcastReceipt {
                 id: TransactionId::new(id.to_string()),

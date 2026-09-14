@@ -76,7 +76,9 @@ pub(super) fn decode(
         .collect()
 }
 
-// design-lint: allow unclassified-free-function -- shared Bitcoin snapshot boundary maps heterogeneous decode and validation errors to foreign TransactionError::InvalidSnapshot without submission ambiguity
+// shared Bitcoin snapshot boundary maps heterogeneous decode and validation errors to foreign
+// TransactionError::InvalidSnapshot without submission ambiguity
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn invalid(error: impl std::fmt::Display) -> TransactionError {
     TransactionError::new(TransactionErrorKind::InvalidSnapshot, error.to_string())
 }

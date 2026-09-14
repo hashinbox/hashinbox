@@ -363,7 +363,7 @@ async fn main() -> Result<(), AnyError> {
         }
         signal = tokio::signal::ctrl_c() => (signal.map_err(Into::into), false),
     };
-    let mut shutdown_order = shutdown::ShutdownOrder::new();
+    let mut shutdown_order = shutdown::Order::new();
     readiness_control.send_replace(false);
     shutdown_order.not_ready()?;
     if !http_done {

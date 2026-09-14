@@ -32,32 +32,40 @@ impl Outputs for Repository {
                 })
                 .await
                 .map_err(Self::storage_error)?;
-            let has_more = page.next.is_some();
-            let position = page.entries.last().map(|(key, _)| key.0.clone());
-            let outputs = page
-                .entries
-                .into_iter()
-                .map(|(_, stored)| {
-                    Self::decode::<record::OutputRecord>(&stored.value.0)?.into_domain()
-                })
-                .collect::<Result<Vec<_>, IndexError>>()?;
-            self.ensure_checkpoint(&checkpoint).await?;
-            let next = if has_more {
-                let Some(position) = position else {
-                    return Err(Self::record_error("paginated output page has no final key"));
-                };
-                Some(OutputCursor {
-                    checkpoint: checkpoint.clone(),
-                    position,
-                })
-            } else {
-                None
+            self.output_page(checkpoint, page).await
+        })
+    }
+}
+
+impl Repository {
+    async fn output_page(
+        &self,
+        checkpoint: Option<BlockRef>,
+        page: ::storage::ScanPage,
+    ) -> Result<OutputPage, IndexError> {
+        let has_more = page.next.is_some();
+        let position = page.entries.last().map(|(key, _)| key.0.clone());
+        let outputs = page
+            .entries
+            .into_iter()
+            .map(|(_, stored)| Self::decode::<record::OutputRecord>(&stored.value.0)?.into_domain())
+            .collect::<Result<Vec<_>, IndexError>>()?;
+        self.ensure_checkpoint(&checkpoint).await?;
+        let next = if has_more {
+            let Some(position) = position else {
+                return Err(Self::record_error("paginated output page has no final key"));
             };
-            Ok(OutputPage {
-                checkpoint,
-                outputs,
-                next,
+            Some(OutputCursor {
+                checkpoint: checkpoint.clone(),
+                position,
             })
+        } else {
+            None
+        };
+        Ok(OutputPage {
+            checkpoint,
+            outputs,
+            next,
         })
     }
 }

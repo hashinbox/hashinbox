@@ -28,7 +28,8 @@ SELECT pg_advisory_xact_lock(hashtextextended(
 /// Locks the scope's checkpoint for the rest of the transaction.
 const LOCK_CHECKPOINT: &str = "SELECT position, height, hash, parent_position, \
                                parent_hash AS parent, block_timestamp AS timestamp \
-                               FROM payments_checkpoint WHERE chain = $1 AND network = $2 FOR UPDATE";
+                               FROM payments_checkpoint WHERE chain = $1 AND network = $2 \
+                               FOR UPDATE";
 
 const JOURNALLED_HASH: &str =
     "SELECT block_hash FROM payments_journal WHERE chain = $1 AND network = $2 AND height = $3";
@@ -48,7 +49,8 @@ INSERT INTO payments_journal (chain, network, height, block_position, block_hash
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
 
 const MOVE_CHECKPOINT: &str = "\
-INSERT INTO payments_checkpoint (chain, network, position, height, hash, parent_position, parent_hash,
+INSERT INTO payments_checkpoint (chain, network, position, height, hash, parent_position, \
+parent_hash,
                         block_timestamp)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (chain, network) DO UPDATE SET position = EXCLUDED.position,
@@ -68,20 +70,7 @@ impl Repository {
         self.lock_scope(&transaction).await?;
         let current = self.locked_checkpoint(&transaction).await?;
         let height = row::as_i64(addition.block().height.0, "block height")?;
-        let statement = transaction
-            .prepare_cached(JOURNALLED_HASH)
-            .await
-            .map_err(crate::store)?;
-        let journalled = transaction
-            .query_opt(
-                &statement,
-                &[&self.scope.chain.0, &self.scope.network, &height],
-            )
-            .await
-            .map_err(crate::store)?
-            .map(|row| row.try_get::<_, Vec<u8>>("block_hash"))
-            .transpose()
-            .map_err(crate::store)?;
+        let journalled = self.journalled_hash(&transaction, height).await?;
 
         // Re-presenting the block that is already the checkpoint is not an
         // error: a restart replays the tip, and the caller must be able to tell
@@ -118,6 +107,27 @@ impl Repository {
 
         transaction.commit().await.map_err(crate::store)?;
         Ok(BlockOutcome::Applied)
+    }
+
+    async fn journalled_hash(
+        &self,
+        transaction: &Transaction<'_>,
+        height: i64,
+    ) -> Result<Option<Vec<u8>>, IndexError> {
+        let statement = transaction
+            .prepare_cached(JOURNALLED_HASH)
+            .await
+            .map_err(crate::store)?;
+        transaction
+            .query_opt(
+                &statement,
+                &[&self.scope.chain.0, &self.scope.network, &height],
+            )
+            .await
+            .map_err(crate::store)?
+            .map(|row| row.try_get::<_, Vec<u8>>("block_hash"))
+            .transpose()
+            .map_err(crate::store)
     }
 }
 
@@ -197,43 +207,8 @@ impl Repository {
         height: i64,
         addition: &BlockAddition,
     ) -> Result<(), IndexError> {
+        let journal = Journal::from_addition(addition)?;
         let previous = addition.expected_checkpoint();
-        let previous_height = previous
-            .map(|block| row::as_i64(block.height.0, "block height"))
-            .transpose()?;
-        let previous_position = previous
-            .map(|block| row::as_i64(block.position.0, "block position"))
-            .transpose()?;
-        let previous_parent_position = previous
-            .and_then(|block| block.parent.as_ref())
-            .map(|parent| row::as_i64(parent.position.0, "parent block position"))
-            .transpose()?;
-        let previous_time = previous
-            .and_then(|block| block.timestamp)
-            .map(|value| row::as_i64(value, "block timestamp"))
-            .transpose()?;
-        // Below the retention window nothing has aged out yet. A height no row can
-        // hold keeps the folded prune inert rather than needing a second statement.
-        let oldest = addition
-            .block()
-            .height
-            .0
-            .checked_sub(addition.retention())
-            .map(|value| row::as_i64(value, "block height"))
-            .transpose()?
-            .unwrap_or(-1);
-        let block_timestamp = addition
-            .block()
-            .timestamp
-            .map(|value| row::as_i64(value, "block timestamp"))
-            .transpose()?;
-        let block_position = row::as_i64(addition.block().position.0, "block position")?;
-        let block_parent_position = addition
-            .block()
-            .parent
-            .as_ref()
-            .map(|parent| row::as_i64(parent.position.0, "parent block position"))
-            .transpose()?;
         let statement = transaction
             .prepare_cached(WRITE_JOURNAL)
             .await
@@ -245,28 +220,178 @@ impl Repository {
                     &self.scope.chain.0,
                     &self.scope.network,
                     &height,
-                    &block_position,
+                    &journal.block_position,
                     &addition.block().hash.0,
-                    &block_parent_position,
+                    &journal.block_parent_position,
                     &addition
                         .block()
                         .parent
                         .as_ref()
                         .map(|parent| parent.hash.0.clone()),
-                    &block_timestamp,
-                    &previous_height,
-                    &previous_position,
+                    &journal.block_timestamp,
+                    &journal.previous_height,
+                    &journal.previous_position,
                     &previous.map(|block| block.hash.0.clone()),
-                    &previous_parent_position,
+                    &journal.previous_parent_position,
                     &previous.and_then(|block| {
                         block.parent.as_ref().map(|parent| parent.hash.0.clone())
                     }),
-                    &previous_time,
-                    &oldest,
+                    &journal.previous_time,
+                    &journal.oldest,
                 ],
             )
             .await
             .map_err(crate::store)?;
         Ok(())
+    }
+}
+
+/// Checked numeric columns for the rollback journal and its retention bound.
+#[derive(Debug)]
+struct Journal {
+    previous_height: Option<i64>,
+    previous_position: Option<i64>,
+    previous_parent_position: Option<i64>,
+    previous_time: Option<i64>,
+    oldest: i64,
+    block_timestamp: Option<i64>,
+    block_position: i64,
+    block_parent_position: Option<i64>,
+}
+
+impl Journal {
+    fn from_addition(addition: &BlockAddition) -> Result<Self, IndexError> {
+        let previous = addition.expected_checkpoint();
+        let block = addition.block();
+        Ok(Self {
+            previous_height: previous
+                .map(|block| row::as_i64(block.height.0, "block height"))
+                .transpose()?,
+            previous_position: previous
+                .map(|block| row::as_i64(block.position.0, "block position"))
+                .transpose()?,
+            previous_parent_position: previous
+                .and_then(|block| block.parent.as_ref())
+                .map(|parent| row::as_i64(parent.position.0, "parent block position"))
+                .transpose()?,
+            previous_time: previous
+                .and_then(|block| block.timestamp)
+                .map(|value| row::as_i64(value, "block timestamp"))
+                .transpose()?,
+            // Below retention, no stored height matches the folded prune.
+            oldest: block
+                .height
+                .0
+                .checked_sub(addition.retention())
+                .map(|value| row::as_i64(value, "block height"))
+                .transpose()?
+                .unwrap_or(-1),
+            block_timestamp: block
+                .timestamp
+                .map(|value| row::as_i64(value, "block timestamp"))
+                .transpose()?,
+            block_position: row::as_i64(block.position.0, "block position")?,
+            block_parent_position: block
+                .parent
+                .as_ref()
+                .map(|parent| row::as_i64(parent.position.0, "parent block position"))
+                .transpose()?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indexing::{BlockHash, BlockHeight, BlockParent, BlockPosition, ChainId};
+
+    fn block(height: u64, position: u64) -> BlockRef {
+        BlockRef {
+            position: BlockPosition(position),
+            height: BlockHeight(height),
+            hash: BlockHash(vec![1]),
+            parent: None,
+            timestamp: None,
+        }
+    }
+
+    fn addition(previous: Option<BlockRef>, mut block: BlockRef, retention: u64) -> BlockAddition {
+        block.parent = previous.as_ref().map(|previous| BlockParent {
+            position: previous.position,
+            hash: previous.hash.clone(),
+        });
+        let scope = IndexScope {
+            chain: ChainId("chain".into()),
+            network: "network".into(),
+        };
+        let interpreted = indexing::InterpretedBlock {
+            block,
+            transactions: Vec::new(),
+            outputs: indexing::OutputChanges::default(),
+        };
+        BlockAddition::new(scope, previous, retention, interpreted).unwrap()
+    }
+
+    #[test]
+    fn journal_retention_uses_height_and_keeps_pruning_inert_below_the_window() {
+        for (height, oldest) in [(0, -1), (3, -1), (4, 0), (5, 1)] {
+            let addition = addition(None, block(height, 900 + height), 4);
+            let journal = Journal::from_addition(&addition).unwrap();
+            assert_eq!(journal.oldest, oldest);
+            assert_eq!(journal.block_position, 900 + i64::try_from(height).unwrap());
+            assert_eq!(journal.block_parent_position, None);
+            assert_eq!(journal.block_timestamp, None);
+            assert_eq!(journal.previous_height, None);
+            assert_eq!(journal.previous_position, None);
+            assert_eq!(journal.previous_parent_position, None);
+            assert_eq!(journal.previous_time, None);
+        }
+    }
+
+    #[test]
+    fn journal_keeps_sparse_checkpoint_metadata_at_the_sql_boundary() {
+        let mut previous = block(5, 8);
+        previous.parent = Some(BlockParent {
+            position: BlockPosition(3),
+            hash: BlockHash(vec![0]),
+        });
+        previous.timestamp = Some(i64::MAX as u64);
+        let mut current = block(6, i64::MAX as u64);
+        current.timestamp = Some(0);
+        let addition = addition(Some(previous), current, 2);
+        let journal = Journal::from_addition(&addition).unwrap();
+        assert_eq!(journal.previous_height, Some(5));
+        assert_eq!(journal.previous_position, Some(8));
+        assert_eq!(journal.previous_parent_position, Some(3));
+        assert_eq!(journal.previous_time, Some(i64::MAX));
+        assert_eq!(journal.oldest, 4);
+        assert_eq!(journal.block_timestamp, Some(0));
+        assert_eq!(journal.block_position, i64::MAX);
+        assert_eq!(journal.block_parent_position, Some(8));
+    }
+
+    #[test]
+    fn journal_reports_previous_checkpoint_range_errors_in_the_original_order() {
+        let over = i64::MAX as u64 + 1;
+        for (height, position, parent_position, timestamp, field) in [
+            (over, over, over, over, "block height"),
+            (1, over, over, over, "block position"),
+            (1, 3, over, over, "parent block position"),
+            (1, 3, 0, over, "block timestamp"),
+        ] {
+            let mut previous = block(height, position);
+            previous.parent = Some(BlockParent {
+                position: BlockPosition(parent_position),
+                hash: BlockHash(vec![0]),
+            });
+            previous.timestamp = Some(timestamp);
+            let mut current = block(height + 1, position + 1);
+            current.timestamp = Some(over);
+            let addition = addition(Some(previous), current, 1);
+            let error = Journal::from_addition(&addition).unwrap_err();
+            assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
+            assert_eq!(error.message, format!("{field} exceeds the storage range"));
+            assert!(!error.retryable);
+        }
     }
 }

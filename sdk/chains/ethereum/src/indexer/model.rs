@@ -5,6 +5,9 @@ use alloy_rpc_types_eth::{Block as RpcBlock, BlockTransactions};
 use indexing::{BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef};
 use serde_json::{Map, Value};
 
+mod log;
+mod receipt;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ParsedBlock {
     pub reference: BlockRef,
@@ -38,6 +41,9 @@ pub(super) struct ParsedLog {
     pub data: Vec<u8>,
     pub log_index: u64,
 }
+
+#[derive(Debug)]
+struct Logs(Vec<ParsedLog>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ParseError {
@@ -90,7 +96,30 @@ impl ParsedBlock {
             timestamp: Some(block.header.timestamp),
         };
 
-        let values = match block.transactions {
+        Ok(Self {
+            reference,
+            transactions: Transactions::parse(
+                block.transactions,
+                height,
+                hash,
+                require_full_transactions,
+            )?
+            .0,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct Transactions(Vec<ParsedTransaction>);
+
+impl Transactions {
+    fn parse(
+        transactions: BlockTransactions<Value>,
+        height: BlockHeight,
+        hash: [u8; 32],
+        require_full_transactions: bool,
+    ) -> Result<Self, ParseError> {
+        let values = match transactions {
             BlockTransactions::Full(values) => values,
             BlockTransactions::Hashes(_) | BlockTransactions::Uncle
                 if require_full_transactions =>
@@ -117,10 +146,7 @@ impl ParsedBlock {
             transactions.push(transaction);
         }
 
-        Ok(Self {
-            reference,
-            transactions,
-        })
+        Ok(Self(transactions))
     }
 }
 
@@ -165,240 +191,6 @@ impl ParsedTransaction {
             to,
             value,
             index,
-        })
-    }
-}
-
-impl ParsedReceipt {
-    pub(super) fn parse_all(
-        raw_receipts: &[Vec<u8>],
-        block: &ParsedBlock,
-    ) -> Result<Vec<ParsedReceipt>, ParseError> {
-        if raw_receipts.len() != block.transactions.len() {
-            return Err(ParseError::new(
-                "Ethereum receipt count does not match transaction count",
-            ));
-        }
-
-        let block_hash: [u8; 32] = block
-            .reference
-            .hash
-            .0
-            .as_slice()
-            .try_into()
-            .map_err(|_| ParseError::new("Ethereum block hash is not 32 bytes"))?;
-        let mut receipts = Vec::with_capacity(raw_receipts.len());
-        let mut seen_log_indexes = BTreeSet::new();
-        let mut previous_log_index = None;
-        for (position, (raw, transaction)) in
-            raw_receipts.iter().zip(&block.transactions).enumerate()
-        {
-            receipts.push(Self::parse(
-                raw,
-                transaction,
-                position,
-                block.reference.height,
-                block_hash,
-                &mut seen_log_indexes,
-                &mut previous_log_index,
-            )?);
-        }
-        Ok(receipts)
-    }
-
-    fn parse(
-        raw: &[u8],
-        transaction: &ParsedTransaction,
-        position: usize,
-        block_height: BlockHeight,
-        block_hash: [u8; 32],
-        seen_log_indexes: &mut BTreeSet<u64>,
-        previous_log_index: &mut Option<u64>,
-    ) -> Result<Self, ParseError> {
-        let value: Value = serde_json::from_slice(raw)
-            .map_err(|_| ParseError::new("Ethereum receipt result is not valid JSON"))?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| ParseError::new("Ethereum receipt must be an object"))?;
-        let transaction_hash = required_hash(object, "transactionHash", "receipt transaction")?;
-        if transaction_hash != transaction.hash {
-            return Err(ParseError::new(
-                "Ethereum receipt transaction hash does not match block order",
-            ));
-        }
-        let transaction_index =
-            required_quantity_u64(object, "transactionIndex", "receipt transaction index")?;
-        if transaction_index != transaction.index
-            || transaction_index
-                != u64::try_from(position)
-                    .map_err(|_| ParseError::new("Ethereum receipt position exceeds u64"))?
-        {
-            return Err(ParseError::new(
-                "Ethereum receipt transaction index does not match block order",
-            ));
-        }
-        if required_hash(object, "blockHash", "receipt block hash")? != block_hash {
-            return Err(ParseError::new(
-                "Ethereum receipt block hash does not match its block",
-            ));
-        }
-        if required_quantity_u64(object, "blockNumber", "receipt block number")? != block_height.0 {
-            return Err(ParseError::new(
-                "Ethereum receipt block number does not match its block",
-            ));
-        }
-        if required_address(object, "from", "receipt sender")? != transaction.from {
-            return Err(ParseError::new(
-                "Ethereum receipt sender does not match its transaction",
-            ));
-        }
-        if optional_address(object, "to", "receipt recipient")? != transaction.to {
-            return Err(ParseError::new(
-                "Ethereum receipt recipient does not match its transaction",
-            ));
-        }
-
-        let status = required_quantity(object, "status", "receipt status")?;
-        let succeeded = if status == U256::ZERO {
-            false
-        } else if status == U256::from(1_u8) {
-            true
-        } else {
-            return Err(ParseError::new(
-                "Ethereum receipt status must be zero or one",
-            ));
-        };
-        let gas_used = required_quantity_u64(object, "gasUsed", "receipt gas used")?;
-        let effective_gas_price =
-            required_quantity(object, "effectiveGasPrice", "receipt effective gas price")?;
-        let contract_address =
-            optional_address(object, "contractAddress", "receipt contract address")?;
-        if transaction.to.is_some() && contract_address.is_some() {
-            return Err(ParseError::new(
-                "non-creation receipt unexpectedly contains a contract address",
-            ));
-        }
-        if succeeded
-            && transaction.to.is_none()
-            && !transaction.value.is_zero()
-            && contract_address.is_none()
-        {
-            return Err(ParseError::new(
-                "successful value-bearing contract creation has no contract address",
-            ));
-        }
-
-        let log_values = object
-            .get("logs")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ParseError::new("Ethereum receipt logs must be an array"))?;
-        let mut logs = Vec::with_capacity(log_values.len());
-        for log_value in log_values {
-            let log = ParsedLog::parse(
-                log_value,
-                block_height,
-                block_hash,
-                transaction_hash,
-                transaction_index,
-            )?;
-            if !seen_log_indexes.insert(log.log_index) {
-                return Err(ParseError::new(
-                    "Ethereum block contains duplicate log indexes",
-                ));
-            }
-            let out_of_order = previous_log_index.is_some_and(|previous| log.log_index <= previous);
-            if out_of_order {
-                return Err(ParseError::new(
-                    "Ethereum logs are not ordered by log index",
-                ));
-            }
-            *previous_log_index = Some(log.log_index);
-            logs.push(log);
-        }
-
-        Ok(Self {
-            transaction_hash,
-            transaction_index,
-            succeeded,
-            gas_used,
-            effective_gas_price,
-            contract_address,
-            logs,
-        })
-    }
-}
-
-impl ParsedLog {
-    fn parse(
-        value: &Value,
-        block_height: BlockHeight,
-        block_hash: [u8; 32],
-        transaction_hash: [u8; 32],
-        transaction_index: u64,
-    ) -> Result<Self, ParseError> {
-        let object = value
-            .as_object()
-            .ok_or_else(|| ParseError::new("Ethereum receipt log must be an object"))?;
-        if required_hash(object, "blockHash", "log block hash")? != block_hash
-            || required_quantity_u64(object, "blockNumber", "log block number")? != block_height.0
-            || required_hash(object, "transactionHash", "log transaction hash")? != transaction_hash
-            || required_quantity_u64(object, "transactionIndex", "log transaction index")?
-                != transaction_index
-        {
-            return Err(ParseError::new(
-                "Ethereum log identity does not match its receipt and block",
-            ));
-        }
-        if object.get("removed").and_then(Value::as_bool) != Some(false) {
-            return Err(ParseError::new(
-                "canonical Ethereum receipt contains a removed log",
-            ));
-        }
-        let address = required_address(object, "address", "log address")?;
-        let topics = object
-            .get("topics")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ParseError::new("Ethereum log topics must be an array"))?
-            .iter()
-            .map(|topic| {
-                let topic = topic
-                    .as_str()
-                    .ok_or_else(|| ParseError::new("Ethereum log topic must be a hash"))?;
-                topic
-                    .parse::<B256>()
-                    .map(Into::into)
-                    .map_err(|_| ParseError::new("Ethereum log topic is not a 32-byte hash"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let data = object
-            .get("data")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ParseError::new("Ethereum log data must be a hex byte string"))?;
-        let digits = data
-            .strip_prefix("0x")
-            .ok_or_else(|| ParseError::new("Ethereum log data is not hex encoded"))?;
-        if digits.len() % 2 != 0 {
-            return Err(ParseError::new(
-                "Ethereum log data has an odd number of hex digits",
-            ));
-        }
-        let data = digits
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let pair = std::str::from_utf8(pair)
-                    .map_err(|_| ParseError::new("Ethereum log data is not valid hex"))?;
-                u8::from_str_radix(pair, 16)
-                    .map_err(|_| ParseError::new("Ethereum log data is not valid hex"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let log_index = required_quantity_u64(object, "logIndex", "log index")?;
-
-        Ok(Self {
-            address,
-            topics,
-            data,
-            log_index,
         })
     }
 }
@@ -475,7 +267,9 @@ fn required_quantity_u64(
     u64::try_from(value).map_err(|_| ParseError::new(format!("Ethereum {label} exceeds u64")))
 }
 
-// design-lint: allow unclassified-free-function -- shared indexing quantity decoder preserves field context and established native U256 parsing semantics across transaction fields and source chain-ID checks
+// shared indexing quantity decoder preserves field context and established native U256 parsing
+// semantics across transaction fields and source chain-ID checks
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn parse_quantity(value: &str, label: &str) -> Result<U256, ParseError> {
     let digits = value
         .strip_prefix("0x")
@@ -546,6 +340,196 @@ mod tests {
             "effectiveGasPrice": "0x3",
             "logs": logs
         })
+    }
+
+    #[test]
+    fn receipt_fields_precede_logs_and_preserve_full_width_execution_values() {
+        let mut block = block(vec![0xaa; 32]);
+        let mut original = receipt(&block.transactions[0], &[]);
+        original["gasUsed"] = json!("0xffffffffffffffff");
+        original["effectiveGasPrice"] = json!(format!("0x{:x}", U256::MAX));
+        let parsed =
+            ParsedReceipt::parse_all(&[serde_json::to_vec(&original).unwrap()], &block).unwrap();
+        assert_eq!(parsed[0].gas_used, u64::MAX);
+        assert_eq!(parsed[0].effective_gas_price, U256::MAX);
+        for (field, invalid, message) in [
+            (
+                "transactionHash",
+                json!(B256::ZERO.to_string()),
+                "Ethereum receipt transaction hash does not match block order",
+            ),
+            (
+                "transactionIndex",
+                json!("0x1"),
+                "Ethereum receipt transaction index does not match block order",
+            ),
+            (
+                "blockHash",
+                json!(B256::ZERO.to_string()),
+                "Ethereum receipt block hash does not match its block",
+            ),
+            (
+                "blockNumber",
+                json!("0xb"),
+                "Ethereum receipt block number does not match its block",
+            ),
+            (
+                "from",
+                json!(Address::ZERO.to_string()),
+                "Ethereum receipt sender does not match its transaction",
+            ),
+            (
+                "to",
+                Value::Null,
+                "Ethereum receipt recipient does not match its transaction",
+            ),
+            (
+                "status",
+                json!("0x2"),
+                "Ethereum receipt status must be zero or one",
+            ),
+            (
+                "gasUsed",
+                json!("0x10000000000000000"),
+                "Ethereum receipt gas used exceeds u64",
+            ),
+            (
+                "effectiveGasPrice",
+                json!("0x00"),
+                "Ethereum receipt effective gas price is not a canonical hex quantity",
+            ),
+            (
+                "contractAddress",
+                json!(Address::ZERO.to_string()),
+                "non-creation receipt unexpectedly contains a contract address",
+            ),
+        ] {
+            let mut value = original.clone();
+            value["logs"] = Value::Null;
+            value[field] = invalid;
+            let error = ParsedReceipt::parse_all(&[serde_json::to_vec(&value).unwrap()], &block)
+                .unwrap_err();
+            assert_eq!(error.to_string(), message);
+        }
+        block.transactions[0].to = None;
+        original["to"] = Value::Null;
+        original["logs"] = Value::Null;
+        let error = ParsedReceipt::parse_all(&[serde_json::to_vec(&original).unwrap()], &block)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "successful value-bearing contract creation has no contract address"
+        );
+    }
+
+    #[test]
+    fn log_identity_short_circuits_before_payload_and_order_state_mutation() {
+        let block = block(vec![0xaa; 32]);
+        let original = receipt(&block.transactions[0], &[3]);
+        let mut invalid = original.clone();
+        invalid["logs"][0]["blockHash"] = json!(B256::ZERO.to_string());
+        invalid["logs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("blockNumber");
+        let mut removed = original.clone();
+        removed["logs"][0]["removed"] = json!(true);
+        removed["logs"][0]["address"] = Value::Null;
+        let mut topics = original.clone();
+        topics["logs"][0]["topics"] = json!([null]);
+        topics["logs"][0]["data"] = Value::Null;
+        for (value, message, inserted) in [
+            (
+                invalid,
+                "Ethereum log identity does not match its receipt and block",
+                false,
+            ),
+            (
+                removed,
+                "canonical Ethereum receipt contains a removed log",
+                false,
+            ),
+            (topics, "Ethereum log topic must be a hash", false),
+            (original, "Ethereum logs are not ordered by log index", true),
+        ] {
+            let mut seen = BTreeSet::from([4]);
+            let mut previous = Some(4);
+            let error = ParsedReceipt::parse(
+                &serde_json::to_vec(&value).unwrap(),
+                &block.transactions[0],
+                0,
+                BlockHeight(10),
+                [0xaa; 32],
+                &mut seen,
+                &mut previous,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), message);
+            assert_eq!(seen.contains(&3), inserted);
+            assert_eq!(previous, Some(4));
+        }
+    }
+
+    #[test]
+    fn block_transaction_modes_preserve_position_and_duplicate_validation() {
+        let transaction = json!({
+            "hash": B256::from([0xcc; 32]).to_string(),
+            "from": Address::ZERO.to_string(), "to": null,
+            "value": format!("0x{:x}", U256::MAX), "transactionIndex": "0x0",
+            "blockHash": B256::ZERO.to_string(), "blockNumber": "0x0",
+        });
+        let mut block = RpcBlock::<Value> {
+            transactions: BlockTransactions::Full(vec![transaction.clone()]),
+            ..Default::default()
+        };
+        let parsed = ParsedBlock::parse(
+            &serde_json::to_vec(&block).unwrap(),
+            Some(BlockHeight(0)),
+            true,
+        )
+        .unwrap();
+        assert_eq!(parsed.transactions[0].value, U256::MAX);
+        assert_eq!(parsed.reference.parent, None);
+        for (transactions, message) in [
+            (
+                BlockTransactions::Hashes(vec![B256::ZERO]),
+                "Ethereum transaction must be an object",
+            ),
+            (
+                BlockTransactions::Uncle,
+                "Ethereum full-block request returned transaction hashes only",
+            ),
+        ] {
+            block.transactions = transactions;
+            let raw = serde_json::to_vec(&block).unwrap();
+            assert!(
+                ParsedBlock::parse(&raw, None, false)
+                    .unwrap()
+                    .transactions
+                    .is_empty()
+            );
+            assert_eq!(
+                ParsedBlock::parse(&raw, None, true)
+                    .unwrap_err()
+                    .to_string(),
+                message
+            );
+            assert_eq!(
+                ParsedBlock::parse(&raw, Some(BlockHeight(1)), true)
+                    .unwrap_err()
+                    .to_string(),
+                "Ethereum block number does not match the requested height"
+            );
+        }
+        let mut duplicate = transaction.clone();
+        duplicate["transactionIndex"] = json!("0x1");
+        block.transactions = BlockTransactions::Full(vec![transaction, duplicate]);
+        assert_eq!(
+            ParsedBlock::parse(&serde_json::to_vec(&block).unwrap(), None, true)
+                .unwrap_err()
+                .to_string(),
+            "Ethereum block contains duplicate transaction hashes"
+        );
     }
 
     #[test]
@@ -649,8 +633,10 @@ mod tests {
     #[test]
     fn address_and_hash_fields_keep_alloy_syntax_and_contextual_errors() {
         for prefix in ["", "0x", "0X"] {
-            let value = json!({"address": format!("{prefix}{}", "aB".repeat(20)),
-                               "hash": format!("{prefix}{}", "aB".repeat(32))});
+            let value = json!({
+                "address": format!("{prefix}{}", "aB".repeat(20)),
+                "hash": format!("{prefix}{}", "aB".repeat(32)),
+            });
             let object = value.as_object().unwrap();
             assert_eq!(
                 required_address(object, "address", "sender").unwrap(),

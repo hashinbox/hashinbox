@@ -2,12 +2,14 @@
 
 use indexing::{
     AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, CanonicalAddress,
-    ChainId, Decimal, IndexError, IndexErrorKind, IndexScope, IndexedOutput, OutputId,
-    TransactionRef,
+    ChainId, Decimal, IndexError, IndexErrorKind, IndexScope, IndexedOutput, MovementKind,
+    OutputId, TransactionRef,
 };
 use tokio_postgres::Row;
 
-// design-lint: allow unclassified-free-function -- shared PostgreSQL numeric text decoding validates canonical Decimal spelling and maps corruption to Store errors without database policy on Decimal
+// shared PostgreSQL numeric text decoding validates canonical Decimal spelling and maps corruption
+// to Store errors without database policy on Decimal
+// design-lint: allow unclassified-free-function -- backend-owned SQL value decoding
 /// Amounts are bound as canonical base-10 text and cast to `numeric` in SQL.
 ///
 /// The SDK's `Decimal` normalizes trailing fractional zeros, so stored text
@@ -23,21 +25,41 @@ pub(crate) fn decimal(encoded: &str) -> Result<Decimal, IndexError> {
     Ok(value)
 }
 
-// design-lint: allow unclassified-free-function -- PostgreSQL signed height decoding is shared by block and output rows and maps negative stored values to adapter-owned corruption errors
+/// Decode the PostgreSQL movement tag without exposing storage spelling on the domain enum.
+// linter:disable rust/string-backed-finite-state -- SQL text parser returns domain MovementKind;
+// the reader uses exhaustive enum matching and does not retain a string-backed movement state.
+pub(crate) fn movement_kind(encoded: &str) -> Option<MovementKind> {
+    match encoded {
+        "transfer" => Some(MovementKind::Transfer),
+        "input" => Some(MovementKind::Input),
+        "output" => Some(MovementKind::Output),
+        "mint" => Some(MovementKind::Mint),
+        "burn" => Some(MovementKind::Burn),
+        _ => None,
+    }
+}
+
+// PostgreSQL signed height decoding is shared by block and output rows and maps negative stored
+// values to adapter-owned corruption errors
+// design-lint: allow unclassified-free-function -- backend-owned SQL value decoding
 pub(crate) fn height(value: i64) -> Result<BlockHeight, IndexError> {
     Ok(BlockHeight(
         u64::try_from(value).map_err(|_| store("stored height is negative"))?,
     ))
 }
 
-// design-lint: allow unclassified-free-function -- shared PostgreSQL block and parent position decoding rejects negative persisted traversal coordinates with adapter-owned nonretryable Store errors
+// shared PostgreSQL block and parent position decoding rejects negative persisted traversal
+// coordinates with adapter-owned nonretryable Store errors
+// design-lint: allow unclassified-free-function -- backend-owned SQL value decoding
 pub(crate) fn position(value: i64) -> Result<BlockPosition, IndexError> {
     Ok(BlockPosition(
         u64::try_from(value).map_err(|_| store("stored block position is negative"))?,
     ))
 }
 
-// design-lint: allow unclassified-free-function -- checked PostgreSQL BIGINT boundary conversion shared by multiple numeric fields; preserves caller-specific range errors
+// checked PostgreSQL BIGINT boundary conversion shared by multiple numeric fields; preserves
+// caller-specific range errors
+// design-lint: allow unclassified-free-function -- backend-owned SQL value decoding
 pub(crate) fn as_i64(value: u64, what: &'static str) -> Result<i64, IndexError> {
     i64::try_from(value).map_err(|_| {
         IndexError::new(
@@ -48,7 +70,9 @@ pub(crate) fn as_i64(value: u64, what: &'static str) -> Result<i64, IndexError> 
     })
 }
 
-// design-lint: allow unclassified-free-function -- PostgreSQL row-to-block boundary conversion owns column aliases and stored-value validation without adding database concerns to BlockRef
+// PostgreSQL row-to-block boundary conversion owns column aliases and stored-value validation
+// without adding database concerns to BlockRef
+// design-lint: allow unclassified-free-function -- backend-owned SQL value decoding
 pub(crate) fn block(row: &Row, prefix: &str) -> Result<BlockRef, IndexError> {
     let raw_height: i64 = get(row, &format!("{prefix}height"))?;
     let raw_position: i64 = get(row, &format!("{prefix}position"))?;
@@ -74,7 +98,9 @@ pub(crate) fn block(row: &Row, prefix: &str) -> Result<BlockRef, IndexError> {
     })
 }
 
-// design-lint: allow unclassified-free-function -- PostgreSQL output-row decoding owns column names and stored-value validation while combining foreign Row and IndexScope into an IndexedOutput without database policy on domain values
+// PostgreSQL output-row decoding owns column names and stored-value validation while combining
+// foreign Row and IndexScope into an IndexedOutput without database policy on domain values
+// design-lint: allow unclassified-free-function -- backend-owned SQL value decoding
 pub(crate) fn output(scope: &IndexScope, row: &Row) -> Result<IndexedOutput, IndexError> {
     let index: i32 = get(row, "output_index")?;
     let created: i64 = get(row, "created_at")?;
@@ -102,7 +128,9 @@ pub(crate) fn output(scope: &IndexScope, row: &Row) -> Result<IndexedOutput, Ind
     })
 }
 
-// design-lint: allow unclassified-free-function -- generic PostgreSQL column extraction maps foreign Row and FromSql errors to nonretryable Store errors shared by block and output projections
+// generic PostgreSQL column extraction maps foreign Row and FromSql errors to nonretryable Store
+// errors shared by block and output projections
+// design-lint: allow unclassified-free-function -- backend-owned SQL value decoding
 fn get<'a, T: tokio_postgres::types::FromSql<'a>>(
     row: &'a Row,
     column: &str,
@@ -111,7 +139,9 @@ fn get<'a, T: tokio_postgres::types::FromSql<'a>>(
         .map_err(|error| IndexError::new(IndexErrorKind::Store, error.to_string(), false))
 }
 
-// design-lint: allow unclassified-free-function -- shared PostgreSQL representation and range validation maps caller context to foreign nonretryable Store errors without moving database policy onto domain values
+// shared PostgreSQL representation and range validation maps caller context to foreign nonretryable
+// Store errors without moving database policy onto domain values
+// design-lint: allow unclassified-free-function -- backend-owned SQL value decoding
 pub(crate) fn store(message: impl Into<String>) -> IndexError {
     IndexError::new(IndexErrorKind::Store, message, false)
 }
@@ -119,6 +149,33 @@ pub(crate) fn store(message: impl Into<String>) -> IndexError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn movement_tags_decode_to_the_existing_domain_kinds() {
+        for (encoded, expected) in [
+            ("transfer", MovementKind::Transfer),
+            ("input", MovementKind::Input),
+            ("output", MovementKind::Output),
+            ("mint", MovementKind::Mint),
+            ("burn", MovementKind::Burn),
+        ] {
+            assert_eq!(movement_kind(encoded), Some(expected));
+        }
+    }
+
+    #[test]
+    fn unknown_movement_tags_are_rejected_without_normalization() {
+        for encoded in [
+            "",
+            "unknown",
+            "Transfer",
+            " transfer",
+            "transfer ",
+            "mint\0",
+        ] {
+            assert_eq!(movement_kind(encoded), None);
+        }
+    }
 
     #[test]
     fn stored_positions_preserve_nonnegative_values_and_reject_negative_data() {

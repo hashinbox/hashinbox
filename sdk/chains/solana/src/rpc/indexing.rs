@@ -77,7 +77,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::rpc::test_support::Scripted;
+    use crate::rpc::test_support::Script;
 
     #[tokio::test]
     async fn uses_exact_finalized_indexing_shapes() {
@@ -89,7 +89,7 @@ mod tests {
             "blockTime": 1,
             "blockHeight": 4,
         });
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             ("getFirstAvailableBlock", json!([]), json!(2)),
             (
                 "getBlocks",
@@ -125,7 +125,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_request_bounds_before_rpc() {
-        let rpc = Scripted::new([]);
+        let rpc = Script::new([]);
         let client = Client::new(rpc.clone());
         for (start, end, message) in [
             (2, 1, "Solana finalized block range must be ordered"),
@@ -151,7 +151,7 @@ mod tests {
             (u64::MAX, u64::MAX),
             (u64::MAX - MAX_ENUMERATION_SPAN + 1, u64::MAX),
         ] {
-            let rpc = Scripted::one(
+            let rpc = Script::one(
                 "getBlocks",
                 json!([start, end, { "commitment": "finalized", "minContextSlot": end }]),
                 json!([end]),
@@ -168,7 +168,7 @@ mod tests {
     #[tokio::test]
     async fn accepts_empty_and_sparse_slots_without_reordering() {
         for slots in [vec![], vec![2], vec![7], vec![2, 4, 7]] {
-            let rpc = Scripted::one(
+            let rpc = Script::one(
                 "getBlocks",
                 json!([2, 7, {"commitment":"finalized","minContextSlot":9}]),
                 json!(slots),
@@ -182,7 +182,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_unordered_duplicate_and_out_of_range_slots() {
         for slots in [json!([3, 2]), json!([2, 2]), json!([1]), json!([4])] {
-            let rpc = Scripted::one(
+            let rpc = Script::one(
                 "getBlocks",
                 json!([2, 3, {
                     "commitment": "finalized",

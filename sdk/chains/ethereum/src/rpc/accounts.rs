@@ -106,7 +106,7 @@ where
             let value: String = raw.deserialize().map_err(map_json_rpc_error)?;
             let word = parse_fixed_data::<32>(&value, "ERC-20 balance result")
                 .map_err(|message| invalid_rpc_response("eth_call", message))?;
-            erc20::decode_balance(&word)
+            Wei::from_erc20_balance(&word)
                 .map_err(|_| invalid_rpc_response("eth_call", "invalid balanceOf result"))
         })
     }
@@ -140,8 +140,42 @@ where
         self.verify_chain_id().await?;
         let block = self.latest_canonical_parameter().await?;
 
+        self.require_token_code(token, &block).await?;
+
+        let decimals = self
+            .erc20_word(token, erc20::decimals(), block.clone())
+            .await
+            .and_then(|word| {
+                erc20::decode_decimals(&word)
+                    .map_err(|_| invalid_rpc_response("eth_call", "invalid ERC-20 decimals result"))
+            })?;
+        if decimals != expected_decimals {
+            return Err(source_error(
+                format!(
+                    "Ethereum ERC-20 token decimals {decimals} do not match configured \
+                     decimals {expected_decimals}"
+                ),
+                false,
+            ));
+        }
+
+        self.erc20_word(token, erc20::balance_of(&Address([0; 20])), block)
+            .await
+            .and_then(|word| {
+                Wei::from_erc20_balance(&word).map_err(|_| {
+                    invalid_rpc_response("eth_call", "invalid ERC-20 balanceOf result")
+                })
+            })?;
+        Ok(())
+    }
+
+    async fn require_token_code(
+        &self,
+        token: &Address,
+        block: &serde_json::Value,
+    ) -> Result<(), SourceError> {
         let raw = self
-            .request_result("eth_getCode", json!([token.to_string(), block.clone()]))
+            .request_result("eth_getCode", json!([token.to_string(), block]))
             .await?;
         let code: String = raw.deserialize().map_err(map_json_rpc_error)?;
         if parse_data(&code)
@@ -154,29 +188,6 @@ where
             ));
         }
 
-        let decimals = self
-            .erc20_word(token, erc20::decimals(), block.clone())
-            .await
-            .and_then(|word| {
-                erc20::decode_decimals(&word)
-                    .map_err(|_| invalid_rpc_response("eth_call", "invalid ERC-20 decimals result"))
-            })?;
-        if decimals != expected_decimals {
-            return Err(source_error(
-                format!(
-                    "Ethereum ERC-20 token decimals {decimals} do not match configured decimals {expected_decimals}"
-                ),
-                false,
-            ));
-        }
-
-        self.erc20_word(token, erc20::balance_of(&Address([0; 20])), block)
-            .await
-            .and_then(|word| {
-                erc20::decode_balance(&word).map_err(|_| {
-                    invalid_rpc_response("eth_call", "invalid ERC-20 balanceOf result")
-                })
-            })?;
         Ok(())
     }
 
@@ -216,5 +227,126 @@ where
 
     fn nonce<'a>(&'a self, address: Address) -> BoxFuture<'a, Result<u64, SourceError>> {
         self.methods.nonce(address)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use futures_executor::block_on;
+    use json_rpc::{Call, CallResult, Error, RawJson};
+    use serde_json::Value;
+
+    use super::*;
+
+    struct Probes {
+        replies: Vec<Value>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Transport for Probes {
+        fn request<'a>(
+            &'a self,
+            method: &'a str,
+            params: Value,
+        ) -> BoxFuture<'a, Result<CallResult, Error>> {
+            let index = self.calls.fetch_add(1, Ordering::SeqCst);
+            let token = Address([0x0b; 20]).to_string();
+            let block = json!({"blockHash": format!("0x{}", "aa".repeat(32)),
+                "requireCanonical": true});
+            let expected = match index {
+                0 => ("eth_chainId", json!([])),
+                1 => ("eth_getBlockByNumber", json!(["latest", false])),
+                2 => ("eth_getCode", json!([token, block])),
+                3 => (
+                    "eth_call",
+                    json!([{"to": token, "data": "0x313ce567"}, block]),
+                ),
+                4 => (
+                    "eth_call",
+                    json!([{"to": token,
+                    "data": format!("0x70a08231{}", "00".repeat(32))}, block]),
+                ),
+                _ => panic!("extra token probe"),
+            };
+            assert_eq!((method, params), expected);
+            let reply = &self.replies[index];
+            Box::pin(async move { Ok(Ok(RawJson::from_serializable(reply)?)) })
+        }
+
+        fn request_once<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: Value,
+        ) -> BoxFuture<'a, Result<CallResult, Error>> {
+            panic!("token validation retains read transport policy")
+        }
+
+        fn batch<'a>(&'a self, _calls: Vec<Call>) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+            panic!("token probes remain sequential")
+        }
+    }
+
+    #[test]
+    fn token_admission_stops_at_each_failure_without_later_probes() {
+        let valid = [
+            json!("0x7a69"),
+            json!({"hash": format!("0x{}", "aa".repeat(32))}),
+            json!("0x6000"),
+            json!(format!("0x{:064x}", 6)),
+            json!(format!("0x{:064x}", 0)),
+        ];
+        for (length, replacement, message) in [
+            (
+                3,
+                json!("0x"),
+                "Ethereum ERC-20 token address has no deployed code",
+            ),
+            (
+                4,
+                json!(format!("0x{:064x}", 18)),
+                "Ethereum ERC-20 token decimals 18 do not match configured decimals 6",
+            ),
+        ] {
+            let mut replies = valid[..length].to_vec();
+            replies[length - 1] = replacement;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let client = AccountClient::new(
+                Client::new(Probes {
+                    replies,
+                    calls: calls.clone(),
+                }),
+                31_337,
+            )
+            .unwrap();
+            let error = block_on(client.validate_token(&Address([0x0b; 20]), 6)).unwrap_err();
+            assert_eq!(error.message, message);
+            assert!(!error.retryable);
+            assert_eq!(calls.load(Ordering::SeqCst), length);
+        }
+    }
+
+    #[test]
+    fn zero_token_is_rejected_without_chain_or_code_requests() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client = AccountClient::new(
+            Client::new(Probes {
+                replies: vec![],
+                calls: calls.clone(),
+            }),
+            31_337,
+        )
+        .unwrap();
+        let error = block_on(client.validate_token(&Address([0; 20]), 6)).unwrap_err();
+        assert_eq!(
+            error.message,
+            "Ethereum ERC-20 token address must not be zero"
+        );
+        assert!(!error.retryable);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

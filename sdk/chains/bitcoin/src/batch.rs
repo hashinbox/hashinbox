@@ -53,6 +53,18 @@ impl Batch {
     }
 
     fn sources(&self, transfers: Vec<Transfer>) -> Result<Vec<Source>, SendError> {
+        if transfers.is_empty() {
+            return Err(SendError::collection(
+                ErrorKind::InvalidBatch,
+                "at least one transfer is required",
+            ));
+        }
+        if transfers.len() > MAX_TRANSFERS {
+            return Err(SendError::collection(
+                ErrorKind::InvalidBatch,
+                "at most 50 transfers are allowed",
+            ));
+        }
         let mut sources: Vec<Source> = Vec::new();
         for (index, transfer) in transfers.into_iter().enumerate() {
             let (wallet, address, output) = self
@@ -72,36 +84,10 @@ impl Batch {
         Ok(sources)
     }
 
-    async fn execute(&self, transfers: Vec<Transfer>) -> Result<Vec<BaseId>, SendError> {
-        if transfers.is_empty() {
-            return Err(SendError::collection(
-                ErrorKind::InvalidBatch,
-                "at least one transfer is required",
-            ));
-        }
-        if transfers.len() > MAX_TRANSFERS {
-            return Err(SendError::collection(
-                ErrorKind::InvalidBatch,
-                "at most 50 transfers are allowed",
-            ));
-        }
-        let sources = self.sources(transfers)?;
-        let fee_rate = self
-            .fees
-            .estimate(self.fee_target_blocks)
-            .await
-            .map_err(|error| SendError::operation(ErrorKind::Transaction, error.to_string()))?;
-        if fee_rate > self.max_fee_rate {
-            return Err(SendError::operation(
-                ErrorKind::Transaction,
-                "estimated fee rate exceeds the configured maximum",
-            ));
-        }
-
+    async fn funding(&self, sources: &[Source]) -> Result<Vec<Funding>, SendError> {
         let mut funding = Vec::with_capacity(sources.len());
-        let mut owners = Vec::new();
         let mut checkpoint = None;
-        for source in &sources {
+        for source in sources {
             let set = self
                 .utxos
                 .utxos(vec![source.address.clone()])
@@ -132,13 +118,37 @@ impl Batch {
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| SendError::operation(ErrorKind::Transaction, error.to_string()))?;
-            owners.extend(std::iter::repeat_n(source.wallet.as_ref(), available.len()));
             funding.push(Funding {
                 available,
                 recipients: source.recipients.clone(),
                 change_address: source.address.clone(),
             });
         }
+        Ok(funding)
+    }
+
+    async fn execute(&self, transfers: Vec<Transfer>) -> Result<Vec<BaseId>, SendError> {
+        let sources = self.sources(transfers)?;
+        let fee_rate = self
+            .fees
+            .estimate(self.fee_target_blocks)
+            .await
+            .map_err(|error| SendError::operation(ErrorKind::Transaction, error.to_string()))?;
+        if fee_rate > self.max_fee_rate {
+            return Err(SendError::operation(
+                ErrorKind::Transaction,
+                "estimated fee rate exceeds the configured maximum",
+            ));
+        }
+
+        let funding = self.funding(&sources).await?;
+        let owners: Vec<_> = sources
+            .iter()
+            .zip(&funding)
+            .flat_map(|(source, group)| {
+                std::iter::repeat_n(source.wallet.as_ref(), group.available.len())
+            })
+            .collect();
 
         let signed = BatchBuilder::new(self.network, funding, fee_rate)
             .sign_each(&owners)
@@ -481,6 +491,191 @@ mod tests {
             assert_eq!(failure.source.ambiguous_transaction_id, None);
             assert_eq!(failure.source.kind, ErrorKind::Transaction);
             assert_eq!(failure.source.message, expected_error);
+        }
+    }
+
+    #[test]
+    fn grouped_submission_preserves_input_owners_and_duplicate_recipients() {
+        struct Node {
+            addresses: Vec<Address>,
+            submitted: std::sync::Mutex<Vec<NativeTransaction>>,
+        }
+
+        impl Fees for Node {
+            fn estimate<'a>(&'a self, _: u16) -> BoxFuture<'a, Result<FeeRate, SourceError>> {
+                Box::pin(async { Ok(FeeRate::new(1_000)) })
+            }
+        }
+
+        impl Outputs for Node {
+            fn list<'a>(
+                &'a self,
+                request: OutputRequest,
+            ) -> BoxFuture<'a, Result<OutputPage, IndexError>> {
+                Box::pin(async move {
+                    let owner = self
+                        .addresses
+                        .iter()
+                        .position(|address| address.encoded() == request.address.value)
+                        .unwrap();
+                    let count = if owner == 0 { 2 } else { 1 };
+                    let script = self.addresses[owner]
+                        .script_pubkey_for_network(Network::Regtest)
+                        .unwrap()
+                        .into_bytes();
+                    let transaction = indexing::TransactionRef {
+                        scope: request.scope.clone(),
+                        value: TransactionId([owner as u8 + 1; 32]).to_string(),
+                    };
+                    let outputs = (0..count)
+                        .map(|index| indexing::IndexedOutput {
+                            id: indexing::OutputId {
+                                transaction: transaction.clone(),
+                                index,
+                            },
+                            address: request.address.clone(),
+                            asset: indexing::AssetId {
+                                chain: ChainId(crate::CHAIN.to_owned()),
+                                asset: "native".to_owned(),
+                            },
+                            amount: base::Decimal::from(100_000_u64),
+                            evidence: script.clone(),
+                            created_at: base::BlockHeight(1),
+                            coinbase: false,
+                        })
+                        .collect();
+                    Ok(OutputPage {
+                        checkpoint: Some(base::BlockRef {
+                            position: base::BlockPosition(1),
+                            height: base::BlockHeight(1),
+                            hash: base::BlockHash(vec![1; 32]),
+                            parent: None,
+                            timestamp: None,
+                        }),
+                        outputs,
+                        next: None,
+                    })
+                })
+            }
+        }
+
+        impl Transactions for Node {
+            fn preflight<'a>(
+                &'a self,
+                _: &'a crate::SignedTransaction,
+                _: FeeRate,
+            ) -> BoxFuture<'a, Result<crate::Preflight, SourceError>> {
+                Box::pin(async {
+                    Ok(crate::Preflight {
+                        allowed: true,
+                        reject_reason: None,
+                        virtual_size: None,
+                        base_fee: None,
+                    })
+                })
+            }
+
+            fn broadcast<'a>(
+                &'a self,
+                transaction: crate::SignedTransaction,
+                _: FeeRate,
+            ) -> BoxFuture<'a, Result<TransactionId, base::TransactionError>> {
+                Box::pin(async move {
+                    self.submitted
+                        .lock()
+                        .unwrap()
+                        .push(consensus::deserialize(transaction.consensus_bytes()).unwrap());
+                    Ok(transaction.id())
+                })
+            }
+        }
+
+        let wallets = provider(
+            Arc::new(InactiveDependencies),
+            Arc::new(InactiveDependencies),
+        );
+        let first = block_on(wallets.create(SecretBytes::new([1_u8; 32]))).unwrap();
+        let second = block_on(wallets.create(SecretBytes::new([2_u8; 32]))).unwrap();
+        let destination = first.address_text(&first.address()).unwrap();
+        let addresses: Vec<_> = [&first, &second]
+            .into_iter()
+            .map(|wallet| {
+                Address::from_wallet_address(&wallet.address(), Network::Regtest).unwrap()
+            })
+            .collect();
+        let node = Arc::new(Node {
+            addresses,
+            submitted: std::sync::Mutex::new(Vec::new()),
+        });
+        let scope = IndexScope {
+            chain: ChainId(crate::CHAIN.to_owned()),
+            network: Network::Regtest.canonical_name().to_owned(),
+        };
+        let batch = Batch::new(
+            Network::Regtest,
+            Arc::new(IndexUtxos::new(scope, Network::Regtest, node.clone()).unwrap()),
+            node.clone(),
+            node.clone(),
+            6,
+            FeeRate::new(1_000),
+        );
+        let transfers = [first.clone(), second, first]
+            .into_iter()
+            .map(|wallet| Transfer {
+                wallet,
+                to: destination.clone(),
+                amount: "0.00001000".parse().unwrap(),
+            })
+            .collect();
+        let accepted = block_on(batch.send(transfers)).unwrap();
+        let submitted = node.submitted.lock().unwrap();
+        assert_eq!(submitted.len(), 1);
+        let transaction = &submitted[0];
+        assert_eq!(
+            accepted,
+            vec![BaseId::new(transaction.compute_txid().to_string())]
+        );
+        assert_eq!(transaction.input.len(), 3);
+        for (input, owner) in transaction.input.iter().zip([0, 0, 1]) {
+            assert_eq!(
+                input.previous_output.txid,
+                Txid::from_byte_array([owner as u8 + 1; 32])
+            );
+            let public =
+                bitcoin::PublicKey::from_slice(input.witness.iter().nth(1).unwrap()).unwrap();
+            assert_eq!(
+                ScriptBuf::new_p2wpkh(&public.wpubkey_hash().unwrap()),
+                node.addresses[owner]
+                    .script_pubkey_for_network(Network::Regtest)
+                    .unwrap(),
+            );
+        }
+        let recipient_script = node.addresses[0]
+            .script_pubkey_for_network(Network::Regtest)
+            .unwrap();
+        assert_eq!(
+            transaction
+                .output
+                .iter()
+                .filter(|output| {
+                    output.value == Amount::from_sat(1_000)
+                        && output.script_pubkey == recipient_script
+                })
+                .count(),
+            3
+        );
+        for address in &node.addresses {
+            let script = address.script_pubkey_for_network(Network::Regtest).unwrap();
+            assert_eq!(
+                transaction
+                    .output
+                    .iter()
+                    .filter(|output| {
+                        output.value > Amount::from_sat(1_000) && output.script_pubkey == script
+                    })
+                    .count(),
+                1
+            );
         }
     }
 

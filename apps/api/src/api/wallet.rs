@@ -9,7 +9,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::{
     State as HttpState,
     contract::{Wallet, WalletAsset, WalletPath},
-    error::{ApiError, ErrorBody},
+    error::{Body, Error},
 };
 
 pub fn routes() -> OpenApiRouter<HttpState> {
@@ -25,25 +25,27 @@ pub struct CreateWallet {
     pub asset: WalletAsset,
 }
 
-// design-lint: allow unclassified-free-function -- Axum owns the extractor signature; this handler assigns the public wallet ID, delegates one wallet generation call, and maps the HTTP response
+// Axum owns the extractor signature; this handler assigns the public wallet ID, delegates one
+// wallet generation call, and maps the HTTP response
+// design-lint: allow unclassified-free-function -- Axum owns the extractor signature
 #[utoipa::path(
     post,
     path = "/v1/wallets",
     request_body = CreateWallet,
     responses(
         (status = 201, description = "Wallet generated and registered for indexing", body = Wallet),
-        (status = 400, body = ErrorBody),
-        (status = 404, body = ErrorBody),
-        (status = 409, body = ErrorBody),
-        (status = 503, body = ErrorBody)
+        (status = 400, body = Body),
+        (status = 404, body = Body),
+        (status = 409, body = Body),
+        (status = 503, body = Body)
     ),
     tag = "wallets"
 )]
 async fn create(
     State(state): State<HttpState>,
     request: Result<Json<CreateWallet>, JsonRejection>,
-) -> Result<(StatusCode, Json<Wallet>), ApiError> {
-    let Json(request) = request.map_err(ApiError::invalid_json)?;
+) -> Result<(StatusCode, Json<Wallet>), Error> {
+    let Json(request) = request.map_err(Error::invalid_json)?;
     let id = uuid::Uuid::now_v7().to_string();
     let wallet = state
         .wallets
@@ -51,28 +53,30 @@ async fn create(
         .await
         .map_err(|error| {
             if error.kind == wallets::ErrorKind::Unsupported {
-                return ApiError::not_found("wallet asset is not configured");
+                return Error::not_found("wallet asset is not configured");
             }
             error.into()
         })?;
     Ok((StatusCode::CREATED, Json(wallet.into())))
 }
 
-// design-lint: allow unclassified-free-function -- Axum owns the state and path extractor signature; this handler delegates one wallet lookup and encodes its public metadata
+// Axum owns the state and path extractor signature; this handler delegates one wallet lookup and
+// encodes its public metadata
+// design-lint: allow unclassified-free-function -- Axum owns the state and path extractor signature
 #[utoipa::path(
     get,
     path = "/v1/wallets/{id}",
     params(WalletPath),
     responses(
         (status = 200, body = Wallet),
-        (status = 404, body = ErrorBody)
+        (status = 404, body = Body)
     ),
     tag = "wallets"
 )]
 async fn read(
     State(state): State<HttpState>,
     Path(path): Path<WalletPath>,
-) -> Result<Json<Wallet>, ApiError> {
+) -> Result<Json<Wallet>, Error> {
     Ok(Json(state.wallets.get(&path.id)?.into()))
 }
 
@@ -82,22 +86,24 @@ pub struct Balance {
     pub observed_height: Option<u64>,
 }
 
-// design-lint: allow unclassified-free-function -- Axum owns the extractor signature; this handler delegates one wallet balance read and encodes the HTTP response
+// Axum owns the extractor signature; this handler delegates one wallet balance read and encodes the
+// HTTP response
+// design-lint: allow unclassified-free-function -- Axum owns the extractor signature
 #[utoipa::path(
     get,
     path = "/v1/wallets/{id}/balance",
     params(WalletPath),
     responses(
         (status = 200, body = Balance),
-        (status = 404, body = ErrorBody),
-        (status = 503, body = ErrorBody)
+        (status = 404, body = Body),
+        (status = 503, body = Body)
     ),
     tag = "wallets"
 )]
 async fn balance(
     State(state): State<HttpState>,
     Path(path): Path<WalletPath>,
-) -> Result<Json<Balance>, ApiError> {
+) -> Result<Json<Balance>, Error> {
     let balance = state.wallets.balance(&path.id).await?;
     Ok(Json(Balance {
         amount: balance.amount.to_string(),

@@ -229,7 +229,8 @@ impl TryFrom<AccountWire> for AccountSnapshot {
     }
 }
 
-// design-lint: allow unclassified-free-function -- shared private account-read RPC encoding; independent of client state and commitment semantics
+// shared private account-read RPC encoding; independent of client state and commitment semantics
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 fn account_config(commitment: Commitment, minimum: Option<u64>) -> serde_json::Value {
     match minimum {
         Some(floor) => {
@@ -254,7 +255,7 @@ impl<T> ContextWire<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::test_support::Scripted;
+    use crate::rpc::test_support::Script;
 
     fn account(owner: &Address, lamports: u64, data: &str, space: u64) -> serde_json::Value {
         json!({
@@ -279,7 +280,7 @@ mod tests {
             if let Some(floor) = minimum {
                 config["minContextSlot"] = json!(floor);
             }
-            let rpc = Scripted::one(
+            let rpc = Script::one(
                 "getBalance",
                 json!([address.to_string(), config]),
                 json!({"context":{"slot":slot},"value":u64::MAX}),
@@ -304,7 +305,7 @@ mod tests {
     #[tokio::test]
     async fn reads_identity_and_contextual_slots_with_exact_shapes() {
         let hash = Hash::new_from_array([9; 32]).to_string();
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             ("getHealth", json!([]), json!("ok")),
             ("getGenesisHash", json!([]), json!(hash.clone())),
             (
@@ -335,16 +336,16 @@ mod tests {
     #[tokio::test]
     async fn rejects_non_ok_health_malformed_hash_number_forms_and_low_floor() {
         for value in [json!("behind"), json!(true), json!(null)] {
-            let client = Client::new(Scripted::one("getHealth", json!([]), value));
+            let client = Client::new(Script::one("getHealth", json!([]), value));
             assert!(client.health().await.is_err());
         }
-        let client = Client::new(Scripted::one("getGenesisHash", json!([]), json!("bad")));
+        let client = Client::new(Script::one("getGenesisHash", json!([]), json!("bad")));
         assert_eq!(
             client.genesis_hash().await.unwrap_err().kind(),
             ErrorKind::MalformedRpc
         );
         for value in [json!(-1), json!(1.5), json!("9")] {
-            let client = Client::new(Scripted::one(
+            let client = Client::new(Script::one(
                 "getSlot",
                 json!([{"commitment":"confirmed"}]),
                 value,
@@ -358,7 +359,7 @@ mod tests {
                 ErrorKind::MalformedRpc
             );
         }
-        let client = Client::new(Scripted::one(
+        let client = Client::new(Script::one(
             "getSlot",
             json!([{"commitment":"confirmed", "minContextSlot":9}]),
             json!(8),
@@ -377,15 +378,21 @@ mod tests {
     async fn decodes_complete_accounts_and_finalized_balances() {
         let address = Address::from_bytes([7; 32]);
         let owner = Address::from_bytes([0; 32]);
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             (
                 "getAccountInfo",
-                json!([address.to_string(), {"encoding":"base64", "commitment":"confirmed", "minContextSlot":4}]),
+                json!([
+                    address.to_string(),
+                    {"encoding": "base64", "commitment": "confirmed", "minContextSlot": 4},
+                ]),
                 json!({"context":{"slot":5,"apiVersion":"x"},"value":account(&owner,9,"AQI=",2)}),
             ),
             (
                 "getMultipleAccounts",
-                json!([[address.to_string(),owner.to_string()], {"encoding":"base64", "commitment":"confirmed", "minContextSlot":5}]),
+                json!([
+                    [address.to_string(), owner.to_string()],
+                    {"encoding": "base64", "commitment": "confirmed", "minContextSlot": 5},
+                ]),
                 json!({"context":{"slot":6},"value":[null,account(&owner,u64::MAX,"",0)]}),
             ),
             (
@@ -421,7 +428,7 @@ mod tests {
     async fn rejects_multi_bounds_cardinality_and_every_account_encoding_violation() {
         let address = Address::from_bytes([7; 32]);
         let owner = Address::from_bytes([0; 32]);
-        let client = Client::new(Scripted::new([]));
+        let client = Client::new(Script::new([]));
         assert!(
             client
                 .accounts(&[], Commitment::Confirmed, None)
@@ -439,10 +446,32 @@ mod tests {
             json!({"context":{"slot":1},"value":[]}),
             json!({"context":{"slot":1},"value":[account(&owner,1,"AQI=",1)]}),
             json!({"context":{"slot":1},"value":[account(&owner,1,"AQ",1)]}),
-            json!({"context":{"slot":1},"value":[{"lamports":1,"owner":"bad","executable":false,"data":["","base64"],"space":0}]}),
-            json!({"context":{"slot":1},"value":[{"lamports":1,"owner":owner.to_string(),"executable":false,"data":["","base58"],"space":0}]}),
+            json!({
+                "context": {"slot": 1},
+                "value": [
+                    {
+                        "lamports": 1,
+                        "owner": "bad",
+                        "executable": false,
+                        "data": ["", "base64"],
+                        "space": 0,
+                    },
+                ],
+            }),
+            json!({
+                "context": {"slot": 1},
+                "value": [
+                    {
+                        "lamports": 1,
+                        "owner": owner.to_string(),
+                        "executable": false,
+                        "data": ["", "base58"],
+                        "space": 0,
+                    },
+                ],
+            }),
         ] {
-            let client = Client::new(Scripted::one(
+            let client = Client::new(Script::one(
                 "getMultipleAccounts",
                 json!([[address.to_string()], {"encoding":"base64", "commitment":"confirmed"}]),
                 value,
@@ -476,14 +505,25 @@ mod tests {
             ),
             (
                 4,
-                json!([{"lamports":1,"owner":"bad","executable":false,"data":["","base64"],"space":0}]),
+                json!([
+                    {
+                        "lamports": 1,
+                        "owner": "bad",
+                        "executable": false,
+                        "data": ["", "base64"],
+                        "space": 0,
+                    },
+                ]),
                 ErrorKind::MalformedRpc,
                 "Solana RPC account returned malformed data",
             ),
         ] {
-            let rpc = Scripted::one(
+            let rpc = Script::one(
                 "getMultipleAccounts",
-                json!([[address.to_string()], {"encoding":"base64", "commitment":"confirmed", "minContextSlot":4}]),
+                json!([
+                    [address.to_string()],
+                    {"encoding": "base64", "commitment": "confirmed", "minContextSlot": 4},
+                ]),
                 json!({"context":{"slot":slot},"value":value}),
             );
             let error = Client::new(rpc.clone())

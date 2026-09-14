@@ -7,7 +7,7 @@
 
 use std::{error::Error, io, sync::Arc, time::Duration};
 
-use indexing::{FilterSource, Indexer, SyncPhase, SyncStatus};
+use indexing::{FilterSource, IndexError, Indexer, SyncPhase, SyncStatus};
 use tokio::sync::watch;
 
 pub type TaskError = Box<dyn Error + Send + Sync>;
@@ -28,6 +28,38 @@ pub enum SyncState {
 }
 
 impl SyncState {
+    fn after_sync(
+        indexer: &dyn Indexer,
+        result: Result<Vec<SyncStatus>, IndexError>,
+        state: &watch::Sender<Self>,
+    ) -> Result<Self, TaskError> {
+        match result.map(|statuses| Self::from_statuses(indexer, &statuses)) {
+            Ok(Some(next)) => Ok(next),
+            Ok(None) => {
+                state.send_replace(Self::Retrying {
+                    error: "incomplete synchronization status".to_owned(),
+                });
+                Err(io::Error::other(
+                    "indexer returned incomplete or inconsistent synchronization status",
+                )
+                .into())
+            }
+            Err(error) if error.retryable => {
+                // The reason must reach the caller: this loop will keep going
+                // forever, and silence here is indistinguishable from health.
+                Ok(Self::Retrying {
+                    error: error.message.clone(),
+                })
+            }
+            Err(error) => {
+                state.send_replace(Self::Retrying {
+                    error: error.message.clone(),
+                });
+                Err(error.into())
+            }
+        }
+    }
+
     fn from_statuses(indexer: &dyn Indexer, statuses: &[SyncStatus]) -> Option<Self> {
         let complete = !indexer.scopes().is_empty()
             && statuses.len() == indexer.scopes().len()
@@ -79,32 +111,7 @@ pub async fn run(
             }
         };
 
-        let result = result.map(|statuses| SyncState::from_statuses(indexer.as_ref(), &statuses));
-        let next = match result {
-            Ok(Some(next)) => next,
-            Ok(None) => {
-                state.send_replace(SyncState::Retrying {
-                    error: "incomplete synchronization status".to_owned(),
-                });
-                return Err(io::Error::other(
-                    "indexer returned incomplete or inconsistent synchronization status",
-                )
-                .into());
-            }
-            Err(error) if error.retryable => {
-                // The reason must reach the caller: this loop will keep going
-                // forever, and silence here is indistinguishable from health.
-                SyncState::Retrying {
-                    error: error.message.clone(),
-                }
-            }
-            Err(error) => {
-                state.send_replace(SyncState::Retrying {
-                    error: error.message.clone(),
-                });
-                return Err(error.into());
-            }
-        };
+        let next = SyncState::after_sync(indexer.as_ref(), result, &state)?;
         let wait = next != SyncState::CatchingUp;
         state.send_if_modified(|current| {
             let changed = *current != next;
@@ -112,15 +119,16 @@ pub async fn run(
             changed
         });
 
-        if wait {
-            tokio::select! {
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() {
-                        return Ok(());
-                    }
+        if !wait {
+            continue;
+        }
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(());
                 }
-                () = tokio::time::sleep(interval) => {}
             }
+            () = tokio::time::sleep(interval) => {}
         }
     }
 }
@@ -328,6 +336,40 @@ mod tests {
                 error: "fatal".to_owned()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn fatal_failure_notifies_an_unchanged_state_and_preserves_the_typed_error() {
+        let index = index([Err(IndexError::new(
+            IndexErrorKind::InvalidBlock,
+            "fatal",
+            false,
+        ))]);
+        let (_shutdown, shutdown_rx) = watch::channel(false);
+        let expected = SyncState::Retrying {
+            error: "fatal".to_owned(),
+        };
+        let (state, state_rx) = watch::channel(expected.clone());
+
+        let error = run(
+            index.clone(),
+            Arc::new(Vec::new()),
+            Duration::from_secs(60),
+            shutdown_rx,
+            state.clone(),
+        )
+        .await
+        .expect_err("fatal failure ends the runtime immediately");
+
+        let error = error
+            .downcast_ref::<IndexError>()
+            .expect("preserved indexing error");
+        assert_eq!(error.kind, IndexErrorKind::InvalidBlock);
+        assert_eq!(error.message, "fatal");
+        assert!(!error.retryable);
+        assert_eq!(*state_rx.borrow(), expected);
+        assert!(state_rx.has_changed().expect("sender remains open"));
+        assert_eq!(index.calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

@@ -3,11 +3,10 @@ use super::{
     TransactionId, UnsignedTransaction,
 };
 
-mod build;
+pub(super) mod build;
 mod rules;
-mod sign;
+pub(super) mod sign;
 
-pub(super) use build::build_grouped;
-pub(super) use sign::{sign, sign_each};
+pub(super) use sign::sign;
 
 use rules::checked_output;

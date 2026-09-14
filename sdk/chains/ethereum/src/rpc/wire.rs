@@ -60,7 +60,9 @@ impl CallError {
     }
 }
 
-// design-lint: allow unclassified-free-function -- shared Ethereum RPC u64 quantity codec validates strict wire syntax before bounded native decoding for block, nonce and gas values without inventing a numeric wrapper
+// shared Ethereum RPC u64 quantity codec validates strict wire syntax before bounded native
+// decoding for block, nonce and gas values without inventing a numeric wrapper
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn parse_quantity_u64(value: &str) -> Result<u64, &'static str> {
     let digits = quantity_digits(value)?;
     u64::from_str_radix(digits, 16).map_err(|_| "hex quantity exceeds u64")
@@ -82,7 +84,9 @@ impl Wei {
     }
 }
 
-// design-lint: allow unclassified-free-function -- shared Ethereum RPC QUANTITY grammar validates prefix, nonempty digits, leading zero and ASCII hex before distinct numeric width checks
+// shared Ethereum RPC QUANTITY grammar validates prefix, nonempty digits, leading zero and ASCII
+// hex before distinct numeric width checks
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn quantity_digits(value: &str) -> Result<&str, &'static str> {
     let digits = value
         .strip_prefix("0x")
@@ -99,7 +103,9 @@ pub(super) fn quantity_digits(value: &str) -> Result<&str, &'static str> {
     Ok(digits)
 }
 
-// design-lint: allow unclassified-free-function -- shared Ethereum RPC fixed-width DATA codec validates lowercase prefix and exact byte width for hashes and ABI words before library decoding
+// shared Ethereum RPC fixed-width DATA codec validates lowercase prefix and exact byte width for
+// hashes and ABI words before library decoding
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn parse_fixed_data<const N: usize>(
     value: &str,
     _field: &'static str,
@@ -113,7 +119,9 @@ pub(super) fn parse_fixed_data<const N: usize>(
     hex::decode_to_array(digits).map_err(|_| "hex data contains invalid data")
 }
 
-// design-lint: allow unclassified-free-function -- Ethereum RPC DATA codec preserves lowercase-prefix and byte-parity checks before library decoding with stable wire errors
+// Ethereum RPC DATA codec preserves lowercase-prefix and byte-parity checks before library decoding
+// with stable wire errors
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn parse_data(value: &str) -> Result<Vec<u8>, &'static str> {
     let digits = value
         .strip_prefix("0x")
@@ -134,12 +142,16 @@ impl TransactionId {
     }
 }
 
-// design-lint: allow unclassified-free-function -- translates foreign JSON-RPC errors into foreign indexing source errors while preserving display text and retryability at the Ethereum RPC boundary
+// translates foreign JSON-RPC errors into foreign indexing source errors while preserving display
+// text and retryability at the Ethereum RPC boundary
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn map_json_rpc_error(error: Error) -> SourceError {
     source_error(error.to_string(), error.is_retryable())
 }
 
-// design-lint: allow unclassified-free-function -- shared Ethereum RPC response validation adds method context to foreign SourceError values and keeps malformed responses nonretryable
+// shared Ethereum RPC response validation adds method context to foreign SourceError values and
+// keeps malformed responses nonretryable
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn invalid_rpc_response(
     method: &'static str,
     message: impl fmt::Display,
@@ -150,7 +162,9 @@ pub(super) fn invalid_rpc_response(
     )
 }
 
-// design-lint: allow unclassified-free-function -- shared Ethereum RPC boundary constructs foreign SourceError values while each wire decoder and RPC caller retains its message and retryability policy
+// shared Ethereum RPC boundary constructs foreign SourceError values while each wire decoder and
+// RPC caller retains its message and retryability policy
+// design-lint: allow unclassified-free-function -- See the boundary rationale above.
 pub(super) fn source_error(message: impl Into<String>, retryable: bool) -> SourceError {
     SourceError {
         message: message.into(),
@@ -254,7 +268,8 @@ mod tests {
                 .unwrap_err();
         assert_eq!(
             error.message,
-            "Ethereum RPC eth_sendRawTransaction returned an invalid response: hex data contains invalid data"
+            "Ethereum RPC eth_sendRawTransaction returned an invalid response: hex \
+             data contains invalid data"
         );
         assert!(!error.retryable);
     }

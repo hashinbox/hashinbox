@@ -3,7 +3,7 @@ use std::{future::Future, pin::Pin};
 use base::{Addresser, Broadcaster, Decimal, Signer, TransactionBuilder, TransactionId};
 use indexing::{
     AssetId, BlockRef, CanonicalAddress, HistoryCursor, IndexScope, MovementId, MovementKind,
-    ObservedTransaction, TransactionRef, TransactionStatus, ValueMovement,
+    NetworkFee, ObservedTransaction, TransactionRef, TransactionStatus, ValueMovement,
 };
 
 use crate::{AddressFormat, Error};
@@ -172,28 +172,7 @@ impl HistoryEntry {
             .collect::<Result<Vec<_>, _>>()?;
         let fee = transaction
             .fee
-            .map(|fee| {
-                if fee.asset.chain != scope.chain {
-                    return Err(Error::history(
-                        "indexed asset does not belong to the transaction chain",
-                    ));
-                }
-                let payer_outside_scope = fee
-                    .payer
-                    .as_ref()
-                    .is_some_and(|payer| !payer.belongs_to(&scope));
-                if payer_outside_scope {
-                    return Err(Error::history(
-                        "indexed fee payer does not belong to the transaction scope",
-                    ));
-                }
-                let metadata = HistoryAsset::resolve(&fee.asset, asset)?;
-                Ok(HistoryFee {
-                    amount: metadata.display_amount(&fee.amount)?,
-                    asset: metadata,
-                    payer: fee.payer,
-                })
-            })
+            .map(|fee| HistoryFee::from_index(fee, &scope, asset))
             .transpose()?;
         Ok(Self {
             scope,
@@ -201,6 +180,34 @@ impl HistoryEntry {
             status: transaction.status.into(),
             movements,
             fee,
+        })
+    }
+}
+
+impl HistoryFee {
+    fn from_index<F>(fee: NetworkFee, scope: &IndexScope, asset: &F) -> Result<Self, Error>
+    where
+        F: Fn(&AssetId) -> Result<HistoryAsset, Error>,
+    {
+        if fee.asset.chain != scope.chain {
+            return Err(Error::history(
+                "indexed asset does not belong to the transaction chain",
+            ));
+        }
+        let payer_outside_scope = fee
+            .payer
+            .as_ref()
+            .is_some_and(|payer| !payer.belongs_to(scope));
+        if payer_outside_scope {
+            return Err(Error::history(
+                "indexed fee payer does not belong to the transaction scope",
+            ));
+        }
+        let metadata = HistoryAsset::resolve(&fee.asset, asset)?;
+        Ok(Self {
+            amount: metadata.display_amount(&fee.amount)?,
+            asset: metadata,
+            payer: fee.payer,
         })
     }
 }
@@ -232,55 +239,46 @@ impl HistoryMovement {
     where
         F: Fn(&AssetId) -> Result<HistoryAsset, Error>,
     {
-        let kind = movement.kind();
-        let (id, asset_id, atomic, from, to) = match movement {
-            ValueMovement::Transfer {
-                id,
-                asset,
-                amount,
-                from,
-                to,
-            } => (id, asset, amount, Some(from), Some(to)),
-            ValueMovement::Input {
-                id,
-                asset,
-                amount,
-                owner,
-            } => (id, asset, amount, owner, None),
-            ValueMovement::Output {
-                id,
-                asset,
-                amount,
-                owner,
-            } => (id, asset, amount, None, owner),
-            ValueMovement::Mint {
-                id,
-                asset,
-                amount,
-                to,
-            } => (id, asset, amount, None, Some(to)),
-            ValueMovement::Burn {
-                id,
-                asset,
-                amount,
-                from,
-            } => (id, asset, amount, Some(from), None),
-        };
-        if asset_id.chain != scope.chain {
+        if movement.asset().chain != scope.chain {
             return Err(Error::history(
                 "indexed asset does not belong to the transaction chain",
             ));
         }
-        if from
-            .iter()
-            .chain(to.iter())
+        if movement
+            .from()
+            .into_iter()
+            .chain(movement.to())
             .any(|address| !address.belongs_to(scope))
         {
             return Err(Error::history(
                 "indexed movement address does not belong to the transaction scope",
             ));
         }
-        let metadata = HistoryAsset::resolve(&asset_id, asset)?;
+        let metadata = HistoryAsset::resolve(movement.asset(), asset)?;
+        Self::from_atomic(movement, metadata)
+    }
+
+    fn from_atomic(movement: ValueMovement, metadata: HistoryAsset) -> Result<Self, Error> {
+        let kind = movement.kind();
+        let (id, atomic, from, to) = match movement {
+            ValueMovement::Transfer {
+                id,
+                amount,
+                from,
+                to,
+                ..
+            } => (id, amount, Some(from), Some(to)),
+            ValueMovement::Input {
+                id, amount, owner, ..
+            } => (id, amount, owner, None),
+            ValueMovement::Output {
+                id, amount, owner, ..
+            } => (id, amount, None, owner),
+            ValueMovement::Mint { id, amount, to, .. } => (id, amount, None, Some(to)),
+            ValueMovement::Burn {
+                id, amount, from, ..
+            } => (id, amount, Some(from), None),
+        };
         Ok(Self {
             id,
             kind,
@@ -668,7 +666,8 @@ mod tests {
             error,
             Error::new(
                 crate::ErrorKind::History,
-                "indexed amount is not a non-negative integer: amount has more than 0 fractional digits"
+                "indexed amount is not a non-negative integer: amount has more than \
+                0 fractional digits"
             )
         );
     }
@@ -696,7 +695,8 @@ mod tests {
             (
                 Ok(asset("native", 8)),
                 Error::history(
-                    "indexed amount is not a non-negative integer: amount has more than 0 fractional digits",
+                    "indexed amount is not a non-negative integer: amount has more \
+                    than 0 fractional digits",
                 ),
             ),
         ] {
@@ -709,6 +709,43 @@ mod tests {
             .unwrap_err();
             assert_eq!(calls.get(), 1);
             assert_eq!(error, expected);
+        }
+    }
+
+    #[test]
+    fn metadata_resolution_preserves_movement_order_and_stops_before_the_fee_on_failure() {
+        let movements = ["first", "second"].map(|name| ValueMovement::Output {
+            id: MovementId(name.to_owned()),
+            asset: asset(name, 3).id,
+            amount: Decimal::from(1_250_u64),
+            owner: None,
+        });
+        let mut observed = transaction(movements.into());
+        observed.fee = Some(NetworkFee {
+            asset: asset("native", 8).id,
+            amount: Decimal::from(2_u64),
+            payer: None,
+        });
+        let unavailable = Error::new(crate::ErrorKind::Unavailable, "second asset unavailable");
+        for fail_second in [true, false] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            let result = HistoryEntry::from_index(observed.clone(), &scope(), &|id| {
+                calls.borrow_mut().push(id.asset.clone());
+                if fail_second && id.asset == "second" {
+                    return Err(unavailable.clone());
+                }
+                Ok(asset(&id.asset, 3))
+            });
+            if fail_second {
+                assert_eq!(result.unwrap_err(), unavailable);
+                assert_eq!(*calls.borrow(), ["first", "second"]);
+            } else {
+                let entry = result.unwrap();
+                assert_eq!(*calls.borrow(), ["first", "second", "native"]);
+                assert_eq!(entry.movements[0].amount.to_string(), "1.25");
+                assert_eq!(entry.movements[1].amount.to_string(), "1.25");
+                assert_eq!(entry.fee.unwrap().amount.to_string(), "0.002");
+            }
         }
     }
 
@@ -744,28 +781,25 @@ mod tests {
             }),
         };
 
-        let history = History::from_index(
-            TransactionPage {
+        let page = TransactionPage {
+            checkpoint: Some(block(7)),
+            transactions: vec![transaction],
+            next: Some(HistoryCursor {
                 checkpoint: Some(block(7)),
-                transactions: vec![transaction],
-                next: Some(HistoryCursor {
-                    checkpoint: Some(block(7)),
-                    position: HistoryPosition {
-                        height: BlockHeight(7),
-                        transaction: TransactionRef {
-                            scope: scope(),
-                            value: "next".to_owned(),
-                        },
+                position: HistoryPosition {
+                    height: BlockHeight(7),
+                    transaction: TransactionRef {
+                        scope: scope(),
+                        value: "next".to_owned(),
                     },
-                }),
-            },
-            &scope(),
-            |value| match value.asset.as_str() {
-                "token" => Ok(asset("token", 6)),
-                "native" => Ok(asset("native", 18)),
-                _ => unreachable!("fixture uses known assets"),
-            },
-        )
+                },
+            }),
+        };
+        let history = History::from_index(page, &scope(), |value| match value.asset.as_str() {
+            "token" => Ok(asset("token", 6)),
+            "native" => Ok(asset("native", 18)),
+            _ => unreachable!("fixture uses known assets"),
+        })
         .expect("exact atomic amounts must convert");
 
         assert_eq!(

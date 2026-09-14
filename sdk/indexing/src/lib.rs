@@ -12,8 +12,6 @@ mod registry;
 mod service;
 mod source;
 mod synchronizer;
-#[cfg(test)]
-mod synchronizer_test;
 mod value;
 
 pub use base::{BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, Decimal};
@@ -43,3 +41,24 @@ use std::{future::Future, pin::Pin};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub use admission::{CommitPermit, PublicationPermit, ScopeAdmission, SyncPlan};
+
+#[cfg(test)]
+mod synchronizer_test {
+    use crate::{ChainId, IndexErrorKind, IndexScope, SyncConfig};
+
+    fn scope() -> IndexScope {
+        IndexScope {
+            chain: ChainId("test".into()),
+            network: "mainnet".into(),
+        }
+    }
+
+    #[test]
+    fn configuration_requires_bounded_rollback_and_confirmation() {
+        assert!(SyncConfig::new(scope(), 1, 1, 100).is_ok());
+        assert_eq!(
+            SyncConfig::new(scope(), 1, 0, 100).unwrap_err().kind,
+            IndexErrorKind::InvalidRequest
+        );
+    }
+}

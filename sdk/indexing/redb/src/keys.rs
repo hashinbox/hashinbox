@@ -15,26 +15,34 @@ pub(super) fn namespace() -> Namespace {
     Namespace(NAMESPACE.to_owned())
 }
 
-// design-lint: allow unclassified-free-function -- encodes the shared checkpoint key for reads and atomic writes; foreign scope and key types keep storage-format policy in this adapter
+// encodes the shared checkpoint key for reads and atomic writes; foreign scope and key types keep
+// storage-format policy in this adapter
+// design-lint: allow unclassified-free-function -- backend-owned encoding boundary
 pub(super) fn checkpoint(scope: &IndexScope) -> Key {
     Key(prefix(scope, CHECKPOINT))
 }
 
-// design-lint: allow unclassified-free-function -- shared redb journal-key encoding preserves scope framing and produced-height byte ordering for writes, retention and rollback without leaking backend format into domain values
+// shared redb journal-key encoding preserves scope framing and produced-height byte ordering for
+// writes, retention and rollback without leaking backend format into domain values
+// design-lint: allow unclassified-free-function -- backend-owned encoding boundary
 pub(super) fn journal(scope: &IndexScope, height: BlockHeight) -> Key {
     let mut key = prefix(scope, JOURNAL);
     key.extend_from_slice(&height.0.to_be_bytes());
     Key(key)
 }
 
-// design-lint: allow unclassified-free-function -- shared redb history-key framing keeps persisted scope and address bytes identical for address-primary writes and prefix scans without leaking storage policy into domain values
+// shared redb history-key framing keeps persisted scope and address bytes identical for
+// address-primary writes and prefix scans without leaking storage policy into domain values
+// design-lint: allow unclassified-free-function -- backend-owned encoding boundary
 pub(super) fn history_prefix(scope: &IndexScope, address: &CanonicalAddress) -> Vec<u8> {
     let mut key = prefix(scope, HISTORY);
     component(&mut key, address.value.as_bytes());
     key
 }
 
-// design-lint: allow unclassified-free-function -- redb rollback history-key classification checks the persisted format and exact scope prefix without exposing storage bytes on domain values
+// redb rollback history-key classification checks the persisted format and exact scope prefix
+// without exposing storage bytes on domain values
+// design-lint: allow unclassified-free-function -- backend-owned encoding boundary
 pub(super) fn is_history(scope: &IndexScope, key: &[u8]) -> bool {
     key.starts_with(&prefix(scope, HISTORY))
 }
@@ -51,19 +59,25 @@ pub(super) fn history(
     Key(key)
 }
 
-// design-lint: allow unclassified-free-function -- shared redb output-prefix encoding preserves scope and address framing for writes and scans without exposing physical keys on foreign domain values
+// shared redb output-prefix encoding preserves scope and address framing for writes and scans
+// without exposing physical keys on foreign domain values
+// design-lint: allow unclassified-free-function -- backend-owned encoding boundary
 pub(super) fn output_prefix(scope: &IndexScope, address: &CanonicalAddress) -> Vec<u8> {
     let mut key = prefix(scope, OUTPUT);
     component(&mut key, address.value.as_bytes());
     key
 }
 
-// design-lint: allow unclassified-free-function -- redb rollback output-key classification shares the persisted format and scope guard for removal and restoration while full record validation stays with the repository
+// redb rollback output-key classification shares the persisted format and scope guard for removal
+// and restoration while full record validation stays with the repository
+// design-lint: allow unclassified-free-function -- backend-owned encoding boundary
 pub(super) fn is_output(scope: &IndexScope, key: &[u8]) -> bool {
     key.starts_with(&prefix(scope, OUTPUT))
 }
 
-// design-lint: allow unclassified-free-function -- shared redb output-key encoding preserves address, transaction and numeric index ordering for writes and rollback validation without adding backend bytes to OutputKey
+// shared redb output-key encoding preserves address, transaction and numeric index ordering for
+// writes and rollback validation without adding backend bytes to OutputKey
+// design-lint: allow unclassified-free-function -- backend-owned encoding boundary
 pub(super) fn output(scope: &IndexScope, output: &OutputKey) -> Key {
     let mut key = output_prefix(scope, &output.address);
     component(&mut key, output.output.transaction.value.as_bytes());
@@ -71,7 +85,9 @@ pub(super) fn output(scope: &IndexScope, output: &OutputKey) -> Key {
     Key(key)
 }
 
-// design-lint: allow unclassified-free-function -- shared redb prefix framing keeps format, collection tag and length-framed scope bytes identical across key encoders and rollback classifiers without exposing backend format on IndexScope
+// shared redb prefix framing keeps format, collection tag and length-framed scope bytes identical
+// across key encoders and rollback classifiers without exposing backend format on IndexScope
+// design-lint: allow unclassified-free-function -- backend-owned encoding boundary
 fn prefix(scope: &IndexScope, tag: u8) -> Vec<u8> {
     let mut key = vec![FORMAT, tag];
     component(&mut key, scope.chain.0.as_bytes());
@@ -79,7 +95,9 @@ fn prefix(scope: &IndexScope, tag: u8) -> Vec<u8> {
     key
 }
 
-// design-lint: allow unclassified-free-function -- shared length-prefix byte-append algorithm for scope, address and transaction key components; neither byte buffer is a domain receiver
+// shared length-prefix byte-append algorithm for scope, address and transaction key components;
+// neither byte buffer is a domain receiver
+// design-lint: allow unclassified-free-function -- backend-owned encoding boundary
 fn component(key: &mut Vec<u8>, value: &[u8]) {
     key.extend_from_slice(&(value.len() as u64).to_be_bytes());
     key.extend_from_slice(value);
@@ -216,7 +234,8 @@ mod tests {
         };
         assert_eq!(
             output(&scope, &identity).0,
-            b"\x01\x04\0\0\0\0\0\0\0\x01a\0\0\0\0\0\0\0\x01b\0\0\0\0\0\0\0\x02\xc3\xa9\0\0\0\0\0\0\0\x02tx\0\0\0\x2a"
+            b"\x01\x04\0\0\0\0\0\0\0\x01a\0\0\0\0\0\0\0\x01b\0\0\0\0\0\0\0\x02\xc3\xa9\
+            \0\0\0\0\0\0\0\x02tx\0\0\0\x2a"
         );
         let ordered = [0, 1, 255, 256, u32::MAX].map(|index| {
             identity.output.index = index;

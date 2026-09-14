@@ -32,44 +32,7 @@ impl UnsignedTransaction {
                     format!("Ethereum signing failed: {error}"),
                 )
             })?;
-        let signature = signed.signature;
-        if signature.scheme != SignatureScheme::EcdsaSecp256k1
-            || signature.encoding != SignatureEncoding::Recoverable
-        {
-            return Err(ChainError::new(
-                ChainErrorKind::Signer,
-                "Ethereum signer returned an incompatible signature",
-            ));
-        }
-        let signature = AlloySignature::try_from(signature.bytes.as_slice()).map_err(|error| {
-            ChainError::new(
-                ChainErrorKind::Signer,
-                format!("invalid recoverable Ethereum signature: {error}"),
-            )
-        })?;
-        let signed = native.into_signed(signature);
-        let recovered = signed.recover_signer().map_err(|error| {
-            ChainError::new(
-                ChainErrorKind::Signer,
-                format!("could not recover Ethereum signer: {error}"),
-            )
-        })?;
-        if recovered.into_array() != self.from.0 {
-            return Err(ChainError::new(
-                ChainErrorKind::Signer,
-                "Ethereum signature does not match the transaction sender",
-            ));
-        }
-
-        let envelope: TxEnvelope = signed.into();
-        let mut encoded = Vec::with_capacity(envelope.encode_2718_len());
-        envelope.encode_2718(&mut encoded);
-        let id = TransactionId(keccak256(&encoded).0);
-
-        Ok(SignedTransaction {
-            id,
-            envelope: encoded,
-        })
+        SignedTransaction::from_signature(native, &self.from, signed.signature)
     }
 
     fn eip1559(&self) -> Result<TxEip1559, ChainError> {
@@ -101,6 +64,52 @@ impl UnsignedTransaction {
             value: U256::from_be_bytes(self.value.0),
             access_list: Default::default(),
             input: Bytes::from(self.input.clone()),
+        })
+    }
+}
+
+impl SignedTransaction {
+    fn from_signature(
+        native: TxEip1559,
+        sender: &crate::Address,
+        signature: base::Signature,
+    ) -> Result<Self, ChainError> {
+        if signature.scheme != SignatureScheme::EcdsaSecp256k1
+            || signature.encoding != SignatureEncoding::Recoverable
+        {
+            return Err(ChainError::new(
+                ChainErrorKind::Signer,
+                "Ethereum signer returned an incompatible signature",
+            ));
+        }
+        let signature = AlloySignature::try_from(signature.bytes.as_slice()).map_err(|error| {
+            ChainError::new(
+                ChainErrorKind::Signer,
+                format!("invalid recoverable Ethereum signature: {error}"),
+            )
+        })?;
+        let signed = native.into_signed(signature);
+        let recovered = signed.recover_signer().map_err(|error| {
+            ChainError::new(
+                ChainErrorKind::Signer,
+                format!("could not recover Ethereum signer: {error}"),
+            )
+        })?;
+        if recovered.into_array() != sender.0 {
+            return Err(ChainError::new(
+                ChainErrorKind::Signer,
+                "Ethereum signature does not match the transaction sender",
+            ));
+        }
+
+        let envelope: TxEnvelope = signed.into();
+        let mut encoded = Vec::with_capacity(envelope.encode_2718_len());
+        envelope.encode_2718(&mut encoded);
+        let id = TransactionId(keccak256(&encoded).0);
+
+        Ok(Self {
+            id,
+            envelope: encoded,
         })
     }
 }
@@ -195,6 +204,26 @@ mod tests {
         }
     }
 
+    impl ReplySigner {
+        fn recoverable(expected: SignRequest, bytes: Vec<u8>) -> Self {
+            Self {
+                expected,
+                result: Ok(base::SignedPayload {
+                    signature: base::Signature {
+                        scheme: SignatureScheme::EcdsaSecp256k1,
+                        encoding: SignatureEncoding::Recoverable,
+                        bytes,
+                    },
+                    public_key: base::PublicKey {
+                        curve: base::Curve::Secp256k1,
+                        format: PublicKeyFormat::Raw,
+                        bytes: Vec::new(),
+                    },
+                }),
+            }
+        }
+    }
+
     fn signing_request() -> (UnsignedTransaction, SignRequest) {
         let transaction = UnsignedTransaction {
             chain_id: 1,
@@ -266,5 +295,48 @@ mod tests {
                 "Ethereum signer returned an incompatible signature"
             );
         }
+    }
+
+    #[test]
+    fn invalid_signature_bytes_and_recovery_keep_distinct_signer_errors() {
+        for (bytes, prefix) in [
+            (Vec::new(), "invalid recoverable Ethereum signature:"),
+            (vec![0; 65], "could not recover Ethereum signer:"),
+        ] {
+            let (transaction, expected) = signing_request();
+            let signer = ReplySigner::recoverable(expected, bytes);
+            let error = futures_executor::block_on(transaction.sign(&signer)).unwrap_err();
+            assert_eq!(error.kind, ChainErrorKind::Signer);
+            assert!(error.message.starts_with(prefix), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn recovered_sender_is_required_before_accepting_the_envelope() {
+        let (transaction, expected) = signing_request();
+        let signature = AlloySignature::new(U256::from(1), U256::from(2), false);
+        let signer = ReplySigner::recoverable(expected, signature.as_bytes().to_vec());
+        let error = futures_executor::block_on(transaction.sign(&signer)).unwrap_err();
+        assert_eq!(error.kind, ChainErrorKind::Signer);
+        assert_eq!(
+            error.message,
+            "Ethereum signature does not match the transaction sender"
+        );
+    }
+
+    #[test]
+    fn accepted_signature_preserves_the_native_envelope_and_local_id() {
+        use alloy_eips::Decodable2718;
+
+        let (mut transaction, expected) = signing_request();
+        let signature = AlloySignature::new(U256::from(1), U256::from(2), false);
+        let native = transaction.eip1559().unwrap().into_signed(signature);
+        transaction.from = crate::Address(native.recover_signer().unwrap().into_array());
+        let signer = ReplySigner::recoverable(expected, signature.as_bytes().to_vec());
+        let signed = futures_executor::block_on(transaction.sign(&signer)).unwrap();
+        let decoded = TxEnvelope::decode_2718_exact(&signed.envelope).unwrap();
+        assert_eq!(decoded.as_eip1559().unwrap(), &native);
+        assert_eq!(signed.id.0, keccak256(&signed.envelope).0);
+        assert_eq!(signed.envelope[0], 2);
     }
 }

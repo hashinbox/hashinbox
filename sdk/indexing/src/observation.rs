@@ -126,6 +126,25 @@ pub struct NetworkFee {
     pub payer: Option<CanonicalAddress>,
 }
 
+impl NetworkFee {
+    fn validate(&self, scope: &IndexScope) -> Result<(), IndexError> {
+        let invalid_fee = self.asset.chain != scope.chain
+            || self.amount.validate_amount().is_err()
+            || self
+                .payer
+                .as_ref()
+                .is_some_and(|payer| !payer.belongs_to(scope));
+        if invalid_fee {
+            return Err(IndexError::new(
+                IndexErrorKind::InvalidBlock,
+                "transaction contains an invalid network fee",
+                false,
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Canonical state stored for a transaction. Confirmation is deliberately absent:
 /// it is derived from the inclusion block and the current checkpoint when read.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -223,6 +242,29 @@ impl ObservationDraft {
                 false,
             ));
         }
+        self.validate_movements(scope)?;
+        if let Some(fee) = &self.fee {
+            fee.validate(scope)?;
+        }
+        let status = match self.status {
+            ObservationDraftStatus::Included => CanonicalStatus::Included {
+                block: block.clone(),
+            },
+            ObservationDraftStatus::Failed { reason } => CanonicalStatus::Failed {
+                block: block.clone(),
+                reason,
+            },
+        };
+        Ok(CanonicalTransaction {
+            scope: self.scope,
+            transaction_id: self.transaction_id,
+            status,
+            movements: self.movements,
+            fee: self.fee,
+        })
+    }
+
+    fn validate_movements(&self, scope: &IndexScope) -> Result<(), IndexError> {
         if matches!(self.status, ObservationDraftStatus::Failed { .. })
             && !self.movements.is_empty()
         {
@@ -250,37 +292,7 @@ impl ObservationDraft {
                 ));
             }
         }
-        let invalid_fee = self.fee.as_ref().is_some_and(|fee| {
-            fee.asset.chain != scope.chain
-                || fee.amount.validate_amount().is_err()
-                || fee
-                    .payer
-                    .as_ref()
-                    .is_some_and(|payer| !payer.belongs_to(scope))
-        });
-        if invalid_fee {
-            return Err(IndexError::new(
-                IndexErrorKind::InvalidBlock,
-                "transaction contains an invalid network fee",
-                false,
-            ));
-        }
-        let status = match self.status {
-            ObservationDraftStatus::Included => CanonicalStatus::Included {
-                block: block.clone(),
-            },
-            ObservationDraftStatus::Failed { reason } => CanonicalStatus::Failed {
-                block: block.clone(),
-                reason,
-            },
-        };
-        Ok(CanonicalTransaction {
-            scope: self.scope,
-            transaction_id: self.transaction_id,
-            status,
-            movements: self.movements,
-            fee: self.fee,
-        })
+        Ok(())
     }
 }
 

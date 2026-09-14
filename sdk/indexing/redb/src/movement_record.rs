@@ -42,18 +42,10 @@ impl MovementRecord {
     }
 
     pub(super) fn into_domain(self) -> Result<ValueMovement, IndexError> {
-        let Self {
-            kind,
-            id,
-            asset,
-            amount,
-            from,
-            to,
-        } = self;
-        let id = MovementId(id);
-        let asset = asset.into_domain();
-        let amount = crate::amount_record::decode(&amount)?;
-        Ok(match (kind, from, to) {
+        let id = MovementId(self.id);
+        let asset = self.asset.into_domain();
+        let amount = crate::amount_record::decode(&self.amount)?;
+        Ok(match (self.kind, self.from, self.to) {
             (MovementTag::Transfer, Some(from), Some(to)) => ValueMovement::Transfer {
                 id,
                 asset,
@@ -162,6 +154,29 @@ mod tests {
                     .expect("movement record"),
                 movement
             );
+        }
+    }
+
+    #[test]
+    fn malformed_amount_precedes_invalid_movement_shape() {
+        for (amount, expected) in [
+            ("bad", "stored amount is not a valid decimal"),
+            ("01", "stored amount is not canonical"),
+            ("-1", "stored monetary amount must not be negative"),
+            ("1", "movement record shape is invalid"),
+        ] {
+            let record = MovementRecord {
+                kind: MovementTag::Transfer,
+                id: "invalid".into(),
+                asset: AssetRecord::from_domain(&asset()),
+                amount: amount.into(),
+                from: None,
+                to: None,
+            };
+            let error = record.into_domain().unwrap_err();
+            assert_eq!(error.kind, indexing::IndexErrorKind::Store);
+            assert_eq!(error.message, expected);
+            assert!(!error.retryable);
         }
     }
 }

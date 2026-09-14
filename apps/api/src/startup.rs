@@ -2,7 +2,9 @@
 
 use std::future::Future;
 
-// design-lint: allow unclassified-free-function -- application startup sequences an injected verification future before a one-shot storage opener, preserving a testable zero-open boundary on verification failure or cancellation
+// application startup sequences an injected verification future before a one-shot storage opener,
+// preserving a testable zero-open boundary on verification failure or cancellation
+// design-lint: allow unclassified-free-function -- application-owned startup sequence
 /// Opens storage only after every supplied identity check has succeeded.
 pub(crate) async fn verify_then_open<V, T, E, O, S>(verification: V, open: O) -> Result<(T, S), E>
 where

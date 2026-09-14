@@ -2,10 +2,10 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use wallets::{Error as WalletError, ErrorKind as WalletErrorKind, SendError};
 
-use crate::{Address, Error, ErrorKind, Key, Lamport, Memo, Message, RpcClient};
+use crate::{Address, BlockhashLifetime, Error, ErrorKind, Key, Lamport, Memo, Message, RpcClient};
 
-use super::source::SourceLeases;
-use super::{AcquiredAccounts, Cancellation, Envelope};
+use super::source::Leases;
+use super::{AcquiredAccounts, Cancellation, Envelope, ResolvedTransfer};
 
 type MemoFactory = dyn Fn() -> Result<Memo, Error> + Send + Sync;
 
@@ -17,7 +17,7 @@ pub struct Preparer<C> {
 pub struct PreparedBatch {
     floor: u64,
     envelopes: Vec<Envelope>,
-    leases: SourceLeases,
+    leases: Leases,
 }
 
 impl PreparedBatch {
@@ -31,12 +31,12 @@ impl PreparedBatch {
         &self.envelopes
     }
 
-    pub(super) fn into_parts(self) -> (u64, Vec<Envelope>, SourceLeases) {
+    pub(super) fn into_parts(self) -> (u64, Vec<Envelope>, Leases) {
         (self.floor, self.envelopes, self.leases)
     }
 
     #[cfg(test)]
-    pub(super) fn fixture(floor: u64, envelopes: Vec<Envelope>, leases: SourceLeases) -> Self {
+    pub(super) fn fixture(floor: u64, envelopes: Vec<Envelope>, leases: Leases) -> Self {
         Self {
             floor,
             envelopes,
@@ -70,58 +70,16 @@ where
             .await?;
         floor = lifetime.slot;
 
-        let mut messages = Vec::with_capacity(transfers.len());
-        let mut memo_values = std::collections::BTreeSet::new();
-        let mut message_values = std::collections::BTreeSet::new();
-        for (transfer, destination) in transfers.iter().zip(&destinations) {
-            cancellation.ensure()?;
-            let memo = (self.memo)().map_err(|_| {
-                item(
-                    transfer.index(),
-                    WalletErrorKind::Generation,
-                    "Solana Memo generation failed",
-                )
-            })?;
-            if !memo_values.insert(memo) {
-                return Err(item(
-                    transfer.index(),
-                    WalletErrorKind::Transaction,
-                    "Solana Memo token must be unique",
-                ));
-            }
-            let message = Message::native_transfer(
-                transfer.source(),
-                destination,
-                transfer.amount(),
-                memo,
-                &lifetime.value,
-            )
-            .map_err(|_| {
-                item(
-                    transfer.index(),
-                    WalletErrorKind::Transaction,
-                    "Solana message construction failed",
-                )
-            })?;
-            let bytes = message.wire_bytes().map_err(|_| {
-                item(
-                    transfer.index(),
-                    WalletErrorKind::Transaction,
-                    "Solana message encoding failed",
-                )
-            })?;
-            if !message_values.insert(bytes.clone()) {
-                return Err(item(
-                    transfer.index(),
-                    WalletErrorKind::Transaction,
-                    "Solana messages must be distinct",
-                ));
-            }
-            messages.push((message, bytes));
-        }
+        let messages = Messages::new(
+            &transfers,
+            &destinations,
+            &lifetime.value,
+            &*self.memo,
+            cancellation,
+        )?;
 
-        let mut fees = Vec::with_capacity(messages.len());
-        for (_, bytes) in &messages {
+        let mut fees = Vec::with_capacity(messages.0.len());
+        for (_, bytes) in &messages.0 {
             cancellation.ensure()?;
             let fee = cancellation
                 .race_preparation(self.rpc.fee_for_message(bytes, floor))
@@ -131,44 +89,7 @@ where
         }
         check_sufficiency(&transfers, &balances, &fees)?;
 
-        let mut envelopes = Vec::with_capacity(messages.len());
-        let mut signatures = std::collections::BTreeSet::new();
-        let mut signed_values = std::collections::BTreeSet::new();
-        for (transfer, (message, _)) in transfers.iter().zip(messages) {
-            cancellation.ensure()?;
-            let key = keys.get(transfer.source()).ok_or_else(|| {
-                item(
-                    transfer.index(),
-                    WalletErrorKind::Transaction,
-                    "Solana source signing key is unavailable",
-                )
-            })?;
-            let envelope = Envelope::sign(
-                transfer.source().clone(),
-                transfer.index(),
-                message,
-                floor,
-                lifetime.value.clone(),
-                key,
-            )
-            .map_err(|_| {
-                item(
-                    transfer.index(),
-                    WalletErrorKind::Transaction,
-                    "Solana envelope signing failed",
-                )
-            })?;
-            if !signatures.insert(envelope.id().as_str().to_owned())
-                || !signed_values.insert(envelope.signed_bytes().to_vec())
-            {
-                return Err(item(
-                    transfer.index(),
-                    WalletErrorKind::Transaction,
-                    "Solana signed envelopes must be distinct",
-                ));
-            }
-            envelopes.push(envelope);
-        }
+        let envelopes = messages.sign(&transfers, keys, floor, &lifetime.value, cancellation)?;
 
         for envelope in &envelopes {
             cancellation.ensure()?;
@@ -196,9 +117,15 @@ where
                     WalletErrorKind::Transaction,
                     "Solana transaction simulation failed",
                 )),
-                Err(_) => Err(SendError::operation(WalletErrorKind::Unavailable, "Solana transaction simulation is unavailable")),
+                Err(_) => Err(SendError::operation(
+                    WalletErrorKind::Unavailable,
+                    "Solana transaction simulation is unavailable",
+                )),
             },
-            () = cancellation.cancelled() => Err(SendError::operation(WalletErrorKind::Unavailable, "Solana transaction preparation was cancelled")),
+            () = cancellation.cancelled() => Err(SendError::operation(
+                WalletErrorKind::Unavailable,
+                "Solana transaction preparation was cancelled",
+            )),
         }
     }
 
@@ -217,6 +144,143 @@ where
                     .ok_or_else(|| Error::new(ErrorKind::Generation, "fixture Memo exhausted"))
             }),
         }
+    }
+}
+
+struct Messages(Vec<(Message, Vec<u8>)>);
+
+impl Messages {
+    fn new(
+        transfers: &[ResolvedTransfer],
+        destinations: &[Address],
+        lifetime: &BlockhashLifetime,
+        memo: &MemoFactory,
+        cancellation: &Cancellation,
+    ) -> Result<Self, SendError> {
+        let mut messages = Vec::with_capacity(transfers.len());
+        let mut memo_values = std::collections::BTreeSet::new();
+        let mut message_values = std::collections::BTreeSet::new();
+        for (transfer, destination) in transfers.iter().zip(destinations) {
+            cancellation.ensure()?;
+            let memo = memo().map_err(|_| {
+                item(
+                    transfer.index(),
+                    WalletErrorKind::Generation,
+                    "Solana Memo generation failed",
+                )
+            })?;
+            if !memo_values.insert(memo) {
+                return Err(item(
+                    transfer.index(),
+                    WalletErrorKind::Transaction,
+                    "Solana Memo token must be unique",
+                ));
+            }
+            let message = Message::for_transfer(transfer, destination, memo, lifetime)?;
+            let bytes = message.wire_bytes().map_err(|_| {
+                item(
+                    transfer.index(),
+                    WalletErrorKind::Transaction,
+                    "Solana message encoding failed",
+                )
+            })?;
+            if !message_values.insert(bytes.clone()) {
+                return Err(item(
+                    transfer.index(),
+                    WalletErrorKind::Transaction,
+                    "Solana messages must be distinct",
+                ));
+            }
+            messages.push((message, bytes));
+        }
+
+        Ok(Self(messages))
+    }
+
+    fn sign(
+        self,
+        transfers: &[ResolvedTransfer],
+        keys: &BTreeMap<Address, Arc<Key>>,
+        floor: u64,
+        lifetime: &BlockhashLifetime,
+        cancellation: &Cancellation,
+    ) -> Result<Vec<Envelope>, SendError> {
+        let mut envelopes = Vec::with_capacity(self.0.len());
+        let mut signatures = std::collections::BTreeSet::new();
+        let mut signed_values = std::collections::BTreeSet::new();
+        for (transfer, (message, _)) in transfers.iter().zip(self.0) {
+            cancellation.ensure()?;
+            let envelope = Envelope::for_transfer(transfer, message, floor, lifetime, keys)?;
+            if !signatures.insert(envelope.id().as_str().to_owned())
+                || !signed_values.insert(envelope.signed_bytes().to_vec())
+            {
+                return Err(item(
+                    transfer.index(),
+                    WalletErrorKind::Transaction,
+                    "Solana signed envelopes must be distinct",
+                ));
+            }
+            envelopes.push(envelope);
+        }
+
+        Ok(envelopes)
+    }
+}
+
+impl Message {
+    fn for_transfer(
+        transfer: &ResolvedTransfer,
+        destination: &Address,
+        memo: Memo,
+        lifetime: &BlockhashLifetime,
+    ) -> Result<Self, SendError> {
+        Self::native_transfer(
+            transfer.source(),
+            destination,
+            transfer.amount(),
+            memo,
+            lifetime,
+        )
+        .map_err(|_| {
+            item(
+                transfer.index(),
+                WalletErrorKind::Transaction,
+                "Solana message construction failed",
+            )
+        })
+    }
+}
+
+impl Envelope {
+    fn for_transfer(
+        transfer: &ResolvedTransfer,
+        message: Message,
+        floor: u64,
+        lifetime: &BlockhashLifetime,
+        keys: &BTreeMap<Address, Arc<Key>>,
+    ) -> Result<Self, SendError> {
+        let key = keys.get(transfer.source()).ok_or_else(|| {
+            item(
+                transfer.index(),
+                WalletErrorKind::Transaction,
+                "Solana source signing key is unavailable",
+            )
+        })?;
+        Self::sign(
+            transfer.source().clone(),
+            transfer.index(),
+            message,
+            floor,
+            lifetime.clone(),
+            key,
+        )
+        .map_err(|_| {
+            item(
+                transfer.index(),
+                WalletErrorKind::Transaction,
+                "Solana envelope signing failed",
+            )
+        })
     }
 }
 
@@ -274,8 +338,16 @@ impl Cancellation {
         future: impl std::future::Future<Output = Result<T, Error>>,
     ) -> Result<T, SendError> {
         tokio::select! {
-            result = future => result.map_err(|_| SendError::operation(WalletErrorKind::Unavailable, "Solana transaction preparation failed")),
-            () = self.cancelled() => Err(SendError::operation(WalletErrorKind::Unavailable, "Solana transaction preparation was cancelled")),
+            result = future => result.map_err(|_| {
+                SendError::operation(
+                    WalletErrorKind::Unavailable,
+                    "Solana transaction preparation failed",
+                )
+            }),
+            () = self.cancelled() => Err(SendError::operation(
+                WalletErrorKind::Unavailable,
+                "Solana transaction preparation was cancelled",
+            )),
         }
     }
 }
@@ -291,7 +363,7 @@ mod tests {
     use solana_hash::Hash;
 
     use crate::{
-        Acquirer, Batch, ResolvedTransfer, Seed, SourceCoordinator, rpc::test_support::Scripted,
+        Acquirer, Batch, ResolvedTransfer, Seed, SourceCoordinator, rpc::test_support::Script,
     };
 
     use super::*;
@@ -337,9 +409,15 @@ mod tests {
                 "Solana transaction simulation is unavailable",
             ),
         ] {
-            let rpc = Scripted::one(
+            let rpc = Script::one(
                 "simulateTransaction",
-                json!([STANDARD.encode(envelope.signed_bytes()), {"encoding":"base64","commitment":"confirmed","sigVerify":true,"replaceRecentBlockhash":false,"minContextSlot":10}]),
+                json!([STANDARD.encode(envelope.signed_bytes()), {
+                    "encoding": "base64",
+                    "commitment": "confirmed",
+                    "sigVerify": true,
+                    "replaceRecentBlockhash": false,
+                    "minContextSlot": 10,
+                }]),
                 response,
             );
             let error = Preparer::new(RpcClient::new(rpc.clone()))
@@ -517,12 +595,15 @@ mod tests {
             "data":["","base64"],
             "space":0
         });
-        let rpc = Scripted::new([
+        let rpc = Script::new([
             ("getHealth", json!([]), json!("ok")),
             ("getSlot", json!([{"commitment":"confirmed"}]), json!(5)),
             (
                 "getMultipleAccounts",
-                json!([[source.to_string(),destination.to_string()], {"encoding":"base64","commitment":"confirmed","minContextSlot":5}]),
+                json!([
+                    [source.to_string(), destination.to_string()],
+                    {"encoding": "base64", "commitment": "confirmed", "minContextSlot": 5},
+                ]),
                 json!({"context":{"slot":5},"value":[account,null]}),
             ),
             (
@@ -533,16 +614,31 @@ mod tests {
             (
                 "getLatestBlockhash",
                 json!([{"commitment":"confirmed","minContextSlot":6}]),
-                json!({"context":{"slot":7},"value":{"blockhash":lifetime.blockhash().to_string(),"lastValidBlockHeight":44}}),
+                json!({
+                    "context": {"slot": 7},
+                    "value": {
+                        "blockhash": lifetime.blockhash().to_string(),
+                        "lastValidBlockHeight": 44,
+                    },
+                }),
             ),
             (
                 "getFeeForMessage",
-                json!([STANDARD.encode(&message_bytes), {"commitment":"confirmed","minContextSlot":7}]),
+                json!([STANDARD.encode(&message_bytes), {
+                    "commitment": "confirmed",
+                    "minContextSlot": 7,
+                }]),
                 json!({"context":{"slot":8},"value":5}),
             ),
             (
                 "simulateTransaction",
-                json!([STANDARD.encode(expected.signed_bytes()), {"encoding":"base64","commitment":"confirmed","sigVerify":true,"replaceRecentBlockhash":false,"minContextSlot":8}]),
+                json!([STANDARD.encode(expected.signed_bytes()), {
+                    "encoding": "base64",
+                    "commitment": "confirmed",
+                    "sigVerify": true,
+                    "replaceRecentBlockhash": false,
+                    "minContextSlot": 8,
+                }]),
                 json!({"context":{"slot":9},"value":{"err":null}}),
             ),
         ]);
@@ -568,5 +664,161 @@ mod tests {
             expected.signed_bytes()
         );
         rpc.assert_finished();
+    }
+
+    async fn acquired_pair(balance: u64, second: &Address) -> AcquiredAccounts {
+        let source = key(7).address().clone();
+        let destination = key(8).address().clone();
+        let account = json!({
+            "lamports": balance, "owner": Address::from_bytes([0; 32]).to_string(),
+            "executable": false, "data": ["", "base64"], "space": 0,
+        });
+        let mut query = vec![source.to_string(), destination.to_string()];
+        let mut values = vec![account.clone(), json!(null)];
+        if second != &source {
+            query.push(second.to_string());
+            values.push(account);
+        }
+        let rpc = Script::new([
+            ("getHealth", json!([]), json!("ok")),
+            ("getSlot", json!([{"commitment":"confirmed"}]), json!(5)),
+            (
+                "getMultipleAccounts",
+                json!([query, {
+                    "encoding":"base64", "commitment":"confirmed", "minContextSlot":5,
+                }]),
+                json!({"context":{"slot":5},"value":values}),
+            ),
+            (
+                "getSlot",
+                json!([{"commitment":"confirmed","minContextSlot":5}]),
+                json!(6),
+            ),
+        ]);
+        let transfers = [source, second.clone()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| {
+                ResolvedTransfer::new(
+                    index,
+                    source,
+                    destination.to_string(),
+                    Lamport::from_atomic(10),
+                )
+            })
+            .collect();
+        let acquired = Acquirer::new(RpcClient::new(rpc.clone()), SourceCoordinator::default())
+            .acquire(Batch::new(transfers).unwrap(), &Cancellation::default())
+            .await
+            .unwrap();
+        rpc.assert_finished();
+        acquired
+    }
+
+    fn lifetime_response() -> serde_json::Value {
+        json!({"context":{"slot":7},"value":{
+            "blockhash":Hash::new_from_array([9;32]).to_string(),"lastValidBlockHeight":44,
+        }})
+    }
+
+    fn pair_messages(second: &Address) -> [Message; 2] {
+        let lifetime = crate::BlockhashLifetime::new(Hash::new_from_array([9; 32]), 44);
+        [key(7).address().clone(), second.clone()]
+            .into_iter()
+            .enumerate()
+            .map(|(i, source)| {
+                Message::native_transfer(
+                    &source,
+                    key(8).address(),
+                    Lamport::from_atomic(10),
+                    Memo::from_bytes([u8::try_from(i + 3).unwrap(); Memo::LENGTH]),
+                    &lifetime,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn finishes_all_message_validation_before_any_fee_or_key_lookup() {
+        let memo = Memo::from_bytes([3; Memo::LENGTH]);
+        for (memos, kind, message) in [
+            (
+                vec![memo],
+                WalletErrorKind::Generation,
+                "Solana Memo generation failed",
+            ),
+            (
+                vec![memo, memo],
+                WalletErrorKind::Transaction,
+                "Solana Memo token must be unique",
+            ),
+        ] {
+            let acquired = acquired_pair(100, key(7).address()).await;
+            let rpc = Script::one(
+                "getLatestBlockhash",
+                json!([{"commitment":"confirmed","minContextSlot":6}]),
+                lifetime_response(),
+            );
+            let error = Preparer::with_memos(RpcClient::new(rpc.clone()), memos)
+                .prepare(acquired, &BTreeMap::new(), &Cancellation::default())
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.failed_index, Some(1));
+            assert_eq!(error.source.kind, kind);
+            assert_eq!(error.source.message, message);
+            assert!(error.accepted.is_empty());
+            assert_eq!(error.ambiguous_transaction_id, None);
+            rpc.assert_finished();
+        }
+    }
+
+    #[tokio::test]
+    async fn all_fees_precede_cumulative_balance_and_all_signatures_precede_simulation() {
+        for (second, balance, expected) in [
+            (key(7), 29, "Solana source balance is insufficient"),
+            (key(9), 100, "Solana source signing key is unavailable"),
+        ] {
+            let acquired = acquired_pair(balance, second.address()).await;
+            let messages = pair_messages(second.address());
+            let rpc = Script::new([
+                (
+                    "getLatestBlockhash",
+                    json!([{"commitment":"confirmed","minContextSlot":6}]),
+                    lifetime_response(),
+                ),
+                (
+                    "getFeeForMessage",
+                    json!([STANDARD.encode(messages[0].wire_bytes().unwrap()),
+                    {"commitment":"confirmed","minContextSlot":7}]),
+                    json!({"context":{"slot":8},"value":5}),
+                ),
+                (
+                    "getFeeForMessage",
+                    json!([STANDARD.encode(messages[1].wire_bytes().unwrap()),
+                    {"commitment":"confirmed","minContextSlot":8}]),
+                    json!({"context":{"slot":9},"value":5}),
+                ),
+            ]);
+            let keys = BTreeMap::from([(key(7).address().clone(), key(7))]);
+            let memos = [
+                Memo::from_bytes([3; Memo::LENGTH]),
+                Memo::from_bytes([4; Memo::LENGTH]),
+            ];
+            let error = Preparer::with_memos(RpcClient::new(rpc.clone()), memos)
+                .prepare(acquired, &keys, &Cancellation::default())
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.failed_index, Some(1));
+            assert_eq!(error.source.kind, WalletErrorKind::Transaction);
+            assert_eq!(error.source.message, expected);
+            assert!(error.accepted.is_empty());
+            assert_eq!(error.ambiguous_transaction_id, None);
+            rpc.assert_finished();
+        }
     }
 }

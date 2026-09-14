@@ -9,7 +9,9 @@ use std::str::FromStr;
 use base::Decimal;
 use indexing::IndexError;
 
-// design-lint: allow unclassified-free-function -- shared redb monetary text codec validates canonical nonnegative Decimal values across fee, movement and output records while keeping stored-data errors in the adapter
+// shared redb monetary text codec validates canonical nonnegative Decimal values across fee,
+// movement and output records while keeping stored-data errors in the adapter
+// design-lint: allow unclassified-free-function -- backend-owned encoding boundary
 pub(super) fn decode(encoded: &str) -> Result<Decimal, IndexError> {
     let value = Decimal::from_str(encoded)
         .map_err(|_| crate::Repository::record_error("stored amount is not a valid decimal"))?;

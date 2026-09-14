@@ -30,20 +30,7 @@ impl Envelope {
         lifetime: BlockhashLifetime,
         key: &Key,
     ) -> Result<Self, Error> {
-        if key.address() != &source
-            || message
-                .native()
-                .account_keys
-                .first()
-                .map(|key| key.to_bytes())
-                != Some(*source.as_bytes())
-            || &message.native().recent_blockhash != lifetime.blockhash()
-        {
-            return Err(Error::new(
-                ErrorKind::Signing,
-                "Solana envelope source, message, and lifetime must agree",
-            ));
-        }
+        message.validate_binding(&source, &lifetime, key)?;
         let message_bytes = message.wire_bytes()?;
         let signed = key.sign_message(&message_bytes)?;
         let signature = Signature::from(*signed.signature());
@@ -113,6 +100,27 @@ impl Envelope {
     #[must_use]
     pub const fn lifetime(&self) -> &BlockhashLifetime {
         &self.lifetime
+    }
+}
+
+impl Message {
+    fn validate_binding(
+        &self,
+        source: &Address,
+        lifetime: &BlockhashLifetime,
+        key: &Key,
+    ) -> Result<(), Error> {
+        if key.address() != source
+            || self.native().account_keys.first().map(|key| key.to_bytes())
+                != Some(*source.as_bytes())
+            || &self.native().recent_blockhash != lifetime.blockhash()
+        {
+            return Err(Error::new(
+                ErrorKind::Signing,
+                "Solana envelope source, message, and lifetime must agree",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -195,5 +203,76 @@ mod tests {
                 .kind(),
             ErrorKind::Signing
         );
+    }
+
+    #[test]
+    fn rejects_message_payer_and_blockhash_mismatch_with_binding_error() {
+        let signer = key(7);
+        let other = key(8);
+        let lifetime = BlockhashLifetime::new(Hash::new_from_array([9; 32]), 44);
+        let wrong_lifetime = BlockhashLifetime::new(Hash::new_from_array([10; 32]), 44);
+        for (payer, signed_lifetime) in [
+            (other.address(), &lifetime),
+            (signer.address(), &wrong_lifetime),
+        ] {
+            let message = Message::native_transfer(
+                payer,
+                &Address::from_bytes([11; 32]),
+                Lamport::from_atomic(17),
+                Memo::from_bytes([3; Memo::LENGTH]),
+                &lifetime,
+            )
+            .unwrap();
+            let error = Envelope::sign(
+                signer.address().clone(),
+                0,
+                message,
+                11,
+                signed_lifetime.clone(),
+                &signer,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Signing);
+            assert_eq!(
+                error.to_string(),
+                "Solana envelope source, message, and lifetime must agree"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_bytes_match_independently_signed_native_transaction() {
+        use solana_keypair::{Keypair, Signer as _};
+
+        let signer = key(7);
+        let lifetime = BlockhashLifetime::new(Hash::new_from_array([9; 32]), 44);
+        let message = Message::native_transfer(
+            signer.address(),
+            &Address::from_bytes([8; 32]),
+            Lamport::from_atomic(17),
+            Memo::from_bytes([3; Memo::LENGTH]),
+            &lifetime,
+        )
+        .unwrap();
+        let native_key = Keypair::new_from_array([7; 32]);
+        let signature = native_key.sign_message(&message.native().serialize());
+        let transaction = Transaction {
+            signatures: vec![signature],
+            message: message.native().clone(),
+        };
+        let expected = bincode::serialize(&transaction).unwrap();
+        let envelope = Envelope::sign(
+            signer.address().clone(),
+            2,
+            message,
+            u64::MAX,
+            lifetime,
+            &signer,
+        )
+        .unwrap();
+        assert_eq!(envelope.signed_bytes(), expected);
+        assert_eq!(envelope.signature(), &signature);
+        assert_eq!(envelope.id().as_str(), signature.to_string());
+        assert_eq!(envelope.floor(), u64::MAX);
     }
 }

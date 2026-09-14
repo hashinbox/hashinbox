@@ -12,10 +12,10 @@ use super::ResolvedTransfer;
 /// Process-local owner of Solana sources currently being prepared.
 #[derive(Clone, Default)]
 pub struct SourceCoordinator {
-    state: Arc<Mutex<SourceState>>,
+    state: Arc<Mutex<State>>,
 }
 
-pub(super) struct SourceLeases {
+pub(super) struct Leases {
     coordinator: SourceCoordinator,
     sources: Vec<Address>,
 }
@@ -26,7 +26,7 @@ pub(super) struct GuardedSources {
 }
 
 #[derive(Default)]
-struct SourceState {
+struct State {
     preparing: BTreeSet<Address>,
     guarded: BTreeSet<Address>,
 }
@@ -36,7 +36,7 @@ impl SourceCoordinator {
         &self,
         transfers: &[ResolvedTransfer],
         batch: bool,
-    ) -> Result<SourceLeases, SendError> {
+    ) -> Result<Leases, SendError> {
         let mut earliest = BTreeMap::<Address, usize>::new();
         for transfer in transfers {
             earliest
@@ -67,7 +67,7 @@ impl SourceCoordinator {
         }
         state.preparing.extend(sources.iter().cloned());
         drop(state);
-        Ok(SourceLeases {
+        Ok(Leases {
             coordinator: self.clone(),
             sources,
         })
@@ -82,7 +82,7 @@ impl SourceCoordinator {
     }
 }
 
-impl SourceLeases {
+impl Leases {
     pub(super) fn guard(mut self) -> GuardedSources {
         let sources = self.sources.drain(..).collect::<BTreeSet<_>>();
         let mut state = self
@@ -124,7 +124,7 @@ impl GuardedSources {
     }
 }
 
-impl Drop for SourceLeases {
+impl Drop for Leases {
     fn drop(&mut self) {
         let mut state = self
             .coordinator

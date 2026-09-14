@@ -71,20 +71,18 @@ impl Supervisor {
         loop {
             tokio::select! {
                 biased;
-                command = self.commands.recv() => {
-                    match command {
-                        Some(Command::Insert { task, acknowledgement }) => {
-                            self.tasks.spawn(task.run());
-                            let _ = acknowledgement.send(());
-                        }
-                        Some(Command::Close { acknowledgement }) => {
-                            self.commands.close();
-                            let _ = acknowledgement.send(());
-                            break;
-                        }
-                        None => break,
+                command = self.commands.recv() => match command {
+                    Some(Command::Insert { task, acknowledgement }) => {
+                        self.tasks.spawn(task.run());
+                        let _ = acknowledgement.send(());
                     }
-                }
+                    Some(Command::Close { acknowledgement }) => {
+                        self.commands.close();
+                        let _ = acknowledgement.send(());
+                        break;
+                    }
+                    None => break,
+                },
                 result = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     if let Some(result) = result {
                         result?;
