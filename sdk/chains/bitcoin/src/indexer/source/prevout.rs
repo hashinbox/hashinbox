@@ -5,10 +5,11 @@ use indexing::SourceError;
 use serde_json::{Map, Value};
 
 use crate::rpc::source_error;
-use crate::{Address, TransactionId, indexer::Outpoint};
+use crate::{Address, Network, TransactionId, indexer::Outpoint};
 
 use super::{
-    MAX_COMPACT_ADDRESS_BYTES, MAX_COMPACT_PREVOUT_JSON_BYTES, MAX_EXTERNAL_PREVOUTS_PER_BLOCK,
+    MAX_COMPACT_ADDRESS_BYTES, MAX_COMPACT_PREVOUT_JSON_BYTES, MAX_COMPACT_PREVOUT_TOTAL_BYTES,
+    MAX_EXTERNAL_PREVOUTS_PER_BLOCK,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,6 +19,37 @@ pub(super) struct ResolvedOutput {
 }
 
 impl ResolvedOutput {
+    pub(super) fn from_transaction(
+        transaction: &Transaction,
+        transaction_id: TransactionId,
+        output_index: u32,
+        network: Network,
+    ) -> Result<Self, SourceError> {
+        let index = usize::try_from(output_index).map_err(|_| {
+            source_error(
+                "Bitcoin previous transaction output index exceeds usize",
+                true,
+            )
+        })?;
+        let output = transaction.output.get(index).ok_or_else(|| {
+            source_error(
+                format!(
+                    "Bitcoin previous transaction {transaction_id} has no output {output_index}"
+                ),
+                true,
+            )
+        })?;
+        let address = crate::Address::from_script_for_network(&output.script_pubkey, network);
+        address
+            .as_ref()
+            .map(crate::Address::validate_compact_prevout)
+            .transpose()?;
+        Ok(Self {
+            value_satoshis: output.value.to_sat(),
+            address,
+        })
+    }
+
     pub(super) fn compact_json(&self) -> Result<Value, SourceError> {
         self.address
             .as_ref()
@@ -111,6 +143,78 @@ pub(super) fn validate_input_claims(
     Ok(())
 }
 
+#[derive(Debug)]
+pub(super) struct Transactions {
+    values: Vec<(TransactionId, Transaction)>,
+    ids: BTreeSet<TransactionId>,
+}
+
+impl Transactions {
+    pub(super) fn from_block(value: &Value) -> Result<Self, SourceError> {
+        let transaction_values = value
+            .as_object()
+            .and_then(|object| object.get("tx"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| source_error("Bitcoin block transactions must be an array", true))?;
+
+        let mut values = Vec::with_capacity(transaction_values.len());
+        let mut transaction_ids = BTreeSet::new();
+        for transaction_value in transaction_values {
+            let object = transaction_value
+                .as_object()
+                .ok_or_else(|| source_error("Bitcoin block transaction must be an object", true))?;
+            let transaction_id = required_string(object, "txid", "Bitcoin block transaction ID")?
+                .parse::<TransactionId>()
+                .map_err(|_| source_error("Bitcoin block transaction ID is invalid", true))?;
+            let transaction = decode_consensus_transaction(object, transaction_id)?;
+            validate_input_claims(transaction_value, &transaction)?;
+            if !transaction_ids.insert(transaction_id) {
+                return Err(source_error(
+                    "Bitcoin block contains duplicate transaction IDs",
+                    true,
+                ));
+            }
+            values.push((transaction_id, transaction));
+        }
+
+        Ok(Self {
+            values,
+            ids: transaction_ids,
+        })
+    }
+
+    pub(super) fn required_prevouts(&self) -> Result<RequiredPrevouts, SourceError> {
+        let mut earlier_outputs = BTreeSet::new();
+        let mut external_outputs = RequiredPrevouts::default();
+        for (transaction_id, transaction) in &self.values {
+            for input in &transaction.input {
+                external_outputs.observe(input, &earlier_outputs, &self.ids)?;
+            }
+            for output_index in 0..transaction.output.len() {
+                let Ok(output_index) = u32::try_from(output_index) else {
+                    return Err(source_error("Bitcoin block output index exceeds u32", true));
+                };
+                earlier_outputs.insert(Outpoint {
+                    transaction_id: *transaction_id,
+                    output_index,
+                });
+            }
+        }
+        let compact_data_budget = external_outputs
+            .len()
+            .checked_mul(MAX_COMPACT_PREVOUT_JSON_BYTES)
+            .ok_or_else(|| source_error("Bitcoin compact prevout data budget overflowed", false))?;
+        if compact_data_budget > MAX_COMPACT_PREVOUT_TOTAL_BYTES {
+            return Err(source_error(
+                "Bitcoin compact prevout data exceeds its aggregate bound",
+                false,
+            ));
+        }
+
+        Ok(external_outputs)
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct RequiredPrevouts {
     by_transaction: BTreeMap<TransactionId, BTreeSet<u32>>,
@@ -200,6 +304,42 @@ pub(super) struct ResolvedPrevouts {
 }
 
 impl ResolvedPrevouts {
+    pub(super) fn enrich_block(
+        &self,
+        value: &mut Value,
+        transactions: &Transactions,
+    ) -> Result<(), SourceError> {
+        let transaction_values = value
+            .as_object_mut()
+            .and_then(|object| object.get_mut("tx"))
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| source_error("Bitcoin block transactions must be an array", true))?;
+        let mut earlier_outputs = BTreeSet::new();
+        for ((transaction_id, transaction), transaction_value) in
+            transactions.values.iter().zip(transaction_values)
+        {
+            let inputs = transaction_value
+                .as_object_mut()
+                .and_then(|object| object.get_mut("vin"))
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| source_error("Bitcoin transaction inputs must be an array", true))?;
+            for (input, native_input) in inputs.iter_mut().zip(&transaction.input) {
+                self.enrich_input(input, native_input, &earlier_outputs)?;
+            }
+            for output_index in 0..transaction.output.len() {
+                let Ok(output_index) = u32::try_from(output_index) else {
+                    return Err(source_error("Bitcoin block output index exceeds u32", true));
+                };
+                earlier_outputs.insert(Outpoint {
+                    transaction_id: *transaction_id,
+                    output_index,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     pub(super) fn insert(
         &mut self,
         transaction_id: TransactionId,

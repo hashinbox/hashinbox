@@ -12,6 +12,7 @@ use json_rpc::{Call, Error, Failure, RawJson};
 use serde_json::{Value, json};
 
 use super::*;
+use crate::indexer::Outpoint;
 
 #[derive(Clone)]
 struct ScriptedClient {
@@ -334,3 +335,105 @@ fn connect_replies() -> Vec<ExpectedReply> {
 
 #[path = "source_cases.rs"]
 mod cases;
+
+#[test]
+fn previous_transaction_identity_validation_precedes_confirmation_and_selection() {
+    let (_, previous, _, _) = external_prevout_block();
+    let transaction_id = TransactionId::from(previous.compute_txid());
+    let hex = consensus::serialize(&previous).to_lower_hex_string();
+    for (result, message) in [
+        (
+            Value::Null,
+            "Bitcoin getrawtransaction result must be an object",
+        ),
+        (
+            json!({"txid": "bad"}),
+            "Bitcoin previous transaction ID is invalid",
+        ),
+        (
+            json!({"txid": hash(9)}),
+            "Bitcoin previous-transaction lookup returned a different transaction ID",
+        ),
+        (
+            json!({"txid": transaction_id.to_string(), "hex": "ff"}),
+            "Bitcoin transaction consensus bytes are invalid",
+        ),
+        (
+            json!({"txid": transaction_id.to_string(), "hex": hex, "blockhash": "bad"}),
+            "Bitcoin RPC returned an invalid block hash",
+        ),
+    ] {
+        let mut replies = connect_replies();
+        replies.push(reply_for(
+            "getrawtransaction",
+            json!([transaction_id.to_string(), true]),
+            result,
+        ));
+        let client = ScriptedClient::new(replies);
+        let source = block_on(Blocks::connect(client.clone(), config())).unwrap();
+        let error = block_on(source.resolve_outputs(transaction_id, &BTreeSet::from([u32::MAX])))
+            .unwrap_err();
+        assert_eq!(error.message, message);
+        assert!(error.retryable);
+        client.assert_exhausted();
+    }
+}
+
+#[test]
+fn previous_transaction_resolution_keeps_only_requested_outputs() {
+    let (_, previous, _, _) = external_prevout_block();
+    let transaction_id = TransactionId::from(previous.compute_txid());
+    let mut replies = connect_replies();
+    replies.push(reply_for(
+        "getrawtransaction",
+        json!([transaction_id.to_string(), true]),
+        json!({
+            "txid": transaction_id.to_string(),
+            "hex": consensus::serialize(&previous).to_lower_hex_string(),
+            "blockhash": hash(5),
+        }),
+    ));
+    let client = ScriptedClient::new(replies);
+    let source = block_on(Blocks::connect(client.clone(), config())).unwrap();
+    let outputs = block_on(source.resolve_outputs(transaction_id, &BTreeSet::from([1]))).unwrap();
+    assert_eq!(outputs.keys().copied().collect::<Vec<_>>(), vec![1]);
+    assert_eq!(
+        outputs[&1].value_satoshis,
+        previous.output[1].value.to_sat()
+    );
+    assert_eq!(
+        outputs[&1].address,
+        crate::Address::from_script_for_network(
+            &previous.output[1].script_pubkey,
+            Network::Regtest,
+        )
+    );
+    client.assert_exhausted();
+}
+
+#[test]
+fn duplicate_transaction_claims_are_validated_before_duplicate_detection_or_lookups() {
+    let (mut block, _, _, _) = external_prevout_block();
+    let first = block["tx"][0].clone();
+    block["tx"] = json!([first.clone(), first]);
+    for invalid_inputs in [true, false] {
+        let mut value = block.clone();
+        if invalid_inputs {
+            value["tx"][1]["vin"] = Value::Null;
+        }
+        let client = ScriptedClient::new(connect_replies());
+        let source = block_on(Blocks::connect(client.clone(), config())).unwrap();
+        let error =
+            block_on(source.enrich_prevouts(serde_json::to_vec(&value).unwrap())).unwrap_err();
+        assert_eq!(
+            error.message,
+            if invalid_inputs {
+                "Bitcoin transaction inputs must be an array"
+            } else {
+                "Bitcoin block contains duplicate transaction IDs"
+            }
+        );
+        assert!(error.retryable);
+        client.assert_exhausted();
+    }
+}

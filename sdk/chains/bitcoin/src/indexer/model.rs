@@ -1,20 +1,14 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-};
+use std::{collections::BTreeMap, fmt};
 
-use bitcoin::{
-    BlockHash as NativeBlockHash, ScriptBuf, Transaction as NativeTransaction, Txid, consensus,
-    hashes::Hash, hex::FromHex,
-};
-use indexing::{BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef};
+use bitcoin::{ScriptBuf, Transaction as NativeTransaction, Txid, consensus, hex::FromHex};
+use indexing::{BlockHeight, BlockRef};
 use serde_json::{Map, Value};
 
 use crate::{Network, Satoshi, TransactionId};
 
 use super::Outpoint;
 
-#[path = "model_value.rs"]
+mod block;
 mod value;
 
 use value::{required_bool, required_string, required_u32, required_u64};
@@ -67,109 +61,6 @@ impl ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.message)
-    }
-}
-
-impl BlockData {
-    pub(super) fn parse(
-        raw: &[u8],
-        expected_height: Option<BlockHeight>,
-        expected_hash: Option<&BlockHash>,
-        network: Network,
-    ) -> Result<Self, ParseError> {
-        let value: Value = serde_json::from_slice(raw)
-            .map_err(|_| ParseError::new("Bitcoin block result is not valid JSON"))?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| ParseError::new("Bitcoin block result must be an object"))?;
-        let height = BlockHeight(required_u64(object, "height", "Bitcoin block height")?);
-        if expected_height.is_some_and(|expected| expected != height) {
-            return Err(ParseError::new(
-                "Bitcoin block height does not match the requested height",
-            ));
-        }
-        let hash = required_string(object, "hash", "Bitcoin block hash")?
-            .parse::<NativeBlockHash>()
-            .map(|hash| BlockHash(hash.to_byte_array().to_vec()))
-            .map_err(|_| ParseError::new("Bitcoin block hash is invalid"))?;
-        if expected_hash.is_some_and(|expected| expected != &hash) {
-            return Err(ParseError::new(
-                "Bitcoin block hash does not match the requested hash",
-            ));
-        }
-        let has_parent = object
-            .get("previousblockhash")
-            .is_some_and(|value| !value.is_null());
-        if height.0 == 0 && has_parent {
-            return Err(ParseError::new(
-                "Bitcoin genesis block unexpectedly has a parent hash",
-            ));
-        }
-        let parent = if height.0 == 0 {
-            None
-        } else {
-            Some(BlockParent {
-                position: BlockPosition(height.0 - 1),
-                hash: required_string(object, "previousblockhash", "Bitcoin previous block hash")?
-                    .parse::<NativeBlockHash>()
-                    .map(|hash| BlockHash(hash.to_byte_array().to_vec()))
-                    .map_err(|_| ParseError::new("Bitcoin block hash is invalid"))?,
-            })
-        };
-        let timestamp = required_u64(object, "time", "Bitcoin block timestamp")?;
-        let transaction_values = object
-            .get("tx")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ParseError::new("Bitcoin block transactions must be an array"))?;
-        let declared_count = required_u64(object, "nTx", "Bitcoin block transaction count")?;
-        if usize::try_from(declared_count).ok() != Some(transaction_values.len()) {
-            return Err(ParseError::new(
-                "Bitcoin block transaction count does not match its transaction array",
-            ));
-        }
-
-        let mut transactions = Vec::with_capacity(transaction_values.len());
-        let mut transaction_ids = BTreeSet::new();
-        let mut same_block_outputs = BTreeMap::new();
-        for transaction in transaction_values {
-            let transaction =
-                Transaction::parse(transaction, height, network, &same_block_outputs)?;
-            if !transaction_ids.insert(transaction.id) {
-                return Err(ParseError::new(
-                    "Bitcoin block contains duplicate transaction IDs",
-                ));
-            }
-            for (index, output) in transaction.outputs.iter().enumerate() {
-                let Ok(output_index) = u32::try_from(index) else {
-                    return Err(ParseError::new("Bitcoin output index exceeds u32"));
-                };
-                let script = ScriptBuf::from_bytes(output.script_pubkey.clone());
-                let outpoint = Outpoint {
-                    transaction_id: transaction.id,
-                    output_index,
-                };
-                same_block_outputs.insert(
-                    outpoint,
-                    PreviousOutput {
-                        outpoint,
-                        value: output.value,
-                        address: crate::Address::from_script_for_network(&script, network),
-                    },
-                );
-            }
-            transactions.push(transaction);
-        }
-
-        Ok(Self {
-            reference: BlockRef {
-                position: BlockPosition(height.0),
-                height,
-                hash,
-                parent,
-                timestamp: Some(timestamp),
-            },
-            transactions,
-        })
     }
 }
 
@@ -330,23 +221,73 @@ impl Input {
                 "Bitcoin coinbase transaction contains a non-coinbase input",
             ));
         }
+        let outpoint = Outpoint::parse_input(object, &native_input.previous_output, index)?;
+        let previous_output = PreviousOutput::resolve(
+            object,
+            outpoint,
+            index,
+            block_height,
+            network,
+            same_block_outputs,
+        )?;
+        Ok(Self {
+            previous_output: Some(previous_output),
+        })
+    }
+}
+
+impl Outpoint {
+    fn parse_input(
+        object: &Map<String, Value>,
+        native: &bitcoin::OutPoint,
+        index: usize,
+    ) -> Result<Self, ParseError> {
         let previous_id = required_string(object, "txid", "Bitcoin input previous transaction ID")?
             .parse::<TransactionId>()
             .map_err(|_| ParseError::new("Bitcoin transaction ID is invalid"))?;
         let output_index = required_u32(object, "vout", "Bitcoin input output index")?;
-        if native_input.previous_output.txid != Txid::from(previous_id)
-            || native_input.previous_output.vout != output_index
-        {
+        if native.txid != Txid::from(previous_id) || native.vout != output_index {
             return Err(ParseError::new(format!(
                 "Bitcoin input {index} outpoint does not match its consensus bytes"
             )));
         }
-        let outpoint = Outpoint {
+        Ok(Self {
             transaction_id: previous_id,
             output_index,
-        };
+        })
+    }
+}
+
+impl PreviousOutput {
+    fn from_output(
+        transaction_id: TransactionId,
+        index: usize,
+        output: &Output,
+        network: Network,
+    ) -> Result<Self, ParseError> {
+        let output_index = u32::try_from(index)
+            .map_err(|_| ParseError::new("Bitcoin output index exceeds u32"))?;
+        let script = ScriptBuf::from_bytes(output.script_pubkey.clone());
+        Ok(Self {
+            outpoint: Outpoint {
+                transaction_id,
+                output_index,
+            },
+            value: output.value,
+            address: crate::Address::from_script_for_network(&script, network),
+        })
+    }
+
+    fn resolve(
+        object: &Map<String, Value>,
+        outpoint: Outpoint,
+        index: usize,
+        block_height: BlockHeight,
+        network: Network,
+        same_block_outputs: &BTreeMap<Outpoint, PreviousOutput>,
+    ) -> Result<Self, ParseError> {
         let local = same_block_outputs.get(&outpoint);
-        let previous_output = match object.get("prevout").and_then(Value::as_object) {
+        match object.get("prevout").and_then(Value::as_object) {
             Some(prevout) => {
                 let resolved = PreviousOutput::parse(prevout, outpoint, block_height, network)?;
                 let conflicts = local.is_some_and(|local| local != &resolved);
@@ -355,21 +296,16 @@ impl Input {
                         "Bitcoin input {index} prevout conflicts with an earlier same-block output"
                     )));
                 }
-                resolved
+                Ok(resolved)
             }
             None => local.cloned().ok_or_else(|| {
                 ParseError::new(format!(
                     "Bitcoin input {index} has no resolved previous output"
                 ))
-            })?,
-        };
-        Ok(Self {
-            previous_output: Some(previous_output),
-        })
+            }),
+        }
     }
-}
 
-impl PreviousOutput {
     fn parse(
         prevout: &Map<String, Value>,
         outpoint: Outpoint,
@@ -458,9 +394,62 @@ impl PreviousOutput {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin::hex::DisplayHex;
+    use bitcoin::{hashes::Hash, hex::DisplayHex};
 
     use super::*;
+
+    #[test]
+    fn inputs_preserve_coinbase_rules_before_outpoint_and_prevout_validation() {
+        let null = bitcoin::OutPoint::null();
+        let regular = bitcoin::OutPoint::new(Txid::from_byte_array([1; 32]), 0);
+        for (outpoint, coinbase, input, expected) in [
+            (
+                null,
+                true,
+                Value::Null,
+                Some("Bitcoin transaction input must be an object"),
+            ),
+            (null, true, serde_json::json!({"coinbase": ""}), None),
+            (
+                null,
+                true,
+                serde_json::json!({"coinbase": null}),
+                Some("Bitcoin null input is not a valid coinbase input"),
+            ),
+            (
+                null,
+                false,
+                serde_json::json!({"coinbase": "00"}),
+                Some("Bitcoin null input is not a valid coinbase input"),
+            ),
+            (
+                regular,
+                true,
+                serde_json::json!({"txid": "invalid", "prevout": {}}),
+                Some("Bitcoin coinbase transaction contains a non-coinbase input"),
+            ),
+        ] {
+            let native = bitcoin::TxIn {
+                previous_output: outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            };
+            let result = Input::parse(
+                &input,
+                &native,
+                0,
+                coinbase,
+                BlockHeight(10),
+                Network::Regtest,
+                &BTreeMap::new(),
+            );
+            match expected {
+                Some(message) => assert_eq!(result.unwrap_err().to_string(), message),
+                None => assert_eq!(result.unwrap().previous_output, None),
+            }
+        }
+    }
 
     #[test]
     fn transaction_projection_preserves_consensus_checks_and_error_precedence() {
@@ -631,47 +620,6 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.to_string(), message);
             transaction["vout"][0][field] = restored;
-        }
-    }
-
-    #[test]
-    fn genesis_parent_rules_preserve_identity_validation_order() {
-        let original = serde_json::json!({
-            "height": 0, "hash": "00".repeat(32), "time": 2, "tx": [], "nTx": 0,
-        });
-        for parent in [None, Some(Value::Null)] {
-            let mut value = original.clone();
-            if let Some(parent) = parent {
-                value["previousblockhash"] = parent;
-            }
-            let block = BlockData::parse(
-                &serde_json::to_vec(&value).unwrap(),
-                Some(BlockHeight(0)),
-                Some(&BlockHash(vec![0; 32])),
-                Network::Regtest,
-            )
-            .unwrap();
-            assert_eq!(block.reference.parent, None);
-            assert_eq!(block.reference.position, BlockPosition(0));
-        }
-
-        for parent in [serde_json::json!("invalid"), serde_json::json!(false)] {
-            let mut value = original.clone();
-            value["previousblockhash"] = parent;
-            value["time"] = Value::Null;
-            let raw = serde_json::to_vec(&value).unwrap();
-            let error = BlockData::parse(&raw, None, None, Network::Regtest).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "Bitcoin genesis block unexpectedly has a parent hash"
-            );
-            let error =
-                BlockData::parse(&raw, None, Some(&BlockHash(vec![1; 32])), Network::Regtest)
-                    .unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "Bitcoin block hash does not match the requested hash"
-            );
         }
     }
 
@@ -863,59 +811,5 @@ mod tests {
             error.to_string(),
             "Bitcoin input 0 outpoint does not match its consensus bytes"
         );
-    }
-
-    #[test]
-    fn block_hashes_keep_native_byte_order_and_case_acceptance() {
-        let hash = "1F1E1D1C1B1A191817161514131211100F0E0D0C0B0A09080706050403020100";
-        let parent = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-        let raw = serde_json::json!({
-            "height": 1, "hash": hash, "previousblockhash": parent,
-            "time": 2, "tx": [], "nTx": 0,
-        });
-        let block = BlockData::parse(
-            &serde_json::to_vec(&raw).unwrap(),
-            None,
-            None,
-            Network::Regtest,
-        )
-        .unwrap();
-        assert_eq!(block.reference.hash, BlockHash((0_u8..32).collect()));
-        assert_eq!(
-            block.reference.parent.unwrap().hash,
-            BlockHash((0_u8..32).rev().collect())
-        );
-    }
-
-    #[test]
-    fn block_hash_errors_keep_context_and_height_validation_precedence() {
-        let invalid = serde_json::json!({"height": 1, "hash": "invalid"});
-        let raw = serde_json::to_vec(&invalid).unwrap();
-        let error =
-            BlockData::parse(&raw, Some(BlockHeight(2)), None, Network::Regtest).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "Bitcoin block height does not match the requested height"
-        );
-        let error = BlockData::parse(&raw, None, None, Network::Regtest).unwrap_err();
-        assert_eq!(error.to_string(), "Bitcoin block hash is invalid");
-
-        for field in ["hash", "previousblockhash"] {
-            for value in ["00".repeat(31), "00".repeat(33), "gg".repeat(32)] {
-                let mut block = serde_json::json!({
-                    "height": 1, "hash": "00".repeat(32), "previousblockhash": "00".repeat(32),
-                    "time": 2, "tx": [], "nTx": 0,
-                });
-                block[field] = Value::String(value);
-                let error = BlockData::parse(
-                    &serde_json::to_vec(&block).unwrap(),
-                    None,
-                    None,
-                    Network::Regtest,
-                )
-                .unwrap_err();
-                assert_eq!(error.to_string(), "Bitcoin block hash is invalid");
-            }
-        }
     }
 }
