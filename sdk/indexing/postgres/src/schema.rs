@@ -231,6 +231,16 @@ pub async fn validate_schema(pool: &Pool, expected_schema: &str) -> Result<(), I
     )
     .await?;
 
+    require_indexes(&transaction, &schema).await?;
+    require_journal_cascade(&transaction, &schema).await?;
+
+    transaction.commit().await.map_err(store)
+}
+
+async fn require_indexes(
+    transaction: &tokio_postgres::Transaction<'_>,
+    schema: &str,
+) -> Result<(), IndexError> {
     let mut actual_indexes = BTreeSet::new();
     for row in transaction.query(INDEXES, &[]).await.map_err(store)? {
         let table: String = row.try_get(0).map_err(store)?;
@@ -248,7 +258,13 @@ pub async fn validate_schema(pool: &Pool, expected_schema: &str) -> Result<(), I
             "PostgreSQL schema {schema} has incompatible indexes"
         )));
     }
+    Ok(())
+}
 
+async fn require_journal_cascade(
+    transaction: &tokio_postgres::Transaction<'_>,
+    schema: &str,
+) -> Result<(), IndexError> {
     let cascade: Option<bool> = transaction
         .query_opt(JOURNAL_CASCADE, &[])
         .await
@@ -261,8 +277,7 @@ pub async fn validate_schema(pool: &Pool, expected_schema: &str) -> Result<(), I
             "PostgreSQL schema {schema} has incompatible journal cascade"
         )));
     }
-
-    transaction.commit().await.map_err(store)
+    Ok(())
 }
 
 async fn require_signature(

@@ -84,6 +84,54 @@ impl ResolvedTransfer {
         }
         Ok(destination.address().clone())
     }
+
+    fn classify_accounts(
+        &self,
+        destination: &Address,
+        observed: &BTreeMap<Address, Option<AccountSnapshot>>,
+    ) -> Result<Lamport, SendError> {
+        let source = observed.get(&self.source).ok_or_else(|| {
+            SendError::operation(
+                WalletErrorKind::Unavailable,
+                "Solana source observation is missing",
+            )
+        })?;
+        if !source
+            .as_ref()
+            .is_none_or(AccountSnapshot::supports_native_transfer)
+        {
+            return Err(SendError::item(
+                self.index,
+                Vec::new(),
+                WalletError::new(
+                    WalletErrorKind::Unsupported,
+                    "unsupported Solana source account",
+                ),
+            ));
+        }
+        let destination = observed.get(destination).ok_or_else(|| {
+            SendError::operation(
+                WalletErrorKind::Unavailable,
+                "Solana destination observation is missing",
+            )
+        })?;
+        if !destination
+            .as_ref()
+            .is_none_or(AccountSnapshot::supports_native_transfer)
+        {
+            return Err(SendError::item(
+                self.index,
+                Vec::new(),
+                WalletError::new(
+                    WalletErrorKind::Unsupported,
+                    "unsupported Solana destination account",
+                ),
+            ));
+        }
+        Ok(source
+            .as_ref()
+            .map_or(Lamport::ZERO, AccountSnapshot::lamports))
+    }
 }
 
 #[derive(Clone, Default)]
@@ -281,49 +329,7 @@ fn classify(
 ) -> Result<Vec<Lamport>, SendError> {
     let mut balances = Vec::with_capacity(items.len());
     for (item, destination) in items.iter().zip(destinations) {
-        let source = observed.get(&item.source).ok_or_else(|| {
-            SendError::operation(
-                WalletErrorKind::Unavailable,
-                "Solana source observation is missing",
-            )
-        })?;
-        if !source
-            .as_ref()
-            .is_none_or(AccountSnapshot::supports_native_transfer)
-        {
-            return Err(SendError::item(
-                item.index,
-                Vec::new(),
-                WalletError::new(
-                    WalletErrorKind::Unsupported,
-                    "unsupported Solana source account",
-                ),
-            ));
-        }
-        let destination = observed.get(destination).ok_or_else(|| {
-            SendError::operation(
-                WalletErrorKind::Unavailable,
-                "Solana destination observation is missing",
-            )
-        })?;
-        if !destination
-            .as_ref()
-            .is_none_or(AccountSnapshot::supports_native_transfer)
-        {
-            return Err(SendError::item(
-                item.index,
-                Vec::new(),
-                WalletError::new(
-                    WalletErrorKind::Unsupported,
-                    "unsupported Solana destination account",
-                ),
-            ));
-        }
-        balances.push(
-            source
-                .as_ref()
-                .map_or(Lamport::ZERO, AccountSnapshot::lamports),
-        );
+        balances.push(item.classify_accounts(destination, observed)?);
     }
     Ok(balances)
 }

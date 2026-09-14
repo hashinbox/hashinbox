@@ -1,11 +1,11 @@
 //! Canonical history, movement, and live-output writes for one block commit.
 
 use deadpool_postgres::Transaction;
-use indexing::{BlockAddition, IndexError, IndexErrorKind, IndexScope};
+use indexing::{BlockAddition, BlockRef, IndexError, IndexErrorKind, IndexScope};
 use tokio_postgres::types::ToSql;
 
 use crate::{
-    columns::{HistoryRows, OutputRows, SpendKeys},
+    columns::{HistoryRows, MovementRows, OutputRows, SpendKeys},
     row,
 };
 
@@ -70,81 +70,98 @@ pub(crate) async fn write_history(
     addition: &BlockAddition,
 ) -> Result<(), IndexError> {
     let history = HistoryRows::try_from(addition)?;
-
     if history.is_empty() {
         return Ok(());
     }
+    history
+        .write(transaction, scope, height, addition.block())
+        .await?;
+    history.movements.write(transaction, scope, height).await
+}
 
-    let block = addition.block();
-    let block_position = row::as_i64(block.position.0, "block position")?;
-    let block_parent_position = block
-        .parent
-        .as_ref()
-        .map(|parent| row::as_i64(parent.position.0, "parent block position"))
-        .transpose()?;
-    let block_parent = block.parent.as_ref().map(|parent| parent.hash.0.clone());
-    let block_timestamp = block
-        .timestamp
-        .map(|value| row::as_i64(value, "block timestamp"))
-        .transpose()?;
-    let statement = transaction
-        .prepare_cached(WRITE_HISTORY)
-        .await
-        .map_err(crate::store)?;
-    transaction
-        .execute(
-            &statement,
-            &[
-                &scope.chain.0,
-                &scope.network,
-                &height,
-                &block_position,
-                &block.hash.0,
-                &block_parent_position,
-                &block_parent,
-                &block_timestamp,
-                &history.address,
-                &history.transaction_id,
-                &history.status,
-                &history.failure_reason,
-                &history.fee_asset,
-                &history.fee_amount,
-                &history.fee_payer,
-            ],
-        )
-        .await
-        .map_err(conflict_aware)?;
-
-    let movements = &history.movements;
-    if movements.is_empty() {
-        return Ok(());
+impl HistoryRows {
+    async fn write(
+        &self,
+        transaction: &Transaction<'_>,
+        scope: &IndexScope,
+        height: i64,
+        block: &BlockRef,
+    ) -> Result<(), IndexError> {
+        let block_position = row::as_i64(block.position.0, "block position")?;
+        let block_parent_position = block
+            .parent
+            .as_ref()
+            .map(|parent| row::as_i64(parent.position.0, "parent block position"))
+            .transpose()?;
+        let block_parent = block.parent.as_ref().map(|parent| parent.hash.0.clone());
+        let block_timestamp = block
+            .timestamp
+            .map(|value| row::as_i64(value, "block timestamp"))
+            .transpose()?;
+        let statement = transaction
+            .prepare_cached(WRITE_HISTORY)
+            .await
+            .map_err(crate::store)?;
+        let parameters: [&(dyn ToSql + Sync); 15] = [
+            &scope.chain.0,
+            &scope.network,
+            &height,
+            &block_position,
+            &block.hash.0,
+            &block_parent_position,
+            &block_parent,
+            &block_timestamp,
+            &self.address,
+            &self.transaction_id,
+            &self.status,
+            &self.failure_reason,
+            &self.fee_asset,
+            &self.fee_amount,
+            &self.fee_payer,
+        ];
+        transaction
+            .execute(&statement, &parameters)
+            .await
+            .map_err(conflict_aware)?;
+        Ok(())
     }
-    let statement = transaction
-        .prepare_cached(WRITE_MOVEMENT)
-        .await
-        .map_err(crate::store)?;
-    transaction
-        .execute(
-            &statement,
-            &[
-                &scope.chain.0,
-                &scope.network,
-                &height,
-                &movements.address,
-                &movements.transaction_id,
-                &movements.ordinal,
-                &movements.kind,
-                &movements.movement_id,
-                &movements.asset_chain,
-                &movements.asset,
-                &movements.amount,
-                &movements.from_address,
-                &movements.to_address,
-            ],
-        )
-        .await
-        .map_err(conflict_aware)?;
-    Ok(())
+}
+
+impl MovementRows {
+    async fn write(
+        &self,
+        transaction: &Transaction<'_>,
+        scope: &IndexScope,
+        height: i64,
+    ) -> Result<(), IndexError> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        let statement = transaction
+            .prepare_cached(WRITE_MOVEMENT)
+            .await
+            .map_err(crate::store)?;
+        let parameters: [&(dyn ToSql + Sync); 13] = [
+            &scope.chain.0,
+            &scope.network,
+            &height,
+            &self.address,
+            &self.transaction_id,
+            &self.ordinal,
+            &self.kind,
+            &self.movement_id,
+            &self.asset_chain,
+            &self.asset,
+            &self.amount,
+            &self.from_address,
+            &self.to_address,
+        ];
+        transaction
+            .execute(&statement, &parameters)
+            .await
+            .map_err(conflict_aware)?;
+        Ok(())
+    }
 }
 
 pub(crate) async fn write_created(
