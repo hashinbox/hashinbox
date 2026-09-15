@@ -19,7 +19,7 @@ tokio = { workspace = true, features = ["sync", "signal"] }
 
 [[bin]]
 name = "bitcoin_wallet"
-path = "bitcoin_wallet.rs"
+path = "bitcoin-wallet.rs"
 
 [[bin]]
 name = "ethereum_wallet"
