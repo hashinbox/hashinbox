@@ -1,9 +1,6 @@
 use std::{env, error::Error, io, sync::Arc, time::Duration};
-use std::thread::scope;
 use chain_bitcoin::{AddressType, WalletProvider, WalletConfig, FeeRate, IndexerSettings, Network, Credentials};
 use indexing::{ChainId, IndexScope};
-use indexing_runtime::SyncState;
-use tokio::sync::watch;
 
 type AnyError = Box<dyn Error + Send + Sync>;
 

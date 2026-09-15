@@ -2901,6 +2901,8 @@ name = "payment-examples"
 version = "0.1.0"
 dependencies = [
  "chain-bitcoin",
+ "chain-ethereum",
+ "chain-solana",
  "indexing",
  "indexing-redb",
  "indexing-runtime",
