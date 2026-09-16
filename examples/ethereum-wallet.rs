@@ -67,7 +67,9 @@ async fn main() -> Result<(), AnyError> {
     println!("Ethereum indexing database opened.");
 
     // 4. Create the indexer with a transaction observer.
-    let indexer = Arc::new(settings.build(source, repository, Some(Arc::new(TransactionLog)))?);
+    let indexer = Arc::new(
+        settings.build(source, repository, 
+            Some(Arc::new(TransactionLog)))?);
 
     // 5. Create the wallet provider with shared account and transaction clients.
     let limits = Limits::new(

@@ -1,22 +1,17 @@
-use std::{env, error::Error, io, sync::Arc, time::Duration};
-use chain_bitcoin::{AddressType, WalletProvider, WalletConfig, FeeRate, IndexerSettings, Network, Credentials};
+use chain_bitcoin::{AddressType, FeeRate, IndexerSettings, Network, WalletConfig, WalletProvider};
 use indexing::{ChainId, IndexScope};
+use std::{error::Error, sync::Arc, time::Duration};
+use wallets::{Provider, Wallet, HistoryRequest};
 
 type AnyError = Box<dyn Error + Send + Sync>;
 
 struct TransactionLog;
 
 impl indexing::Observer for TransactionLog {
-    fn observed<'a>(
-        &'a self,
-        block: indexing::BlockObservation,
-    ) -> indexing::BoxFuture<'a, ()> {
+    fn observed<'a>(&'a self, block: indexing::BlockObservation) -> indexing::BoxFuture<'a, ()> {
         Box::pin(async move {
             for transaction in block.transactions {
-                println!(
-                    "Transaction included: {}",
-                    transaction.transaction_id.value
-                );
+                println!("Transaction included: {}", transaction.transaction_id.value);
             }
         })
     }
@@ -26,7 +21,54 @@ const GENESIS_HASH: &str = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
+    let network = Network::Regtest;
+    let settings = IndexerSettings::new(
+        "http://bitcoin:bitcoin@127.0.0.1:18443",
+        network,
+        GENESIS_HASH,
+    );
+    let config = WalletConfig {
+        scope: settings.scope(),
+        network,
+        address_type: AddressType::SegwitV0,
+        fee_target_blocks: 6,
+        max_fee_rate: FeeRate::new(10_000),
+    };
 
+    println!("Connecting to local Bitcoin regtest...");
+    let rpc = settings.client().await?;
+    let db_dir = std::path::absolute(".redb-data")?;
+    let storage = tokio::task::spawn_blocking(move || -> Result<_, AnyError> {
+        std::fs::create_dir_all(&db_dir)?;
+        Ok(storage_redb::Redb::open(db_dir.join("bitcoin.redb"))?)
+    })
+    .await??;
+    let repository = Arc::new(indexing_redb::Repository::new(storage, settings.scope())?);
+    let history = Arc::new(settings.build(rpc.clone(), repository.as_ref().clone(), None)?);
+    let utxos = Arc::new(chain_bitcoin::IndexUtxos::new(
+        config.scope.clone(),
+        network,
+        repository,
+    )?);
+    let provider: Arc<dyn Provider> = Arc::new(WalletProvider::new(
+        config,
+        utxos,
+        Arc::new(rpc.fees()),
+        Arc::new(rpc.transactions()),
+        history,
+    ));
+
+    let wallet: Arc<dyn Wallet> = provider.generate().await?;
+    let address = wallet.address_text(&wallet.address())?;
+    println!("Wallet address: {}", address.text);
+
+    // 6. Query the wallet's history.
+    
+
+    Ok(())
+}
+
+async fn bitcoin_wallet_indexer() -> Result<(), AnyError> {
     // 1. configure the Bitcoin wallet
     let network = Network::Regtest;
 
@@ -42,10 +84,10 @@ async fn main() -> Result<(), AnyError> {
     };
 
     // 2.Create the Bitcoin RPC client
-    let mut settings = IndexerSettings::new(
+    let settings = IndexerSettings::new(
         "http://bitcoin:bitcoin@127.0.0.1:18443".to_owned(),
         network,
-        GENESIS_HASH
+        GENESIS_HASH,
     );
 
     let rpc = settings.client().await?;
@@ -54,14 +96,11 @@ async fn main() -> Result<(), AnyError> {
     let db_dir = std::path::absolute(".redb-data")?;
     std::fs::create_dir_all(&db_dir)?;
     let db_path = db_dir.join("bitcoin.redb");
-    let storage = tokio::task::spawn_blocking(|| {
-        storage_redb::Redb::open(db_path)
-    }).await??;
+    let storage = tokio::task::spawn_blocking(|| storage_redb::Redb::open(db_path)).await??;
 
-    let repository = Arc::new(indexing_redb::Repository::new(
-        storage,
-        settings.scope(),
-    )?);
+    let repository = Arc::new(
+        indexing_redb::Repository::new(storage, settings.scope())?
+    );
 
     // 4. Create the Bitcoin indexer
     let indexer = Arc::new(settings.build(
@@ -95,23 +134,22 @@ async fn main() -> Result<(), AnyError> {
     println!("Wallet-1 address: {}", address1.text);
 
     // 7. Select the generated wallet's address.
-    let selection: Arc<dyn indexing::FilterSource> =
-        Arc::new(vec![
-            indexing::AddressFilter {
-                address: indexing::CanonicalAddress {
-                    scope: settings.scope(),
-                    value: address.text,
-                },
-                start_position: indexing::BlockPosition(0),
+    let selection: Arc<dyn indexing::FilterSource> = Arc::new(vec![
+        indexing::AddressFilter {
+            address: indexing::CanonicalAddress {
+                scope: settings.scope(),
+                value: address.text,
             },
-            indexing::AddressFilter {
-                address: indexing::CanonicalAddress {
-                    scope: settings.scope(),
-                    value: address1.text
-                },
-                start_position: indexing::BlockPosition(0),
-            }
-        ]);
+            start_position: indexing::BlockPosition(0),
+        },
+        indexing::AddressFilter {
+            address: indexing::CanonicalAddress {
+                scope: settings.scope(),
+                value: address1.text,
+            },
+            start_position: indexing::BlockPosition(0),
+        },
+    ]);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let (state_tx, mut state_rx) =
@@ -131,25 +169,25 @@ async fn main() -> Result<(), AnyError> {
 
     loop {
         tokio::select! {
-        biased;
+            biased;
 
-        result = &mut syncing => {
-            result?;
-            break;
-        }
+            result = &mut syncing => {
+                result?;
+                break;
+            }
 
-        signal = tokio::signal::ctrl_c() => {
-            signal?;
-            shutdown_tx.send_replace(true);
-            syncing.await?;
-            break;
-        }
+            signal = tokio::signal::ctrl_c() => {
+                signal?;
+                shutdown_tx.send_replace(true);
+                syncing.await?;
+                break;
+            }
 
-        changed = state_rx.changed() => {
-            changed?;
-            println!("Indexer: {:?}", *state_rx.borrow_and_update());
+            changed = state_rx.changed() => {
+                changed?;
+                println!("Indexer: {:?}", *state_rx.borrow_and_update());
+            }
         }
-    }
     }
 
     Ok(())
