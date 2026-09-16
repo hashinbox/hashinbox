@@ -5,6 +5,7 @@ mod batch;
 mod erc20;
 mod error;
 mod indexer;
+mod network;
 mod rpc;
 mod transaction;
 mod wallet;
@@ -13,8 +14,9 @@ pub use address::Address as EthereumAddress;
 pub use address::{Address, AddressParseError};
 pub use error::{ChainError, ChainErrorKind};
 pub use indexer::{
-    Block, BlockClient, BlockInterpreter, Indexer, IndexerSettings, Network, Source, SourceConfig,
+    Block, BlockClient, BlockInterpreter, Indexer, IndexerSettings, Source, SourceConfig,
 };
+pub use network::Network;
 pub use rpc::{
     AccountClient, Accounts, BuildError, BuildErrorKind, Client as RpcClient, HttpAccounts,
     HttpConfig, HttpTransactions, Limits, TransactionClient, Transactions,

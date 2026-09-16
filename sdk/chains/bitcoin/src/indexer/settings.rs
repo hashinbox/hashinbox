@@ -1,91 +1,36 @@
-//! Declarative construction for the Bitcoin block indexer.
+//! Bitcoin indexing policy over an already verified RPC client.
 //!
-//! Collapses the transport, node preflight, source, interpreter, and
-//! synchronization wiring into one value an embedding binary can fill in and
-//! hand over. The repository stays a parameter: this crate implements chain
-//! semantics and must not know which storage backend an application chose.
+//! The embedding application owns transport construction and connects its shared
+//! RPC client before opening storage. These settings own only indexing policy.
 
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use indexing::{ChainId, IndexError, IndexErrorKind, IndexScope, Observer, SyncConfig};
-use json_rpc::{Config as TransportConfig, Http, Retry};
 
-use crate::{
-    BlockInterpreter, CoreConfig, Indexer, Network, RpcClient, Source, SourceConfig,
-    parse_bitcoin_block_hash,
-};
+use crate::{BlockInterpreter, Indexer, Network, RpcClient, Source, SourceConfig};
 
-/// Bitcoin Core RPC credentials, sent as HTTP basic authentication.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Credentials {
-    pub user: String,
-    pub password: String,
-}
-
-impl Credentials {
-    fn header(&self) -> (String, String) {
-        use base64::Engine;
-
-        let encoded = base64::engine::general_purpose::STANDARD
-            .encode(format!("{}:{}", self.user, self.password));
-        ("Authorization".to_owned(), format!("Basic {encoded}"))
-    }
-}
-
-/// Everything required to build a Bitcoin indexer.
-///
-/// Every field is public, so a caller may take [`IndexerSettings::new`] and
-/// override only what differs from the defaults.
+/// Synchronization and confirmation policy for one Bitcoin network.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexerSettings {
-    /// Bitcoin Core JSON-RPC endpoints. The first is primary; any others are
-    /// tried in order when it fails.
-    pub endpoints: Vec<String>,
-    /// Encoded into an `Authorization` header when present.
-    pub credentials: Option<Credentials>,
-    /// Extra request headers, for a proxy or a pre-encoded cookie credential.
-    pub headers: Vec<(String, String)>,
-    /// Verified against the node before the indexer is returned.
+    /// Must match the already verified RPC client.
     pub network: Network,
-    /// Verified against the node before the indexer is returned.
-    pub genesis_hash: String,
     /// Depth at which history reports a transaction confirmed.
     pub confirmations: u64,
     /// How far back a reorg can be reversed from the rollback journal.
     pub reorg_retention: u64,
     /// Blocks indexed per `sync` call.
     pub batch_size: usize,
-    pub request_timeout: Duration,
-    pub max_response_bytes: usize,
-    pub retry_attempts: NonZeroU32,
-    pub retry_initial_backoff: Duration,
-    pub retry_max_backoff: Duration,
 }
 
 impl IndexerSettings {
-    /// Settings for one endpoint, with defaults matching the reference
-    /// application: three retries, a fifteen-second request budget, six
-    /// confirmations, and a hundred-block rollback journal.
+    /// Uses six confirmations, a hundred-block rollback journal, and batches of a hundred blocks.
     #[must_use]
-    pub fn new(
-        endpoint: impl Into<String>,
-        network: Network,
-        genesis_hash: impl Into<String>,
-    ) -> Self {
+    pub const fn new(network: Network) -> Self {
         Self {
-            endpoints: vec![endpoint.into()],
-            credentials: None,
-            headers: Vec::new(),
             network,
-            genesis_hash: genesis_hash.into(),
             confirmations: 6,
             reorg_retention: 100,
             batch_size: 100,
-            request_timeout: Duration::from_secs(15),
-            max_response_bytes: 64 * 1024 * 1024,
-            retry_attempts: NonZeroU32::new(3).expect("three is not zero"),
-            retry_initial_backoff: Duration::from_millis(250),
-            retry_max_backoff: Duration::from_secs(2),
         }
     }
 
@@ -99,39 +44,21 @@ impl IndexerSettings {
         }
     }
 
-    /// Opens one long-lived Bitcoin Core connection and verifies the node
-    /// before any indexing happens: expected network, genesis block, supported
-    /// major version, and a transaction index that has reached the tip.
-    ///
-    /// Hold this for the life of the process and clone it as needed — a clone
-    /// is an `Arc` bump — so indexing and wallet capabilities share one
-    /// connection instead of opening a second.
-    pub async fn client(&self) -> Result<RpcClient<Http>, IndexError> {
-        let genesis = parse_bitcoin_block_hash(&self.genesis_hash)?;
-        Ok(RpcClient::connect(
-            self.transport()?,
-            CoreConfig {
-                expected_network: self.network,
-                expected_genesis_hash: genesis,
-            },
-        )
-        .await?)
-    }
-
     /// Builds an indexer on an already-connected client.
     ///
-    /// Takes the genesis hash from the client rather than re-reading it here,
-    /// so the source cannot disagree with the connection it was given.
+    /// Takes the optional genesis pin from the client without making another
+    /// RPC request, so the source cannot disagree with its connection.
     ///
     /// `observer`, when supplied, is called after each block this indexer
     /// commits. Pass `None` to index without notification.
-    pub fn build<R>(
+    pub fn build<C, R>(
         &self,
-        client: RpcClient<Http>,
+        client: RpcClient<C>,
         repository: R,
         observer: Option<Arc<dyn Observer>>,
-    ) -> Result<Indexer<Http, R>, IndexError>
+    ) -> Result<Indexer<C, R>, IndexError>
     where
+        C: json_rpc::Client,
         R: Clone,
     {
         if client.config().expected_network != self.network {
@@ -166,54 +93,180 @@ impl IndexerSettings {
         }
         Ok(indexer)
     }
-
-    fn transport(&self) -> Result<Http, IndexError> {
-        let primary = self.endpoints.first().ok_or_else(|| {
-            IndexError::new(
-                IndexErrorKind::InvalidRequest,
-                "at least one Bitcoin RPC endpoint is required",
-                false,
-            )
-        })?;
-        let mut config = TransportConfig::new(primary.clone(), self.request_timeout);
-        config.endpoints.clone_from(&self.endpoints);
-        config.max_response_bytes = self.max_response_bytes;
-        config.headers.clone_from(&self.headers);
-        if let Some(credentials) = &self.credentials {
-            config.headers.push(credentials.header());
-        }
-        config.retry = Retry::new(
-            self.retry_attempts,
-            self.retry_initial_backoff,
-            self.retry_max_backoff,
-        )
-        .map_err(|error| IndexError::new(IndexErrorKind::Source, error.to_string(), false))?;
-        Http::new(config)
-            .map_err(|error| IndexError::new(IndexErrorKind::Source, error.to_string(), false))
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use futures_executor::block_on;
+    use json_rpc::{BoxFuture, Call, CallResult, Error, RawJson};
+    use serde_json::{Value, json};
+
     use super::*;
+    use crate::CoreConfig;
+
+    struct Readiness {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl json_rpc::Client for Readiness {
+        fn request<'a>(
+            &'a self,
+            method: &'a str,
+            params: Value,
+        ) -> BoxFuture<'a, Result<CallResult, Error>> {
+            let mut calls = self.calls.lock().unwrap();
+            let result = match calls.len() {
+                0 => {
+                    assert_eq!((method, params), ("getnetworkinfo", json!([])));
+                    json!({"version": 310000})
+                }
+                1 => {
+                    assert_eq!((method, params), ("getblockchaininfo", json!([])));
+                    json!({
+                        "chain": "regtest", "blocks": 10, "headers": 10,
+                        "bestblockhash": "02".repeat(32),
+                        "initialblockdownload": false, "pruned": false,
+                    })
+                }
+                2 => {
+                    assert_eq!((method, params), ("getindexinfo", json!(["txindex"])));
+                    json!({"txindex": {"synced": true, "best_block_height": 10}})
+                }
+                3 => {
+                    assert_eq!((method, params), ("getblockhash", json!([0])));
+                    json!("01".repeat(32))
+                }
+                _ => panic!("building the indexer must not repeat verified RPC checks"),
+            };
+            calls.push(method.to_owned());
+            Box::pin(async move { Ok(Ok(RawJson::from_serializable(&result)?)) })
+        }
+
+        fn request_once<'a>(
+            &'a self,
+            _: &'a str,
+            _: Value,
+        ) -> BoxFuture<'a, Result<CallResult, Error>> {
+            panic!("indexer construction must not submit transactions")
+        }
+
+        fn batch<'a>(&'a self, _: Vec<Call>) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+            panic!("readiness checks must retain their ordered requests")
+        }
+    }
 
     #[test]
-    fn transport_configuration_errors_keep_source_kind_nonretryability_and_order() {
-        let mut settings =
-            IndexerSettings::new("http://127.0.0.1:18443", Network::Regtest, "unused");
-        settings.headers = vec![("invalid header".to_owned(), "value".to_owned())];
-        settings.retry_initial_backoff = Duration::from_secs(3);
-        let error = settings.transport().unwrap_err();
-        assert_eq!(error.kind, IndexErrorKind::Source);
-        assert!(!error.retryable);
+    fn construction_uses_verified_client_and_validates_network_before_policy() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let client = block_on(RpcClient::connect_with(
+            Readiness {
+                calls: calls.clone(),
+            },
+            CoreConfig::new(Network::Regtest)
+                .with_genesis_hash(&"01".repeat(32))
+                .unwrap(),
+        ))
+        .unwrap();
+        let mut settings = IndexerSettings::new(Network::Regtest);
+        assert_eq!(settings.scope().network, "regtest");
+        assert_eq!(settings.scope().chain.0, crate::CHAIN);
+        assert_eq!(
+            (
+                settings.confirmations,
+                settings.reorg_retention,
+                settings.batch_size
+            ),
+            (6, 100, 100)
+        );
+        settings.build(client.clone(), (), None).unwrap();
+
+        settings.network = Network::Mainnet;
+        settings.batch_size = 0;
+        let error = settings.build(client.clone(), (), None).err().unwrap();
+        assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
         assert_eq!(
             error.message,
-            "initial retry backoff must not exceed its maximum"
+            "Bitcoin client is connected to a different network than these settings"
         );
-        settings.retry_initial_backoff = Duration::ZERO;
-        let error = settings.transport().unwrap_err();
-        assert_eq!(error.kind, IndexErrorKind::Source);
         assert!(!error.retryable);
-        assert_eq!(error.message, "JSON-RPC header name is invalid");
+
+        settings.network = Network::Regtest;
+        let error = settings.build(client, (), None).err().unwrap();
+        let expected = SyncConfig::new(
+            settings.scope(),
+            settings.confirmations,
+            settings.reorg_retention,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(error, expected);
+        assert_eq!(calls.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn invalid_core_identity_fails_before_rpc() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let result = block_on(RpcClient::connect_with(
+            Readiness {
+                calls: calls.clone(),
+            },
+            CoreConfig {
+                expected_network: Network::Regtest,
+                expected_genesis_hash: Some(indexing::BlockHash(vec![0; 31])),
+            },
+        ));
+        let error = result.err().unwrap();
+        assert_eq!(
+            error.message,
+            "configured Bitcoin genesis hash must be 32 bytes"
+        );
+        assert!(!error.retryable);
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn source_and_indexer_preserve_the_clients_optional_genesis_pin() {
+        for pin in [None, Some("01".repeat(32))] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let mut config = CoreConfig::new(Network::Regtest);
+            if let Some(pin) = &pin {
+                config = config.with_genesis_hash(pin).unwrap();
+            }
+            let client = block_on(RpcClient::connect_with(
+                Readiness {
+                    calls: calls.clone(),
+                },
+                config.clone(),
+            ))
+            .unwrap();
+            let settings = IndexerSettings::new(Network::Regtest);
+            settings.build(client.clone(), (), None).unwrap();
+            let source_config = SourceConfig {
+                scope: settings.scope(),
+                network: settings.network,
+                expected_genesis_hash: config.expected_genesis_hash.clone(),
+            };
+            let source = Source::from_client(client.clone(), source_config.clone()).unwrap();
+            assert_eq!(source.config(), &source_config);
+            for mismatched in [None, Some(indexing::BlockHash(vec![2; 32]))] {
+                if mismatched == config.expected_genesis_hash {
+                    continue;
+                }
+                let mut wrong = source_config.clone();
+                wrong.expected_genesis_hash = mismatched;
+                let error = Source::from_client(client.clone(), wrong).err().unwrap();
+                assert_eq!(
+                    error.message,
+                    "Bitcoin block adapter configuration does not match its RPC client"
+                );
+                assert!(!error.retryable);
+            }
+            assert_eq!(
+                calls.lock().unwrap().len(),
+                if pin.is_some() { 4 } else { 3 }
+            );
+        }
     }
 }

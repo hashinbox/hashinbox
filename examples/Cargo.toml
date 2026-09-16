@@ -15,6 +15,7 @@ indexing = { path = "../sdk/indexing" }
 indexing-redb = { path = "../sdk/indexing/redb" }
 storage-redb = { path = "../packages/storage/redb" }
 indexing-runtime = { path = "../sdk/indexing/runtime" }
+json-rpc = { path = "../packages/json-rpc" }
 
 tokio = { workspace = true, features = ["sync", "signal"] }
 

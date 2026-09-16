@@ -176,9 +176,10 @@ Recorded on 2026-09-16:
 - `cargo test --locked -p chain-ethereum` passes 159 unit tests, three integration
   tests, and one secret-debugging compile-fail documentation test.
 - Both `cargo run --locked -p payment-examples --bin bitcoin_wallet` and
-  `cargo run --locked -p payment-examples --bin ethereum_wallet` run without a
-  node or database and print only the generated public address. Their secrets
-  remain in memory and are dropped on exit.
+  `cargo run --locked -p payment-examples --bin ethereum_wallet` ran without a
+  node or database and printed only the generated public address at this step.
+  Their secrets remained in memory and were dropped on exit. These offline
+  snippets are now preserved as commented Sample 1 inside each `main`.
 - The node/indexer examples remain available as `bitcoin_indexer` and
   `ethereum_indexer`. They compile; this change does not claim fresh real-node
   execution of those examples.
@@ -188,6 +189,78 @@ Recorded on 2026-09-16:
   Its only unsuppressed finding is the existing `rust/layers` mapping gap for
   `payment-examples`. No policy configuration changed.
 - Full workspace test success is blocked by the PostgreSQL defects above.
+
+## RPC configuration separation evidence
+
+Recorded on 2026-09-16:
+
+- Bitcoin and Ethereum construct `json_rpc::Config`, `Http`, and their native
+  RPC clients separately from `IndexerSettings`. Application JSON configuration
+  and transport defaults remain unchanged.
+- `cargo test --locked -p chain-bitcoin` passes 164 unit tests and one
+  documentation test. RPC doubles verify readiness before indexer construction,
+  network mismatch rejection, and no additional calls during `build`.
+- `cargo test --locked -p chain-ethereum` passes 163 unit tests, three integration
+  tests, and one documentation test. RPC doubles verify chain ID/genesis,
+  source identity checks, and no additional calls during `build`.
+- `cargo test --locked -p payment-api --bin payment-api` passes all 36 tests,
+  including independent transport/indexing configuration and the existing
+  verification-before-storage startup checks.
+- Workspace formatting, locked all-target compilation, strict all-target and
+  all-feature Clippy, no-dependency documentation, and diff checks pass.
+- Updated Bitcoin, Ethereum, and ERC-20 indexing examples compile. They were
+  not executed against live nodes during this refactor.
+- `cargo test --locked --workspace --no-fail-fast` completes every target and
+  reproduces the known blockers above: 25 PostgreSQL repository failures and
+  ten API startup failures. All other targets pass; the initializer contracts
+  pass all three tests.
+- The fresh Linter MCP check completes all 39 configured rules; 17 remain
+  unconfigured. Its only unsuppressed finding is the unchanged `rust/layers`
+  mapping gap for `payment-examples`; no policy or suppressions changed.
+
+The subsequent example update puts the connected RPC/indexer/provider setup
+inside `bitcoin-wallet.rs` and `ethereum-wallet.rs` as active Sample 2. Each
+verifies its local node before opening redb, attaches a locally generated key,
+prints the public address, and exits without starting synchronization. The
+commented Sample 1 remains the offline alternative. The separate
+`bitcoin_indexer` and `ethereum_indexer` binaries retain the complete watching
+loops. The active wallet samples now require their documented local nodes and
+were not executed against them during this update. Locked all-target compilation
+and strict all-target/all-feature Clippy pass for `payment-examples`, as do
+workspace formatting and diff checks. A fresh MCP check retains the same
+39 completed rules, 17 unconfigured rules, and existing examples-layer finding.
+
+## Optional genesis and RPC defaults evidence
+
+Recorded on 2026-09-16 after the sample simplification:
+
+- Bitcoin `RpcClient::connect(transport, network)` skips startup genesis lookup
+  while retaining network and readiness checks. `connect_with` accepts an
+  explicit optional pin. `cargo test --locked -p chain-bitcoin` passes 169 unit
+  tests and one documentation test, including default-call ordering, explicit
+  mismatch, malformed pin before I/O, and source/indexer policy consistency.
+- Ethereum `IndexerSettings::new(network)` defaults to `genesis_hash: None`.
+  Chain ID remains mandatory; an explicit hash enables strict genesis parsing
+  and comparison. `cargo test --locked -p chain-ethereum` passes 167 unit, three
+  integration, and one documentation test.
+- `cargo test --locked -p json-rpc` passes 27 tests. The new default request
+  and batch tests failed with the former no-retry default, then passed with
+  three endpoint rounds. Explicit no-retry and first-endpoint-only
+  `request_once` are covered under the new default.
+- `cargo test --locked -p payment-api --bin payment-api` passes 38 tests.
+  Missing/null Bitcoin and Ethereum genesis configuration disables pinning;
+  explicit valid values reach the SDK and invalid supplied values are rejected.
+- Both wallet mains retain their commented offline samples. All five Bitcoin,
+  Ethereum, and ERC-20 examples use default retry policy and omit genesis pins.
+  They compile; no live-node execution was performed for this update.
+- Workspace formatting, locked all-target compilation, strict all-target and
+  all-feature Clippy, no-dependency documentation, and diff checks pass.
+- The fresh MCP check completes 39 configured rules; 17 remain unconfigured.
+  The only unsuppressed finding is the existing examples-layer mapping gap.
+- `cargo test --locked --workspace --no-fail-fast` reproduces the existing
+  25 PostgreSQL repository failures and ten API system-test startup failures.
+  The schema-name mismatch and SQLSTATE `42601` remain unchanged; the three
+  initializer contracts pass. These failures are outside this update.
 
 ## Final gates
 

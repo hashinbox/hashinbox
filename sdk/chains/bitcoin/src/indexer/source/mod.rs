@@ -33,7 +33,7 @@ const MAX_COMPACT_PREVOUT_TOTAL_BYTES: usize =
 pub struct Config {
     pub scope: IndexScope,
     pub network: Network,
-    pub expected_genesis_hash: BlockHash,
+    pub expected_genesis_hash: Option<BlockHash>,
 }
 
 impl Config {
@@ -75,7 +75,7 @@ where
 {
     pub async fn connect(client: C, config: Config) -> Result<Self, SourceError> {
         config.validate()?;
-        let client = RpcClient::connect(
+        let client = RpcClient::connect_with(
             client,
             CoreConfig {
                 expected_network: config.network,
@@ -656,8 +656,9 @@ mod test {
                 network: "regtest".to_owned(),
             },
             network: Network::Regtest,
-            expected_genesis_hash: parse_bitcoin_block_hash(&hash(1))
-                .expect("test genesis hash must parse"),
+            expected_genesis_hash: Some(
+                parse_bitcoin_block_hash(&hash(1)).expect("test genesis hash must parse"),
+            ),
         }
     }
 

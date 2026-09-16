@@ -6,7 +6,8 @@ use super::error;
 pub struct SourceConfig {
     pub scope: IndexScope,
     pub expected_chain_id: u64,
-    pub expected_genesis_hash: BlockHash,
+    /// Optional block-zero hash pin in addition to the required chain ID.
+    pub expected_genesis_hash: Option<BlockHash>,
 }
 
 impl SourceConfig {
@@ -23,7 +24,11 @@ impl SourceConfig {
                 false,
             ));
         }
-        if self.expected_genesis_hash.0.len() != 32 {
+        if self
+            .expected_genesis_hash
+            .as_ref()
+            .is_some_and(|hash| hash.0.len() != 32)
+        {
             return Err(self::error(
                 "configured Ethereum genesis hash must be 32 bytes",
                 false,

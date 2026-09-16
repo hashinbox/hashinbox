@@ -2907,6 +2907,7 @@ dependencies = [
  "indexing",
  "indexing-redb",
  "indexing-runtime",
+ "json-rpc",
  "storage-redb",
  "tokio",
  "wallets",

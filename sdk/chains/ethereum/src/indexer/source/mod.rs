@@ -22,9 +22,10 @@ const RECEIPTS_BY_TRANSACTION: u8 = 2;
 
 /// Authoritative numbered-block source over generic JSON-RPC execution.
 ///
-/// Construction verifies `eth_chainId` and block zero before the value can be
-/// used as a `BlockSource`. Receipt capability is discovered once and an
-/// official method-not-found response permanently selects the batched fallback.
+/// Construction verifies `eth_chainId` and, when configured, a block-zero hash
+/// pin before the value can be used as a `BlockSource`. Receipt capability is
+/// discovered once and an official method-not-found response permanently selects
+/// the batched fallback.
 pub struct BlockClient<C> {
     client: Client<C>,
     config: SourceConfig,
@@ -71,6 +72,9 @@ where
             ));
         }
 
+        let Some(expected_genesis_hash) = &self.config.expected_genesis_hash else {
+            return Ok(());
+        };
         let raw_genesis = self
             .request_result("eth_getBlockByNumber", serde_json::json!(["0x0", false]))
             .await?;
@@ -86,7 +90,7 @@ where
         }
         let genesis = ParsedBlock::parse(raw_genesis.as_bytes(), Some(BlockHeight(0)), false)
             .map_err(|error| self::error(error.to_string(), false))?;
-        if genesis.reference.hash != self.config.expected_genesis_hash {
+        if &genesis.reference.hash != expected_genesis_hash {
             return Err(self::error(
                 "Ethereum RPC genesis hash does not match configuration",
                 false,
@@ -559,13 +563,13 @@ mod tests {
                 network: "dev".to_owned(),
             },
             expected_chain_id: 31_337,
-            expected_genesis_hash: BlockHash(
+            expected_genesis_hash: Some(BlockHash(
                 GENESIS_HASH
                     .parse::<alloy_primitives::B256>()
                     .expect("test genesis hash must be valid")
                     .0
                     .to_vec(),
-            ),
+            )),
         }
     }
 
@@ -653,6 +657,49 @@ mod tests {
         };
         assert!(!error.retryable);
         assert_eq!(client.methods(), vec!["eth_chainId"]);
+    }
+
+    #[test]
+    fn invalid_genesis_pin_fails_before_rpc() {
+        for length in [0, 31, 33] {
+            let client = ScriptedClient::new(Vec::new());
+            let mut config = config();
+            config.expected_genesis_hash = Some(BlockHash(vec![0x11; length]));
+            let error = block_on(BlockClient::connect(client.clone(), config))
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.message,
+                "configured Ethereum genesis hash must be 32 bytes"
+            );
+            assert!(!error.retryable);
+            assert!(client.methods().is_empty());
+        }
+    }
+
+    #[test]
+    fn pinned_genesis_rejects_missing_and_malformed_blocks() {
+        for (genesis, message) in [
+            (
+                Value::Null,
+                "Ethereum RPC does not expose the genesis block",
+            ),
+            (
+                json!({}),
+                "Ethereum block result does not match the RPC block shape",
+            ),
+        ] {
+            let client = ScriptedClient::new(vec![
+                success("eth_chainId", json!("0x7a69")),
+                success("eth_getBlockByNumber", genesis),
+            ]);
+            let error = block_on(BlockClient::connect(client.clone(), config()))
+                .err()
+                .unwrap();
+            assert_eq!(error.message, message);
+            assert!(!error.retryable);
+            assert_eq!(client.methods(), ["eth_chainId", "eth_getBlockByNumber"]);
+        }
     }
 
     #[test]

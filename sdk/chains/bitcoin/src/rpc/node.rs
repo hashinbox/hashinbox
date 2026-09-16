@@ -52,16 +52,18 @@ where
             .await?;
         status.require_synced_index(&index_info)?;
 
-        let genesis = self
-            .request_result("getblockhash", serde_json::json!([0]))
-            .await?;
-        let genesis: String = genesis.deserialize().map_err(map_json_rpc_error)?;
-        let genesis = parse_bitcoin_block_hash(&genesis)?;
-        if genesis != self.connection.config.expected_genesis_hash {
-            return Err(source_error(
-                "Bitcoin RPC genesis hash does not match configuration",
-                false,
-            ));
+        if let Some(expected) = &self.connection.config.expected_genesis_hash {
+            let genesis = self
+                .request_result("getblockhash", serde_json::json!([0]))
+                .await?;
+            let genesis: String = genesis.deserialize().map_err(map_json_rpc_error)?;
+            let genesis = parse_bitcoin_block_hash(&genesis)?;
+            if &genesis != expected {
+                return Err(source_error(
+                    "Bitcoin RPC genesis hash does not match configuration",
+                    false,
+                ));
+            }
         }
 
         Ok(status)
@@ -206,7 +208,7 @@ mod tests {
                 },
                 config: CoreConfig {
                     expected_network: Network::Regtest,
-                    expected_genesis_hash: indexing::BlockHash(vec![1; 32]),
+                    expected_genesis_hash: Some(indexing::BlockHash(vec![1; 32])),
                 },
             }),
         };

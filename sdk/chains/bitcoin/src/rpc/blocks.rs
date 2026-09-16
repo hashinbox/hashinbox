@@ -119,7 +119,7 @@ mod tests {
                     client: self,
                     config: CoreConfig {
                         expected_network: Network::Regtest,
-                        expected_genesis_hash: BlockHash(vec![0; 32]),
+                        expected_genesis_hash: Some(BlockHash(vec![0; 32])),
                     },
                 }),
             }

@@ -1,7 +1,9 @@
 //! Generate Bitcoin wallets and watch their indexed transactions on local regtest.
 //! Run with `cargo run -p payment-examples --bin bitcoin_indexer`.
 
-use chain_bitcoin::{AddressType, FeeRate, IndexerSettings, Network, WalletConfig, WalletProvider};
+use chain_bitcoin::{
+    AddressType, FeeRate, IndexerSettings, Network, RpcClient, WalletConfig, WalletProvider,
+};
 use indexing::{ChainId, IndexScope};
 use std::{error::Error, sync::Arc, time::Duration};
 
@@ -20,8 +22,6 @@ impl indexing::Observer for TransactionLog {
     }
 }
 
-const GENESIS_HASH: &str = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
-
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
     // 1. configure the Bitcoin wallet
@@ -38,14 +38,13 @@ async fn main() -> Result<(), AnyError> {
         max_fee_rate: FeeRate::new(10_000),
     };
 
-    // 2.Create the Bitcoin RPC client
-    let settings = IndexerSettings::new(
-        "http://bitcoin:bitcoin@127.0.0.1:18443".to_owned(),
-        network,
-        GENESIS_HASH,
+    // 2. Configure RPC separately and verify the node before opening storage.
+    let settings = IndexerSettings::new(network);
+    let rpc_config = json_rpc::Config::new(
+        "http://bitcoin:bitcoin@127.0.0.1:18443",
+        Duration::from_secs(15),
     );
-
-    let rpc = settings.client().await?;
+    let rpc = RpcClient::connect(json_rpc::Http::new(rpc_config)?, network).await?;
 
     // 3. Open an embedded redb database and create the Bitcoin indexing repository.
     let db_dir = std::path::absolute(".redb-data")?;

@@ -43,18 +43,24 @@ async fn main() -> Result<(), AnyError> {
     // even loaded, let alone before a pool or schema session exists.
     let verification = async move {
         let bitcoin = if let Some(config) = indexes.bitcoin {
-            let settings = config.settings()?;
+            let settings = config.settings();
             let scope = settings.scope();
-            let client = settings.client().await?;
+            let mut identity = chain_bitcoin::CoreConfig::new(config.network);
+            if let Some(genesis) = &config.genesis_hash {
+                identity = identity.with_genesis_hash(genesis)?;
+            }
+            let transport = json_rpc::Http::new(config.rpc.transport()?)?;
+            let client = chain_bitcoin::RpcClient::connect_with(transport, identity).await?;
             Some((config, settings, scope, client))
         } else {
             None
         };
         let ethereum = if let Some(config) = indexes.ethereum {
             let usdc = config.usdc.as_ref().map(config::UsdcConfig::contract);
-            let settings = config.settings()?;
+            let settings = config.settings();
             let scope = settings.scope();
-            let client = settings.client()?;
+            let transport = json_rpc::Http::new(config.rpc.transport()?)?;
+            let client = chain_ethereum::RpcClient::new(transport);
             let source = settings.source(client.clone()).await?;
             let accounts = Arc::new(chain_ethereum::AccountClient::new(
                 client.clone(),

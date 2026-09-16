@@ -19,8 +19,8 @@
 use std::{error::Error, str::FromStr, sync::Arc, time::Duration};
 
 use chain_ethereum::{
-    AccountClient, Address, AssetKind, IndexerSettings, Limits, Network, TransactionClient,
-    TransactionCoordinator, WalletConfig, WalletProvider, Wei,
+    AccountClient, Address, AssetKind, IndexerSettings, Limits, Network, RpcClient,
+    TransactionClient, TransactionCoordinator, WalletConfig, WalletProvider, Wei,
 };
 use indexing::{AddressFilter, BlockPosition, CanonicalAddress, FilterSource};
 use indexing_runtime::SyncState;
@@ -41,8 +41,6 @@ impl indexing::Observer for TransactionLog {
     }
 }
 
-const GENESIS_HASH: &str = "0x0598047b8adde700d2e815fe0c7436002f7c50ef32447aa4f4bf4c09e1a97789";
-
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
     // 1. Select an already-deployed token; no environment variables are needed.
@@ -57,11 +55,7 @@ async fn main() -> Result<(), AnyError> {
     let decimals: u8 = token_decimals
         .parse()
         .map_err(|_| "Token decimals must be an integer from 0 to 255")?;
-    let settings = IndexerSettings::new(
-        "http://127.0.0.1:8545",
-        Network::new(31_337, "anvil"), // local chain
-        GENESIS_HASH,
-    );
+    let settings = IndexerSettings::new(Network::new(31_337, "anvil"));
     let config = WalletConfig {
         scope: settings.scope(),
         chain_id: settings.network.chain_id,
@@ -71,9 +65,10 @@ async fn main() -> Result<(), AnyError> {
 
     // 2. Share one RPC client and verify identity before opening storage.
     println!("Connecting to Ethereum...");
-    let rpc = settings.client()?;
+    let rpc_config = json_rpc::Config::new("http://127.0.0.1:8545", Duration::from_secs(15));
+    let rpc = RpcClient::new(json_rpc::Http::new(rpc_config)?);
     let source = settings.source(rpc.clone()).await?;
-    println!("Ethereum chain ID and genesis verified.");
+    println!("Ethereum chain ID verified.");
     let accounts = Arc::new(AccountClient::new(rpc.clone(), settings.network.chain_id)?);
     accounts.validate_token(&token, decimals).await?;
     println!("ERC-20 contract verified: {token} ({decimals} decimals).");

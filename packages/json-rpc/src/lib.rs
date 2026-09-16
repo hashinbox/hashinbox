@@ -2,6 +2,11 @@
 //!
 //! This crate owns endpoint policy only. `jsonrpsee` owns JSON-RPC framing,
 //! request correlation, response validation, and batch ordering.
+//!
+//! Ordinary HTTP requests and batches default to three endpoint rounds after
+//! retryable transport failures. Each round visits endpoints in order; received
+//! JSON-RPC call failures and terminal transport errors stop execution. Use
+//! [`Client::request_once`] for one execution without retries or failover.
 
 mod client;
 mod error;
@@ -274,9 +279,9 @@ mod http_test {
         );
     }
 
-    fn serve_batch_rejections(
+    fn serve_batch_rejections<const N: usize>(
         name: &'static str,
-        statuses: [&'static str; 2],
+        statuses: [&'static str; N],
         events: mpsc::Sender<&'static str>,
     ) -> String {
         let listener =
@@ -460,9 +465,77 @@ mod http_test {
         );
     }
 
-    fn serve_request_rejections(
+    #[tokio::test]
+    async fn default_request_retries_three_endpoint_rounds() {
+        let (events, observed) = mpsc::channel();
+        let first =
+            serve_request_rejections("first", ["503 Service Unavailable"; 3], events.clone());
+        let second = serve_request_rejections("second", ["504 Gateway Timeout"; 3], events);
+        let mut config = Config::new(first, Duration::from_secs(2));
+        config.endpoints.push(second);
+        let error = Http::new(config)
+            .unwrap()
+            .request("answer", json!([42]))
+            .await
+            .expect_err("the default must exhaust three endpoint rounds");
+        assert_eq!(error.kind, ErrorKind::HttpStatus(504));
+        assert_eq!(
+            observed.try_iter().collect::<Vec<_>>(),
+            ["first", "second", "first", "second", "first", "second"]
+        );
+    }
+
+    #[tokio::test]
+    async fn default_batch_retries_three_endpoint_rounds() {
+        let (events, observed) = mpsc::channel();
+        let first = serve_batch_rejections("first", ["503 Service Unavailable"; 3], events.clone());
+        let second = serve_batch_rejections("second", ["504 Gateway Timeout"; 3], events);
+        let mut config = Config::new(first, Duration::from_secs(2));
+        config.endpoints.push(second);
+        let error = Http::new(config)
+            .unwrap()
+            .batch(vec![Call::new("answer", json!([42]))])
+            .await
+            .expect_err("the default must exhaust three endpoint rounds");
+        assert_eq!(error.kind, ErrorKind::HttpStatus(504));
+        assert_eq!(
+            observed.try_iter().collect::<Vec<_>>(),
+            ["first", "second", "first", "second", "first", "second"]
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_no_retry_keeps_requests_and_batches_to_one_endpoint_round() {
+        for batch in [false, true] {
+            let (events, observed) = mpsc::channel();
+            let serve = if batch {
+                serve_batch_rejections::<1>
+            } else {
+                serve_request_rejections::<1>
+            };
+            let first = serve("first", ["503 Service Unavailable"], events.clone());
+            let second = serve("second", ["504 Gateway Timeout"], events);
+            let mut config = Config::new(first, Duration::from_secs(2));
+            config.endpoints.push(second);
+            config.retry = Retry::no_retry();
+            let client = Http::new(config).unwrap();
+            let error = if batch {
+                client.batch(vec![Call::new("answer", json!([42]))]).await
+            } else {
+                client
+                    .request("answer", json!([42]))
+                    .await
+                    .map(|value| vec![value])
+            }
+            .expect_err("one endpoint round must preserve its final HTTP error");
+            assert_eq!(error.kind, ErrorKind::HttpStatus(504));
+            assert_eq!(observed.try_iter().collect::<Vec<_>>(), ["first", "second"]);
+        }
+    }
+
+    fn serve_request_rejections<const N: usize>(
         name: &'static str,
-        statuses: [&'static str; 2],
+        statuses: [&'static str; N],
         events: mpsc::Sender<&'static str>,
     ) -> String {
         let listener =
@@ -498,12 +571,6 @@ mod http_test {
         });
         let mut config = Config::new(selected, Duration::from_secs(2));
         config.endpoints.push(fallback);
-        config.retry = Retry::new(
-            NonZeroU32::new(3).expect("three is nonzero"),
-            Duration::ZERO,
-            Duration::ZERO,
-        )
-        .expect("zero backoff is valid");
         let client = Http::new(config).expect("failover client must build");
 
         let error = client

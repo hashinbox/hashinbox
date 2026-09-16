@@ -1,96 +1,48 @@
-//! Declarative construction for the Ethereum block indexer.
+//! Identity and synchronization policy for the Ethereum block indexer.
 //!
-//! Collapses the transport, source, interpreter, and synchronization wiring
-//! into one value an embedding binary can fill in and hand over. The repository
-//! stays a parameter: this crate implements chain semantics and must not know
-//! which storage backend an application chose.
-//!
-//! An Ethereum client carries no chain identity of its own, so nothing can be
-//! verified until a source exists. Chain ID and genesis are therefore checked
-//! in [`IndexerSettings::build`], which is why that call is the asynchronous one
-//! here and [`IndexerSettings::client`] is not.
+//! Callers construct and share their RPC transport separately. [`IndexerSettings::source`]
+//! verifies chain ID and an optional genesis pin before storage opens; [`IndexerSettings::build`]
+//! then combines that verified source with the caller's repository without RPC calls.
 
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use indexing::{BlockHash, ChainId, IndexError, IndexErrorKind, IndexScope, Observer, SyncConfig};
-use json_rpc::{Config as TransportConfig, Http, Retry};
+use json_rpc::Client;
 
-use crate::{BlockInterpreter, Indexer, RpcClient, Source, SourceConfig};
+use crate::{BlockInterpreter, Indexer, Network, RpcClient, Source, SourceConfig};
 
-/// Which EVM chain an indexer follows.
-///
-/// Both halves are explicit on purpose. The numeric ID is what the node is
-/// verified against; the slug names the scope and becomes part of the storage
-/// keyspace, so it must stay stable across restarts. Deriving one from the
-/// other would let a renamed default silently orphan an existing index.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Network {
-    pub chain_id: u64,
-    pub slug: String,
-}
-
-impl Network {
-    #[must_use]
-    pub fn new(chain_id: u64, slug: impl Into<String>) -> Self {
-        Self {
-            chain_id,
-            slug: slug.into(),
-        }
-    }
-}
-
-/// Everything required to build an Ethereum indexer.
+/// Expected Ethereum identity and indexing policy, independent of RPC transport.
 ///
 /// Every field is public, so a caller may take [`IndexerSettings::new`] and
 /// override only what differs from the defaults.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexerSettings {
-    /// Ethereum JSON-RPC endpoints. The first is primary; any others are tried
-    /// in order when it fails.
-    pub endpoints: Vec<String>,
-    /// Request headers, for provider API keys or a proxy.
-    pub headers: Vec<(String, String)>,
-    /// Verified against `eth_chainId` when the indexer is built; its slug
+    /// Verified against `eth_chainId` when the source is built; its slug
     /// becomes the scope's network and part of the storage keyspace.
     pub network: Network,
-    /// Verified against block zero when the indexer is built.
-    pub genesis_hash: String,
+    /// Optional block-zero hash pin, verified when the source is built.
+    /// Without a pin, construction verifies only the chain ID.
+    pub genesis_hash: Option<String>,
     /// Depth at which history reports a transaction confirmed.
     pub confirmations: u64,
     /// How far back a reorg can be reversed from the rollback journal.
     pub reorg_retention: u64,
     /// Blocks indexed per `sync` call.
     pub batch_size: usize,
-    pub request_timeout: Duration,
-    pub max_response_bytes: usize,
-    pub retry_attempts: NonZeroU32,
-    pub retry_initial_backoff: Duration,
-    pub retry_max_backoff: Duration,
 }
 
 impl IndexerSettings {
-    /// Settings for one endpoint, with defaults matching the reference
-    /// application: three retries, a fifteen-second request budget, twelve
-    /// confirmations, and a hundred-block rollback journal.
+    /// Uses twelve confirmations, a hundred-block rollback journal, and batches
+    /// of a hundred blocks. Genesis pinning is opt-in; transport configuration
+    /// remains caller-owned.
     #[must_use]
-    pub fn new(
-        endpoint: impl Into<String>,
-        network: Network,
-        genesis_hash: impl Into<String>,
-    ) -> Self {
+    pub fn new(network: Network) -> Self {
         Self {
-            endpoints: vec![endpoint.into()],
-            headers: Vec::new(),
             network,
-            genesis_hash: genesis_hash.into(),
+            genesis_hash: None,
             confirmations: 12,
             reorg_retention: 100,
             batch_size: 100,
-            request_timeout: Duration::from_secs(15),
-            max_response_bytes: 64 * 1024 * 1024,
-            retry_attempts: NonZeroU32::new(3).expect("three is not zero"),
-            retry_initial_backoff: Duration::from_millis(250),
-            retry_max_backoff: Duration::from_secs(2),
         }
     }
 
@@ -104,20 +56,9 @@ impl IndexerSettings {
         }
     }
 
-    /// Builds one long-lived Ethereum client.
-    ///
-    /// No network round-trip happens here: an Ethereum client is a transport
-    /// wrapper with no chain identity of its own. Hold it for the life of the
-    /// process and clone it as needed — a clone is an `Arc` bump — so indexing
-    /// and wallet capabilities share one connection instead of opening a
-    /// second.
-    pub fn client(&self) -> Result<RpcClient<Http>, IndexError> {
-        Ok(RpcClient::new(self.transport()?))
-    }
-
-    /// Verifies the configured chain ID and genesis and returns the exact
+    /// Verifies the configured chain ID and optional genesis pin and returns the exact
     /// source that later enters indexing composition.
-    pub async fn source(&self, client: RpcClient<Http>) -> Result<Source<Http>, IndexError> {
+    pub async fn source<C: Client>(&self, client: RpcClient<C>) -> Result<Source<C>, IndexError> {
         Ok(Source::from_rpc(client, self.source_config()?).await?)
     }
 
@@ -125,12 +66,12 @@ impl IndexerSettings {
     ///
     /// `observer`, when supplied, is called after each block this indexer
     /// commits. Pass `None` to index without notification.
-    pub fn build<R>(
+    pub fn build<C: Client, R>(
         &self,
-        source: Source<Http>,
+        source: Source<C>,
         repository: R,
         observer: Option<Arc<dyn Observer>>,
-    ) -> Result<Indexer<Http, R>, IndexError>
+    ) -> Result<Indexer<C, R>, IndexError>
     where
         R: Clone,
     {
@@ -167,11 +108,11 @@ impl IndexerSettings {
         })
     }
 
-    fn genesis(&self) -> Result<BlockHash, IndexError> {
-        let digits = self
-            .genesis_hash
-            .strip_prefix("0x")
-            .unwrap_or(&self.genesis_hash);
+    fn genesis(&self) -> Result<Option<BlockHash>, IndexError> {
+        let Some(genesis_hash) = self.genesis_hash.as_deref() else {
+            return Ok(None);
+        };
+        let digits = genesis_hash.strip_prefix("0x").unwrap_or(genesis_hash);
         let bytes = alloy_primitives::hex::decode(digits).map_err(|_| {
             IndexError::new(
                 IndexErrorKind::InvalidRequest,
@@ -186,67 +127,244 @@ impl IndexerSettings {
                 false,
             ));
         }
-        Ok(BlockHash(bytes))
-    }
-
-    fn transport(&self) -> Result<Http, IndexError> {
-        let primary = self.endpoints.first().ok_or_else(|| {
-            IndexError::new(
-                IndexErrorKind::InvalidRequest,
-                "at least one Ethereum RPC endpoint is required",
-                false,
-            )
-        })?;
-        let mut config = TransportConfig::new(primary.clone(), self.request_timeout);
-        config.endpoints.clone_from(&self.endpoints);
-        config.max_response_bytes = self.max_response_bytes;
-        config.headers.clone_from(&self.headers);
-        config.retry = Retry::new(
-            self.retry_attempts,
-            self.retry_initial_backoff,
-            self.retry_max_backoff,
-        )
-        .map_err(|error| IndexError::new(IndexErrorKind::Source, error.to_string(), false))?;
-        Http::new(config)
-            .map_err(|error| IndexError::new(IndexErrorKind::Source, error.to_string(), false))
+        Ok(Some(BlockHash(bytes)))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use futures_executor::block_on;
+    use json_rpc::{BoxFuture, Call, CallResult, Error, RawJson};
+    use serde_json::{Value, json};
+
     use super::*;
 
+    #[derive(Clone, Default)]
+    struct Identity {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Identity {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Client for Identity {
+        fn request<'a>(
+            &'a self,
+            method: &'a str,
+            params: Value,
+        ) -> BoxFuture<'a, Result<CallResult, Error>> {
+            self.calls.lock().unwrap().push(method.to_owned());
+            let result = match method {
+                "eth_chainId" => {
+                    assert_eq!(params, json!([]));
+                    json!("0x7a69")
+                }
+                "eth_getBlockByNumber" => {
+                    assert_eq!(params, json!(["0x0", false]));
+                    json!({
+                        "hash": format!("0x{}", "11".repeat(32)),
+                        "parentHash": format!("0x{}", "00".repeat(32)),
+                        "sha3Uncles": format!("0x{}", "00".repeat(32)),
+                        "miner": format!("0x{}", "00".repeat(20)),
+                        "stateRoot": format!("0x{}", "00".repeat(32)),
+                        "transactionsRoot": format!("0x{}", "00".repeat(32)),
+                        "receiptsRoot": format!("0x{}", "00".repeat(32)),
+                        "logsBloom": format!("0x{}", "00".repeat(256)),
+                        "difficulty": "0x0",
+                        "number": "0x0",
+                        "gasLimit": "0x1c9c380",
+                        "gasUsed": "0x0",
+                        "timestamp": "0x0",
+                        "extraData": "0x",
+                        "mixHash": format!("0x{}", "00".repeat(32)),
+                        "nonce": "0x0000000000000000",
+                        "uncles": [],
+                        "transactions": []
+                    })
+                }
+                _ => panic!("source construction must only verify identity"),
+            };
+            Box::pin(async move { Ok(Ok(RawJson::from_serializable(&result).unwrap())) })
+        }
+
+        fn request_once<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: Value,
+        ) -> BoxFuture<'a, Result<CallResult, Error>> {
+            unreachable!("source construction must not submit a transaction")
+        }
+
+        fn batch<'a>(&'a self, _calls: Vec<Call>) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+            unreachable!("source construction must not fetch receipts")
+        }
+    }
+
+    fn settings() -> IndexerSettings {
+        let mut settings = IndexerSettings::new(Network::new(31_337, "anvil"));
+        settings.genesis_hash = Some("11".repeat(32));
+        settings
+    }
+
     #[test]
-    fn transport_configuration_failures_preserve_classification_context_and_order() {
-        let mut settings = IndexerSettings::new(
-            "http://127.0.0.1:1",
-            Network::new(1, "mainnet"),
-            "00".repeat(32),
-        );
-        settings.retry_initial_backoff = Duration::from_secs(3);
-        settings.retry_max_backoff = Duration::from_secs(2);
-        settings.headers = vec![("invalid header".to_owned(), "hidden value".to_owned())];
-        let error = settings.client().err().expect("invalid settings must fail");
-        assert_eq!(error.kind, IndexErrorKind::Source);
-        assert_eq!(
-            error.message,
-            "initial retry backoff must not exceed its maximum"
-        );
-        assert!(!error.retryable);
+    fn default_source_checks_only_chain_id_and_build_adds_no_rpc() {
+        let client = Identity::default();
+        let settings = IndexerSettings::new(Network::new(31_337, "anvil"));
+        assert_eq!(settings.genesis_hash, None);
+        let source = block_on(settings.source(RpcClient::new(client.clone()))).unwrap();
+        assert_eq!(source.config().expected_genesis_hash, None);
+        settings.build(source, (), None).unwrap();
+        assert_eq!(client.calls(), ["eth_chainId"]);
+    }
 
-        settings.retry_initial_backoff = Duration::ZERO;
-        let error = settings.client().err().expect("invalid settings must fail");
-        assert_eq!(error.kind, IndexErrorKind::Source);
-        assert_eq!(error.message, "JSON-RPC header name is invalid");
-        assert!(!error.retryable);
+    #[test]
+    fn source_verifies_chain_id_and_genesis_before_build() {
+        for (chain_id, genesis, methods, message) in [
+            (
+                1,
+                Some("11".repeat(32)),
+                vec!["eth_chainId"],
+                "Ethereum RPC chain ID does not match configuration",
+            ),
+            (
+                31_337,
+                Some("22".repeat(32)),
+                vec!["eth_chainId", "eth_getBlockByNumber"],
+                "Ethereum RPC genesis hash does not match configuration",
+            ),
+            (
+                1,
+                None,
+                vec!["eth_chainId"],
+                "Ethereum RPC chain ID does not match configuration",
+            ),
+        ] {
+            let client = Identity::default();
+            let mut settings = IndexerSettings::new(Network::new(chain_id, "anvil"));
+            settings.genesis_hash = genesis;
+            let error = block_on(settings.source(RpcClient::new(client.clone())))
+                .err()
+                .unwrap();
+            assert_eq!(error.kind, IndexErrorKind::Source);
+            assert_eq!(error.message, message);
+            assert!(!error.retryable);
+            assert_eq!(client.calls(), methods);
+        }
+    }
 
-        settings.endpoints.clear();
-        let error = settings.client().err().expect("invalid settings must fail");
-        assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
-        assert_eq!(
-            error.message,
-            "at least one Ethereum RPC endpoint is required"
-        );
-        assert!(!error.retryable);
+    #[test]
+    fn malformed_genesis_fails_before_rpc() {
+        for (genesis, message) in [
+            ("invalid", "Ethereum genesis hash must be hexadecimal"),
+            (
+                "0x11",
+                "Ethereum genesis hash must contain exactly 32 bytes",
+            ),
+        ] {
+            let client = Identity::default();
+            let mut settings = IndexerSettings::new(Network::new(31_337, "anvil"));
+            settings.genesis_hash = Some(genesis.to_owned());
+            let error = block_on(settings.source(RpcClient::new(client.clone())))
+                .err()
+                .unwrap();
+            assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
+            assert_eq!(error.message, message);
+            assert!(!error.retryable);
+            assert!(client.calls().is_empty());
+        }
+    }
+
+    #[test]
+    fn build_reuses_verified_source_without_more_rpc() {
+        let client = Identity::default();
+        let settings = settings();
+        let source = block_on(settings.source(RpcClient::new(client.clone()))).unwrap();
+        assert_eq!(source.config().scope, settings.scope());
+        settings.build(source, (), None).unwrap();
+        assert_eq!(client.calls(), ["eth_chainId", "eth_getBlockByNumber"]);
+    }
+
+    #[test]
+    fn build_rejects_every_source_identity_mismatch_without_rpc() {
+        for mismatch in 0..3 {
+            let client = Identity::default();
+            let mut settings = settings();
+            let source = block_on(settings.source(RpcClient::new(client.clone()))).unwrap();
+            match mismatch {
+                0 => settings.network.slug = "another-scope".to_owned(),
+                1 => settings.network.chain_id = 1,
+                _ => settings.genesis_hash = Some("22".repeat(32)),
+            }
+            let error = settings.build(source, (), None).err().unwrap();
+            assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
+            assert_eq!(
+                error.message,
+                "Ethereum source belongs to different indexer settings"
+            );
+            assert!(!error.retryable);
+            assert_eq!(client.calls(), ["eth_chainId", "eth_getBlockByNumber"]);
+        }
+    }
+
+    #[test]
+    fn build_rejects_changed_genesis_pinning_policy_without_rpc() {
+        for pinned in [false, true] {
+            let client = Identity::default();
+            let mut settings = IndexerSettings::new(Network::new(31_337, "anvil"));
+            settings.genesis_hash = pinned.then(|| "11".repeat(32));
+            let source = block_on(settings.source(RpcClient::new(client.clone()))).unwrap();
+            let verified_calls = client.calls();
+            settings.genesis_hash = (!pinned).then(|| "11".repeat(32));
+
+            let error = settings.build(source, (), None).err().unwrap();
+            assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
+            assert_eq!(
+                error.message,
+                "Ethereum source belongs to different indexer settings"
+            );
+            assert!(!error.retryable);
+            assert_eq!(client.calls(), verified_calls);
+        }
+    }
+
+    #[test]
+    fn build_rejects_invalid_sync_policy_without_rpc() {
+        for (confirmations, retention, batch, message) in [
+            (
+                0,
+                100,
+                100,
+                "minimum confirmations must be greater than zero",
+            ),
+            (
+                12,
+                0,
+                100,
+                "rollback retention and batch size must be greater than zero",
+            ),
+            (
+                12,
+                100,
+                0,
+                "rollback retention and batch size must be greater than zero",
+            ),
+        ] {
+            let client = Identity::default();
+            let mut settings = settings();
+            let source = block_on(settings.source(RpcClient::new(client.clone()))).unwrap();
+            settings.confirmations = confirmations;
+            settings.reorg_retention = retention;
+            settings.batch_size = batch;
+            let error = settings.build(source, (), None).err().unwrap();
+            assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
+            assert_eq!(error.message, message);
+            assert!(!error.retryable);
+            assert_eq!(client.calls(), ["eth_chainId", "eth_getBlockByNumber"]);
+        }
     }
 }

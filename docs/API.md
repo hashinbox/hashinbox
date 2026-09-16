@@ -52,6 +52,13 @@ native ETH enabled without a USDC wallet family.
 
 ## Runtime configuration
 
+Bitcoin and Ethereum `genesis_hash` fields are optional. Omission or null skips
+startup genesis pinning; supplying a hash enables the check and malformed
+hashes are rejected. Bitcoin network and Ethereum chain-ID checks still run
+before storage opens. Solana continues to require and verify its genesis hash.
+Bitcoin/Ethereum RPC reads default to three endpoint rounds with 250 ms initial
+backoff capped at 2 seconds; transaction submission remains a single attempt.
+
 The implemented root replaces per-chain database paths with one PostgreSQL
 object and adds one optional Solana index with a singular endpoint:
 

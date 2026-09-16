@@ -1,6 +1,6 @@
 //! Generate two ETH wallets and watch their mined transactions on local Anvil.
 //!
-//! Start Anvil 1.7.1 with the reproducible genesis used below:
+//! Start local Anvil:
 //! `anvil --host 127.0.0.1 --chain-id 31337 --hardfork cancun --timestamp 0`
 //! Then run `cargo run -p payment-examples --bin ethereum_indexer`.
 //!
@@ -11,7 +11,7 @@
 use std::{error::Error, sync::Arc, time::Duration};
 
 use chain_ethereum::{
-    AccountClient, AssetKind, ETH, IndexerSettings, Limits, Network, TransactionClient,
+    AccountClient, AssetKind, ETH, IndexerSettings, Limits, Network, RpcClient, TransactionClient,
     TransactionCoordinator, WalletConfig, WalletProvider, Wei,
 };
 use indexing::{AddressFilter, BlockPosition, CanonicalAddress, FilterSource};
@@ -33,16 +33,10 @@ impl indexing::Observer for TransactionLog {
     }
 }
 
-const GENESIS_HASH: &str = "0x0598047b8adde700d2e815fe0c7436002f7c50ef32447aa4f4bf4c09e1a97789";
-
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
     // 1. Configure Ethereum and native ETH wallets.
-    let settings = IndexerSettings::new(
-        "http://127.0.0.1:8545",
-        Network::new(31_337, "anvil"), // local chain
-        GENESIS_HASH,
-    );
+    let settings = IndexerSettings::new(Network::new(31_337, "anvil"));
     let config = WalletConfig {
         scope: settings.scope(),
         chain_id: settings.network.chain_id,
@@ -52,9 +46,10 @@ async fn main() -> Result<(), AnyError> {
 
     // 2. Share one RPC client and verify identity before opening storage.
     println!("Connecting to Ethereum...");
-    let rpc = settings.client()?;
+    let rpc_config = json_rpc::Config::new("http://127.0.0.1:8545", Duration::from_secs(15));
+    let rpc = RpcClient::new(json_rpc::Http::new(rpc_config)?);
     let source = settings.source(rpc.clone()).await?;
-    println!("Ethereum chain ID and genesis verified.");
+    println!("Ethereum chain ID verified.");
 
     // 3. Open the Ethereum indexing database.
     let db_dir = std::path::absolute(".redb-data")?;

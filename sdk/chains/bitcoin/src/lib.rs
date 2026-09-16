@@ -13,14 +13,13 @@ pub use address::Address;
 pub use address::Address as BitcoinAddress;
 pub use error::{ChainError, ChainErrorKind};
 pub use indexer::{
-    Block, BlockInterpreter, Blocks, Credentials, Indexer, IndexerSettings, Outpoint, Source,
-    SourceConfig,
+    Block, BlockInterpreter, Blocks, Indexer, IndexerSettings, Outpoint, Source, SourceConfig,
 };
 pub use network::Network;
 pub use rpc::{
-    BITCOIN_CORE_MAX_FEE_RATE_SATOSHIS_PER_KVB, Client as RpcClient, CoreConfig, FeeClient, Fees,
-    Node, NodeStatus, Preflight, TransactionClient, Transactions, UnspentOutput, UtxoSet,
-    format_bitcoin_block_hash, parse_bitcoin_block_hash,
+    BITCOIN_CORE_MAX_FEE_RATE_SATOSHIS_PER_KVB, Client as RpcClient, CoreConfig, Credentials,
+    FeeClient, Fees, Node, NodeStatus, Preflight, TransactionClient, Transactions, UnspentOutput,
+    UtxoSet, format_bitcoin_block_hash, parse_bitcoin_block_hash,
 };
 pub use transaction::{
     BuildRequest, FeeRate, Input, InputInspection, Output, OutputInspection, SighashType,

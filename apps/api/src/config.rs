@@ -159,42 +159,30 @@ impl IndexConfig {
 #[serde(deny_unknown_fields)]
 pub(crate) struct BitcoinConfig {
     pub(crate) network: Network,
-    genesis_hash: String,
-    rpc: RpcConfig,
+    #[serde(default)]
+    pub(crate) genesis_hash: Option<String>,
+    pub(crate) rpc: RpcConfig,
     #[serde(flatten)]
     sync: SyncConfig,
 }
 
 impl BitcoinConfig {
-    pub(crate) fn settings(&self) -> Result<chain_bitcoin::IndexerSettings, AnyError> {
-        let endpoint = self
-            .rpc
-            .endpoints
-            .first()
-            .ok_or("RPC endpoints must not be empty")?;
-        let mut settings = chain_bitcoin::IndexerSettings::new(
-            endpoint.clone(),
-            self.network,
-            self.genesis_hash.as_str(),
-        );
-        self.rpc.apply_to(
-            &mut settings.endpoints,
-            &mut settings.headers,
-            &mut settings.request_timeout,
-            &mut settings.max_response_bytes,
-        );
+    pub(crate) fn settings(&self) -> chain_bitcoin::IndexerSettings {
+        let mut settings = chain_bitcoin::IndexerSettings::new(self.network);
         settings.confirmations = self.sync.confirmation_depth;
         settings.reorg_retention = self.sync.reorg_retention;
         settings.batch_size = self.sync.batch_size;
-        Ok(settings)
+        settings
     }
 
     fn validate(&self) -> Result<(), AnyError> {
         self.rpc.validate()?;
         self.sync.validate()?;
-        let hash = chain_bitcoin::parse_bitcoin_block_hash(&self.genesis_hash)?;
-        if chain_bitcoin::format_bitcoin_block_hash(&hash)? != self.genesis_hash {
-            return Err("Bitcoin genesis hash must use canonical lowercase encoding".into());
+        if let Some(expected) = &self.genesis_hash {
+            let hash = chain_bitcoin::parse_bitcoin_block_hash(expected)?;
+            if chain_bitcoin::format_bitcoin_block_hash(&hash)? != *expected {
+                return Err("Bitcoin genesis hash must use canonical lowercase encoding".into());
+            }
         }
         Ok(())
     }
@@ -205,8 +193,9 @@ impl BitcoinConfig {
 pub(crate) struct EthereumConfig {
     network: String,
     pub(crate) chain_id: u64,
-    genesis_hash: String,
-    rpc: RpcConfig,
+    #[serde(default)]
+    genesis_hash: Option<String>,
+    pub(crate) rpc: RpcConfig,
     #[serde(default)]
     limits: EthereumLimits,
     #[serde(default)]
@@ -216,27 +205,16 @@ pub(crate) struct EthereumConfig {
 }
 
 impl EthereumConfig {
-    pub(crate) fn settings(&self) -> Result<chain_ethereum::IndexerSettings, AnyError> {
-        let endpoint = self
-            .rpc
-            .endpoints
-            .first()
-            .ok_or("RPC endpoints must not be empty")?;
-        let mut settings = chain_ethereum::IndexerSettings::new(
-            endpoint.clone(),
-            chain_ethereum::Network::new(self.chain_id, self.network.as_str()),
-            self.genesis_hash.as_str(),
-        );
-        self.rpc.apply_to(
-            &mut settings.endpoints,
-            &mut settings.headers,
-            &mut settings.request_timeout,
-            &mut settings.max_response_bytes,
-        );
+    pub(crate) fn settings(&self) -> chain_ethereum::IndexerSettings {
+        let mut settings = chain_ethereum::IndexerSettings::new(chain_ethereum::Network::new(
+            self.chain_id,
+            self.network.as_str(),
+        ));
+        settings.genesis_hash.clone_from(&self.genesis_hash);
         settings.confirmations = self.sync.confirmation_depth;
         settings.reorg_retention = self.sync.reorg_retention;
         settings.batch_size = self.sync.batch_size;
-        Ok(settings)
+        settings
     }
 
     fn validate(&self) -> Result<(), AnyError> {
@@ -255,16 +233,18 @@ impl EthereumConfig {
         Ok(())
     }
 
-    fn genesis(&self) -> Result<BlockHash, AnyError> {
-        let value = self
-            .genesis_hash
+    fn genesis(&self) -> Result<Option<BlockHash>, AnyError> {
+        let Some(expected) = &self.genesis_hash else {
+            return Ok(None);
+        };
+        let value = expected
             .strip_prefix("0x")
             .ok_or("Ethereum genesis hash must start with 0x")?;
         let bytes = hex::decode(value)?;
         if bytes.len() != 32 {
             return Err("Ethereum genesis hash must contain exactly 32 bytes".into());
         }
-        Ok(BlockHash(bytes))
+        Ok(Some(BlockHash(bytes)))
     }
 
     pub(crate) fn limits(&self) -> Result<chain_ethereum::Limits, AnyError> {
@@ -355,7 +335,7 @@ impl SyncConfig {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RpcConfig {
+pub(crate) struct RpcConfig {
     endpoints: Vec<String>,
     #[serde(default)]
     headers: Vec<(String, String)>,
@@ -378,17 +358,17 @@ impl RpcConfig {
         Ok(())
     }
 
-    fn apply_to(
-        &self,
-        endpoints: &mut Vec<String>,
-        headers: &mut Vec<(String, String)>,
-        request_timeout: &mut Duration,
-        max_response_bytes: &mut usize,
-    ) {
-        endpoints.clone_from(&self.endpoints);
-        headers.clone_from(&self.headers);
-        *request_timeout = Duration::from_secs(self.timeout_seconds);
-        *max_response_bytes = self.max_response_bytes;
+    pub(crate) fn transport(&self) -> Result<json_rpc::Config, AnyError> {
+        let endpoint = self
+            .endpoints
+            .first()
+            .ok_or("RPC endpoints must not be empty")?;
+        let mut config =
+            json_rpc::Config::new(endpoint.clone(), Duration::from_secs(self.timeout_seconds));
+        config.endpoints.clone_from(&self.endpoints);
+        config.headers.clone_from(&self.headers);
+        config.max_response_bytes = self.max_response_bytes;
+        Ok(config)
     }
 
     const fn default_timeout_seconds() -> u64 {
@@ -446,20 +426,87 @@ mod tests {
     const CONTRACT: &str = "0x1111111111111111111111111111111111111111";
 
     #[test]
-    fn defaulted_rpc_and_sync_fields_reach_ethereum_runtime_settings() {
+    fn omitted_or_null_genesis_disables_only_optional_pinning() {
+        for explicit_null in [false, true] {
+            let mut indexes = bitcoin();
+            indexes["ethereum"] = ethereum(None)["ethereum"].clone();
+            for chain in ["bitcoin", "ethereum"] {
+                if explicit_null {
+                    indexes[chain]["genesis_hash"] = Value::Null;
+                } else {
+                    indexes[chain]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("genesis_hash");
+                }
+            }
+            let config = parse(indexes, json!([])).unwrap();
+            config.validate().expect("genesis pinning is optional");
+            let bitcoin = config.indexes.bitcoin.as_ref().unwrap();
+            assert!(bitcoin.genesis_hash.is_none());
+            assert_eq!(bitcoin.settings().network, Network::Regtest);
+            let ethereum = config.indexes.ethereum.as_ref().unwrap();
+            assert!(ethereum.settings().genesis_hash.is_none());
+            assert_eq!(ethereum.settings().network.chain_id, 1);
+        }
+    }
+
+    #[test]
+    fn explicit_genesis_pins_are_preserved_and_invalid_values_are_rejected() {
+        let bitcoin_hash = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
+        let ethereum_hash = format!("0x{}", "11".repeat(32));
+        let mut indexes = bitcoin();
+        indexes["bitcoin"]["genesis_hash"] = json!(bitcoin_hash);
+        indexes["ethereum"] = ethereum(None)["ethereum"].clone();
+        let config = parse(indexes.clone(), json!([])).unwrap();
+        config.validate().expect("explicit pins remain supported");
+        assert_eq!(
+            config
+                .indexes
+                .bitcoin
+                .as_ref()
+                .unwrap()
+                .genesis_hash
+                .as_deref(),
+            Some(bitcoin_hash)
+        );
+        assert_eq!(
+            config
+                .indexes
+                .ethereum
+                .as_ref()
+                .unwrap()
+                .settings()
+                .genesis_hash
+                .as_deref(),
+            Some(ethereum_hash.as_str())
+        );
+        for chain in ["bitcoin", "ethereum"] {
+            for invalid in [json!(""), json!("garbage"), json!(42), json!(false)] {
+                let mut invalid_indexes = indexes.clone();
+                invalid_indexes[chain]["genesis_hash"] = invalid;
+                if let Ok(config) = parse(invalid_indexes, json!([])) {
+                    assert!(
+                        config.validate().is_err(),
+                        "must reject invalid {chain} pin"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ethereum_rpc_and_sync_fields_reach_separate_runtime_settings() {
         let config = parse(ethereum(None), json!([])).expect("configuration JSON");
         config.validate().expect("defaulted bounds");
-        let settings = config
-            .indexes
-            .ethereum
-            .as_ref()
-            .unwrap()
-            .settings()
-            .unwrap();
-        assert_eq!(settings.endpoints, ["http://127.0.0.1:8545"]);
-        assert!(settings.headers.is_empty());
-        assert_eq!(settings.request_timeout, Duration::from_secs(15));
-        assert_eq!(settings.max_response_bytes, 64 * 1024 * 1024);
+        let ethereum_config = config.indexes.ethereum.as_ref().unwrap();
+        let settings = ethereum_config.settings();
+        let transport = ethereum_config.rpc.transport().unwrap();
+        assert_eq!(transport.endpoints, ["http://127.0.0.1:8545"]);
+        assert!(transport.headers.is_empty());
+        assert_eq!(transport.request_timeout, Duration::from_secs(15));
+        assert_eq!(transport.max_response_bytes, 64 * 1024 * 1024);
+        assert_eq!(transport.retry, json_rpc::Retry::default());
         assert_eq!(settings.batch_size, 100);
         assert_eq!(config.indexes.interval(), Duration::from_millis(1_000));
 
@@ -474,28 +521,69 @@ mod tests {
         indexes["ethereum"]["batch_size"] = json!(7);
         let config = parse(indexes, json!([])).expect("explicit configuration");
         config.validate().expect("explicit bounds");
-        let settings = config
-            .indexes
-            .ethereum
-            .as_ref()
-            .unwrap()
-            .settings()
-            .unwrap();
+        let ethereum_config = config.indexes.ethereum.as_ref().unwrap();
+        let settings = ethereum_config.settings();
+        let transport = ethereum_config.rpc.transport().unwrap();
         assert_eq!(
-            settings.endpoints,
+            transport.endpoints,
             ["http://127.0.0.1:9545", "http://127.0.0.1:8545"]
         );
         assert_eq!(
-            settings.headers,
+            transport.headers,
             [
                 ("x-fixture".to_owned(), "first".to_owned()),
                 ("x-fixture".to_owned(), "second".to_owned())
             ]
         );
-        assert_eq!(settings.request_timeout, Duration::from_secs(3));
-        assert_eq!(settings.max_response_bytes, 8_192);
+        assert_eq!(transport.request_timeout, Duration::from_secs(3));
+        assert_eq!(transport.max_response_bytes, 8_192);
         assert_eq!(settings.batch_size, 7);
         assert_eq!(config.indexes.interval(), Duration::from_millis(17));
+    }
+
+    #[test]
+    fn bitcoin_rpc_configuration_is_independent_of_indexing_policy() {
+        let mut config: BitcoinConfig = serde_json::from_value(json!({
+            "network": "regtest",
+            "genesis_hash": "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
+            "rpc": {
+                "endpoints": ["http://127.0.0.1:18443", "http://127.0.0.1:18444"],
+                "headers": [["Authorization", "fixture-credential"]],
+                "timeout_seconds": 4,
+                "max_response_bytes": 8192
+            },
+            "confirmation_depth": 3, "reorg_retention": 12, "batch_size": 7
+        }))
+        .unwrap();
+        config.validate().unwrap();
+        let transport = config.rpc.transport().unwrap();
+        let settings = config.settings();
+        assert_eq!(settings.scope().network, "regtest");
+        assert_eq!(
+            (
+                settings.confirmations,
+                settings.reorg_retention,
+                settings.batch_size
+            ),
+            (3, 12, 7)
+        );
+        assert_eq!(
+            transport.endpoints,
+            ["http://127.0.0.1:18443", "http://127.0.0.1:18444"]
+        );
+        assert_eq!(
+            transport.headers,
+            [("Authorization".to_owned(), "fixture-credential".to_owned())]
+        );
+        assert_eq!(transport.request_timeout, Duration::from_secs(4));
+        assert_eq!(transport.max_response_bytes, 8192);
+        config.sync.confirmation_depth = 9;
+        config.sync.batch_size = 19;
+        assert_eq!(config.rpc.transport().unwrap(), transport);
+        let settings = config.settings();
+        config.rpc.endpoints.clear();
+        assert!(config.rpc.transport().is_err());
+        assert_eq!(config.settings(), settings);
     }
 
     #[test]

@@ -42,6 +42,19 @@ attempt against the first configured endpoint, so failover cannot hide whether
 an earlier endpoint accepted the envelope. The coordinator owns any exact-byte
 replay and reconciliation.
 
+RPC transport configuration belongs to `json_rpc::Config`: endpoints, headers,
+timeouts, size bounds, and retry policy. Bitcoin and Ethereum `IndexerSettings`
+contain chain identity and synchronization policy, and never construct HTTP
+clients. Composition builds the transport and native RPC client explicitly.
+Bitcoin verifies its network and node readiness during `RpcClient::connect`;
+Ethereum verifies chain ID during `IndexerSettings::source`. Genesis pinning is
+optional for these chains and disabled by default; a supplied expected hash
+enables the additional startup check. All enabled checks happen before storage
+opens. Indexer `build` then consumes the verified client/source without
+additional RPC calls, while wallet adapters share that same client. Generic
+transport defaults to three endpoint rounds with 250 ms initial backoff capped
+at 2 seconds. Explicit no-retry and single-attempt submission paths remain.
+
 `apps/api` chooses an application-owned asset key for the existing generic
 wallet-family parameter. Native ETH and an allowlisted ERC-20 such as USDC are
 separate registrations backed by separate `WalletProvider` configurations,

@@ -14,6 +14,11 @@ use serde_json::{Value, value::RawValue};
 
 use crate::{BoxFuture, Call, CallResult, Client, Error, ErrorKind, Failure, RawJson};
 
+/// Retryable transport-failure policy for ordinary requests and batches.
+///
+/// Attempts count complete rounds over the endpoint list, not individual HTTP
+/// executions. The default permits three rounds with exponential backoff starting
+/// at 250 milliseconds and capped at two seconds. `request_once` ignores this policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Retry {
     max_attempts: NonZeroU32,
@@ -22,6 +27,7 @@ pub struct Retry {
 }
 
 impl Retry {
+    /// Sets the maximum endpoint rounds and the delay between failed rounds.
     pub fn new(
         max_attempts: NonZeroU32,
         initial_backoff: Duration,
@@ -40,6 +46,8 @@ impl Retry {
         })
     }
 
+    /// Makes one endpoint round. Endpoint failover remains enabled; use
+    /// `Client::request_once` when exactly one endpoint may be contacted.
     #[must_use]
     pub const fn no_retry() -> Self {
         Self {
@@ -60,7 +68,11 @@ impl Retry {
 
 impl Default for Retry {
     fn default() -> Self {
-        Self::no_retry()
+        Self {
+            max_attempts: NonZeroU32::new(3).expect("three is nonzero"),
+            initial_backoff: Duration::from_millis(250),
+            max_backoff: Duration::from_secs(2),
+        }
     }
 }
 
@@ -94,6 +106,8 @@ impl fmt::Debug for Config {
 }
 
 impl Config {
+    /// Configures one endpoint with [`Retry::default`] and 10 MiB request / 64 MiB
+    /// response limits. `request_timeout` applies to each HTTP execution.
     #[must_use]
     pub fn new(endpoint: impl Into<String>, request_timeout: Duration) -> Self {
         Self {
@@ -425,6 +439,16 @@ fn invalid_limit() -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_retry_uses_bounded_exponential_backoff() {
+        let retry = Config::new("http://example.invalid", Duration::from_secs(1)).retry;
+        assert_eq!(retry.max_attempts.get(), 3);
+        assert_eq!(retry.backoff(1), Duration::from_millis(250));
+        assert_eq!(retry.backoff(2), Duration::from_millis(500));
+        assert_eq!(retry.backoff(4), Duration::from_secs(2));
+        assert_eq!(retry.backoff(u32::MAX), Duration::from_secs(2));
+    }
 
     #[test]
     fn rpc_error_conversion_preserves_classification_and_redacts_details() {
