@@ -262,6 +262,44 @@ Recorded on 2026-09-16 after the sample simplification:
   The schema-name mismatch and SQLSTATE `42601` remain unchanged; the three
   initializer contracts pass. These failures are outside this update.
 
+## Existing wallet insertion evidence
+
+Recorded on 2026-09-16:
+
+- `Wallets::insert` retains an already attached wallet and its explicit
+  native-position birthday after provider validation. Bitcoin and Ethereum
+  examples show local generation, attachment, family registration, insertion,
+  and public-address output. Each sample now has a named function in
+  `examples/bitcoin.rs` or `examples/ethereum.rs`, with all three calls commented
+  in `main` for opt-in execution. Both compile. These two binaries replace the
+  earlier wallet, ERC-20, Solana, and standalone indexer examples described in
+  the historical evidence above.
+  No live-node example execution was performed for this update.
+- Focused Bitcoin tests pass 176 unit tests and one documentation test;
+  Ethereum passes 173 unit tests, three integration tests, and one documentation
+  test. Admission rejects mismatched scope, address/asset configuration, and
+  operational dependencies before publishing a wallet or filter. Tests also
+  reject ETH/USDC mixups for the same EOA address.
+- Focused wallet tests pass 36 unit tests and two documentation tests. They
+  prove exact instance retention, explicit birthday handling, no registry I/O,
+  duplicate-ID preservation, rejection without publication, and that insertion
+  cannot be called through a shared `Arc<Wallets>`.
+- The required provider validation contract is also implemented by Solana;
+  160 unit tests and one documentation test pass with local loopback networking
+  enabled. Solana validation binds the wallet to its existing batch signer
+  registry; no local Solana key/attachment API was added.
+- The new insertion test first failed because the public method was absent,
+  then passed after implementation. Existing batch orchestration moved intact
+  into a private collection child module; its regression tests remain passing.
+- Workspace formatting, locked all-target compilation, strict all-target and
+  all-feature Clippy, no-dependency documentation, and diff checks pass.
+  The final MCP check completes all 39 configured rules; 17 are unconfigured.
+  Its only finding is the pre-existing examples-layer mapping gap.
+- `cargo test --locked --workspace --no-fail-fast` completes with the same
+  25 PostgreSQL repository failures and ten API system-test startup failures
+  recorded above. The schema incompatibility and SQLSTATE `42601` remain
+  outside this change; the three initializer contract tests pass.
+
 ## Final gates
 
 Before a handoff, record fresh results for:

@@ -13,8 +13,10 @@ use indexing::{
 
 use crate::{
     AddressText, Balance, Error, ErrorKind, FutureResult, History, HistoryRequest, Provider,
-    SecretBytes, SendError, SendFuture, Sender, Transfer, Wallet, selection::publication_error,
+    SecretBytes, Sender, Wallet, selection::publication_error,
 };
+
+mod batch;
 
 /// Non-secret facts retained for one registered wallet.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -250,6 +252,41 @@ where
         })
     }
 
+    /// Inserts an existing wallet without recreating or persisting its key.
+    ///
+    /// The registered provider must validate its scope and compatibility.
+    /// Like import, this requires an explicit birthday and exclusive startup
+    /// access: an existing key may already have historical activity.
+    ///
+    /// ```compile_fail,E0596
+    /// use std::sync::Arc;
+    /// use wallets::{Wallet, Wallets};
+    /// fn insert_shared(mut wallets: Arc<Wallets<String, String>>, wallet: Arc<dyn Wallet>) {
+    ///     let _ = wallets.insert("id".into(), &"btc".into(), wallet, base::BlockPosition(0));
+    /// }
+    /// ```
+    pub fn insert<'a>(
+        &'a mut self,
+        id: I,
+        family: &F,
+        wallet: Arc<dyn Wallet>,
+        start_position: BlockPosition,
+    ) -> FutureResult<'a, WalletInfo<I, F>> {
+        let family_key = family.clone();
+        let configured = self.family(family);
+        Box::pin(async move {
+            let configured = configured?;
+            configured
+                .provider
+                .validate(&configured.scope, wallet.as_ref())?;
+            let (info, _, publication) = self
+                .store(id, family_key, configured, wallet, Some(start_position))
+                .await?;
+            debug_assert!(publication.is_none());
+            Ok(info)
+        })
+    }
+
     pub fn get<Q>(&self, id: &Q) -> Result<WalletInfo<I, F>, Error>
     where
         I: Borrow<Q>,
@@ -292,14 +329,6 @@ where
     {
         let wallet = self.instance(id);
         Box::pin(async move { wallet?.send(destination, amount).await })
-    }
-
-    pub fn send_all<'a>(&'a self, requests: Vec<WalletTransfer<I>>) -> SendFuture<'a> {
-        let prepared = self.transfers(requests);
-        Box::pin(async move {
-            let (sender, transfers) = prepared?;
-            sender.send(transfers).await
-        })
     }
 
     /// Returns the authoritative address/birthday snapshot for one index run.
@@ -422,69 +451,6 @@ where
         }
     }
 
-    fn transfers(
-        &self,
-        requests: Vec<WalletTransfer<I>>,
-    ) -> Result<(Arc<dyn Sender>, Vec<Transfer>), SendError> {
-        if requests.is_empty() {
-            return Err(SendError::collection(
-                ErrorKind::InvalidBatch,
-                "at least one transfer is required",
-            ));
-        }
-        if requests.len() > MAX_TRANSFERS {
-            return Err(SendError::collection(
-                ErrorKind::InvalidBatch,
-                "at most 50 transfers are allowed",
-            ));
-        }
-        let mut family = None;
-        let mut transfers = Vec::with_capacity(requests.len());
-        for (index, request) in requests.into_iter().enumerate() {
-            let entry = self
-                .transfer_entry(&request, family.as_ref())
-                .map_err(|error| SendError::item(index, Vec::new(), error))?;
-            family = Some(entry.info.family.clone());
-            transfers.push(Transfer {
-                wallet: entry.wallet,
-                to: request.to,
-                amount: request.amount,
-            });
-        }
-        let family = family.ok_or_else(|| {
-            SendError::operation(ErrorKind::Unsupported, "transfer family is missing")
-        })?;
-        let sender = self
-            .families
-            .get(&family)
-            .map(|configured| configured.sender.clone())
-            .ok_or_else(|| {
-                SendError::operation(ErrorKind::Unsupported, "wallet family is not configured")
-            })?;
-        Ok((sender, transfers))
-    }
-
-    fn transfer_entry(
-        &self,
-        request: &WalletTransfer<I>,
-        family: Option<&F>,
-    ) -> Result<Entry<I, F>, Error> {
-        if request.amount <= Decimal::zero() {
-            return Err(Error::new(
-                ErrorKind::InvalidAmount,
-                "amount must be positive",
-            ));
-        }
-        let entry = self.entry(&request.wallet)?;
-        if family.is_some_and(|expected| expected != &entry.info.family) {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                "all transfers must use the same wallet family",
-            ));
-        }
-        Ok(entry)
-    }
-
     fn entry(&self, id: &I) -> Result<Entry<I, F>, Error> {
         let values = self.values.read().map_err(|_| lock_error())?;
         match values.get(id) {
@@ -521,11 +487,29 @@ mod tests {
 
     use super::*;
     use crate::{
-        AddressEncoding, AddressFormat, BalanceReader, HistoryReader, SingleSender,
-        TransactionFactory,
+        AddressEncoding, AddressFormat, BalanceReader, HistoryReader, SendError, SendFuture,
+        SingleSender, TransactionFactory, Transfer,
     };
 
     struct FixtureIndex(Option<BlockRef>);
+
+    struct InactiveRegistry;
+
+    impl Registry for InactiveRegistry {
+        fn register<'a>(
+            &'a self,
+            _entry: RegisteredAddress,
+        ) -> BoxFuture<'a, Result<(), IndexError>> {
+            panic!("existing wallet insertion must not persist secrets or addresses")
+        }
+
+        fn registered<'a>(
+            &'a self,
+            _scope: &'a IndexScope,
+        ) -> BoxFuture<'a, Result<Vec<RegisteredAddress>, IndexError>> {
+            panic!("existing wallet insertion must not read registry persistence")
+        }
+    }
 
     impl Checkpoint for FixtureIndex {
         fn checkpoint<'a>(
@@ -602,6 +586,16 @@ mod tests {
     }
 
     impl Provider for FixtureProvider {
+        fn validate(&self, _scope: &IndexScope, wallet: &dyn Wallet) -> Result<(), Error> {
+            if (wallet as &dyn std::any::Any).is::<FixtureWallet>() {
+                return Ok(());
+            }
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "incompatible fixture wallet",
+            ))
+        }
+
         fn create<'a>(&'a self, _secret: SecretBytes) -> FutureResult<'a, Arc<dyn Wallet>> {
             Box::pin(async { Ok(Arc::new(FixtureWallet(false)) as Arc<dyn Wallet>) })
         }
@@ -614,6 +608,13 @@ mod tests {
     struct GenerationFailureProvider;
 
     impl Provider for GenerationFailureProvider {
+        fn validate(&self, _scope: &IndexScope, _wallet: &dyn Wallet) -> Result<(), Error> {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "fixture rejects insertion",
+            ))
+        }
+
         fn create<'a>(&'a self, _secret: SecretBytes) -> FutureResult<'a, Arc<dyn Wallet>> {
             Box::pin(async { unreachable!("generation failure must not reach wallet creation") })
         }
@@ -936,6 +937,102 @@ mod tests {
             "wallet family scope has no address admission"
         );
         assert!(!error.retryable);
+    }
+
+    #[test]
+    fn inserted_wallet_keeps_its_instance_and_explicit_birthday() {
+        let (sender, _) = sender();
+        let mut wallets = Wallets::<String, &str>::new(Arc::new(FixtureIndex(Some(block(7)))));
+        wallets
+            .register(
+                "family",
+                scope("mainnet"),
+                FixtureProvider::Value,
+                sender,
+                Some(Arc::new(InactiveRegistry)),
+            )
+            .expect("family registration");
+        let wallet: Arc<dyn Wallet> = Arc::new(FixtureWallet(false));
+        let info = futures_executor::block_on(wallets.insert(
+            "alice".to_owned(),
+            &"family",
+            wallet.clone(),
+            BlockPosition(2),
+        ))
+        .expect("wallet insertion");
+
+        assert_eq!(info.address.text, "fixture-address");
+        assert_eq!(info.scope, scope("mainnet"));
+        assert!(Arc::ptr_eq(&wallets.instance("alice").unwrap(), &wallet));
+        assert_eq!(wallets.get("alice").unwrap(), info);
+        assert_eq!(
+            wallets.filters().unwrap()[0].start_position,
+            BlockPosition(2)
+        );
+        assert_eq!(
+            futures_executor::block_on(wallets.balance("alice"))
+                .unwrap()
+                .amount,
+            Decimal::from(12_u64)
+        );
+    }
+
+    #[test]
+    fn duplicate_insertion_preserves_the_original_instance_and_filter() {
+        let (sender, _) = sender();
+        let mut wallets = Wallets::new(Arc::new(FixtureIndex(None)));
+        wallets
+            .register(
+                "family",
+                scope("mainnet"),
+                FixtureProvider::Value,
+                sender,
+                None,
+            )
+            .unwrap();
+        let first: Arc<dyn Wallet> = Arc::new(FixtureWallet(false));
+        futures_executor::block_on(wallets.insert(1, &"family", first.clone(), BlockPosition(5)))
+            .unwrap();
+        let filters = wallets.filters().unwrap();
+        let error = futures_executor::block_on(wallets.insert(
+            1,
+            &"family",
+            Arc::new(FixtureWallet(true)),
+            BlockPosition(0),
+        ))
+        .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Duplicate);
+        assert!(Arc::ptr_eq(&wallets.instance(&1).unwrap(), &first));
+        assert_eq!(wallets.filters().unwrap(), filters);
+    }
+
+    #[test]
+    fn unknown_or_rejecting_family_leaves_no_wallet_or_filter() {
+        let (sender, _) = sender();
+        let mut wallets = Wallets::new(Arc::new(FixtureIndex(None)));
+        wallets
+            .register(
+                "rejecting",
+                scope("mainnet"),
+                GenerationFailureProvider,
+                sender,
+                None,
+            )
+            .unwrap();
+
+        for family in ["missing", "rejecting"] {
+            let error = futures_executor::block_on(wallets.insert(
+                1,
+                &family,
+                Arc::new(FixtureWallet(false)),
+                BlockPosition(0),
+            ))
+            .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Unsupported);
+            assert_eq!(wallets.get(&1).unwrap_err().kind, ErrorKind::NotFound);
+            assert!(wallets.filters().unwrap().is_empty());
+        }
     }
 
     #[test]

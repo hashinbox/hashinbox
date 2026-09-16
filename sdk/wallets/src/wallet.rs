@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{any::Any, future::Future, pin::Pin};
 
 use base::{Addresser, Broadcaster, Decimal, Signer, TransactionBuilder, TransactionId};
 use indexing::{
@@ -362,7 +362,15 @@ where
 
 /// Chain-independent capabilities available after application composition.
 pub trait Wallet:
-    Addresser + AddressFormat + BalanceReader + HistoryReader + SingleSender + Signer + Send + Sync
+    Addresser
+    + AddressFormat
+    + BalanceReader
+    + HistoryReader
+    + SingleSender
+    + Signer
+    + Send
+    + Sync
+    + Any
 {
 }
 
@@ -375,6 +383,7 @@ impl<T> Wallet for T where
         + Signer
         + Send
         + Sync
+        + Any
 {
 }
 

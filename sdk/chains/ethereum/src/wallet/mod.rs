@@ -27,7 +27,7 @@ mod snapshot;
 
 pub use key_pair::KeyPair;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WalletConfig {
     pub scope: IndexScope,
     /// The EVM chain this wallet signs for, verified against the node before
@@ -156,6 +156,29 @@ impl Provider for WalletProvider {
 
     fn generate(&self) -> FutureResult<'_, Arc<dyn WalletContract>> {
         self.generate_with(SecretBytes::generate_secp256k1)
+    }
+
+    fn validate(&self, scope: &IndexScope, wallet: &dyn WalletContract) -> Result<(), WalletError> {
+        let wallet = (wallet as &dyn std::any::Any)
+            .downcast_ref::<Wallet>()
+            .ok_or_else(|| {
+                WalletError::new(
+                    WalletErrorKind::Unsupported,
+                    "wallet was not constructed by an Ethereum provider",
+                )
+            })?;
+        if scope != &self.config.scope
+            || wallet.config != self.config
+            || !Arc::ptr_eq(&wallet.accounts, &self.accounts)
+            || !Arc::ptr_eq(&wallet.coordinator, &self.coordinator)
+            || !Arc::ptr_eq(&wallet.history, &self.history)
+        {
+            return Err(WalletError::new(
+                WalletErrorKind::Unsupported,
+                "wallet does not match the Ethereum provider's scope, asset, or dependencies",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -487,6 +510,16 @@ mod tests {
         }
     }
 
+    impl indexing::Checkpoint for InactiveDependencies {
+        fn checkpoint<'a>(
+            &'a self,
+            _scope: &'a IndexScope,
+        ) -> indexing::BoxFuture<'a, Result<Option<indexing::BlockRef>, indexing::IndexError>>
+        {
+            panic!("startup wallet insertion must not read the checkpoint")
+        }
+    }
+
     fn config(asset: AssetKind, decimals: u32) -> WalletConfig {
         WalletConfig {
             scope: IndexScope {
@@ -511,6 +544,208 @@ mod tests {
             coordinator,
             history,
         )
+    }
+
+    #[test]
+    fn provider_validation_accepts_equivalent_composition_without_chain_io() {
+        let provider = provider();
+        let wallet = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        let equivalent = WalletProvider::new(
+            provider.config.clone(),
+            provider.accounts.clone(),
+            provider.coordinator.clone(),
+            provider.history.clone(),
+        );
+
+        assert!(
+            provider
+                .validate(&provider.config.scope, wallet.as_ref())
+                .is_ok()
+        );
+        assert!(
+            equivalent
+                .validate(&provider.config.scope, wallet.as_ref())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn provider_validation_rejects_asset_chain_and_precision_mismatches_without_io() {
+        let mut provider = provider();
+        provider.config = config(AssetKind::Erc20(Address([0x33; 20])), 6);
+        let wallet = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        let configurations = [
+            config(AssetKind::Native, 18),
+            config(AssetKind::Erc20(Address([0x44; 20])), 6),
+            WalletConfig {
+                chain_id: 1,
+                ..provider.config.clone()
+            },
+            WalletConfig {
+                decimals: 18,
+                ..provider.config.clone()
+            },
+            WalletConfig {
+                scope: IndexScope {
+                    chain: ChainId("ethereum".to_owned()),
+                    network: "mainnet".to_owned(),
+                },
+                ..provider.config.clone()
+            },
+        ];
+
+        for config in configurations {
+            let incompatible = WalletProvider::new(
+                config,
+                provider.accounts.clone(),
+                provider.coordinator.clone(),
+                provider.history.clone(),
+            );
+            let error = incompatible
+                .validate(&incompatible.config.scope, wallet.as_ref())
+                .unwrap_err();
+            assert_eq!(error.kind, WalletErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
+    fn provider_validation_rejects_registered_scope_mismatch_without_io() {
+        let provider = provider();
+        let wallet = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        for scope in [
+            IndexScope {
+                chain: ChainId("ethereum".to_owned()),
+                network: "mainnet".to_owned(),
+            },
+            IndexScope {
+                chain: ChainId("bitcoin".to_owned()),
+                network: "sepolia".to_owned(),
+            },
+        ] {
+            let error = provider.validate(&scope, wallet.as_ref()).unwrap_err();
+            assert_eq!(error.kind, WalletErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
+    fn provider_validation_rejects_unshared_operational_dependencies_without_io() {
+        let provider = provider();
+        let wallet = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        let other: Arc<InactiveDependencies> = Arc::new(InactiveDependencies);
+        let other_accounts: Arc<dyn Accounts> = other.clone();
+        let other_history: Arc<dyn IndexHistory> = other.clone();
+        let other_coordinator = Arc::new(TransactionCoordinator::new(
+            provider.accounts.clone(),
+            other,
+        ));
+        for (accounts, coordinator, history) in [
+            (
+                other_accounts,
+                provider.coordinator.clone(),
+                provider.history.clone(),
+            ),
+            (
+                provider.accounts.clone(),
+                other_coordinator,
+                provider.history.clone(),
+            ),
+            (
+                provider.accounts.clone(),
+                provider.coordinator.clone(),
+                other_history,
+            ),
+        ] {
+            let incompatible =
+                WalletProvider::new(provider.config.clone(), accounts, coordinator, history);
+            let error = incompatible
+                .validate(&provider.config.scope, wallet.as_ref())
+                .unwrap_err();
+            assert_eq!(error.kind, WalletErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
+    fn collection_insertion_rejects_eth_and_usdc_family_mixups_without_publication() {
+        let native = Arc::new(provider());
+        let token = Arc::new(WalletProvider::new(
+            config(AssetKind::Erc20(Address([0x33; 20])), 6),
+            native.accounts.clone(),
+            native.coordinator.clone(),
+            native.history.clone(),
+        ));
+        let eth = native
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        let usdc = token
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        assert_eq!(eth.address(), usdc.address());
+        let mut wallets = wallets::Wallets::<u32, &str>::new(Arc::new(InactiveDependencies));
+        for (family, provider) in [("eth", native), ("usdc", token)] {
+            wallets
+                .register(
+                    family,
+                    provider.config.scope.clone(),
+                    provider.clone(),
+                    provider.transactions(),
+                    None,
+                )
+                .unwrap();
+        }
+
+        for (id, family, wallet) in [(1, "usdc", eth), (2, "eth", usdc)] {
+            let error =
+                block_on(wallets.insert(id, &family, wallet, base::BlockPosition(25))).unwrap_err();
+            assert_eq!(error.kind, WalletErrorKind::Unsupported);
+            assert_eq!(
+                wallets.get(&id).unwrap_err().kind,
+                WalletErrorKind::NotFound
+            );
+            assert!(wallets.filters().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn collection_insertion_accepts_attached_wallet_and_preserves_earliest_birthday() {
+        let provider = Arc::new(provider());
+        let wallet = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        let address = wallet.address_text(&wallet.address()).unwrap();
+        let scope = provider.config.scope.clone();
+        let mut wallets = wallets::Wallets::<u32, &str>::new(Arc::new(InactiveDependencies));
+        wallets
+            .register(
+                "eth",
+                scope.clone(),
+                provider.clone(),
+                provider.transactions(),
+                None,
+            )
+            .unwrap();
+
+        for (id, birthday) in [(1, 25), (2, 10)] {
+            let info =
+                block_on(wallets.insert(id, &"eth", wallet.clone(), base::BlockPosition(birthday)))
+                    .unwrap();
+            assert_eq!(info.address, address);
+            assert_eq!(info.scope, scope);
+            assert_eq!(info.family, "eth");
+            assert_eq!(wallets.get(&id).unwrap(), info);
+        }
+        let filters = wallets.filters().unwrap();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].start_position, base::BlockPosition(10));
+        assert_eq!(filters[0].address.value, address.text);
+        assert!(filters[0].address.belongs_to(&scope));
     }
 
     #[test]

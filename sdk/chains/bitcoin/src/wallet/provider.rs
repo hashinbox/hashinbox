@@ -20,7 +20,7 @@ use crate::{
 pub(super) const SNAPSHOT_KIND: &str = "bitcoin.transfer";
 pub(crate) const PREPARED_KIND: &str = "bitcoin.signed";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub scope: IndexScope,
     pub network: Network,
@@ -124,6 +124,29 @@ impl Provider for Factory {
 
     fn generate(&self) -> FutureResult<'_, Arc<dyn WalletContract>> {
         self.generate_with(SecretBytes::generate_secp256k1)
+    }
+
+    fn validate(&self, scope: &IndexScope, wallet: &dyn WalletContract) -> Result<(), WalletError> {
+        self.config.validate()?;
+        let Some(wallet) = (wallet as &dyn std::any::Any).downcast_ref::<Wallet>() else {
+            return Err(WalletError::new(
+                WalletErrorKind::Unsupported,
+                "wallet is not a Bitcoin wallet created by this provider type",
+            ));
+        };
+        if scope != &self.config.scope
+            || wallet.config != self.config
+            || !Arc::ptr_eq(&wallet.utxos, &self.utxos)
+            || !Arc::ptr_eq(&wallet.fees, &self.fees)
+            || !Arc::ptr_eq(&wallet.transactions, &self.transactions)
+            || !Arc::ptr_eq(&wallet.history, &self.history)
+        {
+            return Err(WalletError::new(
+                WalletErrorKind::Unsupported,
+                "Bitcoin wallet must match provider scope, configuration, and capabilities",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -292,6 +315,15 @@ mod tests {
 
     struct InactiveDependencies;
 
+    impl indexing::Checkpoint for InactiveDependencies {
+        fn checkpoint<'a>(
+            &'a self,
+            _scope: &'a IndexScope,
+        ) -> BoxFuture<'a, Result<Option<BlockRef>, IndexError>> {
+            unreachable!("startup wallet insertion must not read the checkpoint")
+        }
+    }
+
     impl Outputs for InactiveDependencies {
         fn list<'a>(
             &'a self,
@@ -334,6 +366,55 @@ mod tests {
             _request: HistoryQuery,
         ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
             Box::pin(async { unreachable!("wallet generation must not read indexed history") })
+        }
+    }
+
+    struct ForeignWallet(Arc<dyn WalletContract>);
+
+    impl Addresser for ForeignWallet {
+        fn address(&self) -> BaseAddress {
+            self.0.address()
+        }
+    }
+
+    impl WalletAddressFormat for ForeignWallet {
+        fn address_text(&self, address: &BaseAddress) -> Result<AddressText, WalletError> {
+            self.0.address_text(address)
+        }
+
+        fn parse_address(&self, address: &AddressText) -> Result<BaseAddress, WalletError> {
+            self.0.parse_address(address)
+        }
+    }
+
+    impl BalanceReader for ForeignWallet {
+        fn balance<'a>(&'a self) -> FutureResult<'a, Balance> {
+            self.0.balance()
+        }
+    }
+
+    impl wallets::HistoryReader for ForeignWallet {
+        fn history<'a>(
+            &'a self,
+            request: wallets::HistoryRequest,
+        ) -> FutureResult<'a, wallets::History> {
+            self.0.history(request)
+        }
+    }
+
+    impl wallets::SingleSender for ForeignWallet {
+        fn send<'a>(
+            &'a self,
+            destination: AddressText,
+            amount: base::Decimal,
+        ) -> FutureResult<'a, BaseTransactionId> {
+            self.0.send(destination, amount)
+        }
+    }
+
+    impl base::Signer for ForeignWallet {
+        fn sign<'a>(&'a self, request: SignRequest) -> base::SignFuture<'a> {
+            self.0.sign(request)
         }
     }
 
@@ -445,6 +526,184 @@ mod tests {
             transactions,
             history,
         )
+    }
+
+    fn equivalent_factory(provider: &Factory) -> Factory {
+        Factory::new(
+            provider.config.clone(),
+            provider.utxos.clone(),
+            provider.fees.clone(),
+            provider.transactions.clone(),
+            provider.history.clone(),
+        )
+    }
+
+    #[test]
+    fn validation_accepts_attached_keys_and_equivalent_providers_without_io() {
+        for address_type in [AddressType::SegwitV0, AddressType::Taproot] {
+            let provider = factory(address_type);
+            let equivalent = equivalent_factory(&provider);
+            let key = KeyPair::import(SecretBytes::new([1_u8; 32]), Network::Regtest, address_type)
+                .unwrap();
+            let address = key.address();
+            let wallet = equivalent.attach(key).unwrap();
+
+            provider
+                .validate(&provider.config.scope, wallet.as_ref())
+                .unwrap();
+            equivalent
+                .validate(&provider.config.scope, wallet.as_ref())
+                .unwrap();
+            assert_eq!(wallet.address(), address);
+        }
+    }
+
+    #[test]
+    fn collection_inserts_attached_keys_with_their_address_and_birthday_without_io() {
+        let provider = factory(AddressType::SegwitV0);
+        let key = KeyPair::import(
+            SecretBytes::new([1_u8; 32]),
+            Network::Regtest,
+            AddressType::SegwitV0,
+        )
+        .unwrap();
+        let address = key.address_text(&key.address()).unwrap();
+        let wallet = provider.attach(key).unwrap();
+        let scope = provider.config.scope.clone();
+        let sender = provider.transactions();
+        let mut collection = wallets::Wallets::new(Arc::new(InactiveDependencies));
+        collection
+            .register("btc", scope.clone(), provider, sender, None)
+            .unwrap();
+
+        let info =
+            block_on(collection.insert("existing", &"btc", wallet, BlockPosition(42))).unwrap();
+
+        assert_eq!(info.address, address);
+        assert_eq!(collection.get(&"existing").unwrap(), info);
+        assert_eq!(
+            collection.filters().unwrap(),
+            vec![indexing::AddressFilter {
+                address: indexing::CanonicalAddress {
+                    scope,
+                    value: address.text,
+                },
+                start_position: BlockPosition(42),
+            }],
+        );
+    }
+
+    #[test]
+    fn collection_rejects_a_wallet_with_unrelated_dependencies_before_publication() {
+        let provider = factory(AddressType::SegwitV0);
+        let unrelated = factory(AddressType::SegwitV0);
+        let wallet = block_on(unrelated.create(SecretBytes::new([1_u8; 32]))).unwrap();
+        let sender = provider.transactions();
+        let mut collection = wallets::Wallets::new(Arc::new(InactiveDependencies));
+        collection
+            .register("btc", provider.config.scope.clone(), provider, sender, None)
+            .unwrap();
+
+        let error =
+            block_on(collection.insert("existing", &"btc", wallet, BlockPosition(42))).unwrap_err();
+
+        assert_eq!(error.kind, WalletErrorKind::Unsupported);
+        assert_eq!(
+            collection.get(&"existing").unwrap_err().kind,
+            WalletErrorKind::NotFound
+        );
+        assert!(collection.filters().unwrap().is_empty());
+    }
+
+    #[test]
+    fn validation_rejects_a_different_registered_scope_without_io() {
+        let provider = factory(AddressType::SegwitV0);
+        let wallet = block_on(provider.create(SecretBytes::new([1_u8; 32]))).unwrap();
+        for scope in [
+            IndexScope {
+                chain: ChainId("ethereum".to_owned()),
+                network: provider.config.scope.network.clone(),
+            },
+            IndexScope {
+                chain: provider.config.scope.chain.clone(),
+                network: Network::Mainnet.canonical_name().to_owned(),
+            },
+        ] {
+            let error = provider.validate(&scope, wallet.as_ref()).unwrap_err();
+            assert_eq!(error.kind, WalletErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
+    fn validation_rejects_another_wallet_type_even_with_the_same_address() {
+        let provider = factory(AddressType::SegwitV0);
+        let wallet = block_on(provider.create(SecretBytes::new([1_u8; 32]))).unwrap();
+        let foreign = ForeignWallet(wallet.clone());
+        assert_eq!(foreign.address(), wallet.address());
+
+        let error = provider
+            .validate(&provider.config.scope, &foreign)
+            .unwrap_err();
+
+        assert_eq!(error.kind, WalletErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn validation_rejects_every_mismatched_configuration_field_without_io() {
+        let provider = factory(AddressType::SegwitV0);
+        let wallet = block_on(provider.create(SecretBytes::new([1_u8; 32]))).unwrap();
+        for field in [
+            "scope",
+            "network",
+            "address_type",
+            "fee_target",
+            "max_fee_rate",
+        ] {
+            let mut candidate = equivalent_factory(&provider);
+            match field {
+                "scope" => candidate.config.scope.chain = ChainId("other".to_owned()),
+                "network" => {
+                    candidate.config.network = Network::Signet;
+                    candidate.config.scope.network = Network::Signet.canonical_name().to_owned();
+                }
+                "address_type" => candidate.config.address_type = AddressType::Taproot,
+                "fee_target" => candidate.config.fee_target_blocks += 1,
+                "max_fee_rate" => candidate.config.max_fee_rate = FeeRate::new(2_000),
+                _ => unreachable!("fixture lists configuration fields exhaustively"),
+            }
+            let error = candidate
+                .validate(&candidate.config.scope, wallet.as_ref())
+                .unwrap_err();
+            assert_eq!(error.kind, WalletErrorKind::Unsupported, "{field}");
+        }
+    }
+
+    #[test]
+    fn validation_rejects_each_unrelated_operational_dependency_without_io() {
+        let provider = factory(AddressType::SegwitV0);
+        let wallet = block_on(provider.create(SecretBytes::new([1_u8; 32]))).unwrap();
+        for dependency in ["utxos", "fees", "transactions", "history"] {
+            let mut candidate = equivalent_factory(&provider);
+            match dependency {
+                "utxos" => {
+                    let utxos = IndexUtxos::new(
+                        provider.config.scope.clone(),
+                        provider.config.network,
+                        Arc::new(InactiveDependencies),
+                    )
+                    .unwrap();
+                    candidate.utxos = Arc::new(utxos);
+                }
+                "fees" => candidate.fees = Arc::new(InactiveDependencies),
+                "transactions" => candidate.transactions = Arc::new(InactiveDependencies),
+                "history" => candidate.history = Arc::new(InactiveDependencies),
+                _ => unreachable!("fixture lists dependencies exhaustively"),
+            }
+            let error = candidate
+                .validate(&provider.config.scope, wallet.as_ref())
+                .unwrap_err();
+            assert_eq!(error.kind, WalletErrorKind::Unsupported, "{dependency}");
+        }
     }
 
     #[test]

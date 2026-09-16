@@ -9,7 +9,7 @@ publish = false
 base = { path = "../sdk/chains/base" }
 chain-bitcoin = { path = "../sdk/chains/bitcoin" }
 chain-ethereum = { path = "../sdk/chains/ethereum" }
-chain-solana = { path = "../sdk/chains/solana" }
+#chain-solana = { path = "../sdk/chains/solana" }
 wallets = { path = "../sdk/wallets" }
 indexing = { path = "../sdk/indexing" }
 indexing-redb = { path = "../sdk/indexing/redb" }
@@ -21,27 +21,11 @@ tokio = { workspace = true, features = ["sync", "signal"] }
 
 [[bin]]
 name = "bitcoin_wallet"
-path = "bitcoin-wallet.rs"
-
-[[bin]]
-name = "bitcoin_indexer"
-path = "bitcoin-indexer.rs"
+path = "bitcoin.rs"
 
 [[bin]]
 name = "ethereum_wallet"
-path = "ethereum-wallet.rs"
-
-[[bin]]
-name = "ethereum_indexer"
-path = "ethereum-indexer.rs"
-
-[[bin]]
-name = "erc20_wallet"
-path = "erc20-wallet.rs"
-
-[[bin]]
-name = "solana_wallet"
-path = "solana-wallet.rs"
+path = "ethereum.rs"
 
 [lints]
 workspace = true

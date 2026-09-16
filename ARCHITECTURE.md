@@ -270,7 +270,10 @@ SDK registry path is preserved rather than moved exclusively into `apps/api`.
 - the shared `Checkpoint` capability used to choose safe runtime birthdays.
 
 `Provider` constructs a concrete wallet by generating or importing secret
-material without returning that secret. A separate provider map is redundant;
+material without returning that secret and validates an existing wallet against
+its scope, native configuration, and shared operational dependencies. Native
+type inspection stays private to the provider; application code uses neutral
+wallet capabilities. A separate provider map is redundant;
 family registration owns the provider exactly once.
 
 Bitcoin's local `KeyPair` owns network/address-type identity, address derivation,
@@ -282,10 +285,17 @@ Ethereum's local `KeyPair` similarly owns address derivation, formatting, and
 signing; EOA derivation needs no network or asset configuration. Its provider
 attaches chain/asset policy, accounts, transaction coordination, and history.
 
-`Wallets` exposes startup-only import plus chain-neutral runtime generation,
-get, balance, history, one send, and batch send operations. It delegates native
-behavior to registered wallets and senders. Business and endpoint code do not
-match on a concrete chain.
+`Wallets::insert` registers an already attached `Arc<dyn Wallet>` with an
+explicit native-position birthday during startup. It validates compatibility
+through the registered provider and retains the exact supplied wallet, public
+metadata, and address filter without exporting keys, recreating the wallet,
+or writing registry persistence. The application must reconstruct the same
+wallet and birthday at restart before synchronization begins.
+
+`Wallets` exposes startup-only import and insertion plus chain-neutral runtime
+generation, get, balance, history, one send, and batch send operations. It
+delegates native behavior to registered wallets and senders. Business and
+endpoint code do not match on a concrete chain.
 
 For `payment-api`, `F` is the closed `WalletAsset` selector (`btc`, `eth`,
 `usdc`, or `sol`), not merely a chain identifier. The collection remains

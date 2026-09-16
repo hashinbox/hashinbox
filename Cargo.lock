@@ -2903,7 +2903,6 @@ dependencies = [
  "base",
  "chain-bitcoin",
  "chain-ethereum",
- "chain-solana",
  "indexing",
  "indexing-redb",
  "indexing-runtime",
