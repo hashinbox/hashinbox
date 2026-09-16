@@ -1,33 +1,24 @@
 use std::sync::Arc;
 
 use base::{
-    Address as BaseAddress, Addresser, Broadcaster, KeyPair, Submission as BroadcastReceipt,
+    Address as BaseAddress, Addresser, Broadcaster, Submission as BroadcastReceipt,
     TransactionBuilder as BaseBuilder, TransactionError, TransactionErrorKind, TransactionFuture,
     TransactionId as BaseTransactionId,
 };
-use bitcoin::{
-    Address as NativeAddress, CompressedPublicKey, PublicKey, XOnlyPublicKey, secp256k1::Secp256k1,
-};
-use crypto::{PublicKeyFormat, SecretKey};
 use indexing::{History as IndexHistory, IndexScope};
 use wallets::{
-    AddressEncoding, AddressFormat as WalletAddressFormat, AddressText, Balance, BalanceReader,
+    AddressFormat as WalletAddressFormat, AddressText, Balance, BalanceReader,
     Error as WalletError, ErrorKind as WalletErrorKind, FutureResult, Provider, SecretBytes,
     TransactionFactory, Wallet as WalletContract,
 };
 
 use crate::{
-    Address, FeeRate, Fees, IndexUtxos, Network, Satoshi, SignedTransaction, Transactions,
+    AddressType, FeeRate, Fees, IndexUtxos, KeyPair, Network, Satoshi, SignedTransaction,
+    Transactions,
 };
 
 pub(super) const SNAPSHOT_KIND: &str = "bitcoin.transfer";
 pub(crate) const PREPARED_KIND: &str = "bitcoin.signed";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AddressType {
-    SegwitV0,
-    Taproot,
-}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -47,32 +38,6 @@ impl Config {
             ));
         }
         Ok(())
-    }
-
-    fn address(&self, public: &crypto::PublicKey) -> Result<Address, WalletError> {
-        let native = match self.address_type {
-            AddressType::SegwitV0 => {
-                let key = PublicKey::from_slice(&public.bytes).map_err(|error| {
-                    WalletError::new(WalletErrorKind::InvalidSecret, error.to_string())
-                })?;
-                let key = CompressedPublicKey::try_from(key).map_err(|error| {
-                    WalletError::new(WalletErrorKind::InvalidSecret, error.to_string())
-                })?;
-                NativeAddress::p2wpkh(&key, self.network.native())
-            }
-            AddressType::Taproot => {
-                let key = XOnlyPublicKey::from_slice(&public.bytes).map_err(|error| {
-                    WalletError::new(WalletErrorKind::InvalidSecret, error.to_string())
-                })?;
-                NativeAddress::p2tr(
-                    &Secp256k1::verification_only(),
-                    key,
-                    None,
-                    self.network.native(),
-                )
-            }
-        };
-        Ok(Address::from_encoded(native.to_string()))
     }
 }
 
@@ -100,6 +65,26 @@ impl Factory {
             transactions,
             history,
         }
+    }
+
+    /// Consumes a local key and attaches this provider's operational capabilities.
+    /// The key must match the provider's exact network and address type.
+    pub fn attach(&self, key: KeyPair) -> Result<Arc<dyn WalletContract>, WalletError> {
+        self.config.validate()?;
+        if key.network != self.config.network || key.address_type != self.config.address_type {
+            return Err(WalletError::new(
+                WalletErrorKind::AddressMismatch,
+                "Bitcoin key network and address type must match the wallet provider",
+            ));
+        }
+        Ok(Arc::new(Wallet {
+            config: self.config.clone(),
+            key: Arc::new(key),
+            utxos: self.utxos.clone(),
+            fees: self.fees.clone(),
+            transactions: self.transactions.clone(),
+            history: self.history.clone(),
+        }))
     }
 
     fn generate_with(
@@ -132,30 +117,8 @@ impl Provider for Factory {
     fn create<'a>(&'a self, secret: SecretBytes) -> FutureResult<'a, Arc<dyn WalletContract>> {
         Box::pin(async move {
             self.config.validate()?;
-            let temporary = SecretKey::new(secret.as_bytes().to_vec()).map_err(|error| {
-                WalletError::new(WalletErrorKind::InvalidSecret, error.to_string())
-            })?;
-            let format = match self.config.address_type {
-                AddressType::SegwitV0 => PublicKeyFormat::Compressed,
-                AddressType::Taproot => PublicKeyFormat::XOnly,
-            };
-            let public = temporary.public_key(format).map_err(|error| {
-                WalletError::new(WalletErrorKind::InvalidSecret, error.to_string())
-            })?;
-            let address = self.config.address(&public)?;
-            let signer =
-                KeyPair::new(address.clone(), secret.as_bytes().to_vec()).map_err(|error| {
-                    WalletError::new(WalletErrorKind::InvalidSecret, error.to_string())
-                })?;
-            Ok(Arc::new(Wallet {
-                config: self.config.clone(),
-                address,
-                signer: Arc::new(signer),
-                utxos: self.utxos.clone(),
-                fees: self.fees.clone(),
-                transactions: self.transactions.clone(),
-                history: self.history.clone(),
-            }) as Arc<dyn WalletContract>)
+            let key = KeyPair::import(secret, self.config.network, self.config.address_type)?;
+            self.attach(key)
         })
     }
 
@@ -166,8 +129,7 @@ impl Provider for Factory {
 
 pub(super) struct Wallet {
     pub(super) config: Config,
-    pub(super) address: Address,
-    pub(super) signer: Arc<KeyPair<Address>>,
+    pub(super) key: Arc<KeyPair>,
     pub(super) utxos: Arc<IndexUtxos>,
     pub(super) fees: Arc<dyn Fees>,
     pub(super) transactions: Arc<dyn Transactions>,
@@ -176,64 +138,23 @@ pub(super) struct Wallet {
 
 impl Addresser for Wallet {
     fn address(&self) -> BaseAddress {
-        self.address.address()
+        self.key.address()
     }
 }
 
 impl base::Signer for Wallet {
     fn sign<'a>(&'a self, request: base::SignRequest) -> base::SignFuture<'a> {
-        self.signer.sign(request)
+        self.key.sign(request)
     }
 }
 
 impl WalletAddressFormat for Wallet {
     fn address_text(&self, address: &BaseAddress) -> Result<AddressText, WalletError> {
-        let text = std::str::from_utf8(address.as_bytes()).map_err(|_| {
-            WalletError::new(
-                WalletErrorKind::InvalidAddress,
-                "Bitcoin address bytes are not UTF-8",
-            )
-        })?;
-        let parsed = text
-            .parse::<NativeAddress<bitcoin::address::NetworkUnchecked>>()
-            .map_err(|error| WalletError::new(WalletErrorKind::InvalidAddress, error.to_string()))?
-            .require_network(self.config.network.native())
-            .map_err(|error| {
-                WalletError::new(WalletErrorKind::InvalidAddress, error.to_string())
-            })?;
-        let encoding = match parsed.address_type() {
-            Some(bitcoin::AddressType::P2pkh | bitcoin::AddressType::P2sh) => {
-                AddressEncoding::Base58Check
-            }
-            Some(bitcoin::AddressType::P2tr | bitcoin::AddressType::P2a) => {
-                AddressEncoding::Bech32m
-            }
-            Some(bitcoin::AddressType::P2wpkh | bitcoin::AddressType::P2wsh) => {
-                AddressEncoding::Bech32
-            }
-            None | Some(_) => {
-                return Err(WalletError::new(
-                    WalletErrorKind::InvalidAddress,
-                    "Bitcoin address type is unsupported",
-                ));
-            }
-        };
-        Ok(AddressText::new(encoding, parsed.to_string()))
+        self.key.address_text(address)
     }
 
     fn parse_address(&self, address: &AddressText) -> Result<BaseAddress, WalletError> {
-        let parsed =
-            Address::parse_for_network(&address.text, self.config.network).map_err(|error| {
-                WalletError::new(WalletErrorKind::InvalidAddress, error.to_string())
-            })?;
-        let canonical = self.address_text(&parsed.address())?;
-        if canonical.encoding != address.encoding {
-            return Err(WalletError::new(
-                WalletErrorKind::InvalidAddress,
-                "Bitcoin address encoding does not match its text",
-            ));
-        }
-        Ok(parsed.address())
+        self.key.parse_address(address)
     }
 }
 
@@ -242,7 +163,7 @@ impl BalanceReader for Wallet {
         Box::pin(async move {
             let set = self
                 .utxos
-                .utxos(vec![self.address.clone()])
+                .utxos(vec![self.key.pair.address.clone()])
                 .await
                 .map_err(|error| WalletError::new(WalletErrorKind::Balance, error.to_string()))?;
             let atomic = set
@@ -350,11 +271,14 @@ pub(crate) async fn broadcast_prepared(
 
 #[cfg(test)]
 mod tests {
+    use crate::Address;
     use base::{Digest, SignRequest, SignablePayload, SignatureEncoding, SignatureScheme};
     use bitcoin::{
-        Amount, OutPoint, ScriptBuf, Sequence, Transaction as NativeTransaction, TxIn, TxOut, Txid,
-        Witness, absolute, consensus, hashes::Hash, transaction::Version,
+        Address as NativeAddress, Amount, CompressedPublicKey, OutPoint, PublicKey, ScriptBuf,
+        Sequence, Transaction as NativeTransaction, TxIn, TxOut, Txid, Witness, XOnlyPublicKey,
+        absolute, consensus, hashes::Hash, secp256k1::Secp256k1, transaction::Version,
     };
+    use crypto::PublicKeyFormat;
     use futures_executor::block_on;
     use indexing::{
         AssetId, BlockHash, BlockHeight, BlockPosition, BlockRef, BoxFuture, ChainId, HistoryQuery,
@@ -362,6 +286,7 @@ mod tests {
         SourceError, TransactionPage, TransactionRef, TransactionStatus, ValueMovement,
     };
     use std::sync::Mutex;
+    use wallets::AddressEncoding;
 
     use super::*;
 
@@ -764,6 +689,56 @@ mod tests {
         assert_eq!(error.kind, TransactionErrorKind::Rejected);
         assert_eq!(error.ambiguous_transaction_id, None);
         assert!(transactions.calls().broadcast.is_empty());
+    }
+
+    #[test]
+    fn attaching_local_key_preserves_address_and_signer_without_io() {
+        for address_type in [AddressType::SegwitV0, AddressType::Taproot] {
+            let key = crate::KeyPair::import(
+                SecretBytes::new([1_u8; 32]),
+                Network::Regtest,
+                address_type,
+            )
+            .unwrap();
+            let address = key.address();
+            let request = SignRequest {
+                payload: SignablePayload::Digest(Digest { bytes: vec![9; 32] }),
+                scheme: SignatureScheme::EcdsaSecp256k1,
+                encoding: SignatureEncoding::Der,
+                public_key_format: PublicKeyFormat::Compressed,
+                key_tweak: None,
+            };
+            let signed = block_on(base::Signer::sign(&key, request.clone())).unwrap();
+            let wallet = factory(address_type).attach(key).unwrap();
+
+            assert_eq!(wallet.address(), address);
+            assert_eq!(block_on(wallet.sign(request)).unwrap(), signed);
+        }
+    }
+
+    #[test]
+    fn attachment_rejects_network_and_address_type_mismatches() {
+        for (network, address_type) in [
+            (Network::Mainnet, AddressType::SegwitV0),
+            (Network::Regtest, AddressType::Taproot),
+        ] {
+            let key = crate::KeyPair::import(SecretBytes::new([1_u8; 32]), network, address_type)
+                .unwrap();
+            let error = factory(AddressType::SegwitV0).attach(key).err().unwrap();
+            assert_eq!(error.kind, WalletErrorKind::AddressMismatch);
+        }
+
+        let mut provider = factory(AddressType::SegwitV0);
+        provider.config.network = Network::Signet;
+        provider.config.scope.network = Network::Signet.canonical_name().to_owned();
+        let key = crate::KeyPair::import(
+            SecretBytes::new([1_u8; 32]),
+            Network::Testnet3,
+            AddressType::SegwitV0,
+        )
+        .unwrap();
+        let error = provider.attach(key).err().unwrap();
+        assert_eq!(error.kind, WalletErrorKind::AddressMismatch);
     }
 
     #[test]

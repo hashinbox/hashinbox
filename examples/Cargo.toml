@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+base = { path = "../sdk/chains/base" }
 chain-bitcoin = { path = "../sdk/chains/bitcoin" }
 chain-ethereum = { path = "../sdk/chains/ethereum" }
 chain-solana = { path = "../sdk/chains/solana" }
@@ -22,8 +23,16 @@ name = "bitcoin_wallet"
 path = "bitcoin-wallet.rs"
 
 [[bin]]
+name = "bitcoin_indexer"
+path = "bitcoin-indexer.rs"
+
+[[bin]]
 name = "ethereum_wallet"
 path = "ethereum-wallet.rs"
+
+[[bin]]
+name = "ethereum_indexer"
+path = "ethereum-indexer.rs"
 
 [[bin]]
 name = "erc20_wallet"

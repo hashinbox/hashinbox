@@ -27,7 +27,9 @@ pub use transaction::{
     SignedTransaction, SpendSource, TransactionBuilder, TransactionId, TransactionInspection,
     UnsignedTransaction,
 };
-pub use wallet::{AddressType, Config as WalletConfig, Factory as WalletProvider, IndexUtxos};
+pub use wallet::{
+    AddressType, Config as WalletConfig, Factory as WalletProvider, IndexUtxos, KeyPair,
+};
 
 use base::{Asset, Decimal, DecimalError};
 use base::{Chain, ChainCollection};

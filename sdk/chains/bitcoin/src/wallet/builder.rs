@@ -11,7 +11,7 @@ pub(super) struct Builder {
     scope: indexing::IndexScope,
     network: crate::Network,
     source: Address,
-    signer: std::sync::Arc<base::KeyPair<Address>>,
+    signer: std::sync::Arc<crate::KeyPair>,
     utxos: std::sync::Arc<crate::IndexUtxos>,
     fees: std::sync::Arc<dyn crate::Fees>,
     fee_target_blocks: u16,
@@ -24,8 +24,8 @@ impl Wallet {
         Builder {
             scope: self.config.scope.clone(),
             network: self.config.network,
-            source: self.address.clone(),
-            signer: self.signer.clone(),
+            source: self.key.pair.address.clone(),
+            signer: self.key.clone(),
             utxos: self.utxos.clone(),
             fees: self.fees.clone(),
             fee_target_blocks: self.config.fee_target_blocks,
@@ -41,7 +41,8 @@ impl Builder {
         snapshot: &TransactionSnapshot,
     ) -> Result<Self, TransactionError> {
         let mut builder = wallet.builder();
-        builder.recipients = super::snapshot::decode(&wallet.config, &wallet.address, snapshot)?;
+        builder.recipients =
+            super::snapshot::decode(&wallet.config, &wallet.key.pair.address, snapshot)?;
         builder.validate()?;
         Ok(builder)
     }
@@ -293,7 +294,14 @@ mod tests {
                 bitcoin::Address::p2wpkh(&compressed, network.native()).to_string(),
             );
             Self {
-                signer: Arc::new(base::KeyPair::new(source.clone(), vec![1; 32]).unwrap()),
+                signer: Arc::new(
+                    crate::KeyPair::import(
+                        wallets::SecretBytes::new([1; 32]),
+                        network,
+                        crate::AddressType::SegwitV0,
+                    )
+                    .unwrap(),
+                ),
                 utxos: Arc::new(
                     crate::IndexUtxos::new(scope.clone(), network, readbacks.clone()).unwrap(),
                 ),

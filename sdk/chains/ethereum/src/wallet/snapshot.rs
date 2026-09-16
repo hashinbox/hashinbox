@@ -55,11 +55,11 @@ impl Builder {
         wallet: &Wallet,
         snapshot: &TransactionSnapshot,
     ) -> Result<Self, TransactionError> {
-        let (destination, amount) = decode(&wallet.config, &wallet.address, snapshot)?;
+        let (destination, amount) = decode(&wallet.config, &wallet.key.pair.address, snapshot)?;
         let mut builder = Self::new(
             wallet.config.clone(),
-            wallet.address.clone(),
-            wallet.signer.clone(),
+            wallet.key.pair.address.clone(),
+            wallet.key.clone(),
             wallet.coordinator.clone(),
         );
         builder.transfer = Some((destination, amount));

@@ -260,6 +260,15 @@ SDK registry path is preserved rather than moved exclusively into `apps/api`.
 material without returning that secret. A separate provider map is redundant;
 family registration owns the provider exactly once.
 
+Bitcoin's local `KeyPair` owns network/address-type identity, address derivation,
+formatting, and signing without operational dependencies. Its provider attaches
+that key to UTXO, fee, transaction, and history capabilities to construct a full
+wallet. Existing provider generation and import use the same local derivation.
+The local key alone does not participate in the wallet collection or indexing.
+Ethereum's local `KeyPair` similarly owns address derivation, formatting, and
+signing; EOA derivation needs no network or asset configuration. Its provider
+attaches chain/asset policy, accounts, transaction coordination, and history.
+
 `Wallets` exposes startup-only import plus chain-neutral runtime generation,
 get, balance, history, one send, and batch send operations. It delegates native
 behavior to registered wallets and senders. Business and endpoint code do not

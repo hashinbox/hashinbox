@@ -29,7 +29,7 @@ impl HistoryReader for Wallet {
                     scope: self.config.scope.clone(),
                     address: CanonicalAddress {
                         scope: self.config.scope.clone(),
-                        value: self.address.to_string(),
+                        value: self.key.pair.address.to_string(),
                     },
                     after: request.after,
                     limit: request.limit,

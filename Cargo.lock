@@ -2900,6 +2900,7 @@ dependencies = [
 name = "payment-examples"
 version = "0.1.0"
 dependencies = [
+ "base",
  "chain-bitcoin",
  "chain-ethereum",
  "chain-solana",

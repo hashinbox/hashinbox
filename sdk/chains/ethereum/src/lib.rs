@@ -24,7 +24,7 @@ pub use transaction::{
     TransactionBuilder, TransactionCoordinator, TransactionId, TransferIntent, TransferRequest,
     UnsignedTransaction,
 };
-pub use wallet::{WalletConfig, WalletProvider};
+pub use wallet::{KeyPair, WalletConfig, WalletProvider};
 
 use base::{Asset, Decimal, DecimalError};
 use base::{Chain, ChainCollection, NetworkId, NetworkKind};

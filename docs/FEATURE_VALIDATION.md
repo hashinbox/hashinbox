@@ -11,6 +11,7 @@ exist in the current workspace.
 | Exact chain/network/asset metadata and decimal amounts | `sdk/chains/base` | focused crate tests |
 | Small signing, transaction snapshot, and ambiguity-carrier contracts | `sdk/chains/base` | focused crate tests prove ordinary errors remain ID-free, provider prose supplies no ID, and explicit typed ambiguity preserves the canonical ID |
 | Bitcoin addresses, RPC, UTXO transactions, signing, indexing translation | `sdk/chains/bitcoin` | chain unit tests and deterministic stack test |
+| Local Bitcoin/Ethereum key generation and operational wallet attachment | `sdk/chains/bitcoin`, `sdk/chains/ethereum` | local `KeyPair` tests cover address derivation, formatting, invalid secrets, and non-debuggable secrets; provider tests prove attachment preserves address/signing identity without I/O and rejects invalid configuration |
 | Ethereum native/allowlisted ERC-20 balances, typed transfers, EIP-1559 signing, sender-keyed nonce coordination, exact-envelope ambiguity, and indexing translation | `sdk/chains/ethereum` | 81 chain unit tests, external adapter test, and deterministic ETH/USDC stack tests |
 | Exact wallet history mapping, transaction-ambiguity preservation, truthful batch failure metadata, and bounded batch admission | `sdk/wallets` | history and conversion tests, four scoped `SendError` tests, direct 0/1/50/51 boundary tests, and a four-case competing-error table proving authored itemwise amount, lookup, and family precedence before sender invocation |
 | Native block coordinates and sparse synchronization | `sdk/chains/base`, `sdk/indexing` | every `BlockRef` carries native position, produced height, hash, atomic parent, and timestamp; deterministic fixtures prove sparse `100 -> 103 -> 107` traversal, strict height increments, skipped birthdays, prefix restart, retained reorg, and `ReorgTooDeep` |
@@ -153,9 +154,40 @@ RPC doubles and one owned temporary PostgreSQL database/schema:
 
 ## Known validation blockers
 
-No code-level blocker remains for production shared-PostgreSQL composition.
+The 2026-09-16 wallet-refactor workspace run reaches the unchanged PostgreSQL
+repository suite and fails 25 of its 29 tests. The initializer creates names
+such as `checkpoint` and `payment_wallets`, while runtime queries and schema
+validation expect `payments_checkpoint` and `payments_wallet`. The catalog
+test also embeds a literal backslash in raw SQL and reports SQLSTATE `42601`.
+These source defects are present in the branch's base commit and remain outside
+the local-wallet refactor. The three initializer contract tests pass.
+Finishing the other workspace tests with `--exclude indexing-postgres
+--no-fail-fast` also exposes ten API system-test failures at startup against
+that incompatible schema; the other twelve API integration cases pass.
 Retained migration execution remains a separately authorized deployment action.
 The pinned Agave archive is the current external system-evidence blocker.
+
+## Local wallet separation evidence
+
+Recorded on 2026-09-16:
+
+- `cargo test --locked -p chain-bitcoin` passes 161 unit tests and one
+  secret-debugging compile-fail documentation test.
+- `cargo test --locked -p chain-ethereum` passes 159 unit tests, three integration
+  tests, and one secret-debugging compile-fail documentation test.
+- Both `cargo run --locked -p payment-examples --bin bitcoin_wallet` and
+  `cargo run --locked -p payment-examples --bin ethereum_wallet` run without a
+  node or database and print only the generated public address. Their secrets
+  remain in memory and are dropped on exit.
+- The node/indexer examples remain available as `bitcoin_indexer` and
+  `ethereum_indexer`. They compile; this change does not claim fresh real-node
+  execution of those examples.
+- Workspace formatting, locked all-target compilation, strict all-target and
+  all-feature Clippy, no-dependency documentation, and diff checks pass.
+- The Linter MCP check completes all 39 configured rules; 17 are unconfigured.
+  Its only unsuppressed finding is the existing `rust/layers` mapping gap for
+  `payment-examples`. No policy configuration changed.
+- Full workspace test success is blocked by the PostgreSQL defects above.
 
 ## Final gates
 
@@ -167,14 +199,18 @@ cargo check --locked --workspace --all-targets
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo doc --locked --workspace --no-deps
-cargo run --locked -p design-lint -- --policy lint.toml check .
 git diff --check
 ```
+
+Run the Linter MCP `check` tool with the absolute repository root as well.
+`linter.toml` is the current design policy; local design-lint commands in older
+evidence above are historical and are no longer available. Record both findings
+and configured-rule completion; unconfigured rules are not passes.
 
 If a gate fails, document the exact failure rather than weakening a lint or
 describing the workspace as complete.
 
-Latest persistence-coordinate gate recorded on 2026-09-01: the uninterrupted
+Historical persistence-coordinate gate recorded on 2026-09-01: the uninterrupted
 locked workspace suite passes, including owned PostgreSQL 18 initializer
 contracts 3/3, repository contracts 25/25, and application acceptance 18/18.
 Formatting, locked workspace all-target compilation, strict

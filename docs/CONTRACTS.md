@@ -69,6 +69,42 @@ secp256k1 material; Solana generates one Ed25519 seed. Both operations return an
 abstract wallet and never return secret material. There is no generic
 secp256k1 generation default; each provider must own its native policy.
 
+Bitcoin also exposes `chain_bitcoin::KeyPair` for local generation and import.
+It needs only a Bitcoin `Network` and `AddressType`, retains its secret in
+memory, and implements `Addresser`, `AddressFormat`, and `Signer`. It requires
+no RPC client, storage, indexer, fee policy, or indexing scope and does not
+implement the full `wallets::Wallet` contract. Secret material is not exposed
+through debugging, serialization, cloning, or an export method.
+
+```rust,ignore
+use base::Addresser;
+use chain_bitcoin::{AddressType, KeyPair, Network};
+use wallets::AddressFormat;
+
+let key = KeyPair::generate(Network::Regtest, AddressType::SegwitV0)?;
+let address = key.address_text(&key.address())?;
+
+// A separately configured Bitcoin provider adds balance, history, and sending.
+let wallet = provider.attach(key)?;
+```
+
+`KeyPair::import(secret, network, address_type)` consumes existing `SecretBytes`
+and derives the same identity as provider import. `WalletProvider::attach`
+consumes the local key, validates the provider configuration and exact network
+and address type, and returns `Arc<dyn wallets::Wallet>` without chain I/O.
+It neither persists the key nor registers an indexing filter. The existing
+Bitcoin `Provider::create` and `generate` methods reuse local key construction
+and attachment; callers of the full wallet interface remain unchanged.
+
+Ethereum exposes `chain_ethereum::KeyPair::generate()` and
+`KeyPair::import(secret)` with the same address and signing capabilities. Local
+EOA derivation requires no network, chain ID, asset, or decimal configuration.
+`chain_ethereum::WalletProvider::attach(key)` validates its `WalletConfig` and
+binds the key to the provider's chain, selected asset, accounts, transaction
+coordinator, and history. It consumes the key without I/O, persistence, or
+indexing registration. Existing Ethereum provider methods reuse this path.
+Solana generation APIs are unchanged.
+
 A generated Solana wallet exists only for the current process and is not
 restart-recoverable. A configured Solana import is reconstructed from exactly
 one lowercase 64-character hexadecimal seed held in its named environment
