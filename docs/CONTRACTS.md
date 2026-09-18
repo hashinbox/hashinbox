@@ -61,6 +61,15 @@ let imported = wallets
 let generated = wallets.generate(other_id, &WalletAsset::Usdc).await?;
 ```
 
+Separate Bitcoin and Ethereum samples live in
+[`examples/wallets-collections.rs`](../examples/wallets-collections.rs).
+Uncomment `bitcoin_wallet_collections()` or `ethereum_wallet_collections()`
+in `main`, then run `cargo run --locked -p payment-examples --bin wallets_collections`.
+Each sample registers its own family, generates two wallets, looks up public
+metadata by ID, and prints address/birthday filters. Bitcoin requires local
+regtest Core; Ethereum requires local Anvil. Neither sample starts synchronization
+or persists wallet keys.
+
 Each family registration contains exactly one `IndexScope`, concrete
 `Provider`, chain batch `Sender`, and optional scope-bound `Registry`.
 The examples above use `None` for in-memory registration. Duplicate family keys

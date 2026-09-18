@@ -27,5 +27,9 @@ path = "bitcoin.rs"
 name = "ethereum_wallet"
 path = "ethereum.rs"
 
+[[bin]]
+name = "wallets_collections"
+path = "wallets-collections.rs"
+
 [lints]
 workspace = true
