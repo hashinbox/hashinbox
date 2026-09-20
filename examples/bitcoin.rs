@@ -16,14 +16,14 @@ use chain_bitcoin::{
     WalletProvider,
 };
 use indexing::{Checkpoint, IndexScope};
-use wallets::AddressFormat;
+use wallets::{AddressFormat, Provider};
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
     // Sample 1: generate a local key and print its address.
-    // generate_local_address()?;
+    generate_local_address()?;
 
     // Sample 2: attach a local key and use the operational wallet directly.
     // attach_local_wallet().await?;
@@ -100,8 +100,19 @@ async fn connect_provider(
         Ok(storage_redb::Redb::open(db_dir.join("bitcoin.redb"))?)
     })
     .await??;
-    let repository = Arc::new(indexing_redb::Repository::new(storage, scope.clone())?);
-    let indexer = Arc::new(settings.build(rpc.clone(), repository.as_ref().clone(), None)?);
+    
+    let repository = Arc::new(
+        indexing_redb::Repository::new(storage, scope.clone()
+    )?);
+
+    let indexer = Arc::new(
+        settings.build(
+            rpc.clone(), 
+            repository.as_ref().clone(), 
+            None
+        )
+    ?);
+
     let config = WalletConfig {
         scope: scope.clone(),
         network,
@@ -109,7 +120,11 @@ async fn connect_provider(
         fee_target_blocks: 6,
         max_fee_rate: FeeRate::new(10_000),
     };
-    let utxos = Arc::new(IndexUtxos::new(scope.clone(), network, repository)?);
+
+    let utxos = Arc::new(
+        IndexUtxos::new(scope.clone(), network, repository)?
+    );
+    
     let provider = WalletProvider::new(
         config,
         utxos,
@@ -117,5 +132,8 @@ async fn connect_provider(
         Arc::new(rpc.transactions()),
         indexer.clone(),
     );
+
+    // provider.
+
     Ok((provider, indexer, scope))
 }
