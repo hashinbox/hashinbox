@@ -41,7 +41,7 @@ impl Config {
     }
 }
 
-pub struct Factory {
+pub struct WalletProvider {
     config: Config,
     utxos: Arc<IndexUtxos>,
     fees: Arc<dyn Fees>,
@@ -49,7 +49,7 @@ pub struct Factory {
     history: Arc<dyn IndexHistory>,
 }
 
-impl Factory {
+impl WalletProvider {
     /// Builds the Bitcoin provider and its chain-specific indexed UTXO view.
     ///
     /// Callers supply the narrow indexing output capability; scope and network
@@ -120,7 +120,7 @@ impl Factory {
     }
 }
 
-impl Provider for Factory {
+impl Provider for WalletProvider {
     fn create<'a>(&'a self, secret: SecretBytes) -> FutureResult<'a, Arc<dyn WalletContract>> {
         Box::pin(async move {
             self.config.validate()?;
@@ -498,7 +498,7 @@ mod tests {
         }
     }
 
-    fn factory(address_type: AddressType) -> Factory {
+    fn factory(address_type: AddressType) -> WalletProvider {
         let transactions: Arc<dyn Transactions> = Arc::new(InactiveDependencies);
         factory_with_transactions(address_type, transactions)
     }
@@ -506,7 +506,7 @@ mod tests {
     fn factory_with_transactions(
         address_type: AddressType,
         transactions: Arc<dyn Transactions>,
-    ) -> Factory {
+    ) -> WalletProvider {
         let network = Network::Regtest;
         let scope = IndexScope {
             chain: ChainId(crate::CHAIN.to_owned()),
@@ -516,7 +516,7 @@ mod tests {
         let outputs: Arc<dyn Outputs> = dependencies.clone();
         let fees: Arc<dyn Fees> = dependencies.clone();
         let history: Arc<dyn IndexHistory> = dependencies;
-        Factory::new(
+        WalletProvider::new(
             Config {
                 scope,
                 network,
@@ -532,8 +532,8 @@ mod tests {
         .expect("fixture scope must match the Bitcoin network")
     }
 
-    fn equivalent_factory(provider: &Factory) -> Factory {
-        Factory {
+    fn equivalent_factory(provider: &WalletProvider) -> WalletProvider {
+        WalletProvider {
             config: provider.config.clone(),
             utxos: provider.utxos.clone(),
             fees: provider.fees.clone(),
@@ -555,7 +555,7 @@ mod tests {
             network: network.canonical_name().to_owned(),
         };
 
-        let error = Factory::new(
+        let error = WalletProvider::new(
             Config {
                 scope,
                 network,

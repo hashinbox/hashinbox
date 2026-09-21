@@ -6,6 +6,6 @@ mod snapshot;
 mod utxos;
 
 pub use key_pair::{AddressType, KeyPair};
-pub use provider::{Config, Factory};
+pub use provider::{Config, WalletProvider};
 pub(crate) use provider::{PREPARED_KIND, broadcast_prepared};
 pub use utxos::IndexUtxos;
