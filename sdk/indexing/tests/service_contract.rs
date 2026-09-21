@@ -12,7 +12,7 @@ use indexing::{
     BlockParent, BlockPosition, BlockRef, BlockSelector, BlockSource, Blocks, BoxFuture,
     CanonicalAddress, CanonicalPage, ChainId, FilterSource, HistoryQuery, IndexError,
     IndexErrorKind, IndexScope, IndexedBlock, Indexer, InterpretedBlock, OutputChanges, Service,
-    SourceError, SyncConfig, SyncPhase, Transactions,
+    SourceError, SyncConfig, SyncPhase, SyncPolicy, Transactions,
 };
 
 #[derive(Clone, Debug)]
@@ -376,11 +376,11 @@ fn replacement_chain() -> Vec<BlockRef> {
 }
 
 fn config(scope: IndexScope) -> SyncConfig {
-    SyncConfig::new(scope, 1, 4, 100).expect("sync config")
+    SyncConfig::new(scope, SyncPolicy::new(1, 4, 100)).expect("sync config")
 }
 
 fn bounded_config(scope: IndexScope, retention: u64, batch_size: usize) -> SyncConfig {
-    SyncConfig::new(scope, 1, retention, batch_size).expect("bounded sync config")
+    SyncConfig::new(scope, SyncPolicy::new(1, retention, batch_size)).expect("bounded sync config")
 }
 
 #[test]

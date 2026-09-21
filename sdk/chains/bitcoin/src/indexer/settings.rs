@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use indexing::{ChainId, IndexError, IndexErrorKind, IndexScope, Observer, SyncConfig};
+use indexing::{ChainId, IndexError, IndexErrorKind, IndexScope, Observer, SyncConfig, SyncPolicy};
 
 use crate::{BlockInterpreter, Indexer, Network, RpcClient, Source, SourceConfig};
 
@@ -14,12 +14,8 @@ use crate::{BlockInterpreter, Indexer, Network, RpcClient, Source, SourceConfig}
 pub struct IndexerSettings {
     /// Must match the already verified RPC client.
     pub network: Network,
-    /// Depth at which history reports a transaction confirmed.
-    pub confirmations: u64,
-    /// How far back a reorg can be reversed from the rollback journal.
-    pub reorg_retention: u64,
-    /// Blocks indexed per `sync` call.
-    pub batch_size: usize,
+    /// Chain-neutral synchronization policy for this network.
+    pub sync: SyncPolicy,
 }
 
 impl IndexerSettings {
@@ -28,9 +24,7 @@ impl IndexerSettings {
     pub const fn new(network: Network) -> Self {
         Self {
             network,
-            confirmations: 6,
-            reorg_retention: 100,
-            batch_size: 100,
+            sync: SyncPolicy::new(6, 100, 100),
         }
     }
 
@@ -77,12 +71,7 @@ impl IndexerSettings {
             source,
             BlockInterpreter::new(scope.clone(), self.network)?,
             repository,
-            SyncConfig::new(
-                scope,
-                self.confirmations,
-                self.reorg_retention,
-                self.batch_size,
-            )?,
+            SyncConfig::new(scope, self.sync.clone())?,
         );
         if let Some(observer) = observer {
             indexer.observe(observer);
@@ -164,16 +153,16 @@ mod tests {
         assert_eq!(settings.scope().chain.0, crate::CHAIN);
         assert_eq!(
             (
-                settings.confirmations,
-                settings.reorg_retention,
-                settings.batch_size
+                settings.sync.minimum_confirmations,
+                settings.sync.reorg_retention,
+                settings.sync.batch_size
             ),
             (6, 100, 100)
         );
         settings.build(client.clone(), (), None).unwrap();
 
         settings.network = Network::Mainnet;
-        settings.batch_size = 0;
+        settings.sync.batch_size = 0;
         let error = settings.build(client.clone(), (), None).err().unwrap();
         assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
         assert_eq!(
@@ -184,13 +173,7 @@ mod tests {
 
         settings.network = Network::Regtest;
         let error = settings.build(client, (), None).err().unwrap();
-        let expected = SyncConfig::new(
-            settings.scope(),
-            settings.confirmations,
-            settings.reorg_retention,
-            0,
-        )
-        .unwrap_err();
+        let expected = SyncConfig::new(settings.scope(), settings.sync.clone()).unwrap_err();
         assert_eq!(error, expected);
         assert_eq!(calls.lock().unwrap().len(), 3);
     }

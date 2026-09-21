@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use indexing::{ChainId, IndexError, IndexErrorKind, IndexScope, Observer, SyncConfig};
+use indexing::{ChainId, IndexError, IndexErrorKind, IndexScope, Observer, SyncConfig, SyncPolicy};
 use json_rpc::Client;
 
 use crate::{BlockInterpreter, Indexer, Network, RpcClient, Source, SourceConfig};
@@ -20,12 +20,8 @@ pub struct IndexerSettings {
     /// Verified against `eth_chainId` when the source is built; its slug
     /// becomes the scope's network and part of the storage keyspace.
     pub network: Network,
-    /// Depth at which history reports a transaction confirmed.
-    pub confirmations: u64,
-    /// How far back a reorg can be reversed from the rollback journal.
-    pub reorg_retention: u64,
-    /// Blocks indexed per `sync` call.
-    pub batch_size: usize,
+    /// Chain-neutral synchronization policy for this network.
+    pub sync: SyncPolicy,
 }
 
 impl IndexerSettings {
@@ -35,9 +31,7 @@ impl IndexerSettings {
     pub fn new(network: Network) -> Self {
         Self {
             network,
-            confirmations: 12,
-            reorg_retention: 100,
-            batch_size: 100,
+            sync: SyncPolicy::new(12, 100, 100),
         }
     }
 
@@ -82,12 +76,7 @@ impl IndexerSettings {
             source,
             BlockInterpreter::new(scope.clone())?,
             repository,
-            SyncConfig::new(
-                scope,
-                self.confirmations,
-                self.reorg_retention,
-                self.batch_size,
-            )?,
+            SyncConfig::new(scope, self.sync.clone())?,
         );
         if let Some(observer) = observer {
             indexer.observe(observer);
@@ -240,9 +229,9 @@ mod tests {
             let client = Identity::default();
             let mut settings = settings();
             let source = block_on(settings.source(RpcClient::new(client.clone()))).unwrap();
-            settings.confirmations = confirmations;
-            settings.reorg_retention = retention;
-            settings.batch_size = batch;
+            settings.sync.minimum_confirmations = confirmations;
+            settings.sync.reorg_retention = retention;
+            settings.sync.batch_size = batch;
             let error = settings.build(source, (), None).err().unwrap();
             assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
             assert_eq!(error.message, message);

@@ -11,6 +11,7 @@ mod output;
 mod registry;
 mod service;
 mod source;
+mod sync_policy;
 mod synchronizer;
 mod value;
 
@@ -34,6 +35,7 @@ pub use registry::{RegisteredAddress, Registry};
 pub use service::Service;
 pub use service::{AddressFilter, FilterSource, SyncPhase, SyncStatus};
 pub use source::{BlockInterpreter, BlockSource, IndexedBlock};
+pub use sync_policy::SyncPolicy;
 pub use synchronizer::SyncConfig;
 pub use value::{AssetId, CanonicalAddress, ChainId, IndexScope, TransactionRef};
 
@@ -44,7 +46,7 @@ pub use admission::{CommitPermit, PublicationPermit, ScopeAdmission, SyncPlan};
 
 #[cfg(test)]
 mod synchronizer_test {
-    use crate::{ChainId, IndexErrorKind, IndexScope, SyncConfig};
+    use crate::{ChainId, IndexErrorKind, IndexScope, SyncConfig, SyncPolicy};
 
     fn scope() -> IndexScope {
         IndexScope {
@@ -55,9 +57,11 @@ mod synchronizer_test {
 
     #[test]
     fn configuration_requires_bounded_rollback_and_confirmation() {
-        assert!(SyncConfig::new(scope(), 1, 1, 100).is_ok());
+        assert!(SyncConfig::new(scope(), SyncPolicy::new(1, 1, 100)).is_ok());
         assert_eq!(
-            SyncConfig::new(scope(), 1, 0, 100).unwrap_err().kind,
+            SyncConfig::new(scope(), SyncPolicy::new(1, 0, 100))
+                .unwrap_err()
+                .kind,
             IndexErrorKind::InvalidRequest
         );
     }

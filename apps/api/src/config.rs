@@ -4,6 +4,7 @@ mod postgres;
 mod solana;
 
 use chain_bitcoin::Network;
+use indexing::SyncPolicy;
 use payment_api::WalletAsset;
 use serde::{Deserialize, de};
 
@@ -166,9 +167,11 @@ pub(crate) struct BitcoinConfig {
 impl BitcoinConfig {
     pub(crate) fn settings(&self) -> chain_bitcoin::IndexerSettings {
         let mut settings = chain_bitcoin::IndexerSettings::new(self.network);
-        settings.confirmations = self.sync.confirmation_depth;
-        settings.reorg_retention = self.sync.reorg_retention;
-        settings.batch_size = self.sync.batch_size;
+        settings.sync = SyncPolicy::new(
+            self.sync.confirmation_depth,
+            self.sync.reorg_retention,
+            self.sync.batch_size,
+        );
         settings
     }
 
@@ -199,9 +202,11 @@ impl EthereumConfig {
             self.chain_id,
             self.network.as_str(),
         ));
-        settings.confirmations = self.sync.confirmation_depth;
-        settings.reorg_retention = self.sync.reorg_retention;
-        settings.batch_size = self.sync.batch_size;
+        settings.sync = SyncPolicy::new(
+            self.sync.confirmation_depth,
+            self.sync.reorg_retention,
+            self.sync.batch_size,
+        );
         settings
     }
 
@@ -410,7 +415,7 @@ mod tests {
         assert_eq!(transport.request_timeout, Duration::from_secs(15));
         assert_eq!(transport.max_response_bytes, 64 * 1024 * 1024);
         assert_eq!(transport.retry, json_rpc::Retry::default());
-        assert_eq!(settings.batch_size, 100);
+        assert_eq!(settings.sync.batch_size, 100);
         assert_eq!(config.indexes.interval(), Duration::from_millis(1_000));
 
         let mut indexes = ethereum(None);
@@ -440,7 +445,7 @@ mod tests {
         );
         assert_eq!(transport.request_timeout, Duration::from_secs(3));
         assert_eq!(transport.max_response_bytes, 8_192);
-        assert_eq!(settings.batch_size, 7);
+        assert_eq!(settings.sync.batch_size, 7);
         assert_eq!(config.indexes.interval(), Duration::from_millis(17));
     }
 
@@ -463,9 +468,9 @@ mod tests {
         assert_eq!(settings.scope().network, "regtest");
         assert_eq!(
             (
-                settings.confirmations,
-                settings.reorg_retention,
-                settings.batch_size
+                settings.sync.minimum_confirmations,
+                settings.sync.reorg_retention,
+                settings.sync.batch_size
             ),
             (3, 12, 7)
         );

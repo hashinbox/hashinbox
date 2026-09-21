@@ -280,8 +280,9 @@ the set changed, composition must recreate and rescan that scope.
 
 ## Forward synchronization
 
-Each service receives a `SyncConfig` built as
-`SyncConfig::new(scope, minimum_confirmations, reorg_retention, batch_size)`.
+Each service receives a `SyncConfig` built from an `IndexScope` and shared
+`SyncPolicy`:
+`SyncConfig::new(scope, SyncPolicy::new(minimum_confirmations, reorg_retention, batch_size))`.
 Minimum confirmations, rollback retention, and batch size must all be greater
 than zero. The configured `u64` confirmation depth is used directly when
 history derives transaction status.

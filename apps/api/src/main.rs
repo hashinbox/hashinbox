@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, env, future::IntoFuture, sync::Arc};
 use chain_bitcoin::{AddressType, FeeRate, IndexUtxos};
 use chain_ethereum::AssetKind;
 use config::{AnyError, Config};
-use indexing::{BlockObservation, BlockPosition, BlockRef, Observer};
+use indexing::{BlockObservation, BlockPosition, BlockRef, Observer, SyncPolicy};
 use payment_api::{State, WalletAsset};
 use tokio::sync::{oneshot, watch};
 
@@ -144,9 +144,11 @@ async fn main() -> Result<(), AnyError> {
             repository,
             indexing::SyncConfig::new(
                 scope.clone(),
-                config.confirmation_depth(),
-                config.reorg_retention(),
-                config.batch_size(),
+                SyncPolicy::new(
+                    config.confirmation_depth(),
+                    config.reorg_retention(),
+                    config.batch_size(),
+                ),
             )?,
         );
         let checkpoint = indexing::Checkpoint::checkpoint(&service, &scope).await?;

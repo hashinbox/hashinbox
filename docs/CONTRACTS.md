@@ -442,11 +442,14 @@ synchronizes every child.
 Synchronization policy stays concrete and small:
 
 ```rust,ignore
-SyncConfig::new(scope, minimum_confirmations, reorg_retention, batch_size)?;
+SyncConfig::new(
+    scope,
+    SyncPolicy::new(minimum_confirmations, reorg_retention, batch_size),
+)?;
 ```
 
-The three numeric inputs must be greater than zero. Confirmation depth is the
-`u64` value itself; it does not need a one-field policy wrapper.
+`SyncPolicy` validates that all three numeric inputs are greater than zero.
+Confirmation depth is the configured `u64` value itself.
 
 `Wallets` owns the address selection, one admission coordinator per registered
 scope, and the composed `Checkpoint` capability used to choose safe runtime

@@ -9,44 +9,19 @@ use std::{
 use crate::{
     AddressFilter, BlockAddition, BlockHeight, BlockInterpreter, BlockObservation, BlockOutcome,
     BlockParent, BlockPosition, BlockRef, BlockSelector, BlockSource, Blocks, IndexError,
-    IndexErrorKind, IndexedBlock, Observer, SyncPhase, SyncStatus,
+    IndexErrorKind, IndexedBlock, Observer, SyncPhase, SyncPolicy, SyncStatus,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncConfig {
     pub(crate) scope: crate::IndexScope,
-    pub(crate) minimum_confirmations: u64,
-    pub(crate) reorg_retention: u64,
-    pub(crate) batch_size: usize,
+    pub(crate) policy: SyncPolicy,
 }
 
 impl SyncConfig {
-    pub fn new(
-        scope: crate::IndexScope,
-        minimum_confirmations: u64,
-        reorg_retention: u64,
-        batch_size: usize,
-    ) -> Result<Self, IndexError> {
-        if minimum_confirmations == 0 {
-            return Err(IndexError::new(
-                IndexErrorKind::InvalidRequest,
-                "minimum confirmations must be greater than zero",
-                false,
-            ));
-        }
-        if reorg_retention == 0 || batch_size == 0 {
-            return Err(IndexError::new(
-                IndexErrorKind::InvalidRequest,
-                "rollback retention and batch size must be greater than zero",
-                false,
-            ));
-        }
-        Ok(Self {
-            scope,
-            minimum_confirmations,
-            reorg_retention,
-            batch_size,
-        })
+    pub fn new(scope: crate::IndexScope, policy: SyncPolicy) -> Result<Self, IndexError> {
+        policy.validate()?;
+        Ok(Self { scope, policy })
     }
 }
 
@@ -154,7 +129,7 @@ where
             (checkpoint, applied) = self.initialize_checkpoint(observed_tip, plan).await?;
         }
 
-        if applied < self.config.batch_size
+        if applied < self.config.policy.batch_size
             && let Some(tip) = &checkpoint
             && tip.position < observed_tip.position
         {
@@ -165,7 +140,7 @@ where
                     false,
                 )
             })?;
-            let remaining = self.config.batch_size - applied;
+            let remaining = self.config.policy.batch_size - applied;
             let blocks = self
                 .fetch_blocks(start, observed_tip.position, remaining)
                 .await?;
@@ -216,7 +191,7 @@ where
             checkpoint = Some(self.apply(anchor, &[], None, plan).await?);
             applied += 1;
         }
-        if applied < self.config.batch_size {
+        if applied < self.config.policy.batch_size {
             let addresses = plan.active_addresses(first_ref.position);
             checkpoint = Some(self.apply(first, &addresses, checkpoint, plan).await?);
             applied += 1;
@@ -320,7 +295,7 @@ where
         let addition = BlockAddition::new(
             self.config.scope.clone(),
             checkpoint,
-            self.config.reorg_retention,
+            self.config.policy.reorg_retention,
             interpreted,
         )?;
         // Storage consumes the addition, so keep the facts an observer needs —
@@ -434,7 +409,11 @@ where
     }
 
     async fn common_ancestor(&self, tip: &BlockRef) -> Result<BlockRef, IndexError> {
-        let oldest = BlockHeight(tip.height.0.saturating_sub(self.config.reorg_retention));
+        let oldest = BlockHeight(
+            tip.height
+                .0
+                .saturating_sub(self.config.policy.reorg_retention),
+        );
         let mut height = tip.height;
         loop {
             let local = self
