@@ -94,6 +94,12 @@ no RPC client, storage, indexer, fee policy, or indexing scope and does not
 implement the full `wallets::Wallet` contract. Secret material is not exposed
 through debugging, serialization, cloning, or an export method.
 
+`chain_bitcoin::WalletProvider::new` receives `WalletConfig`, the narrow
+`indexing::Outputs` capability, fee and transaction capabilities, and history.
+The provider validates its configured scope and network, then constructs the
+Bitcoin-specific `IndexUtxos` view internally. Callers do not assemble that
+chain adapter themselves.
+
 ```rust,ignore
 use base::Addresser;
 use chain_bitcoin::{AddressType, KeyPair, Network};

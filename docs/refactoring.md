@@ -347,19 +347,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bitcoin_outputs: Arc<dyn indexing::Outputs> = Arc::new(bitcoin_repository);
 
     // Construct concrete providers/senders with narrow history, RPC, and
-    // output views now that the composed query surface exists.
-    let bitcoin_utxos = Arc::new(bitcoin::IndexUtxos::new(
-        bitcoin_scope.clone(),
-        bitcoin_network,
-        bitcoin_outputs,
-    )?);
+    // output views now that the composed query surface exists. The Bitcoin
+    // provider builds its chain-specific UTXO adapter internally.
     let bitcoin_provider = bitcoin::WalletProvider::new(
         bitcoin_wallet_config,
-        bitcoin_utxos,
+        bitcoin_outputs,
         bitcoin_fees,
         bitcoin_transactions,
         history.clone(),
-    );
+    )?;
     let bitcoin_sender = bitcoin_provider.transactions();
     let eth_provider = ethereum::WalletProvider::new(
         ethereum::WalletConfig {

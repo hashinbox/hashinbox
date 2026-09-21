@@ -6,7 +6,7 @@ mod submissions;
 
 use std::{collections::BTreeMap, env, future::IntoFuture, sync::Arc};
 
-use chain_bitcoin::{AddressType, FeeRate, IndexUtxos};
+use chain_bitcoin::{AddressType, FeeRate};
 use chain_ethereum::AssetKind;
 use config::{AnyError, Config};
 use indexing::{BlockObservation, BlockPosition, BlockRef, Observer, SyncPolicy};
@@ -180,8 +180,6 @@ async fn main() -> Result<(), AnyError> {
     let mut wallets = wallets::Wallets::new(checkpoint);
 
     if let Some((scope, network, repository, rpc)) = bitcoin {
-        let outputs: Arc<dyn indexing::Outputs> = repository.clone();
-        let utxos = Arc::new(IndexUtxos::new(scope.clone(), network, outputs)?);
         let provider = chain_bitcoin::WalletProvider::new(
             chain_bitcoin::WalletConfig {
                 scope: scope.clone(),
@@ -190,11 +188,11 @@ async fn main() -> Result<(), AnyError> {
                 fee_target_blocks: 6,
                 max_fee_rate: FeeRate::new(10_000_000),
             },
-            utxos,
+            repository.clone(),
             Arc::new(rpc.fees()),
             Arc::new(rpc.transactions()),
             history.clone(),
-        );
+        )?;
         let sender = provider.transactions();
         wallets.register(WalletAsset::Btc, scope, provider, sender, Some(repository))?;
         wallets.restore(&WalletAsset::Btc).await?;

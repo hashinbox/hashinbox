@@ -5,7 +5,7 @@ use base::{
     TransactionBuilder as BaseBuilder, TransactionError, TransactionErrorKind, TransactionFuture,
     TransactionId as BaseTransactionId,
 };
-use indexing::{History as IndexHistory, IndexScope};
+use indexing::{History as IndexHistory, IndexScope, Outputs};
 use wallets::{
     AddressFormat as WalletAddressFormat, AddressText, Balance, BalanceReader,
     Error as WalletError, ErrorKind as WalletErrorKind, FutureResult, Provider, SecretBytes,
@@ -50,21 +50,28 @@ pub struct Factory {
 }
 
 impl Factory {
-    #[must_use]
+    /// Builds the Bitcoin provider and its chain-specific indexed UTXO view.
+    ///
+    /// Callers supply the narrow indexing output capability; scope and network
+    /// validation, plus the `IndexUtxos` adapter, remain inside the provider.
     pub fn new(
         config: Config,
-        utxos: Arc<IndexUtxos>,
+        outputs: Arc<dyn Outputs>,
         fees: Arc<dyn Fees>,
         transactions: Arc<dyn Transactions>,
         history: Arc<dyn IndexHistory>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, WalletError> {
+        let utxos = Arc::new(
+            IndexUtxos::new(config.scope.clone(), config.network, outputs)
+                .map_err(|error| WalletError::new(WalletErrorKind::Unsupported, error.message))?,
+        );
+        Ok(Self {
             config,
             utxos,
             fees,
             transactions,
             history,
-        }
+        })
     }
 
     /// Consumes a local key and attaches this provider's operational capabilities.
@@ -509,10 +516,6 @@ mod tests {
         let outputs: Arc<dyn Outputs> = dependencies.clone();
         let fees: Arc<dyn Fees> = dependencies.clone();
         let history: Arc<dyn IndexHistory> = dependencies;
-        let utxos = Arc::new(
-            IndexUtxos::new(scope.clone(), network, outputs)
-                .expect("fixture scope must match the Bitcoin network"),
-        );
         Factory::new(
             Config {
                 scope,
@@ -521,21 +524,58 @@ mod tests {
                 fee_target_blocks: 6,
                 max_fee_rate: FeeRate::new(1_000),
             },
-            utxos,
+            outputs,
             fees,
             transactions,
             history,
         )
+        .expect("fixture scope must match the Bitcoin network")
     }
 
     fn equivalent_factory(provider: &Factory) -> Factory {
-        Factory::new(
-            provider.config.clone(),
-            provider.utxos.clone(),
-            provider.fees.clone(),
-            provider.transactions.clone(),
-            provider.history.clone(),
+        Factory {
+            config: provider.config.clone(),
+            utxos: provider.utxos.clone(),
+            fees: provider.fees.clone(),
+            transactions: provider.transactions.clone(),
+            history: provider.history.clone(),
+        }
+    }
+
+    #[test]
+    fn construction_rejects_a_non_bitcoin_scope_before_wallet_creation() {
+        let network = Network::Regtest;
+        let dependencies = Arc::new(InactiveDependencies);
+        let outputs: Arc<dyn Outputs> = dependencies.clone();
+        let fees: Arc<dyn Fees> = dependencies.clone();
+        let transactions: Arc<dyn Transactions> = dependencies.clone();
+        let history: Arc<dyn IndexHistory> = dependencies;
+        let scope = IndexScope {
+            chain: ChainId("ethereum".to_owned()),
+            network: network.canonical_name().to_owned(),
+        };
+
+        let error = Factory::new(
+            Config {
+                scope,
+                network,
+                address_type: AddressType::SegwitV0,
+                fee_target_blocks: 6,
+                max_fee_rate: FeeRate::new(1_000),
+            },
+            outputs,
+            fees,
+            transactions,
+            history,
         )
+        .err()
+        .expect("a Bitcoin provider must reject a non-Bitcoin scope");
+
+        assert_eq!(error.kind, WalletErrorKind::Unsupported);
+        assert_eq!(
+            error.message,
+            "Bitcoin indexed outputs require the configured Bitcoin scope and network"
+        );
     }
 
     #[test]

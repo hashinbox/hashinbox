@@ -24,9 +24,8 @@ enum WalletAsset {
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
-    // bitcoin_wallet_collections().await?;
+    bitcoin_wallet_collections().await?;
     // ethereum_wallet_collections().await?;
-
     Ok(())
 }
 
@@ -125,8 +124,7 @@ async fn connect_bitcoin_provider() -> Result<
     AnyError,
 > {
     use chain_bitcoin::{
-        AddressType, FeeRate, IndexUtxos, IndexerSettings, Network, RpcClient, WalletConfig,
-        WalletProvider,
+        AddressType, FeeRate, IndexerSettings, Network, RpcClient, WalletConfig, WalletProvider,
     };
 
     let network = Network::Regtest;
@@ -140,7 +138,6 @@ async fn connect_bitcoin_provider() -> Result<
     let storage = open_storage("wallets-collections.redb").await?;
     let repository = Arc::new(indexing_redb::Repository::new(storage, scope.clone())?);
     let indexer = Arc::new(settings.build(rpc.clone(), repository.as_ref().clone(), None)?);
-    let utxos = Arc::new(IndexUtxos::new(scope.clone(), network, repository)?);
     let provider = WalletProvider::new(
         WalletConfig {
             scope: scope.clone(),
@@ -149,11 +146,11 @@ async fn connect_bitcoin_provider() -> Result<
             fee_target_blocks: 6,
             max_fee_rate: FeeRate::new(10_000),
         },
-        utxos,
+        repository.clone(),
         Arc::new(rpc.fees()),
         Arc::new(rpc.transactions()),
         indexer.clone(),
-    );
+    )?;
     Ok((provider, indexer, scope))
 }
 
