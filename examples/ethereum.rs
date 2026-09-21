@@ -43,6 +43,7 @@ async fn main() -> Result<(), AnyError> {
         Wei::from_u128(100_000_000_000),
         Wei::from_u128(10_000_000_000_000_000_000),
     )?;
+
     let accounts = Arc::new(AccountClient::new(rpc.clone(), settings.network.chain_id)?);
     let transactions = Arc::new(TransactionClient::new(
         rpc,
@@ -50,13 +51,16 @@ async fn main() -> Result<(), AnyError> {
         limits,
     )?);
     let coordinator = Arc::new(TransactionCoordinator::new(accounts.clone(), transactions));
+
+    let wallet_config = WalletConfig {
+        scope: scope.clone(),
+        chain_id: settings.network.chain_id,
+        asset: AssetKind::Native,
+        decimals: ETH.decimals,
+    };
+
     let provider = WalletProvider::new(
-        WalletConfig {
-            scope: scope.clone(),
-            chain_id: settings.network.chain_id,
-            asset: AssetKind::Native,
-            decimals: ETH.decimals,
-        },
+        wallet_config,    
         accounts,
         coordinator,
         indexer,
