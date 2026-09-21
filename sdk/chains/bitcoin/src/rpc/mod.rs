@@ -161,18 +161,11 @@ mod test {
                 "getindexinfo",
                 serde_json::json!({"txindex": {"synced": true, "best_block_height": 10}}),
             ),
-            success("getblockhash", Value::String(format!("{:064x}", 1))),
         ]
     }
 
     fn config() -> CoreConfig {
-        CoreConfig {
-            expected_network: Network::Regtest,
-            expected_genesis_hash: Some(
-                parse_bitcoin_block_hash(&format!("{:064x}", 1))
-                    .expect("test genesis hash must parse"),
-            ),
-        }
+        CoreConfig::new(Network::Regtest)
     }
 
     fn signed_transaction() -> SignedTransaction {
@@ -207,10 +200,8 @@ mod test {
     }
 
     #[test]
-    fn default_connection_checks_readiness_without_requesting_genesis() {
-        let mut replies = readiness_replies();
-        replies.pop();
-        let transport = ScriptedClient::new(replies);
+    fn default_connection_checks_readiness_without_genesis_lookup() {
+        let transport = ScriptedClient::new(readiness_replies());
         let client = block_on(Client::connect(transport.clone(), Network::Regtest)).unwrap();
         assert_eq!(client.config(), &CoreConfig::new(Network::Regtest));
         assert!(transport.replies.lock().unwrap().is_empty());
@@ -229,37 +220,6 @@ mod test {
             "Bitcoin RPC network does not match configuration"
         );
         assert!(!error.retryable);
-        assert!(transport.replies.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn explicit_genesis_pin_rejects_a_different_node() {
-        let transport = ScriptedClient::new(readiness_replies());
-        let pinned = CoreConfig::new(Network::Regtest)
-            .with_genesis_hash(&format!("{:064x}", 2))
-            .unwrap();
-        let error = block_on(Client::connect_with(transport.clone(), pinned))
-            .err()
-            .unwrap();
-        assert_eq!(
-            error.message,
-            "Bitcoin RPC genesis hash does not match configuration"
-        );
-        assert!(!error.retryable);
-        assert!(transport.replies.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn malformed_genesis_pin_is_rejected_before_rpc() {
-        let transport = ScriptedClient::new(Vec::new());
-        let result = block_on(async {
-            let config = CoreConfig::new(Network::Regtest).with_genesis_hash("invalid")?;
-            Client::connect_with(transport.clone(), config).await
-        });
-        assert_eq!(
-            result.err().unwrap(),
-            parse_bitcoin_block_hash("invalid").unwrap_err()
-        );
         assert!(transport.replies.lock().unwrap().is_empty());
     }
 

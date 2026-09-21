@@ -688,17 +688,11 @@ validates those transport settings. Its errors retain the generic JSON-RPC
 error type, rather than being wrapped as an indexing error during construction.
 
 For Bitcoin, `RpcClient::connect(transport, network).await` verifies Core version,
-network, readiness, and transaction index before storage is opened. It does not
-request or compare genesis at startup by default. To enable genesis pinning,
-construct `CoreConfig::new(network).with_genesis_hash(hash)?` and pass it to
-`RpcClient::connect_with(transport, config).await`. `CoreConfig` and `SourceConfig`
-represent the optional pin as `Option<BlockHash>`; malformed supplied hashes
-are rejected before any RPC call.
+network, readiness, and transaction index before storage is opened. Bitcoin RPC
+startup does not perform a genesis hash lookup.
 `IndexerSettings::new(network)` owns confirmations, reorg retention, and batch
-size. Its `build` rejects a different client network and uses the client's exact
-optional genesis policy. Optional `Credentials::header()` supplies a Basic
-Authorization entry for `json_rpc::Config::headers`; credential debugging is
-redacted.
+size. Optional `Credentials::header()` supplies a Basic Authorization entry for
+`json_rpc::Config::headers`; credential debugging is redacted.
 
 ```rust,ignore
 let transport = json_rpc::Http::new(rpc_config)?;
@@ -710,21 +704,15 @@ let indexer = settings.build(rpc.clone(), repository, None)?;
 
 For Ethereum, `RpcClient::new(transport)` performs no I/O.
 `IndexerSettings::new(network)` retains the expected network and synchronization
-policy, with `genesis_hash: None`. Set `settings.genesis_hash = Some(hash)` to
-enable genesis pinning. `settings.source(rpc.clone()).await` always verifies
-chain ID, and fetches block zero for startup validation only when a hash is
-supplied. Malformed pins fail before RPC. Synchronous `build` checks that the
-source has the exact configured scope, chain ID, and optional genesis pin.
+policy. `settings.source(rpc.clone()).await` verifies the chain ID before storage
+opens. Synchronous `build` checks that the source has the exact configured scope
+and chain ID.
 `Network` remains available at the chain crate root and belongs to the chain
-domain. Disabling the startup check does not skip block zero when indexing
-history from genesis.
 
 Both settings builders accept an injected `json_rpc::Client`, including RPC
 doubles. `IndexerSettings::client` and transport fields have been removed.
-Application Bitcoin/Ethereum JSON `genesis_hash` is now optional: omission or
-null disables pinning, while a string enables it and must satisfy the existing
-chain-specific encoding checks. Network/chain-ID checks still happen before
-storage; Solana's required genesis configuration is unchanged.
+Network and chain-ID checks happen before storage; Solana's required genesis
+configuration is unchanged.
 
 `Retry::default()` now supplies three endpoint rounds, 250 ms initial backoff,
 and a 2-second maximum backoff. `json_rpc::Config::new` uses it automatically;

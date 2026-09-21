@@ -22,10 +22,9 @@ const RECEIPTS_BY_TRANSACTION: u8 = 2;
 
 /// Authoritative numbered-block source over generic JSON-RPC execution.
 ///
-/// Construction verifies `eth_chainId` and, when configured, a block-zero hash
-/// pin before the value can be used as a `BlockSource`. Receipt capability is
-/// discovered once and an official method-not-found response permanently selects
-/// the batched fallback.
+/// Construction verifies `eth_chainId` before the value can be used as a
+/// `BlockSource`. Receipt capability is discovered once and an official
+/// method-not-found response permanently selects the batched fallback.
 pub struct BlockClient<C> {
     client: Client<C>,
     config: SourceConfig,
@@ -72,30 +71,6 @@ where
             ));
         }
 
-        let Some(expected_genesis_hash) = &self.config.expected_genesis_hash else {
-            return Ok(());
-        };
-        let raw_genesis = self
-            .request_result("eth_getBlockByNumber", serde_json::json!(["0x0", false]))
-            .await?;
-        if raw_genesis
-            .deserialize::<Value>()
-            .map_err(map_json_rpc_error)?
-            .is_null()
-        {
-            return Err(self::error(
-                "Ethereum RPC does not expose the genesis block",
-                false,
-            ));
-        }
-        let genesis = ParsedBlock::parse(raw_genesis.as_bytes(), Some(BlockHeight(0)), false)
-            .map_err(|error| self::error(error.to_string(), false))?;
-        if &genesis.reference.hash != expected_genesis_hash {
-            return Err(self::error(
-                "Ethereum RPC genesis hash does not match configuration",
-                false,
-            ));
-        }
         Ok(())
     }
 
@@ -366,7 +341,6 @@ mod tests {
 
     use super::*;
 
-    const GENESIS_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
     const BLOCK_HASH: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const PARENT_HASH: &str = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const TX_HASH: &str = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -563,13 +537,6 @@ mod tests {
                 network: "dev".to_owned(),
             },
             expected_chain_id: 31_337,
-            expected_genesis_hash: Some(BlockHash(
-                GENESIS_HASH
-                    .parse::<alloy_primitives::B256>()
-                    .expect("test genesis hash must be valid")
-                    .0
-                    .to_vec(),
-            )),
         }
     }
 
@@ -586,15 +553,6 @@ mod tests {
         );
         let client = ScriptedClient::new(vec![
             success("eth_chainId", json!("0x7a69")),
-            success(
-                "eth_getBlockByNumber",
-                block(
-                    0,
-                    GENESIS_HASH,
-                    "0x0000000000000000000000000000000000000000000000000000000000000000",
-                    Vec::new(),
-                ),
-            ),
             raw_success("eth_getBlockByNumber", raw_full_block.clone()),
             failure("eth_getBlockReceipts", -32_601),
             success("eth_getTransactionReceipt", receipt()),
@@ -634,7 +592,6 @@ mod tests {
             vec![
                 "eth_chainId",
                 "eth_getBlockByNumber",
-                "eth_getBlockByNumber",
                 "eth_getBlockReceipts",
                 "eth_getTransactionReceipt",
                 "eth_getBlockByNumber",
@@ -649,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn chains_mismatch_fails_closed_before_genesis_read() {
+    fn chains_mismatch_fails_closed_before_block_reads() {
         let client = ScriptedClient::new(vec![success("eth_chainId", json!("0x1"))]);
         let error = match block_on(BlockClient::connect(client.clone(), config())) {
             Ok(_) => panic!("wrong chain ID must fail closed"),
@@ -660,63 +617,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_genesis_pin_fails_before_rpc() {
-        for length in [0, 31, 33] {
-            let client = ScriptedClient::new(Vec::new());
-            let mut config = config();
-            config.expected_genesis_hash = Some(BlockHash(vec![0x11; length]));
-            let error = block_on(BlockClient::connect(client.clone(), config))
-                .err()
-                .unwrap();
-            assert_eq!(
-                error.message,
-                "configured Ethereum genesis hash must be 32 bytes"
-            );
-            assert!(!error.retryable);
-            assert!(client.methods().is_empty());
-        }
-    }
-
-    #[test]
-    fn pinned_genesis_rejects_missing_and_malformed_blocks() {
-        for (genesis, message) in [
-            (
-                Value::Null,
-                "Ethereum RPC does not expose the genesis block",
-            ),
-            (
-                json!({}),
-                "Ethereum block result does not match the RPC block shape",
-            ),
-        ] {
-            let client = ScriptedClient::new(vec![
-                success("eth_chainId", json!("0x7a69")),
-                success("eth_getBlockByNumber", genesis),
-            ]);
-            let error = block_on(BlockClient::connect(client.clone(), config()))
-                .err()
-                .unwrap();
-            assert_eq!(error.message, message);
-            assert!(!error.retryable);
-            assert_eq!(client.methods(), ["eth_chainId", "eth_getBlockByNumber"]);
-        }
-    }
-
-    #[test]
     fn block_receipt_method_preserves_each_exact_receipt_result() {
         let raw_receipt = raw_receipt_at(TX_HASH, 0, "6.0200e+02");
         let raw_receipt_array = [b"[\n  ".as_slice(), &raw_receipt, b"\n]".as_slice()].concat();
         let client = ScriptedClient::new(vec![
             success("eth_chainId", json!("0x7a69")),
-            success(
-                "eth_getBlockByNumber",
-                block(
-                    0,
-                    GENESIS_HASH,
-                    "0x0000000000000000000000000000000000000000000000000000000000000000",
-                    Vec::new(),
-                ),
-            ),
             success(
                 "eth_getBlockByNumber",
                 block(10, BLOCK_HASH, PARENT_HASH, vec![transaction()]),
@@ -740,15 +645,6 @@ mod tests {
         let second_receipt = raw_receipt_at(TX_HASH_2, 1, "2.00e0");
         let client = ScriptedClient::new(vec![
             success("eth_chainId", json!("0x7a69")),
-            success(
-                "eth_getBlockByNumber",
-                block(
-                    0,
-                    GENESIS_HASH,
-                    "0x0000000000000000000000000000000000000000000000000000000000000000",
-                    Vec::new(),
-                ),
-            ),
             success(
                 "eth_getBlockByNumber",
                 block(
@@ -777,10 +673,6 @@ mod tests {
     fn canonical_lookup_distinguishes_json_null_from_non_null_values() {
         let client = ScriptedClient::new(vec![
             success("eth_chainId", json!("0x7a69")),
-            success(
-                "eth_getBlockByNumber",
-                block(0, GENESIS_HASH, PARENT_HASH, Vec::new()),
-            ),
             raw_success("eth_getBlockByNumber", b" \nnull\t ".to_vec()),
             success("eth_getBlockByNumber", json!("null")),
             success("eth_getBlockByNumber", json!({"value": null})),

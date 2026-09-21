@@ -69,10 +69,8 @@ standards remain compatibility contracts.
 - MUST be independently deletable without breaking generic crates or the other
   concrete chains.
 - Bitcoin network and Ethereum chain-ID startup checks MUST remain mandatory.
-  Their genesis pinning MUST be optional and disabled when no expected hash is
-  supplied. A supplied hash MUST be validated before storage opens; malformed
-  hashes MUST NOT silently disable the check. Solana identity rules below are
-  unchanged.
+  Bitcoin and Ethereum MUST NOT perform startup genesis-hash checking. Solana
+  identity rules below are unchanged.
 
 ### `sdk/chains/solana` target
 

@@ -204,10 +204,7 @@ mod tests {
         let client = Client {
             connection: Arc::new(Connection {
                 client: Reply { params, result },
-                config: CoreConfig {
-                    expected_network: Network::Regtest,
-                    expected_genesis_hash: Some(indexing::BlockHash(vec![1; 32])),
-                },
+                config: CoreConfig::new(Network::Regtest),
             }),
         };
         block_on(client.preflight(&transaction, fee_rate))

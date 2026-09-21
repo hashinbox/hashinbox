@@ -117,10 +117,7 @@ mod tests {
             Client {
                 connection: Arc::new(Connection {
                     client: self,
-                    config: CoreConfig {
-                        expected_network: Network::Regtest,
-                        expected_genesis_hash: Some(BlockHash(vec![0; 32])),
-                    },
+                    config: CoreConfig::new(Network::Regtest),
                 }),
             }
         }

@@ -4,7 +4,6 @@ mod postgres;
 mod solana;
 
 use chain_bitcoin::Network;
-use indexing::BlockHash;
 use payment_api::WalletAsset;
 use serde::{Deserialize, de};
 
@@ -159,8 +158,6 @@ impl IndexConfig {
 #[serde(deny_unknown_fields)]
 pub(crate) struct BitcoinConfig {
     pub(crate) network: Network,
-    #[serde(default)]
-    pub(crate) genesis_hash: Option<String>,
     pub(crate) rpc: RpcConfig,
     #[serde(flatten)]
     sync: SyncConfig,
@@ -178,12 +175,6 @@ impl BitcoinConfig {
     fn validate(&self) -> Result<(), AnyError> {
         self.rpc.validate()?;
         self.sync.validate()?;
-        if let Some(expected) = &self.genesis_hash {
-            let hash = chain_bitcoin::parse_bitcoin_block_hash(expected)?;
-            if chain_bitcoin::format_bitcoin_block_hash(&hash)? != *expected {
-                return Err("Bitcoin genesis hash must use canonical lowercase encoding".into());
-            }
-        }
         Ok(())
     }
 }
@@ -193,8 +184,6 @@ impl BitcoinConfig {
 pub(crate) struct EthereumConfig {
     network: String,
     pub(crate) chain_id: u64,
-    #[serde(default)]
-    genesis_hash: Option<String>,
     pub(crate) rpc: RpcConfig,
     #[serde(default)]
     limits: EthereumLimits,
@@ -210,7 +199,6 @@ impl EthereumConfig {
             self.chain_id,
             self.network.as_str(),
         ));
-        settings.genesis_hash.clone_from(&self.genesis_hash);
         settings.confirmations = self.sync.confirmation_depth;
         settings.reorg_retention = self.sync.reorg_retention;
         settings.batch_size = self.sync.batch_size;
@@ -228,23 +216,8 @@ impl EthereumConfig {
                 "USDC configuration currently requires exactly one Ethereum RPC endpoint".into(),
             );
         }
-        self.genesis()?;
         self.limits.build()?;
         Ok(())
-    }
-
-    fn genesis(&self) -> Result<Option<BlockHash>, AnyError> {
-        let Some(expected) = &self.genesis_hash else {
-            return Ok(None);
-        };
-        let value = expected
-            .strip_prefix("0x")
-            .ok_or("Ethereum genesis hash must start with 0x")?;
-        let bytes = hex::decode(value)?;
-        if bytes.len() != 32 {
-            return Err("Ethereum genesis hash must contain exactly 32 bytes".into());
-        }
-        Ok(Some(BlockHash(bytes)))
     }
 
     pub(crate) fn limits(&self) -> Result<chain_ethereum::Limits, AnyError> {
@@ -426,76 +399,6 @@ mod tests {
     const CONTRACT: &str = "0x1111111111111111111111111111111111111111";
 
     #[test]
-    fn omitted_or_null_genesis_disables_only_optional_pinning() {
-        for explicit_null in [false, true] {
-            let mut indexes = bitcoin();
-            indexes["ethereum"] = ethereum(None)["ethereum"].clone();
-            for chain in ["bitcoin", "ethereum"] {
-                if explicit_null {
-                    indexes[chain]["genesis_hash"] = Value::Null;
-                } else {
-                    indexes[chain]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("genesis_hash");
-                }
-            }
-            let config = parse(indexes, json!([])).unwrap();
-            config.validate().expect("genesis pinning is optional");
-            let bitcoin = config.indexes.bitcoin.as_ref().unwrap();
-            assert!(bitcoin.genesis_hash.is_none());
-            assert_eq!(bitcoin.settings().network, Network::Regtest);
-            let ethereum = config.indexes.ethereum.as_ref().unwrap();
-            assert!(ethereum.settings().genesis_hash.is_none());
-            assert_eq!(ethereum.settings().network.chain_id, 1);
-        }
-    }
-
-    #[test]
-    fn explicit_genesis_pins_are_preserved_and_invalid_values_are_rejected() {
-        let bitcoin_hash = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
-        let ethereum_hash = format!("0x{}", "11".repeat(32));
-        let mut indexes = bitcoin();
-        indexes["bitcoin"]["genesis_hash"] = json!(bitcoin_hash);
-        indexes["ethereum"] = ethereum(None)["ethereum"].clone();
-        let config = parse(indexes.clone(), json!([])).unwrap();
-        config.validate().expect("explicit pins remain supported");
-        assert_eq!(
-            config
-                .indexes
-                .bitcoin
-                .as_ref()
-                .unwrap()
-                .genesis_hash
-                .as_deref(),
-            Some(bitcoin_hash)
-        );
-        assert_eq!(
-            config
-                .indexes
-                .ethereum
-                .as_ref()
-                .unwrap()
-                .settings()
-                .genesis_hash
-                .as_deref(),
-            Some(ethereum_hash.as_str())
-        );
-        for chain in ["bitcoin", "ethereum"] {
-            for invalid in [json!(""), json!("garbage"), json!(42), json!(false)] {
-                let mut invalid_indexes = indexes.clone();
-                invalid_indexes[chain]["genesis_hash"] = invalid;
-                if let Ok(config) = parse(invalid_indexes, json!([])) {
-                    assert!(
-                        config.validate().is_err(),
-                        "must reject invalid {chain} pin"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn ethereum_rpc_and_sync_fields_reach_separate_runtime_settings() {
         let config = parse(ethereum(None), json!([])).expect("configuration JSON");
         config.validate().expect("defaulted bounds");
@@ -545,7 +448,6 @@ mod tests {
     fn bitcoin_rpc_configuration_is_independent_of_indexing_policy() {
         let mut config: BitcoinConfig = serde_json::from_value(json!({
             "network": "regtest",
-            "genesis_hash": "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
             "rpc": {
                 "endpoints": ["http://127.0.0.1:18443", "http://127.0.0.1:18444"],
                 "headers": [["Authorization", "fixture-credential"]],
@@ -816,7 +718,6 @@ mod tests {
         let mut config = json!({
             "network": "mainnet",
             "chain_id": 1,
-            "genesis_hash": format!("0x{}", "11".repeat(32)),
             "rpc": {
                 "endpoints": ["http://127.0.0.1:8545"]
             },
@@ -833,8 +734,6 @@ mod tests {
         json!({
             "bitcoin": {
                 "network": "regtest",
-                "genesis_hash":
-                    "0f9188f13cb7b2c9e5c8f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f",
                 "rpc": { "endpoints": ["http://127.0.0.1:18443"] },
                 "confirmation_depth": 1,
                 "reorg_retention": 10

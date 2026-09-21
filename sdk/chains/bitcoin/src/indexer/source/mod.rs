@@ -33,7 +33,6 @@ const MAX_COMPACT_PREVOUT_TOTAL_BYTES: usize =
 pub struct Config {
     pub scope: IndexScope,
     pub network: Network,
-    pub expected_genesis_hash: Option<BlockHash>,
 }
 
 impl Config {
@@ -50,11 +49,7 @@ impl Config {
                 false,
             ));
         }
-        CoreConfig {
-            expected_network: self.network,
-            expected_genesis_hash: self.expected_genesis_hash.clone(),
-        }
-        .validate()
+        Ok(())
     }
 }
 
@@ -75,14 +70,7 @@ where
 {
     pub async fn connect(client: C, config: Config) -> Result<Self, SourceError> {
         config.validate()?;
-        let client = RpcClient::connect_with(
-            client,
-            CoreConfig {
-                expected_network: config.network,
-                expected_genesis_hash: config.expected_genesis_hash.clone(),
-            },
-        )
-        .await?;
+        let client = RpcClient::connect_with(client, CoreConfig::new(config.network)).await?;
         Ok(Self { client, config })
     }
 
@@ -90,9 +78,7 @@ where
     pub fn from_client(client: RpcClient<C>, config: Config) -> Result<Self, SourceError> {
         config.validate()?;
         let expected = client.config();
-        if expected.expected_network != config.network
-            || expected.expected_genesis_hash != config.expected_genesis_hash
-        {
+        if expected.expected_network != config.network {
             return Err(source_error(
                 "Bitcoin block adapter configuration does not match its RPC client",
                 false,
@@ -656,9 +642,6 @@ mod test {
                 network: "regtest".to_owned(),
             },
             network: Network::Regtest,
-            expected_genesis_hash: Some(
-                parse_bitcoin_block_hash(&hash(1)).expect("test genesis hash must parse"),
-            ),
         }
     }
 
@@ -680,7 +663,6 @@ mod test {
                 "getindexinfo",
                 json!({"txindex": {"synced": true, "best_block_height": 10}}),
             ),
-            reply("getblockhash", Value::String(hash(1))),
         ]
     }
 

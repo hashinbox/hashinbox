@@ -45,12 +45,8 @@ async fn main() -> Result<(), AnyError> {
         let bitcoin = if let Some(config) = indexes.bitcoin {
             let settings = config.settings();
             let scope = settings.scope();
-            let mut identity = chain_bitcoin::CoreConfig::new(config.network);
-            if let Some(genesis) = &config.genesis_hash {
-                identity = identity.with_genesis_hash(genesis)?;
-            }
             let transport = json_rpc::Http::new(config.rpc.transport()?)?;
-            let client = chain_bitcoin::RpcClient::connect_with(transport, identity).await?;
+            let client = chain_bitcoin::RpcClient::connect(transport, config.network).await?;
             Some((config, settings, scope, client))
         } else {
             None

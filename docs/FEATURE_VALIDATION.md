@@ -230,28 +230,21 @@ and strict all-target/all-feature Clippy pass for `payment-examples`, as do
 workspace formatting and diff checks. A fresh MCP check retains the same
 39 completed rules, 17 unconfigured rules, and existing examples-layer finding.
 
-## Optional genesis and RPC defaults evidence
+## RPC defaults evidence
 
 Recorded on 2026-09-16 after the sample simplification:
 
-- Bitcoin `RpcClient::connect(transport, network)` skips startup genesis lookup
-  while retaining network and readiness checks. `connect_with` accepts an
-  explicit optional pin. `cargo test --locked -p chain-bitcoin` passes 169 unit
-  tests and one documentation test, including default-call ordering, explicit
-  mismatch, malformed pin before I/O, and source/indexer policy consistency.
-- Ethereum `IndexerSettings::new(network)` defaults to `genesis_hash: None`.
-  Chain ID remains mandatory; an explicit hash enables strict genesis parsing
-  and comparison. `cargo test --locked -p chain-ethereum` passes 167 unit, three
-  integration, and one documentation test.
+- Bitcoin `RpcClient::connect(transport, network)` performs network and readiness
+  checks without a startup genesis lookup.
+- Ethereum source construction verifies the configured chain ID without a
+  startup genesis lookup.
 - `cargo test --locked -p json-rpc` passes 27 tests. The new default request
   and batch tests failed with the former no-retry default, then passed with
   three endpoint rounds. Explicit no-retry and first-endpoint-only
   `request_once` are covered under the new default.
 - `cargo test --locked -p payment-api --bin payment-api` passes 38 tests.
-  Missing/null Bitcoin and Ethereum genesis configuration disables pinning;
-  explicit valid values reach the SDK and invalid supplied values are rejected.
 - Both wallet mains retain their commented offline samples. All five Bitcoin,
-  Ethereum, and ERC-20 examples use default retry policy and omit genesis pins.
+  Ethereum, and ERC-20 examples use default retry policy.
   They compile; no live-node execution was performed for this update.
 - Workspace formatting, locked all-target compilation, strict all-target and
   all-feature Clippy, no-dependency documentation, and diff checks pass.

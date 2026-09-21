@@ -35,14 +35,13 @@ impl<C> Client<C>
 where
     C: Transport,
 {
-    /// Connects with network and readiness validation, without a genesis pin.
+    /// Connects with network and readiness validation.
     pub async fn connect(client: C, network: crate::Network) -> Result<Self, SourceError> {
         Self::connect_with(client, CoreConfig::new(network)).await
     }
 
     /// Connects with explicit identity requirements and validates node readiness.
     pub async fn connect_with(client: C, config: CoreConfig) -> Result<Self, SourceError> {
-        config.validate()?;
         let core = Self {
             connection: Arc::new(Connection { client, config }),
         };

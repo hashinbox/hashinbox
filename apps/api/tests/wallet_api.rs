@@ -68,7 +68,6 @@ async fn bitcoin_wallet_is_generated_and_indexed() -> Result<(), Box<dyn std::er
     let api = start_api(json!({
         "bitcoin": {
             "network": "regtest",
-            "genesis_hash": node.fixture.genesis_hash,
             "rpc": rpc_config(&node.rpc_url, true),
             "confirmation_depth": 1,
             "reorg_retention": 10,
@@ -145,7 +144,6 @@ async fn ethereum_wallet_is_generated_and_indexed() -> Result<(), Box<dyn std::e
         "ethereum": {
             "network": "mainnet",
             "chain_id": 1,
-            "genesis_hash": ethereum_node::GENESIS_HASH,
             "rpc": rpc_config(&node.rpc_url, false),
             "confirmation_depth": 1,
             "reorg_retention": 10,
@@ -241,7 +239,6 @@ async fn usdc_wallet_is_generated_sent_and_indexed() -> Result<(), Box<dyn std::
         "ethereum": {
             "network": "mainnet",
             "chain_id": 1,
-            "genesis_hash": ethereum_node::GENESIS_HASH,
             "rpc": rpc_config(&node.rpc_url, false),
             "confirmation_depth": 1,
             "reorg_retention": 10,
