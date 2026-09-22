@@ -3,7 +3,6 @@ use super::*;
 fn bitcoin_index(node: &BitcoinNode) -> Value {
     json!({
         "network": "regtest",
-        "genesis_hash": node.fixture.genesis_hash,
         "rpc": rpc_config(&node.rpc_url, true), "confirmation_depth": 1,
         "reorg_retention": 10, "poll_millis": 10, "batch_size": 10
     })
@@ -12,7 +11,6 @@ fn bitcoin_index(node: &BitcoinNode) -> Value {
 fn ethereum_index(node: &EthereumNode) -> Value {
     json!({
         "network": "mainnet", "chain_id": 1,
-        "genesis_hash": ethereum_node::GENESIS_HASH,
         "rpc": rpc_config(&node.rpc_url, false), "confirmation_depth": 1,
         "reorg_retention": 10, "poll_millis": 10, "batch_size": 10
     })

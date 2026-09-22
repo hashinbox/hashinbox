@@ -42,6 +42,19 @@ attempt against the first configured endpoint, so failover cannot hide whether
 an earlier endpoint accepted the envelope. The coordinator owns any exact-byte
 replay and reconciliation.
 
+RPC transport configuration belongs to `json_rpc::Config`: endpoints, headers,
+timeouts, size bounds, and retry policy. Bitcoin and Ethereum `IndexerSettings`
+contain chain identity and synchronization policy, and never construct HTTP
+clients. Composition builds the transport and native RPC client explicitly.
+Bitcoin verifies its network and node readiness during `RpcClient::connect`;
+Ethereum verifies chain ID during `IndexerSettings::source`. Genesis pinning is
+optional for these chains and disabled by default; a supplied expected hash
+enables the additional startup check. All enabled checks happen before storage
+opens. Indexer `build` then consumes the verified client/source without
+additional RPC calls, while wallet adapters share that same client. Generic
+transport defaults to three endpoint rounds with 250 ms initial backoff capped
+at 2 seconds. Explicit no-retry and single-attempt submission paths remain.
+
 `apps/api` chooses an application-owned asset key for the existing generic
 wallet-family parameter. Native ETH and an allowlisted ERC-20 such as USDC are
 separate registrations backed by separate `WalletProvider` configurations,
@@ -257,13 +270,32 @@ SDK registry path is preserved rather than moved exclusively into `apps/api`.
 - the shared `Checkpoint` capability used to choose safe runtime birthdays.
 
 `Provider` constructs a concrete wallet by generating or importing secret
-material without returning that secret. A separate provider map is redundant;
+material without returning that secret and validates an existing wallet against
+its scope, native configuration, and shared operational dependencies. Native
+type inspection stays private to the provider; application code uses neutral
+wallet capabilities. A separate provider map is redundant;
 family registration owns the provider exactly once.
 
-`Wallets` exposes startup-only import plus chain-neutral runtime generation,
-get, balance, history, one send, and batch send operations. It delegates native
-behavior to registered wallets and senders. Business and endpoint code do not
-match on a concrete chain.
+Bitcoin's local `KeyPair` owns network/address-type identity, address derivation,
+formatting, and signing without operational dependencies. Its provider attaches
+that key to UTXO, fee, transaction, and history capabilities to construct a full
+wallet. Existing provider generation and import use the same local derivation.
+The local key alone does not participate in the wallet collection or indexing.
+Ethereum's local `KeyPair` similarly owns address derivation, formatting, and
+signing; EOA derivation needs no network or asset configuration. Its provider
+attaches chain/asset policy, accounts, transaction coordination, and history.
+
+`Wallets::insert` registers an already attached `Arc<dyn Wallet>` with an
+explicit native-position birthday during startup. It validates compatibility
+through the registered provider and retains the exact supplied wallet, public
+metadata, and address filter without exporting keys, recreating the wallet,
+or writing registry persistence. The application must reconstruct the same
+wallet and birthday at restart before synchronization begins.
+
+`Wallets` exposes startup-only import and insertion plus chain-neutral runtime
+generation, get, balance, history, one send, and batch send operations. It
+delegates native behavior to registered wallets and senders. Business and
+endpoint code do not match on a concrete chain.
 
 For `payment-api`, `F` is the closed `WalletAsset` selector (`btc`, `eth`,
 `usdc`, or `sol`), not merely a chain identifier. The collection remains

@@ -2897,6 +2897,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "payment-examples"
+version = "0.1.0"
+dependencies = [
+ "base",
+ "chain-bitcoin",
+ "chain-ethereum",
+ "indexing",
+ "indexing-redb",
+ "indexing-runtime",
+ "json-rpc",
+ "storage-redb",
+ "tokio",
+ "wallets",
+]
+
+[[package]]
 name = "pbkdf2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

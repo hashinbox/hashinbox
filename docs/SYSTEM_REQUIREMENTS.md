@@ -68,6 +68,9 @@ standards remain compatibility contracts.
 - MUST satisfy the common directory skeleton enforced by design lint.
 - MUST be independently deletable without breaking generic crates or the other
   concrete chains.
+- Bitcoin network and Ethereum chain-ID startup checks MUST remain mandatory.
+  Bitcoin and Ethereum MUST NOT perform startup genesis-hash checking. Solana
+  identity rules below are unchanged.
 
 ### `sdk/chains/solana` target
 
@@ -214,7 +217,13 @@ standards remain compatibility contracts.
   birthdays and expose the complete deduplicated filters needed by the sync
   task.
 - MUST support provider-selected generation/import without returning secrets.
-- Import MUST require exclusive startup access and an explicit birthday.
+- MUST support insertion of an existing `Arc<dyn Wallet>` through the registered
+  provider's validation of scope, native configuration, and shared operational
+  dependencies. Insertion MUST retain the supplied wallet instance, its public
+  metadata, and indexing filter without exporting secrets, recreating the
+  wallet, or writing registry persistence.
+- Import and insertion MUST require exclusive startup access and an explicit
+  birthday.
   Runtime generation MUST start at the checked successor of the current
   checkpoint position, or at position zero when no checkpoint exists.
 - MUST expose get, exact selected-asset balance, complete checkpoint-bound
@@ -388,8 +397,8 @@ indexes.solana {
 - A generated runtime wallet MUST begin at the checked successor native
   position and require no historical backfill. If that position is skipped,
   it MUST activate at the first later produced block.
-- Historical import MUST require exclusive startup access and MUST be
-  unavailable after the wallet collection is shared.
+- Historical import or insertion MUST require exclusive startup access and
+  MUST be unavailable after the wallet collection is shared.
 - On restart, the embedding application MUST supply the same complete
   historical address/birthday set that produced the checkpoint. Because filters
   are deliberately not persisted, a changed set requires explicit scope

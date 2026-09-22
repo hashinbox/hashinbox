@@ -12,7 +12,7 @@ mod wire;
 
 pub use capability::{FeeClient, Fees, Node, TransactionClient, Transactions};
 pub use client::Client;
-pub use config::CoreConfig;
+pub use config::{CoreConfig, Credentials};
 pub(crate) use error::source_error;
 pub use types::{NodeStatus, Preflight, UnspentOutput, UtxoSet};
 pub use wire::{format_bitcoin_block_hash, parse_bitcoin_block_hash};
@@ -161,16 +161,11 @@ mod test {
                 "getindexinfo",
                 serde_json::json!({"txindex": {"synced": true, "best_block_height": 10}}),
             ),
-            success("getblockhash", Value::String(format!("{:064x}", 1))),
         ]
     }
 
     fn config() -> CoreConfig {
-        CoreConfig {
-            expected_network: Network::Regtest,
-            expected_genesis_hash: parse_bitcoin_block_hash(&format!("{:064x}", 1))
-                .expect("test genesis hash must parse"),
-        }
+        CoreConfig::new(Network::Regtest)
     }
 
     fn signed_transaction() -> SignedTransaction {
@@ -195,13 +190,37 @@ mod test {
 
     #[test]
     fn connect_validates_core_31_identity_and_readiness() {
-        let core = block_on(Client::connect(
+        let core = block_on(Client::connect_with(
             ScriptedClient::new(readiness_replies()),
             config(),
         ))
         .expect("valid scripted Core node must connect");
 
         assert_eq!(core.config(), &config());
+    }
+
+    #[test]
+    fn default_connection_checks_readiness_without_genesis_lookup() {
+        let transport = ScriptedClient::new(readiness_replies());
+        let client = block_on(Client::connect(transport.clone(), Network::Regtest)).unwrap();
+        assert_eq!(client.config(), &CoreConfig::new(Network::Regtest));
+        assert!(transport.replies.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn default_connection_still_rejects_the_wrong_network() {
+        let mut replies = readiness_replies();
+        replies.truncate(2);
+        let transport = ScriptedClient::new(replies);
+        let error = block_on(Client::connect(transport.clone(), Network::Mainnet))
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.message,
+            "Bitcoin RPC network does not match configuration"
+        );
+        assert!(!error.retryable);
+        assert!(transport.replies.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -220,7 +239,7 @@ mod test {
                 }),
             ),
         ];
-        let error = block_on(Client::connect(ScriptedClient::new(replies), config()))
+        let error = block_on(Client::connect_with(ScriptedClient::new(replies), config()))
             .err()
             .expect("pruned Core node must fail");
 
@@ -230,7 +249,7 @@ mod test {
 
     #[test]
     fn core_warmup_failure_is_retryable() {
-        let error = block_on(Client::connect(
+        let error = block_on(Client::connect_with(
             ScriptedClient::new(vec![remote_failure("getnetworkinfo", -28)]),
             config(),
         ))
@@ -247,7 +266,7 @@ mod test {
             "estimatesmartfee",
             serde_json::json!({"feerate": 0.00001001, "blocks": 6}),
         ));
-        let core = block_on(Client::connect(ScriptedClient::new(replies), config()))
+        let core = block_on(Client::connect_with(ScriptedClient::new(replies), config()))
             .expect("valid scripted Core node must connect");
 
         let rate = block_on(core.fees().estimate(6)).expect("fee estimate must parse");
@@ -270,7 +289,7 @@ mod test {
                 "fees": {"base": base_fee}
             }]),
         ));
-        let core = block_on(Client::connect(ScriptedClient::new(replies), config()))
+        let core = block_on(Client::connect_with(ScriptedClient::new(replies), config()))
             .expect("valid scripted Core node must connect");
 
         let result = block_on(core.transactions().preflight(&signed, FeeRate::new(10_000)))
@@ -303,7 +322,7 @@ mod test {
             "sendrawtransaction",
             Value::String(format!("{:064x}", 9)),
         ));
-        let core = block_on(Client::connect(ScriptedClient::new(replies), config()))
+        let core = block_on(Client::connect_with(ScriptedClient::new(replies), config()))
             .expect("valid scripted Core node must connect");
 
         let error = block_on(core.transactions().broadcast(signed, FeeRate::new(10_000)))
@@ -322,7 +341,7 @@ mod test {
         let signed = signed_transaction();
         let mut replies = readiness_replies();
         replies.push(remote_failure("sendrawtransaction", -26));
-        let core = block_on(Client::connect(ScriptedClient::new(replies), config()))
+        let core = block_on(Client::connect_with(ScriptedClient::new(replies), config()))
             .expect("valid scripted Core node must connect");
 
         let error = block_on(core.transactions().broadcast(signed, FeeRate::new(10_000)))
@@ -342,7 +361,7 @@ mod test {
         let local_id = signed.id();
         let mut replies = readiness_replies();
         replies.push(success("sendrawtransaction", Value::Bool(true)));
-        let core = block_on(Client::connect(ScriptedClient::new(replies), config()))
+        let core = block_on(Client::connect_with(ScriptedClient::new(replies), config()))
             .expect("valid scripted Core node must connect");
 
         let error = block_on(core.transactions().broadcast(signed, FeeRate::new(10_000)))
@@ -364,7 +383,7 @@ mod test {
             "sendrawtransaction",
             json_rpc::ErrorKind::Timeout,
         ));
-        let core = block_on(Client::connect(ScriptedClient::new(replies), config()))
+        let core = block_on(Client::connect_with(ScriptedClient::new(replies), config()))
             .expect("valid scripted Core node must connect");
 
         let error = block_on(core.transactions().broadcast(signed, FeeRate::new(10_000)))
@@ -380,7 +399,7 @@ mod test {
     #[test]
     fn broadcast_fee_rejection_happens_before_wire_and_has_no_ambiguity() {
         let signed = signed_transaction();
-        let core = block_on(Client::connect(
+        let core = block_on(Client::connect_with(
             ScriptedClient::new(readiness_replies()),
             config(),
         ))

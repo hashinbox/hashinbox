@@ -268,10 +268,6 @@ mod tests {
         let dependencies = Arc::new(InactiveDependencies);
         let transactions: Arc<dyn Transactions> = dependencies.clone();
         let history: Arc<dyn History> = dependencies;
-        let utxos = Arc::new(
-            IndexUtxos::new(scope.clone(), network, outputs)
-                .expect("fixture scope must match the Bitcoin network"),
-        );
         WalletProvider::new(
             WalletConfig {
                 scope,
@@ -280,11 +276,12 @@ mod tests {
                 fee_target_blocks: 6,
                 max_fee_rate: FeeRate::new(1_000),
             },
-            utxos,
+            outputs,
             fees,
             transactions,
             history,
         )
+        .expect("fixture scope must match the Bitcoin network")
     }
 
     fn assert_invalid_batch(failure: SendError, message: &str) {

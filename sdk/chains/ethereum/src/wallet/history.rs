@@ -11,7 +11,7 @@ impl HistoryReader for Wallet {
         Box::pin(async move {
             let address = CanonicalAddress {
                 scope: self.config.scope.clone(),
-                value: self.address.to_string(),
+                value: self.key.pair.address.to_string(),
             };
             let transactions = self
                 .history

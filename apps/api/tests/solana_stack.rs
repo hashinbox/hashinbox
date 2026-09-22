@@ -17,7 +17,7 @@ use base::{BlockPosition, Decimal};
 use chain_solana::{AssetKind, RpcClient, RpcConfig, WalletConfig};
 use indexing::{
     BlockObservation, BlockRef, BlockSelector, Blocks as _, Checkpoint as _, Indexer as _,
-    Observer, OutputRequest, Outputs, SyncConfig,
+    Observer, OutputRequest, Outputs, SyncConfig, SyncPolicy,
 };
 use sha2::{Digest, Sha256};
 use tokio::{sync::watch, task::JoinSet, time::sleep};
@@ -408,7 +408,8 @@ async fn native_sol_submission_indexing_and_central_storage() {
         chain_solana::Source::new(client.clone()),
         chain_solana::BlockInterpreter::new(scope.clone()).expect("Solana interpreter"),
         repository.clone(),
-        SyncConfig::new(scope.clone(), 1, 32, 100).expect("synchronization policy"),
+        SyncConfig::new(scope.clone(), SyncPolicy::new(1, 32, 100))
+            .expect("synchronization policy"),
     );
     service.observe(Arc::new(Notice(progress)));
     let service = Arc::new(service);
@@ -553,7 +554,8 @@ async fn native_sol_submission_indexing_and_central_storage() {
         chain_solana::Source::new(client.clone()),
         chain_solana::BlockInterpreter::new(scope.clone()).expect("restarted interpreter"),
         restarted_repository.clone(),
-        SyncConfig::new(scope.clone(), 1, 32, 100).expect("restarted synchronization policy"),
+        SyncConfig::new(scope.clone(), SyncPolicy::new(1, 32, 100))
+            .expect("restarted synchronization policy"),
     );
     restarted_service.observe(Arc::new(Notice(restarted_progress)));
     let restarted_service = Arc::new(restarted_service);

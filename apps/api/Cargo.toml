@@ -29,6 +29,7 @@ hex.workspace = true
 indexing = { path = "../../sdk/indexing" }
 indexing-postgres = { path = "../../sdk/indexing/postgres" }
 indexing-runtime = { path = "../../sdk/indexing/runtime" }
+json-rpc = { path = "../../packages/json-rpc" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "net", "process", "rt", "signal", "sync", "time"] }
@@ -44,7 +45,6 @@ alloy-primitives.workspace = true
 bitcoin.workspace = true
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 http-body-util = "=0.1.4"
-json-rpc = { path = "../../packages/json-rpc" }
 reqwest.workspace = true
 sha2.workspace = true
 tempfile = "=3.27.0"

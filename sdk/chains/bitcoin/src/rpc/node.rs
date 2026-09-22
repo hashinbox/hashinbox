@@ -5,7 +5,7 @@ use crate::Network;
 
 use super::{
     Client, NodeStatus,
-    error::{map_json_rpc_error, source_error},
+    error::source_error,
     transport::{Client as Transport, RawJson},
     wire::{parse_bitcoin_block_hash, parse_object, required_bool, required_string, required_u64},
 };
@@ -51,18 +51,6 @@ where
             .request_result("getindexinfo", serde_json::json!(["txindex"]))
             .await?;
         status.require_synced_index(&index_info)?;
-
-        let genesis = self
-            .request_result("getblockhash", serde_json::json!([0]))
-            .await?;
-        let genesis: String = genesis.deserialize().map_err(map_json_rpc_error)?;
-        let genesis = parse_bitcoin_block_hash(&genesis)?;
-        if genesis != self.connection.config.expected_genesis_hash {
-            return Err(source_error(
-                "Bitcoin RPC genesis hash does not match configuration",
-                false,
-            ));
-        }
 
         Ok(status)
     }
@@ -204,10 +192,7 @@ mod tests {
                     values: Mutex::new(values.into()),
                     methods: Mutex::new(methods),
                 },
-                config: CoreConfig {
-                    expected_network: Network::Regtest,
-                    expected_genesis_hash: indexing::BlockHash(vec![1; 32]),
-                },
+                config: CoreConfig::new(Network::Regtest),
             }),
         };
         let result = block_on(client.readiness());
@@ -359,41 +344,10 @@ mod tests {
                 json!({"txindex": {"synced": true}}),
                 json!({"txindex": {"synced": true, "best_block_height": 10}}),
             ] {
-                let status = readiness(vec![
-                    json!({"version": version}),
-                    chain_info(),
-                    index,
-                    json!("01".repeat(32)),
-                ])
-                .unwrap();
+                let status =
+                    readiness(vec![json!({"version": version}), chain_info(), index]).unwrap();
                 assert_eq!(status, expected);
             }
-        }
-    }
-
-    #[test]
-    fn genesis_errors_retain_identity_policy_after_readiness_checks() {
-        for (genesis, message, retryable) in [
-            (
-                "invalid".to_owned(),
-                "Bitcoin RPC returned an invalid block hash",
-                true,
-            ),
-            (
-                "02".repeat(32),
-                "Bitcoin RPC genesis hash does not match configuration",
-                false,
-            ),
-        ] {
-            let error = readiness(vec![
-                json!({"version": 310000}),
-                chain_info(),
-                json!({"txindex": {"synced": true}}),
-                json!(genesis),
-            ])
-            .unwrap_err();
-            assert_eq!(error.message, message);
-            assert_eq!(error.retryable, retryable);
         }
     }
 }

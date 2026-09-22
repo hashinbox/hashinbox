@@ -8,7 +8,7 @@ mod transaction;
 mod settings;
 
 pub use interpreter::BlockInterpreter;
-pub use settings::{Credentials, IndexerSettings};
+pub use settings::IndexerSettings;
 pub use source::{Blocks, Config as SourceConfig};
 
 /// Standard chain-owned block source name used by embedded indexer composition.

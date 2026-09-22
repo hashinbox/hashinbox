@@ -31,24 +31,28 @@ wallets.register(
     bitcoin_scope,
     bitcoin_provider,
     bitcoin_sender,
+    None,
 )?;
 wallets.register(
     WalletAsset::Eth,
-    ethereum_scope,
+    ethereum_scope.clone(),
     ethereum_native_provider,
     ethereum_native_sender,
+    None,
 )?;
 wallets.register(
     WalletAsset::Usdc,
     ethereum_scope,
     ethereum_usdc_provider,
     ethereum_usdc_sender,
+    None,
 )?;
 wallets.register(
     WalletAsset::Sol,
     solana_scope,
     solana_provider,
     solana_sender,
+    None,
 )?;
 
 let imported = wallets
@@ -57,17 +61,98 @@ let imported = wallets
 let generated = wallets.generate(other_id, &WalletAsset::Usdc).await?;
 ```
 
-Each family registration contains exactly one `IndexScope`, concrete
-`Provider`, and chain batch `Sender`. Duplicate family keys fail during
-composition. A separate provider registry would duplicate that same family map
-and is not part of the public API.
+Separate Bitcoin and Ethereum samples live in
+[`examples/wallets-collections.rs`](../examples/wallets-collections.rs).
+Uncomment `bitcoin_wallet_collections()` or `ethereum_wallet_collections()`
+in `main`, then run `cargo run --locked -p payment-examples --bin wallets_collections`.
+Each sample registers its own family, generates two wallets, looks up public
+metadata by ID, and prints address/birthday filters. Bitcoin requires local
+regtest Core; Ethereum requires local Anvil. Neither sample starts synchronization
+or persists wallet keys.
 
-`Provider::create` and `Provider::generate` are both mandatory methods.
-Each concrete provider owns its native secret generation and validation policy,
-then reuses its own `create` path. Bitcoin and Ethereum explicitly generate
-secp256k1 material; Solana generates one Ed25519 seed. Both operations return an
-abstract wallet and never return secret material. There is no generic
+Each family registration contains exactly one `IndexScope`, concrete
+`Provider`, chain batch `Sender`, and optional scope-bound `Registry`.
+The examples above use `None` for in-memory registration. Duplicate family keys
+fail during composition. A separate provider registry would duplicate that
+same family map and is not part of the public API.
+
+`Provider::create`, `Provider::generate`, and `Provider::validate` are mandatory
+methods. Each concrete provider owns its native secret generation and validation
+policy, then reuses its own `create` path. Bitcoin and Ethereum explicitly generate
+secp256k1 material; Solana generates one Ed25519 seed. Creation and generation
+return an abstract wallet and never return secret material. There is no generic
 secp256k1 generation default; each provider must own its native policy.
+`validate(&IndexScope, &dyn Wallet)` checks an existing wallet against the
+registered scope, native configuration, and shared operational dependencies.
+Concrete providers privately inspect their own wallet type through `Any`;
+matching address text alone cannot establish provider or asset compatibility.
+
+Bitcoin also exposes `chain_bitcoin::KeyPair` for local generation and import.
+It needs only a Bitcoin `Network` and `AddressType`, retains its secret in
+memory, and implements `Addresser`, `AddressFormat`, and `Signer`. It requires
+no RPC client, storage, indexer, fee policy, or indexing scope and does not
+implement the full `wallets::Wallet` contract. Secret material is not exposed
+through debugging, serialization, cloning, or an export method.
+
+`chain_bitcoin::WalletProvider::new` receives `WalletConfig`, the narrow
+`indexing::Outputs` capability, fee and transaction capabilities, and history.
+The provider validates its configured scope and network, then constructs the
+Bitcoin-specific `IndexUtxos` view internally. Callers do not assemble that
+chain adapter themselves.
+
+```rust,ignore
+use base::Addresser;
+use chain_bitcoin::{AddressType, KeyPair, Network};
+use wallets::AddressFormat;
+
+let key = KeyPair::generate(Network::Regtest, AddressType::SegwitV0)?;
+let address = key.address_text(&key.address())?;
+
+// A separately configured Bitcoin provider adds balance, history, and sending.
+let wallet = provider.attach(key)?;
+```
+
+`KeyPair::import(secret, network, address_type)` consumes existing `SecretBytes`
+and derives the same identity as provider import. `WalletProvider::attach`
+consumes the local key, validates the provider configuration and exact network
+and address type, and returns `Arc<dyn wallets::Wallet>` without chain I/O.
+It neither persists the key nor registers an indexing filter. The existing
+Bitcoin `Provider::create` and `generate` methods reuse local key construction
+and attachment; callers of the full wallet interface remain unchanged.
+
+Ethereum exposes `chain_ethereum::KeyPair::generate()` and
+`KeyPair::import(secret)` with the same address and signing capabilities. Local
+EOA derivation requires no network, chain ID, asset, or decimal configuration.
+`chain_ethereum::WalletProvider::attach(key)` validates its `WalletConfig` and
+binds the key to the provider's chain, selected asset, accounts, transaction
+coordinator, and history. It consumes the key without I/O, persistence, or
+indexing registration. Existing Ethereum provider methods reuse this path.
+Solana generation APIs are unchanged.
+
+An attached wallet can join the chain-neutral collection without exporting its
+key or constructing a replacement wallet:
+
+```rust,ignore
+use base::BlockPosition;
+
+let key = chain_bitcoin::KeyPair::generate(network, address_type)?;
+let wallet = provider.attach(key)?;
+let sender = provider.transactions();
+let mut wallets = wallets::Wallets::new(indexer);
+wallets.register("btc", scope, provider, sender, None)?;
+let info = wallets
+    .insert("local-bitcoin", &"btc", wallet, BlockPosition(0))
+    .await?;
+println!("Wallet address: {}", info.address.text);
+```
+
+`Wallets::insert` accepts an `Arc<dyn Wallet>`, validates it with the registered
+provider, and retains that exact instance with its public metadata and indexing
+filter. It does not generate, import, export, or persist secret material and
+does not write a configured `Registry`. The caller supplies a native-position
+birthday and completes insertion before sharing the collection or starting
+synchronization. On restart, the embedding application must reconstruct the
+wallet and its original birthday before indexing resumes.
 
 A generated Solana wallet exists only for the current process and is not
 restart-recoverable. A configured Solana import is reconstructed from exactly
@@ -80,16 +165,17 @@ temporaries follow the same existing handling as Bitcoin/Ethereum imports; this
 contract adds no stricter Solana-only custody guarantee, no Solana row to
 `payment_wallets`, and no claim of durable production custody.
 
-Import requires a native-position birthday. Generation assigns the checked
-successor of the current checkpoint position, or position zero when the scope
-has no checkpoint. If the successor is not a produced block, the address
-becomes active at the first produced block after it. `Wallets`
+Import and insertion require a native-position birthday. Generation assigns
+the checked successor of the current checkpoint position, or position zero
+when the scope has no checkpoint. If the successor is not a produced block,
+the address becomes active at the first produced block after it. `Wallets`
 stores the abstract instance, public identity/scope/address metadata, and the
 deduplicated `AddressFilter` used for synchronization.
 
-`import` requires exclusive mutable access and is a startup-only operation.
-After imports finish, composition wraps the collection in `Arc`; runtime code
-can generate forward-only wallets but cannot add historical coverage.
+`import` and `insert` require exclusive mutable access and are startup-only
+operations. After startup registration finishes, composition wraps the
+collection in `Arc`; runtime code can generate forward-only wallets but cannot
+add historical coverage.
 Wallet lookup state uses a standard `RwLock`; operations clone the required
 entry and release the lock before every `.await`.
 
@@ -138,7 +224,8 @@ ordered dispatch, and ambiguity reconciliation form one indivisible operation.
 
 Code needing one capability accepts that capability rather than `dyn Wallet`.
 `Provider` is construction and does not become a post-construction wallet
-capability.
+capability. `Wallet` also extends `Any` so a provider can validate its private
+native wallet during insertion; callers continue to use the neutral capabilities.
 
 `AddressEncoding::Base58` is distinct from `Base58Check`. The accepted Solana
 address boundary decodes exactly 32 bytes and requires canonical plain-Base58
@@ -361,11 +448,14 @@ synchronizes every child.
 Synchronization policy stays concrete and small:
 
 ```rust,ignore
-SyncConfig::new(scope, minimum_confirmations, reorg_retention, batch_size)?;
+SyncConfig::new(
+    scope,
+    SyncPolicy::new(minimum_confirmations, reorg_retention, batch_size),
+)?;
 ```
 
-The three numeric inputs must be greater than zero. Confirmation depth is the
-`u64` value itself; it does not need a one-field policy wrapper.
+`SyncPolicy` validates that all three numeric inputs are greater than zero.
+Confirmation depth is the configured `u64` value itself.
 
 `Wallets` owns the address selection, one admission coordinator per registered
 scope, and the composed `Checkpoint` capability used to choose safe runtime
@@ -514,16 +604,16 @@ also express with `additionalProperties: false`.
 
 ## Address coverage contract
 
-All imported wallets and native-position birthdays for an existing scope form
-one authoritative startup set. They are registered before the first sync. A
-fresh scope locates the first produced block at or after the earliest birthday
-and anchors at that block's actual parent; it never invents `birthday - 1`. An
-empty scope anchors at the actual produced tip.
+All imported or inserted wallets and native-position birthdays for an existing
+scope form one authoritative startup set. They are registered before the first
+sync. A fresh scope locates the first produced block at or after the earliest
+birthday and anchors at that block's actual parent; it never invents
+`birthday - 1`. An empty scope anchors at the actual produced tip.
 
 A wallet created at runtime starts at the checked successor of
 `checkpoint.position`; a skipped successor activates at the first later
-produced block. A historical address
-cannot be added after `Wallets` becomes shared because import is startup-only.
+produced block. A historical address cannot be added after `Wallets` becomes
+shared because import and insertion are startup-only.
 If the authoritative startup set changes below the persisted checkpoint, the
 embedding application may recreate and rescan only that scope's indexing-owned
 rows. It must not drop the shared database, alter another scope, or touch SDK
@@ -597,6 +687,52 @@ the pinned/checksummed owned validator, and the explicit `solana_stack` target.
 existing `conflict` and `corrupt_data` constructors. Backend adapters retain
 their validation rules and supply the context; the constructor performs no
 storage access.
+
+## RPC configuration and indexing policy
+
+Bitcoin and Ethereum RPC construction is independent of `IndexerSettings`.
+The existing `json_rpc::Config` owns endpoints, headers, request timeout,
+request/response size limits, and `Retry`. `json_rpc::Http::new(config)`
+validates those transport settings. Its errors retain the generic JSON-RPC
+error type, rather than being wrapped as an indexing error during construction.
+
+For Bitcoin, `RpcClient::connect(transport, network).await` verifies Core version,
+network, readiness, and transaction index before storage is opened. Bitcoin RPC
+startup does not perform a genesis hash lookup.
+`IndexerSettings::new(network)` owns confirmations, reorg retention, and batch
+size. Optional `Credentials::header()` supplies a Basic Authorization entry for
+`json_rpc::Config::headers`; credential debugging is redacted.
+
+```rust,ignore
+let transport = json_rpc::Http::new(rpc_config)?;
+let rpc = chain_bitcoin::RpcClient::connect(transport, network).await?;
+let settings = chain_bitcoin::IndexerSettings::new(network);
+// Open a repository for settings.scope() after verification succeeds.
+let indexer = settings.build(rpc.clone(), repository, None)?;
+```
+
+For Ethereum, `RpcClient::new(transport)` performs no I/O.
+`IndexerSettings::new(network)` retains the expected network and synchronization
+policy. `settings.source(rpc.clone()).await` verifies the chain ID before storage
+opens. Synchronous `build` checks that the source has the exact configured scope
+and chain ID.
+`Network` remains available at the chain crate root and belongs to the chain
+
+Both settings builders accept an injected `json_rpc::Client`, including RPC
+doubles. `IndexerSettings::client` and transport fields have been removed.
+Network and chain-ID checks happen before storage; Solana's required genesis
+configuration is unchanged.
+
+`Retry::default()` now supplies three endpoint rounds, 250 ms initial backoff,
+and a 2-second maximum backoff. `json_rpc::Config::new` uses it automatically;
+the application and examples no longer repeat these values. Each round can
+visit every configured endpoint, so this is three total attempts with one
+endpoint, not a global three-request cap across multiple endpoints. The
+application/examples retain a 15-second per-request timeout and 64 MiB response
+limit. `Retry::no_retry()` selects one endpoint round; `request_once` performs
+exactly one execution against the first endpoint. Bitcoin/Ethereum submission
+and Solana's single-attempt transport remain unchanged. USDC composition still
+requires exactly one endpoint.
 
 ## JSON-RPC failures
 

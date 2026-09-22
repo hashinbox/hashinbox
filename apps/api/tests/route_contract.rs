@@ -52,6 +52,23 @@ struct FixtureProvider {
 }
 
 impl Provider for FixtureProvider {
+    fn validate(
+        &self,
+        _scope: &IndexScope,
+        wallet: &dyn wallets::Wallet,
+    ) -> Result<(), wallets::Error> {
+        if (wallet as &dyn std::any::Any)
+            .downcast_ref::<FixtureWallet>()
+            .is_some_and(|wallet| Arc::ptr_eq(&self.calls, &wallet.calls))
+        {
+            return Ok(());
+        }
+        Err(wallets::Error::new(
+            wallets::ErrorKind::Unsupported,
+            "incompatible fixture wallet",
+        ))
+    }
+
     fn create<'a>(&'a self, _secret: SecretBytes) -> FutureResult<'a, Arc<dyn wallets::Wallet>> {
         let wallet = FixtureWallet {
             calls: Arc::clone(&self.calls),

@@ -6,10 +6,10 @@ mod submissions;
 
 use std::{collections::BTreeMap, env, future::IntoFuture, sync::Arc};
 
-use chain_bitcoin::{AddressType, FeeRate, IndexUtxos};
+use chain_bitcoin::{AddressType, FeeRate};
 use chain_ethereum::AssetKind;
 use config::{AnyError, Config};
-use indexing::{BlockObservation, BlockPosition, BlockRef, Observer};
+use indexing::{BlockObservation, BlockPosition, BlockRef, Observer, SyncPolicy};
 use payment_api::{State, WalletAsset};
 use tokio::sync::{oneshot, watch};
 
@@ -43,18 +43,20 @@ async fn main() -> Result<(), AnyError> {
     // even loaded, let alone before a pool or schema session exists.
     let verification = async move {
         let bitcoin = if let Some(config) = indexes.bitcoin {
-            let settings = config.settings()?;
+            let settings = config.settings();
             let scope = settings.scope();
-            let client = settings.client().await?;
+            let transport = json_rpc::Http::new(config.rpc.transport()?)?;
+            let client = chain_bitcoin::RpcClient::connect(transport, config.network).await?;
             Some((config, settings, scope, client))
         } else {
             None
         };
         let ethereum = if let Some(config) = indexes.ethereum {
             let usdc = config.usdc.as_ref().map(config::UsdcConfig::contract);
-            let settings = config.settings()?;
+            let settings = config.settings();
             let scope = settings.scope();
-            let client = settings.client()?;
+            let transport = json_rpc::Http::new(config.rpc.transport()?)?;
+            let client = chain_ethereum::RpcClient::new(transport);
             let source = settings.source(client.clone()).await?;
             let accounts = Arc::new(chain_ethereum::AccountClient::new(
                 client.clone(),
@@ -142,9 +144,11 @@ async fn main() -> Result<(), AnyError> {
             repository,
             indexing::SyncConfig::new(
                 scope.clone(),
-                config.confirmation_depth(),
-                config.reorg_retention(),
-                config.batch_size(),
+                SyncPolicy::new(
+                    config.confirmation_depth(),
+                    config.reorg_retention(),
+                    config.batch_size(),
+                ),
             )?,
         );
         let checkpoint = indexing::Checkpoint::checkpoint(&service, &scope).await?;
@@ -176,8 +180,6 @@ async fn main() -> Result<(), AnyError> {
     let mut wallets = wallets::Wallets::new(checkpoint);
 
     if let Some((scope, network, repository, rpc)) = bitcoin {
-        let outputs: Arc<dyn indexing::Outputs> = repository.clone();
-        let utxos = Arc::new(IndexUtxos::new(scope.clone(), network, outputs)?);
         let provider = chain_bitcoin::WalletProvider::new(
             chain_bitcoin::WalletConfig {
                 scope: scope.clone(),
@@ -186,11 +188,11 @@ async fn main() -> Result<(), AnyError> {
                 fee_target_blocks: 6,
                 max_fee_rate: FeeRate::new(10_000_000),
             },
-            utxos,
+            repository.clone(),
             Arc::new(rpc.fees()),
             Arc::new(rpc.transactions()),
             history.clone(),
-        );
+        )?;
         let sender = provider.transactions();
         wallets.register(WalletAsset::Btc, scope, provider, sender, Some(repository))?;
         wallets.restore(&WalletAsset::Btc).await?;

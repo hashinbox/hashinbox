@@ -245,9 +245,11 @@ confirmation records, spent markers, an event log, or raw blocks.
 
 ## Initial coverage and birthdays
 
-Composition registers all configured imported wallets before the first sync
-and supplies a caller-owned `FilterSource` thereafter. Each source read returns
-one complete filter snapshot; synchronization controls when those reads occur.
+Composition imports or inserts all existing wallets with explicit birthdays
+before the first sync and supplies a caller-owned `FilterSource` thereafter.
+Each source read returns one complete filter snapshot; synchronization controls
+when those reads occur. Insertion accepts an already attached wallet and keeps
+the same instance; it changes no indexing persistence contract.
 
 For a fresh scope:
 
@@ -269,8 +271,8 @@ block. Existing history therefore remains complete without backfill.
 
 One scope checkpoint describes coverage for the complete filter snapshot that
 produced it. Adding a historical address, or lowering a birthday, beneath an
-existing checkpoint would create incomplete history. Runtime import is
-unavailable after the wallet collection is shared, while generation is
+existing checkpoint would create incomplete history. Runtime import and insertion
+are unavailable after the wallet collection is shared, while generation is
 forward-only. Across process restarts, the embedding application must load the
 same authoritative historical wallet set before synchronization; because
 indexing deliberately stores no filters, it cannot detect selection drift. If
@@ -278,8 +280,9 @@ the set changed, composition must recreate and rescan that scope.
 
 ## Forward synchronization
 
-Each service receives a `SyncConfig` built as
-`SyncConfig::new(scope, minimum_confirmations, reorg_retention, batch_size)`.
+Each service receives a `SyncConfig` built from an `IndexScope` and shared
+`SyncPolicy`:
+`SyncConfig::new(scope, SyncPolicy::new(minimum_confirmations, reorg_retention, batch_size))`.
 Minimum confirmations, rollback retention, and batch size must all be greater
 than zero. The configured `u64` confirmation depth is used directly when
 history derives transaction status.

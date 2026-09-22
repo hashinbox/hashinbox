@@ -78,7 +78,7 @@ where
     #[must_use]
     pub fn new(source: S, interpreter: I, repository: R, config: SyncConfig) -> Self {
         let scope = config.scope.clone();
-        let index = Index::new(repository.clone(), config.minimum_confirmations);
+        let index = Index::new(repository.clone(), config.policy.minimum_confirmations);
         Self {
             scope,
             synchronizer: Synchronizer::new(source, interpreter, repository, config),

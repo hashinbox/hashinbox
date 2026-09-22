@@ -1,15 +1,13 @@
 use std::sync::Arc;
 
-use alloy_primitives::keccak256;
 use base::{
-    Address as BaseAddress, Addresser, Broadcaster, Decimal, KeyPair,
-    Submission as BroadcastReceipt, TransactionBuilder as BaseBuilder, TransactionEnvelope,
-    TransactionError, TransactionErrorKind, TransactionFuture, TransactionId, TransactionSnapshot,
+    Address as BaseAddress, Addresser, Broadcaster, Decimal, Submission as BroadcastReceipt,
+    TransactionBuilder as BaseBuilder, TransactionEnvelope, TransactionError, TransactionErrorKind,
+    TransactionFuture, TransactionId, TransactionSnapshot,
 };
-use crypto::{PublicKeyFormat, SecretKey};
 use indexing::{History as IndexHistory, IndexScope};
 use wallets::{
-    AddressEncoding, AddressFormat, AddressText, Balance, BalanceReader, Error as WalletError,
+    AddressFormat, AddressText, Balance, BalanceReader, Error as WalletError,
     ErrorKind as WalletErrorKind, FutureResult, Provider, SecretBytes, TransactionFactory,
     Wallet as WalletContract,
 };
@@ -24,9 +22,12 @@ const SNAPSHOT_KIND: &str = "ethereum.transfer";
 const PREPARED_KIND: &str = "ethereum.signed";
 
 mod history;
+mod key_pair;
 mod snapshot;
 
-#[derive(Clone, Debug)]
+pub use key_pair::KeyPair;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WalletConfig {
     pub scope: IndexScope,
     /// The EVM chain this wallet signs for, verified against the node before
@@ -111,6 +112,18 @@ impl WalletProvider {
         }
     }
 
+    /// Consumes a local key and attaches this provider's chain and asset capabilities.
+    pub fn attach(&self, key: KeyPair) -> Result<Arc<dyn WalletContract>, WalletError> {
+        self.config.validate()?;
+        Ok(Arc::new(Wallet {
+            config: self.config.clone(),
+            key: Arc::new(key),
+            accounts: self.accounts.clone(),
+            coordinator: self.coordinator.clone(),
+            history: self.history.clone(),
+        }))
+    }
+
     fn generate_with(
         &self,
         generator: fn() -> Result<SecretBytes, crypto::Error>,
@@ -137,40 +150,41 @@ impl Provider for WalletProvider {
     fn create<'a>(&'a self, secret: SecretBytes) -> FutureResult<'a, Arc<dyn WalletContract>> {
         Box::pin(async move {
             self.config.validate()?;
-            let key = SecretKey::new(secret.as_bytes().to_vec()).map_err(|error| {
-                WalletError::new(WalletErrorKind::InvalidSecret, error.to_string())
-            })?;
-            let public = key.public_key(PublicKeyFormat::Raw).map_err(|error| {
-                WalletError::new(WalletErrorKind::InvalidSecret, error.to_string())
-            })?;
-            let hash = keccak256(&public.bytes);
-            let mut bytes = [0_u8; 20];
-            bytes.copy_from_slice(&hash[12..]);
-            let address = Address(bytes);
-            let signer =
-                KeyPair::new(address.clone(), secret.as_bytes().to_vec()).map_err(|error| {
-                    WalletError::new(WalletErrorKind::InvalidSecret, error.to_string())
-                })?;
-            Ok(Arc::new(Wallet {
-                config: self.config.clone(),
-                address,
-                signer: Arc::new(signer),
-                accounts: self.accounts.clone(),
-                coordinator: self.coordinator.clone(),
-                history: self.history.clone(),
-            }) as Arc<dyn WalletContract>)
+            self.attach(KeyPair::import(secret)?)
         })
     }
 
     fn generate(&self) -> FutureResult<'_, Arc<dyn WalletContract>> {
         self.generate_with(SecretBytes::generate_secp256k1)
     }
+
+    fn validate(&self, scope: &IndexScope, wallet: &dyn WalletContract) -> Result<(), WalletError> {
+        let wallet = (wallet as &dyn std::any::Any)
+            .downcast_ref::<Wallet>()
+            .ok_or_else(|| {
+                WalletError::new(
+                    WalletErrorKind::Unsupported,
+                    "wallet was not constructed by an Ethereum provider",
+                )
+            })?;
+        if scope != &self.config.scope
+            || wallet.config != self.config
+            || !Arc::ptr_eq(&wallet.accounts, &self.accounts)
+            || !Arc::ptr_eq(&wallet.coordinator, &self.coordinator)
+            || !Arc::ptr_eq(&wallet.history, &self.history)
+        {
+            return Err(WalletError::new(
+                WalletErrorKind::Unsupported,
+                "wallet does not match the Ethereum provider's scope, asset, or dependencies",
+            ));
+        }
+        Ok(())
+    }
 }
 
 struct Wallet {
     config: WalletConfig,
-    address: Address,
-    signer: Arc<KeyPair<Address>>,
+    key: Arc<KeyPair>,
     accounts: Arc<dyn Accounts>,
     coordinator: Arc<TransactionCoordinator>,
     history: Arc<dyn IndexHistory>,
@@ -178,36 +192,23 @@ struct Wallet {
 
 impl Addresser for Wallet {
     fn address(&self) -> BaseAddress {
-        self.address.address()
+        self.key.address()
     }
 }
 
 impl base::Signer for Wallet {
     fn sign<'a>(&'a self, request: base::SignRequest) -> base::SignFuture<'a> {
-        self.signer.sign(request)
+        self.key.sign(request)
     }
 }
 
 impl AddressFormat for Wallet {
     fn address_text(&self, address: &BaseAddress) -> Result<AddressText, WalletError> {
-        let address = Address::try_from(address).map_err(|error| {
-            WalletError::new(WalletErrorKind::InvalidAddress, error.to_string())
-        })?;
-        Ok(AddressText::new(AddressEncoding::Hex, address.to_string()))
+        self.key.address_text(address)
     }
 
     fn parse_address(&self, address: &AddressText) -> Result<BaseAddress, WalletError> {
-        if address.encoding != AddressEncoding::Hex {
-            return Err(WalletError::new(
-                WalletErrorKind::InvalidAddress,
-                "Ethereum addresses use hexadecimal encoding",
-            ));
-        }
-        address
-            .text
-            .parse::<Address>()
-            .map(|parsed| parsed.address())
-            .map_err(|error| WalletError::new(WalletErrorKind::InvalidAddress, error.to_string()))
+        self.key.parse_address(address)
     }
 }
 
@@ -216,7 +217,7 @@ impl BalanceReader for Wallet {
         Box::pin(async move {
             let amount = self
                 .accounts
-                .balance(self.address.clone(), &self.config.asset, None)
+                .balance(self.key.pair.address.clone(), &self.config.asset, None)
                 .await
                 .map_err(|error| WalletError::new(WalletErrorKind::Balance, error.to_string()))?;
             Ok(Balance {
@@ -234,8 +235,8 @@ impl TransactionFactory for Wallet {
     fn transaction(&self) -> Box<dyn BaseBuilder> {
         Box::new(Builder::new(
             self.config.clone(),
-            self.address.clone(),
-            self.signer.clone(),
+            self.key.pair.address.clone(),
+            self.key.clone(),
             self.coordinator.clone(),
         ))
     }
@@ -265,7 +266,7 @@ impl wallets::SingleSender for Wallet {
 struct Builder {
     config: WalletConfig,
     from: Address,
-    signer: Arc<KeyPair<Address>>,
+    signer: Arc<KeyPair>,
     coordinator: Arc<TransactionCoordinator>,
     transfer: Option<(Address, Decimal)>,
 }
@@ -274,7 +275,7 @@ impl Builder {
     fn new(
         config: WalletConfig,
         from: Address,
-        signer: Arc<KeyPair<Address>>,
+        signer: Arc<KeyPair>,
         coordinator: Arc<TransactionCoordinator>,
     ) -> Self {
         Self {
@@ -448,9 +449,12 @@ impl ChainError {
 mod tests {
     use super::*;
     use crate::TransferIntent;
+    use alloy_primitives::keccak256;
     use base::{Digest, SignRequest, SignablePayload, SignatureEncoding, SignatureScheme};
+    use crypto::PublicKeyFormat;
     use futures_executor::block_on;
     use indexing::{ChainId, SourceError};
+    use wallets::AddressEncoding;
 
     struct InactiveDependencies;
 
@@ -506,6 +510,16 @@ mod tests {
         }
     }
 
+    impl indexing::Checkpoint for InactiveDependencies {
+        fn checkpoint<'a>(
+            &'a self,
+            _scope: &'a IndexScope,
+        ) -> indexing::BoxFuture<'a, Result<Option<indexing::BlockRef>, indexing::IndexError>>
+        {
+            panic!("startup wallet insertion must not read the checkpoint")
+        }
+    }
+
     fn config(asset: AssetKind, decimals: u32) -> WalletConfig {
         WalletConfig {
             scope: IndexScope {
@@ -530,6 +544,258 @@ mod tests {
             coordinator,
             history,
         )
+    }
+
+    #[test]
+    fn provider_validation_accepts_equivalent_composition_without_chain_io() {
+        let provider = provider();
+        let wallet = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        let equivalent = WalletProvider::new(
+            provider.config.clone(),
+            provider.accounts.clone(),
+            provider.coordinator.clone(),
+            provider.history.clone(),
+        );
+
+        assert!(
+            provider
+                .validate(&provider.config.scope, wallet.as_ref())
+                .is_ok()
+        );
+        assert!(
+            equivalent
+                .validate(&provider.config.scope, wallet.as_ref())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn provider_validation_rejects_asset_chain_and_precision_mismatches_without_io() {
+        let mut provider = provider();
+        provider.config = config(AssetKind::Erc20(Address([0x33; 20])), 6);
+        let wallet = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        let configurations = [
+            config(AssetKind::Native, 18),
+            config(AssetKind::Erc20(Address([0x44; 20])), 6),
+            WalletConfig {
+                chain_id: 1,
+                ..provider.config.clone()
+            },
+            WalletConfig {
+                decimals: 18,
+                ..provider.config.clone()
+            },
+            WalletConfig {
+                scope: IndexScope {
+                    chain: ChainId("ethereum".to_owned()),
+                    network: "mainnet".to_owned(),
+                },
+                ..provider.config.clone()
+            },
+        ];
+
+        for config in configurations {
+            let incompatible = WalletProvider::new(
+                config,
+                provider.accounts.clone(),
+                provider.coordinator.clone(),
+                provider.history.clone(),
+            );
+            let error = incompatible
+                .validate(&incompatible.config.scope, wallet.as_ref())
+                .unwrap_err();
+            assert_eq!(error.kind, WalletErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
+    fn provider_validation_rejects_registered_scope_mismatch_without_io() {
+        let provider = provider();
+        let wallet = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        for scope in [
+            IndexScope {
+                chain: ChainId("ethereum".to_owned()),
+                network: "mainnet".to_owned(),
+            },
+            IndexScope {
+                chain: ChainId("bitcoin".to_owned()),
+                network: "sepolia".to_owned(),
+            },
+        ] {
+            let error = provider.validate(&scope, wallet.as_ref()).unwrap_err();
+            assert_eq!(error.kind, WalletErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
+    fn provider_validation_rejects_unshared_operational_dependencies_without_io() {
+        let provider = provider();
+        let wallet = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        let other: Arc<InactiveDependencies> = Arc::new(InactiveDependencies);
+        let other_accounts: Arc<dyn Accounts> = other.clone();
+        let other_history: Arc<dyn IndexHistory> = other.clone();
+        let other_coordinator = Arc::new(TransactionCoordinator::new(
+            provider.accounts.clone(),
+            other,
+        ));
+        for (accounts, coordinator, history) in [
+            (
+                other_accounts,
+                provider.coordinator.clone(),
+                provider.history.clone(),
+            ),
+            (
+                provider.accounts.clone(),
+                other_coordinator,
+                provider.history.clone(),
+            ),
+            (
+                provider.accounts.clone(),
+                provider.coordinator.clone(),
+                other_history,
+            ),
+        ] {
+            let incompatible =
+                WalletProvider::new(provider.config.clone(), accounts, coordinator, history);
+            let error = incompatible
+                .validate(&provider.config.scope, wallet.as_ref())
+                .unwrap_err();
+            assert_eq!(error.kind, WalletErrorKind::Unsupported);
+        }
+    }
+
+    #[test]
+    fn collection_insertion_rejects_eth_and_usdc_family_mixups_without_publication() {
+        let native = Arc::new(provider());
+        let token = Arc::new(WalletProvider::new(
+            config(AssetKind::Erc20(Address([0x33; 20])), 6),
+            native.accounts.clone(),
+            native.coordinator.clone(),
+            native.history.clone(),
+        ));
+        let eth = native
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        let usdc = token
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        assert_eq!(eth.address(), usdc.address());
+        let mut wallets = wallets::Wallets::<u32, &str>::new(Arc::new(InactiveDependencies));
+        for (family, provider) in [("eth", native), ("usdc", token)] {
+            wallets
+                .register(
+                    family,
+                    provider.config.scope.clone(),
+                    provider.clone(),
+                    provider.transactions(),
+                    None,
+                )
+                .unwrap();
+        }
+
+        for (id, family, wallet) in [(1, "usdc", eth), (2, "eth", usdc)] {
+            let error =
+                block_on(wallets.insert(id, &family, wallet, base::BlockPosition(25))).unwrap_err();
+            assert_eq!(error.kind, WalletErrorKind::Unsupported);
+            assert_eq!(
+                wallets.get(&id).unwrap_err().kind,
+                WalletErrorKind::NotFound
+            );
+            assert!(wallets.filters().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn collection_insertion_accepts_attached_wallet_and_preserves_earliest_birthday() {
+        let provider = Arc::new(provider());
+        let wallet = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        let address = wallet.address_text(&wallet.address()).unwrap();
+        let scope = provider.config.scope.clone();
+        let mut wallets = wallets::Wallets::<u32, &str>::new(Arc::new(InactiveDependencies));
+        wallets
+            .register(
+                "eth",
+                scope.clone(),
+                provider.clone(),
+                provider.transactions(),
+                None,
+            )
+            .unwrap();
+
+        for (id, birthday) in [(1, 25), (2, 10)] {
+            let info =
+                block_on(wallets.insert(id, &"eth", wallet.clone(), base::BlockPosition(birthday)))
+                    .unwrap();
+            assert_eq!(info.address, address);
+            assert_eq!(info.scope, scope);
+            assert_eq!(info.family, "eth");
+            assert_eq!(wallets.get(&id).unwrap(), info);
+        }
+        let filters = wallets.filters().unwrap();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].start_position, base::BlockPosition(10));
+        assert_eq!(filters[0].address.value, address.text);
+        assert!(filters[0].address.belongs_to(&scope));
+    }
+
+    #[test]
+    fn attachment_preserves_local_identity_and_signatures_without_chain_io() {
+        let key = crate::KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap();
+        let address = key.address();
+        let text = key.address_text(&address).unwrap();
+        let request = SignRequest {
+            payload: SignablePayload::Digest(Digest {
+                bytes: vec![0x42; 32],
+            }),
+            scheme: SignatureScheme::EcdsaSecp256k1,
+            encoding: SignatureEncoding::Recoverable,
+            public_key_format: PublicKeyFormat::Raw,
+            key_tweak: None,
+        };
+        let signature = block_on(base::Signer::sign(&key, request.clone())).unwrap();
+        let wallet = provider().attach(key).unwrap();
+        assert_eq!(wallet.address(), address);
+        assert_eq!(wallet.address_text(&wallet.address()).unwrap(), text);
+        assert_eq!(block_on(wallet.sign(request)).unwrap(), signature);
+    }
+
+    #[test]
+    fn attachment_rejects_invalid_operational_configuration() {
+        let mut provider = provider();
+        provider.config.chain_id = 0;
+        let key = crate::KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap();
+        let error = provider.attach(key).err().unwrap();
+        assert_eq!(error.kind, WalletErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn attachment_keeps_eoa_identity_independent_of_network_and_asset() {
+        let mut provider = provider();
+        let native = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        provider.config.scope.network = "anvil".to_owned();
+        provider.config.chain_id = 31_337;
+        provider.config.asset = AssetKind::Erc20(Address([0x33; 20]));
+        provider.config.decimals = 6;
+        let token = provider
+            .attach(KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap())
+            .unwrap();
+        assert_eq!(native.address(), token.address());
+        assert_eq!(
+            native.address_text(&native.address()).unwrap(),
+            token.address_text(&token.address()).unwrap()
+        );
     }
 
     #[test]
@@ -645,6 +911,7 @@ mod tests {
             .expect("fixed valid secret must generate a wallet");
         let created = block_on(provider.create(SecretBytes::new([1_u8; 32])))
             .expect("fixed valid secret must create a wallet");
+        let local = KeyPair::import(SecretBytes::new([1_u8; 32])).unwrap();
         let source = Address(
             generated
                 .address()
@@ -666,12 +933,19 @@ mod tests {
             .expect("generated wallet must sign a valid EIP-1559 transaction");
         let created_signed = block_on(transaction.sign(created.as_ref()))
             .expect("created wallet must sign the same EIP-1559 transaction");
+        let local_signed = block_on(transaction.sign(&local))
+            .expect("local key must sign the same EIP-1559 transaction");
+        let attached = provider.attach(local).unwrap();
+        let attached_signed = block_on(transaction.sign(attached.as_ref()))
+            .expect("attached wallet must preserve the local key's signed transaction");
         let fees = generated_signed
             .inspect_eip1559_fees()
             .expect("generated signed wire must be a valid EIP-1559 envelope");
 
         assert_eq!(generated.address(), created.address());
         assert_eq!(generated_signed, created_signed);
+        assert_eq!(generated_signed, local_signed);
+        assert_eq!(generated_signed, attached_signed);
         assert_eq!(generated_signed.envelope.first(), Some(&0x02));
         assert_eq!(
             generated_signed.id.0,
@@ -828,9 +1102,8 @@ mod tests {
             let provider = provider();
             let wallet = Wallet {
                 config: config(asset, decimals),
-                address: Address([0x11; 20]),
-                signer: Arc::new(
-                    KeyPair::new(Address([0x11; 20]), vec![1_u8; 32])
+                key: Arc::new(
+                    KeyPair::import(SecretBytes::new([1_u8; 32]))
                         .expect("fixed valid secret must create a signer"),
                 ),
                 accounts: provider.accounts,
@@ -849,12 +1122,12 @@ mod tests {
             assert_eq!(snapshot.value()["asset"], expected);
             let restored_builder =
                 Builder::restore(&wallet, &snapshot).expect("snapshot must restore");
-            assert!(Arc::ptr_eq(&restored_builder.signer, &wallet.signer));
+            assert!(Arc::ptr_eq(&restored_builder.signer, &wallet.key));
             assert!(Arc::ptr_eq(
                 &restored_builder.coordinator,
                 &wallet.coordinator
             ));
-            assert_eq!(restored_builder.from, wallet.address);
+            assert_eq!(restored_builder.from, wallet.key.pair.address);
             assert_eq!(
                 restored_builder.transfer,
                 Some((Address([0x22; 20]), "1.25".parse().unwrap()))

@@ -4,7 +4,7 @@ use std::{
 };
 
 use base::{Address as BaseAddress, Addresser, SignRequest};
-use indexing::History as IndexHistory;
+use indexing::{History as IndexHistory, IndexScope};
 use wallets::{
     AddressFormat, AddressText, Balance, BalanceReader, Error as WalletError,
     ErrorKind as WalletErrorKind, FutureResult, Provider, SecretBytes, SingleSender,
@@ -87,12 +87,32 @@ where
                 rpc: self.rpc.clone(),
                 history: Arc::clone(&self.history),
                 sender: Arc::clone(&self.sender),
+                keys: Arc::clone(&self.keys),
             }) as Arc<dyn WalletContract>)
         })
     }
 
     fn generate(&self) -> FutureResult<'_, Arc<dyn WalletContract>> {
         self.generate_with(Key::generate_secret)
+    }
+
+    fn validate(&self, scope: &IndexScope, wallet: &dyn WalletContract) -> Result<(), WalletError> {
+        let compatible = (wallet as &dyn std::any::Any)
+            .downcast_ref::<Wallet<C>>()
+            .is_some_and(|wallet| {
+                scope == self.config.scope()
+                    && wallet.config == self.config
+                    && Arc::ptr_eq(&wallet.keys, &self.keys)
+                    && Arc::ptr_eq(&wallet.history, &self.history)
+                    && Arc::ptr_eq(&wallet.sender, &self.sender)
+            });
+        if !compatible {
+            return Err(WalletError::new(
+                WalletErrorKind::Unsupported,
+                "wallet does not belong to this Solana provider and scope",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -102,6 +122,8 @@ pub(super) struct Wallet<C> {
     pub(super) rpc: RpcClient<C>,
     pub(super) history: Arc<dyn IndexHistory>,
     sender: Arc<dyn NativeSender>,
+    // Bind admission to the signer registry used by this provider's batch sender.
+    keys: Arc<Keys>,
 }
 
 impl<C> Addresser for Wallet<C>
@@ -363,6 +385,43 @@ mod tests {
             history_contract,
             sender_contract,
         )
+    }
+
+    #[tokio::test]
+    async fn insertion_validation_requires_the_scope_and_original_signer_registry() {
+        let provider = provider(
+            Script::new([]),
+            Arc::new(HistoryFixture::default()),
+            Arc::new(SenderFixture::default()),
+        );
+        let wallet = provider.create(SecretBytes::new([7; 32])).await.unwrap();
+        provider
+            .validate(provider.config.scope(), wallet.as_ref())
+            .unwrap();
+        // A repeated import must not revoke admission of the earlier instance.
+        let repeated = provider.create(SecretBytes::new([7; 32])).await.unwrap();
+        provider
+            .validate(provider.config.scope(), wallet.as_ref())
+            .unwrap();
+        provider
+            .validate(provider.config.scope(), repeated.as_ref())
+            .unwrap();
+        let foreign_scope = WalletConfig::new("other", AssetKind::Native).unwrap();
+        let error = provider
+            .validate(foreign_scope.scope(), wallet.as_ref())
+            .unwrap_err();
+        assert_eq!(error.kind, WalletErrorKind::Unsupported);
+
+        let unrelated = WalletProvider::new(
+            provider.config.clone(),
+            provider.rpc.clone(),
+            provider.history.clone(),
+            provider.sender.clone(),
+        );
+        let error = unrelated
+            .validate(provider.config.scope(), wallet.as_ref())
+            .unwrap_err();
+        assert_eq!(error.kind, WalletErrorKind::Unsupported);
     }
 
     #[tokio::test]
