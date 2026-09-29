@@ -3,15 +3,22 @@ name = "wallets"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Chain-neutral wallet contracts and the Wallets registry: factories, balances, history, and batch sends."
+readme = "README.md"
 
 [dependencies]
-base = { path = "../chains/base" }
+base = { path = "../base" }
 crypto = { path = "../../packages/crypto" }
-indexing = { path = "../indexing" }
+indexing = { path = "../indexing", default-features = false }
 
 [dev-dependencies]
 futures-executor.workspace = true
+# The in-memory store (`indexing::memory`), which stands in for an opened
+# database while a composition is assembled. A shipped backend, so this names
+# `memory` alone and carries none of the repository contract scenarios.
+indexing = { path = "../indexing", default-features = false, features = ["memory"] }
 serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

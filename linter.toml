@@ -24,6 +24,11 @@ allow = true
 description = "Canonical requirements, design decisions, implementation evidence, and source reviews."
 
 [[rules.layout]]
+target = "docs/design/*.md"
+allow = true
+description = "Recorded architecture failures and their accepted fix plans."
+
+[[rules.layout]]
 target = ["AGENTS.md", "ARCHITECTURE.md", "README.md"]
 allow = true
 description = "Repository entry points for agent guidance, architecture, and usage."
@@ -32,6 +37,11 @@ description = "Repository entry points for agent guidance, architecture, and usa
 target = "{apps,sdk,packages}/**/README.md"
 allow = true
 description = "Crate usage documentation beside the owning package."
+
+[[rules.layout]]
+target = "examples/README.md"
+allow = true
+description = "Index of runnable SDK examples and the local node each one needs."
 
 [[rules.layout]]
 target = "tests/kurtosis/*/README.md"
@@ -53,7 +63,7 @@ target = ["**/*{Test,Tests}.rs"]
 allow = false
 
 [[rules.layout]]
-target = ["tests/**/*.rs", "apps/*/tests/**/*.rs", "packages/*/tests/**/*.rs", "packages/*/*/tests/**/*.rs", "sdk/*/tests/**/*.rs", "sdk/*/*/tests/**/*.rs"]
+target = ["tests/**/*.rs", "examples/tests/*.rs", "apps/*/tests/**/*.rs", "packages/*/tests/**/*.rs", "packages/*/*/tests/**/*.rs", "sdk/*/tests/**/*.rs", "sdk/*/*/tests/**/*.rs"]
 allow = true
 description = "Crate integration tests and repository-wide test cases."
 
@@ -107,6 +117,8 @@ ignore_guard_clauses = true
 
 [[rules."rust/struct-noun-naming"]]
 target = "**/*.rs"
+# Bitcoin's vocabulary (a retired design note (007)): a `Spend` is one input of an unsigned transaction.
+accepted_words = ["spend"]
 
 [[rules."rust/duplicate-entity-base"]]
 target = "**/*.rs"
@@ -143,6 +155,12 @@ forbidden_words = ["common", "core", "helper", "helpers", "misc", "shared", "uti
 [[rules."markdown/examples"]]
 target = "**/*.md"
 min_cases = 0
+
+# Crate READMEs are the crate's rustdoc (`#![doc = include_str!("../README.md")]`) and follow
+# a retired design note (005) section 3: at least five H2 sections (why, concepts, API map, usage, related).
+[[rules."markdown/examples"]]
+target = "{apps,sdk,packages}/**/README.md"
+min_cases = 5
 
 [[rules."rust/path-module-flattening"]]
 target = "**/*.rs"
@@ -197,29 +215,127 @@ scope = "production"
 
 # Library, application, and protocol structure are separate from naming rules.
 [[rules.layout]]
-target = ["packages/*", "packages/*/redb", "sdk/chains/*", "sdk/{indexing,wallets}", "sdk/indexing/{postgres,redb,runtime}"]
+# Every crate carries its README: the crate-level rustdoc (a retired design note (005)).
+target = ["packages/*", "sdk/chains/*", "sdk/{base,config,indexing,wallets}"]
 mode = "permissive"
-files.required = ["Cargo.toml", "src/lib.rs"]
+files.required = ["Cargo.toml", "README.md", "src/lib.rs"]
+
+# The routes package is a library; the composition root is the one binary.
+[[rules.layout]]
+target = "apps/api"
+mode = "permissive"
+files.required = ["Cargo.toml", "README.md", "src/lib.rs"]
 
 [[rules.layout]]
-target = "apps/*"
+target = "apps/server"
 mode = "permissive"
-files.required = ["Cargo.toml", "src/main.rs"]
+files.required = ["Cargo.toml", "README.md", "src/main.rs", "src/chains.rs"]
 
-# Base is a chain-neutral library; only the accepted concrete chains own this skeleton.
+# sdk/ holds chain-neutral capability crates plus the chains/ category; nothing else.
 [[rules.layout]]
-target = "sdk/chains/{bitcoin,ethereum,solana}"
-mode = "permissive"
+target = "sdk"
+mode = "restrictive"
+directories.allowed = [
+    { target = "base", description = "Chain-neutral values and capability traits." },
+    { target = "config", description = "The configuration document, and which chain reads which section." },
+    { target = "indexing", description = "Chain-neutral indexing contracts and adapters." },
+    { target = "wallets", description = "Chain-neutral wallet contracts." },
+    { target = "chains", description = "Concrete chain implementations only." },
+]
+
+# sdk/chains/ contains only chain crates; no loose files, no shared or test-support crates.
+[[rules.layout]]
+target = "sdk/chains"
+mode = "restrictive"
+directories.allowed = [{ target = "*", description = "One concrete chain implementation." }]
+
+# Chain crate root (docs/CHAIN_LAYOUT.md): closed world. No examples/,
+# benches/, build.rs, or loose files; a new chain fails until it has the
+# full skeleton.
+[[rules.layout]]
+target = "sdk/chains/*"
+mode = "restrictive"
 files.required = [
-    "src/address.rs",
-    "src/batch.rs",
-    "src/error.rs",
-    "src/indexer/mod.rs",
-    "src/indexer/source/mod.rs",
-    "src/rpc/mod.rs",
-    "src/transaction/mod.rs",
-    "src/transaction/operations/mod.rs",
-    "src/wallet/mod.rs",
+    "Cargo.toml",
+    "README.md",
+    "src/lib.rs",
+    "tests/address_conversion.rs",
+    "tests/transaction_adapter.rs",
+    "tests/vocabulary.rs",
+]
+
+# Canonical chain src/: one adapter file per SDK contract; native/ holds all
+# protocol code and is open (scripts/check-chains.sh guards its imports).
+[[rules.layout]]
+target = "sdk/chains/*/src"
+mode = "restrictive"
+files.required = [
+    "lib.rs",
+    "config.rs",
+    "error.rs",
+    "identity.rs",
+    "source.rs",
+    "interpreter.rs",
+    "indexer.rs",
+    "key.rs",
+    "wallet.rs",
+    "builder.rs",
+    "sender.rs",
+    # The send pipeline (a retired design note (010), docs/CHAIN_LAYOUT.md section 7):
+    # the same stages in the same files on every chain.
+    "sender/outbox.rs",
+    "sender/reservation.rs",
+    "sender/dispatch.rs",
+    "sender/recovery.rs",
+    "native/mod.rs",
+    "native/error.rs",
+    "native/rpc/submitter.rs",
+    "native/transaction/preflight.rs",
+    "native/transaction/funds.rs",
+]
+directories.allowed = [
+    { target = "{source,interpreter,wallet,sender}", description = "Submodules of the same-named adapter file when it outgrows one file." },
+]
+
+# Runnable examples (a retired design note (004)): one directory per scenario, not per
+# chain. A scenario directory is its `main.rs` and the `config.toml` beside it
+# that states the chains it runs, so the src-tree rule below does not reach
+# them. `custom_store` is the one scenario with a third file: the repository it
+# supplies is the subject of the scenario rather than its setup, and
+# examples/tests/custom_store.rs includes that same file so the store the
+# scenario runs is the store the test asserts against. `local.rs` is the
+# examples' non-chain setup and the one file under examples/ that names a chain
+# crate, to register it.
+# scripts/check-chains.sh check 4 requires a section per chain in every
+# scenario's config.toml, and examples/tests/scenarios.rs requires that no
+# main.rs but custom_store's names a chain crate.
+[[rules.layout]]
+target = "examples"
+mode = "restrictive"
+files.required = [
+    "Cargo.toml",
+    "README.md",
+    "local.rs",
+    "tests/scenarios.rs",
+    "tests/custom_store.rs",
+    "wallet/main.rs",
+    "wallet/config.toml",
+    "transfer/main.rs",
+    "transfer/config.toml",
+    "indexing/main.rs",
+    "indexing/config.toml",
+    "watch_only/main.rs",
+    "watch_only/config.toml",
+    "all_chains/main.rs",
+    "all_chains/config.toml",
+    "custom_store/main.rs",
+    "custom_store/config.toml",
+    "custom_store/sink.rs",
+]
+directories.allowed = [
+    { target = "{wallet,transfer,indexing,watch_only,all_chains}", description = "One runnable scenario: its main.rs and the config.toml that states its chains." },
+    { target = "custom_store", description = "The scenario that supplies its own indexing repository: main.rs, its config.toml and the store it writes." },
+    { target = "tests", description = "The examples' scenario tests." },
 ]
 
 [[rules.layout]]
@@ -247,46 +363,73 @@ dependencies = ["packages"]
 
 [[rules."rust/layers"]]
 name = "base"
-target = "sdk/chains/base"
+target = "sdk/base"
 dependencies = ["packages"]
 
+# The self-edge is `indexing`'s dev-dependency on itself, which is how Cargo
+# enables a crate's own feature for its own integration tests (`memory`, the
+# store the shared contracts are held against beside `sqlite`). It couples no
+# package to another, and the layer covers exactly one package, so it permits no
+# cross-package edge that was forbidden before.
 [[rules."rust/layers"]]
 name = "indexing"
 target = "sdk/indexing"
-dependencies = ["packages", "base"]
+dependencies = ["packages", "base", "indexing"]
 
 [[rules."rust/layers"]]
 name = "wallets"
 target = "sdk/wallets"
 dependencies = ["packages", "base", "indexing"]
 
-# Persistence adapters and the driver have the same dependency boundary; no peer edges.
+# Every package under sdk/chains is a concrete chain; omitting "chains" forbids peer edges.
+# The configuration reader sits above `wallets` because a registered chain
+# hands back a `wallets::Connection`, and below `chains` because it names no
+# chain crate — which is the whole point of registration (docs/design/030
+# step 11).
 [[rules."rust/layers"]]
-name = "indexing-integrations"
-target = "sdk/indexing/*"
-dependencies = ["packages", "base", "indexing"]
-
-# The selector API has no exclusion for base, so list the accepted concrete-chain set.
-# Not allowing "chains" here forbids dependencies between concrete chains.
-[[rules."rust/layers"]]
-name = "chains"
-target = ["sdk/chains/bitcoin", "sdk/chains/ethereum", "sdk/chains/solana"]
+name = "config"
+target = "sdk/config"
 dependencies = ["packages", "base", "indexing", "wallets"]
 
 [[rules."rust/layers"]]
-name = "apps"
-target = "apps/*"
-dependencies = ["packages", "base", "indexing", "wallets", "indexing-integrations", "chains"]
+name = "chains"
+target = "sdk/chains/*"
+dependencies = ["packages", "base", "indexing", "wallets", "config"]
+
+# Routes and wire models see the abstractions only; naming a chain crate here
+# is a finding, not a review comment (a retired design note (015) section 7).
+[[rules."rust/layers"]]
+name = "api"
+target = "apps/api"
+dependencies = ["packages", "base", "indexing", "wallets"]
+
+# The composition root may name every chain; only it may.
+[[rules."rust/layers"]]
+name = "server"
+target = "apps/server"
+dependencies = [
+    "packages",
+    "base",
+    "indexing",
+    "wallets",
+    "config",
+    "chains",
+    "api",
+]
+
+# Runnable SDK examples compose like an application; nothing depends on them.
+[[rules."rust/layers"]]
+name = "examples"
+target = "examples"
+dependencies = ["packages", "base", "indexing", "wallets", "config", "chains"]
 
 # Read ambient configuration at application configuration or owned benchmark entry points.
 [[rules."rust/environment-variable-access"]]
 target = "**/*.rs"
 scope = "production"
 allowed_targets = [
-    "apps/api/src/config.rs",
-    "apps/api/src/config/postgres.rs",
-    "sdk/indexing/postgres/examples/bench.rs",
-    "sdk/indexing/redb/examples/bench.rs",
+    "apps/server/src/config.rs",
+    "sdk/indexing/examples/bench.rs",
 ]
 functions = [
     "std::env::var",

@@ -1,17 +1,29 @@
-# Opt-in Ethereum Indexer reorg validation
+# Opt-in Ethereum reorg validation against a real fork
 
-This scenario validates IX against a real pre-finality Ethereum fork. It is
-manual/opt-in and is never run by `cargo test`.
+This scenario validates `payment-server`'s Ethereum indexing against a real
+pre-finality Ethereum fork. It is manual and opt-in: nothing here runs under
+`cargo test`, and this directory holds only the pinned network definition
+([`network_params.yaml`](./network_params.yaml)) plus this runbook.
 
-The network isolates participant 1 from participants 2–4 at both execution and
-consensus P2P layers. Point IX at participant 1, wait for a watched transaction
-to be included on that minority branch, then heal the partition. The majority
-branch should win and IX must reconcile through HTTP, append `Reorged`, replay
-the replacement branch, and converge without duplicate event cursors.
+The network isolates participant 1 from participants 2–4 at both the execution
+and the consensus P2P layer. Point one `payment-server` at participant 1, wait
+for a watched address's transaction to be included on that minority branch,
+then heal the partition. The majority branch wins, and the server must discard
+the orphaned inclusion, replay the replacement branch, and converge — over plain
+JSON-RPC polling, which is the only transport the Ethereum chain crate uses.
+
+The fork this scenario causes is **pre-finality by construction**, which is
+exactly the region the indexer keeps in memory: Ethereum's confirmed line is the
+node's own `finalized` block, the server commits nothing above it, and the whole
+reorg therefore happens in the pending overlay without touching a stored row
+(`docs/design/030 §8 (ex-025)`). A fork that reached a *finalized* block would be a consensus
+failure, not a reorg, and the server would quarantine that network with a
+terminal `confirmed_reorg`.
 
 Exact fork depth is deliberately not asserted. Proposer assignment and timing
-make a Disruptoor fork nondeterministic; deterministic Rust doubles own the
-depth 1, 12, 49, 50, and 51 acceptance cases.
+make a Disruptoor fork nondeterministic; the deterministic Rust doubles in
+`sdk/chains/ethereum` and `sdk/indexing` own the exact depth cases, including a
+reorg below the confirmed line.
 
 ## Pins
 
@@ -32,7 +44,8 @@ Review and deliberately update all pins together. Do not replace them with
 - a current Kurtosis CLI and engine supporting `--privileged`;
 - permission to mount the Docker socket and use the host PID namespace;
 - enough local CPU, memory, and disk for four Geth/Lighthouse pairs; and
-- a built Indexer binary plus a fresh disposable IX database path.
+- a built `payment-server` plus a fresh, disposable index path. Never point
+  this at an index file that holds anything else.
 
 Disruptoor needs privileged containers, `/var/run/docker.sock`, and host PID
 access. Never run this profile on an untrusted shared Docker host.
@@ -49,7 +62,7 @@ Then run the pinned package from the repository root:
 
 ```bash
 kurtosis run \
-  --enclave payment-sdk-ix-reorg \
+  --enclave payment-sdk-ethereum-reorg \
   github.com/ethpandaops/ethereum-package@8e81c5709deffad01d0bd1770d259c224f1ed349 \
   --args-file tests/kurtosis/ethereum-indexer-reorg/network_params.yaml \
   --image-download always \
@@ -57,57 +70,68 @@ kurtosis run \
   --verbosity detailed
 ```
 
-Inspect the enclave and record participant 1's published Geth HTTP and
-WebSocket endpoints, the majority participant endpoints, Dora, and Disruptoor:
+Inspect the enclave and record participant 1's published Geth HTTP endpoint,
+the majority participant endpoints, Dora, and Disruptoor:
 
 ```bash
-kurtosis enclave inspect payment-sdk-ix-reorg
+kurtosis enclave inspect payment-sdk-ethereum-reorg
 ```
 
 Do not put RPC credentials, bearer tokens, or private keys in this directory or
-captured test output.
+in captured output.
 
-## Exercise IX
+## Exercise the server
 
-1. Start IX with participant 1's Geth HTTP endpoint as the authoritative RPC.
-   Keep WebSocket disabled for the first run, or deliberately disconnect it
-   during the fork to prove HTTP reconciliation is sufficient.
-2. Use the enclave's disposable prefunded test account to submit a transfer to
-   a watched address on participant 1. This is devnet-only test value; never
-   reuse a real key.
-3. Wait until participant 1 includes the transaction and IX publishes its
-   `Included` revision. Record the event ID, cursor, transaction hash, inclusion
-   height, and inclusion hash.
-4. Confirm through Dora or both branch RPC endpoints that the partition has
-   produced different block hashes. If participant 1 has not included the test
-   transaction, keep the partition active rather than weakening assertions.
-5. Heal `isolate-indexer-branch` using the Disruptoor control surface exposed by
-   the enclave. Confirm peer connectivity and wait for participant 1 to adopt
-   the majority canonical branch.
-6. Allow at least one regular IX poll cycle. Optional WebSocket reconnection may
-   wake the worker but is not evidence of canonical state.
+1. Write a configuration whose single `chains.ethereum.rpc.endpoints` entry is
+   participant 1's Geth HTTP endpoint and the enclave's chain ID. Ethereum takes
+   no confirmation depth: the node states its own `finalized` block and the
+   server commits there. Storage is a fresh index file. Start the server
+   (`docs/API.md` §Configuration) and wait for `GET /health/ready` to answer
+   `204`.
+2. Watch an address with `POST /v1/addresses`, and record the returned wallet
+   ID. Note the checkpoint in `GET /v1/status` before sending anything.
+3. Use the enclave's disposable prefunded test account to send that address a
+   transfer through participant 1. This is devnet-only test value; never reuse
+   a real key.
+4. Poll `GET /v1/wallets/{id}/transactions` until the transaction appears.
+   Record its `transaction_id`, its `status.kind`, and its `status.block`
+   (`position`, `height`, `hash`).
+5. Confirm through Dora, or through both branches' RPC endpoints, that the
+   partition has produced different block hashes at that height. If participant
+   1 has not included the test transaction, keep the partition active rather
+   than weakening the assertions below.
+6. Heal `isolate-indexer-branch` through the Disruptoor control surface the
+   enclave exposes. Confirm peer connectivity and wait for participant 1 to
+   adopt the majority canonical branch.
+7. Allow at least one polling interval (`chains.ethereum.cadence.poll_millis`).
 
 ## Required assertions
 
-- The stored pre-heal inclusion hash becomes non-canonical at its height.
-- IX appends exactly one `Reorged` revision for that orphaned inclusion; it does
-  not delete or rewrite the prior event.
-- Replacement blocks connect in ascending order and the IX checkpoint
-  height/hash converges to participant 1's HTTP canonical tip.
-- Event cursors are strictly increasing and unique before and after an IX
-  restart/reconnect.
-- Replaying from the cursor before the fork returns the same published event
-  prefix and all correction events.
-- No `eth_pendingTransactions`, pending subscription, txpool, trace,
-  `safe`, or `finalized` RPC is issued.
-- An RPC outage pauses canonical mutation and is reported retryable; it never
-  creates `Dropped` or `Failed` by inference.
+- The pre-heal inclusion hash recorded in step 4 is no longer canonical at its
+  height on participant 1.
+- `GET /v1/status` shows `checkpoint` moving **forward only** across the whole
+  scenario: the fork is above the confirmed line, so no committed block is ever
+  taken back. `pending_block` follows the branch that wins.
+- `GET /v1/wallets/{id}/transactions` no longer lists the orphaned inclusion in
+  `pending`. Either the transaction reappears at its replacement block, or it is
+  absent — history holds canonical transactions only, and there is no
+  tombstone, revision, or event feed.
+- A history cursor taken before the fork still answers, because confirmed
+  history is append-only and the fork never reached it. A `409` here would be a
+  defect.
+- The server survives a restart mid-scenario: it resumes from the persisted
+  checkpoint and reaches the same canonical history.
+- No `eth_pendingTransactions`, pending subscription, txpool, trace, `safe`, or
+  `finalized` RPC is issued.
+- Stopping participant 1 pauses progress and is reported as retrying
+  (`GET /health/ready` answers `503`); it never produces a failed or dropped
+  transaction by inference.
 
-Keep the enclave on failure so logs and OTel data remain inspectable. Remove it
+Keep the enclave on failure so logs and OTel data stay inspectable. Remove it
 explicitly after collecting evidence:
 
 ```bash
-kurtosis enclave rm -f payment-sdk-ix-reorg
+kurtosis enclave rm -f payment-sdk-ethereum-reorg
 ```
 
 The host-level OTel stack is shared with other enclaves; stop it only when no

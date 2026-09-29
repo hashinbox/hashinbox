@@ -23,11 +23,11 @@
 # Logs/runtime files
 *.log
 logs/
-*.redb
 *.db
 *.sqlite
 *.sqlite3
 .data
+/.index-data/
 
 # Recoverable previous design and local upstream research material
 /old

@@ -1,0 +1,14 @@
+[package]
+name = "decimal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Exact base-10 amounts: canonical positional text, numeric ordering, and atomic-unit conversion without rounding."
+readme = "README.md"
+
+[dependencies]
+bigdecimal.workspace = true
+num-bigint.workspace = true
+
+[lints]
+workspace = true

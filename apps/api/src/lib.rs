@@ -1,13 +1,12 @@
-//! Public HTTP contract for the composed payment API.
-//!
-//! Concrete chains, persistence, synchronization, and wallet providers are
-//! wired explicitly by the binary composition root. This library owns only the
-//! transport state, routes, and wire models.
+#![doc = include_str!("../README.md")]
 
 mod api;
 pub use api::{
-    Address, AddressEncoding, AddressInput, Asset, Balance, Block, Chain, CreateWallet, Fee,
-    HistoryQuery, Movement, MovementKind, Scope, SendFunds, State, Status, Submission, Transaction,
-    TransactionPage, TransferRequest, TransferResponse, Wallet, WalletAsset, WalletTransfer,
-    router,
+    Address, AddressQuery, Asset, AssetList, AssetPath, AssetTag, Backfill, BackfillCancelled,
+    Balance, BatchAccepted, BatchedTransfer, Block, CancelBackfill, Completeness, ConfirmedStatus,
+    CreateWallet, ErrorBody, FailedStatus, Fee, HistoryQuery, ImportWallet, IndexFailure,
+    IndexState, Listing, Movement, MovementKind, Network, NetworkCheckpoint, ParentBlock, Payments,
+    PaymentsParams, PendingStatus, Resume, ResumeAccepted, ResumeNetwork, SecretText, Signers,
+    Start, Status, SyncReport, TagError, Transaction, TransactionPage, Transfer, TransferAccepted,
+    TransferBatch, Wallet, WalletList, WatchAddress, openapi, router,
 };

@@ -1,0 +1,73 @@
+use std::{fmt, str::FromStr};
+
+use bitcoin::{Txid, hashes::Hash};
+
+use crate::native::Error;
+
+/// A non-witness transaction ID (txid), stored in the digest byte order of
+/// `rust-bitcoin`.
+///
+/// `Display` and `FromStr` use Bitcoin Core's reversed hexadecimal order.
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct TransactionId(pub [u8; 32]);
+
+impl fmt::Display for TransactionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Txid::from_byte_array(self.0).fmt(formatter)
+    }
+}
+
+impl fmt::Debug for TransactionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl FromStr for TransactionId {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse::<Txid>()
+            .map(Self::from)
+            .map_err(|_| Error::invalid_transaction("Bitcoin transaction ID is invalid"))
+    }
+}
+
+impl From<Txid> for TransactionId {
+    fn from(id: Txid) -> Self {
+        Self(id.to_byte_array())
+    }
+}
+
+impl From<TransactionId> for Txid {
+    fn from(id: TransactionId) -> Self {
+        Self::from_byte_array(id.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transaction_id_uses_conventional_display_byte_order() {
+        let displayed = format!("{:064x}", 1);
+        let id: TransactionId = displayed.parse().unwrap();
+        let mut internal = [0_u8; 32];
+        internal[0] = 1;
+        assert_eq!(id.0, internal);
+        assert_eq!(id.to_string(), displayed);
+        assert_eq!(format!("{id:?}"), displayed);
+    }
+
+    #[test]
+    fn transaction_id_rejects_invalid_hex() {
+        for text in ["not-a-transaction-id", "00"] {
+            let error = text.parse::<TransactionId>().unwrap_err();
+            assert_eq!(error.message, "Bitcoin transaction ID is invalid");
+        }
+    }
+}

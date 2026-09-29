@@ -10,28 +10,40 @@ tests. Prefer fewer, stronger abstractions and less code.
 Read this file before changing code. Use project sources in this order:
 
 1. `docs/SYSTEM_REQUIREMENTS.md` for canonical scope and acceptance criteria.
-2. `ARCHITECTURE.md` for ownership and dependency direction.
-3. `docs/CONTRACTS.md` for reusable Rust boundaries; source is authoritative
+2. `ARCHITECTURE.md` for ownership and dependency direction; its crate map
+   says what each crate is for in one table.
+3. `docs/INDEXING.md` for indexing and persistence semantics.
+4. `docs/API.md` for the public HTTP surface.
+5. Each crate's `README.md` (its rustdoc) for that crate's purpose, concepts,
+   API map, and usage.
+6. `docs/CHAIN_LAYOUT.md` for the layout every chain crate follows and the
+   only places a chain may differ.
+7. Current source and tests for implemented behavior; source is authoritative
    for exact signatures.
-4. `docs/FEATURE_VALIDATION.md` for implementation evidence and honest status.
-5. `docs/INDEXING.md` for indexing and persistence semantics.
-6. Current source and tests for implemented behavior.
+
+`docs/adr/` is **not** in that order. An ADR records one decision at the moment
+it was taken; its paths and type names are historical and most of them predate
+the chain-unification refactor. Never rewrite an ADR to match a rename — write
+a new, superseding ADR when a decision changes, and correct an existing one
+only when it misstates its own outcome. `docs/adr/readme.md` states this
+policy for readers.
 
 Follow the higher-authority source when documents disagree and update the
 stale document. The project is pre-release: replace unpublished internal types
 and wire formats directly. Do not add compatibility aliases, legacy runtime
-readers, or project-defined `V1`/`V2` DTOs. The shared PostgreSQL database is
-durable multi-chain state, not a disposable internal format: its canonical
-deployment-owned creation and ordered migration scripts live physically under
-`sdk/indexing/postgres/migrations/` and evolve preservation-first. A migration
-or exact-scope rescan must preserve unrelated scopes and application-owned
-tables unless their owner separately approves a change. External Bitcoin,
-Ethereum, Solana, JSON-RPC, and HTTP standards remain compatibility contracts.
-
-The current predeployment PostgreSQL history contains one fresh-schema
-initializer. Apply it only to an empty schema. Freeze its exact bytes and
-checksum at the first persistent deployment; every later schema change is a new
-ordered migration rather than an edit or replay of the initializer.
+readers, or project-defined `V1`/`V2` DTOs. **The index file is not an
+exception.** It used to be one: the redb layout was frozen byte for byte, two
+committed fixtures pinned it, and `payment-server --export-keys` existed as the
+one-release read-only path off a dead key tag. `docs/design/030 §8 (ex-031)` replaced that
+store with one SQLite file and `docs/SYSTEM_REQUIREMENTS.md` revoked the
+exception outright, so the layout, the fixtures and the export are all gone.
+What a schema change needs now is what SQL has always offered: one more step in
+`storage/sqlite/schema.rs`, applied in order inside the transaction that bumps
+`PRAGMA user_version`, and a file this build cannot account for refused rather
+than interpreted. A single-network rescan must still preserve unrelated networks
+and the address registry unless their owner separately approves a change.
+External Bitcoin, Ethereum, Solana, JSON-RPC, and HTTP standards remain
+compatibility contracts.
 
 `old/` and `reference/` are excluded research, not production dependencies or
 architecture templates. Do not edit them unless explicitly asked.
@@ -46,17 +58,11 @@ Payment-SDK's accepted target is one API process that initializes Bitcoin,
 Ethereum, and Solana RPC clients and embedded synchronizers; generates or
 imports wallets without returning secrets; returns canonical addresses, exact
 balances, and complete history; submits one transfer or a non-empty ordered
-batch; indexes caller-selected addresses; and survives restarts and retained
-reorgs. Current source initializes Bitcoin and Ethereum only; Solana remains an
-implementation gap.
+batch; indexes caller-selected addresses; and survives restarts and reorgs.
+Current source initializes all three.
 
 Business and HTTP code must not import a concrete chain. Concrete chains are
 selected once at composition.
-
-The accepted architecture includes Solana, but the Solana crate and `apps/api`
-runtime composition remain unimplemented and source-step gated. Do not add a
-nonexistent crate to the current ownership table or claim runtime support before
-implementation evidence exists.
 
 There is currently no deposit accounting, ledger, payment state machine,
 collection/sweep job, reservation system, hardware-wallet workflow, remote
@@ -66,55 +72,75 @@ change or claim development in-process custody is production custody.
 
 ## Architecture and ownership
 
-`apps/api` is the only executable and composition root. No crate depends on it.
+`apps/server` is the only executable and composition root; `apps/api` holds the
+routes it serves and may not depend on a chain or storage crate. No crate
+depends on `apps/server`.
 
 | Path | Owner |
 |---|---|
-| `apps/api` | Config, public HTTP/OpenAPI, concrete composition, task supervision, shutdown |
-| `sdk/chains/base` | Small approved chain-neutral values, signing requests, transaction snapshots, broadcast capabilities |
+| `apps/api` | Public HTTP/OpenAPI routes and wire models over `wallets::Wallets`, `indexing::Index` and the narrow `indexing::{History, Balances}` handles beside it, plus `Signers`: the id -> wallet map of what this process can sign |
+| `apps/server` | Config, storage choice, concrete chain composition (`src/chains{.rs,/}` alone), task supervision, shutdown |
+| `sdk/base` | Small approved chain-neutral values, signing requests, transaction snapshots, broadcast capabilities |
 | `sdk/chains/bitcoin` | Bitcoin addresses, RPC, blocks, UTXOs, scripts, fees, transactions, wallets, indexing translation |
 | `sdk/chains/ethereum` | Ethereum addresses, RPC, blocks, gas/nonces, typed transactions, receipts/logs, wallets, indexing translation |
-| `sdk/wallets` | Chain-neutral capabilities, providers, wallet registry, history presentation, batch orchestration |
-| `sdk/indexing` | Storage-independent synchronization, address filters, canonical history, checkpoints, reorg handling, repository contracts |
-| `sdk/indexing/postgres` | Physical home for the deployment-owned shared-schema history; production indexing repository implementation |
-| `sdk/indexing/redb` | Embedded/test indexing repository implementation and all redb record/key encoding |
+| `sdk/chains/solana` | Solana addresses, RPC, finalized sparse-slot blocks, System transfers, lamports, blockhash lifetimes, the send outbox, wallets, indexing translation |
+| `sdk/wallets` | Chain-neutral capabilities, the wallet factory contract, history in display units, batch orchestration. It unifies factories and stores no wallet, no id and no key |
+| `sdk/indexing` (root) | Storage-independent synchronization, the watch list it owns, canonical history, checkpoints, the confirmed line and the in-memory overlay above it, the store ports, the commit listener, the per-network health vocabulary |
+| `sdk/indexing/src/storage/sqlite` (feature `sqlite`) | The durable indexing store: every table, statement and schema step, each whole operation on one pooled connection, off the executor |
+| `sdk/indexing/src/storage/memory` (feature `memory`) | The second indexing store: every port on ordinary maps, for every network in one process. Not durable, and not a test double |
+| `sdk/indexing/src/supervisor` (feature `supervisor`) | One Tokio task per composed chain: the per-network state machine, backoff, quarantine, the `SyncMonitor` callback, and the `SyncControl` resume handle |
+| `sdk/indexing/tests/contracts` | The shared contract suites both stores are held against, as integration-test code rather than crate API |
+| `sdk/config` | The configuration document: `Document`, `Registry`, `Sections`, `Chains`, plus the shell every chain's section shares (`Rpc`, `Repetition`, `Cadence`). It names **no chain crate**: a chain registers itself by implementing `sdk_config::Chain` for its own `Config`. TOML behind feature `toml`, off by default |
 | `packages/*` | Generic crypto, HTTP, JSON-RPC, and storage mechanics usable outside blockchain projects |
+
+`sdk/chains/*` holds concrete chain implementations only; chain-neutral crates
+live at `sdk/<capability>` (`sdk/base`, `sdk/config`, `sdk/indexing`,
+`sdk/wallets`). The
+linter enforces both directories as closed.
 
 Dependency rules:
 
 - Packages do not import SDK or application crates.
-- `sdk/chains/base` does not import concrete chains, RPC, indexing, or wallets.
+- `sdk/base` does not import concrete chains, RPC, indexing, or wallets.
   It is not a universal transaction or RPC abstraction.
-- `sdk/indexing` knows no native block, backend record, wallet registry, Axum
-  route, or business label.
+- `sdk/indexing`'s root knows no native block, stored record, wallet registry,
+  Axum route, or business label; its `storage/sqlite` and `supervisor`
+  modules are cargo features, so a dependent that wants only the contracts
+  takes `default-features = false` and compiles neither. `Schedule` and
+  `Schedules` sit outside the `supervisor` feature on purpose — a caller driving
+  `sync` itself needs them, and they are a `Duration` and a map — so `wallets`,
+  `sdk/config` and all three chain crates take `indexing` that way and feature
+  unification never hands an embedder a store or a runtime it declined.
 - Concrete chains retain chain-native semantics while implementing wallet and
   indexing contracts. Removing one chain leaves the other generic crates and
   other chain usable.
-- `sdk/indexing/postgres` and `sdk/indexing/redb` implement persistence only;
-  neither owns a synchronizer runtime or public handle.
-- `apps/api` constructs one process-wide PostgreSQL pool, one scope-bound
-  repository handle per `(chain, network)`, and all long-lived RPC clients,
-  synchronizers, and providers once. An asset never gets its own database,
+- `sdk/indexing/src/storage/sqlite` implements persistence only; it owns no
+  synchronizer runtime and exposes no stored record through the crate's API.
+- `apps/server` constructs the configured storage (one SQLite file), the one
+  repository over it that serves every network, and all long-lived RPC clients,
+  synchronizers, and wallet factories once. An asset never gets its own database,
   schema, pool, or repository. Handlers receive abstractions and do not open
   storage or construct dependencies per request.
 
-Concrete chain crates keep this skeleton, configured in `linter.toml`:
+Concrete chain crates follow `docs/CHAIN_LAYOUT.md` (worked example:
+`sdk/chains/ethereum`), enforced by `linter.toml` and `scripts/check-chains.sh`:
 
 ```text
-src/address.rs
-src/batch.rs
-src/error.rs
-src/lib.rs
-src/indexer/mod.rs
-src/indexer/source/mod.rs
-src/rpc/mod.rs
-src/transaction/mod.rs
-src/transaction/operations/mod.rs
-src/wallet/mod.rs
+README.md  tests/{address_conversion,transaction_adapter,vocabulary}.rs
+src/{lib,error,identity,source,interpreter,indexer,key,wallet,builder,sender}.rs
+src/sender/{outbox,reservation,dispatch,recovery}.rs   the send pipeline (Outbox)
+src/native/          protocol code only; never names indexing/wallets or SDK identities
 ```
 
 Protocol-specific children may differ. Do not flatten cohesive directory
 modules into oversized files.
+
+Every chain is also demonstrated in every `examples/` scenario
+(docs/CHAIN_LAYOUT.md section 8): one directory per scenario, one `main.rs`,
+and one `async fn <chain>(…)` setup function per chain inside it. A chain crate
+named anywhere else in a scenario fails `examples/tests/scenarios.rs`, and a
+chain missing from a scenario fails it and `scripts/check-chains.sh` check 4.
+Each chain has one chain key, `CHAIN_NAME: base::ChainName`.
 
 ## Domain models and collections
 
@@ -154,7 +180,7 @@ impl Movements {
     fn successful(
         transaction: &ParsedTransaction,
         receipt: &ParsedReceipt,
-        scope: &IndexScope,
+        network: &Network,
     ) -> Result<Self, IndexError> {
         // Build native and token movements under one success policy.
     }
@@ -172,9 +198,9 @@ private to their chain unless a stable cross-chain contract needs them.
 Use associated constructors for validation and policy:
 
 ```rust,ignore
-let address = bitcoin::Address::parse_for_network(input, network)?;
-let indexer = bitcoin::Indexer::new(source, interpreter, blocks, config);
-let indexers = indexing::Composer::new(vec![Arc::new(indexer)])?;
+let address = chain_bitcoin::Address::parse(input, network)?;
+let indexer = chain_bitcoin::indexer(IndexerParams::new(rpc, repository))?;
+let indexers = indexing::Index::of(vec![Arc::new(indexer)])?;
 ```
 
 Use `From`, `TryFrom`, and `FromStr` for complete policy-free conversions. Use
@@ -205,14 +231,15 @@ Prefer standard traits and concrete code to ceremonial abstractions.
 
 ```rust,ignore
 pub trait Addresser {
-    fn address(&self) -> Address;
+    fn address(&self) -> &base::Address;
 }
 ```
 
-Code needing an address accepts `&dyn Addresser`; code needing history accepts
-`&dyn HistoryReader`. Use `dyn Wallet` only where the composed capability is
-needed. `Provider` constructs wallets; it is not a post-construction wallet
-capability. Crate roots re-export small stable surfaces and keep implementation
+Code needing an address or an asset accepts `&dyn indexing::Holder`, which a
+balance and a history read both take. Use `dyn Wallet` only where the composed
+capability is needed. `WalletFactory` constructs wallets; it is not a
+post-construction wallet capability. History is not a wallet capability: the
+index answers it by wallet address and asset (`Wallets::history`). Crate roots re-export small stable surfaces and keep implementation
 modules private.
 
 Keep logic and types close to their owner. Reusable wallet, indexing,
@@ -284,7 +311,8 @@ chain-native request
 - Solana owns Base58 addresses, Ed25519 seeds, slots, account/context floors,
   legacy System-transfer-plus-Memo messages, blockhash lifetime, fees,
   simulation, exact signatures, ordered broadcast, and source-keyed ambiguity
-  coordination. Its singular endpoint has no transparent retry, and indexing
+  coordination. It is configured with exactly one endpoint and every call is
+  `json_rpc::Request::once`, so no transport decorator can repeat it; indexing
   remains the confirmation authority.
 - A batch is one non-empty ordered list on one chain. Validate destinations,
   amounts, fee bounds, wallet compatibility, and chain invariants before the
@@ -296,52 +324,143 @@ chain-native request
 
 ## Indexing invariants
 
-- `Indexer` is the complete chain-neutral indexing surface used by callers.
-  Bitcoin, Ethereum, Solana, and the multi-chain `Composer` implement the same
-  trait; callers do not change APIs when moving from one chain to several.
+- `Indexing` is the whole of what an index is — observe, advance, say where it
+  got to — and every method on it is answerable by a `Repository` alone. There is
+  no wider indexer trait above it, because **querying is the repository's
+  responsibility and not the indexer's**. A consumer reads no query through an
+  indexer: `History` is answered by `ObservedHistory`, which joins one
+  repository's `ConfirmedHistory` pages to that index's overlay, a balance is
+  `ObservedBalance` over that store's total completed by the same overlay, a
+  spendable set is
+  `ObservedOutputs` over the store's `OutputStore`, and a consumer serving
+  several networks holds one of each per network
+  (`wallets::Composition::history`, `::balance`). Each reader names its three
+  dependencies — the repository, the blocks above its confirmed line, and the
+  inspection progress a read is gated on — and `Service::history` /
+  `Service::balances` / `Service::outputs` hand them over, because the service is
+  the one value holding all three; none of them is an impl on the service. Bitcoin, Ethereum,
+  Solana and the multi-chain `Index` all implement `Indexing`; callers do not
+  change APIs when moving from one chain to several. `Index` and `Supervisor`
+  are generic over the child trait with `dyn Indexing` as the default, so a
+  store answering no query at all is still composed and supervised.
 - A checkpoint contains native position, produced height, hash, and one atomic
   optional parent pairing parent position with parent hash. Native position
   drives traversal, canonical lookup, restart, readiness, and birthdays;
-  produced height drives confirmation, ordering, journal keys, and retention.
-- `Wallets` supplies a caller-owned `FilterSource`; each read yields one complete
-  `Vec<AddressFilter>`. Wallet/application runtime owns address and birthday
-  lifecycle; indexing persists no watch, watch ID, or address registry.
+  produced height drives confirmation and ordering.
+- The index owns what it observes. `Watching::watch(id, &dyn Holder, Start)`
+  writes the durable `indexing::WatchStore` row and inserts into the hot set
+  each `Service` keeps; `Indexing::sync` and `Supervisor::new` take no selection
+  argument, because each unit reads its own list on every pass.
+  The store is the mirror, read once before the first pass, not an authority
+  a pass consults: `NetworkAdmission::plan` captures the list through a
+  synchronous closure while `WatchStore::all` is async. One read, not two:
+  `all` returns each watch beside its own `indexed_through`, from one snapshot,
+  because a watch and how far it has been inspected are one fact and two reads
+  could pair a watch with another registration's progress. A watch row
+  holds the id, the address, the birthday and the `AssetId` it is read in, and
+  **no key material** — observation is indexing's, custody is the
+  application's. The set is keyed by watch identity, so one address is observed
+  once per asset; scanning is deduplicated by address instead, from the earliest
+  birthday any observation of it names, because `BlockInterpreter::inspect`
+  takes addresses and no asset.
+- **Progress is one contiguous, hash-verified block per observation.**
+  `WatchProgress::indexed_through` means every applicable block from that
+  observation's birthday through that block was inspected for it, empty ones
+  included; `next_required()` is where it resumes. There is no second position
+  and no gap, which is what one reference can honestly describe.
+  `WatchProgress::caught_up(checkpoint)` is **the one predicate** behind both
+  halves of the trade: an observation that has not reached the confirmed line is
+  inspected for what it owes rather than for what is arriving now, *and* reads
+  touching it are gated through `Completeness::while_backfilling`. Its doc comment
+  states both possible behaviours and which is chosen; flipping the trade is that
+  one comparison. Never add a second notion of "still catching up" beside it.
+  `Watching::unwatch(id)` withdraws a watch: it
+  stops inspection, deletes nothing, and is reversible, which is what replaced
+  the refusal `docs/design/030 §8 (ex-029)` §5.2 recorded (`docs/SYSTEM_REQUIREMENTS.md` revokes that
+  requirement in place). Nothing in `indexing` calls back into `wallets`.
+- `Listener::committed(&BlockCommit)` is the one reaction hook: registered with
+  `Indexing::listen` as a list rather than a slot, called once per committed
+  block in block order after the store returned, synchronous, unable to fail
+  and unable to veto. Delivery is at most once and never retracted. `IndexStore`
+  is the veto-capable path and the answer to fully custom storage;
+  a store is a constructor argument, never a runtime registration.
 - Transactions preserve all stable movements. Never flatten a
   multi-input/multi-output UTXO transaction into a fictional transfer.
-- Confirmation derives from inclusion produced height and checkpoint produced
-  height; it is not stored as a transition. Checkpoint-bound pagination
-  restarts if the checkpoint changes.
+- Each chain states its own confirmed line (`ChainTip::confirmed_tip`): the
+  newest block it will call irreversible. Ethereum asks its node for
+  `finalized`, Solana already reads only rooted blocks and returns its tip, and
+  Bitcoin, which has no finality, subtracts a configured depth. Nothing above
+  that line is ever written.
+- `Confirmed` is a fact, not a threshold: it means the durable store holds the
+  transaction, which it only does at or below the line. Above it a transaction
+  is `Pending`, reported apart on the first page. History cursors carry a
+  position only: confirmed history is append-only, so a moved checkpoint can
+  only have appended above a cursor and paging never conflicts.
 - One commit atomically writes address-primary canonical history, live output
-  changes, one bounded rollback-journal entry, and checkpoint movement.
-- A retained reorg atomically removes orphan canonical history, restores live
-  projection state, and moves the checkpoint back. `ReorgTooDeep` requires the
-  caller to recreate and rescan only that exact scope's indexing-owned rows;
-  unrelated scopes and application-owned tables remain untouched.
-- Persistence uses obvious domain collections. `Blocks` owns canonical
-  checkpoint lookup, retained block lookup, atomic add, and atomic removal;
-  `Transactions` lists canonical address history; `Outputs` lists live UTXOs.
-  Do not split load/plan/apply phases into ceremonial public traits or expose
-  rollback command/context bags.
-- `Blocks::add` atomically writes history, live outputs, rollback journal, and
-  checkpoint. `Blocks::remove` derives its inverse from the stored journal; it
-  never accepts caller-authored undo state. Chain interpreters emit facts;
+  changes, and checkpoint movement.
+- A reorg above the confirmed line truncates the in-memory overlay: no store
+  I/O, no backend code. A reorg below it is a terminal `ConfirmedReorg` and
+  requires the caller to recreate and rescan only that exact network's
+  indexing-owned rows; unrelated networks and application-owned tables remain
+  untouched. That rescan is `Purging::purge_network`, exposed offline as
+  `payment-server <config.json> --rescan <chain>/<network>`; it is the only
+  port method that removes anything, it names the one network it purges, it sits
+  outside `Repository` because the rescan is not indexing, and it must never
+  start the listener or the supervisor.
+- Persistence has **two required ports**, together `Repository`, and nothing
+  else is asked of a store: `WatchStore` (`add`, `all`, `forget`, `reanchor`) is
+  the durable
+  watch list, and `IndexStore` (`checkpoint`, `commit`) holds the checkpoint and
+  takes the **one** write a pass makes. The rest are optional
+  consumer capabilities, each its own trait, so a store that answers no query is
+  legal rather than stubbed: `BalanceStore` folds a balance, `OutputStore` lists
+  live UTXOs, `Purging` owns `purge_network`. History is not a port at all —
+  querying is the repository's own `ConfirmedHistory` API, joined to one index's
+  overlay by `ObservedHistory`, so no sink carries a pagination model. None asks for `Clone`; each of them, and
+  `ConfirmedHistory` too, has an `Arc<T>` forwarding
+  impl, so a sink holding a connection or a channel is used as `Arc<MySink>`.
+  Do not split load/plan/apply phases into ceremonial public traits, and never
+  reintroduce a removal, an undo record, or a rollback journal.
+- `IndexStore::commit` takes one `IndexedBatch` and atomically writes its
+  history, its credits, its folded live-output changes, the `Progress` it proves
+  and the line it leaves behind. **One write, both directions**: whether the
+  checkpoint moves is `IndexedBatch::checkpoint`'s answer, derived from the
+  blocks, so filling in a block the network already committed for an observation
+  that was not watched at the time is the same call with the affected observation
+  simply further behind. Every row is insert-if-absent, verify-if-present,
+  terminal on one that disagrees. **Each `Progress` carries the `expected` value
+  its author read, and the store compares it** — never a monotonic rule, because
+  a batch redone under a smaller budget can honestly settle less than the write
+  it is redoing, and refusing that would wedge the observation for good. A
+  refusal is retryable and makes the index read its own list again.
+  Chain interpreters emit facts;
   storage keys, codecs, records, and compare-and-swap mechanics remain private.
 
-Store only canonical checkpoint, bounded journal, address-primary canonical
-history, and current live outputs. Do not add watches, synchronizer status,
-observation revisions, pending confirmations, spent markers, secondary address
+The synchronizer stores only canonical checkpoint, address-primary canonical
+history, and current live outputs (the `WatchStore` capability owns its own
+rows). The blocks above the confirmed line live in memory on the `Service` and
+are rebuilt by the ordinary catch-up pass after a restart. Do not add
+synchronizer status, observation revisions, spent markers, secondary address
 indexes, event feeds, or raw-block archives.
 
-The production composition uses one PostgreSQL database, one schema, and one
-process-wide pool. `Repository::new(pool.clone(), scope)` binds a handle to one
-exact `(chain, network)` and rejects another scope. The canonical ordered schema
-history is deployment-owned and lives physically under
-`sdk/indexing/postgres/migrations/`. Physical script or table colocation does
-not grant indexing runtime ownership of application data: the runtime adapter
-must not query, rewrite, truncate, delete, or issue application-table DDL for
-`payment_wallets`. An
-application-owned restart read path must be proven before the current indexing
-registry query surface is removed.
+The one marker that does exist is not a spend log: a required spend that matched
+no live output is kept, exactly the keys a commit already reports, because the
+block that created the output it named may still be filled in below the
+checkpoint while the spend that named it was applied above where that filling
+reaches. Nothing reads it but the create path of a later batch, which cancels the
+create against it; only `purge_network` removes one.
+
+The composition uses one SQLite file for every network, and there is no second
+live store: the one capability a shared database would add is multi-writer
+deployment, which `docs/SYSTEM_REQUIREMENTS.md` places out of scope.
+`indexing::sqlite::Repository::new(database)` cannot fail and serves every
+network: each operation names the network it is about, every table is keyed
+`(chain, network, ...)`, and a read of a network holding no rows answers empty
+rather than refusing. Sharing one file does not grant the indexing *runtime*
+ownership of the watch list: a pass must not read, rewrite or remove the
+registration table, which a network purge also leaves untouched. Only
+`WatchStore` reaches it, through `add`, `forget` and `reanchor`, and a `Service`
+reads it once, through `all`, before its first pass.
 
 ## Coding, errors, security, and concurrency
 
@@ -362,13 +481,38 @@ registry query surface is removed.
 - Borrow for observation; transfer ownership for storage/transformation. Clone
   only when ownership requires it. Use `Arc`, locks, channels, and atomics for
   their semantics, not by habit.
+- A type with several construction inputs takes a parameters struct and builds
+  itself from it: `Type::from_params(params)`. Never invert it into
+  `params.type()` — a parameter bag does not construct the thing it configures,
+  and the inverted form puts one constructor per type on a struct that should
+  only carry values. This has been reverted once across three chains, three
+  `config.rs` files, the tests, the examples, five READMEs and three documents;
+  do not reintroduce it.
 - Introduce concurrency only for real parallelism/latency. Do not block async
-  executors or hold locks across `.await`; move blocking redb/CPU work off
+  executors or hold locks across `.await`; move blocking storage/CPU work off
   executors and bound spawned work.
-- The `apps/api` composition root owns cancellation, fatal-task handling,
+- The `apps/server` composition root owns cancellation, fatal-task handling,
   readiness, and graceful shutdown. Do not hide unresolved chain composition
   inside a generic `Application` wrapper. The public listener starts only after
-  each configured index reaches `SyncPhase::Ready` with a persisted checkpoint.
+  every configured network has settled: reached `SyncPhase::Ready` with a
+  persisted checkpoint at least once, or become `NetworkState::Quarantined`.
+- One chain's indexing failure must not stop another's.
+  `indexing::Supervisor` drives one task per `indexing::SyncUnit`
+  and returns only on shutdown. A retryable failure retries that network with
+  capped, jittered backoff; a non-retryable one, or a panicked unit task,
+  quarantines that network alone, parks it with its last checkpoint, and is
+  never auto-retried, because every class that reaches it is deterministic.
+  `SyncControl::resume(&network)` is the way out when the cause was fixed out
+  of band, reachable without a restart as `POST /v1/status/resume`;
+  `ConfirmedReorg` re-quarantines within one pass and needs the
+  offline rescan instead. `SyncMonitor` is a
+  synchronous, notification-only callback: it fires on every state change and
+  every failed attempt, never per catch-up batch, and must not do work.
+  `Listener` is synchronous for the same reason, and a slow one costs latency
+  on its own chain alone.
+  Readiness is `all(Ready | Quarantined) && any(Ready)`; a quarantined chain
+  never holds `/health/ready` at 503 forever, and all-quarantined answers 503
+  without exiting.
 
 ## Delivery and style
 
@@ -376,15 +520,21 @@ registry query surface is removed.
 - Prefer mature protocol libraries over local standard reimplementations.
 - Write a failing behavioral test for a defect or testable behavior. Test exact
   outcomes, edges, errors, and invariants.
-- Unit tests stay beside their owner. Repository contract tests cover both redb
-  and PostgreSQL. System tests compose the public facade, RPC doubles,
-  synchronizer, and one owned disposable PostgreSQL database/schema through one
-  process-wide pool. Tests are deterministic, own their resources, preserve
-  sentinel application rows, and never contact public networks.
-- Indexing coverage includes birthdays, catch-up, checkpoint/hash restart,
-  duplicate commit, retained reorgs, `ReorgTooDeep`, orphan removal, Bitcoin
-  output restoration, native-position restart, produced-height confirmation,
-  sparse Solana slots, Ethereum native/token movements, shared-schema scope
+- Unit tests stay beside their owner. Repository contract tests run every
+  shared scenario against both shipped stores -- the SQLite file and
+  `indexing::memory::Repository` -- as a pair of tests per scenario in
+  `sdk/indexing/tests/repository_contract.rs`, so they stay statements about
+  the ports rather than about either store. System tests compose the public facade,
+  RPC doubles, the synchronizer, and one temporary index file. Tests are deterministic, own their
+  resources, preserve sentinel registry rows, and never contact public networks.
+- Indexing coverage includes birthdays, catch-up, per-observation contiguous
+  progress including the `docs/design/030 §8 (ex-032)` X/Y/Z table as one test,
+  checkpoint/hash restart,
+  duplicate commit, a reorg above the confirmed line changing no stored byte,
+  a reorg below it quarantining with `ConfirmedReorg`, confirmed and pending
+  balance across a reorg, Bitcoin change spendable at depth one,
+  native-position restart, produced-height confirmation,
+  sparse Solana slots, Ethereum native/token movements, shared-schema network
   isolation, and RPC outage without false terminal state.
 - Use precise nouns and plural collections. Avoid `Manager`, `Helper`, `Util`,
   `Impl`, vague abbreviations, repeated chain prefixes, and catch-all `core`,
@@ -399,6 +549,11 @@ registry query surface is removed.
   `Debug`.
 - Comments explain contracts, security, compatibility, or non-obvious reasons;
   names explain mechanics. Keep public APIs and rustdoc focused.
+- Every crate's `README.md` is its crate doc (`#![doc = include_str!("../README.md")]`)
+  and follows a retired design note (005) section 3: why it exists, concepts, public API map,
+  a compiling usage doc-test (`no_run` for I/O, never `ignore`), and related
+  crates. `missing_docs` is denied workspace-wide: document every public item
+  and update the README when its API changes.
 - Production Rust is limited to 500 counted physical lines. Standalone test
   files and lines inside test-only Rust items/modules do not count. Production
   and tests must still be organized cohesively; numbered fragments and
@@ -418,7 +573,7 @@ configuration, generated case queues, or suppression directives. This rule
 supersedes older documents and remembered local-linter workflows.
 
 Read the plugin skill before design work. Preserve the existing `linter.toml`;
-it is the project policy for MCP checks. Call `mcp__linter__check` with the
+it is the project policy for MCP checks. Call `mcp__plugin_linter_linter__check` with the
 absolute repository root as `root`. Inspect both findings and each configured
 rule's status: an unconfigured rule is not a pass, and an analysis failure is
 not a clean result. MCP does not replace compilation, tests, rustfmt, or Clippy.
@@ -465,9 +620,15 @@ cargo fmt --all -- --check
 cargo check --locked --workspace --all-targets
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo doc --locked --workspace --no-deps
+cargo test --locked --workspace --doc
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+sh scripts/check-chains.sh
 git diff --check
 ```
+
+CI (`.github/workflows/check.yml`) runs all eight gates plus `linter check .`;
+the whitespace gate runs there against the whole committed tree
+(`git diff --check <empty tree> HEAD`).
 
 Also run the Linter MCP `check` tool with the absolute repository root and
 report configured-rule statuses and findings.

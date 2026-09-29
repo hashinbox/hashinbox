@@ -3,51 +3,28 @@ name = "payment-api"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-autotests = false
-
-[[test]]
-name = "wallet_api"
-path = "tests/wallet_api.rs"
-
-[[test]]
-name = "solana_stack"
-path = "tests/solana_stack.rs"
-required-features = ["solana-stack"]
-
-[features]
-solana-stack = []
+description = "The payment HTTP routes and OpenAPI contract over the chain-neutral wallet and index abstractions."
+readme = "README.md"
 
 [dependencies]
 axum = "0.8"
-base = { path = "../../sdk/chains/base" }
+base = { path = "../../sdk/base" }
 base64 = "=0.22.1"
-chain-bitcoin = { path = "../../sdk/chains/bitcoin" }
-chain-ethereum = { path = "../../sdk/chains/ethereum" }
-chain-solana = { path = "../../sdk/chains/solana" }
-http-support = { package = "http", path = "../../packages/http" }
+http-server = { path = "../../packages/http-server" }
 hex.workspace = true
-indexing = { path = "../../sdk/indexing" }
-indexing-postgres = { path = "../../sdk/indexing/postgres" }
-indexing-runtime = { path = "../../sdk/indexing/runtime" }
-json-rpc = { path = "../../packages/json-rpc" }
+indexing = { path = "../../sdk/indexing", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["fs", "net", "process", "rt", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["sync"] }
 utoipa = { version = "=5.5.0", features = ["axum_extras"] }
 utoipa-axum = "=0.2.0"
 uuid.workspace = true
 wallets = { path = "../../sdk/wallets" }
+zeroize.workspace = true
 
 [dev-dependencies]
-alloy-consensus.workspace = true
-alloy-eips.workspace = true
-alloy-primitives.workspace = true
-bitcoin.workspace = true
-deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 http-body-util = "=0.1.4"
-reqwest.workspace = true
-sha2.workspace = true
-tempfile = "=3.27.0"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { version = "=0.5.2", features = ["util"] }
 
 [lints]

@@ -1,158 +1,61 @@
-use k256::{
-    NonZeroScalar, Scalar, ecdsa::SigningKey as EcdsaSigningKey,
-    ecdsa::signature::hazmat::PrehashSigner, elliptic_curve::PrimeField,
-    schnorr::SigningKey as SchnorrSigningKey,
-};
 use sha2::{Digest as _, Sha256};
-use zeroize::Zeroize;
 
-use crate::{Error, ErrorKind, SignatureEncoding};
+use crate::{Error, ErrorKind};
 
+/// Elliptic curve a public key belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Curve {
+    /// secp256k1 (Bitcoin, Ethereum).
     Secp256k1,
+    /// Curve25519 in Edwards form (Solana).
     Ed25519,
-    NistP256,
 }
 
+/// Byte layout of a public key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PublicKeyFormat {
+    /// 33-byte SEC1 `02/03 || x` (Bitcoin P2WPKH).
     Compressed,
+    /// 65-byte SEC1 `04 || x || y`.
     Uncompressed,
+    /// 32-byte `x` (BIP-340, Taproot).
     XOnly,
+    /// The curve's plain bytes: 64-byte `x || y` on secp256k1, 32 bytes on Ed25519.
     Raw,
 }
 
+/// Public key bytes labelled with their curve and layout.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PublicKey {
+    /// Curve of the key.
     pub curve: Curve,
+    /// Layout of `bytes`.
     pub format: PublicKeyFormat,
+    /// The encoded key.
     pub bytes: Vec<u8>,
 }
 
+/// A scalar added to the secret key before Schnorr signing.
+///
+/// BIP-340 Schnorr is the only scheme that accepts one: ECDSA and Ed25519
+/// refuse a tweaked request rather than ignoring the tweak.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ScalarTweak {
+    /// Adds this 32-byte big-endian scalar.
     Add([u8; 32]),
-    TaggedHashAdd { tag: Vec<u8>, suffix: Vec<u8> },
-}
-
-/// An in-memory secp256k1 secret scalar.
-///
-/// This value intentionally implements neither `Clone`, `Debug`, nor Serde.
-pub struct SecretKey {
-    bytes: Vec<u8>,
-}
-
-impl SecretKey {
-    pub fn new(bytes: impl Into<Vec<u8>>) -> Result<Self, Error> {
-        let bytes = bytes.into();
-        EcdsaSigningKey::from_slice(&bytes).map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidKey,
-                "secret key must be a valid 32-byte secp256k1 scalar",
-            )
-        })?;
-        Ok(Self { bytes })
-    }
-
-    pub fn public_key(&self, format: PublicKeyFormat) -> Result<PublicKey, Error> {
-        let key = self.ecdsa_key()?;
-        let encoded = key.verifying_key().to_encoded_point(false);
-        let raw = &encoded.as_bytes()[1..];
-        let bytes = match format {
-            PublicKeyFormat::Raw => raw.to_vec(),
-            PublicKeyFormat::XOnly => raw[..32].to_vec(),
-            PublicKeyFormat::Uncompressed => encoded.as_bytes().to_vec(),
-            PublicKeyFormat::Compressed => key
-                .verifying_key()
-                .to_encoded_point(true)
-                .as_bytes()
-                .to_vec(),
-        };
-        Ok(PublicKey {
-            curve: Curve::Secp256k1,
-            format,
-            bytes,
-        })
-    }
-
-    pub fn sign_ecdsa(&self, digest: &[u8], encoding: SignatureEncoding) -> Result<Vec<u8>, Error> {
-        let digest: [u8; 32] = digest.try_into().map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidDigest,
-                "digest must contain exactly 32 bytes",
-            )
-        })?;
-        let (signature, recovery_id) = self
-            .ecdsa_key()?
-            .sign_prehash_recoverable(&digest)
-            .map_err(|_| Error::new(ErrorKind::Signing, "ECDSA signing failed"))?;
-        match encoding {
-            SignatureEncoding::Recoverable => {
-                let mut bytes = signature.to_bytes().to_vec();
-                bytes.push(recovery_id.to_byte());
-                Ok(bytes)
-            }
-            SignatureEncoding::Compact | SignatureEncoding::Raw => {
-                Ok(signature.to_bytes().to_vec())
-            }
-            SignatureEncoding::Der => Ok(signature.to_der().as_bytes().to_vec()),
-        }
-    }
-
-    pub fn sign_schnorr(
-        &self,
-        digest: &[u8],
-        encoding: SignatureEncoding,
-        tweak: Option<&ScalarTweak>,
-    ) -> Result<Vec<u8>, Error> {
-        if encoding != SignatureEncoding::Raw {
-            return Err(Error::new(
-                ErrorKind::UnsupportedEncoding,
-                "Schnorr signatures require raw encoding",
-            ));
-        }
-        let digest: [u8; 32] = digest.try_into().map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidDigest,
-                "digest must contain exactly 32 bytes",
-            )
-        })?;
-        let mut key = SchnorrSigningKey::from_bytes(&self.bytes)
-            .map_err(|_| Error::new(ErrorKind::InvalidKey, "invalid Schnorr key"))?;
-        if let Some(tweak) = tweak {
-            let bytes = tweak.scalar(&key)?;
-            let tweak = Option::<Scalar>::from(Scalar::from_repr(bytes.into()))
-                .ok_or_else(|| Error::new(ErrorKind::InvalidTweak, "invalid scalar tweak"))?;
-            let scalar = *key.as_nonzero_scalar().as_ref() + tweak;
-            let scalar =
-                Option::<NonZeroScalar>::from(NonZeroScalar::new(scalar)).ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::InvalidTweak,
-                        "scalar tweak produced the zero key",
-                    )
-                })?;
-            key = SchnorrSigningKey::from(scalar);
-        }
-        let signature: k256::schnorr::Signature = PrehashSigner::sign_prehash(&key, &digest)
-            .map_err(|_| Error::new(ErrorKind::Signing, "Schnorr signing failed"))?;
-        Ok(signature.to_bytes().to_vec())
-    }
-
-    fn ecdsa_key(&self) -> Result<EcdsaSigningKey, Error> {
-        EcdsaSigningKey::from_slice(&self.bytes)
-            .map_err(|_| Error::new(ErrorKind::InvalidKey, "invalid secp256k1 secret key"))
-    }
-}
-
-impl Drop for SecretKey {
-    fn drop(&mut self) {
-        self.bytes.zeroize();
-    }
+    /// Adds the BIP-340 tagged hash `H_tag(x-only public key || suffix)`, the
+    /// BIP-341 Taproot output-key tweak when `tag` is `TapTweak`.
+    TaggedHashAdd {
+        /// Hash tag; must not be empty.
+        tag: Vec<u8>,
+        /// Bytes after the public key (a Taproot merkle root, or empty).
+        suffix: Vec<u8>,
+    },
 }
 
 impl ScalarTweak {
-    fn scalar(&self, key: &SchnorrSigningKey) -> Result<[u8; 32], Error> {
+    /// The scalar to add, given the untweaked x-only public key it commits to.
+    pub(crate) fn scalar(&self, public_key: &[u8]) -> Result<[u8; 32], Error> {
         match self {
             Self::Add(bytes) => Ok(*bytes),
             Self::TaggedHashAdd { tag, suffix } => {
@@ -163,7 +66,7 @@ impl ScalarTweak {
                 let mut hash = Sha256::new();
                 hash.update(tag_hash);
                 hash.update(tag_hash);
-                hash.update(key.verifying_key().to_bytes());
+                hash.update(public_key);
                 hash.update(suffix);
                 Ok(hash.finalize().into())
             }
@@ -176,69 +79,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signing_rejects_every_non_32_byte_digest_at_the_boundary() {
-        let key = SecretKey::new([1_u8; 32]).expect("test key must be valid");
-        let expected = Error::new(
-            ErrorKind::InvalidDigest,
-            "digest must contain exactly 32 bytes",
-        );
-        for length in [0, 1, 31, 33, 64] {
-            let digest = vec![2; length];
-            assert_eq!(
-                key.sign_ecdsa(&digest, SignatureEncoding::Recoverable),
-                Err(expected.clone())
-            );
-            assert_eq!(
-                key.sign_schnorr(&digest, SignatureEncoding::Raw, None),
-                Err(expected.clone())
-            );
-        }
-    }
-
-    #[test]
-    fn schnorr_validates_encoding_then_digest_then_tweak() {
-        let key = SecretKey::new([1_u8; 32]).expect("test key must be valid");
-        let tweak = ScalarTweak::Add([255; 32]);
-        for encoding in [
-            SignatureEncoding::Der,
-            SignatureEncoding::Compact,
-            SignatureEncoding::Recoverable,
-        ] {
-            assert_eq!(
-                key.sign_schnorr(&[], encoding, Some(&tweak)),
-                Err(Error::new(
-                    ErrorKind::UnsupportedEncoding,
-                    "Schnorr signatures require raw encoding",
-                ))
-            );
-        }
+    fn a_tagged_hash_tweak_commits_to_the_public_key_and_rejects_an_empty_tag() {
+        let public = [7_u8; 32];
+        let tweak = ScalarTweak::TaggedHashAdd {
+            tag: b"TapTweak".to_vec(),
+            suffix: Vec::new(),
+        };
+        let expected = {
+            let tag_hash = Sha256::digest(b"TapTweak");
+            let mut hash = Sha256::new();
+            hash.update(tag_hash);
+            hash.update(tag_hash);
+            hash.update(public);
+            <[u8; 32]>::from(hash.finalize())
+        };
+        assert_eq!(tweak.scalar(&public), Ok(expected));
+        assert_eq!(ScalarTweak::Add([3; 32]).scalar(&public), Ok([3; 32]));
         assert_eq!(
-            key.sign_schnorr(&[], SignatureEncoding::Raw, Some(&tweak)),
-            Err(Error::new(
-                ErrorKind::InvalidDigest,
-                "digest must contain exactly 32 bytes",
-            ))
-        );
-        assert_eq!(
-            key.sign_schnorr(&[2; 32], SignatureEncoding::Raw, Some(&tweak)),
-            Err(Error::new(ErrorKind::InvalidTweak, "invalid scalar tweak"))
-        );
-    }
-
-    #[test]
-    fn signs_ecdsa_and_schnorr_digests() {
-        let key = SecretKey::new([1_u8; 32]).expect("test key must be valid");
-        assert_eq!(
-            key.sign_ecdsa(&[2; 32], SignatureEncoding::Recoverable)
-                .expect("ECDSA must sign")
-                .len(),
-            65
-        );
-        assert_eq!(
-            key.sign_schnorr(&[3; 32], SignatureEncoding::Raw, None)
-                .expect("Schnorr must sign")
-                .len(),
-            64
+            ScalarTweak::TaggedHashAdd {
+                tag: Vec::new(),
+                suffix: Vec::new(),
+            }
+            .scalar(&public),
+            Err(Error::new(ErrorKind::InvalidTweak, "tag must not be empty"))
         );
     }
 }

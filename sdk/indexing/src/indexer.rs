@@ -1,344 +1,67 @@
+//! What an application calls to read an index.
+
+use std::sync::Arc;
+
 use crate::{
-    BlockRef, BlockSelector, Blocks, BoxFuture, CanonicalPage, CanonicalStatus, HistoryQuery,
-    IndexError, IndexErrorKind, IndexScope, ObservedTransaction, TransactionPage,
-    TransactionStatus, Transactions,
+    Backfilling, BlockRef, BoxFuture, IndexError, Listener, Network, SyncStatus, Watching,
 };
 
-#[derive(Clone)]
-pub(crate) struct Index<R> {
-    repository: R,
-    confirmations: u64,
-}
-
-impl<R> Index<R> {
-    #[must_use]
-    pub(crate) const fn new(repository: R, confirmations: u64) -> Self {
-        Self {
-            repository,
-            confirmations,
-        }
-    }
-}
-
-impl<R: Blocks> Checkpoint for Index<R> {
-    fn checkpoint<'a>(
-        &'a self,
-        scope: &'a IndexScope,
-    ) -> BoxFuture<'a, Result<Option<BlockRef>, IndexError>> {
-        self.repository.get(BlockSelector::Tip(scope.clone()))
-    }
-}
-
-impl<R: Transactions> History for Index<R> {
-    fn history<'a>(
-        &'a self,
-        request: HistoryQuery,
-    ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
-        Box::pin(async move {
-            if !request.address.belongs_to(&request.scope) {
-                return Err(IndexError::new(
-                    IndexErrorKind::ScopeMismatch,
-                    "history address belongs to another scope",
-                    false,
-                ));
-            }
-            let expected_checkpoint = request
-                .after
-                .as_ref()
-                .map(|cursor| cursor.checkpoint.clone());
-            let page = self.repository.list(request).await?;
-            let checkpoint_changed =
-                expected_checkpoint.is_some_and(|checkpoint| checkpoint != page.checkpoint);
-            if checkpoint_changed {
-                return Err(IndexError::new(
-                    IndexErrorKind::Conflict,
-                    "history changed between pages; restart from the first page",
-                    true,
-                ));
-            }
-            self.observe(page)
-        })
-    }
-}
-
-impl<R> Index<R> {
-    fn observe(&self, page: CanonicalPage) -> Result<TransactionPage, IndexError> {
-        let transactions = page
-            .transactions
-            .into_iter()
-            .map(|transaction| {
-                let status = self.observe_status(transaction.status, page.checkpoint.as_ref())?;
-                Ok(ObservedTransaction {
-                    scope: transaction.scope,
-                    transaction_id: transaction.transaction_id,
-                    status,
-                    movements: transaction.movements,
-                    fee: transaction.fee,
-                })
-            })
-            .collect::<Result<Vec<_>, IndexError>>()?;
-        Ok(TransactionPage {
-            checkpoint: page.checkpoint,
-            transactions,
-            next: page.next,
-        })
-    }
-
-    fn observe_status(
-        &self,
-        status: CanonicalStatus,
-        checkpoint: Option<&BlockRef>,
-    ) -> Result<TransactionStatus, IndexError> {
-        let block = match status {
-            CanonicalStatus::Included { block } => block,
-            CanonicalStatus::Failed { block, reason } => {
-                return Ok(TransactionStatus::Failed { block, reason });
-            }
-        };
-        let tip = checkpoint.ok_or_else(|| {
-            IndexError::new(
-                IndexErrorKind::Store,
-                "history exists without a checkpoint",
-                false,
-            )
-        })?;
-        let confirmations = tip
-            .height
-            .0
-            .checked_sub(block.height.0)
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| {
-                IndexError::new(
-                    IndexErrorKind::Store,
-                    "history contains a transaction beyond its checkpoint",
-                    false,
-                )
-            })?;
-        Ok(if confirmations >= self.confirmations {
-            TransactionStatus::Confirmed {
-                block,
-                confirmations,
-            }
-        } else {
-            TransactionStatus::Included {
-                block,
-                confirmations,
-            }
-        })
-    }
-}
-
+/// Reads how far a network is indexed.
 pub trait Checkpoint: Send + Sync {
+    /// The last committed block of `network`, or `None` before the first commit.
+    ///
+    /// This is the network's confirmed line, not its tip: blocks above it are
+    /// held in memory and reported separately.
     fn checkpoint<'a>(
         &'a self,
-        scope: &'a IndexScope,
+        network: &'a Network,
     ) -> BoxFuture<'a, Result<Option<BlockRef>, IndexError>>;
 }
 
-pub trait History: Send + Sync {
-    fn history<'a>(
-        &'a self,
-        request: HistoryQuery,
-    ) -> BoxFuture<'a, Result<TransactionPage, IndexError>>;
-}
+/// What an index *is*: it observes **one** network, it advances it, and it says
+/// where it got to.
+///
+/// **One network, one status.** Every indexer this workspace ships is one
+/// chain's [`Service`](crate::Service) over one `(chain, network)`, so the
+/// contract says so: a pass answers with the single [`SyncStatus`] of the single
+/// network [`Self::network`] names. Many networks is what [`crate::Index`] is
+/// for, and it aggregates these rather than being one of them — so nothing has
+/// to check that a child reported each of its networks exactly once, and no
+/// driver holds a vector of health rows per task.
+///
+/// **The whole of it, and the minimum.** Everything here is answerable by a
+/// store that implements [`Repository`](crate::Repository) — registration and
+/// committing — and nothing here reads a balance, a history page or an output.
+/// That is the whole point of the split: a third party whose sink answers no
+/// query at all still gets an index it can observe wallets with and drive
+/// (`tests/minimum_contract.rs`), and a consumer that does read a query holds
+/// the value that answers it ([`crate::ObservedHistory`],
+/// [`crate::ObservedOutputs`], [`crate::Balances`]) rather than reaching for it
+/// through the thing doing the indexing. There is no wider indexer trait above
+/// this one; there was, carrying [`crate::Balances`], and it was a courier —
+/// nothing that held it read the balance it forwarded.
+///
+/// Implemented by [`crate::Service`], which is what each chain's own
+/// constructor returns.
+pub trait Indexing: Backfilling + Checkpoint + Watching {
+    /// The one `(chain, network)` network this indexer synchronizes and answers
+    /// for.
+    fn network(&self) -> &Network;
 
-/// Complete indexing surface shared by one chain index and a multi-chain composer.
-pub trait Indexer: Checkpoint + History {
-    fn scopes(&self) -> &[IndexScope];
+    /// Notifies `listener` after each block this indexer commits. A list, not
+    /// a slot; a composer forwards to every unit.
+    fn listen(&self, listener: Arc<dyn Listener>);
 
-    /// Advances every scope this indexer owns.
+    /// Advances this indexer's network, against its own watch list.
     ///
-    /// The selection is read during the pass rather than passed in, so it is
-    /// never older than the tip the pass indexes towards. See
-    /// [`crate::FilterSource`].
-    fn sync<'a>(
-        &'a self,
-        selection: &'a dyn crate::FilterSource,
-    ) -> BoxFuture<'a, Result<Vec<crate::SyncStatus>, IndexError>>;
-}
-
-#[cfg(test)]
-mod tests {
-    use base::BlockHeight;
-
-    use super::*;
-    use crate::{
-        BlockHash, CanonicalTransaction, ChainId, HistoryCursor, HistoryPosition, TransactionRef,
-    };
-
-    #[derive(Clone)]
-    struct Repository(CanonicalPage);
-
-    impl Transactions for Repository {
-        fn list<'a>(
-            &'a self,
-            _request: HistoryQuery,
-        ) -> BoxFuture<'a, Result<CanonicalPage, IndexError>> {
-            Box::pin(async move { Ok(self.0.clone()) })
-        }
-    }
-
-    fn scope() -> IndexScope {
-        IndexScope {
-            chain: ChainId("test".into()),
-            network: "mainnet".into(),
-        }
-    }
-
-    fn block(height: u64) -> BlockRef {
-        BlockRef {
-            position: crate::BlockPosition(height),
-            height: BlockHeight(height),
-            hash: BlockHash(vec![height as u8]),
-            parent: None,
-            timestamp: None,
-        }
-    }
-
-    fn transaction(scope: &IndexScope, height: u64) -> CanonicalTransaction {
-        CanonicalTransaction {
-            scope: scope.clone(),
-            transaction_id: TransactionRef {
-                scope: scope.clone(),
-                value: "tx".into(),
-            },
-            status: CanonicalStatus::Included {
-                block: block(height),
-            },
-            movements: Vec::new(),
-            fee: None,
-        }
-    }
-
-    #[test]
-    fn history_derives_confirmation_from_page_checkpoint() {
-        let scope = scope();
-        let page = CanonicalPage {
-            checkpoint: Some(block(3)),
-            transactions: vec![transaction(&scope, 2)],
-            next: None,
-        };
-        let result = Index::new((), 2).observe(page).expect("canonical history");
-        assert!(matches!(
-            result.transactions[0].status,
-            TransactionStatus::Confirmed { .. }
-        ));
-    }
-
-    #[test]
-    fn confirmation_threshold_uses_produced_height_instead_of_native_position() {
-        let checkpoint = BlockRef {
-            position: crate::BlockPosition(1_000),
-            ..block(3)
-        };
-        let page = CanonicalPage {
-            checkpoint: Some(checkpoint),
-            transactions: vec![transaction(&scope(), 2)],
-            next: None,
-        };
-        let included = Index::new((), 3)
-            .observe(page.clone())
-            .expect("below threshold");
-        assert!(matches!(
-            included.transactions[0].status,
-            TransactionStatus::Included {
-                confirmations: 2,
-                ..
-            }
-        ));
-        let confirmed = Index::new((), 2).observe(page).expect("at threshold");
-        assert!(matches!(
-            confirmed.transactions[0].status,
-            TransactionStatus::Confirmed {
-                confirmations: 2,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn observation_rejects_missing_checkpoint_and_invalid_confirmation_arithmetic() {
-        for (checkpoint, height, message) in [
-            (None, 0, "history exists without a checkpoint"),
-            (
-                Some(block(2)),
-                3,
-                "history contains a transaction beyond its checkpoint",
-            ),
-            (
-                Some(block(u64::MAX)),
-                0,
-                "history contains a transaction beyond its checkpoint",
-            ),
-        ] {
-            let page = CanonicalPage {
-                checkpoint,
-                transactions: vec![transaction(&scope(), height)],
-                next: None,
-            };
-            let error = Index::new((), 1)
-                .observe(page)
-                .expect_err("invalid included history");
-            assert_eq!(error.kind, IndexErrorKind::Store);
-            assert_eq!(error.message, message);
-            assert!(!error.retryable);
-        }
-    }
-
-    #[test]
-    fn failed_history_keeps_its_existing_passthrough_semantics() {
-        let mut failed = transaction(&scope(), 2);
-        failed.status = CanonicalStatus::Failed {
-            block: block(2),
-            reason: Some("reverted".into()),
-        };
-        let page = CanonicalPage {
-            checkpoint: None,
-            transactions: vec![failed],
-            next: None,
-        };
-        let observed = Index::new((), u64::MAX)
-            .observe(page)
-            .expect("failed observation");
-        assert_eq!(
-            observed.transactions[0].status,
-            TransactionStatus::Failed {
-                block: block(2),
-                reason: Some("reverted".into())
-            }
-        );
-        assert_eq!(observed.checkpoint, None);
-        assert_eq!(observed.next, None);
-    }
-
-    #[test]
-    fn history_rejects_cursor_from_another_checkpoint() {
-        let scope = scope();
-        let repository = Repository(CanonicalPage {
-            checkpoint: Some(block(4)),
-            transactions: Vec::new(),
-            next: None,
-        });
-        let index = Index::new(repository, 1);
-        let query = HistoryQuery {
-            scope: scope.clone(),
-            address: crate::CanonicalAddress {
-                scope: scope.clone(),
-                value: "owner".into(),
-            },
-            after: Some(HistoryCursor {
-                checkpoint: Some(block(3)),
-                position: HistoryPosition {
-                    height: BlockHeight(2),
-                    transaction: TransactionRef {
-                        scope,
-                        value: "tx".into(),
-                    },
-                },
-            }),
-            limit: 10,
-        };
-        let error = futures_executor::block_on(index.history(query)).unwrap_err();
-        assert_eq!(error.kind, IndexErrorKind::Conflict);
-    }
+    /// **Bounded.** One pass does the work its [`crate::SyncPolicy`] allows and
+    /// returns; it is not a loop, and nothing here schedules, retries or waits.
+    /// A caller drives it — in its own loop, from a cron, or through the
+    /// optional `crate::Supervisor`, which calls this and owns no second
+    /// implementation of scanning or committing.
+    ///
+    /// The list is read during the pass rather than passed in, so it is never
+    /// older than the tip the pass indexes towards: an address watched between
+    /// the two reads has a birthday the pass's own blocks already cover.
+    fn sync<'a>(&'a self) -> BoxFuture<'a, Result<SyncStatus, IndexError>>;
 }

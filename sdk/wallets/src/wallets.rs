@@ -1,1640 +1,785 @@
-use std::{
-    borrow::Borrow,
-    collections::BTreeMap,
-    fmt,
-    sync::{Arc, RwLock},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
-use base::{BlockPosition, Decimal, TransactionId};
-use indexing::{
-    AddressFilter, CanonicalAddress, Checkpoint, IndexScope, PublicationPermit, RegisteredAddress,
-    Registry, ScopeAdmission,
-};
+use base::{AssetId, Decimal};
+use indexing::{Address, Network};
 
 use crate::{
-    AddressText, Balance, Error, ErrorKind, FutureResult, History, HistoryRequest, Provider,
-    SecretBytes, Sender, Wallet, selection::publication_error,
+    Author, Authorship, FutureResult, SecretBytes, SendError, SendFuture, Transfer, Wallet,
+    WalletError, WalletErrorKind, WalletFactory,
 };
 
-mod batch;
-
-/// Non-secret facts retained for one registered wallet.
+/// What one registered asset key is: its network and the identity of the
+/// asset its wallets hold, from its factory's [`crate::FactoryProfile`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WalletInfo<I, F> {
-    pub id: I,
-    pub family: F,
-    pub scope: IndexScope,
-    pub address: AddressText,
+pub struct AssetInfo<A> {
+    /// The key the factory was registered under.
+    pub tag: A,
+    /// The one network its wallets live in.
+    pub network: Network,
+    /// The identity of the asset its wallets hold. What an amount of it is
+    /// worth reading is the asset's own ([`base::Units`]), not this map's.
+    pub id: AssetId,
 }
 
 /// Maximum authored transfer occurrences accepted by one batch.
 pub const MAX_TRANSFERS: usize = 50;
 
-/// One batch item referencing a wallet already held by [`Wallets`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WalletTransfer<I> {
-    pub wallet: I,
-    pub to: AddressText,
-    pub amount: Decimal,
-}
-
+/// One registered [`WalletFactory`] with the facts it declared
+/// ([`crate::FactoryProfile`]), read once at registration.
 #[derive(Clone)]
-struct Family {
-    scope: IndexScope,
-    provider: Arc<dyn Provider>,
-    sender: Arc<dyn Sender>,
-    /// Durable address selection for this family's scope. A registry is bound
-    /// to one scope, so it belongs beside the scope rather than on the whole
-    /// collection, which spans every chain.
-    registry: Option<Arc<dyn Registry>>,
+struct Factory {
+    network: Network,
+    asset: AssetId,
+    maker: Arc<dyn WalletFactory>,
+    /// Absent for an asset this system receives and reports and never spends;
+    /// that absence is the whole refusal.
+    authorship: Option<Arc<dyn Authorship>>,
 }
 
-#[derive(Clone)]
-struct Entry<I, F> {
-    info: WalletInfo<I, F>,
-    wallet: Arc<dyn Wallet>,
-    filter: AddressFilter,
+/// One asset's authorship with the transfers it accepted.
+type Prepared = (Arc<dyn Authorship>, Vec<Transfer>);
+
+/// The wallet factories of every configured asset, keyed by asset tag.
+///
+/// It unifies factories and stores nothing else: it makes wallets, hands them
+/// to the caller, and answers what each asset is. Who holds a wallet is the
+/// caller's question, what is observed is [`indexing::Watching`]'s, and where
+/// a key lives is the application's (`docs/design/030 §8 (ex-029)`).
+pub struct Wallets<A: Ord> {
+    factories: BTreeMap<A, Factory>,
 }
 
-/// Configured wallet families and the abstract wallet instances they create.
-// design-lint: allow package-name-prefix -- Wallets is the public domain collection
-pub struct Wallets<I: Ord, F: Ord> {
-    checkpoint: Arc<dyn Checkpoint>,
-    families: BTreeMap<F, Family>,
-    admissions: BTreeMap<IndexScope, Arc<ScopeAdmission>>,
-    values: RwLock<BTreeMap<I, Entry<I, F>>>,
-}
-
-impl<I: Ord, F: Ord> Wallets<I, F> {
-    pub(crate) fn admission(&self, scope: &IndexScope) -> Result<Arc<ScopeAdmission>, Error> {
-        self.admissions.get(scope).cloned().ok_or_else(|| {
-            Error::new(
-                ErrorKind::Unsupported,
-                "wallet family scope has no address admission",
-            )
-        })
-    }
-}
-
-impl<I, F> Wallets<I, F>
-where
-    I: Clone + Ord + Send + Sync + 'static,
-    F: Clone + Ord + Send + Sync + 'static,
-{
-    #[must_use]
-    pub fn new(checkpoint: Arc<dyn Checkpoint>) -> Self {
+impl<A: Ord> Default for Wallets<A> {
+    fn default() -> Self {
         Self {
-            checkpoint,
-            families: BTreeMap::new(),
-            admissions: BTreeMap::new(),
-            values: RwLock::new(BTreeMap::new()),
+            factories: BTreeMap::new(),
         }
     }
+}
 
-    /// Registers one concrete constructor and sender at the composition root.
-    pub fn register(
+impl<A> Wallets<A>
+where
+    A: Clone + Ord + Send + Sync + 'static,
+{
+    /// An empty map. It takes no index and no storage: nothing in a factory
+    /// map reads either.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers the one factory of `asset` at the composition root; its
+    /// network, asset identity, and whether the system spends it at all come
+    /// from the factory ([`crate::FactoryProfile`]).
+    ///
+    /// A factory that declares no [`Authorship`] registers an asset this
+    /// system receives and reports and never spends: [`Wallets::author`] and
+    /// [`Wallets::send_all`] refuse it here, at lookup, and its wallets are
+    /// plain [`Wallet`]s with no send and no builder on them at all. That is
+    /// the only place the refusal exists — a chain writes none.
+    ///
+    /// There is no registry argument: the index owns the durable list of what
+    /// it observes ([`indexing::Watching`]).
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Duplicate`] when `asset` already has a factory.
+    pub fn add(
         &mut self,
-        family: F,
-        scope: IndexScope,
-        provider: impl Provider + 'static,
-        sender: Arc<dyn Sender>,
-        registry: Option<Arc<dyn Registry>>,
-    ) -> Result<(), Error> {
-        if self.families.contains_key(&family) {
-            return Err(Error::new(
-                ErrorKind::Duplicate,
-                "a wallet family is already registered for this key",
+        asset: A,
+        factory: impl WalletFactory + 'static,
+    ) -> Result<(), WalletError> {
+        if self.factories.contains_key(&asset) {
+            return Err(WalletError::new(
+                WalletErrorKind::Duplicate,
+                "a wallet factory is already registered for this asset",
             ));
         }
-        self.admissions.entry(scope.clone()).or_default();
-        self.families.insert(
-            family,
-            Family {
-                scope,
-                provider: Arc::new(provider),
-                sender,
-                registry,
-            },
-        );
+        let registered = Factory {
+            network: factory.network().clone(),
+            asset: factory.asset(),
+            authorship: factory.authorship(),
+            maker: Arc::new(factory),
+        };
+        self.factories.insert(asset, registered);
         Ok(())
     }
 
-    /// Generates secret material without returning it and starts indexing at
-    /// the first block after the current persisted checkpoint.
-    pub fn generate<'a>(&'a self, id: I, family: &F) -> FutureResult<'a, WalletInfo<I, F>> {
-        let family_key = family.clone();
-        let configured = self.family(family);
+    /// A new wallet of `asset`, returned and kept by nothing.
+    ///
+    /// The caller keeps it. To have it indexed, watch it:
+    /// `index.watch(&id, &*wallet, Start::Fresh)` — and, per
+    /// `docs/design/030 §8 (ex-029)` section 3.3, do that *before* filing the key, so a
+    /// crash leaves a watch-only address rather than a key nothing observes.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unsupported`] for an unregistered asset;
+    /// [`WalletErrorKind::Generation`] from the chain's key generation.
+    pub fn create<'a>(&'a self, asset: &A) -> FutureResult<'a, Arc<dyn Wallet>> {
+        let factory = self.factory(asset);
+        Box::pin(async move { Ok(factory?.maker.generate().await?.wallet) })
+    }
+
+    /// The wallet of `asset` that `secret` builds, returned and kept by
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unsupported`] for an unregistered asset;
+    /// [`WalletErrorKind::InvalidSecret`] when the bytes are not a key of this
+    /// chain's curve.
+    pub fn from<'a>(&'a self, asset: &A, secret: SecretBytes) -> FutureResult<'a, Arc<dyn Wallet>> {
+        let factory = self.factory(asset);
+        Box::pin(async move { factory?.maker.create(secret).await })
+    }
+
+    /// A new key in `asset`'s chain format, on that chain's own curve,
+    /// returned and kept by nothing.
+    ///
+    /// This is the key-first path: make the material, store it wherever the
+    /// application keeps keys, and hand it to [`Wallets::from`] when a wallet
+    /// is wanted. The wallet the factory built to derive it is dropped;
+    /// nothing is registered and no address is watched.
+    ///
+    /// There is no matching `parse_secret`: every supported chain's import
+    /// format is 32 bytes as 64 hexadecimal characters, which
+    /// [`crate::SecretBytes::from_hex`] already decodes without naming a
+    /// chain, and the curve check belongs to
+    /// [`crate::WalletFactory::create`].
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unsupported`] for an unregistered asset;
+    /// [`WalletErrorKind::Generation`] from the chain's key generation.
+    pub fn secret<'a>(&'a self, asset: &A) -> FutureResult<'a, SecretBytes> {
+        let factory = self.factory(asset);
+        Box::pin(async move { Ok(factory?.maker.generate().await?.material) })
+    }
+
+    /// Accepts `wallet` as one of `asset`'s own.
+    ///
+    /// Membership is proved by [`WalletFactory::validate`]
+    /// ([`crate::Origin`]) — same type, same configuration, same shared RPC
+    /// and outbox handles — rather than by a tag recorded when the wallet was
+    /// filed somewhere.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unsupported`] for an unregistered asset or a wallet this
+    /// factory could not have made.
+    pub fn accepts(&self, asset: &A, wallet: &dyn Wallet) -> Result<(), WalletError> {
+        self.factory(asset)?.maker.validate(wallet)
+    }
+
+    /// Parses user-supplied address text in `asset`'s network into its
+    /// canonical [`Address`]: a destination, or an address to watch.
+    ///
+    /// It only ever produces addresses of that asset's network, which is why
+    /// no send needs a separate same-network check.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unsupported`] for an unregistered asset;
+    /// [`WalletErrorKind::InvalidAddress`] from the factory's parse.
+    pub fn parse(&self, asset: &A, text: &str) -> Result<Address, WalletError> {
+        self.factory(asset)?.maker.parse_address(text)
+    }
+
+    /// Sends an ordered batch of 1..=[`MAX_TRANSFERS`] transfers, all from
+    /// wallets `asset`'s factory made, through that factory's [`Authorship`],
+    /// which is its batch [`crate::Sender`].
+    ///
+    /// An asset whose factory declared no [`Authorship`] is refused here, at
+    /// the lookup, before any item is examined: nothing about the request was
+    /// wrong, so the failure names no index.
+    ///
+    /// Every item is checked before anything is sent; the first failure names
+    /// its index. Membership is proved by [`crate::WalletFactory::validate`]
+    /// ([`crate::Origin`]) — same type, same configuration, same shared RPC
+    /// and outbox handles — which is the property a batch actually needs, and
+    /// a stronger one than a tag recorded when a wallet was filed.
+    pub fn send_all<'a>(&'a self, asset: &A, transfers: Vec<Transfer>) -> SendFuture<'a> {
+        let prepared = self.prepared(asset, transfers);
         Box::pin(async move {
-            let configured = configured?;
-            let wallet = configured.provider.generate().await?;
-            let (info, _, publication) =
-                self.store(id, family_key, configured, wallet, None).await?;
-            publication.ok_or_else(publication_error)?.complete()?;
-            Ok(info)
+            let (authorship, transfers) = prepared?;
+            authorship.send(transfers).await
         })
     }
 
-    /// Registers a wallet from caller-held secret material while running.
+    /// `wallet`'s authoring capability in `asset`: the one way to obtain an
+    /// [`Author`], and so the one way to reach a send or a transaction
+    /// builder at all.
     ///
-    /// Unlike [`Wallets::import`] this takes `&self`, so it stays available
-    /// after synchronization has started. That is safe because the address is
-    /// anchored at the current checkpoint exactly like a generated one: no
-    /// historical selection is introduced, so no rescan is implied.
+    /// Both halves are checked here and nowhere else. The asset must be one
+    /// this system spends — a factory that declared no [`Authorship`] is
+    /// refused at this lookup, so no unspendable asset ever reaches a chain's
+    /// builder — and `wallet` must be one that asset's own factory made
+    /// ([`crate::Origin`]).
     ///
-    /// Use it when the application generates and durably stores its own key
-    /// material — a deposit address whose custody belongs in the application's
-    /// database rather than in this in-memory registry.
-    pub fn adopt<'a>(
-        &'a self,
-        id: I,
-        family: &F,
-        secret: SecretBytes,
-    ) -> FutureResult<'a, WalletInfo<I, F>>
-    where
-        I: fmt::Display,
-    {
-        let family_key = family.clone();
-        let configured = self.family(family);
-        Box::pin(async move {
-            let configured = configured?;
-            // Copy the material before the provider consumes the secret: a
-            // registry has to store what the caller supplied, not a derivation.
-            let material = secret.as_bytes().to_vec();
-            let registry = configured.registry.clone();
-            let wallet = configured.provider.create(secret).await?;
-            let (info, filter, publication) = self
-                .store(id.clone(), family_key, configured, wallet, None)
-                .await?;
-            if let Some(registry) = &registry
-                && let Err(error) = registry
-                    .register(RegisteredAddress {
-                        id: id.to_string(),
-                        filter,
-                        material,
-                    })
-                    .await
-            {
-                // A wallet observed in memory but absent from the registry
-                // would vanish on restart while appearing registered now.
-                self.forget(&id);
-                return Err(error.into());
-            }
-            publication.ok_or_else(publication_error)?.complete()?;
-            Ok(info)
-        })
-    }
-
-    /// Re-registers every address this family previously adopted.
+    /// # Errors
     ///
-    /// Startup-only, for the same reason as [`Wallets::import`]: a stored
-    /// birthday is usually below the current checkpoint, which is historical
-    /// selection and must not be introduced once synchronization is running.
-    /// Taking `&mut self` makes that impossible after the collection is shared.
-    ///
-    /// Returns how many addresses were restored. A family with no registry
-    /// restores nothing and is not an error — that collection is simply
-    /// memory-only.
-    pub fn restore<'a>(&'a mut self, family: &F) -> FutureResult<'a, usize>
-    where
-        I: From<String>,
-    {
-        let family_key = family.clone();
-        let configured = self.family(family);
-        Box::pin(async move {
-            let configured = configured?;
-            let Some(registry) = configured.registry.clone() else {
-                return Ok(0);
-            };
-            let entries = registry.registered(&configured.scope).await?;
-            let mut restored = 0;
-            for entry in entries {
-                let wallet = configured
-                    .provider
-                    .create(SecretBytes::new(entry.material))
-                    .await?;
-                let (_, _, publication) = self
-                    .store(
-                        I::from(entry.id),
-                        family_key.clone(),
-                        configured.clone(),
-                        wallet,
-                        Some(entry.filter.start_position),
-                    )
-                    .await?;
-                debug_assert!(publication.is_none());
-                restored += 1;
-            }
-            Ok(restored)
-        })
+    /// [`WalletErrorKind::Unsupported`] for an unregistered asset, for an asset
+    /// this system receives and never spends, and for a wallet this factory
+    /// could not have made.
+    pub fn author(
+        &self,
+        asset: &A,
+        wallet: &Arc<dyn Wallet>,
+    ) -> Result<Arc<dyn Author>, WalletError> {
+        let factory = self.factory(asset)?;
+        // The asset first: whether it is spent at all is a fact about the
+        // registration, and says nothing about the wallet that was offered.
+        let authorship = Self::authorship(&factory)?;
+        factory.maker.validate(wallet.as_ref())?;
+        authorship.author(wallet)
     }
 
-    /// Imports secret material and indexes from its explicit birthday.
-    ///
-    /// This startup-only operation requires exclusive access so historical
-    /// selection cannot be introduced after synchronization begins.
-    pub fn import<'a>(
-        &'a mut self,
-        id: I,
-        family: &F,
-        secret: SecretBytes,
-        start_position: BlockPosition,
-    ) -> FutureResult<'a, WalletInfo<I, F>> {
-        let family_key = family.clone();
-        let configured = self.family(family);
-        Box::pin(async move {
-            let configured = configured?;
-            let wallet = configured.provider.create(secret).await?;
-            let (info, _, publication) = self
-                .store(id, family_key, configured, wallet, Some(start_position))
-                .await?;
-            debug_assert!(publication.is_none());
-            Ok(info)
-        })
-    }
-
-    /// Inserts an existing wallet without recreating or persisting its key.
-    ///
-    /// The registered provider must validate its scope and compatibility.
-    /// Like import, this requires an explicit birthday and exclusive startup
-    /// access: an existing key may already have historical activity.
-    ///
-    /// ```compile_fail,E0596
-    /// use std::sync::Arc;
-    /// use wallets::{Wallet, Wallets};
-    /// fn insert_shared(mut wallets: Arc<Wallets<String, String>>, wallet: Arc<dyn Wallet>) {
-    ///     let _ = wallets.insert("id".into(), &"btc".into(), wallet, base::BlockPosition(0));
-    /// }
-    /// ```
-    pub fn insert<'a>(
-        &'a mut self,
-        id: I,
-        family: &F,
-        wallet: Arc<dyn Wallet>,
-        start_position: BlockPosition,
-    ) -> FutureResult<'a, WalletInfo<I, F>> {
-        let family_key = family.clone();
-        let configured = self.family(family);
-        Box::pin(async move {
-            let configured = configured?;
-            configured
-                .provider
-                .validate(&configured.scope, wallet.as_ref())?;
-            let (info, _, publication) = self
-                .store(id, family_key, configured, wallet, Some(start_position))
-                .await?;
-            debug_assert!(publication.is_none());
-            Ok(info)
-        })
-    }
-
-    pub fn get<Q>(&self, id: &Q) -> Result<WalletInfo<I, F>, Error>
-    where
-        I: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        let values = self.values.read().map_err(|_| lock_error())?;
-        match values.get(id) {
-            Some(entry) => Ok(entry.info.clone()),
-            None => Err(Error::new(ErrorKind::NotFound, "wallet does not exist")),
-        }
-    }
-
-    pub fn balance<'a, Q>(&'a self, id: &Q) -> FutureResult<'a, Balance>
-    where
-        I: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        let wallet = self.instance(id);
-        Box::pin(async move { wallet?.balance().await })
-    }
-
-    pub fn history<'a, Q>(&'a self, id: &Q, request: HistoryRequest) -> FutureResult<'a, History>
-    where
-        I: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        let wallet = self.instance(id);
-        Box::pin(async move { wallet?.history(request).await })
-    }
-
-    pub fn send<'a, Q>(
-        &'a self,
-        id: &Q,
-        destination: AddressText,
-        amount: Decimal,
-    ) -> FutureResult<'a, TransactionId>
-    where
-        I: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        let wallet = self.instance(id);
-        Box::pin(async move { wallet?.send(destination, amount).await })
-    }
-
-    /// Returns the authoritative address/birthday snapshot for one index run.
-    /// Wallets sharing an address contribute the earliest birthday.
-    pub fn filters(&self) -> Result<Vec<AddressFilter>, Error> {
-        let values = self.values.read().map_err(|_| lock_error())?;
-        let mut filters = BTreeMap::<CanonicalAddress, BlockPosition>::new();
-        for entry in values.values() {
-            filters
-                .entry(entry.filter.address.clone())
-                .and_modify(|position| *position = (*position).min(entry.filter.start_position))
-                .or_insert(entry.filter.start_position);
-        }
-        Ok(filters
-            .into_iter()
-            .map(|(address, start_position)| AddressFilter {
-                address,
-                start_position,
+    /// Every registered asset key with its network and asset identity, in key
+    /// order.
+    #[must_use]
+    pub fn assets(&self) -> Vec<AssetInfo<A>> {
+        self.factories
+            .iter()
+            .map(|(tag, factory)| AssetInfo {
+                tag: tag.clone(),
+                network: factory.network.clone(),
+                id: factory.asset.clone(),
             })
-            .collect())
+            .collect()
     }
 
-    fn family(&self, family: &F) -> Result<Family, Error> {
-        self.families.get(family).cloned().ok_or_else(|| {
-            Error::new(
-                ErrorKind::Unsupported,
-                "no wallet family is registered for this key",
+    /// The registered facts of `asset`.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unsupported`] for an unregistered asset.
+    pub fn asset(&self, asset: &A) -> Result<AssetInfo<A>, WalletError> {
+        let factory = self.factory(asset)?;
+        Ok(AssetInfo {
+            tag: asset.clone(),
+            network: factory.network,
+            id: factory.asset,
+        })
+    }
+
+    fn prepared(&self, asset: &A, transfers: Vec<Transfer>) -> Result<Prepared, SendError> {
+        SendError::check_count(transfers.len())?;
+        let definite = |error: WalletError| SendError::definite(error.kind, error.message);
+        let factory = self.factory(asset).map_err(definite)?;
+        let authorship = Self::authorship(&factory).map_err(definite)?;
+        for (index, transfer) in transfers.iter().enumerate() {
+            Self::check(&factory, transfer)
+                .map_err(|error| SendError::item(index, Vec::new(), error))?;
+        }
+        Ok((authorship, transfers))
+    }
+
+    /// The registered asset's spending capability.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unsupported`] when its factory declared none, which is a
+    /// whole-request refusal and names no item: nothing about the request was
+    /// wrong, the asset is one this system only receives.
+    fn authorship(factory: &Factory) -> Result<Arc<dyn Authorship>, WalletError> {
+        factory.authorship.clone().ok_or_else(|| {
+            WalletError::new(
+                WalletErrorKind::Unsupported,
+                "this asset is received and reported, and is never sent",
             )
         })
     }
 
-    async fn store(
-        &self,
-        id: I,
-        family_key: F,
-        family: Family,
-        wallet: Arc<dyn Wallet>,
-        start_position: Option<BlockPosition>,
-    ) -> Result<(WalletInfo<I, F>, AddressFilter, Option<PublicationPermit>), Error> {
-        let publication = if start_position.is_none() {
-            let persisted = self.checkpoint.checkpoint(&family.scope).await?;
-            let admission = self.admission(&family.scope)?;
-            Some(admission.publication(persisted).await?)
-        } else {
-            None
-        };
-        let checkpoint = publication.as_ref().map(PublicationPermit::checkpoint);
-        let start_position = match (start_position, checkpoint) {
-            (Some(position), _) => position,
-            (None, Some(Some(block))) => block.position.checked_successor().ok_or_else(|| {
-                Error::new(
-                    ErrorKind::Unavailable,
-                    "checkpoint position has no successor for wallet publication",
-                )
-            })?,
-            (None, Some(None)) => BlockPosition(0),
-            (None, None) => return Err(publication_error()),
-        };
-        let entry = self
-            .activate(id.clone(), family_key, family, wallet, start_position)
-            .await?;
-        let info = entry.info.clone();
-        let filter = entry.filter.clone();
-        let mut values = self.values.write().map_err(|_| lock_error())?;
-        if values.contains_key(&id) {
-            return Err(Error::new(
-                ErrorKind::Duplicate,
-                "a wallet is already registered for this key",
+    /// Accepts one item: a positive amount, a destination of the factory's own
+    /// network, and a wallet the factory made.
+    fn check(factory: &Factory, transfer: &Transfer) -> Result<(), WalletError> {
+        if transfer.amount <= Decimal::zero() {
+            return Err(WalletError::new(
+                WalletErrorKind::InvalidAmount,
+                "amount must be positive",
             ));
         }
-        values.insert(id, entry);
-        Ok((info, filter, publication))
-    }
-
-    /// Drops an in-memory wallet again after a durable write failed, so the two
-    /// never disagree about which addresses are registered.
-    fn forget(&self, id: &I) {
-        if let Ok(mut values) = self.values.write() {
-            values.remove(id);
+        if !transfer.to.belongs_to(&factory.network) {
+            return Err(WalletError::new(
+                WalletErrorKind::InvalidAddress,
+                "destination address belongs to another network than the wallet",
+            ));
         }
+        factory.maker.validate(transfer.wallet.as_ref())
     }
 
-    async fn activate(
-        &self,
-        id: I,
-        family_key: F,
-        family: Family,
-        wallet: Arc<dyn Wallet>,
-        start_position: BlockPosition,
-    ) -> Result<Entry<I, F>, Error> {
-        let address = wallet.address_text(&wallet.address())?;
-        let filter = AddressFilter {
-            address: CanonicalAddress {
-                scope: family.scope.clone(),
-                value: address.text.clone(),
-            },
-            start_position,
-        };
-        Ok(Entry {
-            info: WalletInfo {
-                id,
-                family: family_key,
-                scope: family.scope,
-                address,
-            },
-            wallet,
-            filter,
+    fn factory(&self, asset: &A) -> Result<Factory, WalletError> {
+        self.factories.get(asset).cloned().ok_or_else(|| {
+            WalletError::new(
+                WalletErrorKind::Unsupported,
+                "no wallet factory is registered for this asset",
+            )
         })
     }
-
-    fn instance<Q>(&self, id: &Q) -> Result<Arc<dyn Wallet>, Error>
-    where
-        I: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        let values = self.values.read().map_err(|_| lock_error())?;
-        match values.get(id) {
-            Some(entry) => Ok(entry.wallet.clone()),
-            None => Err(Error::new(ErrorKind::NotFound, "wallet does not exist")),
-        }
-    }
-
-    fn entry(&self, id: &I) -> Result<Entry<I, F>, Error> {
-        let values = self.values.read().map_err(|_| lock_error())?;
-        match values.get(id) {
-            Some(entry) => Ok(entry.clone()),
-            None => Err(Error::new(ErrorKind::NotFound, "wallet does not exist")),
-        }
-    }
-}
-
-fn lock_error() -> Error {
-    Error::new(ErrorKind::Unavailable, "wallet registry lock is poisoned")
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        cmp::Ordering,
-        sync::{
-            Mutex,
-            atomic::{AtomicUsize, Ordering as AtomicOrdering},
-        },
-        task::{Context, Poll, Waker},
-    };
+pub(crate) mod tests {
+    use std::sync::Mutex;
 
     use base::{
-        Address, Addresser, Broadcaster, SignFuture, SignRequest, SignedTransaction, Signer,
-        Submission, TransactionBuilder, TransactionEnvelope, TransactionError, TransactionFuture,
-        TransactionSnapshot,
+        Address, Broadcaster, ChainName, Decimal, SignFuture, SignRequest, Signer,
+        TransactionBuilder, TransactionError, TransactionId, TransactionSnapshot,
     };
-    use indexing::{
-        BlockHash, BlockHeight, BlockRef, BoxFuture, ChainId, FilterSource, HistoryCursor,
-        IndexError, IndexErrorKind,
-    };
+    use futures_executor::block_on;
+    use indexing::{AssetId, Holder};
 
     use super::*;
     use crate::{
-        AddressEncoding, AddressFormat, BalanceReader, HistoryReader, SendError, SendFuture,
+        AddressParser, FactoryProfile, Generation, SecretBytes, SendError, SendFuture, Sender,
         SingleSender, TransactionFactory, Transfer,
     };
 
-    struct FixtureIndex(Option<BlockRef>);
-
-    struct InactiveRegistry;
-
-    impl Registry for InactiveRegistry {
-        fn register<'a>(
-            &'a self,
-            _entry: RegisteredAddress,
-        ) -> BoxFuture<'a, Result<(), IndexError>> {
-            panic!("existing wallet insertion must not persist secrets or addresses")
-        }
-
-        fn registered<'a>(
-            &'a self,
-            _scope: &'a IndexScope,
-        ) -> BoxFuture<'a, Result<Vec<RegisteredAddress>, IndexError>> {
-            panic!("existing wallet insertion must not read registry persistence")
-        }
+    /// Makes [`FixtureWallet`]s in its network and parses any non-empty text.
+    /// A factory only accepts wallets of its own network, which is what
+    /// `Origin` proves for a real chain.
+    pub(crate) struct FixtureFactory {
+        network: Network,
+        sender: Arc<RecordingSender>,
+        generation: Option<WalletErrorKind>,
+        /// Whether its asset is one the system spends at all.
+        spends: bool,
     }
 
-    impl Checkpoint for FixtureIndex {
-        fn checkpoint<'a>(
-            &'a self,
-            _scope: &'a IndexScope,
-        ) -> BoxFuture<'a, Result<Option<BlockRef>, IndexError>> {
-            Box::pin(async move { Ok(self.0.clone()) })
+    impl FixtureFactory {
+        /// A factory of the example chain's `network`.
+        pub(crate) fn new(network: &str) -> Self {
+            Self::of(fixture_network(network))
         }
-    }
 
-    #[derive(Clone, Debug)]
-    struct CountedId {
-        value: usize,
-        comparisons: Arc<AtomicUsize>,
-    }
+        /// A factory of any network, for a fixture that needs several chains.
+        pub(crate) fn of(network: Network) -> Self {
+            Self {
+                network,
+                sender: Arc::new(RecordingSender::default()),
+                generation: None,
+                spends: true,
+            }
+        }
 
-    impl PartialEq for CountedId {
-        fn eq(&self, other: &Self) -> bool {
-            self.value == other.value
+        /// A factory of an asset the system receives and reports and never
+        /// spends, as a chain declares one by returning no authorship.
+        fn receiving(network: &str) -> Self {
+            Self {
+                spends: false,
+                ..Self::new(network)
+            }
         }
     }
 
-    impl Eq for CountedId {}
-
-    impl PartialOrd for CountedId {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-
-    impl Ord for CountedId {
-        fn cmp(&self, other: &Self) -> Ordering {
-            self.comparisons.fetch_add(1, AtomicOrdering::Relaxed);
-            self.value.cmp(&other.value)
-        }
-    }
-
-    #[derive(Clone)]
-    struct FixtureSender {
-        calls: Arc<Mutex<usize>>,
-    }
-
-    impl Sender for FixtureSender {
-        fn send<'a>(&'a self, transfers: Vec<Transfer>) -> SendFuture<'a> {
-            Box::pin(async move {
-                *self.calls.lock().expect("fixture lock") += 1;
-                Ok(vec![TransactionId::new(format!(
-                    "batch-{}",
-                    transfers.len()
-                ))])
-            })
-        }
-    }
-
-    struct RecordingSender {
-        batches: Arc<Mutex<Vec<Vec<Transfer>>>>,
-        result: Vec<TransactionId>,
-    }
-
-    impl Sender for RecordingSender {
-        fn send<'a>(&'a self, transfers: Vec<Transfer>) -> SendFuture<'a> {
-            Box::pin(async move {
-                self.batches
-                    .lock()
-                    .expect("recording sender lock")
-                    .push(transfers);
-                Ok(self.result.clone())
-            })
-        }
-    }
-
-    enum FixtureProvider {
-        Value,
-    }
-
-    impl Provider for FixtureProvider {
-        fn validate(&self, _scope: &IndexScope, wallet: &dyn Wallet) -> Result<(), Error> {
-            if (wallet as &dyn std::any::Any).is::<FixtureWallet>() {
+    impl WalletFactory for FixtureFactory {
+        fn validate(&self, wallet: &dyn Wallet) -> Result<(), WalletError> {
+            if wallet.address().belongs_to(&self.network) {
                 return Ok(());
             }
-            Err(Error::new(
-                ErrorKind::Unsupported,
+            Err(WalletError::new(
+                WalletErrorKind::Unsupported,
                 "incompatible fixture wallet",
             ))
         }
 
-        fn create<'a>(&'a self, _secret: SecretBytes) -> FutureResult<'a, Arc<dyn Wallet>> {
-            Box::pin(async { Ok(Arc::new(FixtureWallet(false)) as Arc<dyn Wallet>) })
+        fn create<'a>(&'a self, secret: SecretBytes) -> FutureResult<'a, Arc<dyn Wallet>> {
+            let value = format!("fixture-{:02x}", secret.as_bytes().first().unwrap_or(&0));
+            let wallet = FixtureWallet {
+                address: Address::new(self.network.clone(), value),
+                asset: AssetId::native(self.network.chain.clone()),
+            };
+            Box::pin(async move { Ok(Arc::new(wallet) as Arc<dyn Wallet>) })
         }
 
-        fn generate(&self) -> FutureResult<'_, Arc<dyn Wallet>> {
-            self.create(SecretBytes::new([7; 32]))
-        }
-    }
-
-    struct GenerationFailureProvider;
-
-    impl Provider for GenerationFailureProvider {
-        fn validate(&self, _scope: &IndexScope, _wallet: &dyn Wallet) -> Result<(), Error> {
-            Err(Error::new(
-                ErrorKind::Unsupported,
-                "fixture rejects insertion",
-            ))
-        }
-
-        fn create<'a>(&'a self, _secret: SecretBytes) -> FutureResult<'a, Arc<dyn Wallet>> {
-            Box::pin(async { unreachable!("generation failure must not reach wallet creation") })
-        }
-
-        fn generate(&self) -> FutureResult<'_, Arc<dyn Wallet>> {
-            Box::pin(async {
-                Err(Error::new(
-                    ErrorKind::Generation,
-                    "fixture generation failed",
-                ))
-            })
+        fn generate(&self) -> FutureResult<'_, Generation> {
+            if let Some(kind) = self.generation {
+                return Box::pin(async move {
+                    Err(WalletError::new(kind, "fixture generation failed"))
+                });
+            }
+            Generation::of(self, Ok(SecretBytes::new([7; 32])))
         }
     }
 
-    struct FixtureWallet(bool);
+    impl AddressParser for FixtureFactory {
+        fn parse_address(&self, text: &str) -> Result<Address, WalletError> {
+            if text.is_empty() {
+                return Err(WalletError::new(
+                    WalletErrorKind::InvalidAddress,
+                    "invalid fixture address",
+                ));
+            }
+            Ok(Address::new(self.network.clone(), text.to_lowercase()))
+        }
+    }
 
-    impl Addresser for FixtureWallet {
-        fn address(&self) -> Address {
-            Address::from([1])
+    impl FactoryProfile for FixtureFactory {
+        fn network(&self) -> &Network {
+            &self.network
+        }
+
+        fn asset(&self) -> AssetId {
+            AssetId::native(self.network.chain.clone())
+        }
+
+        fn authorship(&self) -> Option<Arc<dyn Authorship>> {
+            self.spends
+                .then(|| self.sender.clone() as Arc<dyn Authorship>)
+        }
+    }
+
+    /// Records every batch it is handed, so a test can check what reached it.
+    #[derive(Default)]
+    struct RecordingSender(Mutex<Vec<Vec<(String, String)>>>);
+
+    impl RecordingSender {
+        fn batches(&self) -> Vec<Vec<(String, String)>> {
+            self.0.lock().expect("recorded batches").clone()
+        }
+    }
+
+    impl Sender for RecordingSender {
+        fn send<'a>(&'a self, transfers: Vec<Transfer>) -> SendFuture<'a> {
+            let recorded = transfers
+                .iter()
+                .map(|transfer| (transfer.to.value.clone(), transfer.amount.to_string()))
+                .collect();
+            self.0.lock().expect("recorded batches").push(recorded);
+            Box::pin(async move { Ok(vec![TransactionId::new("batch")]) })
+        }
+    }
+
+    impl Authorship for RecordingSender {
+        fn author(&self, wallet: &Arc<dyn Wallet>) -> Result<Arc<dyn Author>, WalletError> {
+            let wallet = (wallet.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<FixtureWallet>()
+                .ok_or_else(|| {
+                    WalletError::new(WalletErrorKind::Unsupported, "not a fixture wallet")
+                })?;
+            Ok(Arc::new(FixtureWallet {
+                address: wallet.address.clone(),
+                asset: wallet.asset.clone(),
+            }))
+        }
+    }
+
+    /// A wallet with a fixed address and no chain.
+    struct FixtureWallet {
+        address: Address,
+        asset: AssetId,
+    }
+
+    impl Holder for FixtureWallet {
+        fn address(&self) -> &Address {
+            &self.address
+        }
+
+        fn asset(&self) -> &AssetId {
+            &self.asset
         }
     }
 
     impl Signer for FixtureWallet {
         fn sign<'a>(&'a self, _request: SignRequest) -> SignFuture<'a> {
-            Box::pin(async { unreachable!("fixture builder does not call the signer") })
+            Box::pin(async { unreachable!("fixture wallets do not sign") })
         }
     }
 
-    impl AddressFormat for FixtureWallet {
-        fn address_text(&self, _address: &Address) -> Result<AddressText, Error> {
-            Ok(AddressText::new(AddressEncoding::Hex, "fixture-address"))
-        }
-
-        fn parse_address(&self, address: &AddressText) -> Result<Address, Error> {
-            if address.encoding != AddressEncoding::Hex || address.text.is_empty() {
-                return Err(Error::new(
-                    ErrorKind::InvalidAddress,
-                    "invalid fixture address",
-                ));
-            }
-            Ok(Address::new(address.text.as_bytes()))
-        }
-    }
-
-    impl BalanceReader for FixtureWallet {
-        fn balance<'a>(&'a self) -> FutureResult<'a, Balance> {
-            Box::pin(async {
-                Ok(Balance {
-                    amount: Decimal::from(12_u64),
-                    observed_at: None,
-                })
-            })
-        }
-    }
-
-    impl HistoryReader for FixtureWallet {
-        fn history<'a>(&'a self, _request: HistoryRequest) -> FutureResult<'a, History> {
-            Box::pin(async {
-                Ok(History {
-                    checkpoint: None,
-                    transactions: Vec::new(),
-                    next: None::<HistoryCursor>,
-                })
-            })
+    impl SingleSender for FixtureWallet {
+        fn send<'a>(
+            &'a self,
+            _destination: Address,
+            _amount: Decimal,
+        ) -> FutureResult<'a, TransactionId> {
+            Box::pin(async { Ok(TransactionId::new("single")) })
         }
     }
 
     impl TransactionFactory for FixtureWallet {
         fn transaction(&self) -> Box<dyn TransactionBuilder> {
-            Box::new(FixtureBuilder(false))
+            unreachable!("fixture wallets build nothing")
         }
 
-        fn restore(
+        fn resume(
             &self,
             _snapshot: &TransactionSnapshot,
         ) -> Result<Box<dyn TransactionBuilder>, TransactionError> {
-            Ok(self.transaction())
+            unreachable!("fixture wallets restore nothing")
         }
 
         fn broadcaster(&self) -> &dyn Broadcaster {
-            self
+            unreachable!("fixture wallets broadcast nothing")
         }
     }
 
-    impl crate::SingleSender for FixtureWallet {
-        fn send<'a>(
-            &'a self,
-            destination: AddressText,
-            amount: Decimal,
-        ) -> FutureResult<'a, TransactionId> {
-            crate::send_with_transaction(self, destination, amount)
-        }
+    fn fixture_network(name: &str) -> Network {
+        Network::new(ChainName::new("example"), name)
     }
 
-    impl Broadcaster for FixtureWallet {
-        fn broadcast<'a>(
-            &'a self,
-            transaction: &'a SignedTransaction,
-        ) -> TransactionFuture<'a, Result<Submission, TransactionError>> {
-            Box::pin(async move {
-                Ok(Submission {
-                    id: if self.0 {
-                        TransactionId::new("different")
-                    } else {
-                        transaction.id().clone()
-                    },
-                })
-            })
-        }
-    }
-
-    struct FixtureBuilder(bool);
-
-    impl TransactionBuilder for FixtureBuilder {
-        fn transfer(
-            &mut self,
-            _destination: Address,
-            _amount: Decimal,
-        ) -> Result<(), TransactionError> {
-            self.0 = true;
-            Ok(())
-        }
-
-        fn snapshot(&self) -> Result<TransactionSnapshot, TransactionError> {
-            Ok(TransactionSnapshot::new("fixture", serde_json::json!({})))
-        }
-
-        fn prepare<'a>(
-            &'a mut self,
-        ) -> TransactionFuture<'a, Result<SignedTransaction, TransactionError>> {
-            Box::pin(async move {
-                assert!(self.0, "fixture transfer must be configured");
-                Ok(SignedTransaction::new(
-                    "fixture",
-                    TransactionId::new("single"),
-                    TransactionEnvelope::new(Vec::new()),
-                ))
-            })
-        }
-    }
-
-    fn scope(network: &str) -> IndexScope {
-        IndexScope {
-            chain: ChainId("example".to_owned()),
-            network: network.to_owned(),
-        }
-    }
-
-    fn block(height: u64) -> BlockRef {
-        BlockRef {
-            position: base::BlockPosition(height),
-            height: BlockHeight(height),
-            hash: BlockHash(vec![height as u8]),
-            parent: None,
-            timestamp: None,
-        }
-    }
-
-    fn sender() -> (Arc<FixtureSender>, Arc<Mutex<usize>>) {
-        let calls = Arc::new(Mutex::new(0));
-        (
-            Arc::new(FixtureSender {
-                calls: calls.clone(),
-            }),
-            calls,
-        )
-    }
-
-    fn batch_wallets() -> (
-        Wallets<CountedId, String>,
-        CountedId,
-        Arc<AtomicUsize>,
-        Arc<Mutex<usize>>,
-    ) {
-        let comparisons = Arc::new(AtomicUsize::new(0));
-        let wallet_id = CountedId {
-            value: 1,
-            comparisons: comparisons.clone(),
-        };
-        let (sender, calls) = sender();
-        let family = "family".to_owned();
-        let mut wallets = Wallets::new(Arc::new(FixtureIndex(None)));
-        wallets
-            .register(
-                family.clone(),
-                scope("mainnet"),
-                FixtureProvider::Value,
-                sender,
-                None,
-            )
-            .expect("family registration");
-        futures_executor::block_on(wallets.import(
-            wallet_id.clone(),
-            &family,
-            SecretBytes::new([1; 32]),
-            BlockPosition(1),
-        ))
-        .expect("wallet import");
-        comparisons.store(0, AtomicOrdering::Relaxed);
-        (wallets, wallet_id, comparisons, calls)
-    }
-
-    fn batch_transfers(wallet: &CountedId, count: usize) -> Vec<WalletTransfer<CountedId>> {
-        std::iter::repeat_with(|| WalletTransfer {
-            wallet: wallet.clone(),
-            to: AddressText::new(AddressEncoding::Hex, "destination"),
-            amount: Decimal::from(1_u64),
-        })
-        .take(count)
-        .collect()
-    }
-
-    fn assert_invalid_batch(failure: SendError, message: &str) {
-        assert!(failure.accepted.is_empty());
-        assert_eq!(failure.failed_index, None);
-        assert_eq!(failure.ambiguous_transaction_id, None);
-        assert_eq!(failure.source.kind, ErrorKind::InvalidBatch);
-        assert_eq!(failure.source.message, message);
-        assert_eq!(failure.source.ambiguous_transaction_id, None);
-        assert_eq!(failure.to_string(), message);
+    /// A map with `coin` registered on `mainnet`, and that factory's sender.
+    fn map() -> (Wallets<&'static str>, Arc<RecordingSender>) {
+        let factory = FixtureFactory::new("mainnet");
+        let sender = factory.sender.clone();
+        let mut wallets = Wallets::new();
+        wallets.add("coin", factory).expect("first registration");
+        (wallets, sender)
     }
 
     #[test]
-    fn families_share_admission_only_within_the_exact_scope() {
-        let (sender, _) = sender();
-        let mainnet = scope("mainnet");
-        let testnet = scope("testnet");
-        let other_chain = IndexScope {
-            chain: ChainId("other".to_owned()),
-            network: mainnet.network.clone(),
-        };
-        let mut wallets = Wallets::<String, &str>::new(Arc::new(FixtureIndex(Some(block(7)))));
-        wallets
-            .register(
-                "first",
-                mainnet.clone(),
-                FixtureProvider::Value,
-                sender.clone(),
-                None,
-            )
-            .expect("first family");
-        let admission = wallets.admission(&mainnet).expect("first admission");
+    fn one_factory_per_asset_and_a_second_is_a_duplicate() {
+        let (mut wallets, _) = map();
 
-        for (family, scope) in [
-            ("second", mainnet.clone()),
-            ("testnet", testnet.clone()),
-            ("other-chain", other_chain.clone()),
+        let error = wallets
+            .add("coin", FixtureFactory::new("mainnet"))
+            .expect_err("one factory per asset");
+
+        assert_eq!(error.kind, WalletErrorKind::Duplicate);
+        assert_eq!(wallets.assets().len(), 1);
+    }
+
+    /// The map makes wallets and keeps none: nothing it exposes can find one
+    /// again, because the caller is holding it.
+    #[test]
+    fn creating_and_importing_return_the_wallet_and_keep_nothing() {
+        let (wallets, _) = map();
+
+        let created = block_on(wallets.create(&"coin")).expect("create");
+        let imported = block_on(wallets.from(&"coin", SecretBytes::new([0x2a; 32]))).expect("from");
+
+        assert_eq!(created.address().value, "fixture-07");
+        assert_eq!(imported.address().value, "fixture-2a");
+        assert_eq!(*created.asset(), AssetId::native(ChainName::new("example")));
+        // Two creations of one asset are two wallets; nothing is deduplicated
+        // or remembered here.
+        let again = block_on(wallets.create(&"coin")).expect("create again");
+        assert!(!Arc::ptr_eq(&created, &again));
+    }
+
+    #[test]
+    fn an_unregistered_asset_is_unsupported_everywhere() {
+        let (wallets, _) = map();
+
+        for kind in [
+            block_on(wallets.create(&"missing")).err().map(|e| e.kind),
+            block_on(wallets.from(&"missing", SecretBytes::new([1; 32])))
+                .err()
+                .map(|e| e.kind),
+            block_on(wallets.secret(&"missing")).err().map(|e| e.kind),
+            wallets.parse(&"missing", "a").err().map(|e| e.kind),
+            wallets.asset(&"missing").err().map(|e| e.kind),
+            wallets
+                .author(
+                    &"missing",
+                    &block_on(wallets.create(&"coin")).expect("a wallet"),
+                )
+                .err()
+                .map(|e| e.kind),
         ] {
-            wallets
-                .register(family, scope, FixtureProvider::Value, sender.clone(), None)
-                .expect("additional family");
+            assert_eq!(kind, Some(WalletErrorKind::Unsupported));
         }
-        assert!(Arc::ptr_eq(
-            &admission,
-            &wallets.admission(&mainnet).expect("shared admission"),
-        ));
-        for scope in [&testnet, &other_chain] {
-            assert!(!Arc::ptr_eq(
-                &admission,
-                &wallets.admission(scope).expect("distinct admission"),
-            ));
-        }
-
-        let stale = wallets
-            .plan(&mainnet, Some(block(7)))
-            .expect("mainnet plan");
-        let testnet_plan = wallets
-            .plan(&testnet, Some(block(7)))
-            .expect("testnet plan");
-        let other_plan = wallets
-            .plan(&other_chain, Some(block(7)))
-            .expect("other chain plan");
-        futures_executor::block_on(wallets.generate("alice".to_owned(), &"second"))
-            .expect("second-family publication");
-
-        let error = stale.begin().err().expect("same-scope plan is stale");
-        assert_eq!(error.kind, IndexErrorKind::Conflict);
-        assert!(testnet_plan.filters().is_empty());
-        assert!(other_plan.filters().is_empty());
-        assert!(testnet_plan.begin().is_ok());
-        assert!(other_plan.begin().is_ok());
-        let current = wallets
-            .plan(&mainnet, Some(block(7)))
-            .expect("current plan");
-        assert_eq!(current.filters().len(), 1);
-        assert_eq!(current.filters()[0].start_position, BlockPosition(8));
     }
 
+    /// Membership is the factory's answer, not a tag recorded when a wallet
+    /// was filed somewhere.
     #[test]
-    fn unsupported_admission_preserves_wallet_and_filter_errors() {
-        let (sender, _) = sender();
-        let mut wallets = Wallets::<String, &str>::new(Arc::new(FixtureIndex(None)));
+    fn acceptance_is_proved_by_the_factory() {
+        let (mut wallets, _) = map();
         wallets
-            .register(
-                "family",
-                scope("mainnet"),
-                FixtureProvider::Value,
-                sender,
-                None,
-            )
-            .expect("family registration");
-        let unsupported = scope("testnet");
+            .add("other", FixtureFactory::new("testnet"))
+            .expect("second network");
+        let coin = block_on(wallets.create(&"coin")).expect("create");
+
+        wallets.accepts(&"coin", coin.as_ref()).expect("its own");
         let error = wallets
-            .admission(&unsupported)
-            .err()
-            .expect("unknown scope");
-        assert_eq!(error.kind, ErrorKind::Unsupported);
-        assert_eq!(
-            error.message,
-            "wallet family scope has no address admission"
-        );
+            .accepts(&"other", coin.as_ref())
+            .expect_err("another factory's wallet");
 
-        let error = wallets
-            .plan(&unsupported, None)
-            .err()
-            .expect("unknown scope plan");
-        assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
-        assert_eq!(
-            error.message,
-            "wallet family scope has no address admission"
-        );
-        assert!(!error.retryable);
+        assert_eq!(error.kind, WalletErrorKind::Unsupported);
     }
 
     #[test]
-    fn inserted_wallet_keeps_its_instance_and_explicit_birthday() {
-        let (sender, _) = sender();
-        let mut wallets = Wallets::<String, &str>::new(Arc::new(FixtureIndex(Some(block(7)))));
-        wallets
-            .register(
-                "family",
-                scope("mainnet"),
-                FixtureProvider::Value,
-                sender,
-                Some(Arc::new(InactiveRegistry)),
-            )
-            .expect("family registration");
-        let wallet: Arc<dyn Wallet> = Arc::new(FixtureWallet(false));
-        let info = futures_executor::block_on(wallets.insert(
-            "alice".to_owned(),
-            &"family",
-            wallet.clone(),
-            BlockPosition(2),
-        ))
-        .expect("wallet insertion");
+    fn registered_assets_carry_their_network_and_asset_identity() {
+        let (wallets, _) = map();
 
-        assert_eq!(info.address.text, "fixture-address");
-        assert_eq!(info.scope, scope("mainnet"));
-        assert!(Arc::ptr_eq(&wallets.instance("alice").unwrap(), &wallet));
-        assert_eq!(wallets.get("alice").unwrap(), info);
+        let info = wallets.asset(&"coin").expect("registered asset");
+
+        assert_eq!(info.tag, "coin");
+        assert_eq!(info.network, fixture_network("mainnet"));
+        assert_eq!(info.id, AssetId::native(ChainName::new("example")));
+        assert_eq!(wallets.assets(), vec![info]);
+    }
+
+    /// The one lenient address parse, and the reason a send needs no separate
+    /// same-network check: it only ever produces this asset's network.
+    #[test]
+    fn parsing_canonicalizes_text_in_the_assets_own_network() {
+        let (wallets, _) = map();
+
+        let parsed = wallets.parse(&"coin", "FIXTURE-Address").expect("parse");
+
         assert_eq!(
-            wallets.filters().unwrap()[0].start_position,
-            BlockPosition(2)
+            parsed,
+            Address::new(fixture_network("mainnet"), "fixture-address")
         );
         assert_eq!(
-            futures_executor::block_on(wallets.balance("alice"))
-                .unwrap()
-                .amount,
-            Decimal::from(12_u64)
+            wallets.parse(&"coin", "").expect_err("blank text").kind,
+            WalletErrorKind::InvalidAddress
         );
     }
 
+    /// The whole of the receive-only refusal, in one place: an asset whose
+    /// factory declared no [`Authorship`] has no [`Author`] and no
+    /// [`Sender`], and this lookup is where both are refused. The chain that
+    /// made the wallet writes no gate, and cannot: `Arc<dyn Wallet>` carries
+    /// neither capability.
     #[test]
-    fn duplicate_insertion_preserves_the_original_instance_and_filter() {
-        let (sender, _) = sender();
-        let mut wallets = Wallets::new(Arc::new(FixtureIndex(None)));
+    fn an_asset_that_declares_no_authorship_has_no_author_and_no_sender() {
+        let mut wallets = Wallets::new();
         wallets
-            .register(
-                "family",
-                scope("mainnet"),
-                FixtureProvider::Value,
-                sender,
-                None,
-            )
-            .unwrap();
-        let first: Arc<dyn Wallet> = Arc::new(FixtureWallet(false));
-        futures_executor::block_on(wallets.insert(1, &"family", first.clone(), BlockPosition(5)))
-            .unwrap();
-        let filters = wallets.filters().unwrap();
-        let error = futures_executor::block_on(wallets.insert(
-            1,
-            &"family",
-            Arc::new(FixtureWallet(true)),
-            BlockPosition(0),
-        ))
-        .unwrap_err();
-
-        assert_eq!(error.kind, ErrorKind::Duplicate);
-        assert!(Arc::ptr_eq(&wallets.instance(&1).unwrap(), &first));
-        assert_eq!(wallets.filters().unwrap(), filters);
-    }
-
-    #[test]
-    fn unknown_or_rejecting_family_leaves_no_wallet_or_filter() {
-        let (sender, _) = sender();
-        let mut wallets = Wallets::new(Arc::new(FixtureIndex(None)));
+            .add("coin", FixtureFactory::new("mainnet"))
+            .expect("an asset the system spends");
         wallets
-            .register(
-                "rejecting",
-                scope("mainnet"),
-                GenerationFailureProvider,
-                sender,
-                None,
-            )
-            .unwrap();
+            .add("token", FixtureFactory::receiving("mainnet"))
+            .expect("an asset the system only receives");
+        let held = block_on(wallets.create(&"token")).expect("create");
+        let to = wallets.parse(&"token", "destination").expect("destination");
 
-        for family in ["missing", "rejecting"] {
-            let error = futures_executor::block_on(wallets.insert(
-                1,
-                &family,
-                Arc::new(FixtureWallet(false)),
-                BlockPosition(0),
-            ))
-            .unwrap_err();
-            assert_eq!(error.kind, ErrorKind::Unsupported);
-            assert_eq!(wallets.get(&1).unwrap_err().kind, ErrorKind::NotFound);
-            assert!(wallets.filters().unwrap().is_empty());
-        }
-    }
-
-    #[test]
-    fn generated_wallet_owns_lookup_reads_send_and_tip_birthday() {
-        let (sender, _) = sender();
-        let mut wallets = Wallets::<String, String>::new(Arc::new(FixtureIndex(Some(block(7)))));
-        wallets
-            .register(
-                "family".to_owned(),
-                scope("mainnet"),
-                FixtureProvider::Value,
-                sender,
-                None,
-            )
-            .expect("family registration");
-
-        let info =
-            futures_executor::block_on(wallets.generate("alice".to_owned(), &"family".to_owned()))
-                .expect("wallet generation");
-        assert_eq!(info.address.text, "fixture-address");
-        assert_eq!(wallets.get("alice").expect("wallet").family, "family");
-        assert_eq!(
-            futures_executor::block_on(wallets.balance("alice"))
-                .expect("balance")
-                .amount,
-            Decimal::from(12_u64)
-        );
-        assert!(
-            futures_executor::block_on(wallets.history("alice", HistoryRequest::first(10)))
-                .expect("history")
-                .transactions
-                .is_empty()
-        );
-        assert_eq!(
-            futures_executor::block_on(wallets.send(
-                "alice",
-                AddressText::new(AddressEncoding::Hex, "destination"),
-                Decimal::from(1_u64),
-            ))
-            .expect("send")
-            .as_str(),
-            "single"
-        );
-        assert_eq!(
-            wallets.filters().expect("filters")[0].start_position,
-            BlockPosition(8)
-        );
-    }
-
-    #[test]
-    fn checkpoint_commit_wins_before_wallet_publication() {
-        let (sender, _) = sender();
-        let family = "family".to_owned();
-        let index_scope = scope("mainnet");
-        let mut wallets = Wallets::<String, String>::new(Arc::new(FixtureIndex(Some(block(7)))));
-        wallets
-            .register(
-                family.clone(),
-                index_scope.clone(),
-                FixtureProvider::Value,
-                sender,
-                None,
-            )
-            .expect("family registration");
-
-        let plan = wallets
-            .plan(&index_scope, Some(block(7)))
-            .expect("sync plan");
-        let mut commit = plan.begin().expect("commit permit");
-        commit.start();
-        let mut generation = wallets.generate("alice".to_owned(), &family);
-        let mut context = Context::from_waker(Waker::noop());
-        assert!(matches!(
-            generation.as_mut().poll(&mut context),
-            Poll::Pending
-        ));
-
-        commit.complete(Some(block(8))).expect("checkpoint commit");
-        futures_executor::block_on(generation).expect("wallet publication");
-
-        assert_eq!(
-            wallets.filters().expect("filters")[0].start_position,
-            BlockPosition(9)
-        );
-    }
-
-    #[test]
-    fn wallet_publication_invalidates_an_older_sync_plan() {
-        let (sender, _) = sender();
-        let family = "family".to_owned();
-        let index_scope = scope("mainnet");
-        let mut wallets = Wallets::<String, String>::new(Arc::new(FixtureIndex(Some(block(7)))));
-        wallets
-            .register(
-                family.clone(),
-                index_scope.clone(),
-                FixtureProvider::Value,
-                sender,
-                None,
-            )
-            .expect("family registration");
-
-        let stale = wallets
-            .plan(&index_scope, Some(block(7)))
-            .expect("sync plan");
-        futures_executor::block_on(wallets.generate("alice".to_owned(), &family))
-            .expect("wallet publication");
-
-        let error = match stale.begin() {
-            Ok(_) => panic!("old filter revision must not commit"),
-            Err(error) => error,
+        let Err(refused) = wallets.author(&"token", &held) else {
+            panic!("a received asset must have no authoring capability")
         };
-        assert_eq!(error.kind, IndexErrorKind::Conflict);
-        let current = wallets
-            .plan(&index_scope, Some(block(7)))
-            .expect("replacement plan");
-        assert_eq!(current.filters().len(), 1);
-        assert_eq!(current.filters()[0].start_position, BlockPosition(8));
-    }
+        let batch = block_on(wallets.send_all(&"token", vec![transfer(&held, to, "1")]))
+            .expect_err("and no sender to reach");
 
-    #[test]
-    fn generation_failure_publishes_no_wallet_or_filter() {
-        let (sender, _) = sender();
-        let family = "family".to_owned();
-        let mut wallets = Wallets::<String, String>::new(Arc::new(FixtureIndex(None)));
-        wallets
-            .register(
-                family.clone(),
-                scope("mainnet"),
-                GenerationFailureProvider,
-                sender,
-                None,
-            )
-            .expect("family registration");
-
-        let error = futures_executor::block_on(wallets.generate("alice".to_owned(), &family))
-            .expect_err("generation must fail");
-
-        assert_eq!(error.kind, ErrorKind::Generation);
+        assert_eq!(refused.kind, WalletErrorKind::Unsupported);
         assert_eq!(
-            wallets
-                .get("alice")
-                .expect_err("wallet must not be stored")
-                .kind,
-            ErrorKind::NotFound
+            refused.message,
+            "this asset is received and reported, and is never sent"
         );
-        assert!(wallets.filters().expect("filters").is_empty());
-    }
-
-    #[test]
-    fn generated_wallet_rejects_exhausted_checkpoint_position_without_publication() {
-        let (sender, _) = sender();
-        let family = "family".to_owned();
-        let mut wallets =
-            Wallets::<String, String>::new(Arc::new(FixtureIndex(Some(block(u64::MAX)))));
-        wallets
-            .register(
-                family.clone(),
-                scope("mainnet"),
-                FixtureProvider::Value,
-                sender,
-                None,
-            )
-            .expect("family registration");
-
-        let error = futures_executor::block_on(wallets.generate("alice".to_owned(), &family))
-            .expect_err("maximum checkpoint position has no safe birthday");
-
-        assert_eq!(error.kind, ErrorKind::Unavailable);
-        assert!(error.message.contains("no successor"));
-        assert!(wallets.filters().expect("filters").is_empty());
+        assert_eq!(batch.source.kind, WalletErrorKind::Unsupported);
         assert_eq!(
-            wallets.get("alice").expect_err("wallet not published").kind,
-            ErrorKind::NotFound
+            batch.failed_index, None,
+            "no item failed: the asset is one the system never sends"
         );
-    }
-
-    #[test]
-    fn startup_imports_deduplicate_address_at_earliest_birthday() {
-        let (sender, _) = sender();
-        let mut wallets = Wallets::<String, String>::new(Arc::new(FixtureIndex(None)));
+        let spent = block_on(wallets.create(&"coin")).expect("create");
         wallets
-            .register(
-                "family".to_owned(),
-                scope("mainnet"),
-                FixtureProvider::Value,
-                sender,
-                None,
-            )
-            .expect("family registration");
-        futures_executor::block_on(wallets.import(
-            "newer".to_owned(),
-            &"family".to_owned(),
-            SecretBytes::new([1; 32]),
-            BlockPosition(20),
-        ))
-        .expect("newer wallet");
-        futures_executor::block_on(wallets.import(
-            "older".to_owned(),
-            &"family".to_owned(),
-            SecretBytes::new([2; 32]),
-            BlockPosition(5),
-        ))
-        .expect("older wallet");
-
-        let filters = wallets.filters().expect("filters");
-        assert_eq!(filters.len(), 1);
-        assert_eq!(filters[0].start_position, BlockPosition(5));
+            .author(&"coin", &spent)
+            .expect("an asset the system spends authors");
     }
 
     #[test]
-    fn batch_bounds_reject_zero_and_fifty_one_before_lookup_or_sender() {
-        assert_eq!(crate::MAX_TRANSFERS, 50);
-        let (wallets, wallet_id, comparisons, calls) = batch_wallets();
+    fn a_new_secret_is_returned_and_kept_by_nothing() {
+        let (wallets, _) = map();
 
-        let empty =
-            futures_executor::block_on(wallets.send_all(Vec::new())).expect_err("empty batch");
-        assert_invalid_batch(empty, "at least one transfer is required");
-        assert_eq!(comparisons.load(AtomicOrdering::Relaxed), 0);
-        assert_eq!(*calls.lock().expect("sender calls"), 0);
+        let secret = block_on(wallets.secret(&"coin")).expect("secret");
 
-        let oversized = futures_executor::block_on(
-            wallets.send_all(batch_transfers(&wallet_id, MAX_TRANSFERS + 1)),
-        )
-        .expect_err("oversized batch");
-        assert_invalid_batch(oversized, "at most 50 transfers are allowed");
-        assert_eq!(comparisons.load(AtomicOrdering::Relaxed), 0);
-        assert_eq!(*calls.lock().expect("sender calls"), 0);
+        assert_eq!(secret.as_bytes(), [7; 32]);
+    }
+
+    fn transfer(wallet: &Arc<dyn Wallet>, to: Address, amount: &str) -> Transfer {
+        Transfer {
+            wallet: wallet.clone(),
+            to,
+            amount: amount.parse().expect("exact amount"),
+        }
     }
 
     #[test]
-    fn batch_bounds_admit_one_and_fifty() {
-        let (wallets, wallet_id, comparisons, calls) = batch_wallets();
+    fn a_batch_reaches_its_assets_sender_in_authored_order() {
+        let (wallets, sender) = map();
+        let wallet = block_on(wallets.create(&"coin")).expect("create");
+        let first = wallets.parse(&"coin", "first").expect("destination");
+        let second = wallets.parse(&"coin", "second").expect("destination");
 
-        let one = futures_executor::block_on(wallets.send_all(batch_transfers(&wallet_id, 1)))
-            .expect("one transfer");
-        assert_eq!(one, vec![TransactionId::new("batch-1")]);
-        assert!(comparisons.load(AtomicOrdering::Relaxed) > 0);
-        assert_eq!(*calls.lock().expect("sender calls"), 1);
-
-        comparisons.store(0, AtomicOrdering::Relaxed);
-        let fifty = futures_executor::block_on(
-            wallets.send_all(batch_transfers(&wallet_id, MAX_TRANSFERS)),
-        )
-        .expect("fifty transfers");
-        assert_eq!(fifty, vec![TransactionId::new("batch-50")]);
-        assert!(comparisons.load(AtomicOrdering::Relaxed) > 0);
-        assert_eq!(*calls.lock().expect("sender calls"), 2);
-    }
-
-    #[test]
-    fn batch_preserves_authored_occurrences_and_sender_result() {
-        let batches = Arc::new(Mutex::new(Vec::new()));
-        let sender_result = vec![
-            TransactionId::new("sender-result-two"),
-            TransactionId::new("sender-result-one"),
-        ];
-        let sender = Arc::new(RecordingSender {
-            batches: batches.clone(),
-            result: sender_result.clone(),
-        });
-        let family = "family".to_owned();
-        let primary = "primary".to_owned();
-        let alias = "alias".to_owned();
-        let mut wallets = Wallets::<String, String>::new(Arc::new(FixtureIndex(None)));
-        wallets
-            .register(
-                family.clone(),
-                scope("mainnet"),
-                FixtureProvider::Value,
-                sender,
-                None,
-            )
-            .expect("family registration");
-        let primary_info = futures_executor::block_on(wallets.import(
-            primary.clone(),
-            &family,
-            SecretBytes::new([1; 32]),
-            BlockPosition(1),
-        ))
-        .expect("primary wallet");
-        let alias_info = futures_executor::block_on(wallets.import(
-            alias.clone(),
-            &family,
-            SecretBytes::new([2; 32]),
-            BlockPosition(1),
-        ))
-        .expect("alias wallet");
-        assert_eq!(primary_info.address, alias_info.address);
-
-        let first = AddressText::new(AddressEncoding::Hex, "first");
-        let second = AddressText::new(AddressEncoding::Hex, "second");
-        let one = Decimal::from(1_u64);
-        let two = Decimal::from(2_u64);
-        let requests = vec![
-            WalletTransfer {
-                wallet: primary.clone(),
-                to: first.clone(),
-                amount: one.clone(),
-            },
-            WalletTransfer {
-                wallet: primary.clone(),
-                to: first.clone(),
-                amount: one.clone(),
-            },
-            WalletTransfer {
-                wallet: alias.clone(),
-                to: first.clone(),
-                amount: one.clone(),
-            },
-            WalletTransfer {
-                wallet: primary.clone(),
-                to: second.clone(),
-                amount: two.clone(),
-            },
-            WalletTransfer {
-                wallet: alias,
-                to: second.clone(),
-                amount: two.clone(),
-            },
-            WalletTransfer {
-                wallet: primary,
-                to: first.clone(),
-                amount: two.clone(),
-            },
-        ];
-
-        let result = futures_executor::block_on(wallets.send_all(requests)).expect("batch send");
-        assert_eq!(result, sender_result);
-
-        let recorded = batches.lock().expect("recorded batches");
-        assert_eq!(recorded.len(), 1);
-        let transfers = &recorded[0];
-        assert_eq!(transfers.len(), 6);
-        assert!(Arc::ptr_eq(&transfers[0].wallet, &transfers[1].wallet));
-        assert!(Arc::ptr_eq(&transfers[0].wallet, &transfers[3].wallet));
-        assert!(Arc::ptr_eq(&transfers[0].wallet, &transfers[5].wallet));
-        assert!(Arc::ptr_eq(&transfers[2].wallet, &transfers[4].wallet));
-        assert!(!Arc::ptr_eq(&transfers[0].wallet, &transfers[2].wallet));
-        assert_eq!(
-            transfers
-                .iter()
-                .map(|transfer| (
-                    transfer.wallet.address(),
-                    transfer.to.clone(),
-                    transfer.amount.clone(),
-                ))
-                .collect::<Vec<_>>(),
+        let ids = block_on(wallets.send_all(
+            &"coin",
             vec![
-                (Address::from([1]), first.clone(), one.clone()),
-                (Address::from([1]), first.clone(), one.clone()),
-                (Address::from([1]), first.clone(), one.clone()),
-                (Address::from([1]), second.clone(), two.clone()),
-                (Address::from([1]), second, two.clone()),
-                (Address::from([1]), first, two),
-            ]
+                transfer(&wallet, first, "1.25"),
+                transfer(&wallet, second, "0.5"),
+            ],
+        ))
+        .expect("batch");
+
+        assert_eq!(ids, [TransactionId::new("batch")]);
+        assert_eq!(
+            sender.batches(),
+            [vec![
+                ("first".to_owned(), "1.25".to_owned()),
+                ("second".to_owned(), "0.5".to_owned()),
+            ]]
         );
     }
 
+    /// Every item is checked before anything is sent, and the first failure
+    /// names its authored index.
     #[test]
-    fn batch_failure_keeps_original_authored_index() {
-        let batches = Arc::new(Mutex::new(Vec::new()));
-        let sender = Arc::new(RecordingSender {
-            batches: batches.clone(),
-            result: Vec::new(),
-        });
-        let family = "family".to_owned();
-        let primary = "primary".to_owned();
-        let alias = "alias".to_owned();
-        let mut wallets = Wallets::<String, String>::new(Arc::new(FixtureIndex(None)));
+    fn a_batch_is_checked_completely_before_its_sender_is_reached() {
+        let (mut wallets, sender) = map();
         wallets
-            .register(
-                family.clone(),
-                scope("mainnet"),
-                FixtureProvider::Value,
-                sender,
-                None,
-            )
-            .expect("family registration");
-        futures_executor::block_on(wallets.import(
-            primary.clone(),
-            &family,
-            SecretBytes::new([1; 32]),
-            BlockPosition(1),
-        ))
-        .expect("primary wallet");
-        futures_executor::block_on(wallets.import(
-            alias.clone(),
-            &family,
-            SecretBytes::new([2; 32]),
-            BlockPosition(1),
-        ))
-        .expect("alias wallet");
+            .add("other", FixtureFactory::new("testnet"))
+            .expect("second network");
+        let wallet = block_on(wallets.create(&"coin")).expect("create");
+        let foreign = block_on(wallets.create(&"other")).expect("create elsewhere");
+        let to = wallets.parse(&"coin", "destination").expect("destination");
+        let elsewhere = wallets.parse(&"other", "destination").expect("destination");
+        let good = || transfer(&wallet, to.clone(), "1");
 
-        let transfer = |wallet: String| WalletTransfer {
-            wallet,
-            to: AddressText::new(AddressEncoding::Hex, "destination"),
-            amount: Decimal::from(1_u64),
-        };
-        let failure = futures_executor::block_on(wallets.send_all(vec![
-            transfer(primary.clone()),
-            transfer(alias.clone()),
-            transfer(primary.clone()),
-            transfer(alias),
-            transfer("missing".to_owned()),
-            transfer(primary),
-        ]))
-        .expect_err("missing wallet");
-
-        assert!(failure.accepted.is_empty());
-        assert_eq!(failure.failed_index, Some(4));
-        assert_eq!(failure.ambiguous_transaction_id, None);
-        assert_eq!(failure.source.kind, ErrorKind::NotFound);
-        assert_eq!(failure.source.message, "wallet does not exist");
-        assert_eq!(failure.source.ambiguous_transaction_id, None);
-        assert!(batches.lock().expect("recorded batches").is_empty());
-    }
-
-    #[test]
-    fn batch_common_validation_uses_authored_itemwise_precedence() {
-        let (first_sender, first_calls) = sender();
-        let (second_sender, second_calls) = sender();
-        let first_family = "first".to_owned();
-        let second_family = "second".to_owned();
-        let mut wallets = Wallets::<String, String>::new(Arc::new(FixtureIndex(None)));
-        wallets
-            .register(
-                first_family.clone(),
-                scope("firstnet"),
-                FixtureProvider::Value,
-                first_sender,
-                None,
-            )
-            .expect("first family");
-        wallets
-            .register(
-                second_family.clone(),
-                scope("secondnet"),
-                FixtureProvider::Value,
-                second_sender,
-                None,
-            )
-            .expect("second family");
-        futures_executor::block_on(wallets.import(
-            "first".to_owned(),
-            &first_family,
-            SecretBytes::new([1; 32]),
-            BlockPosition(1),
-        ))
-        .expect("first wallet");
-        futures_executor::block_on(wallets.import(
-            "second".to_owned(),
-            &second_family,
-            SecretBytes::new([2; 32]),
-            BlockPosition(1),
-        ))
-        .expect("second wallet");
-
-        let transfer = |wallet: &str, amount: u64| WalletTransfer {
-            wallet: wallet.to_owned(),
-            to: AddressText::new(AddressEncoding::Hex, "destination"),
-            amount: Decimal::from(amount),
-        };
-        let cases = [
+        for (transfers, index, kind) in [
             (
-                "amount before same-item lookup",
-                vec![transfer("first", 1), transfer("missing", 0)],
-                ErrorKind::InvalidAmount,
-                "amount must be positive",
+                vec![good(), transfer(&wallet, to.clone(), "0")],
+                1,
+                WalletErrorKind::InvalidAmount,
             ),
             (
-                "amount before same-item family compatibility",
-                vec![transfer("first", 1), transfer("second", 0)],
-                ErrorKind::InvalidAmount,
-                "amount must be positive",
+                vec![good(), transfer(&wallet, elsewhere, "1")],
+                1,
+                WalletErrorKind::InvalidAddress,
             ),
             (
-                "lookup before later amount and family defects",
-                vec![
-                    transfer("first", 1),
-                    transfer("missing", 1),
-                    transfer("second", 0),
-                ],
-                ErrorKind::NotFound,
-                "wallet does not exist",
+                vec![good(), transfer(&foreign, to.clone(), "1")],
+                1,
+                WalletErrorKind::Unsupported,
             ),
-            (
-                "family compatibility before later amount and lookup defects",
-                vec![
-                    transfer("first", 1),
-                    transfer("second", 1),
-                    transfer("missing", 0),
-                ],
-                ErrorKind::Unsupported,
-                "all transfers must use the same wallet family",
-            ),
-        ];
-
-        for (name, requests, kind, message) in cases {
-            let failure = futures_executor::block_on(wallets.send_all(requests)).expect_err(name);
-
-            assert!(failure.accepted.is_empty(), "{name}");
-            assert_eq!(failure.failed_index, Some(1), "{name}");
-            assert_eq!(failure.ambiguous_transaction_id, None, "{name}");
-            assert_eq!(failure.source.kind, kind, "{name}");
-            assert_eq!(failure.source.message, message, "{name}");
-            assert_eq!(failure.source.ambiguous_transaction_id, None, "{name}");
+        ] {
+            let error = block_on(wallets.send_all(&"coin", transfers)).expect_err("refused batch");
+            assert_eq!(error.failed_index, Some(index));
+            assert_eq!(error.source.kind, kind);
+            assert!(error.accepted.is_empty());
         }
-        assert_eq!(*first_calls.lock().expect("first calls"), 0);
-        assert_eq!(*second_calls.lock().expect("second calls"), 0);
+        assert!(sender.batches().is_empty(), "nothing reached the sender");
     }
 
     #[test]
-    fn batch_resolves_wallets_and_rejects_mixed_families_before_sending() {
-        let (first_sender, first_calls) = sender();
-        let (second_sender, second_calls) = sender();
-        let mut wallets = Wallets::<String, String>::new(Arc::new(FixtureIndex(None)));
-        wallets
-            .register(
-                "first".to_owned(),
-                scope("firstnet"),
-                FixtureProvider::Value,
-                first_sender,
-                None,
-            )
-            .expect("first family");
-        wallets
-            .register(
-                "second".to_owned(),
-                scope("secondnet"),
-                FixtureProvider::Value,
-                second_sender,
-                None,
-            )
-            .expect("second family");
-        futures_executor::block_on(wallets.import(
-            "alice".to_owned(),
-            &"first".to_owned(),
-            SecretBytes::new([1; 32]),
-            BlockPosition(1),
-        ))
-        .expect("alice");
-        futures_executor::block_on(wallets.import(
-            "bob".to_owned(),
-            &"second".to_owned(),
-            SecretBytes::new([2; 32]),
-            BlockPosition(1),
-        ))
-        .expect("bob");
+    fn a_batch_holds_one_to_fifty_transfers_of_a_registered_asset() {
+        let (wallets, sender) = map();
+        let wallet = block_on(wallets.create(&"coin")).expect("create");
+        let to = wallets.parse(&"coin", "destination").expect("destination");
+        let many = |count| {
+            (0..count)
+                .map(|_| transfer(&wallet, to.clone(), "1"))
+                .collect::<Vec<_>>()
+        };
 
-        let error = futures_executor::block_on(wallets.send_all(vec![
-            WalletTransfer {
-                wallet: "alice".to_owned(),
-                to: AddressText::new(AddressEncoding::Hex, "one"),
-                amount: Decimal::from(1_u64),
-            },
-            WalletTransfer {
-                wallet: "bob".to_owned(),
-                to: AddressText::new(AddressEncoding::Hex, "two"),
-                amount: Decimal::from(1_u64),
-            },
-        ]))
-        .expect_err("mixed family batch");
-
-        assert_eq!(error.failed_index, Some(1));
-        assert_eq!(*first_calls.lock().expect("first calls"), 0);
-        assert_eq!(*second_calls.lock().expect("second calls"), 0);
-    }
-
-    #[test]
-    fn error_conversion_preserves_index_conflict_and_unavailability() {
-        let conflict = Error::from(IndexError::new(
-            indexing::IndexErrorKind::Conflict,
-            "history changed",
-            true,
-        ));
-        let unavailable = Error::from(IndexError::new(
-            indexing::IndexErrorKind::Store,
-            "database unavailable",
-            true,
-        ));
-
-        assert_eq!(conflict.kind, ErrorKind::Conflict);
-        assert_eq!(conflict.ambiguous_transaction_id, None);
-        assert_eq!(unavailable.kind, ErrorKind::Unavailable);
-        assert_eq!(unavailable.ambiguous_transaction_id, None);
-    }
-
-    #[test]
-    fn wallet_send_rejects_non_positive_amounts_and_divergent_ids() {
-        let invalid = futures_executor::block_on(FixtureWallet(false).send(
-            AddressText::new(AddressEncoding::Hex, "destination"),
-            Decimal::zero(),
-        ))
-        .expect_err("zero amount");
-        let divergent = futures_executor::block_on(FixtureWallet(true).send(
-            AddressText::new(AddressEncoding::Hex, "destination"),
-            Decimal::from(1_u64),
-        ))
-        .expect_err("different broadcast ID");
-
-        assert_eq!(invalid.kind, ErrorKind::InvalidAmount);
-        assert_eq!(divergent.kind, ErrorKind::Transaction);
+        for count in [0, MAX_TRANSFERS + 1] {
+            let error = block_on(wallets.send_all(&"coin", many(count))).expect_err("bounds");
+            assert_eq!(error.source.kind, WalletErrorKind::InvalidBatch);
+            assert_eq!(error.failed_index, None);
+        }
+        let unregistered =
+            block_on(wallets.send_all(&"missing", many(1))).expect_err("unregistered asset");
+        assert_eq!(unregistered.source.kind, WalletErrorKind::Unsupported);
+        assert_eq!(unregistered.failed_index, None);
+        for count in [1, MAX_TRANSFERS] {
+            block_on(wallets.send_all(&"coin", many(count))).expect("accepted bounds");
+        }
+        assert_eq!(sender.batches().len(), 2);
+        assert_eq!(
+            SendError::check_count(MAX_TRANSFERS + 1)
+                .expect_err("the shared bound")
+                .source
+                .kind,
+            WalletErrorKind::InvalidBatch
+        );
     }
 }

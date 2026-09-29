@@ -1,7 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-use super::{error::Error, transaction::Block};
+use super::error::Error;
 
+/// The opaque `cursor` of a history page: a position in one address's
+/// confirmed history, and nothing else.
+///
+/// It used to carry the checkpoint it was issued at, so the index could refuse
+/// a cursor whose checkpoint had moved. That refusal is gone with the journal:
+/// the confirmed store is append-only, so a checkpoint that moved can only
+/// have appended *above* this position, and an ascending keyset page is stable
+/// however long a caller holds it (`docs/design/030 §8 (ex-025)` section 6.3).
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct HistoryCursor {
@@ -9,35 +17,28 @@ pub(super) struct HistoryCursor {
     network: String,
     transaction: String,
     height: u64,
-    checkpoint: Option<Checkpoint>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Checkpoint {
-    block: Block,
-    timestamp: Option<u64>,
+    /// The transaction's native place in its block, which is the middle
+    /// component of the page order. Without it a cursor could not name a
+    /// position at all once two transactions of one block are stored.
+    order: u64,
 }
 
 impl HistoryCursor {
-    pub fn encode(cursor: &indexing::HistoryCursor) -> Result<String, Error> {
+    pub fn encode(position: &indexing::HistoryPosition) -> Result<String, Error> {
         use base64::Engine;
 
         let bytes = serde_json::to_vec(&Self {
-            chain: cursor.position.transaction.scope.chain.0.clone(),
-            network: cursor.position.transaction.scope.network.clone(),
-            transaction: cursor.position.transaction.value.clone(),
-            height: cursor.position.height.0,
-            checkpoint: cursor.checkpoint.as_ref().map(|block| Checkpoint {
-                block: block.into(),
-                timestamp: block.timestamp,
-            }),
+            chain: position.transaction.network.chain.to_string(),
+            network: position.transaction.network.name.clone(),
+            transaction: position.transaction.id.to_string(),
+            height: position.height.0,
+            order: position.transaction_order,
         })
         .map_err(|_| Self::invalid_response("history cursor could not be encoded"))?;
         Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
     }
 
-    pub fn decode(value: &str) -> Result<indexing::HistoryCursor, Error> {
+    pub fn decode(value: &str) -> Result<indexing::HistoryPosition, Error> {
         use base64::Engine;
 
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -48,40 +49,16 @@ impl HistoryCursor {
         if cursor.chain.is_empty() || cursor.network.is_empty() || cursor.transaction.is_empty() {
             return Err(Self::invalid_request("history cursor is invalid"));
         }
-        let scope = indexing::IndexScope {
-            chain: indexing::ChainId(cursor.chain),
-            network: cursor.network,
+        let network = base::Network {
+            chain: base::ChainName::new(cursor.chain),
+            name: cursor.network,
         };
-        let checkpoint = cursor
-            .checkpoint
-            .map(|checkpoint| {
-                let block = checkpoint.block;
-                let hash = base::BlockHash(Checkpoint::decode_hash(&block.hash)?);
-                let parent = block
-                    .parent
-                    .map(|parent| {
-                        let hash = base::BlockHash(Checkpoint::decode_hash(&parent.hash)?);
-                        let position = base::BlockPosition(parent.position);
-                        Ok::<_, Error>(base::BlockParent { position, hash })
-                    })
-                    .transpose()?;
-                Ok::<_, Error>(base::BlockRef {
-                    position: base::BlockPosition(block.position),
-                    height: base::BlockHeight(block.height),
-                    hash,
-                    parent,
-                    timestamp: checkpoint.timestamp,
-                })
-            })
-            .transpose()?;
-        Ok(indexing::HistoryCursor {
-            checkpoint,
-            position: indexing::HistoryPosition {
-                height: base::BlockHeight(cursor.height),
-                transaction: indexing::TransactionRef {
-                    scope,
-                    value: cursor.transaction,
-                },
+        Ok(indexing::HistoryPosition {
+            height: base::BlockHeight(cursor.height),
+            transaction_order: cursor.order,
+            transaction: base::TransactionRef {
+                network,
+                id: cursor.transaction.into(),
             },
         })
     }
@@ -92,16 +69,5 @@ impl HistoryCursor {
 
     fn invalid_response(message: impl Into<String>) -> Error {
         Error::invalid_response(message)
-    }
-}
-
-impl Checkpoint {
-    fn decode_hash(value: &str) -> Result<Vec<u8>, Error> {
-        let bytes = hex::decode(value)
-            .map_err(|_| HistoryCursor::invalid_request("history cursor is invalid"))?;
-        if bytes.is_empty() {
-            return Err(HistoryCursor::invalid_request("history cursor is invalid"));
-        }
-        Ok(bytes)
     }
 }

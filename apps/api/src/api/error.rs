@@ -1,15 +1,17 @@
 use axum::{
     Json,
-    extract::rejection::JsonRejection,
+    extract::rejection::{JsonRejection, PathRejection, QueryRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// The body of every error response: `message` is always present, the
+/// submission fields only when they are truthfully known.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
-#[schema(as = ErrorBody)]
-pub struct Body {
+pub struct ErrorBody {
+    /// What went wrong.
     pub message: String,
     /// Definitely acknowledged transaction IDs before an ordered batch failed.
     /// Present only when that accepted prefix is non-empty.
@@ -19,26 +21,42 @@ pub struct Body {
     /// Zero-based original request index. Present only when one public batch
     /// occurrence truthfully failed.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub failed_index: Option<usize>,
     /// Canonical ID derived from the exact locally signed envelope. Present only
     /// when its submission outcome remains unknown; its presence produces 503.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub ambiguous_transaction_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Kind {
-    InvalidRequest,
+/// One HTTP status the API answers with; every handler failure picks one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Failure {
+    BadRequest,
     NotFound,
     Conflict,
-    Transaction,
+    Unprocessable,
+    Internal,
     Unavailable,
-    InvalidResponse,
+}
+
+impl Failure {
+    const fn status(self) -> StatusCode {
+        match self {
+            Self::BadRequest => StatusCode::BAD_REQUEST,
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Conflict => StatusCode::CONFLICT,
+            Self::Unprocessable => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct Error {
-    kind: Kind,
+    failure: Failure,
     message: String,
     transaction_ids: Vec<String>,
     failed_index: Option<usize>,
@@ -47,11 +65,50 @@ pub struct Error {
 
 impl Error {
     pub fn invalid_request(message: impl Into<String>) -> Self {
-        Self::new(Kind::InvalidRequest, message)
+        Self::new(Failure::BadRequest, message)
+    }
+
+    /// An index page that breaks the read contract: a 503.
+    pub fn indexed(message: impl Into<String>) -> Self {
+        Self::new(Failure::Unavailable, message)
+    }
+
+    /// An indexed amount that is not a non-negative whole number of atomic
+    /// units, which no chain reports.
+    pub fn unscalable(error: base::DecimalError) -> Self {
+        Self::indexed(format!(
+            "indexed amount is not a non-negative integer: {error}"
+        ))
+    }
+
+    /// An indexed asset whose unit no configured chain declared. Composition
+    /// refuses to start a process whose factories leave one undeclared, so
+    /// this is an index reporting an asset nothing was configured for.
+    pub fn undeclared() -> Self {
+        Self::indexed("indexed asset has no unit declared by any configured chain")
     }
 
     pub fn invalid_json(_error: JsonRejection) -> Self {
         Self::invalid_request("request body must match the documented JSON schema")
+    }
+
+    /// An unparsable query string: the contract answers JSON, never Axum's
+    /// plain-text rejection.
+    pub fn invalid_query(_error: QueryRejection) -> Self {
+        Self::invalid_request("query parameters must match the documented schema")
+    }
+
+    /// An unparsable path segment (an asset tag that is not a tag at all).
+    pub fn invalid_path(_error: PathRejection) -> Self {
+        Self::invalid_request("path parameters must match the documented schema")
+    }
+
+    /// Secret text that is not key material: every supported chain writes a
+    /// key as 64 hexadecimal characters, so the one parse is
+    /// [`wallets::SecretBytes::from_hex`] and the curve check belongs to the
+    /// asset's factory. The message never echoes what was sent.
+    pub fn invalid_secret() -> Self {
+        Self::invalid_request("wallet secret must be hexadecimal key material")
     }
 
     pub fn invalid_batch(failed_index: usize, message: impl Into<String>) -> Self {
@@ -62,16 +119,52 @@ impl Error {
     }
 
     pub fn invalid_response(message: impl Into<String>) -> Self {
-        Self::new(Kind::InvalidResponse, message)
+        Self::new(Failure::Internal, message)
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(Kind::NotFound, message)
+        Self::new(Failure::NotFound, message)
     }
 
-    fn new(kind: Kind, message: impl Into<String>) -> Self {
+    /// A request the current state refuses rather than performs: a 409.
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(Failure::Conflict, message)
+    }
+
+    /// A wallet error of an operation selected by asset tag: an unregistered
+    /// tag (`Unsupported`) is `404 wallet asset is not configured`.
+    pub fn by_asset(error: wallets::WalletError) -> Self {
+        if error.kind == wallets::WalletErrorKind::Unsupported {
+            return Self::not_found("wallet asset is not configured");
+        }
+        error.into()
+    }
+
+    /// No network watches this id, so no route can answer for it.
+    pub fn unknown_wallet() -> Self {
+        Self::not_found("wallet does not exist")
+    }
+
+    /// The id is watched but this process holds no key for it.
+    pub fn watch_only() -> Self {
+        Self::new(
+            Failure::Unprocessable,
+            "a watch-only address has no key to read a balance or send",
+        )
+    }
+
+    /// The same failure, attributed to one authored batch occurrence.
+    #[must_use]
+    pub fn at(self, failed_index: usize) -> Self {
         Self {
-            kind,
+            failed_index: Some(failed_index),
+            ..self
+        }
+    }
+
+    fn new(failure: Failure, message: impl Into<String>) -> Self {
+        Self {
+            failure,
             message: message.into(),
             transaction_ids: Vec::new(),
             failed_index: None,
@@ -80,32 +173,48 @@ impl Error {
     }
 }
 
-impl From<wallets::Error> for Error {
-    fn from(error: wallets::Error) -> Self {
-        let wallets::Error {
+impl From<wallets::WalletError> for Error {
+    fn from(error: wallets::WalletError) -> Self {
+        let wallets::WalletError {
             kind,
             message,
             ambiguous_transaction_id,
         } = error;
-        let kind = match kind {
-            wallets::ErrorKind::Unsupported
-            | wallets::ErrorKind::InvalidSecret
-            | wallets::ErrorKind::InvalidAddress
-            | wallets::ErrorKind::InvalidAmount
-            | wallets::ErrorKind::InvalidBatch
-            | wallets::ErrorKind::AddressMismatch => Kind::InvalidRequest,
-            wallets::ErrorKind::Duplicate | wallets::ErrorKind::Conflict => Kind::Conflict,
-            wallets::ErrorKind::NotFound => Kind::NotFound,
-            wallets::ErrorKind::Transaction => Kind::Transaction,
-            wallets::ErrorKind::Unavailable
-            | wallets::ErrorKind::SourceBusy
-            | wallets::ErrorKind::Generation
-            | wallets::ErrorKind::Balance
-            | wallets::ErrorKind::History => Kind::Unavailable,
+        let failure = match kind {
+            wallets::WalletErrorKind::Unsupported
+            | wallets::WalletErrorKind::InvalidSecret
+            | wallets::WalletErrorKind::InvalidAddress
+            | wallets::WalletErrorKind::InvalidAmount
+            | wallets::WalletErrorKind::InvalidBatch
+            | wallets::WalletErrorKind::AddressMismatch => Failure::BadRequest,
+            wallets::WalletErrorKind::Duplicate | wallets::WalletErrorKind::Conflict => {
+                Failure::Conflict
+            }
+            wallets::WalletErrorKind::NotFound => Failure::NotFound,
+            wallets::WalletErrorKind::Transaction | wallets::WalletErrorKind::WatchOnly => {
+                Failure::Unprocessable
+            }
+            wallets::WalletErrorKind::Unavailable
+            | wallets::WalletErrorKind::SourceBusy
+            | wallets::WalletErrorKind::Generation => Failure::Unavailable,
         };
-        let mut response = Self::new(kind, message);
+        let mut response = Self::new(failure, message);
         response.ambiguous_transaction_id = ambiguous_transaction_id.map(|id| id.to_string());
         response
+    }
+}
+
+/// The index's own failures, with the same status mapping the wallet errors
+/// they used to travel through had.
+impl From<indexing::IndexError> for Error {
+    fn from(error: indexing::IndexError) -> Self {
+        let failure = match error.kind {
+            indexing::IndexErrorKind::InvalidRequest => Failure::BadRequest,
+            indexing::IndexErrorKind::NetworkMismatch => Failure::NotFound,
+            indexing::IndexErrorKind::Conflict => Failure::Conflict,
+            _ => Failure::Unavailable,
+        };
+        Self::new(failure, error.message)
     }
 }
 
@@ -128,18 +237,11 @@ impl IntoResponse for Error {
         let status = if self.ambiguous_transaction_id.is_some() {
             StatusCode::SERVICE_UNAVAILABLE
         } else {
-            match self.kind {
-                Kind::InvalidRequest => StatusCode::BAD_REQUEST,
-                Kind::NotFound => StatusCode::NOT_FOUND,
-                Kind::Conflict => StatusCode::CONFLICT,
-                Kind::Transaction => StatusCode::UNPROCESSABLE_ENTITY,
-                Kind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-                Kind::InvalidResponse => StatusCode::INTERNAL_SERVER_ERROR,
-            }
+            self.failure.status()
         };
         (
             status,
-            Json(Body {
+            Json(ErrorBody {
                 message: self.message,
                 transaction_ids: self.transaction_ids,
                 failed_index: self.failed_index,
@@ -153,22 +255,22 @@ impl IntoResponse for Error {
 #[cfg(test)]
 mod tests {
     use axum::{http::StatusCode, response::IntoResponse};
-    use base::Id;
+    use base::TransactionId;
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
-    use wallets::{Error, ErrorKind, SendError};
+    use wallets::{SendError, WalletError, WalletErrorKind};
 
-    use super::Error as HttpError;
+    use super::Error;
 
-    fn ambiguous_error(message: &str, id: &str) -> Error {
-        Error {
-            kind: ErrorKind::Transaction,
+    fn ambiguous_error(message: &str, id: &str) -> WalletError {
+        WalletError {
+            kind: WalletErrorKind::Transaction,
             message: message.to_owned(),
-            ambiguous_transaction_id: Some(Id::new(id)),
+            ambiguous_transaction_id: Some(TransactionId::new(id)),
         }
     }
 
-    async fn projection(error: HttpError) -> (StatusCode, Value) {
+    async fn projection(error: Error) -> (StatusCode, Value) {
         let response = error.into_response();
         let status = response.status();
         let bytes = response
@@ -196,7 +298,7 @@ mod tests {
 
         let item = SendError::item(
             1,
-            vec![Id::new("accepted-0")],
+            vec![TransactionId::new("accepted-0")],
             ambiguous_error("item ambiguous", "item-local"),
         );
         let (status, body) = projection(item.into()).await;
@@ -212,7 +314,7 @@ mod tests {
         );
 
         let grouped = SendError::grouped(
-            vec![Id::new("accepted-group")],
+            vec![TransactionId::new("accepted-group")],
             ambiguous_error("grouped ambiguous", "grouped-local"),
         );
         let (status, body) = projection(grouped.into()).await;
@@ -231,22 +333,22 @@ mod tests {
     async fn definite_operation_failures_omit_submission_metadata() {
         for (error, status, body) in [
             (
-                Error::new(ErrorKind::Transaction, "definite single").into(),
+                WalletError::new(WalletErrorKind::Transaction, "definite single").into(),
                 StatusCode::UNPROCESSABLE_ENTITY,
                 json!({"message": "definite single"}),
             ),
             (
-                SendError::collection(ErrorKind::InvalidBatch, "collection failure").into(),
+                SendError::definite(WalletErrorKind::InvalidBatch, "collection failure").into(),
                 StatusCode::BAD_REQUEST,
                 json!({"message": "collection failure"}),
             ),
             (
-                SendError::operation(ErrorKind::Unavailable, "operation failure").into(),
+                SendError::definite(WalletErrorKind::Unavailable, "operation failure").into(),
                 StatusCode::SERVICE_UNAVAILABLE,
                 json!({"message": "operation failure"}),
             ),
             (
-                SendError::operation(ErrorKind::SourceBusy, "single source is busy").into(),
+                SendError::definite(WalletErrorKind::SourceBusy, "single source is busy").into(),
                 StatusCode::SERVICE_UNAVAILABLE,
                 json!({"message": "single source is busy"}),
             ),
@@ -262,7 +364,7 @@ mod tests {
                 SendError::item(
                     3,
                     Vec::new(),
-                    Error::new(ErrorKind::SourceBusy, "source is busy"),
+                    WalletError::new(WalletErrorKind::SourceBusy, "source is busy"),
                 )
                 .into(),
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -272,7 +374,7 @@ mod tests {
                 SendError::item(
                     2,
                     Vec::new(),
-                    Error::new(ErrorKind::Transaction, "item failure"),
+                    WalletError::new(WalletErrorKind::Transaction, "item failure"),
                 )
                 .into(),
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -280,8 +382,8 @@ mod tests {
             ),
             (
                 SendError::grouped(
-                    vec![Id::new("accepted-definite")],
-                    Error::new(ErrorKind::Transaction, "grouped failure"),
+                    vec![TransactionId::new("accepted-definite")],
+                    WalletError::new(WalletErrorKind::Transaction, "grouped failure"),
                 )
                 .into(),
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -293,5 +395,26 @@ mod tests {
         ] {
             assert_eq!(projection(error).await, (status, body));
         }
+    }
+
+    #[test]
+    fn every_failure_maps_to_its_own_status() {
+        use super::Failure;
+
+        let statuses = [
+            Failure::BadRequest,
+            Failure::NotFound,
+            Failure::Conflict,
+            Failure::Unprocessable,
+            Failure::Internal,
+            Failure::Unavailable,
+        ]
+        .map(Failure::status);
+        let mut unique = statuses.to_vec();
+        unique.sort_unstable_by_key(StatusCode::as_u16);
+        unique.dedup();
+        assert_eq!(unique.len(), statuses.len(), "one variant per status");
+        assert_eq!(statuses[0], StatusCode::BAD_REQUEST);
+        assert_eq!(statuses[4], StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

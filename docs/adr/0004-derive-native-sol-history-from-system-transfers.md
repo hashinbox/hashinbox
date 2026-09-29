@@ -78,7 +78,7 @@ For each transaction, the interpreter will:
 1. require a non-empty signature list whose length matches the message's
    required signer count;
 2. validate and canonicalize every signature and address through native types;
-3. use the canonical Base58 first signature as `TransactionRef.value`; and
+3. use the canonical Base58 first signature as `TransactionRef.id`; and
 4. use the first static account, which must be a signer, as the fee payer.
 
 For a legacy transaction, the runtime account-key vector is its static message

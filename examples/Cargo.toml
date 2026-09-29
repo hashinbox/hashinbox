@@ -3,33 +3,55 @@ name = "payment-examples"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Runnable scenarios: one directory per scenario, every chain inside it as setup."
+readme = "README.md"
 publish = false
 
+# `local.rs` is the examples' non-chain setup, shared by every scenario as the
+# `local` library: the deployment document each one configures its chains
+# from, the index file, and the node transport. A scenario directory is one
+# `[[example]]` — its `main.rs` — beside the `config.toml` that states its
+# chains.
+[lib]
+name = "local"
+path = "local.rs"
+
 [dependencies]
-base = { path = "../sdk/chains/base" }
+base = { path = "../sdk/base" }
 chain-bitcoin = { path = "../sdk/chains/bitcoin" }
 chain-ethereum = { path = "../sdk/chains/ethereum" }
-#chain-solana = { path = "../sdk/chains/solana" }
+chain-solana = { path = "../sdk/chains/solana" }
+sdk-config = { path = "../sdk/config", features = ["toml"] }
 wallets = { path = "../sdk/wallets" }
 indexing = { path = "../sdk/indexing" }
-indexing-redb = { path = "../sdk/indexing/redb" }
-storage-redb = { path = "../packages/storage/redb" }
-indexing-runtime = { path = "../sdk/indexing/runtime" }
 json-rpc = { path = "../packages/json-rpc" }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "sync", "time"] }
 
-tokio = { workspace = true, features = ["sync", "signal"] }
+[[example]]
+name = "wallet"
+path = "wallet/main.rs"
 
-[[bin]]
-name = "bitcoin_wallet"
-path = "bitcoin.rs"
+[[example]]
+name = "transfer"
+path = "transfer/main.rs"
 
-[[bin]]
-name = "ethereum_wallet"
-path = "ethereum.rs"
+[[example]]
+name = "indexing"
+path = "indexing/main.rs"
 
-[[bin]]
-name = "wallets_collections"
-path = "wallets-collections.rs"
+[[example]]
+name = "watch_only"
+path = "watch_only/main.rs"
+
+[[example]]
+name = "all_chains"
+path = "all_chains/main.rs"
+
+[[example]]
+name = "custom_store"
+path = "custom_store/main.rs"
 
 [lints]
 workspace = true

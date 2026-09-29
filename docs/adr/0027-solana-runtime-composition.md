@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted
+Accepted. Its RPC-configuration clauses are partially superseded by
+`a retired design note (023).md`: a node's settings (headers, timeout,
+size bounds, credentials) now travel in that node's own URL inside the one
+plural `rpc.endpoints`, and the singular `endpoint` key and the separate
+singular Solana RPC type are gone. What the clauses were protecting is kept
+and strengthened — Solana is validated to exactly one endpoint, and every
+Solana call carries `Repetition::Forbidden`, so no decorator can repeat it.
 
 ## Date
 

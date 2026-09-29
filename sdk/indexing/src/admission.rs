@@ -1,14 +1,26 @@
-use std::sync::{Arc, Mutex, MutexGuard};
+//! The watch <-> block-commit handshake of one network: `NetworkAdmission`,
+//! the `SyncPlan` a pass takes from it, and the two permits (`CommitPermit`,
+//! `PublicationPermit`) that serialize a checkpoint commit against publishing
+//! a new address. Crate-private; nothing here is part of the public API.
+
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
 use futures_channel::oneshot;
 
-use crate::{AddressFilter, BlockPosition, BlockRef, CanonicalAddress, IndexError, IndexErrorKind};
+use crate::{Address, AddressFilter, BlockPosition, BlockRef, IndexError, IndexErrorKind};
 
 #[derive(Default)]
 struct State {
     initialized: bool,
     persisted: Option<BlockRef>,
     revision: u64,
+    /// Which reading of the address selection the last captured plan was, and
+    /// the coverage the last one described.
+    selection: u64,
+    coverage: Coverage,
     commit: bool,
     publication: bool,
     recovery: bool,
@@ -21,28 +33,123 @@ impl State {
             let _ = waiter.send(());
         }
     }
+
+    /// The number naming the selection `coverage` describes, new only when that
+    /// selection covers a block it did not cover before.
+    ///
+    /// **Directional, and that is the whole of why it costs nothing.** A
+    /// filter's start position is the next block its observation needs, so every
+    /// pass that commits anything raises it; a plain inequality here would call
+    /// the selection new every single pass and re-fetch and re-interpret every
+    /// block above the line for facts that cannot have changed. What a held
+    /// block's facts can be *wrong* about is only ever an address that gained
+    /// it — one that appeared in the selection, or one whose first covered block
+    /// moved down — so a selection that only narrowed keeps its number and the
+    /// held facts keep an address that stopped being watched, which is the same
+    /// history a withdrawal leaves stored anyway
+    /// ([`crate::WatchStore::forget`]).
+    ///
+    /// A count over a comparison rather than a hash of the coverage, because a
+    /// collision here is a held block left standing at a selection it was never
+    /// interpreted against — the one thing this number exists to catch.
+    ///
+    /// # Errors
+    ///
+    /// `Store` when the count overflows.
+    fn select(&mut self, coverage: Coverage) -> Result<u64, IndexError> {
+        let widened = coverage
+            .iter()
+            .any(|(address, from)| self.coverage.get(address).is_none_or(|held| from < held));
+        self.coverage = coverage;
+        if !widened {
+            return Ok(self.selection);
+        }
+        self.selection = self.selection.checked_add(1).ok_or_else(|| {
+            IndexError::new(
+                IndexErrorKind::Store,
+                "address selection count is exhausted",
+                false,
+            )
+        })?;
+        Ok(self.selection)
+    }
+}
+
+/// Which blocks above its checkpoint each address of one plan's selection is
+/// inspected for: the address, and the first of them it covers.
+///
+/// Deliberately not the filter list itself, and deliberately compared in one
+/// direction only ([`State::select`]).
+type Coverage = BTreeMap<Address, BlockPosition>;
+
+/// What `filters` covers, keyed by address as the selection already is.
+fn coverage(filters: &[AddressFilter]) -> Coverage {
+    filters
+        .iter()
+        .map(|filter| (filter.address.clone(), filter.start_position))
+        .collect()
 }
 
 /// Serializes checkpoint commits with forward-only address publication.
+///
+/// This is the watch <-> block-commit handshake for one network. A new
+/// address's birthday is the checkpoint's successor, so no block may commit
+/// between reading that checkpoint and publishing the address's filter, and a
+/// pass planned before the publication must not commit afterwards. The list
+/// has one owner now, but two concurrent actors still reach it: a running
+/// [`crate::Watching::watch`] and the pass on the supervisor's task.
+///
+/// 1. Sync plans ([`NetworkAdmission::plan`]): it captures filters,
+///    checkpoint, revision and selection together.
+/// 2. Sync commits each block under a [`CommitPermit`] ([`SyncPlan::begin`]),
+///    which rechecks both and holds publication off while storage writes.
+/// 3. A watch takes a [`PublicationPermit`]
+///    ([`NetworkAdmission::publication`]): it waits for an in-flight commit and
+///    holds new commits off while the row is written.
+/// 4. [`PublicationPermit::complete`] bumps the revision, so a plan captured
+///    before the watch fails its next commit with a retryable `Conflict`.
+///
+/// One [`crate::Service`] owns one, for its own network. No mutex guard is
+/// held across `.await`.
 #[derive(Default)]
-pub struct ScopeAdmission {
+pub(crate) struct NetworkAdmission {
     state: Mutex<State>,
 }
 
-impl ScopeAdmission {
+impl NetworkAdmission {
+    /// An admission with no known checkpoint and revision zero.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    /// Captures filters and their revision against one repository checkpoint.
-    pub fn plan<F>(
+    /// Captures filters, their publication revision and their selection against
+    /// one repository checkpoint.
+    ///
+    /// `capture` is handed that checkpoint, because which observations belong in
+    /// the selection depends on it: one whose own history has not reached the
+    /// line is inspected for what it owes and not for what is arriving
+    /// ([`crate::WatchProgress::caught_up`]). It stays a *synchronous* closure
+    /// holding no guard across an await, which is what makes the snapshot
+    /// immutable.
+    ///
+    /// The selection ([`SyncPlan::selection`]) is derived here rather than
+    /// signalled by whatever changed the set, and that is the point: progress
+    /// advancing, a store reload and a publication all move the same selection,
+    /// so comparing the captured coverage catches every one of them without any
+    /// of them having to remember to say so.
+    ///
+    /// # Errors
+    ///
+    /// A retryable `Conflict` when a commit or publication is in progress or
+    /// the revision changed while `capture` ran; `capture`'s own error.
+    pub(crate) fn plan<F>(
         self: &Arc<Self>,
         persisted: Option<BlockRef>,
         capture: F,
     ) -> Result<SyncPlan, IndexError>
     where
-        F: FnOnce() -> Result<Vec<AddressFilter>, IndexError>,
+        F: FnOnce(Option<&BlockRef>) -> Result<Vec<AddressFilter>, IndexError>,
     {
         let revision = {
             let mut state = self.lock()?;
@@ -58,8 +165,9 @@ impl ScopeAdmission {
             }
             state.revision
         };
-        let filters = capture()?;
-        let state = self.lock()?;
+        let filters = capture(persisted.as_ref())?;
+        let covered = coverage(&filters);
+        let mut state = self.lock()?;
         if state.commit
             || state.publication
             || state.recovery
@@ -70,16 +178,25 @@ impl ScopeAdmission {
                 "checkpoint or address revision changed during filter capture",
             ));
         }
+        let selection = state.select(covered)?;
         Ok(SyncPlan {
             filters,
             checkpoint: persisted,
             revision,
-            admission: Some(self.clone()),
+            selection,
+            admission: self.clone(),
         })
     }
 
     /// Waits without holding the state lock, then reserves publication.
-    pub async fn publication(
+    ///
+    /// `persisted` is the checkpoint the caller just read; the permit's
+    /// [`PublicationPermit::checkpoint`] is the one to derive a birthday from.
+    ///
+    /// # Errors
+    ///
+    /// `Store` when the admission lock is poisoned or a waiter was abandoned.
+    pub(crate) async fn publication(
         self: &Arc<Self>,
         persisted: Option<BlockRef>,
     ) -> Result<PublicationPermit, IndexError> {
@@ -139,7 +256,7 @@ impl ScopeAdmission {
         }
         state.commit = true;
         Ok(CommitPermit {
-            admission: Some(self.clone()),
+            admission: self.clone(),
             started: false,
             finished: false,
         })
@@ -156,30 +273,20 @@ impl ScopeAdmission {
     }
 }
 
-/// One immutable filter/checkpoint/revision snapshot used by a sync plan.
-pub struct SyncPlan {
+/// One immutable snapshot a sync plan works from: its filters, the checkpoint
+/// they were captured against, the publication count a commit is rechecked
+/// against, and the selection every held block is stamped with.
+pub(crate) struct SyncPlan {
     filters: Vec<AddressFilter>,
     checkpoint: Option<BlockRef>,
+    /// The publication count this plan was captured at: what a commit is
+    /// rechecked against, and nothing else ([`NetworkAdmission::begin`]).
     revision: u64,
-    admission: Option<Arc<ScopeAdmission>>,
+    selection: u64,
+    admission: Arc<NetworkAdmission>,
 }
 
 impl SyncPlan {
-    #[must_use]
-    pub fn detached(filters: Vec<AddressFilter>, checkpoint: Option<BlockRef>) -> Self {
-        Self {
-            filters,
-            checkpoint,
-            revision: 0,
-            admission: None,
-        }
-    }
-
-    #[must_use]
-    pub fn filters(&self) -> &[AddressFilter] {
-        &self.filters
-    }
-
     pub(crate) fn earliest_position(&self) -> Option<BlockPosition> {
         self.filters
             .iter()
@@ -187,7 +294,7 @@ impl SyncPlan {
             .min()
     }
 
-    pub(crate) fn active_addresses(&self, position: BlockPosition) -> Vec<CanonicalAddress> {
+    pub(crate) fn active_addresses(&self, position: BlockPosition) -> Vec<Address> {
         self.filters
             .iter()
             .filter(|filter| filter.start_position <= position)
@@ -195,63 +302,75 @@ impl SyncPlan {
             .collect()
     }
 
+    /// The checkpoint the plan was captured at, advanced as blocks commit.
     #[must_use]
-    pub fn checkpoint(&self) -> Option<&BlockRef> {
+    pub(crate) fn checkpoint(&self) -> Option<&BlockRef> {
         self.checkpoint.as_ref()
     }
 
+    /// The address selection this plan captured, as one number.
+    ///
+    /// Synchronization stamps it on every block it holds above the confirmed
+    /// line, so a block interpreted against another selection is inspected again
+    /// before it commits ([`crate::overlay::Frontier::outdated`]).
+    ///
+    /// **Deliberately not [`Self::revision`].** That counts *publications*,
+    /// which is what a commit is rechecked against; this names *which addresses
+    /// cover which blocks above the line*, which is what those blocks' facts
+    /// were produced from. Answering both with the publication count made
+    /// admission the only thing that could invalidate held facts, so a watch
+    /// that finished its own catch-up joined the forward selection while the
+    /// blocks above the line stayed interpreted without it — no publication had
+    /// happened, so the count had not moved — and they committed unchanged while
+    /// its progress advanced through them.
     #[must_use]
-    pub fn with_filters(mut self, filters: Vec<AddressFilter>) -> Self {
-        self.filters = filters;
-        self
+    pub(crate) const fn selection(&self) -> u64 {
+        self.selection
     }
 
-    pub fn begin(&self) -> Result<CommitPermit, IndexError> {
-        match &self.admission {
-            Some(admission) => admission.begin(self),
-            None => Ok(CommitPermit::detached()),
-        }
+    /// Reserves one repository transition.
+    ///
+    /// # Errors
+    ///
+    /// A retryable `Conflict` when a publication or commit is in progress,
+    /// or the checkpoint or revision changed since the plan was captured.
+    pub(crate) fn begin(&self) -> Result<CommitPermit, IndexError> {
+        self.admission.clone().begin(self)
     }
 
-    pub fn advance(&mut self, checkpoint: BlockRef) {
+    /// Records a committed block as the plan's checkpoint.
+    pub(crate) fn advance(&mut self, checkpoint: BlockRef) {
         self.checkpoint = Some(checkpoint);
     }
 }
 
 /// Owns one asynchronous repository transition without holding a mutex guard.
-pub struct CommitPermit {
-    admission: Option<Arc<ScopeAdmission>>,
+///
+/// Dropped without [`CommitPermit::complete`] after [`CommitPermit::start`],
+/// the outcome is unknown, so the admission requires a repository reload.
+pub(crate) struct CommitPermit {
+    admission: Arc<NetworkAdmission>,
     started: bool,
     finished: bool,
 }
 
 impl CommitPermit {
-    fn detached() -> Self {
-        Self {
-            admission: None,
-            started: false,
-            finished: false,
-        }
-    }
-
-    pub fn start(&mut self) {
+    /// Marks that storage I/O has begun.
+    pub(crate) fn start(&mut self) {
         self.started = true;
     }
 
-    pub fn persist(&mut self, checkpoint: Option<BlockRef>) -> Result<(), IndexError> {
-        if let Some(admission) = &self.admission {
-            admission.lock()?.persisted = checkpoint;
-        }
-        Ok(())
-    }
-
-    pub fn complete(mut self, checkpoint: Option<BlockRef>) -> Result<(), IndexError> {
-        if let Some(admission) = &self.admission {
-            let mut state = admission.lock()?;
-            state.persisted = checkpoint;
-            state.commit = false;
-            state.notify();
-        }
+    /// Records the final checkpoint and reopens publication.
+    ///
+    /// # Errors
+    ///
+    /// `Store` when the admission lock is poisoned.
+    pub(crate) fn complete(mut self, checkpoint: Option<BlockRef>) -> Result<(), IndexError> {
+        let mut state = self.admission.lock()?;
+        state.persisted = checkpoint;
+        state.commit = false;
+        state.notify();
+        drop(state);
         self.finished = true;
         Ok(())
     }
@@ -262,10 +381,7 @@ impl Drop for CommitPermit {
         if self.finished {
             return;
         }
-        let Some(admission) = &self.admission else {
-            return;
-        };
-        if let Ok(mut state) = admission.state.lock() {
+        if let Ok(mut state) = self.admission.state.lock() {
             state.commit = false;
             state.recovery |= self.started;
             state.notify();
@@ -273,20 +389,26 @@ impl Drop for CommitPermit {
     }
 }
 
-/// Holds publication closed against commits until wallet/filter insertion ends.
-pub struct PublicationPermit {
-    admission: Arc<ScopeAdmission>,
+/// Holds publication closed against commits until the watch row is written.
+pub(crate) struct PublicationPermit {
+    admission: Arc<NetworkAdmission>,
     checkpoint: Option<BlockRef>,
     finished: bool,
 }
 
 impl PublicationPermit {
+    /// The checkpoint no block can move past while this permit is held.
     #[must_use]
-    pub fn checkpoint(&self) -> Option<&BlockRef> {
+    pub(crate) fn checkpoint(&self) -> Option<&BlockRef> {
         self.checkpoint.as_ref()
     }
 
-    pub fn complete(mut self) -> Result<(), IndexError> {
+    /// Publishes: bumps the filter revision and reopens commits.
+    ///
+    /// # Errors
+    ///
+    /// `Store` when the admission lock is poisoned or the revision overflows.
+    pub(crate) fn complete(mut self) -> Result<(), IndexError> {
         let mut state = self.admission.lock()?;
         state.revision = state.revision.checked_add(1).ok_or_else(|| {
             IndexError::new(
@@ -325,7 +447,7 @@ mod tests {
     use futures_executor::block_on;
 
     use super::*;
-    use crate::{BlockHash, BlockHeight, BlockParent, ChainId, IndexScope};
+    use crate::{BlockHash, BlockHeight, BlockParent, ChainName, Network};
 
     fn block(position: u64) -> BlockRef {
         BlockRef {
@@ -347,12 +469,19 @@ mod tests {
         }
     }
 
+    /// A captured plan over a fresh admission: every plan has one now.
+    fn plan(filters: Vec<AddressFilter>, checkpoint: Option<BlockRef>) -> SyncPlan {
+        Arc::new(NetworkAdmission::new())
+            .plan(checkpoint, |_| Ok(filters))
+            .expect("a fresh admission captures a plan")
+    }
+
     fn filter(value: &str, position: u64) -> AddressFilter {
         AddressFilter {
-            address: CanonicalAddress {
-                scope: IndexScope {
-                    chain: ChainId("test".into()),
-                    network: "testing".into(),
+            address: Address {
+                network: Network {
+                    chain: ChainName::new("test"),
+                    name: "testing".into(),
                 },
                 value: value.into(),
             },
@@ -381,7 +510,7 @@ mod tests {
 
     #[test]
     fn empty_plan_has_no_active_addresses() {
-        let plan = SyncPlan::detached(Vec::new(), None);
+        let plan = plan(Vec::new(), None);
 
         assert_eq!(plan.earliest_position(), None);
         assert!(plan.active_addresses(BlockPosition(0)).is_empty());
@@ -401,18 +530,20 @@ mod tests {
                 .enumerate()
                 .map(|(index, position)| filter(&format!("address-{index}"), position))
                 .collect();
-            let plan = SyncPlan::detached(filters, Some(block(1)));
+            let plan = plan(filters, Some(block(1)));
             assert_eq!(plan.earliest_position(), expected);
         }
     }
 
     #[test]
-    fn earliest_position_tracks_replaced_filters_without_changing_checkpoint() {
-        let plan = SyncPlan::detached(vec![filter("old", 50)], Some(block(10)))
-            .with_filters(vec![filter("future", 100), filter("earlier", 20)]);
-        assert_eq!(plan.earliest_position(), Some(BlockPosition(20)));
-        assert_eq!(plan.checkpoint(), Some(&block(10)));
-        assert_eq!(plan.with_filters(Vec::new()).earliest_position(), None);
+    fn earliest_position_is_the_lowest_captured_birthday_not_the_checkpoint() {
+        let captured = plan(
+            vec![filter("future", 100), filter("earlier", 20)],
+            Some(block(10)),
+        );
+        assert_eq!(captured.earliest_position(), Some(BlockPosition(20)));
+        assert_eq!(captured.checkpoint(), Some(&block(10)));
+        assert_eq!(plan(Vec::new(), Some(block(10))).earliest_position(), None);
     }
 
     #[test]
@@ -427,7 +558,7 @@ mod tests {
             height: BlockHeight(2),
             ..block(103)
         };
-        let plan = SyncPlan::detached(filters.clone(), Some(checkpoint));
+        let plan = plan(filters.clone(), Some(checkpoint));
 
         assert!(plan.active_addresses(BlockPosition(99)).is_empty());
         assert_eq!(
@@ -445,16 +576,15 @@ mod tests {
                 .map(|filter| filter.address.clone())
                 .collect::<Vec<_>>()
         );
-        assert_eq!(plan.filters(), filters);
     }
 
     #[test]
     fn checkpoint_movement_keeps_the_captured_address_selection() {
-        let admission = Arc::new(ScopeAdmission::new());
+        let admission = Arc::new(NetworkAdmission::new());
         let mut filters = vec![filter("selected", 103), filter("future", 107)];
         let selected = filters[0].address.clone();
         let mut plan = admission
-            .plan(Some(block(100)), || Ok(filters.clone()))
+            .plan(Some(block(100)), |_| Ok(filters.clone()))
             .expect("captured plan");
         filters[0].start_position = BlockPosition(0);
         filters.push(filter("registered-later", 101));
@@ -473,9 +603,9 @@ mod tests {
 
     #[test]
     fn commit_wins_and_publication_uses_the_committed_checkpoint() {
-        let admission = Arc::new(ScopeAdmission::new());
+        let admission = Arc::new(NetworkAdmission::new());
         let plan = admission
-            .plan(None, || Ok(Vec::new()))
+            .plan(None, |_| Ok(Vec::new()))
             .expect("initial plan");
         let mut commit = plan.begin().expect("commit permit");
         commit.start();
@@ -496,9 +626,9 @@ mod tests {
 
     #[test]
     fn publication_wins_and_invalidates_the_older_sync_plan() {
-        let admission = Arc::new(ScopeAdmission::new());
+        let admission = Arc::new(NetworkAdmission::new());
         let plan = admission
-            .plan(Some(block(7)), || Ok(Vec::new()))
+            .plan(Some(block(7)), |_| Ok(Vec::new()))
             .expect("initial plan");
         let publication =
             block_on(admission.publication(Some(block(7)))).expect("publication permit");
@@ -524,9 +654,9 @@ mod tests {
 
     #[test]
     fn dropped_started_commit_requires_checkpoint_reload() {
-        let admission = Arc::new(ScopeAdmission::new());
+        let admission = Arc::new(NetworkAdmission::new());
         let stale = admission
-            .plan(Some(block(7)), || Ok(Vec::new()))
+            .plan(Some(block(7)), |_| Ok(Vec::new()))
             .expect("initial plan");
         let mut commit = stale.begin().expect("commit permit");
         commit.start();
@@ -541,7 +671,7 @@ mod tests {
             )
         );
         let reloaded = admission
-            .plan(Some(block(8)), || Ok(Vec::new()))
+            .plan(Some(block(8)), |_| Ok(Vec::new()))
             .expect("repository reload repairs admission");
         reloaded
             .begin()
@@ -553,9 +683,9 @@ mod tests {
     #[test]
     fn idle_publication_reloads_after_a_cancelled_commit_even_for_an_empty_checkpoint() {
         for persisted in [Some(block(8)), None] {
-            let admission = Arc::new(ScopeAdmission::new());
+            let admission = Arc::new(NetworkAdmission::new());
             let plan = admission
-                .plan(Some(block(7)), || Ok(Vec::new()))
+                .plan(Some(block(7)), |_| Ok(Vec::new()))
                 .expect("initial plan");
             let mut commit = plan.begin().expect("commit permit");
             commit.start();
@@ -574,7 +704,7 @@ mod tests {
 
     #[test]
     fn dropped_publication_releases_waiters_without_changing_revision() {
-        let admission = Arc::new(ScopeAdmission::new());
+        let admission = Arc::new(NetworkAdmission::new());
         let first = block_on(admission.publication(None)).expect("first publication");
         let mut second = Box::pin(admission.publication(None));
         let mut context = Context::from_waker(Waker::noop());
@@ -584,13 +714,13 @@ mod tests {
         let second = block_on(second).expect("drop wakes next publication");
         second.complete().expect("second publication completes");
         admission
-            .plan(None, || Ok(Vec::new()))
+            .plan(None, |_| Ok(Vec::new()))
             .expect("admission remains usable");
     }
 
     #[test]
     fn exhausted_revision_releases_publication_and_wakes_waiters() {
-        let admission = Arc::new(ScopeAdmission::new());
+        let admission = Arc::new(NetworkAdmission::new());
         admission.lock().unwrap().revision = u64::MAX;
         let first = block_on(admission.publication(Some(block(7)))).unwrap();
         let mut second = Box::pin(admission.publication(None));
@@ -614,7 +744,7 @@ mod tests {
 
     #[test]
     fn abandoned_publication_waiter_is_a_terminal_store_error() {
-        let admission = Arc::new(ScopeAdmission::new());
+        let admission = Arc::new(NetworkAdmission::new());
         let first = block_on(admission.publication(None)).unwrap();
         let mut second = Box::pin(admission.publication(None));
         let mut context = Context::from_waker(Waker::noop());
@@ -637,7 +767,7 @@ mod tests {
 
     #[test]
     fn poisoned_admission_rejects_plan_before_capturing_filters() {
-        let admission = Arc::new(ScopeAdmission::new());
+        let admission = Arc::new(NetworkAdmission::new());
         let poisoned = admission.clone();
         assert!(
             std::thread::spawn(move || {
@@ -649,7 +779,7 @@ mod tests {
         );
 
         let error = admission
-            .plan(None, || {
+            .plan(None, |_| {
                 panic!("poisoned state must precede filter capture")
             })
             .err()
@@ -664,13 +794,59 @@ mod tests {
         );
     }
 
+    /// The selection is new only when it *widened*, and that is the trade the
+    /// number exists to make.
+    ///
+    /// A filter's start position is the next block its observation needs, so it
+    /// rises with every block that commits. Calling the selection new on any
+    /// change would re-fetch and re-interpret every block above the line on
+    /// every pass; calling it new only when the *address set* changes would miss
+    /// a second observation of an address already in the set, registered from
+    /// further back, which does newly cover held blocks.
+    #[test]
+    fn a_selection_is_new_when_it_widens_and_not_when_it_narrows() {
+        let admission = Arc::new(NetworkAdmission::new());
+        let capture = |filters: Vec<AddressFilter>| {
+            admission
+                .plan(Some(block(7)), |_| Ok(filters))
+                .expect("captured plan")
+                .selection()
+        };
+
+        let empty = capture(Vec::new());
+        let first = capture(vec![filter("watched", 10)]);
+        assert_ne!(first, empty, "an address entering the selection widens it");
+        assert_eq!(
+            capture(vec![filter("watched", 20)]),
+            first,
+            "a start that advanced with the line covers no block it did not",
+        );
+        assert_eq!(
+            capture(vec![]),
+            first,
+            "an address leaving covers no block it did not, and the facts it is \
+             already in are the history a withdrawal leaves stored",
+        );
+        let lower = capture(vec![filter("watched", 5)]);
+        assert_ne!(
+            lower, first,
+            "a second observation of a watched address, from further back, does \
+             newly cover the blocks between",
+        );
+        assert_ne!(
+            capture(vec![filter("watched", 5), filter("another", 99)]),
+            lower,
+            "and so does an address nothing watched before",
+        );
+    }
+
     #[test]
     fn plan_captures_filters_without_holding_the_admission_lock() {
-        let admission = Arc::new(ScopeAdmission::new());
+        let admission = Arc::new(NetworkAdmission::new());
         let inspected = admission.clone();
 
         admission
-            .plan(None, || {
+            .plan(None, |_| {
                 assert!(inspected.state.try_lock().is_ok());
                 Ok(Vec::new())
             })

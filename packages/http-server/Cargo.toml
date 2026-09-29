@@ -1,0 +1,18 @@
+[package]
+name = "http-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Hardened axum serving for application routers: TLS/bind validation, bearer auth, body limits, health routes."
+readme = "README.md"
+
+[dependencies]
+axum = "0.8"
+constant_time_eq = "=0.4.2"
+tokio = { workspace = true, features = ["net"] }
+
+[dev-dependencies]
+tower = { version = "=0.5.2", features = ["util"] }
+
+[lints]
+workspace = true

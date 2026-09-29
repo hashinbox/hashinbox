@@ -3,9 +3,12 @@ name = "chain-ethereum"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Ethereum support for the payment SDK: indexing source and interpreter, ETH and ERC-20 wallets, and the send pipeline."
+readme = "README.md"
 
 [dependencies]
-base = { path = "../base" }
+base = { path = "../../base" }
+sdk-config = { path = "../../config" }
 crypto = { path = "../../../packages/crypto" }
 wallets = { path = "../../wallets" }
 alloy-consensus.workspace = true
@@ -14,7 +17,7 @@ alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 alloy-rpc-types-eth = { version = "1.8", default-features = false, features = ["serde", "std"] }
 futures-util = { version = "=0.3.33", default-features = false, features = ["std"] }
-indexing = { path = "../../indexing" }
+indexing = { path = "../../indexing", default-features = false }
 num-bigint.workspace = true
 json-rpc = { path = "../../../packages/json-rpc" }
 serde_json = { workspace = true, features = ["raw_value"] }
@@ -23,6 +26,8 @@ tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
 futures-executor.workspace = true
+# The scripted node double (`json_rpc::testing`): tests only, never a production link.
+json-rpc = { path = "../../../packages/json-rpc", features = ["testing"] }
 
 [lints]
 workspace = true

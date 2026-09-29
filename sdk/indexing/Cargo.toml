@@ -3,13 +3,50 @@ name = "indexing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Reorg-safe, chain-neutral block synchronization into canonical history, checkpoints, and live outputs."
+readme = "README.md"
+
+[features]
+# `sqlite` is the only store this crate ships, and the one a build gets without
+# asking (docs/design/030 §8 (ex-031) step 8). It stays a feature rather than becoming
+# unconditional because that is what lets `apps/api` depend on this crate with
+# `default-features = false` and name no async runtime at all.
+default = ["sqlite", "supervisor"]
+# The embedded SQL store: `indexing::sqlite`, and rusqlite with it. SQLite is
+# synchronous, so every operation is one `spawn_blocking` on one connection of
+# a bounded pool. The C library is bundled: one amalgamation compile, no
+# operator prerequisite. Off, the crate is the traits and the vocabulary.
+sqlite = ["dep:rusqlite", "dep:tokio", "tokio/rt"]
+# The driver: `indexing::Supervisor` and its tasks. Off, the crate carries no
+# async runtime.
+supervisor = ["dep:tokio", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time"]
+# The in-process store: `indexing::memory`, on no file and no runtime. A second
+# shipped backend rather than a test double — it answers every port `sqlite`
+# does, including the consumer capabilities — for an ephemeral process, an
+# embedding that wants nothing on disk, and any test that would otherwise open
+# one. Independent of `sqlite`: a build may take either, both, or neither.
+memory = []
 
 [dependencies]
-base = { path = "../chains/base" }
+base = { path = "../base" }
 futures-channel.workspace = true
+num-bigint.workspace = true
+rusqlite ={ version = "=0.40.2", default-features = false, features = ["bundled", "cache"], optional = true }
+tokio = { version = "=1.49.0", default-features = false, optional = true }
 
 [dev-dependencies]
+# This package on itself: the only way Cargo offers to turn one of a crate's
+# own features on for its own integration tests, and the reason `rust/layers`
+# names `indexing` in its own dependency list. Cargo permits a dev-dependency
+# cycle for exactly this case.
+indexing = { path = ".", features = ["memory"] }
 futures-executor.workspace = true
+tempfile = "=3.27.0"
+tokio = { version = "=1.49.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[[example]]
+name = "bench"
+path = "examples/bench.rs"
 
 [lints]
 workspace = true

@@ -52,7 +52,7 @@ must not reinterpret, rewrite, log, or expose stored secret bytes.
 
 `sdk/indexing` owns one concrete checkpoint/revision coordinator and its commit
 and publication permits because the protected commit occurs in the generic
-synchronizer. `apps/api` constructs one coordinator per `IndexScope` after
+synchronizer. `apps/api` constructs one coordinator per `Network` after
 loading the persisted checkpoint, injects its commit side into that scope's
 `Service`, and gives the matching publication handle to each registered wallet
 family in the scope. `sdk/wallets` consumes that handle without indexing
@@ -205,7 +205,7 @@ compatibility reader or inferred `position = height` fallback.
 ### Dynamic wallet correctness
 
 The generic runtime must close the existing wallet-registration race before
-Solana can claim complete history. One coordinator per `IndexScope` keeps an
+Solana can claim complete history. One coordinator per `Network` keeps an
 in-memory persisted-checkpoint snapshot, filter revision, and commit-in-progress
 flag. It owns no database records or watch registry.
 

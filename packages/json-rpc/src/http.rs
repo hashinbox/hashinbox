@@ -1,4 +1,4 @@
-use std::{fmt, num::NonZeroU32, time::Duration};
+use std::fmt;
 
 use jsonrpsee::{
     core::{
@@ -7,163 +7,24 @@ use jsonrpsee::{
         params::BatchRequestBuilder,
         traits::ToRpcParams,
     },
-    http_client::{HeaderMap, HeaderValue, HttpClient, HttpClientBuilder, transport},
+    http_client::{HeaderMap, HttpClient, HttpClientBuilder, transport},
     types::ErrorObjectOwned,
 };
 use serde_json::{Value, value::RawValue};
 
-use crate::{BoxFuture, Call, CallResult, Client, Error, ErrorKind, Failure, RawJson};
+use crate::{
+    Batch, Bounds, BoxFuture, CallResult, Client, Error, ErrorKind, Failure, RawJson, Request,
+};
 
-/// Retryable transport-failure policy for ordinary requests and batches.
+/// JSON-RPC over HTTP against one endpoint: one execution per call, no retry
+/// and no failover. Compose [`crate::Retry`] and [`crate::Failover`] around it
+/// for those. Cheap to clone; clones share the connection pool.
 ///
-/// Attempts count complete rounds over the endpoint list, not individual HTTP
-/// executions. The default permits three rounds with exponential backoff starting
-/// at 250 milliseconds and capped at two seconds. `request_once` ignores this policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Retry {
-    max_attempts: NonZeroU32,
-    initial_backoff: Duration,
-    max_backoff: Duration,
-}
-
-impl Retry {
-    /// Sets the maximum endpoint rounds and the delay between failed rounds.
-    pub fn new(
-        max_attempts: NonZeroU32,
-        initial_backoff: Duration,
-        max_backoff: Duration,
-    ) -> std::result::Result<Self, Error> {
-        if initial_backoff > max_backoff {
-            return Err(Error::new(
-                ErrorKind::InvalidConfiguration,
-                "initial retry backoff must not exceed its maximum",
-            ));
-        }
-        Ok(Self {
-            max_attempts,
-            initial_backoff,
-            max_backoff,
-        })
-    }
-
-    /// Makes one endpoint round. Endpoint failover remains enabled; use
-    /// `Client::request_once` when exactly one endpoint may be contacted.
-    #[must_use]
-    pub const fn no_retry() -> Self {
-        Self {
-            max_attempts: NonZeroU32::MIN,
-            initial_backoff: Duration::ZERO,
-            max_backoff: Duration::ZERO,
-        }
-    }
-
-    fn backoff(self, attempt: u32) -> Duration {
-        let multiplier = 1_u32 << attempt.saturating_sub(1).min(31);
-        self.initial_backoff
-            .checked_mul(multiplier)
-            .unwrap_or(self.max_backoff)
-            .min(self.max_backoff)
-    }
-}
-
-impl Default for Retry {
-    fn default() -> Self {
-        Self {
-            max_attempts: NonZeroU32::new(3).expect("three is nonzero"),
-            initial_backoff: Duration::from_millis(250),
-            max_backoff: Duration::from_secs(2),
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct Config {
-    pub endpoints: Vec<String>,
-    pub request_timeout: Duration,
-    pub max_request_bytes: usize,
-    pub max_response_bytes: usize,
-    pub headers: Vec<(String, String)>,
-    pub retry: Retry,
-}
-
-impl fmt::Debug for Config {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let header_names = self
-            .headers
-            .iter()
-            .map(|(name, _)| name)
-            .collect::<Vec<_>>();
-        formatter
-            .debug_struct("Config")
-            .field("endpoint_count", &self.endpoints.len())
-            .field("request_timeout", &self.request_timeout)
-            .field("max_request_bytes", &self.max_request_bytes)
-            .field("max_response_bytes", &self.max_response_bytes)
-            .field("header_names", &header_names)
-            .field("retry", &self.retry)
-            .finish()
-    }
-}
-
-impl Config {
-    /// Configures one endpoint with [`Retry::default`] and 10 MiB request / 64 MiB
-    /// response limits. `request_timeout` applies to each HTTP execution.
-    #[must_use]
-    pub fn new(endpoint: impl Into<String>, request_timeout: Duration) -> Self {
-        Self {
-            endpoints: vec![endpoint.into()],
-            request_timeout,
-            max_request_bytes: 10 * 1024 * 1024,
-            max_response_bytes: 64 * 1024 * 1024,
-            headers: Vec::new(),
-            retry: Retry::default(),
-        }
-    }
-
-    fn validate(&self) -> std::result::Result<(), Error> {
-        if self.endpoints.is_empty() || self.endpoints.iter().any(|value| value.trim().is_empty()) {
-            return Err(Error::new(
-                ErrorKind::InvalidConfiguration,
-                "JSON-RPC requires at least one endpoint",
-            ));
-        }
-        if self.request_timeout.is_zero()
-            || self.max_request_bytes == 0
-            || self.max_response_bytes == 0
-        {
-            return Err(Error::new(
-                ErrorKind::InvalidConfiguration,
-                "JSON-RPC bounds must be greater than zero",
-            ));
-        }
-        Ok(())
-    }
-
-    fn parsed_headers(&self) -> std::result::Result<HeaderMap, Error> {
-        let mut headers = HeaderMap::new();
-        for (name, value) in &self.headers {
-            let name = name.parse::<http_types::HeaderName>().map_err(|_| {
-                Error::new(
-                    ErrorKind::InvalidConfiguration,
-                    "JSON-RPC header name is invalid",
-                )
-            })?;
-            let value = HeaderValue::from_str(value).map_err(|_| {
-                Error::new(
-                    ErrorKind::InvalidConfiguration,
-                    "JSON-RPC header value is invalid",
-                )
-            })?;
-            headers.insert(name, value);
-        }
-        Ok(headers)
-    }
-}
-
+/// `Debug` shows header names only; the `jsonrpsee` client keeps the full URL,
+/// userinfo included, so it is never handed to a formatter.
 #[derive(Clone)]
 pub struct Http {
-    clients: Vec<HttpClient>,
-    retry: Retry,
+    client: HttpClient,
     header_names: Vec<String>,
 }
 
@@ -171,169 +32,52 @@ impl fmt::Debug for Http {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Http")
-            .field("endpoint_count", &self.clients.len())
             .field("header_names", &self.header_names)
-            .field("retry", &self.retry)
             .finish()
     }
 }
 
 impl Http {
-    pub fn new(config: Config) -> std::result::Result<Self, Error> {
-        config.validate()?;
-        let headers = config.parsed_headers()?;
-        let max_request = u32::try_from(config.max_request_bytes).map_err(|_| invalid_limit())?;
-        let max_response = u32::try_from(config.max_response_bytes).map_err(|_| invalid_limit())?;
-        let clients = config
-            .endpoints
-            .iter()
-            .map(|endpoint| {
-                HttpClientBuilder::default()
-                    .request_timeout(config.request_timeout)
-                    .max_request_size(max_request)
-                    .max_response_size(max_response)
-                    .set_headers(headers.clone())
-                    .build(endpoint)
-                    .map_err(Error::from_rpc)
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+    /// Builds the client once every value is resolved; does no I/O.
+    pub(crate) fn build(target: &str, headers: HeaderMap, bounds: Bounds) -> Result<Self, Error> {
+        let header_names = headers
+            .keys()
+            .map(|name| name.as_str().to_owned())
+            .collect();
+        let client = HttpClientBuilder::default()
+            .request_timeout(bounds.timeout())
+            .max_request_size(bounds.max_request_bytes)
+            .max_response_size(bounds.max_response_bytes)
+            .set_headers(headers)
+            .build(target)
+            .map_err(Error::from_rpc)?;
         Ok(Self {
-            clients,
-            retry: config.retry,
-            header_names: config.headers.into_iter().map(|(name, _)| name).collect(),
+            client,
+            header_names,
         })
     }
 
-    async fn execute_request(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> std::result::Result<CallResult, Error> {
-        let params = Params::new(params)?;
-        let mut last = None;
-        for attempt in 1..=self.retry.max_attempts.get() {
-            match self.request_attempt(method, &params).await {
-                Err(error) if error.is_retryable() => last = Some(error),
-                result => return result,
-            }
-            if attempt < self.retry.max_attempts.get() {
-                tokio::time::sleep(self.retry.backoff(attempt)).await;
-            }
+    async fn execute(&self, request: Request) -> Result<CallResult, Error> {
+        let call = request.into_call();
+        let params = Params::new(call.params)?;
+        match self
+            .client
+            .request::<Box<RawValue>, _>(&call.method, params)
+            .await
+        {
+            Ok(value) => Ok(Ok(RawJson(value.get().as_bytes().to_vec()))),
+            Err(RpcError::Call(error)) => Ok(Err(Failure::from(error))),
+            Err(source) => Err(Error::from_rpc(source)),
         }
-        Err(last.unwrap_or_else(|| {
-            Error::new(ErrorKind::Unavailable, "JSON-RPC endpoints are unavailable")
-        }))
     }
 
-    async fn request_attempt(
-        &self,
-        method: &str,
-        params: &Params,
-    ) -> std::result::Result<CallResult, Error> {
-        let mut last = None;
-        for client in &self.clients {
-            let result = match client
-                .request::<Box<RawValue>, _>(method, params.clone())
-                .await
-            {
-                Ok(value) => Ok(Ok(RawJson(value.get().as_bytes().to_vec()))),
-                Err(RpcError::Call(error)) => Ok(Err(Failure::from(error))),
-                Err(source) => Err(Error::from_rpc(source)),
-            };
-            match result {
-                Err(error) if error.is_retryable() => last = Some(error),
-                result => return result,
-            }
-        }
-        Err(last.unwrap_or_else(|| {
-            Error::new(ErrorKind::Unavailable, "JSON-RPC endpoints are unavailable")
-        }))
-    }
-
-    async fn execute_batch(&self, calls: Vec<Call>) -> std::result::Result<Vec<CallResult>, Error> {
-        let batch = Batch::new(calls)?;
-        let mut last = None;
-        for attempt in 1..=self.retry.max_attempts.get() {
-            match self.batch_attempt(&batch).await {
-                Err(error) if error.is_retryable() => last = Some(error),
-                result => return result,
-            }
-            if attempt < self.retry.max_attempts.get() {
-                tokio::time::sleep(self.retry.backoff(attempt)).await;
-            }
-        }
-        Err(last.unwrap_or_else(|| {
-            Error::new(ErrorKind::Unavailable, "JSON-RPC endpoints are unavailable")
-        }))
-    }
-
-    async fn batch_attempt(&self, batch: &Batch) -> std::result::Result<Vec<CallResult>, Error> {
-        let mut last = None;
-        for client in &self.clients {
-            match batch.request(client).await {
-                Err(error) if error.is_retryable() => last = Some(error),
-                result => return result,
-            }
-        }
-        Err(last.unwrap_or_else(|| {
-            Error::new(ErrorKind::Unavailable, "JSON-RPC endpoints are unavailable")
-        }))
-    }
-}
-
-impl Client for Http {
-    fn request<'a>(
-        &'a self,
-        method: &'a str,
-        params: Value,
-    ) -> BoxFuture<'a, std::result::Result<CallResult, Error>> {
-        Box::pin(self.execute_request(method, params))
-    }
-
-    fn request_once<'a>(
-        &'a self,
-        method: &'a str,
-        params: Value,
-    ) -> BoxFuture<'a, std::result::Result<CallResult, Error>> {
-        Box::pin(async move {
-            let params = Params::new(params)?;
-            let client = self.clients.first().ok_or_else(|| {
-                Error::new(ErrorKind::Unavailable, "JSON-RPC endpoint is unavailable")
-            })?;
-            match client.request::<Box<RawValue>, _>(method, params).await {
-                Ok(value) => Ok(Ok(RawJson(value.get().as_bytes().to_vec()))),
-                Err(RpcError::Call(error)) => Ok(Err(Failure::from(error))),
-                Err(source) => Err(Error::from_rpc(source)),
-            }
-        })
-    }
-
-    fn batch<'a>(
-        &'a self,
-        calls: Vec<Call>,
-    ) -> BoxFuture<'a, std::result::Result<Vec<CallResult>, Error>> {
-        Box::pin(self.execute_batch(calls))
-    }
-}
-
-#[derive(Debug)]
-struct Batch(Vec<Call>);
-
-impl Batch {
-    fn new(calls: Vec<Call>) -> std::result::Result<Self, Error> {
-        if calls.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidRequest,
-                "JSON-RPC batch must not be empty",
-            ));
-        }
-        Ok(Self(calls))
-    }
-
-    async fn request(&self, client: &HttpClient) -> std::result::Result<Vec<CallResult>, Error> {
-        let mut batch = BatchRequestBuilder::new();
-        for call in &self.0 {
-            batch
+    /// Every call is serialized before the first byte leaves, so an invalid
+    /// parameter fails without contacting the node.
+    async fn execute_batch(&self, batch: Batch) -> Result<Vec<CallResult>, Error> {
+        let calls = batch.into_calls();
+        let mut builder = BatchRequestBuilder::new();
+        for call in &calls {
+            builder
                 .insert(call.method.as_str(), Params::new(call.params.clone())?)
                 .map_err(|_| {
                     Error::new(
@@ -342,8 +86,9 @@ impl Batch {
                     )
                 })?;
         }
-        let responses = client
-            .batch_request::<Box<RawValue>>(batch)
+        let responses = self
+            .client
+            .batch_request::<Box<RawValue>>(builder)
             .await
             .map_err(Error::from_rpc)?;
         Ok(responses
@@ -356,11 +101,21 @@ impl Batch {
     }
 }
 
+impl Client for Http {
+    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+        Box::pin(self.execute(request))
+    }
+
+    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+        Box::pin(self.execute_batch(batch))
+    }
+}
+
 #[derive(Clone)]
 struct Params(Option<Box<RawValue>>);
 
 impl Params {
-    fn new(value: Value) -> std::result::Result<Self, Error> {
+    fn new(value: Value) -> Result<Self, Error> {
         if !matches!(value, Value::Array(_) | Value::Object(_)) {
             return Err(Error::new(
                 ErrorKind::InvalidRequest,
@@ -380,7 +135,7 @@ impl Params {
 }
 
 impl ToRpcParams for Params {
-    fn to_rpc_params(self) -> std::result::Result<Option<Box<RawValue>>, serde_json::Error> {
+    fn to_rpc_params(self) -> Result<Option<Box<RawValue>>, serde_json::Error> {
         Ok(self.0)
     }
 }
@@ -429,26 +184,9 @@ impl Error {
     }
 }
 
-fn invalid_limit() -> Error {
-    Error::new(
-        ErrorKind::InvalidConfiguration,
-        "JSON-RPC size limit exceeds the supported range",
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_retry_uses_bounded_exponential_backoff() {
-        let retry = Config::new("http://example.invalid", Duration::from_secs(1)).retry;
-        assert_eq!(retry.max_attempts.get(), 3);
-        assert_eq!(retry.backoff(1), Duration::from_millis(250));
-        assert_eq!(retry.backoff(2), Duration::from_millis(500));
-        assert_eq!(retry.backoff(4), Duration::from_secs(2));
-        assert_eq!(retry.backoff(u32::MAX), Duration::from_secs(2));
-    }
 
     #[test]
     fn rpc_error_conversion_preserves_classification_and_redacts_details() {
@@ -552,86 +290,6 @@ mod tests {
             assert_eq!(error.kind, ErrorKind::HttpStatus(status));
             assert_eq!(error.message, "JSON-RPC endpoint rejected the request");
             assert_eq!(error.is_retryable(), retryable);
-        }
-    }
-
-    #[test]
-    fn configured_headers_preserve_last_value_and_original_configuration() {
-        let mut config = Config::new("http://example.invalid", Duration::from_secs(1));
-        config.headers = vec![
-            ("X-Token".to_owned(), "first".to_owned()),
-            ("authorization".to_owned(), "Bearer hidden".to_owned()),
-            ("x-token".to_owned(), "last".to_owned()),
-        ];
-        let original = config.headers.clone();
-        let parsed = config
-            .parsed_headers()
-            .expect("configured headers must parse");
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed.get_all("x-token").iter().count(), 1);
-        assert_eq!(parsed["x-token"], "last");
-        assert_eq!(parsed["authorization"], "Bearer hidden");
-        assert_eq!(config.headers, original);
-    }
-
-    #[test]
-    fn configured_headers_validate_in_order_without_exposing_values() {
-        for (headers, message) in [
-            (
-                vec![("invalid name", "hidden\nvalue")],
-                "JSON-RPC header name is invalid",
-            ),
-            (
-                vec![("x-token", "hidden\nvalue"), ("invalid name", "value")],
-                "JSON-RPC header value is invalid",
-            ),
-        ] {
-            let mut config = Config::new("http://example.invalid", Duration::from_secs(1));
-            config.headers = headers
-                .into_iter()
-                .map(|(name, value)| (name.to_owned(), value.to_owned()))
-                .collect();
-            config.max_request_bytes = usize::MAX;
-            let error = Http::new(config)
-                .expect_err("headers must validate before size conversion and client building");
-            assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
-            assert_eq!(error.message, message);
-            assert!(!error.is_retryable());
-        }
-    }
-
-    #[test]
-    fn endpoint_and_zero_bound_checks_still_precede_header_parsing() {
-        let mut config = Config::new("http://example.invalid", Duration::from_secs(1));
-        config
-            .headers
-            .push(("invalid name".to_owned(), "hidden".to_owned()));
-        for endpoints in [
-            Vec::new(),
-            vec![String::new()],
-            vec!["http://example.invalid".to_owned(), " \t\n".to_owned()],
-        ] {
-            let mut invalid = config.clone();
-            invalid.endpoints = endpoints;
-            invalid.request_timeout = Duration::ZERO;
-            let error = Http::new(invalid).expect_err("empty endpoint must fail first");
-            assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
-            assert_eq!(error.message, "JSON-RPC requires at least one endpoint");
-            assert!(!error.is_retryable());
-        }
-        for (timeout, request, response) in [
-            (Duration::ZERO, 1, 1),
-            (Duration::from_secs(1), 0, 1),
-            (Duration::from_secs(1), 1, 0),
-        ] {
-            let mut invalid = config.clone();
-            invalid.request_timeout = timeout;
-            invalid.max_request_bytes = request;
-            invalid.max_response_bytes = response;
-            let error = Http::new(invalid).expect_err("zero bounds must fail before headers");
-            assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
-            assert_eq!(error.message, "JSON-RPC bounds must be greater than zero");
-            assert!(!error.is_retryable());
         }
     }
 }

@@ -1,0 +1,114 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Check (all targets, including example binaries)
+        run: cargo check --locked --workspace --all-targets
+      # --all-features also lints payment-server's feature-gated real-validator
+      # Solana test (`solana-node`).
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      # Missing docs are denied workspace-wide, so this also gates every crate's API docs.
+      - name: Rustdoc
+        run: cargo doc --locked --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Doc tests
+        run: cargo test --locked --workspace --doc
+      # A workspace build unifies features, so a `#[cfg(feature = ...)]` that
+      # names a type another module uses unconditionally still compiles there.
+      # These are the combinations nothing else exercises: the indexing traits
+      # with no store and no driver, each optional half on its own, and each of
+      # the two shipped stores without the other, since neither may drag it.
+      - name: Indexing feature matrix
+        run: |
+          for features in "" sqlite memory supervisor \
+                          sqlite,memory sqlite,supervisor memory,supervisor \
+                          sqlite,memory,supervisor; do
+            cargo check --locked -p indexing --no-default-features --features "$features"
+          done
+          # The contract scenarios are integration-test code now, so the store
+          # they are held against has to be on for `--all-targets` to build.
+          cargo check --locked -p indexing --no-default-features \
+            --features sqlite,memory,supervisor --all-targets
+      # sdk/config's types are the API and the TOML reader is a convenience:
+      # it compiles only with the feature, and everything else — the registry,
+      # the JSON reader, the shared shell — compiles without it. A workspace
+      # build unifies features, so both halves are checked on a crate-scoped
+      # resolve.
+      - name: Config feature matrix
+        run: |
+          cargo check --locked -p sdk-config --no-default-features --all-targets
+          cargo test --locked -p sdk-config --features toml
+      # The invariant behind that feature: no library crate links `toml`.
+      # Only the binary and the examples read a file, so only they may.
+      # `cargo tree` is crate-scoped, which workspace feature unification is
+      # not, and this is mechanical rather than a review convention
+      # (docs/fails/028 section 6.2).
+      - name: No SDK crate links toml
+        run: |
+          status=0
+          for crate in base indexing wallets chain-bitcoin chain-ethereum chain-solana \
+                       payment-api decimal crypto json-rpc http-server sdk-config; do
+            if cargo tree --locked -q -p "$crate" -e normal --prefix none \
+                 | grep -q '^toml '; then
+              echo "$crate links toml"
+              status=1
+            fi
+          done
+          exit "$status"
+      - name: Test
+        run: cargo test --locked --workspace --no-fail-fast
+      # docs/openapi.json is the committed contract typed clients are generated
+      # from. Regenerating it here catches a change that only the test would
+      # otherwise report, and proves the flag works on a clean checkout.
+      - name: OpenAPI document is current
+        run: |
+          cargo run --locked -p payment-server -- --openapi > "$RUNNER_TEMP/openapi.json"
+          diff -u docs/openapi.json "$RUNNER_TEMP/openapi.json"
+
+  structure:
+    runs-on: ubuntu-latest
+    env:
+      LINTER_VERSION: v0.1.3
+    steps:
+      - uses: actions/checkout@v4
+      # The eighth documented gate (AGENTS.md, README.md): no trailing
+      # whitespace and no conflict markers anywhere in the tree.
+      - name: Whitespace
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
+      - name: Chain rules the linter cannot express
+        run: sh scripts/check-chains.sh
+      # Pinned release of the design linter; a failed download fails the job
+      # instead of skipping the check.
+      - name: Install linter
+        run: |
+          base=https://github.com/propdevil/linter/releases/download/$LINTER_VERSION
+          asset=linter-x86_64-unknown-linux-musl.tar.gz
+          curl -fsSL --retry 3 --proto '=https' "$base/$asset" -o "$RUNNER_TEMP/$asset"
+          curl -fsSL --retry 3 --proto '=https' "$base/SHA256SUMS" -o "$RUNNER_TEMP/SHA256SUMS"
+          (cd "$RUNNER_TEMP" && grep " $asset\$" SHA256SUMS | sha256sum -c -)
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/linter/bin" >> "$GITHUB_PATH"
+      - name: Linter
+        run: linter check .

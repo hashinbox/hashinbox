@@ -1,23 +1,20 @@
-//! Runtime wallet composition without concrete protocol dependencies.
+#![doc = include_str!("../README.md")]
 
-mod address;
+mod composition;
 mod error;
-mod provider;
-mod selection;
+mod factory;
 mod sender;
 mod wallet;
 mod wallets;
 
-pub use address::{AddressEncoding, AddressFormat, AddressText};
-pub use crypto::SecretBytes;
-pub use error::{Error, ErrorKind};
-pub use provider::Provider;
-pub use sender::{SendError, SendFuture, Sender, Transfer};
-#[doc(hidden)]
-pub use wallet::send_with_transaction;
-pub use wallet::{
-    Balance, BalanceReader, FutureResult, History, HistoryAsset, HistoryEntry, HistoryFee,
-    HistoryMovement, HistoryReader, HistoryRequest, HistoryStatus, SingleSender,
-    TransactionFactory, Wallet,
+pub use base::{
+    Activation, RegistrationError, RegistrationFuture, SubmissionRegistrar, SubmissionTask,
 };
-pub use wallets::{MAX_TRANSFERS, WalletInfo, WalletTransfer, Wallets};
+pub use composition::{ComposedChain, Composition, Connection};
+pub use crypto::SecretBytes;
+pub use error::{WalletError, WalletErrorKind};
+pub use factory::{AddressParser, Dependency, FactoryProfile, Generation, Origin, WalletFactory};
+pub use indexing::{Holder, Page, Subject};
+pub use sender::{Authorship, SendError, SendFuture, Sender, Transfer};
+pub use wallet::{Author, FutureResult, SingleSender, TransactionFactory, Wallet};
+pub use wallets::{AssetInfo, MAX_TRANSFERS, Wallets};

@@ -1,0 +1,28 @@
+[package]
+name = "sdk-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Reads a deployment's configuration document and hands each named section to the chain that registered for it."
+readme = "README.md"
+
+[dependencies]
+base = { path = "../base" }
+indexing = { path = "../indexing", default-features = false }
+json-rpc = { path = "../../packages/json-rpc" }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs"], optional = true }
+toml = { version = "=0.9.12", optional = true }
+wallets = { path = "../wallets" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[features]
+default = []
+# The file reader is a convenience; the types above it are the API.
+toml = ["dep:toml", "dep:tokio"]
+
+[lints]
+workspace = true

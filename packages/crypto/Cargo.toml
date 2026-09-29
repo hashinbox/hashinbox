@@ -3,8 +3,11 @@ name = "crypto"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Secret key material with zeroization, secp256k1 and Ed25519 public keys, and ECDSA/Schnorr/Ed25519 signing."
+readme = "README.md"
 
 [dependencies]
+ed25519-dalek = "=2.2.0"
 getrandom = "=0.3.4"
 k256.workspace = true
 serde = { workspace = true, features = ["alloc", "derive"] }

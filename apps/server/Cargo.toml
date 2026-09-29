@@ -1,0 +1,54 @@
+[package]
+name = "payment-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The payment server binary: the workspace's single composition root of chains, storage, and the HTTP API."
+readme = "README.md"
+autotests = false
+
+[[bin]]
+name = "payment-server"
+path = "src/main.rs"
+
+[[test]]
+name = "wallet_api"
+path = "tests/wallet_api.rs"
+
+[[test]]
+name = "solana_node"
+path = "tests/solana_node.rs"
+required-features = ["solana-node"]
+
+[features]
+solana-node = []
+
+[dependencies]
+axum = "0.8"
+base = { path = "../../sdk/base" }
+chain-bitcoin = { path = "../../sdk/chains/bitcoin" }
+chain-ethereum = { path = "../../sdk/chains/ethereum" }
+chain-solana = { path = "../../sdk/chains/solana" }
+hex.workspace = true
+http-server = { path = "../../packages/http-server" }
+indexing = { path = "../../sdk/indexing" }
+json-rpc = { path = "../../packages/json-rpc" }
+payment-api = { path = "../api" }
+sdk-config = { path = "../../sdk/config", features = ["toml"] }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "net", "process", "rt", "signal", "sync", "time"] }
+wallets = { path = "../../sdk/wallets" }
+
+[dev-dependencies]
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+bitcoin.workspace = true
+futures-executor.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true

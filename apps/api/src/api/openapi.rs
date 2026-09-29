@@ -4,22 +4,22 @@ use axum::{Extension, Json};
 use utoipa::openapi::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::State;
-use super::error::{Body, Error};
+use super::Payments;
+use super::error::{Error, ErrorBody};
 
-pub fn routes() -> OpenApiRouter<State> {
+pub fn routes() -> OpenApiRouter<Payments> {
     OpenApiRouter::new().routes(routes!(read))
 }
 
-// Axum owns the extension extractor signature; this handler serializes the injected OpenAPI
-// contract and maps encoding errors to HTTP
-// design-lint: allow unclassified-free-function -- Axum owns the extension extractor signature
 #[utoipa::path(
     get,
     path = "/openapi.json",
+    operation_id = "read_openapi_document",
+    summary = "Read this OpenAPI 3 document",
+    description = "The contract every route is generated from; public, like the health routes.",
     responses(
         (status = 200, description = "OpenAPI 3 contract", body = Object),
-        (status = 500, body = Body)
+        (status = 500, description = "The contract could not be encoded", body = ErrorBody)
     ),
     tag = "openapi"
 )]
