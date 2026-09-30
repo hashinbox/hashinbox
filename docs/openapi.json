@@ -12,35 +12,34 @@
     }
   ],
   "paths": {
-    "/health/live": {
+    "/healthz": {
       "get": {
         "tags": [
           "health"
         ],
-        "summary": "Liveness probe",
-        "description": "Answers 204 while the process runs; public, no bearer token.",
-        "operationId": "read_liveness",
+        "summary": "Read readiness and network health from memory",
+        "description": "Public memory-only readiness. Ready when every network is ready or quarantined and at least one is ready. No RPC or storage reads.",
+        "operationId": "read_health",
         "responses": {
-          "204": {
-            "description": "Process is alive"
-          }
-        }
-      }
-    },
-    "/health/ready": {
-      "get": {
-        "tags": [
-          "health"
-        ],
-        "summary": "Readiness probe",
-        "description": "Answers 204 only while every configured index is ready; public, no bearer token.",
-        "operationId": "read_readiness",
-        "responses": {
-          "204": {
-            "description": "Wallets and indexes are ready"
+          "200": {
+            "description": "Ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Report"
+                }
+              }
+            }
           },
           "503": {
-            "description": "Wallets or indexes are not ready"
+            "description": "Not ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Report"
+                }
+              }
+            }
           }
         }
       }
@@ -83,7 +82,7 @@
           "addresses"
         ],
         "summary": "Observe an address without its key",
-        "description": "Observes an address of a configured asset without a key. The entry is a watch-only wallet: its history (`GET /v1/wallets/{id}/transactions`) is indexed from `start` — a native block position, whose earlier history is backfilled, or `\"fresh\"` for the block after the current checkpoint. A position further below the checkpoint than the index's policy allows answers 400 naming the earliest acceptable start. Sends answer 422.",
+        "description": "Observes an address from registration without its key. The entry is watch-only; sending from it answers 422.",
         "operationId": "watch_address",
         "requestBody": {
           "content": {
@@ -185,295 +184,6 @@
           },
           "401": {
             "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/v1/assets/{asset}/address": {
-      "get": {
-        "tags": [
-          "assets"
-        ],
-        "summary": "Parse address text into its canonical form",
-        "description": "The canonical address of `text` in the asset's network, parsed by the asset's chain without a wallet: validates a destination or an address to watch.",
-        "operationId": "read_asset_address",
-        "parameters": [
-          {
-            "name": "asset",
-            "in": "path",
-            "description": "A configured asset tag.",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
-            }
-          },
-          {
-            "name": "text",
-            "in": "query",
-            "description": "Address text in any form the asset's chain accepts. It is arbitrary\ncaller text, so it travels in the query string, never in a path segment.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The canonical address",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Address"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed asset tag or address text",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Asset is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/v1/status": {
-      "get": {
-        "tags": [
-          "status"
-        ],
-        "summary": "Read readiness and every indexed network's checkpoint and state",
-        "description": "Whether the API serves complete history, and for each configured network the last block it committed, the newest block it holds above that confirmed line, what its synchronization is doing, why it is failing, and what history it still owes addresses watched from below its checkpoint. One network's failure does not stop the others: a quarantined network keeps its last checkpoint and reports it here, and a network whose historical range this node cannot serve keeps answering for its tip.",
-        "operationId": "read_sync_status",
-        "responses": {
-          "200": {
-            "description": "Readiness and one checkpoint per indexed network",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SyncReport"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "A checkpoint could not be read",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/v1/status/backfill/cancel": {
-      "post": {
-        "tags": [
-          "status"
-        ],
-        "summary": "Stop asking for the history one network still owes",
-        "description": "Settles the historical range `GET /v1/status` reports as `networks[].backfill` for one network. Every watched address that still owes history is left as one created now would be: same id, same address, birthday at the current checkpoint, nothing owed. **Nothing indexed is deleted** — the rows a partial backfill already wrote stay and are still served; what stops is the reading, so each affected address's reads claim completeness from the raised birthday instead. Forward indexing is untouched. The range can be asked for again by watching the address from a lower start, at the price of reading it. A network that owes nothing answers 409 rather than pretending to act.",
-        "operationId": "cancel_sync_backfill",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CancelBackfill"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "The owed range was settled; no pass will ask for it again",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BackfillCancelled"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "The network is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The network owes no history",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The index could not settle the range",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/v1/status/resume": {
-      "post": {
-        "tags": [
-          "status"
-        ],
-        "summary": "Clear one network's quarantine and index it again",
-        "description": "Clears the quarantine of one network named exactly as `GET /v1/status` names it: its attempt count resets and its next pass runs at once. Nothing durable changes, and no outcome is promised — a network whose cause is still unfixed fails again on that pass, through the ordinary attempt and quarantine path, and `GET /v1/status` reports it. Other networks are untouched. A network that is not quarantined answers 409 rather than pretending to act.",
-        "operationId": "resume_sync_network",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ResumeNetwork"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "The quarantine was cleared; the next pass decides",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResumeAccepted"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "The network is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The network is not quarantined",
             "content": {
               "application/json": {
                 "schema": {
@@ -628,7 +338,7 @@
           "wallets"
         ],
         "summary": "Generate a wallet for one configured asset",
-        "description": "Generates a wallet of one configured asset. The key never leaves the server; it is persisted unencrypted in the storage registry so the wallet survives a restart (development custody, not an HSM or KMS). `start` states the birthday to index from: `\"fresh\"` for a key with no past, or a native block position, whose earlier history is then backfilled. The call is not idempotent: a retried request mints a second wallet and a second key.",
+        "description": "Generates a wallet, encrypts its key in the application registry, then watches it from creation. Keys never leave the server. Retrying creates another wallet.",
         "operationId": "create_wallet",
         "requestBody": {
           "content": {
@@ -709,93 +419,6 @@
         ]
       }
     },
-    "/v1/wallets/import": {
-      "post": {
-        "tags": [
-          "wallets"
-        ],
-        "summary": "Register a wallet from a caller-held private key",
-        "description": "Registers a wallet from a private key. The asset's chain parses the key text; the wallet is indexed from `start` — a native block position, whose history below the checkpoint is backfilled, or `\"fresh\"` for the block after the current checkpoint — and persisted unencrypted in the storage registry (development custody, not an HSM or KMS). A position further below the checkpoint than the index's policy allows answers 400 naming the earliest acceptable start.",
-        "operationId": "import_wallet",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ImportWallet"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Wallet imported and registered for indexing",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Wallet"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body, asset tag, or key text",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Asset is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Wallet ID or address is already registered",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Wallet registration is unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
     "/v1/wallets/{id}": {
       "get": {
         "tags": [
@@ -808,7 +431,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "The wallet ID a create, import, or watch call returned.",
+            "description": "The wallet ID a create or watch call returned.",
             "required": true,
             "schema": {
               "type": "string"
@@ -860,13 +483,13 @@
           "wallets"
         ],
         "summary": "Read a wallet's balance in its own asset",
-        "description": "The balance of the wallet's address in its asset's display units, folded by the index over the movements it stores: the height of the confirmed line it was folded at, what is still arriving and leaving in blocks above that line, and how much of the history behind the amount the index can prove it holds. A watch-only address answers it exactly as a wallet does, because the fold needs no key.",
+        "description": "The confirmed indexed total and pending incoming/outgoing amounts in the asset's display units, with the confirmed and pending heights and history completeness. Chain spending rules still apply. A watch-only address reads the same balance without a key.",
         "operationId": "read_wallet_balance",
         "parameters": [
           {
             "name": "id",
             "in": "path",
-            "description": "The wallet ID a create, import, or watch call returned.",
+            "description": "The wallet ID a create or watch call returned.",
             "required": true,
             "schema": {
               "type": "string"
@@ -934,7 +557,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "The wallet ID a create, import, or watch call returned.",
+            "description": "The wallet ID a create or watch call returned.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1041,7 +664,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "The wallet ID a create, import, or watch call returned.",
+            "description": "The wallet ID a create or watch call returned.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1246,41 +869,9 @@
           }
         }
       },
-      "BackfillCancelled": {
-        "type": "object",
-        "description": "What `POST /v1/status/backfill/cancel` settled.\n\n`stopped` is what `GET /v1/status` reported for this network immediately\nbefore, and `watches` is what the index actually re-anchored: the first is a\nsnapshot the last pass published, the second is the act itself, and they can\ndiffer by whatever a pass settled in between.",
-        "required": [
-          "network",
-          "watches",
-          "stopped"
-        ],
-        "properties": {
-          "network": {
-            "$ref": "#/components/schemas/Network",
-            "description": "The network whose owed history this settled."
-          },
-          "stopped": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Backfill",
-                "description": "The range this stopped asking for, as the report held it just before.\nAlways present."
-              }
-            ]
-          },
-          "watches": {
-            "type": "integer",
-            "format": "int64",
-            "description": "How many watched addresses had their birthday raised to the checkpoint.\nEach keeps its id, its address and every row already indexed for it.",
-            "minimum": 0
-          }
-        }
-      },
       "Balance": {
         "type": "object",
-        "description": "A wallet's balance in its asset, on both sides of its chain's confirmed\nline.\n\n`amount` is settled and spendable and cannot revert: it is the index's\nfold over the movements it stores at or below the confirmed line. The two\npending figures are what is still in blocks above that line: they are\nreported apart rather than netted, because \"3.0 arriving\" and \"1.0\nleaving\" are different facts to a payments operator, and neither is ever\nnegative. Pending fees are not folded in; a pending transaction's fee is\nreported with it in history.",
+        "description": "A wallet's balance in its asset, on both sides of its chain's confirmed\nline.\n\n`amount` is the confirmed indexed total. Completeness states whether history\nis missing; chain spending rules, such as coinbase maturity, still apply.\nThe two pending figures describe blocks above the confirmed line: they are\nreported apart rather than netted, because \"3.0 arriving\" and \"1.0\nleaving\" are different facts to a payments operator, and neither is ever\nnegative. Pending fees are not folded in; a pending transaction's fee is\nreported with it in history.",
         "required": [
           "amount",
           "pending_incoming",
@@ -1292,11 +883,11 @@
         "properties": {
           "amount": {
             "type": "string",
-            "description": "Confirmed and spendable: exact decimal in display units, e.g. `12.5`.\nFolded over durable rows only, so it cannot revert."
+            "description": "Confirmed indexed amount in exact display units, e.g. `12.5`.\nCompleteness and chain spending rules apply separately."
           },
           "completeness": {
             "$ref": "#/components/schemas/Completeness",
-            "description": "How much of the history behind `amount` the index can prove it holds.\n`incomplete` while this address still owes a historical range, and\n`overdrawn` when the fold proves credits are missing."
+            "description": "How much of the history behind `amount` the index can prove it holds.\n`incomplete` while this address still owes a historical range, and\n`overdrawn` when indexed debits exceed known credits."
           },
           "observed_height": {
             "type": [
@@ -1304,7 +895,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Height of the confirmed line `amount` was folded at; null before a\ncheckpoint. Always present.",
+            "description": "Height of the confirmed line for the saved total; null before a\ncheckpoint. Always present.",
             "minimum": 0
           },
           "pending_height": {
@@ -1353,7 +944,7 @@
         "properties": {
           "amount": {
             "type": "string",
-            "description": "Exact decimal in display units of the wallet's asset."
+            "description": "Exact decimal in display units, or `all` to sweep spendable funds."
           },
           "destination": {
             "type": "string",
@@ -1406,23 +997,9 @@
         },
         "additionalProperties": false
       },
-      "CancelBackfill": {
-        "type": "object",
-        "description": "`POST /v1/status/backfill/cancel` body: the one network to stop asking.\n\nIt names a network for the same reason the resume body does, and for one\nmore: what an operator can see is a network aggregate. `networks[].backfill`\nreports one `resume`, one `anchor` and one count for the whole network and\nnames no address, so an address-by-address cancellation would be a request\nthis API gives nobody the information to make.",
-        "required": [
-          "network"
-        ],
-        "properties": {
-          "network": {
-            "$ref": "#/components/schemas/Network",
-            "description": "The network whose owed history to stop asking for, exactly as\n`GET /v1/status` names it."
-          }
-        },
-        "additionalProperties": false
-      },
       "Completeness": {
         "type": "string",
-        "description": "How much of the history behind an answer the index can prove it holds.\n\nIt is a property of the read, not of the wallet, and the balance and the\nhistory page report it in the same four words.",
+        "description": "How much of the history behind an answer the index can prove it holds.\n\nIt is a property of the read, not of the wallet, and the balance and the\nhistory page share the vocabulary; opening evidence applies only to balances.",
         "enum": [
           "complete_history",
           "verified_opening_balance",
@@ -1430,55 +1007,17 @@
           "overdrawn"
         ]
       },
-      "ConfirmedKind": {
-        "type": "string",
-        "description": "`kind: \"confirmed\"`.",
-        "enum": [
-          "confirmed"
-        ]
-      },
-      "ConfirmedStatus": {
-        "type": "object",
-        "description": "Committed at or below the chain's confirmed line: it will not revert.",
-        "required": [
-          "kind",
-          "block",
-          "confirmations"
-        ],
-        "properties": {
-          "block": {
-            "$ref": "#/components/schemas/Block",
-            "description": "The including block."
-          },
-          "confirmations": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Blocks from the including block to the newest block the index knows\nof, inclusive.",
-            "minimum": 0
-          },
-          "kind": {
-            "$ref": "#/components/schemas/ConfirmedKind",
-            "description": "Always `confirmed`."
-          }
-        },
-        "additionalProperties": false
-      },
       "CreateWallet": {
         "type": "object",
         "description": "`POST /v1/wallets` body: generate a wallet for one configured asset.",
         "required": [
-          "asset",
-          "start"
+          "asset"
         ],
         "properties": {
           "asset": {
             "type": "string",
             "description": "The configured asset tag the new wallet holds (`GET /v1/assets`).",
             "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
-          },
-          "start": {
-            "$ref": "#/components/schemas/Start",
-            "description": "Where to begin observing the new address. A generated key has no past,\nso `\"fresh\"` is the honest answer; a position is accepted because the\nsame body registers a key an operator may have used elsewhere first."
           }
         },
         "additionalProperties": false
@@ -1512,40 +1051,6 @@
           }
         }
       },
-      "FailedKind": {
-        "type": "string",
-        "description": "`kind: \"failed\"`.",
-        "enum": [
-          "failed"
-        ]
-      },
-      "FailedStatus": {
-        "type": "object",
-        "description": "Included but failed on chain.",
-        "required": [
-          "kind",
-          "block",
-          "reason"
-        ],
-        "properties": {
-          "block": {
-            "$ref": "#/components/schemas/Block",
-            "description": "The including block."
-          },
-          "kind": {
-            "$ref": "#/components/schemas/FailedKind",
-            "description": "Always `failed`."
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Chain-reported failure reason, when available; always present."
-          }
-        },
-        "additionalProperties": false
-      },
       "Fee": {
         "type": "object",
         "description": "A transaction fee, always in the chain's native asset.",
@@ -1575,32 +1080,6 @@
             ]
           }
         }
-      },
-      "ImportWallet": {
-        "type": "object",
-        "description": "`POST /v1/wallets/import` body: register a wallet from a caller-held key.",
-        "required": [
-          "asset",
-          "secret",
-          "start"
-        ],
-        "properties": {
-          "asset": {
-            "type": "string",
-            "description": "The configured asset tag the wallet holds.",
-            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
-          },
-          "secret": {
-            "type": "string",
-            "format": "password",
-            "description": "The private key in the textual form the asset's chain defines\n(`docs/API.md` lists the built-in chains' forms)."
-          },
-          "start": {
-            "$ref": "#/components/schemas/Start",
-            "description": "Where to begin observing the imported address: a native block position\nfor a key with history, or `\"fresh\"` for one that has never been used."
-          }
-        },
-        "additionalProperties": false
       },
       "IndexFailure": {
         "type": "object",
@@ -1841,127 +1320,13 @@
         },
         "additionalProperties": false
       },
-      "PendingKind": {
-        "type": "string",
-        "description": "`kind: \"pending\"`.",
-        "enum": [
-          "pending"
-        ]
-      },
-      "PendingStatus": {
+      "Report": {
         "type": "object",
-        "description": "In a canonical block above the confirmed line. It may still revert, and it\nis reported in `pending` rather than `transactions`.",
-        "required": [
-          "kind",
-          "block",
-          "confirmations"
-        ],
-        "properties": {
-          "block": {
-            "$ref": "#/components/schemas/Block",
-            "description": "The including block."
-          },
-          "confirmations": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Blocks from the including block to the newest block the index knows\nof, inclusive.",
-            "minimum": 0
-          },
-          "kind": {
-            "$ref": "#/components/schemas/PendingKind",
-            "description": "Always `pending`."
-          }
-        },
-        "additionalProperties": false
-      },
-      "ResumeAccepted": {
-        "type": "object",
-        "description": "What `POST /v1/status/resume` accepted: the network it resumed and the\nfailure that quarantine was holding.\n\n`cleared` is what `GET /v1/status` reported for this network immediately\nbefore, not a claim that the cause is gone. It is `202` and not `200` for\nthat reason: the next pass decides, and the same route's `GET` is where\nthe answer appears.",
-        "required": [
-          "network",
-          "cleared"
-        ],
-        "properties": {
-          "cleared": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/IndexFailure",
-                "description": "The failure the quarantine was holding; null when it recorded none.\nAlways present."
-              }
-            ]
-          },
-          "network": {
-            "$ref": "#/components/schemas/Network",
-            "description": "The network whose quarantine this cleared."
-          }
-        }
-      },
-      "ResumeNetwork": {
-        "type": "object",
-        "description": "`POST /v1/status/resume` body: the one network to take out of quarantine.\n\nIt names a network rather than resuming everything, because \"the cause was\nfixed\" is a fact about one chain: a blanket resume would re-attempt chains\nnobody looked at and hide which one the operator actually repaired.",
-        "required": [
-          "network"
-        ],
-        "properties": {
-          "network": {
-            "$ref": "#/components/schemas/Network",
-            "description": "The quarantined chain and network, exactly as `GET /v1/status` names it."
-          }
-        },
-        "additionalProperties": false
-      },
-      "Start": {
-        "oneOf": [
-          {
-            "type": "string",
-            "description": "This key or address has never been used: observation begins at the block after the current checkpoint and claims no history.",
-            "enum": [
-              "fresh"
-            ]
-          },
-          {
-            "type": "integer",
-            "format": "int64",
-            "description": "Observe from this native block position. Below the checkpoint the history is backfilled; further below it than the index's policy allows, this call answers 400 naming the earliest acceptable start.",
-            "minimum": 0
-          }
-        ],
-        "description": "Where an address begins to be observed: \"fresh\" for a key or address that has never been used, or a native block position to observe from."
-      },
-      "Status": {
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/PendingStatus",
-            "description": "In a canonical block above the confirmed line; it may still revert."
-          },
-          {
-            "$ref": "#/components/schemas/ConfirmedStatus",
-            "description": "Committed at or below the confirmed line; it will not revert."
-          },
-          {
-            "$ref": "#/components/schemas/FailedStatus",
-            "description": "Included but failed on chain."
-          }
-        ],
-        "description": "Where a history transaction stands relative to its chain's confirmed line:\none named schema per `kind`, discriminated by that field.",
-        "discriminator": {
-          "propertyName": "kind",
-          "mapping": {
-            "confirmed": "#/components/schemas/ConfirmedStatus",
-            "failed": "#/components/schemas/FailedStatus",
-            "pending": "#/components/schemas/PendingStatus"
-          }
-        }
-      },
-      "SyncReport": {
-        "type": "object",
-        "description": "`GET /v1/status`: readiness and every indexed network's checkpoint.",
+        "description": "The memory-only health snapshot of this process.",
         "required": [
           "ready",
-          "networks"
+          "networks",
+          "rpc"
         ],
         "properties": {
           "networks": {
@@ -1969,13 +1334,154 @@
             "items": {
               "$ref": "#/components/schemas/NetworkCheckpoint"
             },
-            "description": "Networks in index order."
+            "description": "Latest notification for each network; no repository or node calls."
           },
           "ready": {
             "type": "boolean",
-            "description": "Whether the API answers for every chain's tip: every network is\n`ready` or `quarantined`, and at least one is `ready`\n(`GET /health/ready`). It says nothing about the historical ranges\n`networks[].backfill` reports; those are per address, and each read\nthey weaken carries its own `completeness`."
+            "description": "Every network settled and at least one ready; false if reporting stopped."
+          },
+          "rpc": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Rpc"
+            },
+            "description": "One set of counters per configured RPC endpoint."
           }
         }
+      },
+      "Rpc": {
+        "type": "object",
+        "description": "One RPC endpoint's sanitized execution counters.",
+        "required": [
+          "network",
+          "endpoint",
+          "attempts",
+          "failures",
+          "consecutive_failures"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "HTTP executions, including failed attempts hidden by transport retries.",
+            "minimum": 0
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Failed completions since the last successful completion.",
+            "minimum": 0
+          },
+          "endpoint": {
+            "type": "integer",
+            "description": "Zero-based endpoint ordinal in that network's configuration.",
+            "minimum": 0
+          },
+          "failures": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Transport failures or JSON-RPC errors.",
+            "minimum": 0
+          },
+          "last_failure": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sanitized failure category; never RPC response text or endpoint credentials."
+          },
+          "network": {
+            "$ref": "#/components/schemas/Network",
+            "description": "Chain and network this client serves."
+          }
+        }
+      },
+      "Status": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "In a canonical block above the confirmed line; it may still revert.",
+            "required": [
+              "block",
+              "confirmations",
+              "kind"
+            ],
+            "properties": {
+              "block": {
+                "$ref": "#/components/schemas/Block",
+                "description": "The including block."
+              },
+              "confirmations": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Blocks from inclusion to the newest indexed block, inclusive.",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "pending"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Committed at or below the confirmed line; it will not revert.",
+            "required": [
+              "block",
+              "confirmations",
+              "kind"
+            ],
+            "properties": {
+              "block": {
+                "$ref": "#/components/schemas/Block",
+                "description": "The including block."
+              },
+              "confirmations": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Blocks from inclusion to the newest indexed block, inclusive.",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "confirmed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Included but failed on chain.",
+            "required": [
+              "block",
+              "reason",
+              "kind"
+            ],
+            "properties": {
+              "block": {
+                "$ref": "#/components/schemas/Block",
+                "description": "The including block."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "failed"
+                ]
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Chain-reported failure reason, when available; always present."
+              }
+            }
+          }
+        ],
+        "description": "Where a history transaction stands relative to its chain's confirmed line."
       },
       "Transaction": {
         "type": "object",
@@ -2079,7 +1585,7 @@
         "properties": {
           "amount": {
             "type": "string",
-            "description": "Exact decimal in display units of the wallet's asset."
+            "description": "Exact decimal in display units, or `all` for the available balance after fees."
           },
           "destination": {
             "type": "string",
@@ -2175,8 +1681,7 @@
         "description": "`POST /v1/addresses` body: observe an address without its key.",
         "required": [
           "asset",
-          "address",
-          "start"
+          "address"
         ],
         "properties": {
           "address": {
@@ -2187,10 +1692,6 @@
             "type": "string",
             "description": "The configured asset tag whose history to record.",
             "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
-          },
-          "start": {
-            "$ref": "#/components/schemas/Start",
-            "description": "Where to begin observing the address: a native block position, whose\nhistory below the checkpoint is backfilled, or `\"fresh\"` for an\naddress that has never been used."
           }
         },
         "additionalProperties": false
@@ -2207,11 +1708,11 @@
   "tags": [
     {
       "name": "assets",
-      "description": "Configured assets and address parsing"
+      "description": "Configured assets"
     },
     {
       "name": "wallets",
-      "description": "Wallets, imports, and balances"
+      "description": "Wallets and balances"
     },
     {
       "name": "addresses",
@@ -2222,12 +1723,8 @@
       "description": "History, single transfers, and batches"
     },
     {
-      "name": "status",
-      "description": "Index readiness, checkpoints, and clearing a quarantine"
-    },
-    {
       "name": "health",
-      "description": "Liveness and readiness probes"
+      "description": "Readiness, network state, and RPC statistics"
     },
     {
       "name": "openapi",

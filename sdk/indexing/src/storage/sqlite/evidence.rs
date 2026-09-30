@@ -85,6 +85,20 @@ impl Tables {
             .then_some(evidence))
     }
 
+    /// Inspect each completed block, not temporary insertion-order deficits.
+    pub(super) fn clear_deficits(&self, read: &Transaction<'_>) -> Result<(), IndexError> {
+        read.execute(
+            "UPDATE watch SET evidence_position = NULL, evidence_height = NULL,
+                evidence_hash = NULL, evidence_parent_position = NULL, evidence_parent_hash = NULL,
+                evidence_timestamp = NULL, evidence_amount = NULL
+             WHERE chain = ?1 AND network = ?2 AND evidence_position IS NOT NULL
+                AND substr(balance, 1, 1) = '-'",
+            params![self.chain(), self.name()],
+        )
+        .map(drop)
+        .map_err(|error| failure(&error, "failed to invalidate overdrawn evidence"))
+    }
+
     pub(super) fn invalidate_evidence(
         &self,
         read: &Transaction<'_>,

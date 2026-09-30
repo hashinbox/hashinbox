@@ -25,7 +25,7 @@ use crate::{
 /// How many of the newest native blocks are kept.
 ///
 /// A native block is only ever needed again to re-inspect a block after an
-/// address was added (`docs/design/030 §8 (ex-025)` section 3.2), and it is megabytes where
+/// address was added, and it is megabytes where
 /// the interpreted facts are usually bytes. Keeping a short suffix makes the
 /// ordinary case free and leaves the rest to one bounded refetch.
 const RETAINED_BLOCKS: usize = 16;

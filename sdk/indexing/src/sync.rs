@@ -25,8 +25,7 @@ pub struct BackfillStatus {
     ///
     /// A backfill failure never fails the pass and never changes the network's
     /// state: forward synchronization is what an operator's clients read, and
-    /// a node that cannot serve a historical range must not stop it
-    /// (`docs/design/024` section 8).
+    /// a node that cannot serve a historical range must not stop it.
     pub failure: Option<IndexError>,
 }
 
@@ -76,7 +75,6 @@ pub struct SyncStatus {
     /// nothing else. An owed range can be one the node will never serve, so a
     /// phase that waited for it would wait for the life of the process; what
     /// the range actually weakens is each read it touches, which
-    /// [`Completeness`](crate::Completeness) already states there
-    /// (`docs/design/024` section 7).
+    /// [`Completeness`](crate::Completeness) already states there.
     pub backfill: Option<BackfillStatus>,
 }

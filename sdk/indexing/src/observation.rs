@@ -28,7 +28,7 @@ pub struct MovementId(pub String);
 /// address it shrank. That is the guarantee the five-variant enum this replaced
 /// made at the type level, kept at the type level — and [`MovementKind`] was
 /// already the flat discriminant every store writes, so the enum was a second
-/// representation of a vocabulary that had a first (`docs/design/033` §5.5).
+/// representation of a vocabulary that had a first.
 ///
 /// [`Self::stored`] is the one door for a triple that was read back rather than
 /// constructed, and it is checked.
@@ -300,8 +300,7 @@ pub struct ObservationDraft {
     /// be recovered further down: a store sees the selection and never the list.
     /// Taking the position in the complete list gives one transaction the same
     /// ordinal under every selection, which is what keeps a history page ordered
-    /// by a function of the block alone and a held cursor stable
-    /// (`docs/design/034` section 5.6). A rank over the reported subset —
+    /// by a function of the block alone and a held cursor stable. A rank over the reported subset —
     /// `enumerate()` over the filtered vector — would instead depend on which
     /// watch reached the block first, and a later, wider watch would renumber
     /// rows underneath a cursor a caller is already holding.

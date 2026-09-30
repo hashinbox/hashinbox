@@ -91,8 +91,7 @@ impl IndexFailure {
     }
 }
 
-// The availability floor of `docs/design/024` section 7, answered by reporting
-// rather than by withholding.
+// Missing historical ranges are reported without blocking forward readiness.
 /// The history one network still owes addresses watched from below its
 /// checkpoint, and why the last attempt at it stopped.
 ///

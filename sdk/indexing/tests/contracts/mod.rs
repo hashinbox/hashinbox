@@ -30,6 +30,7 @@ mod backfill_fixture;
 mod balance;
 mod balance_totals;
 mod completeness_claims;
+mod evidence;
 mod fixture;
 mod history;
 mod idempotent_replay;

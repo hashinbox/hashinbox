@@ -1,61 +1,15 @@
-//! The store ports on one embedded SQLite file (cargo feature `sqlite`).
-//!
-//! [`Database::open`] opens the file once and brings its schema to the version
-//! this build expects; [`Repository::new`] speaks the domain over it and
-//! implements the two required ports, [`WatchStore`](crate::WatchStore) and
-//! [`IndexStore`](crate::IndexStore), plus every consumer capability this
-//! workspace needs of a store — [`BalanceStore`](crate::BalanceStore),
-//! [`OutputStore`](crate::OutputStore) and [`Purging`](crate::Purging) — and its
-//! own history query, [`ConfirmedHistory`](crate::ConfirmedHistory).
-//!
-//! **One repository serves every configured network.** It is bound to the file
-//! and to nothing else; each operation names the network it is about, and every
-//! table is keyed `(chain, network, ...)` so a read of one network cannot see
-//! another's rows. That reverses `docs/design/030` section 8's deviation, whose
-//! reasoning was that a repository binds one network while the file is opened
-//! once per process — the first half of which is no longer true.
-//!
-//! Every port passes the shared contracts unmodified, which is this
-//! repository's only definition of two stores being the same store. They run in
-//! `tests/repository_contract.rs`, against this store and `crate::memory`
-//! together and never against one alone; what stays in this module's own test
-//! blocks is only what a store on a *file* can be asked. This is the store the
-//! server composes (`docs/design/030 §8 (ex-031)` step 8).
-//!
-//! Two altitudes, two types: [`Database`] owns the file and the one blocking
-//! hop each operation costs, [`Repository`] speaks the domain. What is *not*
-//! between them is the point — no key encoder, no value frame, no namespace
-//! prefix and no conditional-batch vocabulary, because the engine is handed a
-//! statement instead of bytes.
-//!
-//! One writer and many readers run at once, which is what the write-ahead log
-//! is for and what a connection pool is needed to take: a connection is a
-//! serial thing, so a reader sharing the writer's one connection waits for the
-//! commit rather than reading past it. [`Database`] says what that costs.
-//!
-//! # Conditions, and why this schema cannot be talked into a stale write
-//!
-//! Uniqueness *is* the schema — `(chain, network, asset, address)` is the
-//! registration's primary key and `id` carries a unique index over the whole
-//! file — so a duplicate is refused by the engine inside the insert's own
-//! transaction. There is no read, so nothing is remembered for a later write to
-//! quote, and a stale condition has no surface here at all.
-//!
-//! The checkpoint does **not** get the compare-and-set `docs/design/030 §8 (ex-031)`
-//! section 5.2 proposed, and this module's `blocks` half says why at length:
-//! naming the checkpoint's own durable `(position, hash)` in an
-//! `UPDATE ... WHERE` is not a stronger condition, it is a weaker one, because
-//! a rescan re-indexes the same chain and restores the same `(position, hash)`.
-//! What replaces it is not a condition at all: `Database::transaction` reads
-//! the checkpoint and writes it inside **one** `BEGIN IMMEDIATE` transaction,
-//! so there is no window between the read and the write for anything to
-//! interleave into, and the whole compare-and-set vocabulary — versions,
-//! conditions, stored versions — is unnecessary rather than merely cheaper.
+//! SQLite repository over one file and a bounded connection pool.
+//! One repository serves all networks; SQL predicates isolate each operation.
+//! Each write reads its expected state and changes rows in one BEGIN IMMEDIATE
+//! transaction. Whole operations run on blocking workers. Read snapshots use
+//! separate pooled connections under WAL while one writer commits.
+//! The same repository contracts run against SQLite and Memory.
 
 mod activity;
 mod balance;
 mod blocks;
 mod effects;
+mod evidence;
 mod history;
 mod movements;
 mod outputs;
@@ -77,22 +31,9 @@ use crate::{IndexError, IndexErrorKind, Networked};
 
 use tables::Tables;
 
-/// One open SQLite file, shared by every network's [`Repository`].
-///
-/// SQLite is synchronous, so each call hands **one whole operation** to
-/// `tokio::task::spawn_blocking`: the unit is the operation and never the
-/// row.
-///
-/// The operation borrows a connection from a bounded pool for its length. One
-/// shared connection would be correct, and is what `docs/design/030 §8 (ex-031)` step 2
-/// measured: a reader that runs while a block commits pays 5.658 ms a page
-/// instead of 0.199 ms, because a `Connection` is behind a mutex and the commit
-/// is holding it. A second connection removes that entirely, which is the whole
-/// of what the write-ahead log promises -- one writer, readers alongside it --
-/// and that is a property of the file rather than of the handle, so the pool
-/// simply takes it.
-///
-/// Cheap to clone; every clone shares the file and its connections.
+/// An opened SQLite file and its bounded connection pool. Each operation borrows
+/// one connection and runs entirely on a blocking worker. WAL permits readers
+/// alongside the single writer. Clones share the pool.
 pub struct Database {
     pool: Arc<Pool>,
 }
@@ -203,17 +144,8 @@ impl Database {
         })?
     }
 
-    /// Runs one whole operation inside one `BEGIN IMMEDIATE` transaction: it
-    /// commits when the operation returns a value and rolls the whole thing
-    /// back when it returns an error.
-    ///
-    /// `IMMEDIATE` rather than the default deferred begin, because every caller
-    /// here reads the state it is about to condition a write on. A deferred
-    /// transaction takes its write lock at the first write, which would leave
-    /// exactly the read-to-write window `docs/design/030 §8 (ex-031)` section 5.2 tries to
-    /// close with a condition; an immediate one holds the file's single write
-    /// lock from the first statement, so the read and the write it justifies
-    /// cannot be separated by another writer.
+    /// Runs a conditional mutation in one BEGIN IMMEDIATE transaction.
+    /// Reads and writes share the write lock; an error rolls back the whole operation.
     async fn transaction<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, IndexError> + Send + 'static,

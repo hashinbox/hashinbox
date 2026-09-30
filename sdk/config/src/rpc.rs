@@ -23,7 +23,7 @@ pub type Transport = Arc<dyn json_rpc::Client>;
 ///
 /// The fields are public: a deployment that reads a document deserializes
 /// this, and one that has its URLs in hand writes
-/// `Rpc { repeat: Repetition::Off, ..Rpc::endpoint(url) }`. `Debug` is written
+/// `Rpc { repeat: Repetition::Off,..Rpc::endpoint(url) }`. `Debug` is written
 /// rather than derived, for the reason `json_rpc::Endpoint`'s is: a URL may
 /// carry a credential inline, and a value that prints itself ends up in a log.
 #[derive(Clone, Deserialize, PartialEq, Eq)]
@@ -282,7 +282,7 @@ mod tests {
     /// The point of the types being the API: a value assembled in Rust and the
     /// same value read from a document are indistinguishable, defaults
     /// included, and reach the identical `validate` — no check hides inside a
-    /// `Deserialize` implementation (`docs/design/030 §8 (ex-028)` section 5.2).
+    /// `Deserialize` implementation.
     #[test]
     fn a_value_built_in_code_equals_the_parsed_one_and_validates_identically() {
         let url = "http://127.0.0.1:8545";

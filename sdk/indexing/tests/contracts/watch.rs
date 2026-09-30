@@ -81,7 +81,7 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
     /// This is the capability the durable schema always had and the hot watch
     /// set used to refuse: a wallet holding a chain's own currency and a token
     /// at one address is two observations with two identities, and one
-    /// inspection of that address proves both (`docs/design/030 §8 (ex-032)` section 4).
+    /// inspection of that address proves both.
     pub async fn accepts_one_address_once_per_asset(&self) {
         let native = self.watch("native-wallet", "native", "a", 7);
         let token = self.watch("token-wallet", "0xtoken", "a", 7);
@@ -219,7 +219,7 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
     /// every asset observed at it, so withdrawing either observation raised the
     /// question of who owned the claim — and a second observation registered from
     /// an earlier birthday had to widen the shared range, which a restart in
-    /// between could read back as settled (`docs/design/030 §8 (ex-032)`, the first defect).
+    /// between could read back as settled.
     /// Now each observation carries its own contiguous claim, earned under its own
     /// birthday: two observations of one address advance together because one
     /// inspection serves both ([`indexing::BlockInterpreter::inspect`] takes

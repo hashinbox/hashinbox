@@ -43,3 +43,16 @@ impl Repository {
             .then(|| evidence.clone())
     }
 }
+
+impl Tables {
+    /// A transient insertion order cannot invalidate an otherwise sound block.
+    pub(super) fn clear_deficits(&mut self, network: &crate::Network) {
+        self.openings.retain(|key, _| {
+            key.0 != *network
+                || self
+                    .balances
+                    .get(key)
+                    .is_some_and(|net| net.sign() != num_bigint::Sign::Minus)
+        });
+    }
+}

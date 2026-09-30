@@ -8,6 +8,18 @@ use crate::{
 };
 use rusqlite::{Connection, Row, params};
 
+const PAGE: &str = "SELECT m.block_height, t.transaction_order, m.transaction_id, m.movement_order,
+                    m.movement_id, m.direction, m.block_position, m.kind, m.amount, m.counterparty
+             FROM balance_movement m LEFT JOIN transaction_fact t
+               ON t.chain = m.chain AND t.network = m.network
+                  AND t.transaction_id = m.transaction_id
+             WHERE m.chain = ?1 AND m.network = ?2 AND m.address = ?3 AND m.asset = ?4
+               AND (?5 IS NULL OR
+                (m.block_height, COALESCE(t.transaction_order, -1), m.transaction_id,
+                 m.movement_order, m.movement_id, m.direction) > (?5, ?6, ?7, ?8, ?9, ?10))
+             ORDER BY m.block_height, COALESCE(t.transaction_order, -1), m.transaction_id,
+                      m.movement_order, m.movement_id, m.direction LIMIT ?11";
+
 impl Repository {
     /// Reads confirmed effects, checkpoint and coverage in one database snapshot.
     ///
@@ -33,18 +45,9 @@ impl Tables {
         let probe = Probe::new(query.limit);
         let after = query.after.as_ref();
         let transaction = after.and_then(|position| position.transaction.as_ref());
-        let mut statement = read.prepare_cached(
-            "SELECT m.block_height, t.transaction_order, m.transaction_id, m.movement_order,
-                    m.movement_id, m.direction, m.block_position, m.kind, m.amount, m.counterparty
-             FROM balance_movement m LEFT JOIN transaction_fact t
-               ON t.chain = m.chain AND t.network = m.network AND t.transaction_id = m.transaction_id
-             WHERE m.chain = ?1 AND m.network = ?2 AND m.address = ?3 AND m.asset = ?4
-               AND (?5 IS NULL OR
-                (m.block_height, COALESCE(t.transaction_order, -1), m.transaction_id,
-                 m.movement_order, m.movement_id, m.direction) > (?5, ?6, ?7, ?8, ?9, ?10))
-             ORDER BY m.block_height, COALESCE(t.transaction_order, -1), m.transaction_id,
-                      m.movement_order, m.movement_id, m.direction LIMIT ?11"
-        ).map_err(|error| failure(&error, "failed to prepare activity page"))?;
+        let mut statement = read
+            .prepare_cached(PAGE)
+            .map_err(|error| failure(&error, "failed to prepare activity page"))?;
         let mut rows = statement
             .query(params![
                 self.chain(),

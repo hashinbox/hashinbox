@@ -27,8 +27,6 @@ type AnyError = Box<dyn std::error::Error + Send + Sync>;
 const CONFIG: &str = include_str!("config.toml");
 
 const INTERVAL: Duration = Duration::from_secs(1);
-/// Bitcoin coinbase outputs require 100 blocks before they are spendable.
-const MATURITY: u64 = 100;
 /// One SOL in lamports.
 const AIRDROP: u64 = 1_000_000_000;
 /// A well-known Ethereum address, observed without a key.
@@ -129,11 +127,14 @@ async fn main() -> Result<(), AnyError> {
         .await?;
 
     // 7. Funding is a local-network operation and not part of the SDK:
-    //    bitcoin mines past coinbase maturity, solana asks for an airdrop.
+    //    use the node's funded Bitcoin wallet and Solana's airdrop.
+    let coinbase = call(&sections, "bitcoin", "getnewaddress", json!([])).await?;
     let depth = sections["bitcoin"]["confirmation_depth"]
         .as_u64()
         .ok_or("bitcoin confirmation_depth must be explicit")?;
-    let mined = json!([MATURITY + depth + 1, signers["btc-alice"].address().value]);
+    let deposit = json!([signers["btc-alice"].address().value, 1]);
+    call(&sections, "bitcoin", "sendtoaddress", deposit).await?;
+    let mined = json!([depth + 1, coinbase]);
     call(&sections, "bitcoin", "generatetoaddress", mined).await?;
     let airdrop = json!([signers["sol-alice"].address().value, AIRDROP]);
     call(&sections, "solana", "requestAirdrop", airdrop).await?;

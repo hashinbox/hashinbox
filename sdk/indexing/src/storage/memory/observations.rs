@@ -165,6 +165,7 @@ impl Repository {
             watch.address.value.clone(),
         );
         tables.balances.remove(&key);
+        tables.openings.remove(&key);
         if tables.watches.remove(&key).is_some() {
             drop(tables.identities.remove(&watch.id));
         }

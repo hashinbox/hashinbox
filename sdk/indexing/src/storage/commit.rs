@@ -6,8 +6,7 @@
 //! moves: a batch whose blocks extend the checkpoint advances it, a batch whose
 //! blocks sit at or below it does not. That is a property of the blocks, so it
 //! is derived from them rather than selected by the caller — which is why
-//! [`IndexStore`] has one write and not two (`docs/design/030 §8 (ex-032)`, "What a commit
-//! contains").
+//! [`IndexStore`] has one write and not two.
 //!
 //! The other half of a commit is the progress it proves. [`Progress`] advances
 //! one observation's contiguous [`indexed_through`](crate::WatchProgress), in
@@ -39,7 +38,7 @@ use crate::{
 /// does not *retreat* from the value its own author read. Equality is therefore a
 /// legal claim to build; only one going backwards from its own expectation is
 /// refused, and that is a check on the index rather than a rule about the store's
-/// history (`docs/design/030 §8 (ex-032)`, the fourth defect).
+/// history.
 ///
 /// Legal to *build* is not the same as accepted twice. A batch that carried a
 /// claim and landed has made its own `expected` stale, so presenting that exact
@@ -285,7 +284,7 @@ impl IndexedBatch {
     /// inside the write transaction and compares it. A `WHERE position = ? AND
     /// hash = ?` would be unsound anyway — that pair is not monotonic across a
     /// rescan, so it matches again after exactly the purge-then-rescan it would
-    /// be introduced to refuse (`docs/design/030`, the `031` row). What rules
+    /// be introduced to refuse. What rules
     /// that out is that [`crate::Purging::purge_network`] is contractually
     /// offline.
     #[must_use]
@@ -319,35 +318,15 @@ fn unjustified(message: &str) -> IndexError {
     IndexError::new(IndexErrorKind::InvalidBlock, message, false)
 }
 
-/// Where an index writes what it inspected, and the line it writes it against.
+/// Required atomic indexing writes and checkpoint reads, beside [`crate::WatchStore`].
+/// Committed facts are append-only during synchronization; offline removal is the
+/// separate [`crate::Purging`] capability. Balance, history and output reads are optional.
 ///
-/// One half of the minimum an index sink must implement
-/// ([`crate::Repository`]); the other is [`crate::WatchStore`]. **One write**,
-/// because a chain is written in one vocabulary: a batch of blocks and the
-/// per-observation progress they prove. Whether the network's confirmed line
-/// moves is a property of the blocks, not a second method. Nothing here reads a
-/// balance, a history page or an output — those are consumer capabilities a
-/// repository may also offer, and an index neither calls nor requires them.
-///
-/// The store is append-only while a network is running. Every block it receives
-/// is at or below the chain's confirmed line
-/// ([`crate::ChainTips::confirmed_tip`]), so no row it holds is ever undone and
-/// it needs no rollback data of any kind (`docs/design/030 §8 (ex-025)`). Undoing is
-/// [`crate::Purging::purge_network`], which is not part of a pass at all.
-///
-/// # The one consistent read
-///
-/// Every operation here reads the network's checkpoint and the rows it
-/// conditions on **inside one transaction**, and a reader port does the same
-/// with its rows ([`crate::ConfirmedHistory`], [`crate::BalanceStore`],
-/// [`crate::OutputStore`]). This is a contract, not an implementation note:
-/// a consumer completing an answer with the pending blocks samples them, reads
-/// the store, and then narrows the sample by the checkpoint *the store's own
-/// answer carried* ([`crate::PendingSample::above`]).
-/// A store that answered rows at one instant and its checkpoint at another
-/// would make that narrowing admit a block into both halves or neither, which
-/// is the double-count `docs/design/030 §8 (ex-032)` collision 5 records. SQLite takes it by
-/// reading the checkpoint as the first statement of the transaction.
+/// Every mutation reads its expected checkpoint and conditional rows inside the
+/// same transaction that writes them. Every optional query reads its answer and
+/// checkpoint in one snapshot. Consumers sample pending blocks before that read,
+/// then narrow them by the returned checkpoint using [`crate::PendingSample::above`];
+/// splitting the snapshot could omit a block or count it twice.
 pub trait IndexStore: Send + Sync {
     /// The network's current checkpoint, or `None` before its first commit.
     ///
@@ -356,8 +335,7 @@ pub trait IndexStore: Send + Sync {
     /// per-network fact and stays one — the confirmed/pending boundary, the
     /// compare-and-set base of [`Self::commit`], the top of every observation's
     /// own catch-up, and the anchor a paginated read pins itself to. Per-watch
-    /// progress is recorded *beside* it and does not replace it
-    /// (`docs/design/030 §8 (ex-032)` section 1).
+    /// progress is recorded *beside* it and does not replace it.
     fn checkpoint<'a>(
         &'a self,
         network: &'a Network,

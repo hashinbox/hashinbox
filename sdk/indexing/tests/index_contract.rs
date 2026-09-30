@@ -273,13 +273,7 @@ fn refusal<C: ?Sized>(built: Result<Index<C>, IndexError>, expected: &str) -> In
     }
 }
 
-/// **The assembly flow `docs/design/030 §8 (ex-032)` describes, as one test.** One store, three
-/// chains, and a validation that launches nothing.
-///
-/// What it pins is what the flow is *for*: each chain is handed the same store by
-/// the index rather than by the caller, so a third party writes the store once;
-/// and `build` is where a duplicate network or a chain that refused to compose is
-/// reported, before anything has been driven.
+/// One shared repository composes three independently driven network indexers.
 #[test]
 fn an_assembly_hands_one_store_to_every_chain_and_launches_nothing() {
     /// The one thing a chain needs of a store here: that it arrived.
@@ -477,13 +471,7 @@ fn routes_each_watch_and_combines_statuses_from_every_indexer() {
     assert_eq!(idle.calls(), vec![Call::Sync]);
 }
 
-/// A failing unit does not cost the units after it their pass.
-///
-/// Per-chain failure isolation is `docs/design/019`'s whole subject, and it landed
-/// for the supervisor, which drives one unit per task. Bounded `sync` — what an
-/// embedder without the `supervisor` feature drives — had lost it to a `?` inside
-/// the loop: one chain's node refusing a call skipped every chain after it, for
-/// as long as it kept refusing.
+/// An embedded collection still drives healthy chains after another chain fails.
 #[test]
 fn a_failing_unit_does_not_stop_the_units_after_it() {
     /// A unit whose pass always fails, and counts how often it was asked.

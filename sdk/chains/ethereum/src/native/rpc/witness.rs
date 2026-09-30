@@ -6,7 +6,7 @@
 //! it cannot do is notice a change it never saw: a rebasing token, a mint
 //! spelled as something other than a `Transfer`, a proxy that changed its
 //! accounting mid-life, or an address funded before the index started
-//! watching it (`docs/design/021` sections 7.1-7.3). None of those is visible
+//! watching it. None of those is visible
 //! in logs, by construction.
 //!
 //! `balanceOf` is. Pinned to a canonical block **hash** it is not a matter of
@@ -72,7 +72,7 @@ impl<'a> Attester<'a> {
     ///
     /// This returns no `Result` on purpose. An attester that could fail a
     /// balance read would make the node part of the answer again, which is
-    /// the arrangement `docs/design/021` exists to end. Every failure is an
+    /// the dependency this independent check avoids. Every failure is an
     /// absence of proof.
     pub async fn attest(
         &self,

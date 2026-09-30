@@ -14,7 +14,7 @@ use crate::{Error, ErrorKind};
 /// cadence, not synchronisation.
 ///
 /// Where the confirmed line sits is not one of these numbers. The chain states
-/// it itself (`docs/design/030 §8 (ex-025)`): Ethereum and Solana ask their node, so a
+/// it itself : Ethereum and Solana ask their node, so a
 /// number here would be a lie, and Bitcoin, which has no finality, keeps a
 /// confirmation depth of its own in its own section. `reorg_retention`
 /// described a rollback journal that no longer exists.

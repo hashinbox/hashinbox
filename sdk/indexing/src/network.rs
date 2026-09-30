@@ -5,8 +5,7 @@
 //! Two free functions rather than a trait. Both take the network as their
 //! first argument because `IndexError` lives here and `Network` lives in
 //! `base`, so neither can be an inherent method. A one-method-per-caller trait
-//! with exactly one implementation bought method syntax and nothing else
-//! (`DEFECT_PATTERNS.md` section 3.1, and `docs/design/030` G3), and
+//! with exactly one implementation bought method syntax and nothing else, and
 //! `rules."rust/free-function".mode = "receiver"` was checked against this
 //! shape and does not forbid it.
 

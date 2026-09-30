@@ -18,8 +18,8 @@
 //! `Movements` chain writes nothing and cannot be talked into charging twice.
 //!
 //! **Transactionless credits are these rows too.** A consensus-layer withdrawal
-//! is one address, one asset, one amount and no transaction to name it
-//! (`docs/design/021` section 4.1), which is this row with an empty
+//! is one address, one asset, one amount and no transaction to name it, which is this row with an
+//! empty
 //! `transaction_id`. The disjointness that used to be structural — two
 //! collections a reader could not confuse — is now an identity argument, and it
 //! is exactly as tight: a `MovementId` is unique within its transaction
@@ -253,6 +253,11 @@ impl Tables {
         if written == 0 {
             return self.verify_effect(transaction, effect);
         }
+        self.invalidate_evidence(
+            transaction,
+            (effect.address, effect.asset),
+            effect.place.height,
+        )?;
         let units = effect
             .amount
             .to_atomic(0)

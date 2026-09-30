@@ -87,5 +87,12 @@ repository, not to the index.
   transactionless withdrawals, with native ordering and snapshot coverage.
   Concrete repositories offer `verify_balance`
   for an explicit independent comparison; verification never repairs rows.
+- To retain an external balance attestation, capture one `BalanceEvidence` from
+  the query and its settled answer, verify that same capture, then call the
+  concrete repository's `record_evidence` only on agreement. It compares the
+  checkpoint, signed total and caught-up watch progress atomically; no money is
+  changed. `Balance.opening` reports the saved anchor while contiguous inspection
+  still supports it, independently of complete-history coverage. Historical
+  additions, re-anchoring, unwatch, rescan and a negative block-end total invalidate it.
 - The SQLite repository needs a Tokio runtime, because each operation runs on
   `spawn_blocking`.

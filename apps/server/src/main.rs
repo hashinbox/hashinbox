@@ -59,7 +59,7 @@ async fn main() -> Result<(), AnyError> {
     // The one safety number an operator chooses is Bitcoin's confirmation
     // depth, so every chain states what its section commits this deployment
     // to before anything connects. A library crate must not write to standard
-    // output, so this is the application's (`docs/design/030 §8 (ex-028)` section 8.4).
+    // output, so composition reports the configured safety policy.
     for notice in chains.notices() {
         println!("{notice}");
     }
@@ -110,8 +110,7 @@ async fn main() -> Result<(), AnyError> {
     // Nor does history still owed below a checkpoint, which the wallets
     // imported above can ask for: settling follows forward indexing, and the
     // owed range is reported on `GET /healthz` instead of holding the
-    // listener unbound for a range a pruned node can never serve
-    // (`docs/design/024` section 7).
+    // listener unbound for a range a pruned node can never serve.
     let startup_result: Option<Result<(), AnyError>> = tokio::select! {
         settled = settling.settled() => {
             settled.is_none().then(|| Err("index readiness channel closed".into()))
@@ -134,7 +133,7 @@ async fn main() -> Result<(), AnyError> {
         }
         return result;
     }
-    let payments = Payments::from_params(api::PaymentsParams {
+    let payments = Payments {
         wallets,
         units: Arc::new(units),
         signers,
@@ -144,7 +143,7 @@ async fn main() -> Result<(), AnyError> {
         balance,
         health,
         rpc,
-    });
+    };
     let router = api::router(payments, &server)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let (stop_http, stop_http_rx) = oneshot::channel();

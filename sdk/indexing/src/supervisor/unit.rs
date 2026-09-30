@@ -159,7 +159,7 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
         // it to `Retrying` published a readiness dip for every `POST
         // /v1/addresses` that happened to land inside a pass, which depools
         // the process from its own load balancer for doing what a client
-        // asked (`docs/design/024` section 7, one layer in). A conflict that
+        // asked. A conflict that
         // stops reconciling needs no report of its own: the checkpoint stops
         // tracking the tip, and the next pass that completes says so as
         // `CatchingUp`.
@@ -223,8 +223,7 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
     /// clients read and it is healthy, so the network reports whatever the
     /// tip says it is; the failure travels on the status
     /// [`NetworkHealth`] keeps, beside the range that is stuck, instead of
-    /// being dropped or turned into an outage (`docs/design/024` sections 7
-    /// and 8).
+    /// being dropped or turned into an outage.
     fn stalled(status: &SyncStatus) -> Option<&IndexError> {
         status.backfill.as_ref()?.failure.as_ref()
     }

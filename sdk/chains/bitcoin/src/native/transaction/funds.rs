@@ -4,8 +4,7 @@ use crate::native::{Address, Error, block::Utxo};
 /// One source's funds in a grouped transaction: the outputs it spends, the
 /// transfers it pays, and where its change goes. No source pays for another.
 ///
-/// A pure rule and nothing else, as on every chain (`docs/CHAIN_LAYOUT.md`
-/// section 3): it answers what one source must afford, and the transaction
+/// It answers what one source must afford, and the transaction
 /// that pays a group of them is built by [`super::Builder::grouped`]. On a
 /// UTXO chain the answer names the outputs, because there is no balance to
 /// name instead.

@@ -59,8 +59,7 @@ impl<R> PendingJoin<R> {
     /// A block credit counts as arriving, for the same reason it counts in
     /// the settled fold: it is value on its way to the address. It is the one
     /// thing reported here that the pending half of a *history* page cannot
-    /// show, because that page lists transactions and a credit is not one
-    /// (`docs/design/021` section 4.4). Leaving it out instead would understate
+    /// show: a credit is not a transaction. Leaving it out would understate
     /// an address for the whole depth of the confirmed line.
     fn moving(of: &dyn Holder, blocks: &[CanonicalBlock]) -> PendingValue {
         let movements = blocks
@@ -122,8 +121,7 @@ mod tests {
     /// reported as pending rather than withheld until the block settles.
     ///
     /// Left out, an address would read short for the whole depth of the line —
-    /// twelve blocks on a typical Ethereum deployment — with nothing saying
-    /// so, which is the drift `docs/design/021` section 4.1 exists to stop.
+    /// with nothing in the answer identifying the missing value.
     #[test]
     fn a_block_credit_above_the_line_is_pending_incoming() {
         let holder = Subject {

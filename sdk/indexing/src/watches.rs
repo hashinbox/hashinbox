@@ -4,8 +4,8 @@
 //! The set stays in memory because [`CommitGate::plan`] captures it
 //! through a *synchronous* closure and holds no guard across an await, while
 //! [`WatchStore::all`] is async. The store is therefore the mirror, read once
-//! before the first pass, not the authority a pass consults (`docs/design/030 §8 (ex-029)`
-//! section 5.3). [`Watches::with`] and [`Watches::with_mut`] are the only access
+//! before the first pass, not the authority a pass consults. [`Watches::with`] and
+//! [`Watches::with_mut`] are the only access
 //! to the set and both take a synchronous closure, so that is a property of the
 //! signatures and not of the code that happens to call them.
 //!
@@ -72,8 +72,7 @@ impl Watches {
     /// Called when a store refused a write the set's own belief authorised: a
     /// batch whose outcome was lost leaves the store ahead of this set, and the
     /// refusal is the only way to find out. Re-reading is what turns a permanent
-    /// refusal into one retryable pass (`docs/design/030 §8 (ex-032)`, the expected-progress
-    /// guard).
+    /// refusal into one retryable pass.
     pub(crate) fn mark_stale(&self) {
         self.loaded.store(false, Ordering::Release);
     }
@@ -159,7 +158,7 @@ impl Watches {
         // Refused here, synchronously, under the permit that fixed the
         // checkpoint the answer is relative to. A start the index cannot
         // afford to honour must fail the call that asked for it, not a
-        // background pass an hour later (`docs/design/024` section 7).
+        // background pass an hour later.
         if let Some(line) = permit.checkpoint() {
             self.policy.admits(watch.start, line.position)?;
         }
@@ -285,7 +284,7 @@ impl Watches {
     /// list is keyed by `(address, asset)` and always was; the hot set used to
     /// key by address alone and refused the pair here, which is why the
     /// capability the store supports could not be reached and why a restart
-    /// silently dropped the second row (`docs/design/030 §8 (ex-032)` section 4). What is
+    /// silently dropped the second row. What is
     /// refused is a name that is taken: the same identity over another
     /// observation, or the same `(address, asset)` under another identity.
     ///
@@ -374,7 +373,7 @@ impl Watches {
     /// These two are the *only* access to `self.set`, which puts that property in
     /// their signatures instead of in the code that calls them: there is no way
     /// here to obtain a guard, so there is nothing for an `.await` to be written
-    /// after (`docs/design/030 §8 (ex-029)` section 5.3, `docs/design/033` section 5.7).
+    /// after.
     fn with<T>(&self, read: impl FnOnce(&WatchRows) -> T) -> Result<T, IndexError> {
         let set = self.set.read().map_err(|_| Self::poisoned())?;
         Ok(read(&set))

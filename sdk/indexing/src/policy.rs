@@ -18,8 +18,7 @@ const MAX_BACKFILL_BLOCKS: u64 = 100_000;
 /// confirmation line are gone because the chain now answers them itself — the
 /// line is [`ChainTips::confirmed_tip`], stated by the source rather than
 /// guessed at in a configuration file, and retention described a journal that
-/// no longer exists, because nothing the store holds is ever undone
-/// (`docs/design/030 §8 (ex-025)`).
+/// no longer exists, because nothing the store holds is ever undone.
 ///
 /// [`ChainTips::confirmed_tip`]: crate::ChainTips::confirmed_tip
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

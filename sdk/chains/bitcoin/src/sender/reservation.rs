@@ -508,7 +508,7 @@ mod tests {
             .expect("a fresh process does not remember the in-flight spend");
     }
 
-    /// `docs/design/030 §8 (ex-025)` section 5: selection folds the pending overlay in, so
+    /// Selection folds the pending overlay in, so
     /// a block that reorgs out after its change was spent must not free what
     /// the accepted send holds. [`State::prune`] frees an outpoint only when
     /// a fresh read shows it **absent**; a reorg makes it reappear.

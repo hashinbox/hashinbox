@@ -1,11 +1,4 @@
-//! What the index owns after `docs/design/030 §8 (ex-029)`: the list of what it observes,
-//! the durable row behind it, and the hook that says what a commit changed.
-//!
-//! A wallet and a bare holding reach the same call, both are indexed, and both
-//! come back after a restart from the registry alone — no caller re-states
-//! anything. The listener is a list rather than a slot, it carries what the
-//! commit actually produced, and it cannot stall the pass because it cannot
-//! await.
+//! Observation ownership: durable watches, their hot mirror and commit listeners.
 
 use std::{
     sync::{
@@ -294,15 +287,7 @@ fn owed(index: &dyn Indexing) -> Option<(BlockPosition, BlockPosition, usize)> {
         .map(|status| (status.resume, status.anchor, status.inspected))
 }
 
-/// Withdrawing a watch stops inspection and deletes nothing, the removal is
-/// durable, and re-watching the address inherits what the store proved was read
-/// while still owing what nobody read.
-///
-/// The questions `docs/design/030 §8 (ex-029)` section 5.2 refused an `unwatch` over,
-/// answered one assertion each. Note what is *not* asserted: that the rows
-/// become unreadable. They do not, and must not -- a read answers for an
-/// `indexing::Holder` and consults no watch list, which is why an application
-/// that lost the id is the thing that cannot reach them.
+/// Unwatch removes selection and progress without deleting retained history.
 #[test]
 fn unwatching_stops_inspection_keeps_every_row_and_can_be_undone() {
     let memory = memory::Repository::new();

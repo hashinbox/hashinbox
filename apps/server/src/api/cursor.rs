@@ -9,7 +9,7 @@ use super::error::Error;
 /// a cursor whose checkpoint had moved. That refusal is gone with the journal:
 /// the confirmed store is append-only, so a checkpoint that moved can only
 /// have appended *above* this position, and an ascending keyset page is stable
-/// however long a caller holds it (`docs/design/030 §8 (ex-025)` section 6.3).
+/// however long a caller holds it.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct HistoryCursor {

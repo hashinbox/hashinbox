@@ -66,7 +66,7 @@ pub struct NetworkHealth {
     /// process, while forward indexing answered every question a client
     /// actually asks. An operator reads the stuck range here; a caller reads
     /// the same fact as [`Completeness`](crate::Completeness) on the balance
-    /// or the history page it weakens (`docs/design/024` section 7).
+    /// or the history page it weakens.
     pub status: SyncStatus,
 }
 

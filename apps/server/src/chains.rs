@@ -6,8 +6,7 @@
 //! `wallets::Composition` knows how to hold any number of them: a chain
 //! crate's own `Config<AssetTag>` carries its section, `connect` verifies its
 //! node's identity without opening anything, and the verified node is a
-//! `wallets::Connection` that composes over this process's repository
-//! (`docs/design/030` section 5.1 steps 9 to 11).
+//! `wallets::Connection` that composes over this process's repository.
 //!
 //! What is left here is three registration lines. A fourth chain is a fourth
 //! line; nothing else in this binary would change.

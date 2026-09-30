@@ -47,7 +47,7 @@ pub(crate) struct Settlement {
 
 /// One signed transaction and the floor its batch's simulation reached — the
 /// same role, under the same name, as bitcoin's and ethereum's
-/// `PreparedTransaction` (`docs/CHAIN_LAYOUT.md` section 6).
+/// `PreparedTransaction`.
 ///
 /// Two slots, two names: `transaction.min_slot` is the slot the transaction
 /// was built at, and `floor_slot` is where simulation left the batch, at or

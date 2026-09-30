@@ -1,4 +1,4 @@
-//! The chain vocabulary (docs/CHAIN_LAYOUT.md), exercised through the public
+//! The chain vocabulary, exercised through the public
 //! API: `RawBlock` → `parse` → `Block` → `Transaction` → `movements`.
 //! Every chain has this file; only the `use` line and the fixture differ.
 

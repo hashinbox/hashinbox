@@ -126,8 +126,13 @@ u256 text. Explicit verification compares persisted totals to source movements.
 Each query reads its rows, checkpoint and completeness from one snapshot.
 
 A node balance witness is independent evidence, not the indexed answer: it reports
-agreement or disagreement without changing the amount. Persisted opening-balance
-evidence and a separate transactionless activity query remain unfinished requirements.
+agreement or disagreement without changing the amount. Repository activity pages
+include transactionless movements without fabricating history entries. Optional
+opening-balance evidence records the same immutable amount/block that an external
+attester checked. Recording compares the current checkpoint, signed total and watch
+coverage atomically; it never repairs money or proves complete transaction history.
+Forward inspection preserves evidence; newly discovered older effects, re-anchoring,
+unwatch and purge invalidate it. Neither activity nor evidence adds a required port.
 
 Confirmed queries go directly to repositories. `wallets::PendingJoin` supplies
 pending-inclusive balance/history/output reads: sample pending blocks before the
@@ -152,7 +157,10 @@ Solana SPL remains receive-only. Batches are non-empty, ordered and validated be
 broadcast. Bitcoin can combine sources with deterministic fees and per-source
 change/signatures. Ethereum preserves consecutive source nonces and accepted-prefix
 reporting. Solana preserves source reservations, Memo identities, context floors,
-blockhash lifetimes and complete finalized-history recovery.
+blockhash lifetimes and complete finalized-history recovery. Preserve distinct native
+stages where invariants differ: Bitcoin parsed inputs can lack signing prevouts,
+reservations can outlive their signed transaction, and Solana wire values require
+context and canonical-encoding validation before becoming domain values.
 
 Each chain owns ambiguity and exact-byte replay. RPC acceptance means submitted;
 an uncertain failure is not proof of a drop. Transport decorators must honor

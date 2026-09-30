@@ -1,12 +1,4 @@
-//! Step 12 of `docs/design/030`: an address registered after its history began
-//! ends up with that history, and nothing claims to be complete while it is
-//! still arriving.
-//!
-//! The fixture is deliberately the shape that used to lose data silently. Ten
-//! blocks are indexed with nothing watched at all, so the store holds a
-//! checkpoint and no history; then an address is watched from a position the
-//! network passed long ago. Before this step that watch indexed exactly
-//! nothing and said so nowhere.
+//! Late observations backfill their own history without delaying forward sync.
 
 use std::sync::{
     Arc,
@@ -647,22 +639,7 @@ fn a_lower_birthday_registered_before_a_restart_is_not_lost_to_recorded_progress
     );
 }
 
-/// **The `docs/design/030 §8 (ex-032)` table, as one test.** Three observations of the same
-/// network, in three different states, and one pass over the union of what they
-/// owe.
-///
-/// | Wallet | Birthday | Indexed through | Next inspection |
-/// | --- | ---: | ---: | ---: |
-/// | X | 20 | 25 | 26 |
-/// | Y | 22 | None | 22 |
-/// | Z | 10 | 30 | 31 |
-///
-/// With a confirmed line at 30: scan 22 to 30 — blocks 22 to 25 inspected for Y
-/// alone, 26 to 30 for X *and* Y — and Z requires no work at all. Each block is
-/// fetched **once** and interpreted once, for the observations that need it.
-/// Adding Y resets neither X nor Z, which is the property a shared per-address
-/// claim could not give: each observation carries its own contiguous
-/// `indexed_through`, earned under its own immutable birthday.
+/// Independent observations at one address keep their own contiguous progress.
 #[test]
 fn one_pass_serves_three_observations_from_their_own_positions() {
     let memory = memory::Repository::new();
@@ -937,7 +914,7 @@ fn a_backfill_the_source_cannot_serve_reports_its_failure() {
     );
 }
 
-/// The availability floor (`docs/design/024` section 7): a historical range the
+/// The availability floor : a historical range the
 /// node will never serve must not make the network unanswerable.
 ///
 /// A pruned range is a property of one watch's request, not of the chain. The

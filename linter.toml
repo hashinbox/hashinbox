@@ -251,7 +251,7 @@ target = "sdk/chains"
 mode = "restrictive"
 directories.allowed = [{ target = "*", description = "One concrete chain implementation." }]
 
-# Chain crate root (docs/CHAIN_LAYOUT.md): closed world. No examples/,
+# Chain crate root: closed world. No examples/,
 # benches/, build.rs, or loose files; a new chain fails until it has the
 # full skeleton.
 [[rules.layout]]
@@ -283,7 +283,7 @@ files.required = [
     "wallet.rs",
     "builder.rs",
     "sender.rs",
-    # The send pipeline (a retired design note (010), docs/CHAIN_LAYOUT.md section 7):
+    # The send pipeline:
     # the same stages in the same files on every chain.
     "sender/outbox.rs",
     "sender/reservation.rs",
@@ -414,8 +414,7 @@ dependencies = ["packages", "base", "indexing"]
 # Every package under sdk/chains is a concrete chain; omitting "chains" forbids peer edges.
 # The configuration reader sits above `wallets` because a registered chain
 # hands back a `wallets::Connection`, and below `chains` because it names no
-# chain crate — which is the whole point of registration (docs/design/030
-# step 11).
+# chain crate; registration keeps concrete dependencies at composition.
 [[rules."rust/layers"]]
 name = "config"
 target = "sdk/config"

@@ -10,7 +10,7 @@
 //! says it read. It is deliberately **not** a monotonic rule: a batch redone
 //! under a smaller budget legitimately settles less than the write it is
 //! redoing, so what this refuses is a claim whose author was reading a different
-//! value (`docs/design/030 §8 (ex-032)`, `crate::Progress`).
+//! value.
 //!
 
 use rusqlite::{Connection, Transaction, params};
@@ -98,7 +98,10 @@ impl Tables {
                 "UPDATE watch SET balance = '0',
                      indexed_position = NULL, indexed_height = NULL, indexed_hash = NULL,
                      indexed_parent_position = NULL, indexed_parent_hash = NULL,
-                     indexed_timestamp = NULL
+                     indexed_timestamp = NULL,
+                     evidence_position = NULL, evidence_height = NULL, evidence_hash = NULL,
+                     evidence_parent_position = NULL, evidence_parent_hash = NULL,
+                     evidence_timestamp = NULL, evidence_amount = NULL
                  WHERE chain = ?1 AND network = ?2",
                 params![self.chain(), self.name()],
             )
@@ -126,8 +129,7 @@ impl Tables {
 ///
 /// The contract itself runs in `tests/repository_contract.rs`, against this
 /// store and the in-memory one together, which is the only definition this
-/// repository has of two stores being the same store
-/// (`docs/design/030 §8 (ex-031)` section 6.3).
+/// repository has of two stores being the same store.
 #[cfg(test)]
 mod progress_test {
     use base::Decimal;

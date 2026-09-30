@@ -1,22 +1,6 @@
-//! What a caller holds: one index over one store and any number of chains.
-//!
-//! One chain or many, the caller holds the same [`Index`]: it answers for every
-//! network its units own and advances each in turn, so adding a chain changes
-//! composition and nothing else. Each unit is one network
-//! ([`Indexing::network`]), so this is where many networks become one handle,
-//! and the only place they do.
-//!
-//! [`Index::over`] is the assembly flow `docs/design/030 §8 (ex-032)` describes —
-//! `Index::over(repository).chain(…)?.chain(…)?.build()?` — and it exists so a
-//! caller hands the store to the *index* once instead of threading it through
-//! each chain by hand. It launches nothing: what `build` does is validate, and
-//! every pass afterwards is the caller's own bounded [`Index::sync`] or the
-//! optional `crate::Supervisor`.
-//!
-//! The design's sketch spells that entry `Index::new`; it is `over` here because
-//! a `new` that returns a builder rather than the type is `clippy`'s
-//! `new_ret_no_self`, and this workspace carries no lint suppressions. The other
-//! constructor, [`Index::of`], takes indexers that were composed some other way.
+//! A caller-owned collection of network indexers over one shared repository.
+//! Each unit keeps its own network state and failure; composition selects concrete
+//! chains before the collection is driven.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -70,7 +54,7 @@ impl<R: Clone, C: Indexing + ?Sized> Assembly<R, C> {
     /// `chain` is the chain crate's own constructor — its RPC client, its
     /// interpreter, its policy — handed the store and nothing else. It is
     /// synchronous and does no I/O: every chain in this workspace verifies its
-    /// node *before* a store is opened (`docs/design/030 §8 (ex-028)` section 10.1), so by the
+    /// node *before* a store is opened, so by the
     /// time a store exists there is nothing left to await.
     ///
     /// # Errors
@@ -191,25 +175,11 @@ impl<C: Indexing + ?Sized> Index<C> {
         }
     }
 
-    /// Every unit's pass, then the answer — never "the units up to the first
-    /// failure".
-    ///
-    /// **Bounded**, exactly as [`Indexing::sync`] is: one pass per unit, each
-    /// doing the work its own [`crate::SyncPolicy`] allows, and no waiting,
-    /// retrying or scheduling.
-    ///
-    /// **One chain's failure must not cost the others their pass.** That is the
-    /// whole subject of `docs/design/019`, and it landed for the supervisor,
-    /// which drives one [`SyncUnit`] per task. Bounded `sync` — the path an
-    /// embedder without the `supervisor` feature drives, and the one
-    /// `tests/minimum_contract.rs` and `examples/custom_store/` use — had lost
-    /// it to a `?` inside this loop: a Bitcoin node refusing one call skipped
-    /// Ethereum and Solana entirely, for as long as it kept refusing.
+    /// Advances every network once, retaining failure isolation for embedded callers.
+    /// A failed unit does not prevent later units from receiving their pass.
     ///
     /// # Errors
-    ///
-    /// The worst failure any unit reported: a terminal one outranks a
-    /// retryable one, and the earliest of equal rank wins.
+    /// The worst failure reported: terminal outranks retryable, earliest wins ties.
     pub fn sync<'a>(&'a self) -> BoxFuture<'a, Result<Vec<SyncStatus>, IndexError>> {
         Box::pin(async move {
             let mut reported = Vec::with_capacity(self.units.len());

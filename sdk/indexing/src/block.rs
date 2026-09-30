@@ -16,15 +16,14 @@ use crate::{
 /// One value change a block makes with no transaction to name it.
 ///
 /// Post-Merge Ethereum credits a consensus-layer withdrawal straight from the
-/// block body: no transaction, no receipt, no trace entry
-/// (`docs/design/021` section 4.1). A fold over transactions alone therefore
+/// block body: no transaction, no receipt, no trace entry. A fold over transactions alone therefore
 /// understates such an address by every withdrawal it ever received, silently
 /// and for good.
 ///
 /// It is a record of its own rather than a synthetic
 /// [`TransactionRef`](crate::TransactionRef), because that type means *the
 /// chain's transaction identifier* and a reserved string prefix every reader
-/// must learn is worse than a field (`docs/design/021` section 4.4). Nothing
+/// must learn is worse than a field. Nothing
 /// here can be mistaken for a transaction, which is the point: a caller that
 /// asks "which transaction did this" gets no answer because there is none.
 ///
@@ -114,8 +113,7 @@ pub struct Facts<T: Identified> {
     /// Live-output changes (UTXO chains); empty for account chains.
     pub outputs: OutputChanges,
     /// Value the block moved to a selected address with no transaction to
-    /// name it, in block order. Empty on every chain but Ethereum
-    /// (`docs/CHAIN_LAYOUT.md` section 6).
+    /// name it, in block order. Empty on every chain but Ethereum.
     pub credits: Vec<BlockCredit>,
 }
 
@@ -188,8 +186,7 @@ impl<T: Identified> Facts<T> {
 /// wants one again — and no database precondition. Which checkpoint storage
 /// must hold before these facts may be written is a property of the *write*,
 /// and lives on [`IndexedBatch`](crate::IndexedBatch); the facts themselves
-/// are equally what a pending-block read answers from
-/// (`docs/design/030 §8 (ex-032)`, the model's `Block` row).
+/// are equally what a pending-block read answers from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalBlock {
     facts: Facts<CanonicalTransaction>,

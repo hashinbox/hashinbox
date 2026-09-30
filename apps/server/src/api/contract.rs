@@ -1,122 +1,15 @@
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use utoipa::{
-    IntoParams, PartialSchema,
-    openapi::{RefOr, Schema, schema::KnownFormat, schema::ObjectBuilder, schema::OneOfBuilder},
-};
+use serde::{Deserialize, Serialize};
+use utoipa::IntoParams;
 
 use super::Custody;
 
-/// The one sentinel that is not a block position.
-const FRESH: &str = "fresh";
-
-// A birthday the caller did not state was once accepted silently and indexed
-// nothing (`docs/design/024` section 1.2), which is why it is required here and
-// has no default.
-/// Where an address begins to be observed.
-///
-/// Required on every add path, and with no default. `0` is genesis on every
-/// supported chain, so the sentinel cannot be a number — it would collide with
-/// the one position a caller is most likely to mean literally.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Start {
-    /// This key or address has never been used, so observation begins at the
-    /// block after the index's current checkpoint and claims no history. An
-    /// assertion of fact: a caller who does not know cannot honestly write it.
-    Fresh,
-    /// Observe from this native block position — a height on chains whose
-    /// positions are heights, a slot on chains whose positions are slots.
-    /// Below the checkpoint it is backfilled, never discarded, and a position
-    /// further below it than the index's policy allows is refused by this
-    /// call rather than by a background pass an hour later.
-    At(u64),
-}
-
-impl From<Start> for indexing::Birthday {
-    fn from(value: Start) -> Self {
-        match value {
-            Start::Fresh => Self::Fresh,
-            Start::At(position) => Self::At(base::BlockPosition(position)),
-        }
-    }
-}
-
-impl Serialize for Start {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match *self {
-            Self::Fresh => serializer.serialize_str(FRESH),
-            Self::At(position) => serializer.serialize_u64(position),
-        }
-    }
-}
-
-/// Untagged, so the two forms are told apart by their JSON type and a caller
-/// never writes a wrapper object around one integer.
-impl<'de> Deserialize<'de> for Start {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Stated {
-            Position(u64),
-            Sentinel(String),
-        }
-
-        match Stated::deserialize(deserializer)? {
-            Stated::Position(position) => Ok(Self::At(position)),
-            Stated::Sentinel(text) if text == FRESH => Ok(Self::Fresh),
-            Stated::Sentinel(text) => Err(de::Error::invalid_value(
-                de::Unexpected::Str(&text),
-                &"\"fresh\" or a non-negative block position",
-            )),
-        }
-    }
-}
-
-/// Hand-written because the type is a union of two scalars: a derived schema
-/// would publish an anonymous object per member, which a generator turns into
-/// an unnamed client type.
-impl PartialSchema for Start {
-    fn schema() -> RefOr<Schema> {
-        OneOfBuilder::new()
-            .item(
-                ObjectBuilder::new()
-                    .schema_type(utoipa::openapi::Type::String)
-                    .enum_values(Some([FRESH]))
-                    .description(Some(
-                        "This key or address has never been used: observation begins at the \
-                         block after the current checkpoint and claims no history.",
-                    )),
-            )
-            .item(
-                ObjectBuilder::new()
-                    .schema_type(utoipa::openapi::Type::Integer)
-                    .format(Some(utoipa::openapi::SchemaFormat::KnownFormat(
-                        KnownFormat::Int64,
-                    )))
-                    .minimum(Some(0))
-                    .description(Some(
-                        "Observe from this native block position. Below the checkpoint the \
-                         history is backfilled; further below it than the index's policy \
-                         allows, this call answers 400 naming the earliest acceptable start.",
-                    )),
-            )
-            .description(Some(
-                "Where an address begins to be observed: \"fresh\" for a key or address that \
-                 has never been used, or a native block position to observe from.",
-            ))
-            .into()
-    }
-}
-
-impl utoipa::ToSchema for Start {}
-
 // Deliberately per read rather than per wallet: `overdrawn` is a fact about
 // one fold and `incomplete` a claim about one start, and a single
-// wallet-level state would have to pick one grain for both
-// (`docs/design/030` section 5.5 (c)).
+// wallet-level state would have to pick one grain for both.
 /// How much of the history behind an answer the index can prove it holds.
 ///
 /// It is a property of the read, not of the wallet, and the balance and the
-/// history page report it in the same four words.
+/// history page share the vocabulary; opening evidence applies only to balances.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Completeness {
@@ -127,14 +20,10 @@ pub(super) enum Completeness {
     /// first block and inspected up to the line the answer was read at. Treat
     /// its absence as "not proven", never as "wrong".
     CompleteHistory,
-    /// The settled total was checked against an independent read of the same
-    /// holding at the same block, and the two agreed.
-    ///
-    /// **A word of the wire contract that no read produces.** It is evidence
-    /// about a *total* that only a node read can give, and no repository can
-    /// make or persist it, so it is not a value of `indexing::Completeness` and
-    /// nothing maps to it. It stays in the vocabulary because removing a
-    /// documented enum value is a wire change, which is not this type's to make.
+    /// An independent read verified an opening amount at the same block,
+    /// and the index has continuously inspected subsequent confirmed changes.
+    /// Balance reads may report this when complete history is not proven;
+    /// it never replaces `overdrawn` and history reads cannot claim it.
     VerifiedOpeningBalance,
     /// Every change since observation began is indexed, and nothing proves it
     /// began early enough. The ordinary answer.
@@ -253,7 +142,7 @@ impl From<Custody> for Wallet {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
 #[into_params(parameter_in = Path)]
 pub(super) struct WalletPath {
-    /// The wallet ID a create, import, or watch call returned.
+    /// The wallet ID a create or watch call returned.
     pub(super) id: String,
 }
 

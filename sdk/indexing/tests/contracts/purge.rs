@@ -10,8 +10,7 @@ use indexing::{
 
 use super::fixture::Fixture;
 
-/// [`Purging::purge_network`] checked against one store holding two networks
-/// (`docs/design/019` section 5.3).
+/// [`Purging::purge_network`] checked against one store holding two networks.
 ///
 /// Two networks, because the only interesting question is what a purge does
 /// *not* touch: the store the quarantined network shares with every other

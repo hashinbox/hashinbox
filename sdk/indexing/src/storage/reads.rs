@@ -170,7 +170,7 @@ impl Holder for BalanceQuery {
 /// a page is bounded and ordered for a reader, while a balance is one
 /// aggregate the store can answer in a single ordered scan, at one
 /// checkpoint, without the caller paging an address's whole history to add it
-/// up (`docs/design/021` section 5.3).
+/// up.
 ///
 /// The returned [`Balance`] carries the store's own checkpoint as
 /// `observed_at` and nothing pending; the blocks above the confirmed line are
@@ -224,7 +224,7 @@ pub trait Purging: Send + Sync {
     /// its checkpoint, history, movements, block credits, and live outputs —
     /// and reports how many of each it removed.
     ///
-    /// The offline rescan (`docs/design/019` section 5.3), and the only way
+    /// The offline rescan, and the only way
     /// back from an [`crate::IndexErrorKind::ConfirmedReorg`].
     ///
     /// **The observations survive and their progress does not.** What each
@@ -254,13 +254,9 @@ pub trait Purging: Send + Sync {
     ) -> BoxFuture<'a, Result<PurgedRows, IndexError>>;
 }
 
-/// What one [`Purging::purge_network`] removed, per stored collection.
-///
-/// The collections `docs/design/019` section 5.3 names, and the block credits
-/// `docs/design/021` section 4.4 added. A store that keeps value movements in a
-/// collection of their own reports them here; one that nests a transaction's
-/// movements inside its history entry removes them with `history` and reports
-/// no movement rows of its own.
+/// Rows removed by one network rescan, counted by stored collection.
+/// Stores with a separate movement collection report its count; stores nesting
+/// movements inside transactions remove them with their history rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PurgedRows {
     /// The checkpoint: one when the network had committed a block, zero when

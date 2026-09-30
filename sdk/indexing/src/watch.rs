@@ -25,7 +25,7 @@ pub struct ForwardRange {
 /// Where an address begins to be observed.
 ///
 /// No default and no `Option`: a birthday below the checkpoint was once
-/// accepted silently and indexed nothing (`docs/design/024` section 1.2).
+/// accepted silently and indexed nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Birthday {
     /// This key or address has never been used, so observation begins at the
@@ -72,14 +72,14 @@ impl Holder for Watch {
 /// transaction instead — and the fate of an unwatched address's committed
 /// history is stated on [`Self::unwatch`] rather than left open.
 /// Nothing is deleted, so the act is reversible, which is what makes it safe to
-/// expose at all (`docs/design/030` G10).
+/// expose at all.
 pub trait Watching: Send + Sync {
     /// Observes `subject`'s address from `start`, durably, under `id`.
     ///
     /// The row is committed before this returns, so a caller that keeps a key
     /// for `id` keeps it *after* this call: a crash then leaves a watched
     /// address with no key, which is a watch-only address, rather than a key
-    /// nothing observes (`docs/design/030 §8 (ex-029)` section 3.3).
+    /// nothing observes.
     ///
     /// Re-watching the same address under the same id is a no-op; a known
     /// address under another id, another `Birthday::At`, or a known id on another
@@ -134,7 +134,7 @@ pub trait Watching: Send + Sync {
     /// rewritten). Inspection *is* address-scoped and asset-independent by
     /// construction — [`crate::BlockInterpreter::inspect`] takes addresses and no
     /// asset — which is why one read of an address serves every asset observed at
-    /// it (`docs/design/024` section 3.5). What is not inheritable is a claim
+    /// it. What is not inheritable is a claim
     /// across an interruption.
     ///
     /// **It orders against a running pass exactly as [`Self::watch`] does**,

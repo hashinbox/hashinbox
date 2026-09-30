@@ -1,10 +1,10 @@
 #!/bin/sh
-# Chain-crate rules the linter cannot express (a retired design note (002), 004, 007, 008, 011).
+# Chain-crate rules not covered by the linter.
 # native/ is protocol code only: no SDK contracts, no adapter modules.
 # Run from the repository root. Exit 1 lists every violation.
 set -u
 
-# Check 4 (every scenario demonstrates every chain, a retired design note (004)) is on by
+# Check 4 (every scenario demonstrates every chain) is on by
 # default; CHECK_EXAMPLES=0 skips it while a new chain is being scaffolded.
 CHECK_EXAMPLES=${CHECK_EXAMPLES:-1}
 
@@ -25,7 +25,7 @@ if [ -n "$dirs" ]; then
       END { exit !found }' "$file" && status=1
   done
 fi
-# 5. native/ takes only primitive inputs from base (docs/CHAIN_LAYOUT.md section 2):
+# 5. native/ takes only primitive inputs from base:
 #    block coordinates, amounts, signing inputs, envelopes, chain metadata, and the
 #    block/transaction vocabulary. SDK identities (Network, Address,
 #    TransactionId, TransactionRef) and SDK errors (TransactionError) are
@@ -76,25 +76,25 @@ if [ -n "$dirs" ]; then
   ' || status=1
 fi
 # 6. Retired names must not come back anywhere in code:
-#    - one chain-neutral address (a retired design note (011)): base::Address, no other address
+#    - one chain-neutral address: base::Address, no other address
 #      type and no BaseAddress alias;
 #    - history is one repository query by asset, served by wallets::Wallets
-#      (docs/design/030 §8 (ex-012), 014): no wallet-side history reader or post-filter;
+#      without a wallet-side history reader or post-filter;
 #    - one factory concept, wallets::WalletFactory, registered once with
-#      Wallets::register (a retired design note (014)): no provider or family.
+#      Wallets::register: no provider or family.
 banned='CanonicalAddress|AddressText|AddressEncoding|AddressFormat|AddressValidator|BaseAddress'
 banned="$banned|HistoryReader|IndexedHistory|selected_history|history_asset"
 banned="$banned|Provider|WalletProvider|Family|enroll|enroll_with_registry"
-#    - one network vocabulary (a retired design note (018)): base::Network is the identity,
+#    - one network vocabulary: base::Network is the identity,
 #      base::Networked converts to it, and indexing::NetworkRules admits it;
 #      no IndexScope, no TestnetMap, no TransactionEnvelope alias;
-#    - one meaning per retired chain noun (docs/CHAIN_LAYOUT.md section 3).
+#    - one meaning per retired chain noun.
 banned="$banned|IndexScope|TestnetMap|TransactionEnvelope|MemoSource|UtxoSet|Holding"
 #    - the (chain, network) partition is a *network*, never a "scope": the
 #      health vocabulary is NetworkState/NetworkFailure/NetworkHealth/
 #      NetworkEvent, the handshake is CommitGate, the error kind is
 #      IndexErrorKind::NetworkMismatch, and the callback is
-#      SyncMonitor::network_changed (docs/CHAIN_LAYOUT.md section 3).
+#      SyncMonitor::network_changed.
 banned="$banned|ScopeState|ScopeFailure|ScopeHealth|ScopeEvent|ScopeAdmission"
 banned="$banned|ScopeMismatch|scope_changed"
 grep -rnE --include='*.rs' "${w}(${banned})([^A-Za-z0-9_]|$)" sdk apps examples packages && status=1
@@ -107,8 +107,7 @@ grep -rnE --include='*.rs' "${w}(${banned})([^A-Za-z0-9_]|$)" sdk apps examples 
 #     So a second list, matched case-insensitively: the retired nouns that are
 #     also ordinary English words. Only those — a name like `ScopeState` needs
 #     no second pass, and `scope` cannot join because `std::thread::scope` owns
-#     it (docs/CHAIN_LAYOUT.md section 3, docs/DEFECT_PATTERNS.md section 2.1:
-#     a pattern that can be made mechanical should be a rule, not a paragraph).
+#     it. Enforce naming mechanically where the boundary is unambiguous.
 #
 #     Two narrowings keep this a rule about *names*, and both are load-bearing.
 #     Comments and string literals are stripped before matching, because prose
@@ -139,21 +138,17 @@ find sdk apps examples packages -name '*.rs' -type f | sort | ENGLISH="$english"
 #     through the declaration.
 find sdk apps examples packages -type f -name '*.rs' | grep -iE "/(${english})\.rs\$" \
   && { echo "a file is named for a retired noun"; status=1; }
-# 7. Chain vocabulary (a retired design note (007), docs/CHAIN_LAYOUT.md section 3): a chain
+# 7. Chain vocabulary: a chain
 #    crate defines no Parsed*/*Data/Interpreted*/Facts/Movements/Blocks types, no
 #    trait Transactions, no Envelope of its own (base::transaction::Envelope),
 #    and no public *Wire type. `type Transactions = base::Transactions<_>` is
 #    the one allowed Transactions item. Across sdk/, a plural noun is a
 #    collection of values, never a trait: storage ports are *Store.
 #
-#    The second list is the nouns section 3 bans for saying nothing or saying
-#    two things at once. They were documented as checked here and were not, and
-#    `struct Preparation` sat in bitcoin's outbox past the claim
-#    (docs/DEFECT_PATTERNS.md: a pattern that can be made mechanical should be
-#    a rule, not a paragraph — and a gate that is documented and absent is
-#    worse than no gate). `Entry` is the bare noun only, and its one remedy is
-#    `PreparedTransaction`, so `*Entry` is untouched.
-#    `Context` cannot join: section 3 bans it only *for a slot-stamped value*
+#    The second list bans nouns that say nothing or say
+#    two things at once. `Entry` is the bare noun only; use the concrete
+#    `PreparedTransaction` where appropriate. `*Entry` is untouched.
+#    `Context` cannot join: it is ambiguous only *for a slot-stamped value*
 #    (`rpc::Reading<T>`), and nothing a regex can see separates that from the
 #    per-block parsing `Context` bitcoin's block reader legitimately has — the
 #    same narrowing check 6b makes for `scope`.
@@ -161,11 +156,11 @@ item='^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?(struct|enum|type|trait)[[:spa
 grep -rnE --include='*.rs' "${item}(Parsed[A-Za-z0-9_]*|[A-Za-z0-9_]*Data|Interpreted[A-Za-z0-9_]*|Facts|Movements|Blocks|Envelope)([^A-Za-z0-9_]|$)" sdk/chains/*/src && status=1
 vocabulary='Coordinator|Preparation|Funding|Entry|Attempt|Evidence|Resolver|IndexerSettings'
 grep -rnE --include='*.rs' "${item}(${vocabulary})([^A-Za-z0-9_]|$)" sdk/chains/*/src \
-  && { echo "a chain crate declares a name docs/CHAIN_LAYOUT.md section 3 bans"; status=1; }
+  && { echo "a chain crate declares a banned vocabulary name"; status=1; }
 grep -rnE --include='*.rs' "^[[:space:]]*pub[[:space:]]+(struct|enum|type)[[:space:]]+[A-Za-z0-9_]*Wire([^A-Za-z0-9_]|$)" sdk/chains/*/src && status=1
 grep -rnE --include='*.rs' "${w}trait[[:space:]]+(Blocks|Transactions|Outputs)([^A-Za-z0-9_]|$)" sdk apps examples && status=1
-# 9. `Source` is the indexer's block source and nothing else
-#    (docs/CHAIN_LAYOUT.md section 3): inside a chain crate only src/source.rs
+# 9. `Source` is the indexer's block source and nothing else.
+#    Inside a chain crate only src/source.rs
 #    may declare one; a sender's payer is a Payer.
 if [ -n "$(ls -d sdk/chains/*/src 2>/dev/null)" ]; then
   grep -rnE --include='*.rs' \
@@ -174,7 +169,7 @@ if [ -n "$(ls -d sdk/chains/*/src 2>/dev/null)" ]; then
     && { echo "Source declared outside a chain's src/source.rs"; status=1; }
 fi
 
-# 8. Only the composition root names a chain crate (a retired design note (015)). The linter
+# 8. Only the composition root names a chain crate. The linter
 #    works on Cargo packages, so it cannot see inside apps/server.
 #
 #    There is one application crate, and it is a binary: apps/server reads its
@@ -200,8 +195,8 @@ grep -rnE "${w}(${composed})([^A-Za-z0-9_]|\$)" "$app/api" \
   && { echo "a route names a chain, the configuration reader or a storage backend"; status=1; }
 grep -rnE 'enum (Chain|WalletAsset)\b|WalletAsset::' "$app/api" && { echo "closed asset/chain enum in routes"; status=1; }
 
-# 10. The lenient address parse is store-free and there is exactly one of it
-#     (docs/CHAIN_LAYOUT.md section 3, Addresses). `wallets::AddressParser` is
+# 10. The lenient address parse is store-free and has one implementation.
+#     `wallets::AddressParser` is
 #     implemented by `WalletConfig` — a value any caller builds from a `Network`
 #     in plain code — so validating user-supplied address text needs no store,
 #     no node and no index, and a third party embedding this SDK over its own

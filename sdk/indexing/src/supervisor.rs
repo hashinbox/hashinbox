@@ -41,8 +41,7 @@ impl<C: Indexing + ?Sized + 'static> Supervisor<C> {
     /// Supervises every unit of `units`, polling each on its own schedule and
     /// reporting every network transition to `monitor`.
     ///
-    /// There is no selection argument: each unit reads its own watch list
-    /// (`docs/design/030 §8 (ex-029)` section 5.5).
+    /// There is no selection argument: each unit reads its own watch list.
     #[must_use]
     pub fn new(units: Arc<Index<C>>, schedules: Schedules, monitor: Arc<dyn SyncMonitor>) -> Self {
         let control = SyncControl::new(&units);

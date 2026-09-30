@@ -443,9 +443,8 @@ async fn native_sol_submission_indexing_and_central_storage() {
             .from(&SOL, SecretBytes::new(vec![seed; 32]))
             .await
             .expect("configured wallet");
-        // The index owns observation, and its row commits before the key is
-        // kept: a crash between them leaves a watch-only address, never a key
-        // nothing observes (`docs/design/030 §8 (ex-029)` section 3.3).
+        // This in-memory fixture keeps signing handles only after its watch
+        // succeeds; production durable custody is owned by the server registry.
         service
             .watch(id, wallet.as_ref(), Birthday::At(BlockPosition(0)))
             .await

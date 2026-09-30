@@ -163,7 +163,7 @@ pub trait Checkpointed {
 /// This is not a second store. It is the blocks synchronization already
 /// fetched and already interpreted, held instead of thrown away, so the
 /// durable store only ever receives blocks that cannot revert while every read
-/// can still answer "what is on its way" (`docs/design/030 §8 (ex-025)`). A
+/// can still answer "what is on its way". A
 /// reorg shallower than the line is [`Blocks::unwind`] — no store I/O
 /// and no backend code at all.
 ///
@@ -175,7 +175,7 @@ pub trait Checkpointed {
 /// wants one again, so [`crate::fetch::NativeBlocks`] keeps its own bounded
 /// cache of them. Neither is the checkpoint a commit of one is conditional on:
 /// what this collection holds is facts, and a reader of it needs no
-/// precondition (`docs/design/030 §8 (ex-032)`, the model's `Blocks` row).
+/// precondition.
 #[derive(Default)]
 pub(crate) struct Blocks {
     blocks: Mutex<Vec<Candidate>>,

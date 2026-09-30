@@ -276,7 +276,10 @@ impl Tables {
                 "UPDATE watch SET birthday = ?4, indexed_position = NULL,
                      indexed_height = NULL, indexed_hash = NULL,
                      indexed_parent_position = NULL, indexed_parent_hash = NULL,
-                     indexed_timestamp = NULL
+                     indexed_timestamp = NULL,
+                     evidence_position = NULL, evidence_height = NULL, evidence_hash = NULL,
+                     evidence_parent_position = NULL, evidence_parent_hash = NULL,
+                     evidence_timestamp = NULL, evidence_amount = NULL
                  WHERE chain = ?1 AND network = ?2 AND id = ?3",
                 params![self.chain(), self.name(), row.id, row.birthday],
             )

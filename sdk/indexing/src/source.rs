@@ -21,8 +21,7 @@ pub trait NativeBlock: Clone + Send + Sync + 'static {
 ///
 /// Both are read once per pass. The distance between them is the whole of
 /// [`crate::Indexer`]'s pending blocks: blocks at or below the confirmed tip
-/// are committed to durable storage, blocks above it are held in memory
-/// (docs/design/030 §8 (ex-025)).
+/// are committed to durable storage, blocks above it are held in memory.
 pub trait ChainTips: Send + Sync {
     /// The newest produced block the source considers canonical. A pass
     /// reads up to this tip, never beyond it.

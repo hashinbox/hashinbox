@@ -4,8 +4,7 @@
 //! observes and hands it back with its progress; [`commit::IndexStore`] holds the
 //! network's checkpoint and takes the one write an index makes. Together they
 //! are [`Repository`], and they are the whole of what a third party writing its
-//! own index sink has to implement: registration and committing
-//! (`docs/design/030 §8 (ex-032)`, "Required repository interfaces").
+//! own index sink has to implement: registration and committing.
 //!
 //! **The rest are consumer capabilities**, and [`reads`] is all three of them.
 //! They are what *this* workspace's consumers need — `apps/server`'s balance route,
@@ -32,6 +31,7 @@
 mod activity;
 mod balance;
 mod commit;
+mod evidence;
 mod history;
 #[cfg(feature = "memory")]
 pub mod memory;
@@ -47,6 +47,7 @@ pub use activity::{
 };
 pub use balance::{Balance, Completeness, Fold, MovementEffect, PendingValue};
 pub use commit::{IndexStore, IndexedBatch, Progress};
+pub use evidence::BalanceEvidence;
 #[cfg(any(feature = "sqlite", feature = "memory"))]
 pub(crate) use history::Probe;
 pub use history::{CanonicalPage, ConfirmedHistory, HistoryPosition, HistoryQuery, Page};

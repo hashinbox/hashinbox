@@ -63,8 +63,7 @@ jobs:
       # The invariant behind that feature: no library crate links `toml`.
       # Only the binary and the examples read a file, so only they may.
       # `cargo tree` is crate-scoped, which workspace feature unification is
-      # not, and this is mechanical rather than a review convention
-      # (docs/fails/028 section 6.2).
+      # not; check each consumer without workspace feature unification.
       - name: No SDK crate links toml
         run: |
           status=0

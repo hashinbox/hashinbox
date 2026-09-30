@@ -33,14 +33,14 @@ pub struct WatchProgress {
     /// whole of what has been read: there is no second position and no hole
     /// between them. A watch born at 20 and inspected through 25 resumes at 26;
     /// a watch born at 22 with `None` resumes at 22, and registering it resets
-    /// nothing for the first (`docs/design/030 §8 (ex-032)`, "Per-watch inspection").
+    /// nothing for the first.
     ///
     /// It is a hash-verified [`BlockRef`] rather than a position, and it is
     /// always at or below the network's checkpoint
     /// ([`crate::IndexStore::checkpoint`]) — a store refuses a claim above the
     /// line. One `canonical_at` on the checkpoint therefore vouches for every
     /// one of these at once, because a confirmed block never reverts
-    /// (`docs/design/030 §8 (ex-025)`); verifying them one by one would be an RPC per watch
+    ///; verifying them one by one would be an RPC per watch
     /// per pass for no further proof.
     pub indexed_through: Option<BlockRef>,
 }
@@ -91,7 +91,7 @@ impl WatchProgress {
     ///   been inspected, so nothing has to represent, migrate or reason about a
     ///   hole. What it costs is latency: a wallet imported with an old birthday
     ///   does not see a payment arriving *now* until its catch-up reaches the
-    ///   present (`docs/design/030 §8 (ex-032)`, "Per-watch inspection").
+    ///   present.
     /// - **Not chosen: it joins immediately.** A payment arriving now is seen at
     ///   once while older history fills in behind it. Its coverage is then two
     ///   ranges with a gap between them, which one contiguous reference cannot
@@ -123,8 +123,7 @@ impl WatchProgress {
 /// One half of the minimum an index sink must implement ([`crate::Repository`]);
 /// the other is [`crate::IndexStore`]. Nothing here reads a balance, a history
 /// page or an output: those are consumer capabilities a repository may also
-/// offer, and an index neither calls nor requires them
-/// (`docs/design/030 §8 (ex-032)`, "Queries and UTXOs are separate concerns").
+/// offer, and an index neither calls nor requires them.
 // linter:disable rust/trait-method-count -- re-anchoring must be one transaction.
 // A fourth method is what buys that: expressed as `forget` then `add`, the
 // operation passes through a state in which the address is watched by nothing,
@@ -326,9 +325,7 @@ mod tests {
         }
     }
 
-    /// The numeric boundary owes nothing further rather than re-reading the same
-    /// range forever, which is the unterminating catch-up `docs/design/030 §8 (ex-032)`
-    /// section 5 found in the position-only representation this replaces.
+    /// An exhausted native position owes no successor and cannot spin forever.
     #[test]
     fn an_exhausted_position_owes_nothing_and_never_spins() {
         let exhausted = observed(0, Some(u64::MAX));

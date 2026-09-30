@@ -69,8 +69,7 @@ or private keys. Single and batch transfers accept an exact decimal amount or
   The passphrase and decrypted key buffers are zeroized. This is in-process
   custody, not an HSM or remote custody service.
 
-
-- The file holds no secret. The API token, wallet keys and RPC credentials are
+- The configuration file holds no secret. The API token, wallet keys and RPC credentials are
   names of environment variables, so the file can be committed and logged.
 - The server speaks plain HTTP. A `bind` that is not loopback is refused unless
   `tls_terminated_upstream = true`, which states that a proxy in front of it

@@ -6,7 +6,7 @@
 //! [`ChainHandle::compose`]s over an opened repository into a
 //! [`wallets::ComposedChain`]. No storage is opened on the first step, which is
 //! what lets an application check every chain's identity before it opens
-//! anything (`docs/design/030 §8 (ex-028)` section 10.1). [`wallets::Composition`] is what
+//! anything. [`wallets::Composition`] is what
 //! holds this chain beside the others.
 
 use std::{str::FromStr, sync::Arc};
@@ -27,7 +27,7 @@ use wallets::{ComposedChain, Connection, SubmissionRegistrar};
 /// because it is this
 /// chain's requirement and not a rule about stores: an account chain needs no
 /// [`indexing::OutputStore`] at all, and a third party's sink that answers none
-/// of these still indexes (`docs/design/030 §8 (ex-032)`, gap 1).
+/// of these still indexes.
 pub trait Store:
     indexing::Repository
     + indexing::BalanceStore
@@ -107,7 +107,7 @@ pub struct Config<A> {
     ///
     /// One key, one shape, on every chain: `sdk/config` owns the document and
     /// each chain owns its section, so there is no reason left for one chain
-    /// to flatten what another nests (`docs/CHAIN_LAYOUT.md` section 6).
+    /// to flatten what another nests.
     #[serde(default)]
     pub cadence: Cadence,
 }
@@ -139,7 +139,7 @@ impl<A: Ord> Config<A> {
     ///
     /// Everything an in-code builder can get wrong is checked here rather than
     /// inside a `Deserialize` implementation, so both ways in reach the same
-    /// refusal (`docs/design/030 §8 (ex-028)` section 5.4).
+    /// refusal.
     ///
     /// # Errors
     ///

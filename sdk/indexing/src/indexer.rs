@@ -84,29 +84,12 @@ pub trait Indexing: Backfilling + Checkpoint + Watching {
     fn sync<'a>(&'a self) -> BoxFuture<'a, Result<SyncStatus, IndexError>>;
 }
 
-/// One chain's reusable indexing implementation: one network's watches, the
-/// blocks it holds above the confirmed line, its chain adapter, and its
-/// reference to the store.
+/// One network's indexer, owning its watch set and pending blocks.
 ///
-/// Generic over a [`BlockSource`] `S`, a [`BlockInterpreter`] `I`, and a store
-/// `R`. What it requires of `R` is [`Repository`] — [`crate::WatchStore`] plus
-/// [`crate::IndexStore`] — and nothing else: a store that answers no balance, no
-/// history page and no output still synchronizes, watches and commits through
-/// it, which is what `tests/minimum_contract.rs` proves. Whatever else `R`
-/// answers is asked of `R`: no query is routed through this type.
-///
-/// One repository serves every network, so the same `R` is handed to each
-/// network's service; a store that cannot be cloned is passed as `Arc<MySink>`.
-///
-/// **It owns the state its pass advances.** [`Indexing::sync`] is a bounded
-/// procedure over these fields rather than a call into a second object holding
-/// a second copy of them, which is what `docs/design/030 §8 (ex-032)` asked for: the watch
-/// set is not a parameter, no pending block is shared with a reader, and the
-/// checkpoint a commit is compared against is read here. Only one pass runs at
-/// a time; a concurrent call is a retryable `Conflict`. Scheduling, retries,
-/// quarantine and shutdown are not here at all — they belong to the optional
-/// `crate::Supervisor`, which calls [`Indexing::sync`] and owns no second
-/// implementation of scanning or committing.
+/// The source and interpreter preserve native chain semantics. The repository
+/// requires only registration and atomic committing; optional queries are called
+/// on the repository directly. One bounded pass runs at a time, while scheduling,
+/// retry, quarantine and shutdown belong to the optional supervisor.
 pub struct Indexer<S, I, R>
 where
     I: BlockInterpreter,

@@ -581,7 +581,7 @@ async fn a_failing_backfill_is_reported_and_waited_on_rather_than_retried_at_onc
     supervised.shut_down().await;
 }
 
-/// The availability floor (`docs/design/024` section 7): a watch over a range
+/// The availability floor : a watch over a range
 /// the node will never serve must not take the API down with it.
 ///
 /// This is what made the omission a live defect rather than a missing

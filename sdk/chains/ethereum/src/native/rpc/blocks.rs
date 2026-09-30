@@ -22,7 +22,7 @@ const RECEIPTS_BY_BLOCK: u8 = 1;
 const RECEIPTS_BY_TRANSACTION: u8 = 2;
 /// JSON-RPC "method not found".
 const METHOD_NOT_FOUND: i64 = -32_601;
-/// The one block trace method this chain requires; see `docs/design/021`.
+/// Required to recover internal native movements absent from transaction fields and logs.
 const TRACE_METHOD: &str = "debug_traceBlockByHash";
 /// `eth_getBlockByNumber` tag for the newest produced block.
 const LATEST: &str = "latest";

@@ -74,7 +74,7 @@ where
     /// A pass reads two lines from the source. Everything at or below the
     /// confirmed line is committed to the append-only store; everything above
     /// it is held interpreted in `pending`, where a reorg is a truncation and
-    /// no stored row is ever undone (`docs/design/030 §8 (ex-025)`).
+    /// no stored row is ever undone.
     ///
     /// The contract is [`crate::Indexing::sync`], which calls this and adds
     /// nothing: scheduling, retry delays, quarantine and shutdown are the
@@ -140,8 +140,8 @@ where
             // reported on `backfill`, never by withholding the phase: the
             // range below a watch's registration may be one a pruned node can
             // never serve, and folding that into `CatchingUp` made one such
-            // watch hold every reader of every chain at 503 forever
-            // (`docs/design/024` section 7). What the gap actually weakens is
+            // watch hold every reader of every chain at 503 forever. What the gap actually
+            // weakens is
             // each read it touches, and `Completeness` already says so there.
             phase: if reached {
                 SyncPhase::Ready
@@ -160,7 +160,7 @@ where
     /// returns: it is never above the source's own tip, and it never moves
     /// backwards. Both are cheap to believe and expensive to be wrong about —
     /// either one broken means committing a block that can still revert — so
-    /// both are guards rather than documentation (`docs/design/030 §8 (ex-025)` section 9).
+    /// both are guards rather than documentation.
     /// The first is one comparison; the second needs [`ConfirmedLine`], which
     /// is two numbers.
     ///
@@ -403,8 +403,8 @@ where
     /// of actually landed: the set's belief is then behind the store's, no number
     /// of retries derived from that belief will ever be accepted, so the mirror is
     /// marked stale and the next pass reads it again — an expected-value guard
-    /// made recoverable rather than a wedge (`docs/design/030 §8 (ex-032)`,
-    /// `Progress`). A future cancelled or failed between the permit's `start` and
+    /// made recoverable rather than a wedge. A future cancelled or failed between the permit's
+    /// `start` and
     /// its completion leaves the outcome *unknown* rather than refused, and the
     /// permit's own drop guard is what records that the admission needs a reload.
     pub(super) async fn commit_batch(
@@ -433,8 +433,7 @@ where
     /// Notifies every listener of one committed block, in registration order.
     ///
     /// Synchronous on purpose: no list is copied per block, and a hook that
-    /// cannot await cannot slow the pass by awaiting (`docs/design/030 §8
-    /// (ex-029)` section 6.3). The list is shared for the loop rather than
+    /// cannot await cannot slow the pass by awaiting. The list is shared for the loop rather than
     /// locked across it, so a callback may register another listener.
     fn announce(
         &self,

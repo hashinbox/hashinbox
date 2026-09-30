@@ -61,7 +61,8 @@ impl Operation {
             Self::Rescan(network) => {
                 let removed = repository.purge_network(network).await?;
                 println!(
-                    "removed {} checkpoint, {} history, {} movement, {} block-credit, and {} output rows \
+                    "removed {} checkpoint, {} history, {} movement, \
+                     {} block-credit, and {} output rows \
                      from {self}; watches and application keys preserved",
                     removed.checkpoint,
                     removed.history,

@@ -4,7 +4,7 @@
 //! same [`Indexer`] that moved the checkpoint forward turns round, once, and
 //! inspects the blocks an observation still owes from its own birthday, against
 //! the watch set it already holds. The affected observation is simply further
-//! behind (`docs/design/030 §8 (ex-032)`, "What a commit contains").
+//! behind.
 //!
 //! **What this file owns is the scheduling and nothing else.** Every block is
 //! inspected by [`Indexer::inspect`], the one procedure the forward half also
@@ -15,7 +15,7 @@
 //!
 //! Forward progress goes first and spends the batch budget first, so a network
 //! that is behind its tip does no filling at all — the tip is what every client
-//! reads, and history must never delay it (`docs/design/024` section 3.3).
+//! reads, and history must never delay it.
 //!
 //! Two things bound the work. A pass reads at most what the forward half left of
 //! [`SyncPolicy::batch_size`](crate::SyncPolicy::batch_size), and a watch may
@@ -45,8 +45,7 @@ use crate::{
 ///
 /// It is a durable write rather than a signal, which is why it is not on
 /// `SyncControl` (the `supervisor` feature's own handle): that one bumps an
-/// in-memory counter a parked unit waits on, and holds no store
-/// (`docs/design/030` section 5.5 (b)).
+/// in-memory counter a parked unit waits on, and holds no store.
 pub trait Backfilling: Send + Sync {
     /// Settles every range `network` still owes, and returns the watches it
     /// re-anchored, each carrying its new birthday.
@@ -104,8 +103,7 @@ where
     /// checkpoint that moved under the batch, a lost admission race: all of them
     /// leave the forward progress this pass already committed intact and come
     /// back as [`BackfillStatus::failure`], because a node that cannot serve an
-    /// old block is a property of the request, not of the chain
-    /// (`docs/design/024` section 8). Only a terminal
+    /// old block is a property of the request, not of the chain. Only a terminal
     /// [`IndexErrorKind::Store`] — the store disagreeing with itself — stops the
     /// network, because that is the store failing rather than the read.
     pub(super) async fn backfill(
@@ -176,7 +174,7 @@ where
     /// the range rather than an empty stretch of positions. It is therefore an
     /// error and never a settlement: settling a range nothing read would claim
     /// coverage that does not exist, and nothing downstream would ever re-derive
-    /// it (`docs/design/030 §8 (ex-032)` section 8, the named risk).
+    /// it.
     fn reached(last: Option<&CanonicalBlock>) -> Result<BlockRef, IndexError> {
         last.map(|canonical| canonical.block().clone())
             .ok_or_else(|| {

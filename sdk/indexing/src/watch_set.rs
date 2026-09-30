@@ -161,8 +161,7 @@ impl WatchRows {
     /// further back — keeps the claim it earned. That is what per-observation
     /// progress buys over a claim shared by address, where a second observation
     /// from an earlier birthday had to widen the shared range and a restart in
-    /// between could read the narrower row back as settled
-    /// (`docs/design/030 §8 (ex-032)`, the first defect).
+    /// between could read the narrower row back as settled.
     pub(crate) fn attach(&mut self, watch: crate::Watch) {
         drop(
             self.rows

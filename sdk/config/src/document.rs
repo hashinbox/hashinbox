@@ -75,7 +75,7 @@ impl Document {
     ///
     /// Defaults and strictness are `T`'s own, and so is validation: this
     /// performs none, because a value built in code must reach exactly the
-    /// same checks (`docs/design/030 §8 (ex-028)` section 5.4).
+    /// same checks.
     ///
     /// # Errors
     ///

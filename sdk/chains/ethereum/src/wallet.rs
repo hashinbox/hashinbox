@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use base::{
-    BlockRef, Broadcaster, Decimal, Networked, SecretBytes, SignFuture, SignRequest, Signer,
-    Submission, TransactionError, TransactionFuture, TransactionSnapshot,
+    Broadcaster, Decimal, Networked, SecretBytes, SignFuture, SignRequest, Signer, Submission,
+    TransactionError, TransactionFuture, TransactionSnapshot,
 };
 use indexing::Holder;
 use wallets::{
@@ -221,37 +221,20 @@ impl WalletFactory {
     }
 }
 
-/// Vouches for a balance a repository folded, without ever replacing it.
+/// Checks one immutable atomic balance capture against canonically pinned state.
 ///
-/// The number a caller is given is the fold over the movements a repository
-/// stores (`indexing::Fold`). This asks one node, at exactly the block that
-/// fold settled at, what it computes for the same holding — `eth_getBalance`
-/// for ether, `balanceOf` for a token, both pinned by block hash with
-/// `requireCanonical` — and reports whether the two agree.
+/// Ether uses `eth_getBalance` and tokens use `balanceOf`, both at the capture's
+/// block hash with `requireCanonical`. An agreement proves the total at that
+/// block, not that the address's complete history was indexed.
 ///
-/// **It reports, and claims nothing.** The answer is an [`Attestation`], handed
-/// to whoever asked. It is not written onto the balance and it is not a value
-/// of `indexing::Completeness`: that claim is the repository's own, made from
-/// the rows it holds, and a node read is evidence no repository can persist or
-/// make. What an agreement is worth is the reader's to decide, and two facts
-/// bound it. It is evidence about the **total at one block** — the rows and the
-/// chain's own state came out the same there — and says nothing about how much
-/// of the address's history is indexed. And two errors that cancelled exactly
-/// would also agree, which is why agreement over a fold the repository reports
-/// as `Overdrawn` is a coincidence and not a proof: that fold has already
-/// proved itself short. A fold alone can show none of this: an address funded
-/// before the index began watching it folds to a smaller number and nothing in
-/// the rows says so (`docs/design/021` section 7.1). No cheaper evidence
-/// exists, and disagreement is always reported rather than swallowed.
+/// The caller captures [`indexing::BalanceEvidence`] once, passes it here, and
+/// may record that same value in its repository after [`Attestation::Agreed`].
+/// The repository compares the captured holding, checkpoint and amount with its
+/// current rows before retaining it. This witness neither writes storage nor
+/// replaces an indexed amount; disagreement and unavailability are reported.
 ///
-/// The two sides line up because both are settled: `indexing::Balance::amount`
-/// folds durable rows only and `indexing::Balance::pending` is what the blocks
-/// *above* that line move, which the node at the same block has not applied
-/// either.
-///
-/// Ethereum is the only chain here that can do this at all: Bitcoin Core has
-/// no address index, and Solana cannot read an account at a past slot, so
-/// neither has an oracle to pin (`docs/design/021` section 7.4).
+/// Bitcoin has no address-state oracle, and Solana cannot pin an account read
+/// to a past slot, so neither chain supplies this capability.
 pub struct BalanceWitness {
     accounts: Arc<dyn Accounts>,
     asset: AssetKind,
@@ -259,33 +242,19 @@ pub struct BalanceWitness {
 }
 
 impl BalanceWitness {
-    /// Whether an independent read of `of`'s holding at `at` agrees with
-    /// `settled`, the amount a repository folded at that block.
+    /// Whether an independent read agrees with this exact captured holding,
+    /// atomic amount and block. Record the same capture only after agreement.
     ///
-    /// `settled` and `at` are the two halves of one answer
-    /// (`indexing::Balance::amount` and `indexing::Balance::observed_at`), so
-    /// the node is asked about the very block the fold was read at.
-    ///
-    /// Nothing here can fail a balance read: every reason not to have proof
-    /// — a wrong network or asset, an address this chain cannot parse, a
-    /// network with no committed block, a node that refused the pin — is
-    /// [`Attestation::Unavailable`].
-    pub async fn attest(
-        &self,
-        of: &dyn Holder,
-        settled: &Decimal,
-        at: Option<&BlockRef>,
-    ) -> Attestation {
+    /// A wrong holding, malformed address or refused canonical pin is
+    /// [`Attestation::Unavailable`]; it never fails or changes a balance read.
+    pub async fn attest(&self, evidence: &indexing::BalanceEvidence) -> Attestation {
         let unavailable = |reason: &str| Attestation::Unavailable {
             reason: reason.to_owned(),
         };
-        if of.address().network != self.network || of.asset() != &self.asset.id() {
+        if evidence.address().network != self.network || evidence.asset() != &self.asset.id() {
             return unavailable("this witness holds another Ethereum network or asset");
         }
-        let Some(at) = at else {
-            return unavailable("the network has committed no block to vouch for");
-        };
-        let address = match Address::try_from(of.address()) {
+        let address = match Address::try_from(evidence.address()) {
             Ok(address) => address,
             Err(error) => {
                 return Attestation::Unavailable {
@@ -294,7 +263,7 @@ impl BalanceWitness {
             }
         };
         Attester::new(self.accounts.as_ref())
-            .attest(address, &self.asset, at, settled)
+            .attest(address, &self.asset, evidence.at(), evidence.amount())
             .await
     }
 }
@@ -633,9 +602,10 @@ mod tests {
             _asset: &'a AssetKind,
             at: View,
         ) -> BoxFuture<'a, Result<Wei, Error>> {
-            assert!(
-                matches!(at, View::Block(_)),
-                "a witness reads one canonical block, never the node's own view"
+            assert_eq!(
+                at,
+                View::Block(settled()),
+                "a witness must use the captured canonical block"
             );
             Box::pin(async move {
                 self.0
@@ -684,25 +654,42 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_agreeing_witness_says_so() {
-        let attestation = block_on(witness(Some(42)).attest(
-            &subject(AssetKind::Native),
-            &Decimal::from(42_u64),
-            Some(&settled()),
-        ));
-        assert_eq!(attestation, Attestation::Agreed);
+    fn balance(amount: u64) -> indexing::Balance {
+        indexing::Balance {
+            amount: Decimal::from(amount),
+            observed_at: Some(settled()),
+            pending: indexing::PendingValue::none(),
+            completeness: indexing::Completeness::Incomplete,
+            opening: None,
+        }
+    }
+
+    fn evidence(asset: AssetKind, amount: u64) -> indexing::BalanceEvidence {
+        indexing::BalanceEvidence::capture(
+            &indexing::BalanceQuery::new(&subject(asset)),
+            &balance(amount),
+        )
+        .unwrap()
     }
 
     #[test]
-    fn a_seeded_disagreement_is_reported_with_both_amounts() {
-        // The node computes one unit more than the index folded, which is
-        // what a withdrawal-funded address or a rebasing token looks like.
-        let attestation = block_on(witness(Some(43)).attest(
-            &subject(AssetKind::Native),
-            &Decimal::from(42_u64),
-            Some(&settled()),
-        ));
+    fn an_agreeing_witness_uses_the_immutable_capture_even_after_the_reader_advances() {
+        let query = indexing::BalanceQuery::new(&subject(AssetKind::Native));
+        let mut answer = balance(42);
+        let captured = indexing::BalanceEvidence::capture(&query, &answer).unwrap();
+        answer.amount = Decimal::from(43_u64);
+        answer.observed_at.as_mut().unwrap().position = base::BlockPosition(10);
+        let attestation = block_on(witness(Some(42)).attest(&captured));
+        assert_eq!(attestation, Attestation::Agreed);
+        assert_eq!(captured.at(), &settled());
+        assert_eq!(captured.amount(), &Decimal::from(42_u64));
+        assert_eq!(answer.amount, Decimal::from(43_u64));
+    }
+
+    #[test]
+    fn a_seeded_disagreement_is_reported_without_mutating_the_capture() {
+        let captured = evidence(AssetKind::Native, 42);
+        let attestation = block_on(witness(Some(43)).attest(&captured));
         assert_eq!(
             attestation,
             Attestation::Disagreed {
@@ -710,33 +697,30 @@ mod tests {
                 witness: Decimal::from(43_u64),
             }
         );
+        assert_eq!(captured.amount(), &Decimal::from(42_u64));
     }
 
     #[test]
-    fn nothing_is_vouched_for_without_a_block_to_pin() {
-        // No committed block: there is no state to name, so nothing is asked.
-        let attestation =
-            block_on(witness(Some(0)).attest(&subject(AssetKind::Native), &Decimal::zero(), None));
+    fn a_balance_without_a_checkpoint_cannot_be_captured_for_a_witness() {
+        let mut answer = balance(0);
+        answer.observed_at = None;
+        let captured = indexing::BalanceEvidence::capture(
+            &indexing::BalanceQuery::new(&subject(AssetKind::Native)),
+            &answer,
+        );
         assert_eq!(
-            attestation,
-            Attestation::Unavailable {
-                reason: "the network has committed no block to vouch for".to_owned(),
-            }
+            captured.unwrap_err().kind,
+            indexing::IndexErrorKind::InvalidRequest
         );
     }
 
     #[test]
     fn a_refused_pin_or_another_holding_proves_nothing_rather_than_failing_the_read() {
-        let amount = Decimal::from(42_u64);
-        let refused =
-            block_on(witness(None).attest(&subject(AssetKind::Native), &amount, Some(&settled())));
+        let captured = evidence(AssetKind::Native, 42);
+        let refused = block_on(witness(None).attest(&captured));
         assert!(matches!(refused, Attestation::Unavailable { .. }));
-
-        // An ether witness cannot vouch for a token holding of the same
-        // address, and says so instead of comparing the wrong two numbers.
         let token = AssetKind::Erc20(Address::from_bytes([0x0b; 20]));
-        let foreign =
-            block_on(witness(Some(42)).attest(&subject(token), &amount, Some(&settled())));
+        let foreign = block_on(witness(Some(42)).attest(&evidence(token, 42)));
         assert_eq!(
             foreign,
             Attestation::Unavailable {

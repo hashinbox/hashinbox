@@ -1,34 +1,6 @@
-//! Address history: the transaction a block carried, who took part in it, and
-//! the pages a query reads.
-//!
-//! **The fact is stored once.** A transaction's block reference, status and fee
-//! are eleven columns, and the shape this replaced copied all eleven *per
-//! participating address* — twice for a two-party transfer, twelve times for a
-//! Bitcoin transaction naming a dozen addresses. `transaction_fact` holds them
-//! once and `transaction_address` says who took part, which also makes
-//! `verify` stronger: a re-presented transaction is compared against one row
-//! rather than against one row per address.
-//!
-//! **Membership is its own table because it has to be.** A failed transaction
-//! carries no movement at all (`ObservationDraft::validate_movements`) and a
-//! successful one may touch its fee payer nowhere but the fee, so an address's
-//! history derived from `balance_movement` alone would lose both — which is
-//! exactly what `HistoryContract::failed_fee_payment_appears_for_every_asset`
-//! and `successful_fee_payment_appears_for_the_fee_asset_only` assert.
-//!
-//! **A page is ordered by `(block_height, transaction_order, transaction_id)`,
-//! every component of which is a function of the block alone.** That is what
-//! makes it append-only, and append-only is the whole of `docs/API.md`'s cursor
-//! promise: a later watch causing more of an already-stored block to be written
-//! gives each transaction the very place it already had, so the new rows are
-//! ordered *among* the existing ones and nothing is renumbered beneath a
-//! position a caller is holding. An ordinal computed here could not do that — a
-//! store sees the transactions that touched a selected address and never the
-//! block's whole list, so its rank would be a property of indexing history
-//! rather than of the chain. `transaction_order` is therefore written, not
-//! derived: `ObservationDraft::transaction_order` is the transaction's native
-//! place in its block, and the interpreter that still holds the whole list is
-//! what supplies it.
+//! Confirmed transaction pages from address membership and shared transaction facts.
+//! Native transaction order makes the cursor independent of which addresses were
+//! selected when facts first arrived; the snapshot also carries watch coverage.
 
 use rusqlite::{Connection, Row, Transaction, params};
 
@@ -124,17 +96,8 @@ impl Tables {
         }
     }
 
-    /// The place a presented cursor resumes after.
-    ///
-    /// The cursor is the stored order, so there is nothing to resolve and
-    /// nothing a store could resolve it to differently later — which is the
-    /// property `docs/API.md` states and the reason the page order is not a rank
-    /// this file computes.
-    ///
-    /// A request with no cursor anchors below every stored place: both
-    /// coordinates are narrowed from a `u64`, so `-1` is a value no row can
-    /// hold and the empty identifier is the sentinel a transaction cannot
-    /// claim.
+    /// Reads rows in native block order. Cursor order never depends on the subset
+    /// of transactions selected for one address.
     fn anchored(after: Option<&HistoryPosition>) -> Result<Place, IndexError> {
         let Some(after) = after else {
             return Ok(Place {

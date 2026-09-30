@@ -286,11 +286,13 @@ impl Outbox {
             None
         };
         if let Some(balance) = &balance {
-            let ceiling = match item.transfer.asset {
-                AssetKind::Native => item.limits.max_total_fee(),
-                AssetKind::Erc20(_) => &Wei::ZERO,
+            let available = item.remainder(funds, balance, &Wei::ZERO)?;
+            // The configured ceiling is a limit, not an expected fee. Quote
+            // the smallest positive value, then validate the actual remainder.
+            item.transfer.amount = match item.transfer.asset {
+                AssetKind::Native => Wei::from_u128(1),
+                AssetKind::Erc20(_) => available,
             };
-            item.transfer.amount = item.remainder(funds, balance, ceiling)?;
         }
         let context = self.context(item, nonce).await?;
         if let Some(balance) = balance
@@ -503,8 +505,34 @@ mod tests {
                 .iter()
                 .map(|transfer| transfer.amount.clone())
                 .collect::<Vec<_>>(),
-            [Wei::from_u128(10), Wei::from_u128(87), Wei::from_u128(88)]
+            [Wei::from_u128(10), Wei::from_u128(1), Wei::from_u128(88)]
         );
+        assert!(node.broadcasts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_sweep_quotes_actual_fees_when_balance_is_below_default_ceiling() {
+        let key = Arc::new(signer(1));
+        let node = Arc::new(Node {
+            reject_zero: true,
+            ..Node::default()
+        });
+        let balance = 989_978_999_000_000_000;
+        let limits = FeeLimits::default();
+        assert!(Wei::from_u128(balance) < *limits.max_total_fee());
+        node.set_balance(key.address(), &AssetKind::Native, balance);
+        let sweep = SendRequest::sweep(
+            key.clone(),
+            key.address().clone(),
+            native(1).to,
+            AssetKind::Native,
+            limits,
+        );
+        let batch = node.outbox().prepare(&[sweep]).await.unwrap();
+        assert_eq!(batch.len(), 1);
+        let quoted = node.transfers.lock().unwrap();
+        assert_eq!(quoted[0].amount, Wei::from_u128(1));
+        assert_eq!(quoted[1].amount, Wei::from_u128(balance - 1));
         assert!(node.broadcasts.lock().unwrap().is_empty());
     }
 

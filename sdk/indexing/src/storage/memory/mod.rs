@@ -29,8 +29,8 @@
 //! Two collections reach the balance fold, not one. The history rows carry
 //! every change a transaction made, and `credits` carries the changes no
 //! transaction made — a consensus-layer withdrawal is value that arrived with
-//! no transaction, no receipt and no trace entry (`docs/design/021` section
-//! 4.1), so a fold that read only the first would be short by every one of
+//! no transaction, no receipt and no trace entry, so a fold that read only the first would be
+//! short by every one of
 //! them and would say nothing about it.
 //!
 //! This store is deliberately unlike a file-backed one: ordinary maps keyed by
@@ -50,6 +50,7 @@
 mod activity;
 mod balances;
 mod commits;
+mod evidence;
 mod observations;
 
 use std::{
@@ -102,6 +103,7 @@ struct Tables {
     identities: BTreeMap<String, Network>,
     watches: BTreeMap<(Network, AssetId, String), Watch>,
     balances: BTreeMap<(Network, AssetId, String), num_bigint::BigInt>,
+    openings: BTreeMap<(Network, AssetId, String), crate::BalanceEvidence>,
     /// How far each observation has been inspected, by its own identity. One row
     /// per observation, not per address: a claim belongs to the watch that earned
     /// it under its own birthday.
@@ -352,6 +354,7 @@ impl Repository {
         // away.
         if balance.completeness != Completeness::Overdrawn {
             balance.completeness = Self::provenance(query, tables, balance.observed_at.as_ref());
+            balance.opening = Self::opening(query, tables, balance.observed_at.as_ref());
         }
         Ok(balance)
     }

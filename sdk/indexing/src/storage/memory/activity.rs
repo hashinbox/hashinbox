@@ -35,19 +35,7 @@ impl Repository {
                 if !Self::owns(bound, address, &query.address) || credit.asset != query.asset {
                     continue;
                 }
-                effects.push(Activity {
-                    position: ActivityPosition {
-                        height: *height,
-                        transaction: None,
-                        movement_order: 0,
-                        movement: Some(credit.id.clone()),
-                        direction: Direction::Credit,
-                    },
-                    block_position: *position,
-                    kind: ActivityKind::Withdrawal,
-                    amount: credit.amount.clone(),
-                    counterparty: None,
-                });
+                effects.push(credit.activity(*height, *position));
             }
             effects.retain(|effect| {
                 query
@@ -71,16 +59,7 @@ impl Repository {
 impl CanonicalTransaction {
     /// One fact's address-local effects, without cancelling self-transfer sides.
     fn activity(&self, query: &ActivityQuery, settlement: FeeSettlement) -> Vec<Activity> {
-        let position = ActivityPosition {
-            height: self.block().height,
-            transaction: Some(ActivityTransaction {
-                order: self.transaction_order,
-                id: self.transaction_id.clone(),
-            }),
-            movement_order: 0,
-            movement: None,
-            direction: Direction::Credit,
-        };
+        let position = ActivityPosition::transaction(self);
         let mut effects = Vec::new();
         for (order, movement) in self.movements.iter().enumerate() {
             if movement.asset != query.asset {
@@ -125,5 +104,42 @@ impl CanonicalTransaction {
             });
         }
         effects
+    }
+}
+
+impl crate::BlockCredit {
+    fn activity(
+        &self,
+        height: crate::BlockHeight,
+        block_position: crate::BlockPosition,
+    ) -> Activity {
+        Activity {
+            position: ActivityPosition {
+                height,
+                transaction: None,
+                movement_order: 0,
+                movement: Some(self.id.clone()),
+                direction: Direction::Credit,
+            },
+            block_position,
+            kind: ActivityKind::Withdrawal,
+            amount: self.amount.clone(),
+            counterparty: None,
+        }
+    }
+}
+
+impl ActivityPosition {
+    fn transaction(transaction: &CanonicalTransaction) -> Self {
+        Self {
+            height: transaction.block().height,
+            transaction: Some(ActivityTransaction {
+                order: transaction.transaction_order,
+                id: transaction.transaction_id.clone(),
+            }),
+            movement_order: 0,
+            movement: None,
+            direction: Direction::Credit,
+        }
     }
 }

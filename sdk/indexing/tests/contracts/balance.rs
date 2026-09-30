@@ -113,8 +113,7 @@ impl<'a, R: BalanceStore + IndexStore> BalanceContract<'a, R> {
 
     /// A block credits an address with no transaction to name it, and the
     /// store folds it: a second collection beside the history rows, per
-    /// asset, and able to settle a fold that was provably short
-    /// (`docs/design/021` section 4.1).
+    /// asset, and able to settle a fold that was provably short.
     ///
     /// The ninth block credits `a` 11 native and 6 token, `v` 4 native, and
     /// `d` the 12 its fold was missing. `v` is the shape the whole record

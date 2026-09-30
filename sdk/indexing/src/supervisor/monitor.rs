@@ -1,6 +1,6 @@
 use crate::{NetworkHealth, NetworkState};
 
-/// Notified as each network's indexing state changes.
+/// Observes network snapshots and receives state-change notifications.
 ///
 /// Called inline on the reporting unit's task, between passes, so it must
 /// return promptly: hand work to a queue or a channel rather than doing I/O

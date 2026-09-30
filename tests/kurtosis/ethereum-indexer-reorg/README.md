@@ -15,8 +15,8 @@ JSON-RPC polling, which is the only transport the Ethereum chain crate uses.
 The fork this scenario causes is **pre-finality by construction**, which is
 exactly the region the indexer keeps in memory: Ethereum's confirmed line is the
 node's own `finalized` block, the server commits nothing above it, and the whole
-reorg therefore happens in the pending blocks without touching a stored row
-(`docs/design/030 §8 (ex-025)`). A fork that reached a *finalized* block would be a consensus
+reorg therefore happens in the pending blocks without touching a stored row.
+A fork that reached a *finalized* block would be a consensus
 failure, not a reorg, and the server would quarantine that network with a
 terminal `confirmed_reorg`.
 
@@ -86,10 +86,10 @@ in captured output.
    participant 1's Geth HTTP endpoint and the enclave's chain ID. Ethereum takes
    no confirmation depth: the node states its own `finalized` block and the
    server commits there. Storage is a fresh index file. Start the server
-   (`docs/API.md` §Configuration) and wait for `GET /health/ready` to answer
-   `204`.
+   using `apps/server/README.md`, including the wallet passphrase, and wait for
+   `GET /healthz` to answer `200`.
 2. Watch an address with `POST /v1/addresses`, and record the returned wallet
-   ID. Note the checkpoint in `GET /v1/status` before sending anything.
+   ID. Note the checkpoint in `GET /healthz` before sending anything.
 3. Use the enclave's disposable prefunded test account to send that address a
    transfer through participant 1. This is devnet-only test value; never reuse
    a real key.
@@ -109,7 +109,7 @@ in captured output.
 
 - The pre-heal inclusion hash recorded in step 4 is no longer canonical at its
   height on participant 1.
-- `GET /v1/status` shows `checkpoint` moving **forward only** across the whole
+- `GET /healthz` shows `checkpoint` moving **forward only** across the whole
   scenario: the fork is above the confirmed line, so no committed block is ever
   taken back. `pending_block` follows the branch that wins.
 - `GET /v1/wallets/{id}/transactions` no longer lists the orphaned inclusion in

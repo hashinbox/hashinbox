@@ -3,8 +3,8 @@
 //! The confirmed half derives from stored movements. Shipped repositories
 //! maintain watched totals atomically and use [`Fold`] for independent
 //! verification and unwatched holdings. Every amount here is in the
-//! asset's **atomic** units: this crate never learns an asset's decimals
-//! (`docs/design/021` section 5.2), so the object is built by code that
+//! asset's **atomic** units: this crate never learns an asset's decimals, so the object is built
+//! by code that
 //! physically cannot produce display units.
 
 use num_bigint::BigUint;
@@ -24,9 +24,10 @@ use crate::{
 /// caller can tell how stale each one is without a second call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Balance {
-    /// Settled and spendable, in atomic units.
+    /// Confirmed indexed total in atomic units; completeness and spendability
+    /// are separate claims.
     pub amount: Decimal,
-    /// The confirmed line `amount` was folded at; `None` before the
+    /// The confirmed line `amount` was read at; `None` before the
     /// network's first commit.
     pub observed_at: Option<BlockRef>,
     /// What the blocks above that line move, in and out, and the newest of
@@ -35,6 +36,9 @@ pub struct Balance {
     /// How much of the history behind `amount` the repository can prove it
     /// holds.
     pub completeness: Completeness,
+    /// Externally verified opening amount, still supported by contiguous inspection.
+    /// Independent of complete-history coverage; never changes `amount`.
+    pub opening: Option<crate::BalanceEvidence>,
 }
 
 /// The line the settled amount was folded at is the line a pending sample is
@@ -106,8 +110,7 @@ pub enum Completeness {
     /// that case and no other.
     ///
     /// For a birthday above the first block the claim cannot be earned this
-    /// way, and proving it needs a per-asset backfill (`docs/design/021`
-    /// section 7.4, `docs/design/030` step 13).
+    /// way, and proving it needs a per-asset backfill.
     CompleteHistory,
     /// Every change since the birthday is indexed, and nothing proves the
     /// birthday was early enough. The honest answer for every chain today.
@@ -259,29 +262,12 @@ impl<'a> Fold<'a> {
         Ok(())
     }
 
-    /// Adds a credit the block made with no transaction to name it.
-    ///
-    /// Unconditional: a [`BlockCredit`] of the holding's own asset, to the
-    /// holding's own address, is value that reached it, and there is no
-    /// counterparty, no fee and no failure status to weigh. A credit of
-    /// another asset or to another address is skipped, exactly as a movement
-    /// of another asset is.
-    ///
-    /// It cannot double-count against a transaction that credited the same
-    /// address in the same block, because the two are disjoint by
-    /// construction: [`apply`](Self::apply) reads only
-    /// [`CanonicalTransaction::movements`] and the transaction's fee, a
-    /// credit is in neither, and no chain can express one as the other —
-    /// which is precisely why `docs/design/021` section 4.4 refused the
-    /// synthetic transaction identifier. Applying the *same* credit twice is
-    /// prevented where identity lives: `BlockCredit::validate_all` rejects a
-    /// repeated identity inside a block, and a store keys the row by
-    /// `(address, height, id)`.
+    /// Applies one transactionless credit for this holding. Other addresses or assets
+    /// are ignored. Credits are separate from transaction movements and fees, so both
+    /// may appear in one block without double-counting. Stores enforce credit identity.
     ///
     /// # Errors
-    ///
-    /// [`IndexErrorKind::Store`] when a stored amount is not a non-negative
-    /// integer, which the write path forbids.
+    /// A store error when the credited amount is not an atomic nonnegative integer.
     pub fn apply_credit(&mut self, credit: &BlockCredit) -> Result<(), IndexError> {
         if &credit.asset == self.of.asset() && &credit.to == self.of.address() {
             self.record(&MovementEffect::Credit(credit.amount.clone()))?;
@@ -310,6 +296,7 @@ impl<'a> Fold<'a> {
             observed_at,
             pending: PendingValue::none(),
             completeness,
+            opening: None,
         }
     }
 
@@ -390,14 +377,7 @@ mod tests {
         }
     }
 
-    /// The constraint `docs/design/021` section 4.4 exists to guarantee: a
-    /// block that both pays an address by transaction and credits it from its
-    /// own body counts each fact once.
-    ///
-    /// The two cannot be confused because they are different types read from
-    /// different collections — which is what the rejected synthetic
-    /// transaction identifier would have destroyed, by making a credit
-    /// indistinguishable from a transaction to every reader and every join.
+    /// A block's transaction movement and independent credit each count once.
     #[test]
     fn a_credit_and_a_transaction_to_one_address_are_each_counted_once() {
         let holder = subject("beneficiary");

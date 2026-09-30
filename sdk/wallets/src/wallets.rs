@@ -44,7 +44,7 @@ type Prepared = (Arc<dyn Authorship>, Vec<Transfer>);
 /// It unifies factories and stores nothing else: it makes wallets, hands them
 /// to the caller, and answers what each asset is. Who holds a wallet is the
 /// caller's question, what is observed is [`indexing::Watching`]'s, and where
-/// a key lives is the application's (`docs/design/030 §8 (ex-029)`).
+/// a key lives is the application's.
 pub struct Wallets<A: Ord> {
     factories: BTreeMap<A, Factory>,
 }
@@ -108,9 +108,8 @@ where
     /// A new wallet of `asset`, returned and kept by nothing.
     ///
     /// The caller keeps it. To have it indexed, watch it:
-    /// `index.watch(&id, &*wallet, Birthday::Fresh)` — and, per
-    /// `docs/design/030 §8 (ex-029)` section 3.3, do that *before* filing the key, so a
-    /// crash leaves a watch-only address rather than a key nothing observes.
+    /// `index.watch(&id, &*wallet, Birthday::Fresh)`. The application coordinates
+    /// durable observation and custody; this collection persists neither.
     ///
     /// # Errors
     ///

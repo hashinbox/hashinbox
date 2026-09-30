@@ -16,7 +16,6 @@ mod openapi_contract;
 mod route_contract;
 
 pub(crate) use asset::AssetTag;
-pub(crate) use contract::Start;
 pub(crate) use signers::Signers;
 
 use error::Error;
@@ -100,11 +99,11 @@ impl Modify for BearerAuth {
 /// Cheap to clone; every route receives a clone.
 #[derive(Clone)]
 pub(crate) struct Payments {
-    wallets: Arc<Wallets>,
-    units: Arc<base::Units>,
-    signers: Arc<Signers>,
-    registry: Arc<crate::registry::Registry>,
-    index: Arc<indexing::Index>,
+    pub(crate) wallets: Arc<Wallets>,
+    pub(crate) units: Arc<base::Units>,
+    pub(crate) signers: Arc<Signers>,
+    pub(crate) registry: Arc<crate::registry::Registry>,
+    pub(crate) index: Arc<indexing::Index>,
     /// The one history read these routes make, for whichever network the wallet
     /// belongs to.
     ///
@@ -113,84 +112,24 @@ pub(crate) struct Payments {
     /// blocks above its confirmed line, and neither half answers it alone. What
     /// satisfies it is `wallets::PendingJoin`, one per network, collected by
     /// `wallets::Composition`.
-    history: Arc<dyn wallets::History>,
+    pub(crate) history: Arc<dyn wallets::History>,
     /// The one balance read these routes make, held for the same reason and in
     /// the same way as `history`: a total is the repository's own query
     /// completed by the blocks one index still holds above its line, so it is
-    /// asked of the fold that owns the holding's network. One per network,
+    /// asked of the reader that owns the holding's network. One per network,
     /// collected by `wallets::Composition` — never reached for through `index`,
     /// which can route one and is not what owns the answer.
-    balance: Arc<dyn wallets::Balances>,
-    health: watch::Receiver<indexing::SyncHealth>,
-    rpc: Vec<(base::Network, Vec<json_rpc::Statistics>)>,
-}
-
-/// Everything [`Payments`] is built from, one field per field of it, so a
-/// composition root names each part where it hands it over — rather than eight
-/// positional arguments, which is a defect waiting for the day two of them
-/// share a type. Every field is named and none has a default; what each one is,
-/// and why it is held rather than reached for, is on [`Payments`] itself.
-pub(crate) struct PaymentsParams {
-    /// Every configured asset's wallet factory, under its tag
-    /// (`wallets::Composition::wallets`).
-    pub(crate) wallets: Arc<Wallets>,
-    /// What an amount of each configured asset is, by identity
-    /// (`wallets::Composition::units`).
-    pub(crate) units: Arc<base::Units>,
-    /// The wallets this process holds keys for; one missing from it is
-    /// watch-only.
-    pub(crate) signers: Arc<Signers>,
-    /// Encrypted application-owned keys, committed before watch publication.
-    pub(crate) registry: Arc<crate::registry::Registry>,
-    /// What observes every configured network (`wallets::Composition::index`):
-    /// watches and checkpoints — never a stored query.
-    pub(crate) index: Arc<indexing::Index>,
-    /// One history page, routed per network (`wallets::Composition::history`).
-    pub(crate) history: Arc<dyn wallets::History>,
-    /// One balance, routed per network (`wallets::Composition::balance`).
     pub(crate) balance: Arc<dyn wallets::Balances>,
-    /// The channel the composition root publishes each network's state on; `GET
-    /// /healthz` answers 200 only while it is ready and its sender alive.
     pub(crate) health: watch::Receiver<indexing::SyncHealth>,
-    /// Endpoint counters supplied by configured RPC clients; no URLs or credentials.
     pub(crate) rpc: Vec<(base::Network, Vec<json_rpc::Statistics>)>,
 }
 
 impl Payments {
-    /// The state [`PaymentsParams`] describes.
-    #[must_use]
-    pub(crate) fn from_params(params: PaymentsParams) -> Self {
-        let PaymentsParams {
-            wallets,
-            units,
-            signers,
-            registry,
-            index,
-            history,
-            balance,
-            health,
-            rpc,
-        } = params;
-        Self {
-            wallets,
-            units,
-            signers,
-            registry,
-            index,
-            history,
-            balance,
-            health,
-            rpc,
-        }
-    }
-
     /// What this process knows about one wallet id.
     ///
     /// Two owners answer it: the index says what is observed and from where,
-    /// and [`Signers`] says whether this process can sign for it. Neither
-    /// knows the other's half, which is the split `docs/design/030 §8 (ex-029)` exists to
-    /// make; putting the two answers together is what `docs/design/030 §8 (ex-026)`
-    /// section 1.9 called `subject(id)`.
+    /// and [`Signers`] says whether this process can sign for it. The application
+    /// joins those facts; indexing owns no signing material.
     ///
     /// # Errors
     ///
@@ -319,9 +258,9 @@ impl Payments {
         &self,
         item: &transaction::BatchedTransfer,
     ) -> Result<(AssetTag, wallets::Transfer), Error> {
+        let amount = transaction::Transfer::amount(&item.amount)?;
         let custody = self.custody(&item.wallet_id).await?;
         let wallet = custody.signing()?.clone();
-        let amount = transaction::Transfer::amount(&item.amount)?;
         let to = self.destination(&custody, &item.destination)?;
         Ok((custody.tag, wallets::Transfer { wallet, to, amount }))
     }
@@ -351,21 +290,20 @@ impl Payments {
         history::TransactionPage::new(page, &network, &custody.watch.asset, &self.units)
     }
 
-    /// One custody's balance, folded over the movements its network's owner
-    /// stores, on both sides of that chain's confirmed line.
+    /// One custody's confirmed indexed total and pending movements, in display units.
     ///
     /// One owner answers both halves, so they cannot disagree about what is
     /// confirmed, and no key is involved: a watched address reads its balance
     /// exactly as a wallet does. The amounts arrive in atomic units and are
     /// scaled here, by the unit the asset's own chain declared.
     ///
-    /// The custody names its network, so the fold that owns it answers — the
+    /// The custody names its network, so the balance reader that owns it answers — the
     /// same route the page takes. Nothing here holds a repository, knows one
     /// exists, or reaches an answer through an indexer.
     ///
     /// # Errors
     ///
-    /// The fold's own error, and a 503 when a stored amount cannot be scaled.
+    /// The balance reader's own error, and a 503 when a stored amount cannot be scaled.
     pub(crate) async fn balance(&self, custody: &Custody) -> Result<wallet::Balance, Error> {
         let unit = self
             .units

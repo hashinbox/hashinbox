@@ -10,8 +10,7 @@
 //! What this file is for: if any of that stops being true, a third party's own
 //! index sink stops compiling, and no test inside `indexing` would notice. Every
 //! assertion reads the sink's own rows, never a port the sink does not
-//! implement, because a third party's query vocabulary is its own business
-//! (`docs/design/030 §8 (ex-032)`, "Queries and UTXOs are separate concerns").
+//! implement, because a third party's query vocabulary is its own business.
 
 use std::sync::{
     Arc, Mutex,

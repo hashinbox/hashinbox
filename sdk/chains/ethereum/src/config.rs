@@ -6,7 +6,7 @@
 //! [`ChainHandle::compose`]s over an opened repository into a
 //! [`wallets::ComposedChain`]. No storage is opened on the first step, which is
 //! what lets an application check every chain's identity before it opens
-//! anything (`docs/design/030 §8 (ex-028)` section 10.1). [`wallets::Composition`] is what
+//! anything. [`wallets::Composition`] is what
 //! holds this chain beside the others.
 
 use std::{collections::BTreeSet, str::FromStr, sync::Arc};
@@ -25,8 +25,7 @@ use wallets::{ComposedChain, Connection, SubmissionRegistrar};
 /// `apps/server` can project a page and its sender can prove a transaction absent.
 /// A trait bound, never a backend: this file names no store implementation. No
 /// [`indexing::OutputStore`]: an account chain produces no UTXO records, and
-/// asking for one would make a store carry a table it can never fill
-/// (`docs/design/030 §8 (ex-032)`, gap 1).
+/// asking for one would make a store carry a table it can never fill.
 pub trait Store:
     indexing::Repository
     + indexing::BalanceStore
@@ -94,7 +93,7 @@ pub struct Config<A> {
     ///
     /// One key, one shape, on every chain: `sdk/config` owns the document and
     /// each chain owns its section, so there is no reason left for one chain
-    /// to flatten what another nests (`docs/CHAIN_LAYOUT.md` section 6).
+    /// to flatten what another nests.
     #[serde(default)]
     pub cadence: Cadence,
 }
@@ -126,7 +125,7 @@ impl<A: Ord> Config<A> {
     ///
     /// Everything an in-code builder can get wrong is checked here rather than
     /// inside a `Deserialize` implementation, so both ways in reach the same
-    /// refusal (`docs/design/030 §8 (ex-028)` section 5.4).
+    /// refusal.
     ///
     /// # Errors
     ///
@@ -375,8 +374,7 @@ impl<A> Token<A> {
     }
 
     /// The deserializer owns the encoding, and only the encoding: a value an
-    /// embedder builds in code has no text to check (`docs/design/030 §8 (ex-028)`
-    /// section 5.2).
+    /// embedder builds in code has no text to check.
     fn deserialize_contract<'de, D>(deserializer: D) -> Result<Address, D::Error>
     where
         D: serde::Deserializer<'de>,

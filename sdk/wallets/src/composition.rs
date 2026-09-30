@@ -11,7 +11,7 @@
 //!
 //! The two phases never merge. **Every identity check finishes before any
 //! storage is opened**, so a deployment that names the wrong node fails
-//! without having written a byte (`docs/design/030 §8 (ex-028)` section 10.1).
+//! without having written a byte.
 //! [`Composition::build`] takes chains that are already verified — the data
 //! flow states the order — and [`Composition::verify_then_build`] states it
 //! for a caller that would otherwise have to remember it.
@@ -76,13 +76,11 @@ pub struct ComposedChain<A> {
 /// Three chains produce three different verified-node types and one vector has
 /// to hold them together, so something must erase them; a trait rather than a
 /// boxed closure, so each chain crate can state the store capabilities its own
-/// composition needs (`docs/design/030 §8 (ex-028)` section 9.4). An application writes none
-/// of it.
+/// composition needs. An application writes none of it.
 ///
 /// It no longer answers which network it indexes. It had to while a repository
 /// was opened per network and the network was what selected one; one store
-/// serves every network now, so the question had no caller left
-/// (`docs/design/030` section 8's deviation, reversed).
+/// serves every network now, so selecting a repository no longer needs it.
 pub trait Connection<A, R>: Send {
     /// This chain's parts, built over `repository`. Background send work a
     /// chain cannot finish inside its own call goes to `registrar`.
@@ -404,6 +402,7 @@ mod tests {
                     observed_at: None,
                     pending: indexing::PendingValue::none(),
                     completeness: indexing::Completeness::Incomplete,
+                    opening: None,
                 })
             })
         }

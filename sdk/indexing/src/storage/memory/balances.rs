@@ -10,6 +10,7 @@ impl Tables {
     pub(super) fn disclaim(&mut self, network: &crate::Network) {
         self.progress.retain(|(bound, ..), _| bound != network);
         self.settlements.remove(network);
+        self.openings.retain(|(bound, ..), _| bound != network);
         for (_, net) in self
             .balances
             .iter_mut()
@@ -72,13 +73,21 @@ impl Repository {
     pub(super) fn accrue_credit(
         tables: &mut Tables,
         credit: &crate::BlockCredit,
+        block: &crate::BlockRef,
     ) -> Result<(), IndexError> {
-        let holding = (
+        let key = (
             credit.to.network.clone(),
             credit.asset.clone(),
             credit.to.value.clone(),
         );
-        let Some(net) = tables.balances.get_mut(&holding) else {
+        if tables
+            .openings
+            .get(&key)
+            .is_some_and(|evidence| block.height <= evidence.at().height)
+        {
+            tables.openings.remove(&key);
+        }
+        let Some(net) = tables.balances.get_mut(&key) else {
             return Ok(());
         };
         let units = credit
@@ -99,7 +108,8 @@ impl Repository {
             .get(&address.network)
             .copied()
             .unwrap_or(FeeSettlement::Charged);
-        for ((network, asset, owner), net) in &mut tables.balances {
+        for (key, net) in &mut tables.balances {
+            let (network, asset, owner) = key;
             if network != &address.network || owner != &address.value {
                 continue;
             }
@@ -110,6 +120,21 @@ impl Repository {
             let mut fold = Fold::new(&query);
             fold.apply(transaction, settlement)?;
             *net += fold.net();
+            let changed = transaction.movements.iter().any(|movement| {
+                &movement.asset == asset
+                    && (movement.from() == Some(address) || movement.to() == Some(address))
+            }) || transaction.fee.as_ref().is_some_and(|fee| {
+                settlement == FeeSettlement::Charged
+                    && &fee.asset == asset
+                    && fee.payer.as_ref() == Some(address)
+            });
+            let historical = tables
+                .openings
+                .get(key)
+                .is_some_and(|evidence| transaction.block().height <= evidence.at().height);
+            if changed && historical {
+                tables.openings.remove(key);
+            }
         }
         Ok(())
     }

@@ -4,7 +4,7 @@
 //! credit an execution-layer account directly from the block body. There is
 //! no transaction, no receipt and no trace entry, so a fold over transactions
 //! alone understates such an account by every withdrawal it ever received,
-//! silently and permanently (`docs/design/021` section 4.1).
+//! silently and permanently.
 //!
 //! The bytes are already in hand: the `eth_getBlockByNumber` result this
 //! crate fetches carries `withdrawals`, and

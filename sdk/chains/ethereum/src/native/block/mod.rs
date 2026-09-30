@@ -105,8 +105,7 @@ impl RawBlock {
     /// they are not in [`Self::parse`]'s result and cannot be: a [`Block`] is
     /// its transactions. An account that only ever received withdrawals has
     /// an empty history and a non-zero balance, which is why this is a
-    /// balance fact rather than a history nicety (`docs/design/021` section
-    /// 4.1).
+    /// balance fact independent of transaction history.
     ///
     /// It reads the payload already held — no RPC call, and nothing of the
     /// transaction path.
@@ -629,7 +628,7 @@ mod tests {
         );
     }
 
-    /// The double-count trap of `docs/design/021` section 6.2: the trace
+    /// The trace
     /// carries the very ether the top-level `value` already names, so a plain
     /// transfer must still produce exactly one movement — and the fee trap
     /// beside it: traced balances already include the gas the sender paid, so

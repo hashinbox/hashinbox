@@ -1,13 +1,5 @@
-//! The fixture every scenario in `backfill.rs` writes first, and the batch that
-//! fills it in.
-//!
-//! The split is by role, not by type: this file is the setup — the observation,
-//! the five blocks committed with nothing watched, one batch over them, and the
-//! reads a scenario checks them with — so `backfill.rs` holds the twenty-one
-//! guarantees alone. Merging the two would be one idea in one file and is what
-//! the repository's 500-line cap forbids, at 730 lines for twenty-one
-//! invariants; `docs/design/033` section 3.1 argues that a cap on a contract
-//! file caps invariants per file, which is the wrong axis.
+//! Shared setup for backfill contracts: observations, canonical blocks and reads.
+//! The scenarios remain beside this fixture in backfill.rs.
 
 use base::Decimal;
 

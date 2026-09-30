@@ -318,7 +318,7 @@ fn history_pages_survive_a_moving_checkpoint_and_output_pages_do_not() {
 /// A re-created output and a stale checkpoint both leave every stored byte
 /// untouched, and a restart finds exactly what was committed. An unmatched
 /// required spend is deliberately not one of the refusals: it commits and is
-/// reported instead (docs/design/024 §5.1, `SpendContract`).
+/// reported instead.
 ///
 /// The two refusals are different kinds on purpose: a stale checkpoint is a
 /// retryable `Conflict`, because the pass simply reads the line again, while an
@@ -497,6 +497,11 @@ contract!(
 contract!(
     BalanceContract,
     activity_pages_preserve_every_effect_and_native_order,
+    opening_evidence_requires_the_exact_caught_up_snapshot,
+    opening_evidence_follows_progress_and_is_invalidated_by_new_old_effects,
+    a_forward_deficit_cannot_resurrect_opening_evidence,
+    a_deficit_inside_one_batch_invalidates_opening_evidence,
+    insertion_order_inside_one_block_keeps_opening_evidence,
     folds_the_movements_of_one_holding,
     never_charges_a_settled_fee_twice,
     charges_a_fee_to_the_fee_asset_only,
@@ -595,4 +600,26 @@ mod purge_network_removes_only_its_own_network {
                 .purge_network_removes_only_its_own_network(),
         );
     }
+}
+
+#[test]
+fn sqlite_restores_verified_opening_evidence_after_reopen() {
+    let directory = TempDir::new().expect("directory");
+    let path = directory.path().join("opening.db");
+    let query = indexing::BalanceQuery {
+        address: Address::new(network(), "a"),
+        asset: AssetId::native(network().chain),
+    };
+    let before = {
+        let store = open(&path);
+        block_on(
+            BalanceContract::new(&store, network())
+                .opening_evidence_requires_the_exact_caught_up_snapshot(),
+        );
+        block_on(indexing::BalanceStore::balance(&store, query.clone())).expect("balance")
+    };
+    assert!(before.opening.is_some());
+    let reopened = open(&path);
+    let after = block_on(indexing::BalanceStore::balance(&reopened, query)).expect("reopened");
+    assert_eq!(after, before);
 }

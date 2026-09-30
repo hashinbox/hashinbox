@@ -184,13 +184,8 @@ impl Tables {
             .map_err(|error| failure(&error, "failed to write the checkpoint"))
     }
 
-    /// Removes every row of one table that belongs to this network, and counts
-    /// them.
-    ///
-    /// One statement per table, whatever the network holds. This is the half of
-    /// `docs/design/030 §8 (ex-031)` section 5.2 a key-value store cannot answer: naming
-    /// every key it removes makes an offline rescan materialize one delete
-    /// operation per row of the whole network before it commits any of them.
+    /// Removes matching rows of one network with a single SQL statement, returning
+    /// the count without materializing the rows being deleted.
     pub(super) fn purge(
         &self,
         transaction: &Transaction<'_>,

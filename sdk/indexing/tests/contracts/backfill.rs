@@ -424,7 +424,7 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
     ///
     /// Without it a withdrawal-funded address watched from its own past would
     /// come back permanently short, and nothing would say so: the history
-    /// rows would all be there (`docs/design/021` section 4.1).
+    /// rows would all be there.
     pub async fn fills_in_a_credit_no_transaction_names(&self) {
         self.prepare().await;
         assert_eq!(self.settled().await, Decimal::zero(), "the gap this closes");

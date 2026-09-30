@@ -124,8 +124,8 @@ where
     /// What is deliberately *not* here is the source's own canonicality. Only
     /// blocks above the confirmed line can still be taken back, and only
     /// [`Self::admit`] reads any; a historical block is at or below a checkpoint
-    /// this pass already proved canonical, and a confirmed block never reverts
-    /// (`docs/design/030 §8 (ex-025)`), so asking again would be one RPC per
+    /// this pass already proved canonical, and a confirmed block never reverts, so asking again
+    /// would be one RPC per
     /// block for no further proof.
     pub(super) fn inspect(
         &self,

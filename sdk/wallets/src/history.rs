@@ -88,7 +88,7 @@ pub struct TransactionPage {
     /// backfill is still inserting *below* it, so `next` being `None` says
     /// nothing about the rows older than the first one here. Without it a
     /// caller paging to the end mid-backfill would hold what reads as a
-    /// complete export and is not one (`docs/design/030 §8 (ex-032)`, consumer reads).
+    /// complete export and is not one.
     ///
     /// It is [`CanonicalPage::completeness`], unchanged. The repository
     /// answered it from the snapshot the rows came from, and the blocks above

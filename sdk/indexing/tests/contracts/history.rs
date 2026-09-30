@@ -38,7 +38,7 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
     }
 
     /// `limit` counts matching transactions only: pages are full, and no
-    /// empty tail page follows the last match (docs/design/030 §8 (ex-012) §1.2).
+    /// empty tail page follows the last match.
     pub async fn limit_counts_only_the_query_asset(&self) {
         self.prepare().await;
         let first = self.page("a", &self.fixture.token(), None, 2).await;
@@ -145,7 +145,7 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
     /// The confirmed store is append-only, so a held cursor can only be
     /// overtaken from above. A store whose cursor were an offset, a row count
     /// or a snapshot handle would pass every other scenario here and fail this
-    /// one (`docs/design/030 §8 (ex-027)` section 4.3).
+    /// one.
     pub async fn a_cursor_survives_writes_that_land_after_it(&self) {
         self.prepare().await;
         let native = self.fixture.native();

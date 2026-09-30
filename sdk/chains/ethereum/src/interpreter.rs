@@ -441,7 +441,7 @@ mod tests {
         )
     }
 
-    /// `docs/design/021` section 4.1, closed. The block body credits a watched
+    /// The block body credits a watched
     /// address two ether with no transaction, `InterpretedBlock::credits`
     /// carries it, and the fold reports it — beside the 42 wei the block's one
     /// transaction moved to the same address, each counted exactly once.
@@ -508,7 +508,7 @@ mod tests {
 
     /// The case the old code was silently wrong for, and the one that has no
     /// other record at all: an address with no transaction history and a
-    /// non-zero balance (`docs/design/021` section 4.1's second trap).
+    /// non-zero balance.
     #[test]
     fn an_address_funded_only_by_withdrawals_has_no_transactions_and_a_balance() {
         let plain = ethereum_block(
@@ -642,7 +642,7 @@ mod tests {
         assert_eq!(draft.status, ObservationDraftStatus::Included);
     }
 
-    /// The headline of `docs/design/021` section 6: a wallet paid through a
+    /// A wallet paid through a
     /// contract appears in no transaction field and in no log, so before the
     /// trace landed this block was invisible to it. The credit must now be a
     /// movement of the transaction that caused it.

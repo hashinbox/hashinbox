@@ -29,7 +29,7 @@ use wallets::{
 };
 use wallets::{ObservedTransaction, TransactionPage, TransactionStatus};
 
-use super::{AssetTag, Payments, PaymentsParams, Signers, router};
+use super::{AssetTag, Payments, Signers, router};
 
 const TOKEN: &str = "route-contract-secret";
 
@@ -313,6 +313,7 @@ impl wallets::Balances for FixtureIndex {
     ) -> BoxFuture<'a, Result<indexing::Balance, IndexError>> {
         Box::pin(async {
             Ok(indexing::Balance {
+                opening: None,
                 amount: 1_250_000_000_u64.into(),
                 observed_at: Some(block(8)),
                 pending: indexing::PendingValue {
@@ -646,7 +647,7 @@ fn fixture_with_generation_error(
         NetworkState::CatchingUp
     }));
     let registry = crate::registry::Registry::fixture();
-    let payments = Payments::from_params(PaymentsParams {
+    let payments = Payments {
         wallets: Arc::new(wallets),
         units: Arc::new(units()),
         signers: Arc::new(Signers::new()),
@@ -656,7 +657,7 @@ fn fixture_with_generation_error(
         balance,
         health: receiver,
         rpc: vec![],
-    });
+    };
     let token = http_server::BearerToken::new(TOKEN).expect("fixture bearer token");
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("fixture bind address"),
@@ -1494,27 +1495,29 @@ async fn watched_addresses_have_history_and_balance_but_no_sends() {
         "a fold over indexed movements needs no key"
     );
     assert_eq!(json_body(&balance)["amount"], "12.5");
-    let send = request(
-        &fixture.app,
-        "POST",
-        &format!("/v1/wallets/{id}/transactions"),
-        Some(json!({"destination": "fixture-destination", "amount": "1"})),
-        true,
-    )
-    .await;
-    assert_eq!(send.status, StatusCode::UNPROCESSABLE_ENTITY);
-    let batch = request(
-        &fixture.app,
-        "POST",
-        "/v1/transactions",
-        Some(json!({"transfers": [
-            {"wallet_id": id, "destination": "fixture-destination", "amount": "1"}
-        ]})),
-        true,
-    )
-    .await;
-    assert_eq!(batch.status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(json_body(&batch)["failed_index"], 0);
+    for amount in ["1", "all"] {
+        let send = request(
+            &fixture.app,
+            "POST",
+            &format!("/v1/wallets/{id}/transactions"),
+            Some(json!({"destination": "fixture-destination", "amount": amount})),
+            true,
+        )
+        .await;
+        assert_eq!(send.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let batch = request(
+            &fixture.app,
+            "POST",
+            "/v1/transactions",
+            Some(json!({"transfers": [
+                {"wallet_id": id, "destination": "fixture-destination", "amount": amount}
+            ]})),
+            true,
+        )
+        .await;
+        assert_eq!(batch.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(json_body(&batch)["failed_index"], 0);
+    }
     assert_no_transaction_calls(&fixture.calls);
 
     for (body, status) in [
@@ -2076,9 +2079,16 @@ async fn health_reads_rpc_counters_after_the_endpoint_has_stopped() {
         .await
         .expect("local node");
     let url = format!("http://{}", listener.local_addr().expect("address"));
-    let app = axum::Router::new().route("/", axum::routing::post(|axum::Json(request): axum::Json<Value>| async move {
-        axum::Json(json!({"jsonrpc":"2.0", "id":request["id"], "error":{"code":-32001,"message":"private-provider-detail"}}))
-    }));
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(|axum::Json(request): axum::Json<Value>| async move {
+            axum::Json(json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "error": {"code": -32001, "message": "private-provider-detail"}
+            }))
+        }),
+    );
     let node = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("local response");
     });
@@ -2117,4 +2127,34 @@ async fn health_reads_rpc_counters_after_the_endpoint_has_stopped() {
     let wire = body.to_string();
     assert!(!wire.contains("private-provider-detail"));
     assert!(!wire.contains(&url));
+}
+
+#[tokio::test]
+async fn malformed_batch_amount_precedes_wallet_lookup_and_signing() {
+    let fixture = fixture(true);
+    let watched = request(
+        &fixture.app,
+        "POST",
+        "/v1/addresses",
+        Some(json!({"asset": "btc", "address": "fixture-watched"})),
+        true,
+    )
+    .await;
+    let watched_id = json_body(&watched)["id"]
+        .as_str()
+        .expect("watch")
+        .to_owned();
+    for id in ["missing-wallet", watched_id.as_str()] {
+        let body = json!({"transfers": [{
+            "wallet_id": id, "destination": "fixture-destination", "amount": "invalid"
+        }]});
+        let response = request(&fixture.app, "POST", "/v1/transactions", Some(body), true).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(&response)["failed_index"], 0);
+        assert_eq!(
+            json_body(&response)["message"],
+            "amount must be an exact base-10 decimal or all"
+        );
+    }
+    assert_no_transaction_calls(&fixture.calls);
 }

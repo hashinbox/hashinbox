@@ -3,8 +3,7 @@
 //!
 //! A list rather than a slot, and synchronous rather than awaited: a hook that
 //! cannot await cannot slow a pass by awaiting, and the dispatch keeps its
-//! allocation-free shape by sharing the list rather than copying it
-//! (`docs/design/030 §8 (ex-029)` section 6.3).
+//! allocation-free shape by sharing the list rather than copying it.
 
 use std::sync::{Arc, RwLock};
 

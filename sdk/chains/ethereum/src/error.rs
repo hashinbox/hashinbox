@@ -97,7 +97,7 @@ impl From<native::Error> for wallets::WalletError {
 }
 
 /// The chain's native error into the single-transaction contract's error:
-/// the only error-kind mapping (`docs/CHAIN_LAYOUT.md` section 1).
+/// the only error-kind mapping.
 impl native::Error {
     /// A failed submission of `id`: [`ErrorKind::RpcUnavailable`] means the
     /// attempt may have reached the node, so the error is

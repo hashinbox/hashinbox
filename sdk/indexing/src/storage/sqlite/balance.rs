@@ -67,12 +67,13 @@ impl Tables {
         // claim about provenance cannot talk it away.
         if balance.completeness != Completeness::Overdrawn {
             balance.completeness = self.provenance(&read, query, balance.observed_at.as_ref())?;
+            balance.opening = self.opening(&read, query, balance.observed_at.as_ref())?;
         }
         Ok(balance)
     }
 
     /// The persisted total, absent only when this holding is not watched.
-    fn saved(
+    pub(super) fn saved(
         &self,
         read: &Transaction<'_>,
         subject: (&str, &str),
@@ -112,7 +113,8 @@ impl Tables {
         delta: BigInt,
     ) -> Result<(), IndexError> {
         if let Some(held) = self.saved(transaction, subject)? {
-            self.save_total(transaction, subject, held + delta)?;
+            let total = held + delta;
+            self.save_total(transaction, subject, total)?;
         }
         Ok(())
     }

@@ -1,7 +1,7 @@
 //! What an asset's amounts are counted in, and where that is resolved.
 //!
 //! An index deals in atomic units and never learns an asset's decimals
-//! (`docs/design/021` section 5.2), so an amount is scaled once, at the edge
+//! so an amount is scaled once, at the edge
 //! that reports it. The scale belongs to the asset, not to a wallet: a chain
 //! declares it for its own currency and an ERC-20 or SPL token declares its
 //! own, checked against the contract when the chain connects. [`Units`] is

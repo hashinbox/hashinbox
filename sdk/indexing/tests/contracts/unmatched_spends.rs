@@ -8,20 +8,7 @@ use indexing::{
 
 use super::fixture::Fixture;
 
-/// The rule of `docs/design/024` §5.1, checked against one repository: a
-/// required spend the index cannot match is a completeness fact about one
-/// address, never a verdict on the block.
-///
-/// And the rule's second half, which is about the store rather than the block:
-/// the miss is *kept*. An address is watched above its own funding, so the
-/// output a spend could not find is one a later batch may still discover below
-/// the checkpoint — and the spend that named it was applied above where that
-/// batch reaches, so no batch ever carries it again. A store that forgot the
-/// miss would fill the creation in and leave an output nothing can ever spend.
-///
-/// Every scenario writes its own fixture over an empty repository bound to
-/// `network`, and the two backends must agree on all of it — including which
-/// conditions are *still* errors.
+/// A spend recorded before its creation prevents historical insertion resurrecting it.
 pub struct SpendContract<'a, R> {
     pub(super) fixture: Fixture<'a, R>,
 }
@@ -35,9 +22,7 @@ impl<'a, R: IndexStore + OutputStore + ConfirmedHistory> SpendContract<'a, R> {
         }
     }
 
-    /// The defect of `docs/design/024` §1.3: a block that spends an output this
-    /// network never indexed commits, names the key it could not match, and
-    /// leaves every other fact of the block in place.
+    /// Spending an output not yet indexed still prevents its later resurrection.
     pub async fn an_unknown_required_spend_is_reported_not_refused(&self) {
         let ghost = self.key("owner", "ghost");
         let fresh = self.fixture.output("owner", "fresh", BlockHeight(1));

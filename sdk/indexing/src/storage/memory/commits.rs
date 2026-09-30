@@ -109,6 +109,7 @@ impl Repository {
             self.fill_history(canonical.transactions(), tables)?;
             self.fill_credits(network, canonical.credits(), canonical.block(), tables)?;
             unknown.extend(self.fill_outputs(network, canonical.outputs(), tables)?);
+            tables.clear_deficits(network);
         }
         for claim in batch.progress() {
             Self::advance(network, claim, tables)?;
@@ -124,8 +125,7 @@ impl Repository {
     /// The compare is the whole guard, and it is not a monotonic rule: a batch
     /// redone under a smaller budget legitimately settles less than the write it
     /// is redoing, so what is refused is a claim whose author was reading a
-    /// different value — never one that went down (`docs/design/030 §8 (ex-032)`,
-    /// [`Progress`]).
+    /// different value — never one that went down.
     fn advance(network: &Network, claim: &Progress, tables: &mut Tables) -> Result<(), IndexError> {
         if tables.identities.get(&claim.watch_id) != Some(network) {
             return Err(conflict(
@@ -197,7 +197,7 @@ impl Repository {
                     ));
                 }
                 None => {
-                    Self::accrue_credit(tables, credit)?;
+                    Self::accrue_credit(tables, credit, block)?;
                     drop(tables.credits.insert(key, (block.position, credit.clone())));
                 }
             }

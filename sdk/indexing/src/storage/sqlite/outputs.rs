@@ -206,7 +206,7 @@ impl Tables {
 
     /// One upsert; `false` when the row already carried a creation.
     ///
-    /// `DO UPDATE ... WHERE output.asset IS NULL` is the whole of it: an
+    /// `DO UPDATE... WHERE output.asset IS NULL` is the whole of it: an
     /// existing row with no creation is a spend that arrived first and is filled
     /// in here, and an existing row that already has one is left exactly as it
     /// is for [`Self::verify_output`] to compare.
@@ -264,10 +264,9 @@ impl Tables {
     ///
     /// A required spend of an output this network never indexed is the normal
     /// outcome of watching an already-funded address, so it is reported rather
-    /// than refused (`docs/design/024` section 5.1). Nothing is recorded to put
+    /// than refused. Nothing is recorded to put
     /// an output back: a confirmed output is only ever spent by a confirmed
-    /// block, and no confirmed block is ever undone (`docs/design/030 §8
-    /// (ex-025)`).
+    /// block, and no confirmed block is ever undone.
     ///
     /// What *is* recorded is the spend itself, against an outpoint whose
     /// creation is still unknown, because that creation may arrive from below.

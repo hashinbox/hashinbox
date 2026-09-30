@@ -28,7 +28,10 @@ impl<R: BalanceStore + IndexStore + ActivityRead> BalanceContract<'_, R> {
         let f = &self.fixture;
         let batch = f.batch(Some(f.block(8)), Self::credited(f));
         f.repository.commit(batch.clone()).await.expect("credits");
-        f.repository.commit(batch).await.expect("replay");
+        f.repository
+            .commit(f.batch(Some(f.block(9)), Self::credited(f)))
+            .await
+            .expect("replay");
         let draft = |id: &str, order| ObservationDraft {
             transaction_id: f.transaction(id),
             transaction_order: order,

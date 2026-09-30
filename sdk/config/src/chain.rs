@@ -10,19 +10,10 @@ use crate::{Error, ErrorKind};
 /// Consumers label endpoints by ordinal; no URL or credential is retained.
 pub type RpcStatistics = Vec<(Network, Vec<Statistics>)>;
 
-/// One chain's configuration, with the chain crate that declared it erased.
-///
-/// A chain crate implements this for its own `Config<A>`, which is the whole
-/// of registration: `sdk/config` depends on no chain crate, names no chain
-/// type, and learns each one only through these three methods. It is **not**
-/// the bundled chain trait `docs/CHAIN_LAYOUT.md` section 6 rejects — there is
-/// no associated `Network`, `Source`, `Interpreter` or `KeyPair` here, and
-/// nothing generic is written against it. It carries a section from the
-/// document to the composition and stops.
-///
-/// The two phases never merge, exactly as [`wallets::Connection`] states them:
-/// [`Self::accept`] touches nothing, and [`Self::connect`] contacts a node but
-/// opens no storage (`docs/design/030 §8 (ex-028)` section 10.1).
+/// One chain's configuration, erased at registration. The chain owns its
+/// configuration and connection policy; this crate names no concrete chain.
+/// Acceptance validates local settings; connection verifies node identity before
+/// composition opens storage.
 pub trait Chain<A, R>: Send + 'static {
     /// The network this section configures, read from the document alone: no
     /// node is contacted and no storage is opened.
@@ -133,8 +124,7 @@ impl<A: 'static, R: 'static> Chains<A, R> {
     /// is contacted and no storage is opened.
     ///
     /// The offline rescan checks its `<chain>/<network>` argument against
-    /// this, so a typo is refused before anything is deleted
-    /// (`docs/design/019` section 5.3).
+    /// this, so a typo is refused before anything is deleted.
     #[must_use]
     pub fn networks(&self) -> Vec<Network> {
         self.chains
@@ -145,7 +135,7 @@ impl<A: 'static, R: 'static> Chains<A, R> {
 
     /// What every accepted chain asked an operator to be told, in section
     /// order. A library crate must not write to standard output, so printing
-    /// them is the application's (`docs/design/030 §8 (ex-028)` section 8.4).
+    /// them is the application's.
     #[must_use]
     pub fn notices(&self) -> &[String] {
         &self.notices

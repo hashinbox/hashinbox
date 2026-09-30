@@ -33,7 +33,7 @@ impl Health {
     /// The historical range this network still owes, logged because it is the
     /// one condition that no longer shows up as an outage: readiness follows
     /// forward indexing, so a range a pruned node can never serve would
-    /// otherwise be silent (`docs/design/024` section 7).
+    /// otherwise be silent.
     fn owed(health: &indexing::NetworkHealth) -> String {
         let owed = health.status.backfill.as_ref();
         owed.map_or_else(String::new, |owed| {

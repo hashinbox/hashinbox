@@ -4,10 +4,8 @@ use std::sync::Arc;
 
 /// The wallets this process holds keys for, by the id it minted.
 ///
-/// It is deliberately here and not in `wallets`: a container there called
-/// anything at all would be `Wallets` renamed, which is what `docs/design/030 §8 (ex-029)`
-/// removes. What is left once publication, persistence, custody and filters
-/// belong to the index is a map with two methods.
+/// Application custody stays outside `wallets` and indexing. The encrypted
+/// registry restores these handles at boot; durable watches supply public identity.
 #[derive(Default)]
 pub(crate) struct Signers(
     std::sync::RwLock<std::collections::BTreeMap<String, Arc<dyn wallets::Wallet>>>,

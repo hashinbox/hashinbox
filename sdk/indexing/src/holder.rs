@@ -70,8 +70,7 @@ pub(crate) fn require_address(address: &Address) -> Result<(), IndexError> {
 /// the asset it is read in.
 ///
 /// Deliberately not called a "holding": in a payments SDK that reads as a
-/// balance position, and the word already had another meaning
-/// (`docs/CHAIN_LAYOUT.md` section 3).
+/// balance position, and the word already had another meaning.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subject {
     /// The observed address.

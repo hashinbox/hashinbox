@@ -130,8 +130,7 @@ impl Page {
 /// after the last position it returned, and nothing else. The confirmed store
 /// is append-only, so a checkpoint that moved can only have appended *above*
 /// that position — an ascending keyset page is stable however long a caller
-/// holds it, with no checkpoint to compare and no page to restart
-/// (`docs/design/030 §8 (ex-025)` section 6.3).
+/// holds it, with no checkpoint to compare and no page to restart.
 ///
 /// **All three components are functions of the block**, which is what keeps
 /// that true when more of an already-stored block is written later:

@@ -36,7 +36,9 @@ working directory when resetting the nodes: an index from another local chain is
 not reusable. Scenarios which generate new keys also need a fresh index on rerun.
 
 Before either transfer scenario, train Bitcoin Core's fee estimator using its
-local wallet. Empty blocks alone cannot supply fee observations:
+local wallet. Keep this funded wallet loaded; the examples use it to send their
+Bitcoin deposits, then mine confirmation blocks. This avoids relying on coinbase
+maturity or the regtest block reward. Empty blocks alone cannot train fees:
 
 ```bash
 btc() { bitcoin-cli -regtest -rpcuser=bitcoin -rpcpassword=bitcoin "$@"; }
@@ -54,7 +56,9 @@ btc estimatesmartfee 6 conservative
 
 The final reply must contain `feerate`. `fallbackfee` only funds these training
 transactions in the local node's wallet; SDK sends still use the estimator.
-Repeat training if enough empty blocks make the estimate unavailable again.
+Repeat training if enough empty blocks make the estimate unavailable again. Keep
+only this wallet loaded, or set the Bitcoin RPC URL to `/wallet/example-funding`
+in the scenario config when multiple node wallets are loaded.
 
 ## Notes
 
@@ -66,5 +70,5 @@ Repeat training if enough empty blocks make the estimate unavailable again.
   `main.rs` asks the node for the hash and substitutes it. A real deployment
   writes the hash it expects.
 - Never point an example at a funded key or a public endpoint. Funding uses the
-  local node's own RPC (`generatetoaddress`, Anvil's unlocked development account,
+  local node's own RPC (`sendtoaddress` and `generatetoaddress`, Anvil's unlocked account,
   `requestAirdrop`).

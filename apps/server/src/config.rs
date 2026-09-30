@@ -10,10 +10,10 @@
 use std::{collections::BTreeSet, env, error::Error, net::SocketAddr, path::Path};
 
 use sdk_config::{Chains, Document, Sections};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 
 use crate::{
-    api::{AssetTag, Signers, Start, Wallets},
+    api::{AssetTag, Signers, Wallets},
     chains,
     storage::{self, Repository},
 };
@@ -131,13 +131,46 @@ impl Config {
     }
 }
 
+/// Explicit observation start for an environment-imported wallet.
+/// Zero means genesis; `fresh` starts after the current checkpoint.
+enum Start {
+    Fresh,
+    At(u64),
+}
+
+impl From<Start> for indexing::Birthday {
+    fn from(value: Start) -> Self {
+        match value {
+            Start::Fresh => Self::Fresh,
+            Start::At(position) => Self::At(base::BlockPosition(position)),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Start {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Stated {
+            Position(u64),
+            Sentinel(String),
+        }
+        match Stated::deserialize(deserializer)? {
+            Stated::Position(position) => Ok(Self::At(position)),
+            Stated::Sentinel(text) if text == "fresh" => Ok(Self::Fresh),
+            Stated::Sentinel(text) => Err(de::Error::invalid_value(
+                de::Unexpected::Str(&text),
+                &"\"fresh\" or a non-negative block position",
+            )),
+        }
+    }
+}
+
 /// A wallet imported at every startup from a secret held in the
 /// environment, indexed from its explicit birthday.
 ///
-/// `start` is the same vocabulary the HTTP add paths use — a native block
-/// position, or `"fresh"` — because a bare integer could not say "this key
-/// has never been used": `0` is genesis, not the tip
-/// (`docs/design/030` section 5.5 (e)).
+/// `start` is a native block position or `"fresh"`; `0` means genesis.
+/// HTTP creation and watching always choose fresh observation.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ConfiguredWallet {
@@ -148,9 +181,9 @@ pub(crate) struct ConfiguredWallet {
 }
 
 impl ConfiguredWallet {
-    /// Builds the wallet, has `index` observe it from its explicit birthday,
-    /// then files the key in `signers` — in that order (`docs/design/030 §8 (ex-029)`
-    /// section 3.3).
+    /// Builds the wallet, durably encrypts its key, publishes its watch, then
+    /// installs the process's signing handle. Interrupted publication leaves
+    /// the saved key private until the configured import is retried.
     ///
     /// The index is asked for one capability, `indexing::Watching`, because
     /// registering an observation is the whole of what an import does with it.

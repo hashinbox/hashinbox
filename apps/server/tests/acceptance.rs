@@ -419,6 +419,9 @@ async fn generated_wallet_survives_restart_and_spends_without_configured_keys()
         .send()
         .await?;
     assert_eq!(empty.status(), reqwest::StatusCode::BAD_REQUEST);
+    let empty_batch = batch_response(&first.root, &[(&id, bitcoin_destination(9), "all")]).await?;
+    assert_eq!(empty_batch.status(), reqwest::StatusCode::BAD_REQUEST);
+
     let transaction = bitcoin.fund(vec![FundingOutput::new(
         wallet["address"].as_str().unwrap(),
         100_000,

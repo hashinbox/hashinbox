@@ -320,7 +320,7 @@ fn collection(outbox: &Arc<Outbox>) -> Wallets<Tag> {
     wallets
 }
 
-/// Section 1.8 of `docs/design/030 §8 (ex-026)`, end to end, with no chain named: the
+/// The complete preparation and submission path without naming a chain: the
 /// map hands back a wallet, the wallet hands back a builder, the draft says
 /// what will be paid before any node is asked, the signed transaction says
 /// what it costs before anything leaves the process, and only `broadcast`

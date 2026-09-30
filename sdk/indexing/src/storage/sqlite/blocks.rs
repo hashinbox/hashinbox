@@ -1,27 +1,7 @@
-//! Canonical blocks, their atomic commit, and the offline rescan.
-//!
-//! # The compare-and-set, and why the one `docs/design/030 §8 (ex-031)` proposed is wrong
-//!
-//! Section 5.2 proposes `UPDATE checkpoint SET ... WHERE chain = ? AND
-//! network = ? AND position = ? AND hash = ?` plus a row-count check, on the
-//! grounds that naming the checkpoint's own durable state cannot be reset by a
-//! delete the way a per-key version counter can. The first half is true and the
-//! conclusion does not follow. A version counter is *monotonic*: the value a
-//! reader saw is never produced again. `(position, hash)` is not — it is the
-//! chain's own coordinate, and the entire purpose of `purge_network` is that
-//! the network is re-indexed from the same chain afterwards, which restores the
-//! same `(position, hash)` at the same height. A condition on those two columns
-//! therefore matches again after exactly the sequence it was introduced to
-//! refuse. `blocks_test::the_proposed_checkpoint_condition_cannot_see_an_aba`
-//! is that sequence, written out.
-//!
-//! What this adapter does instead is not a better condition. It is no condition
-//! at all: [`super::Database::transaction`] begins `IMMEDIATE`, so the
-//! checkpoint read and the writes it authorizes are inside one transaction that
-//! holds the file's single write lock for its whole length. A version counter
-//! is needed only when the read and the commit are two transactions with a
-//! window between them; this removes the window rather than guarding it, and
-//! with it the whole condition vocabulary.
+//! Canonical blocks, atomic commit and offline network rescan.
+//! The checkpoint read and its conditional write share one BEGIN IMMEDIATE
+//! transaction, excluding intervening writers. A checkpoint coordinate alone is
+//! not a mutation version: rescan can reproduce the same position and hash.
 
 use rusqlite::Transaction;
 
@@ -36,7 +16,7 @@ use crate::{
 ///
 /// The watch list is deliberately absent, and only half absent: the
 /// observations are application state and a purged network re-indexes from the
-/// earliest registered birthday (`docs/design/019` section 5.3), while the
+/// earliest registered birthday, while the
 /// progress and the balance they carry are claims about rows this purge just
 /// removed and are reset in the same transaction.
 const PURGED: [&str; 4] = [
@@ -73,13 +53,8 @@ impl IndexStore for Repository {
 }
 
 impl Purging for Repository {
-    /// One statement per table, and no materialized batch.
-    ///
-    /// This is the other half of `docs/design/030 §8 (ex-031)` section 5.2, and the one it
-    /// gets right: a store that has to name every key it removes builds one
-    /// delete operation per row -- of the whole network -- in memory before it
-    /// commits any of them. `DELETE ... WHERE` names a predicate instead, and
-    /// the rows never exist as Rust values at all.
+    /// Removes one network's indexing rows inside one transaction. SQL predicates
+    /// bound deletion memory independently of the network's row count.
     fn purge_network<'a>(
         &'a self,
         network: &'a Network,
@@ -123,6 +98,7 @@ impl Tables {
             self.refill_credits(transaction, canonical.credits(), (height, position))?;
             self.fill_outputs(transaction, &canonical.outputs().created)?;
             unknown.extend(self.spend(transaction, canonical.outputs())?);
+            self.clear_deficits(transaction)?;
         }
         for claim in batch.progress() {
             self.advance(transaction, claim)?;
@@ -142,7 +118,7 @@ impl Tables {
     /// **One rule, both directions.** A newly watched address routinely already
     /// has rows in its own past: an effect is written for *every* endpoint of
     /// every movement, so the address has one wherever it was somebody else's
-    /// counterparty (`docs/design/024` section 1.4). Refusing those would loop
+    /// counterparty. Refusing those would loop
     /// forever, and rewriting them blindly would hide corruption, so a row that
     /// differs is terminal.
     ///
@@ -213,10 +189,8 @@ impl Tables {
     }
 }
 
-/// The statement that `docs/design/030 §8 (ex-031)` section 5.2 proposes as the checkpoint's
-/// compare-and-set, kept only so a test can run it.
-///
-/// It is never called by the adapter: see this module's own documentation.
+/// A deliberately insufficient coordinate-only condition, exercised by the ABA
+/// regression test. Production commits read and write under one transaction.
 #[cfg(test)]
 pub(super) fn proposed(
     transaction: &Transaction<'_>,
@@ -245,11 +219,7 @@ pub(super) fn proposed(
         .map_err(|error| failure(&error, "the proposed condition failed"))
 }
 
-/// The three invariants `docs/design/030 §8 (ex-031)` step 2 could test none of.
-///
-/// The shared block-store contracts are not here: they run in
-/// `tests/repository_contract.rs`, against this store and the in-memory one
-/// together, so a disagreement between the two is one failing pair.
+/// File-store regressions for atomicity, stale conditions and network isolation.
 #[cfg(test)]
 mod blocks_test {
     use std::thread;
@@ -367,16 +337,8 @@ mod blocks_test {
         block_on(repository.database.blocking(counted)).expect("row count")
     }
 
-    /// **Invariant 1, the proposed condition.** `docs/design/030 §8 (ex-031)` section 5.2
-    /// argues that `... WHERE position = ? AND hash = ?` closes the ABA a
-    /// per-key version counter reopens across `purge_network`, because it names
-    /// the checkpoint's own durable state rather than a number standing in for
-    /// it. It does not. A version counter is monotonic: a value a reader saw is
-    /// never produced again. `(position, hash)` is the *chain's* coordinate,
-    /// and a rescan re-indexes the same chain, so the deleted row comes back
-    /// byte for byte and the stale condition matches a row it never read.
-    ///
-    /// This is that sequence, at the level of the statement itself.
+    /// A rescan can recreate identical checkpoint coordinates. A coordinate-only
+    /// condition therefore cannot detect a delete/recreate ABA.
     #[test]
     fn the_proposed_checkpoint_condition_cannot_see_an_aba() {
         let directory = TempDir::new().expect("temporary directory");
@@ -444,7 +406,7 @@ mod blocks_test {
     /// runs on another: `BEGIN IMMEDIATE` holds the file's single write lock,
     /// so the two serialize whichever way the scheduler picks, and the end state
     /// is never a network with history but no checkpoint -- which is itself a
-    /// terminal state (`docs/design/019` section 5.3).
+    /// terminal state.
     #[test]
     fn a_purge_racing_a_commit_never_leaves_history_without_a_checkpoint() {
         let mut refusals = 0;
@@ -549,17 +511,7 @@ mod blocks_test {
     }
 }
 
-/// The two costs `docs/design/030 §8 (ex-031)` never booked: an offline rescan of a long
-/// network, and what one shared connection does to a reader.
-///
-/// Commit and read throughput itself is `examples/bench.rs`; what is here is
-/// only what a second connection makes observable, which a single-threaded
-/// benchmark cannot show.
-///
-/// Ignored by default; every one of these writes thousands of durable commits:
-///
-///   cargo test --release -p indexing --features sqlite \
-///       -- --ignored --nocapture throughput_test
+/// Ignored measurements of rescan memory and concurrent-reader latency.
 #[cfg(test)]
 mod throughput_test {
     use std::{
@@ -586,10 +538,7 @@ mod throughput_test {
     const ADDRESSES: usize = 16;
     const CREATED: usize = 40;
     const SPENT: usize = 30;
-    /// How long the network a rescan removes is, by default. It is an
-    /// environment variable so the memory profile of a purge can be watched as
-    /// the network grows: that, and not the wall clock, is the claim
-    /// `docs/design/030 §8 (ex-031)` section 5.2 makes about the unbounded batch.
+    /// Number of fixture blocks used to observe rescan memory as network size grows.
     fn purged_blocks() -> u64 {
         std::env::var("PURGE_BLOCKS")
             .ok()

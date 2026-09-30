@@ -1313,7 +1313,7 @@ fn a_reorg_below_the_line_quarantines_the_network_with_an_actionable_message() {
     assert_eq!(repository.stored(), before);
 }
 
-/// The way back from that quarantine, end to end (`docs/design/019` §5.3): the
+/// The way back from that quarantine, end to end : the
 /// offline rescan empties the network, and the next start finds no checkpoint
 /// and re-indexes from the earliest registered start position — not from
 /// genesis, and not from the tip.
@@ -2135,7 +2135,7 @@ impl BlockSource for Retreating {
 /// source that moves it anyway is refused rather than believed: everything the
 /// store already committed above the retreated line was promised irreversible,
 /// and believing the retreat would let the next pass commit above a line the
-/// chain may still take back (`docs/design/030 §8 (ex-025)` section 9).
+/// chain may still take back.
 #[test]
 fn a_confirmed_tip_that_moves_backwards_is_a_retryable_source_failure() {
     let own_network = network("retreating-source");
@@ -2632,10 +2632,7 @@ fn the_pending_sample_is_the_blocks_the_next_commit_writes() {
     );
 }
 
-/// The defect of `docs/design/024` §1.3, end to end: watching an address that
-/// was funded before its birthday and then indexing the block that spends
-/// that funding must complete the pass and name the address, not stop the
-/// chain. Before the fix this returned a non-retryable `InvalidBlock`.
+/// A watch whose earlier outputs were not indexed must not lose later spends.
 #[test]
 fn a_spend_of_a_pre_birthday_output_is_reported_and_the_pass_completes() {
     let own_network = network("funded-chain");

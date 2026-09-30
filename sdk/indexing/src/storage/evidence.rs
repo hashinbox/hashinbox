@@ -10,7 +10,7 @@ use crate::{
 /// Recording evidence never changes the indexed amount or claims complete history.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BalanceEvidence {
-    holding: BalanceQuery,
+    query: BalanceQuery,
     at: BlockRef,
     amount: Decimal,
 }
@@ -47,19 +47,15 @@ impl BalanceEvidence {
     }
 
     pub(crate) fn restored(
-        holding: BalanceQuery,
+        query: BalanceQuery,
         at: BlockRef,
         amount: Decimal,
     ) -> Result<Self, IndexError> {
-        holding.validate()?;
+        query.validate()?;
         amount
             .to_atomic(0)
             .map_err(|_| Self::invalid("balance evidence must be atomic"))?;
-        Ok(Self {
-            holding,
-            at,
-            amount,
-        })
+        Ok(Self { query, at, amount })
     }
 
     fn invalid(message: &'static str) -> IndexError {
@@ -69,10 +65,10 @@ impl BalanceEvidence {
 
 impl Holder for BalanceEvidence {
     fn address(&self) -> &Address {
-        &self.holding.address
+        &self.query.address
     }
     fn asset(&self) -> &AssetId {
-        &self.holding.asset
+        &self.query.asset
     }
 }
 
@@ -111,5 +107,46 @@ impl BalanceEvidence {
     ) -> bool {
         checkpoint.is_some_and(|line| line.position > self.at.position || line == &self.at)
             && observations.iter().all(|row| row.caught_up(checkpoint))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BlockHash, BlockHeight, BlockPosition, ChainName, Network, PendingValue};
+
+    #[test]
+    fn a_capture_requires_a_checkpoint_and_nonnegative_atomic_money() {
+        let network = Network::new(ChainName::new("evidence"), "test");
+        let query = BalanceQuery {
+            address: Address::new(network.clone(), "a"),
+            asset: AssetId::native(network.chain),
+        };
+        let mut balance = Balance {
+            amount: Decimal::from(1_u64),
+            observed_at: None,
+            pending: PendingValue::none(),
+            completeness: Completeness::Incomplete,
+            opening: None,
+        };
+        assert!(BalanceEvidence::capture(&query, &balance).is_err());
+        balance.observed_at = Some(BlockRef {
+            position: BlockPosition(0),
+            height: BlockHeight(0),
+            hash: BlockHash(vec![1]),
+            parent: None,
+            timestamp: None,
+        });
+        let captured = BalanceEvidence::capture(&query, &balance).expect("integer capture");
+        balance.amount = "1.5".parse().expect("decimal");
+        assert!(BalanceEvidence::capture(&query, &balance).is_err());
+        balance.amount = Decimal::zero();
+        balance.completeness = Completeness::Overdrawn;
+        assert!(BalanceEvidence::capture(&query, &balance).is_err());
+        assert_eq!(
+            captured.amount(),
+            &Decimal::from(1_u64),
+            "capture cannot follow later answers"
+        );
     }
 }

@@ -129,23 +129,23 @@ async fn read(
 /// A wallet's balance in its asset, on both sides of its chain's confirmed
 /// line.
 ///
-/// `amount` is settled and spendable and cannot revert: it is the index's
-/// fold over the movements it stores at or below the confirmed line. The two
-/// pending figures are what is still in blocks above that line: they are
+/// `amount` is the confirmed indexed total. Completeness states whether history
+/// is missing; chain spending rules, such as coinbase maturity, still apply.
+/// The two pending figures describe blocks above the confirmed line: they are
 /// reported apart rather than netted, because "3.0 arriving" and "1.0
 /// leaving" are different facts to a payments operator, and neither is ever
 /// negative. Pending fees are not folded in; a pending transaction's fee is
 /// reported with it in history.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub(crate) struct Balance {
-    /// Confirmed and spendable: exact decimal in display units, e.g. `12.5`.
-    /// Folded over durable rows only, so it cannot revert.
+    /// Confirmed indexed amount in exact display units, e.g. `12.5`.
+    /// Completeness and chain spending rules apply separately.
     pub(super) amount: String,
     /// Incoming value in blocks above the confirmed line. Never negative.
     pub(super) pending_incoming: String,
     /// Outgoing value in blocks above the confirmed line. Never negative.
     pub(super) pending_outgoing: String,
-    /// Height of the confirmed line `amount` was folded at; null before a
+    /// Height of the confirmed line for the saved total; null before a
     /// checkpoint. Always present.
     #[schema(required)]
     pub(super) observed_height: Option<u64>,
@@ -155,12 +155,12 @@ pub(crate) struct Balance {
     pub(super) pending_height: Option<u64>,
     /// How much of the history behind `amount` the index can prove it holds.
     /// `incomplete` while this address still owes a historical range, and
-    /// `overdrawn` when the fold proves credits are missing.
+    /// `overdrawn` when indexed debits exceed known credits.
     pub(super) completeness: Completeness,
 }
 
 impl Balance {
-    /// One folded balance in `unit`, the unit the asset's own chain declared.
+    /// One indexed balance in `unit`, the unit the asset's own chain declared.
     ///
     /// Every amount the index reports is exact and atomic, so the asset's own
     /// decimals — which the index never learns — are applied here.
@@ -170,13 +170,19 @@ impl Balance {
     /// A 503 when a stored amount is not a non-negative integer.
     pub(crate) fn new(balance: indexing::Balance, unit: &base::Unit) -> Result<Self, Error> {
         let display = |amount| unit.display(amount).map_err(Error::unscalable);
+        let completeness = match balance.completeness {
+            indexing::Completeness::Incomplete if balance.opening.is_some() => {
+                Completeness::VerifiedOpeningBalance
+            }
+            other => other.into(),
+        };
         Ok(Self {
             amount: display(&balance.amount)?.to_string(),
             pending_incoming: display(&balance.pending.incoming)?.to_string(),
             pending_outgoing: display(&balance.pending.outgoing)?.to_string(),
             observed_height: balance.observed_at.map(|block| block.height.0),
             pending_height: balance.pending.block.map(|block| block.height.0),
-            completeness: balance.completeness.into(),
+            completeness,
         })
     }
 }
@@ -186,11 +192,10 @@ impl Balance {
     path = "/v1/wallets/{id}/balance",
     operation_id = "read_wallet_balance",
     summary = "Read a wallet's balance in its own asset",
-    description = "The balance of the wallet's address in its asset's display units, folded by \
-        the index over the movements it stores: the height of the confirmed line it was folded \
-        at, what is still arriving and leaving in blocks above that line, and how much of the \
-        history behind the amount the index can prove it holds. A watch-only address answers it \
-        exactly as a wallet does, because the fold needs no key.",
+    description = "The confirmed indexed total and pending incoming/outgoing amounts in the \
+        asset's display units, with the confirmed and pending heights and history completeness. \
+        Chain spending rules still apply. A watch-only address reads the same balance \
+        without a key.",
     params(WalletPath),
     security(("bearerAuth" = [])),
     responses(
@@ -207,4 +212,59 @@ async fn balance(
 ) -> Result<Json<Balance>, Error> {
     let custody = payments.custody(&path.id).await?;
     Ok(Json(payments.balance(&custody).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_evidence_only_upgrades_an_incomplete_balance() {
+        let network = base::Network::new(base::ChainName::new("fixture"), "local");
+        let query = indexing::BalanceQuery {
+            address: base::Address::new(network.clone(), "holder"),
+            asset: base::AssetId::native(network.chain),
+        };
+        let mut answer = indexing::Balance {
+            amount: 7_u64.into(),
+            observed_at: Some(base::BlockRef {
+                position: base::BlockPosition(8),
+                height: base::BlockHeight(8),
+                hash: base::BlockHash(vec![8]),
+                parent: None,
+                timestamp: None,
+            }),
+            pending: indexing::PendingValue::none(),
+            completeness: indexing::Completeness::Incomplete,
+            opening: None,
+        };
+        let evidence = indexing::BalanceEvidence::capture(&query, &answer).expect("opening");
+        for (coverage, expected) in [
+            (
+                indexing::Completeness::Incomplete,
+                Completeness::VerifiedOpeningBalance,
+            ),
+            (
+                indexing::Completeness::CompleteHistory,
+                Completeness::CompleteHistory,
+            ),
+            (indexing::Completeness::Overdrawn, Completeness::Overdrawn),
+        ] {
+            answer.completeness = coverage;
+            for witnessed in [false, true] {
+                answer.opening = witnessed.then(|| evidence.clone());
+                let wire = Balance::new(answer.clone(), &base::Unit::token(0)).expect("projection");
+                assert_eq!(
+                    wire.completeness,
+                    if witnessed { expected } else { coverage.into() }
+                );
+                assert_eq!(wire.amount, "7", "evidence never changes the amount");
+            }
+            assert_ne!(
+                Completeness::from(coverage),
+                Completeness::VerifiedOpeningBalance,
+                "history coverage never claims balance evidence"
+            );
+        }
+    }
 }

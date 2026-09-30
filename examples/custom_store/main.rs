@@ -241,8 +241,7 @@ const OBSERVED: [[&str; 2]; 3] = [
 /// constructor still waiting for the store.
 ///
 /// One of these per chain, built by `Chain::<chain>` below, so the chain crate is
-/// named in one place and the assembly names none of them
-/// (`docs/CHAIN_LAYOUT.md` section 8).
+/// named in one place and the assembly names none of them.
 struct Chain(Composing);
 
 /// One chain's index, once the store reaches it.

@@ -353,6 +353,7 @@ pub(crate) mod tests {
                 observed_at: Some(stored.checkpoint.clone()),
                 pending: PendingValue::none(),
                 completeness: self.claim,
+                opening: None,
             };
             Box::pin(async move { Ok(balance) })
         }

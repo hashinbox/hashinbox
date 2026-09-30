@@ -1,12 +1,5 @@
-//! What the file is, what shape it is in, and how it is brought forward.
-//!
-//! This is the half `docs/design/030 §8 (ex-031)` section 5.2 calls the one thing the
-//! key-value layout it replaced genuinely could not do. A format marker that
-//! either matches or does not freezes a stored record's shape for the life of
-//! the file; here the file says which application owns it and how many ordered
-//! steps have been applied to it, and a step may alter what an earlier step
-//! wrote. `docs/SYSTEM_REQUIREMENTS.md` revoked the durable-layout exception on
-//! the strength of exactly that.
+//! File ownership, versioned schema migration and durability settings.
+//! Each ordered migration and its version update commit in one transaction.
 
 use rusqlite::{Connection, types::FromSql};
 
@@ -250,13 +243,8 @@ mod schema_test {
         drop(Database::open(&path).expect("migration must not seed again on reopen"));
     }
 
-    /// The three settings a benchmark is only honest with.
-    ///
-    /// `docs/design/030 §8 (ex-031)` step 2 measured this store as eighty-five times faster
-    /// than the one it replaced until it noticed that `synchronous = FULL` is a
-    /// plain `fsync` on macOS, which the drive may still be holding in cache.
-    /// These are asserted rather than assumed, because a pragma SQLite silently
-    /// declines would make every benchmark a measurement of the disk cache.
+    /// SQLite must accept the requested durability and concurrency settings.
+    /// In particular macOS needs fullfsync rather than an assumed drive-cache flush.
     #[test]
     fn durability_and_concurrency_settings_are_the_ones_asked_for() {
         let directory = TempDir::new().expect("temporary directory");

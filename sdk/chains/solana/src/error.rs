@@ -104,7 +104,7 @@ impl From<native::Error> for wallets::WalletError {
 ///
 /// Solana's batch pipeline settles through `wallets::SendError` and this
 /// module's `send_failure`; these three are the same mapping for a
-/// caller that drives `native` directly (`docs/CHAIN_LAYOUT.md` section 1).
+/// caller that drives `native` directly.
 impl native::Error {
     /// A failed submission of `id`: [`ErrorKind::RpcUnavailable`] means the
     /// attempt may have reached the node, so the error is
@@ -118,7 +118,7 @@ impl native::Error {
     }
 
     /// An unknown outcome of `id`: `Unknown` (Solana's documented
-    /// unknown-outcome kind, `docs/CHAIN_LAYOUT.md` section 7), carrying the
+    /// unknown-outcome kind), carrying the
     /// local ID of the exact envelope the caller holds.
     #[must_use]
     pub fn ambiguous(self, id: &TransactionId) -> TransactionError {

@@ -92,9 +92,7 @@ impl Builder {
     /// output dropped as dust stays dropped even if the smaller transaction
     /// then costs less.
     ///
-    /// Construction lives here and not on [`Funds`] because building a
-    /// transaction is this file's responsibility on every chain
-    /// (`docs/CHAIN_LAYOUT.md` section 3); [`Funds`] states only what each
+    /// Construction belongs to this builder; [`Funds`] states what each
     /// source must afford.
     ///
     /// # Errors

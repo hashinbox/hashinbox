@@ -66,8 +66,16 @@ tokens = [{ contract = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', asset = 'us
 A send accepts `wallets::Amount::All` as its source's final batch item. A native
 sweep reserves all earlier transfers and maximum EIP-1559 fees before resolving
 the remainder. Actual execution can refund fees, so the account may retain a
-residue. A positive candidate reserves the configured total-fee ceiling; insufficient
-funds for that conservative quote are refused. The resolved transfer is
-preflighted again and refused if its execution
-exceeds the quoted fee budget. ERC-20 sweeps transfer the remaining token units
+residue. A one-wei positive candidate obtains the node's checked fee quote; the
+configured total-fee ceiling remains a limit rather than a required reserve.
+Contracts that reject this probe are refused without a fallback. The resolved
+transfer is preflighted again and refused if its execution exceeds the quoted fee
+budget. ERC-20 sweeps transfer the remaining token units
 while native ETH independently funds gas. Incoming batch transfers are not funding.
+
+For an independent balance check, capture `indexing::BalanceEvidence` from the
+repository's atomic balance answer and its query, then pass `&evidence` to
+`factory.witness().attest`. After `Attestation::Agreed`, record that same capture
+with the repository's optional `record_evidence` method. It rejects a stale
+checkpoint or changed total; neither operation replaces the indexed amount or
+claims complete history.
