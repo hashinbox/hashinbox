@@ -172,9 +172,18 @@ impl<A: Ord> Config<A> {
     /// [`Self::validate`]'s refusals, and whatever the node reports when it
     /// serves another cluster or disagrees with a configured mint.
     pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<ChainHandle<A>, Error> {
+        self.connect_monitored(secrets, &mut Vec::new()).await
+    }
+
+    async fn connect_monitored(
+        self,
+        secrets: &dyn json_rpc::Secrets,
+        statistics: &mut Vec<json_rpc::Statistics>,
+    ) -> Result<ChainHandle<A>, Error> {
         self.validate()?;
         let network = self.cluster();
-        let transport = self.rpc.transport(secrets)?;
+        let (transport, endpoints) = self.rpc.monitored(secrets)?;
+        statistics.extend(endpoints);
         let rpc = RpcClient::connect(transport, &network).await?;
         for token in &self.tokens {
             rpc.validate_token(&token.mint, token.decimals).await?;
@@ -197,6 +206,7 @@ impl<A> Config<A> {
     /// authority is published. No wallet carries it.
     #[must_use]
     pub fn units(&self) -> Units {
+        let network = Network::new(self.network.as_str(), self.genesis_hash.clone()).canonical();
         let sol = (AssetKind::Native.id(), Unit::native(&SOL));
         let tokens = self.tokens.iter().map(|token| {
             (
@@ -204,7 +214,10 @@ impl<A> Config<A> {
                 Unit::token(token.decimals.into()),
             )
         });
-        std::iter::once(sol).chain(tokens).collect()
+        std::iter::once(sol)
+            .chain(tokens)
+            .map(|(asset, unit)| ((network.clone(), asset), unit))
+            .collect()
     }
 }
 
@@ -412,9 +425,11 @@ where
     fn connect<'a>(
         self: Box<Self>,
         secrets: &'a dyn json_rpc::Secrets,
+        statistics: &'a mut Vec<json_rpc::Statistics>,
     ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, sdk_config::Error>> {
         Box::pin(async move {
-            let node = Config::connect(*self, secrets)
+            let node = (*self)
+                .connect_monitored(secrets, statistics)
                 .await
                 .map_err(sdk_config::Error::refused)?;
             Ok(Box::new(node) as Box<dyn Connection<A, R>>)
@@ -500,16 +515,21 @@ mod tests {
 
         let units = config.units();
 
-        let sol = units.of(&AssetKind::Native.id()).expect("SOL");
+        let sol = units
+            .of(&config.network(), &AssetKind::Native.id())
+            .expect("SOL");
         assert_eq!((sol.decimals, sol.ticker.as_deref()), (9, Some("SOL")));
         let mint: Address = MINT.parse().expect("a canonical mint");
         let token = units
-            .of(&AssetKind::SplToken(mint).id())
+            .of(&config.network(), &AssetKind::SplToken(mint).id())
             .expect("the allowlisted mint");
         assert_eq!(token.decimals, u32::from(config.tokens[0].decimals));
         assert_eq!((token.name.as_ref(), token.ticker.as_ref()), (None, None));
         let other: Address = OTHER_MINT.parse().expect("a canonical mint");
-        assert_eq!(units.of(&AssetKind::SplToken(other).id()), None);
+        assert_eq!(
+            units.of(&config.network(), &AssetKind::SplToken(other).id()),
+            None
+        );
     }
 
     /// The point of the types being the API: a value assembled in Rust and the

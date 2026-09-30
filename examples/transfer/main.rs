@@ -6,7 +6,6 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use base::BlockPosition;
 use indexing::{
     Birthday, Page, Subject, Supervisor, SyncReport, Watching as _,
     sqlite::{Database, Repository},
@@ -15,7 +14,7 @@ use json_rpc::Client as _;
 use sdk_config::{Document, Registry};
 use serde_json::{Value, json};
 use tokio::sync::watch;
-use wallets::{Composition, SecretBytes, SubmissionRegistrar, Submissions, Wallet};
+use wallets::{Composition, SubmissionRegistrar, Submissions, Wallet};
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -23,12 +22,10 @@ type AnyError = Box<dyn std::error::Error + Send + Sync>;
 const CONFIG: &str = include_str!("config.toml");
 
 const INTERVAL: Duration = Duration::from_secs(1);
-/// Blocks mined to bitcoin's sender: a coinbase output matures after 100.
-const MATURITY: u32 = 101;
+/// Bitcoin coinbase outputs require 100 blocks before they are spendable.
+const MATURITY: u64 = 100;
 /// One SOL in lamports.
 const AIRDROP: u64 = 1_000_000_000;
-/// Anvil's first pre-funded development account (public test key).
-const ANVIL_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
 /// Each chain's part: its asset tag, the sending wallet, the receiving wallet,
 /// and the amount sent in display units.
@@ -85,21 +82,14 @@ async fn main() -> Result<(), AnyError> {
         )
         .await?;
 
-    // 4. A sender and a receiver per asset. Ethereum's sender is Anvil's
-    //    pre-funded account, built from its key and watched from block zero —
-    //    an explicit birthday, which is what `Birthday::At` states.
+    // 4. Observe new senders before funding: genesis allocations are not
+    //    transactions, so the example creates an ordinary indexed deposit.
     let mut signers: BTreeMap<&str, Arc<dyn Wallet>> = BTreeMap::new();
     for (asset, sender, receiver, _) in TRANSFERS {
         let asset = asset.to_owned();
         for id in [sender, receiver] {
-            let (wallet, birthday) = if id == "eth-alice" {
-                let secret = SecretBytes::from_hex(ANVIL_KEY)?;
-                let funded = wallets.from(&asset, secret).await?;
-                (funded, Birthday::At(BlockPosition(0)))
-            } else {
-                (wallets.create(&asset).await?, Birthday::Fresh)
-            };
-            index.watch(id, wallet.as_ref(), birthday).await?;
+            let wallet = wallets.create(&asset).await?;
+            index.watch(id, wallet.as_ref(), Birthday::Fresh).await?;
             signers.insert(id, wallet);
         }
     }
@@ -108,17 +98,33 @@ async fn main() -> Result<(), AnyError> {
     //    goes straight to the node: bitcoin mines past coinbase maturity,
     //    solana asks for an airdrop.
     let coinbase = &signers["btc-alice"].address().value;
-    let mined = json!([MATURITY, coinbase]);
+    let depth = sections["bitcoin"]["confirmation_depth"]
+        .as_u64()
+        .ok_or("bitcoin confirmation_depth must be explicit")?;
+    let mined = json!([MATURITY + depth + 1, coinbase]);
     call(&sections, "bitcoin", "generatetoaddress", mined).await?;
     let airdrop = json!([signers["sol-alice"].address().value, AIRDROP]);
     call(&sections, "solana", "requestAirdrop", airdrop).await?;
+    let accounts = call(&sections, "ethereum", "eth_accounts", json!([])).await?;
+    let funder = accounts[0]
+        .as_str()
+        .ok_or("Anvil needs an unlocked account")?;
+    let deposit = json!([{
+        "from": funder,
+        "to": signers["eth-alice"].address().value,
+        "value": "0xde0b6b3a7640000"
+    }]);
+    call(&sections, "ethereum", "eth_sendTransaction", deposit).await?;
 
     // 6. One sync loop over the composed index serves every chain's wallets;
     //    wait until every network has reached its node's tip.
     let (stop, stopped) = watch::channel(false);
     let (monitor, mut readiness) = SyncReport::watching(index.networks());
     let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
-    readiness.settled().await.ok_or("synchronization stopped")?;
+    let health = readiness.settled().await.ok_or("synchronization stopped")?;
+    if let Some(error) = health.networks().iter().find_map(|row| row.failure.clone()) {
+        return Err(error.into());
+    }
 
     // 7. One send per chain, once the index has seen the sender's funds:
     //    parse the receiver's address text in the sender's own network, then
@@ -136,13 +142,15 @@ async fn main() -> Result<(), AnyError> {
         }
         let to = wallets.parse(&asset, &signers[receiver].address().value)?;
         let author = wallets.author(&asset, &signers[sender])?;
-        let id = author.send(to, amount.parse()?).await?;
+        let id = author
+            .send(to, amount.parse::<base::Decimal>()?.into())
+            .await?;
         println!("{sender} sent {amount} to {receiver} in {id}");
     }
 
     // 8. Only a confirmed transaction is history, so mine bitcoin's block;
     //    Anvil and the validator confirm on their own.
-    let mined = json!([1, coinbase]);
+    let mined = json!([depth + 1, coinbase]);
     call(&sections, "bitcoin", "generatetoaddress", mined).await?;
     for (asset, sender, receiver, _) in TRANSFERS {
         let asset = wallets.asset(&asset.to_owned())?.id;
@@ -152,19 +160,18 @@ async fn main() -> Result<(), AnyError> {
         }
         let received = transactions(history.as_ref(), &asset, to).await?.len();
         let settled = balances.balance(signers[sender].as_ref()).await?;
-        let unit = units.of(&asset).ok_or("a declared unit")?;
+        let unit = units.of(&to.network, &asset).ok_or("a declared unit")?;
         println!(
             "{sender} balance {}; {receiver} has {received} transaction(s)",
             unit.display(&settled.amount)?
         );
     }
 
-    // 9. Stop the loop, then wait for the send work still running: a send
-    //    its chain finishes in the background must not be cut off by the
-    //    process exiting.
+    // Finish ambiguous submissions while indexing can still reconcile them.
+    submissions.drain().await?;
     stop.send(true)?;
     sync.await?;
-    Ok(submissions.drain().await?)
+    Ok(())
 }
 
 /// One raw call to the node `config.toml` names for `chain`. Local-network

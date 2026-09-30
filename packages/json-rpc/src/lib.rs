@@ -6,6 +6,7 @@ mod error;
 mod failover;
 mod http;
 mod retry;
+mod statistics;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod value;
@@ -18,6 +19,7 @@ pub use error::{CallError, Error, ErrorKind};
 pub use failover::Failover;
 pub use http::Http;
 pub use retry::{Backoff, Retry, Trigger};
+pub use statistics::{Snapshot, Statistics};
 pub use value::{CallResult, Failure, RawJson};
 
 /// One request of a [`Batch`].

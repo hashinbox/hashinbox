@@ -24,6 +24,7 @@
 //! run them either, which is why SQLite's adapter modules keep only what is
 //! SQLite's own.
 
+mod activity;
 mod backfill;
 mod backfill_fixture;
 mod balance;

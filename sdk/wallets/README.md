@@ -85,3 +85,10 @@ where
   (`indexing::Completeness`), made from the rows it holds. `PendingJoin` passes
   it on unchanged, and a repository's refusal to list outputs it cannot prove
   unspent reaches the caller as the repository made it.
+
+Transfers accept `Amount::Exact(decimal)` or `Amount::All`. A sweep resolves
+inside the chain's existing send reservation; a batch may contain one sweep
+per source, after that source's fixed transfers. It spends available funds
+after fees, without using incoming transfers in the same batch as funding.
+Ethereum budgets maximum EIP-1559 fees, so unused fees can leave a residue.
+Draft builders continue to describe exact amounts.

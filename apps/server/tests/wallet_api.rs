@@ -368,6 +368,10 @@ async fn start_server(
     let child = Command::new(env!("CARGO_BIN_EXE_payment-server"))
         .arg(config_path)
         .env("SYSTEM_TEST_TOKEN", TOKEN)
+        .env(
+            "PAYMENT_WALLET_PASSPHRASE",
+            "offline-registry-fixture-passphrase",
+        )
         .envs(secrets.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -410,7 +414,7 @@ async fn create_wallet(root: &str, asset: &str) -> Result<Value, Box<dyn std::er
     let response = reqwest::Client::new()
         .post(format!("{root}/v1/wallets"))
         .bearer_auth(TOKEN)
-        .json(&json!({"asset": asset, "start": "fresh"}))
+        .json(&json!({"asset": asset}))
         .send()
         .await?;
     let status = response.status();
@@ -605,7 +609,7 @@ async fn get(url: &str) -> Option<Value> {
 }
 
 async fn wait_ready(root: &str) {
-    let url = format!("{root}/health/ready");
+    let url = format!("{root}/healthz");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let ready = reqwest::get(&url)

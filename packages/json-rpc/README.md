@@ -38,6 +38,14 @@ replies in order and asserts each method and its parameters. Enable it in
 
 ## Notes
 
+- Capture `Http::statistics()` before wrapping it in retry/failover. Its
+  cloneable handle samples attempts, failures, consecutive failures and a
+  sanitized last failure from memory without locks or RPC. Every endpoint
+  execution counts once, including batches; any transport or JSON-RPC error
+  makes it a failure. Successful completions reset the consecutive counter.
+  Invalid local parameters do not count; cancellation records no invented outcome.
+  Label handles by configured ordinal, never by a credential-bearing URL.
+
 - Submit a transaction with `Request::once` or `Batch::once`. `Retry` and
   `Failover` then execute it exactly once against one endpoint, because a
   repeated submission can send the same payment twice.

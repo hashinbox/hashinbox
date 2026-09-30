@@ -45,3 +45,6 @@ assert_eq!(signed.signature.bytes.len(), 65);
   it. Addresses are compared as strings, so parse user input with the chain's
   wallet factory; a differently spelled address is a different address and its
   history will not be found.
+
+`Units` resolves display precision by both network and asset identity: the same
+token address on different networks may declare different decimals.

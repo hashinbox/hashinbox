@@ -62,3 +62,12 @@ tokens = [{ contract = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', asset = 'us
 - A transaction signed through `TransferBuilder` but not broadcast reserves
   nothing. A later send may take its nonce, and its broadcast then fails.
 - A configuration with tokens accepts exactly one RPC endpoint.
+
+A send accepts `wallets::Amount::All` as its source's final batch item. A native
+sweep reserves all earlier transfers and maximum EIP-1559 fees before resolving
+the remainder. Actual execution can refund fees, so the account may retain a
+residue. A positive candidate reserves the configured total-fee ceiling; insufficient
+funds for that conservative quote are refused. The resolved transfer is
+preflighted again and refused if its execution
+exceeds the quoted fee budget. ERC-20 sweeps transfer the remaining token units
+while native ETH independently funds gas. Incoming batch transfers are not funding.

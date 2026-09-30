@@ -97,7 +97,10 @@ async fn main() -> Result<(), AnyError> {
         };
         index.watch(id, &subject, Birthday::Fresh).await?;
         println!("{id}: watching {}", subject.address.value);
-        let unit = units.of(&subject.asset).ok_or("a declared unit")?.clone();
+        let unit = units
+            .of(&subject.address.network, &subject.asset)
+            .ok_or("a declared unit")?
+            .clone();
         subjects.push((id, unit, subject));
     }
 
@@ -106,7 +109,10 @@ async fn main() -> Result<(), AnyError> {
     let (stop, stopped) = watch::channel(false);
     let (monitor, mut readiness) = SyncReport::watching(index.networks());
     let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
-    readiness.settled().await.ok_or("synchronization stopped")?;
+    let health = readiness.settled().await.ok_or("synchronization stopped")?;
+    if let Some(error) = health.networks().iter().find_map(|row| row.failure.clone()) {
+        return Err(error.into());
+    }
 
     // 6. History and balance need no key: each is the repository's own
     //    answer, completed by the blocks above its confirmed line.

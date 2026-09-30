@@ -117,9 +117,16 @@ impl Builder {
         let mut transfers = Vec::new();
         let mut surplus = Vec::with_capacity(groups.len());
         let mut change = Vec::with_capacity(groups.len());
+        let required = groups.iter().map(|group| group.sweep.is_some()).collect();
         for group in &mut groups {
             surplus.push(group.surplus()?);
-            change.push(group.change.script_pubkey(network)?);
+            change.push(
+                group
+                    .sweep
+                    .as_ref()
+                    .unwrap_or(&group.change)
+                    .script_pubkey(network)?,
+            );
             available.append(&mut group.available);
             transfers.append(&mut group.transfers);
         }
@@ -132,10 +139,13 @@ impl Builder {
             surplus,
             change,
             fee_rate,
+            required,
         };
         let remaining = shares.change(&available, &scripts)?;
         for (group, value) in groups.iter().zip(remaining) {
-            transfers.extend(value.map(|value| Transfer::new(group.change.clone(), value)));
+            transfers.extend(value.map(|value| {
+                Transfer::new(group.sweep.as_ref().unwrap_or(&group.change).clone(), value)
+            }));
         }
         Ok(UnsignedTransaction::from_selected(available, transfers))
     }
@@ -334,6 +344,7 @@ struct Shares {
     surplus: Vec<u64>,
     change: Vec<ScriptBuf>,
     fee_rate: FeeRate,
+    required: Vec<bool>,
 }
 
 impl Shares {
@@ -352,6 +363,16 @@ impl Shares {
             let remaining = Self::charge(&self.surplus, fee.units())?;
             let next = self.above_dust(&remaining, Some(&active));
             if next == active {
+                let dust = self.required.iter().zip(&remaining).zip(&self.change).any(
+                    |((required, value), script)| {
+                        *required && *value < script.minimal_non_dust().to_sat()
+                    },
+                );
+                if dust {
+                    return Err(Error::insufficient(
+                        "Bitcoin sweep remainder cannot cover a non-dust output",
+                    ));
+                }
                 let change = remaining.into_iter().zip(active);
                 return Ok(change
                     .map(|(value, keep)| keep.then_some(Satoshi::from_atomic(value)))
@@ -369,7 +390,7 @@ impl Shares {
             .enumerate()
             .map(|(index, (value, script))| {
                 let was_active = active.is_none_or(|active| active[index]);
-                was_active && *value >= script.minimal_non_dust().to_sat()
+                self.required[index] || (was_active && *value >= script.minimal_non_dust().to_sat())
             })
             .collect()
     }
@@ -671,7 +692,28 @@ pub(super) mod tests {
                 Satoshi::from_atomic(amount),
             )],
             change,
+            sweep: None,
         }
+    }
+
+    #[test]
+    fn grouped_sweep_receives_its_residual_after_fixed_payments_and_fee_share() {
+        let (recipient, _) = p2wpkh(9);
+        let (swept, _) = p2wpkh(8);
+        let mut first = funds_group(1, 1, 100_000, 1_000, &recipient);
+        first.sweep = Some(swept.clone());
+        let second = funds_group(2, 2, 100_000, 2_000, &recipient);
+        let built = combine(vec![first, second]).unwrap();
+        assert_eq!(built.inputs.len(), 2);
+        assert_eq!(
+            built
+                .outputs
+                .iter()
+                .map(|output| output.amount.units())
+                .collect::<Vec<_>>(),
+            [1_000, 2_000, 98_729, 98_000]
+        );
+        assert_eq!(built.outputs[2].to, swept);
     }
 
     fn combine(groups: Vec<Funds>) -> Result<UnsignedTransaction, Error> {
@@ -752,6 +794,7 @@ pub(super) mod tests {
             available: vec![utxo([7; 32], 2, 100_000, &script)],
             transfers: vec![Transfer::new(address.clone(), Satoshi::from_atomic(1_000))],
             change: address.clone(),
+            sweep: None,
         };
         let mut distinct = one.clone();
         distinct.available[0].outpoint.output_index = 3;

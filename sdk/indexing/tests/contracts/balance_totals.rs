@@ -112,6 +112,53 @@ impl<R: BalanceStore + IndexStore + WatchStore> BalanceContract<'_, R> {
         );
     }
 
+    /// Totals retain deficits, self-transfer cancellation and late historical credits.
+    pub async fn a_watched_total_preserves_deficits_until_credits_arrive(&self) {
+        self.observe("watched-a", "a").await;
+        self.observe("watched-d", "d").await;
+        self.prepare().await;
+        assert_eq!(self.reads("a").await, Decimal::from(7_u64));
+        assert_eq!(
+            self.proof("d").await,
+            (Decimal::zero(), Completeness::Overdrawn)
+        );
+        self.fixture
+            .repository
+            .commit(
+                self.fixture
+                    .batch(Some(self.fixture.block(8)), Self::credited(&self.fixture)),
+            )
+            .await
+            .expect("credit exactly repays the deficit");
+        assert_eq!(self.reads("d").await, Decimal::zero());
+        assert_ne!(self.proof("d").await.1, Completeness::Overdrawn);
+        let historical = CanonicalBlock::new(
+            self.fixture.network.clone(),
+            InterpretedBlock {
+                credits: vec![indexing::BlockCredit {
+                    id: MovementId("late-credit".into()),
+                    asset: self.fixture.native(),
+                    amount: Decimal::from(1_u64),
+                    to: self.fixture.address("d"),
+                }],
+                ..InterpretedBlock::new(&self.fixture.network, self.fixture.block(1), Vec::new())
+                    .expect("empty block")
+            },
+        )
+        .expect("historical credit");
+        for _ in 0..2 {
+            self.fixture
+                .repository
+                .commit(
+                    self.fixture
+                        .batch(Some(self.fixture.block(9)), historical.clone()),
+                )
+                .await
+                .expect("historical insertion or replay");
+            assert_eq!(self.reads("d").await, Decimal::from(1_u64));
+        }
+    }
+
     /// A deficit reads the same whether or not anything observes the subject.
     ///
     /// The fixture's `d` sends 5 and pays a fee of 7 without ever having been

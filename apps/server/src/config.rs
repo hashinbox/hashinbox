@@ -42,6 +42,8 @@ impl json_rpc::Secrets for Environment {
 pub(crate) struct Config {
     pub(crate) bind: SocketAddr,
     bearer_token_env: String,
+    #[serde(default = "Config::passphrase_env")]
+    wallet_passphrase_env: String,
     #[serde(default)]
     tls_terminated_upstream: bool,
     #[serde(default)]
@@ -54,6 +56,21 @@ pub(crate) struct Config {
 }
 
 impl Config {
+    fn passphrase_env() -> String {
+        "PAYMENT_WALLET_PASSPHRASE".to_owned()
+    }
+
+    pub(crate) fn passphrase(&self) -> Result<zeroize::Zeroizing<String>, AnyError> {
+        let value = zeroize::Zeroizing::new(
+            env::var(&self.wallet_passphrase_env)
+                .map_err(|_| "wallet passphrase environment variable is unavailable")?,
+        );
+        if value.is_empty() {
+            return Err("wallet passphrase must not be empty".into());
+        }
+        Ok(value)
+    }
+
     pub(crate) async fn read(path: impl AsRef<Path>) -> Result<Self, AnyError> {
         let config: Self = Document::read(path).await?.parse()?;
         config.validate()?;
@@ -78,6 +95,9 @@ impl Config {
     fn validate(&self) -> Result<(), AnyError> {
         if self.bearer_token_env.trim().is_empty() {
             return Err("bearer-token environment name must not be empty".into());
+        }
+        if self.wallet_passphrase_env.trim().is_empty() {
+            return Err("wallet passphrase environment name must not be empty".into());
         }
         self.storage.validate()?;
         self.chains()?;
@@ -143,15 +163,23 @@ impl ConfiguredWallet {
         wallets: &Wallets,
         index: &dyn indexing::Watching,
         signers: &Signers,
+        registry: &std::sync::Arc<crate::registry::Registry>,
     ) -> Result<(), AnyError> {
-        let text = env::var(&self.secret_env)
-            .map_err(|_| "configured wallet secret environment variable is unavailable")?;
+        let text = zeroize::Zeroizing::new(
+            env::var(&self.secret_env)
+                .map_err(|_| "configured wallet secret environment variable is unavailable")?,
+        );
         let secret = wallets::SecretBytes::from_hex(&text)
             .map_err(|_| "configured wallet secret is not hexadecimal key material")?;
+        let retained = wallets::SecretBytes::new(secret.as_bytes());
         let wallet = wallets
             .from(&self.asset, secret)
             .await
             .map_err(Self::disabled)?;
+        registry.keep(&self.id, &self.asset, retained).await?;
+        if signers.get(&self.id).is_some() {
+            return Ok(());
+        }
         index
             .watch(&self.id, wallet.as_ref(), self.start.into())
             .await?;

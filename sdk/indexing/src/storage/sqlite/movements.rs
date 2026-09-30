@@ -253,7 +253,20 @@ impl Tables {
         if written == 0 {
             return self.verify_effect(transaction, effect);
         }
-        Ok(())
+        let units = effect
+            .amount
+            .to_atomic(0)
+            .map_err(|_| store("an effect is not an atomic integer"))?;
+        let delta = num_bigint::BigInt::from(units);
+        self.accrue(
+            transaction,
+            (effect.address, effect.asset),
+            if effect.direction == CREDIT {
+                delta
+            } else {
+                -delta
+            },
+        )
     }
 
     /// Checks that the row the file already holds is the row being written.

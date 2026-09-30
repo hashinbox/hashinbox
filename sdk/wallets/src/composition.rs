@@ -211,7 +211,7 @@ where
         declared: &Units,
     ) -> Result<(), E> {
         for (tag, factory) in factories {
-            if declared.of(&factory.asset()).is_none() {
+            if declared.of(factory.network(), &factory.asset()).is_none() {
                 return Err(E::from(WalletError::new(
                     WalletErrorKind::Unsupported,
                     "a chain registered a wallet factory for an asset whose unit it \
@@ -497,7 +497,7 @@ mod tests {
                 let factory = FixtureFactory::of(network(self.chain));
                 let declared = AssetId::native(ChainName::new(self.chain));
                 let units = if self.declares {
-                    Units::from_iter([(declared, Unit::token(0))])
+                    Units::from_iter([((network(self.chain), declared), Unit::token(0))])
                 } else {
                     Units::default()
                 };
@@ -589,7 +589,9 @@ mod tests {
         );
         for chain in ["alpha", "beta"] {
             assert_eq!(
-                composed.units.of(&AssetId::native(ChainName::new(chain))),
+                composed
+                    .units
+                    .of(&network(chain), &AssetId::native(ChainName::new(chain))),
                 Some(&Unit::token(0)),
                 "every chain's declared units are folded into one map"
             );

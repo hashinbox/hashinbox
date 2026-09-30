@@ -43,6 +43,9 @@ pub(crate) struct Node {
     pub(crate) balance_reads: Mutex<Vec<(Address, AssetKind)>>,
     /// Every preflight call: the sender and its nonce.
     pub(crate) contexts: Mutex<Vec<(Address, u64)>>,
+    pub(crate) transfers: Mutex<Vec<Transfer>>,
+    pub(crate) gas_limits: Mutex<VecDeque<u64>>,
+    pub(crate) reject_zero: bool,
     /// Chain IDs the next contexts report instead of [`CHAIN_ID`].
     pub(crate) chain_ids: Mutex<VecDeque<u64>>,
     pub(crate) broadcasts: Mutex<Vec<SignedTransaction>>,
@@ -156,18 +159,25 @@ impl Preflight for Node {
     fn context<'a>(
         &'a self,
         from: &'a Address,
-        _transfer: &'a Transfer,
+        transfer: &'a Transfer,
         nonce: u64,
         _limits: &'a FeeLimits,
     ) -> BoxFuture<'a, Result<BuildContext, Error>> {
         Box::pin(async move {
             self.contexts.lock().unwrap().push((from.clone(), nonce));
+            self.transfers.lock().unwrap().push(transfer.clone());
+            if self.reject_zero && transfer.amount == Wei::ZERO {
+                return Err(Error::new(
+                    crate::native::ErrorKind::Rejected,
+                    "payable destination rejects zero value",
+                ));
+            }
             let chain_id = self.chain_ids.lock().unwrap().pop_front();
             Ok(BuildContext {
                 chain_id: chain_id.unwrap_or(CHAIN_ID),
                 from: from.clone(),
                 nonce,
-                gas_limit: 1,
+                gas_limit: self.gas_limits.lock().unwrap().pop_front().unwrap_or(1),
                 max_fee_per_gas: Wei::from_u128(1),
                 max_priority_fee_per_gas: Wei::from_u128(1),
             })

@@ -1,13 +1,15 @@
 //! One holding's balance: the settled fold, and what is still above the line.
 //!
-//! The confirmed half is a fold over the movements the index already stores
-//! ([`Fold`]), not a second number read from a node, so it cannot disagree
-//! with the history the same store answers. Every amount here is in the
+//! The confirmed half derives from stored movements. Shipped repositories
+//! maintain watched totals atomically and use [`Fold`] for independent
+//! verification and unwatched holdings. Every amount here is in the
 //! asset's **atomic** units: this crate never learns an asset's decimals
 //! (`docs/design/021` section 5.2), so the object is built by code that
 //! physically cannot produce display units.
 
 use num_bigint::BigUint;
+#[cfg(any(feature = "sqlite", feature = "memory"))]
+use num_bigint::{BigInt, Sign};
 
 use crate::{
     Address, BlockCredit, BlockRef, CanonicalTransaction, Checkpointed, Decimal, FeeSettlement,
@@ -114,10 +116,8 @@ pub enum Completeness {
     /// address than ever reached it, so credits are provably missing.
     /// `amount` is zero, because no honest number exists.
     ///
-    /// **Only a recomputation can produce it.** A total maintained forward from
-    /// what each commit inserted has no way to notice it is short — it clamps at
-    /// zero and looks like an honest small balance — so this variant is the one
-    /// thing that keeps the fold worth running (`docs/design/034` section 5.3).
+    /// Signed persisted totals preserve this deficit; presentation alone renders
+    /// zero. Independent verification also detects disagreement with stored effects.
     Overdrawn,
 }
 
@@ -184,6 +184,28 @@ impl<'a> Fold<'a> {
             credits: BigUint::ZERO,
             debits: BigUint::ZERO,
         }
+    }
+
+    /// Restores a persisted signed atomic total, preserving an unresolved deficit.
+    #[cfg(any(feature = "sqlite", feature = "memory"))]
+    pub(crate) fn from_net(of: &'a dyn Holder, net: BigInt) -> Self {
+        let (sign, units) = net.into_parts();
+        let (credits, debits) = if sign == Sign::Minus {
+            (BigUint::ZERO, units)
+        } else {
+            (units, BigUint::ZERO)
+        };
+        Self {
+            of,
+            credits,
+            debits,
+        }
+    }
+
+    /// The exact net, including debits whose earlier credits are not indexed yet.
+    #[cfg(feature = "memory")]
+    pub(crate) fn net(self) -> BigInt {
+        BigInt::from(self.credits) - BigInt::from(self.debits)
     }
 
     /// Adds one stored effect.

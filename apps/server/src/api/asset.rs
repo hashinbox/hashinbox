@@ -1,21 +1,10 @@
 use std::{error, fmt, str::FromStr};
 
-use axum::{
-    Json,
-    extract::{
-        Path, Query, State,
-        rejection::{PathRejection, QueryRejection},
-    },
-};
+use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
-use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{
-    Payments, Wallets,
-    contract::{Address, Network},
-    error::{Error, ErrorBody},
-};
+use super::{Payments, Wallets, contract::Network, error::ErrorBody};
 
 /// Metadata of the asset an amount is denominated in.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -48,9 +37,7 @@ impl Asset {
 }
 
 pub(super) fn routes() -> OpenApiRouter<Payments> {
-    OpenApiRouter::new()
-        .routes(routes!(list))
-        .routes(routes!(address))
+    OpenApiRouter::new().routes(routes!(list))
 }
 
 /// One configured asset: its tag, where its wallets live, and what they hold.
@@ -97,7 +84,7 @@ impl AssetList {
             .assets()
             .into_iter()
             .filter_map(|info| {
-                let unit = units.of(&info.id)?;
+                let unit = units.of(&info.network, &info.id)?;
                 Some(Listing::new(info, unit))
             })
             .collect();
@@ -121,57 +108,6 @@ impl AssetList {
 )]
 async fn list(State(payments): State<Payments>) -> Json<AssetList> {
     Json(AssetList::new(&payments.wallets, &payments.units))
-}
-
-/// Path of `GET /v1/assets/{asset}/address`.
-// linter:disable rust/redundant-module-prefix -- A bare `Path` is axum's extractor here.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
-#[into_params(parameter_in = Path)]
-struct AssetPath {
-    /// A configured asset tag.
-    #[param(value_type = String, pattern = "^[a-z0-9][a-z0-9-]{0,31}$")]
-    asset: AssetTag,
-}
-
-/// Query of `GET /v1/assets/{asset}/address`.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
-#[into_params(parameter_in = Query)]
-#[serde(deny_unknown_fields)]
-struct AddressQuery {
-    /// Address text in any form the asset's chain accepts. It is arbitrary
-    /// caller text, so it travels in the query string, never in a path segment.
-    text: String,
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/assets/{asset}/address",
-    operation_id = "read_asset_address",
-    summary = "Parse address text into its canonical form",
-    description = "The canonical address of `text` in the asset's network, parsed by the \
-        asset's chain without a wallet: validates a destination or an address to watch.",
-    params(AssetPath, AddressQuery),
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "The canonical address", body = Address),
-        (status = 400, description = "Malformed asset tag or address text", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Asset is not configured", body = ErrorBody)
-    ),
-    tag = "assets"
-)]
-async fn address(
-    State(payments): State<Payments>,
-    path: Result<Path<AssetPath>, PathRejection>,
-    query: Result<Query<AddressQuery>, QueryRejection>,
-) -> Result<Json<Address>, Error> {
-    let Path(path) = path.map_err(Error::invalid_path)?;
-    let Query(query) = query.map_err(Error::invalid_query)?;
-    let address = payments
-        .wallets
-        .parse(&path.asset, &query.text)
-        .map_err(Error::by_asset)?;
-    Ok(Json(address.into()))
 }
 
 /// The user-facing key of one registered asset: `btc`, `eth`, `usdc`,

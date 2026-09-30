@@ -422,11 +422,16 @@ impl SingleSender for Wallet {
     fn send<'a>(
         &'a self,
         destination: base::Address,
-        amount: Decimal,
+        amount: wallets::Amount,
     ) -> FutureResult<'a, base::TransactionId> {
         Box::pin(async move {
             let to = Address::try_from(&destination).map_err(|_| invalid_address())?;
-            let request = self.request(to, &amount)?;
+            let request = match amount {
+                wallets::Amount::Exact(amount) => self.request(to, &amount)?,
+                wallets::Amount::All => {
+                    SendRequest::sweep(self.key.clone(), self.key.address().clone(), to)?
+                }
+            };
             let accepted = self.outbox.send(vec![request]).await.map_err(|error| {
                 let mut source = error.source;
                 source.ambiguous_transaction_id = error.ambiguous_transaction_id;
@@ -776,7 +781,7 @@ mod tests {
                 Decimal::from(1_u64),
             ),
         ] {
-            assert!(wallet.send(address, amount).await.is_err());
+            assert!(wallet.send(address, amount.into()).await.is_err());
         }
         assert_eq!(sent(&node), 1);
     }
@@ -790,14 +795,14 @@ mod tests {
         let factory = node_factory(&node);
         let wallet = factory.authored(SecretBytes::new([7; 32])).await;
         let error = wallet
-            .send(base58(key(8).address()), Decimal::from(1_u64))
+            .send(base58(key(8).address()), Decimal::from(1_u64).into())
             .await
             .unwrap_err();
         assert_eq!(error.kind, WalletErrorKind::Unavailable);
         assert_eq!(error.message, "Solana submission outcome is unknown");
         assert!(error.ambiguous_transaction_id.is_some());
         let busy = wallet
-            .send(base58(key(8).address()), Decimal::from(1_u64))
+            .send(base58(key(8).address()), Decimal::from(1_u64).into())
             .await
             .unwrap_err();
         assert_eq!(

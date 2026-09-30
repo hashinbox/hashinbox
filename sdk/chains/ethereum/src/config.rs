@@ -176,9 +176,18 @@ impl<A: Ord> Config<A> {
     /// serves another chain ID, cannot trace a block, or disagrees with a
     /// configured token.
     pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<ChainHandle<A>, Error> {
+        self.connect_monitored(secrets, &mut Vec::new()).await
+    }
+
+    async fn connect_monitored(
+        self,
+        secrets: &dyn json_rpc::Secrets,
+        statistics: &mut Vec<json_rpc::Statistics>,
+    ) -> Result<ChainHandle<A>, Error> {
         self.validate()?;
         let network = Network::new(self.chain_id, self.network.as_str());
-        let transport = self.rpc.transport(secrets)?;
+        let (transport, endpoints) = self.rpc.monitored(secrets)?;
+        statistics.extend(endpoints);
         let rpc = RpcClient::connect(transport, &network).await?;
         rpc.validate_tracing().await?;
         for token in &self.tokens {
@@ -197,6 +206,7 @@ impl<A> Config<A> {
     /// authority is published. No wallet carries it.
     #[must_use]
     pub fn units(&self) -> Units {
+        let network = Network::new(self.chain_id, self.network.as_str()).canonical();
         let ether = (AssetKind::Native.id(), Unit::native(&ETH));
         let tokens = self.tokens.iter().map(|token| {
             (
@@ -204,7 +214,10 @@ impl<A> Config<A> {
                 Unit::token(token.decimals.into()),
             )
         });
-        std::iter::once(ether).chain(tokens).collect()
+        std::iter::once(ether)
+            .chain(tokens)
+            .map(|(asset, unit)| ((network.clone(), asset), unit))
+            .collect()
     }
 }
 
@@ -408,9 +421,11 @@ where
     fn connect<'a>(
         self: Box<Self>,
         secrets: &'a dyn json_rpc::Secrets,
+        statistics: &'a mut Vec<json_rpc::Statistics>,
     ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, sdk_config::Error>> {
         Box::pin(async move {
-            let node = Config::connect(*self, secrets)
+            let node = (*self)
+                .connect_monitored(secrets, statistics)
                 .await
                 .map_err(sdk_config::Error::refused)?;
             Ok(Box::new(node) as Box<dyn Connection<A, R>>)
@@ -505,16 +520,42 @@ mod tests {
 
         let units = config.units();
 
-        let ether = units.of(&AssetKind::Native.id()).expect("ether");
+        let ether = units
+            .of(&config.network(), &AssetKind::Native.id())
+            .expect("ether");
         assert_eq!((ether.decimals, ether.ticker.as_deref()), (18, Some("ETH")));
         let contract: Address = CONTRACT.parse().expect("a contract address");
         let token = units
-            .of(&AssetKind::Erc20(contract).id())
+            .of(&config.network(), &AssetKind::Erc20(contract).id())
             .expect("the allowlisted token");
         assert_eq!(token.decimals, u32::from(config.tokens[0].decimals));
         assert_eq!((token.name.as_ref(), token.ticker.as_ref()), (None, None));
         let other: Address = OTHER_CONTRACT.parse().expect("a contract address");
-        assert_eq!(units.of(&AssetKind::Erc20(other).id()), None);
+        assert_eq!(
+            units.of(&config.network(), &AssetKind::Erc20(other).id()),
+            None
+        );
+    }
+
+    #[test]
+    fn composing_networks_preserves_each_contracts_verified_scale() {
+        let main = parse(section(Some(CONTRACT))).expect("mainnet config");
+        let mut other = parse(section(Some(CONTRACT))).expect("other network config");
+        other.network = "sepolia".to_owned();
+        other.chain_id = 11_155_111;
+        other.asset = "sepolia-eth".to_owned();
+        other.tokens[0].asset = "sepolia-token".to_owned();
+        other.tokens[0].decimals = 18;
+        main.validate().expect("valid mainnet config");
+        other.validate().expect("valid sepolia config");
+        let mut units = main.units();
+        units.extend(other.units());
+        let asset = AssetKind::Erc20(CONTRACT.parse().unwrap()).id();
+        assert_eq!(
+            units.of(&main.network(), &asset).unwrap().decimals,
+            u32::from(main.tokens[0].decimals)
+        );
+        assert_eq!(units.of(&other.network(), &asset).unwrap().decimals, 18);
     }
 
     #[test]

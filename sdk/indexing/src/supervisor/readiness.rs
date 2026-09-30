@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::{NetworkEvent, SyncMonitor};
-use crate::{Network, SyncHealth};
+use crate::{Network, NetworkHealth, SyncHealth};
 
 /// The monitor that keeps one [`SyncHealth`] snapshot current, and publishes
 /// it to the [`Readiness`] a caller waits on.
@@ -14,7 +14,7 @@ use crate::{Network, SyncHealth};
 ///
 /// It does no I/O, as [`SyncMonitor`] requires, and it writes nothing: an
 /// application that wants a line per transition implements [`SyncMonitor`]
-/// itself and forwards each event here.
+/// itself and forwards both `network_observed` and `network_changed` here.
 pub struct SyncReport {
     snapshot: watch::Sender<SyncHealth>,
     /// What every network looks like before it has reported, kept so
@@ -51,9 +51,12 @@ impl SyncReport {
 }
 
 impl SyncMonitor for SyncReport {
+    fn network_observed(&self, health: &NetworkHealth) {
+        self.snapshot.send_modify(|snapshot| snapshot.apply(health));
+    }
+
     fn network_changed(&self, event: &NetworkEvent) {
-        self.snapshot
-            .send_modify(|snapshot| snapshot.apply(&event.health));
+        self.network_observed(&event.health);
     }
 }
 

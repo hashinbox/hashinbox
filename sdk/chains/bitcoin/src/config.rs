@@ -170,8 +170,17 @@ impl<A: Ord> Config<A> {
     /// [`Self::validate`]'s refusals, and whatever `RpcClient::connect`
     /// reports when the node serves another network.
     pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<ChainHandle<A>, Error> {
+        self.connect_monitored(secrets, &mut Vec::new()).await
+    }
+
+    async fn connect_monitored(
+        self,
+        secrets: &dyn json_rpc::Secrets,
+        statistics: &mut Vec<json_rpc::Statistics>,
+    ) -> Result<ChainHandle<A>, Error> {
         self.validate()?;
-        let transport = self.rpc.transport(secrets)?;
+        let (transport, endpoints) = self.rpc.monitored(secrets)?;
+        statistics.extend(endpoints);
         let rpc = RpcClient::connect(transport, &self.network).await?;
         Ok(ChainHandle { config: self, rpc })
     }
@@ -187,7 +196,8 @@ impl<A> Config<A> {
     /// configurable, and no wallet carries it.
     #[must_use]
     pub fn units(&self) -> Units {
-        Units::from_iter([(AssetKind::Native.id(), Unit::native(&BTC))])
+        let network = self.network.canonical();
+        Units::from_iter([((network, AssetKind::Native.id()), Unit::native(&BTC))])
     }
 
     /// The wallet configuration this deployment's factory is built from: the
@@ -353,9 +363,11 @@ where
     fn connect<'a>(
         self: Box<Self>,
         secrets: &'a dyn json_rpc::Secrets,
+        statistics: &'a mut Vec<json_rpc::Statistics>,
     ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, sdk_config::Error>> {
         Box::pin(async move {
-            let node = Config::connect(*self, secrets)
+            let node = (*self)
+                .connect_monitored(secrets, statistics)
                 .await
                 .map_err(sdk_config::Error::refused)?;
             Ok(Box::new(node) as Box<dyn Connection<A, R>>)
@@ -432,7 +444,9 @@ mod tests {
 
         let units = config.units();
 
-        let btc = units.of(&AssetKind::Native.id()).expect("BTC");
+        let btc = units
+            .of(&config.network(), &AssetKind::Native.id())
+            .expect("BTC");
         assert_eq!((btc.decimals, btc.ticker.as_deref()), (8, Some("BTC")));
         assert_eq!(btc.name.as_deref(), Some("Bitcoin"));
     }

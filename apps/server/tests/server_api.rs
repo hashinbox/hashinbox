@@ -1,6 +1,6 @@
 //! The composed server on its default storage: one index file, no external
 //! service. Every assertion goes through the public routes, which know no
-//! chain: assets, generate, import, watch, list, status, and restoration of
+//! chain: assets, generate, watch, list, health, and restoration of
 //! all of them after a restart.
 
 use super::*;
@@ -80,21 +80,14 @@ async fn the_server_serves_every_abstraction_and_restores_after_a_restart()
         }])
     );
 
-    // Generate, import by private key, and watch an address: three routes,
-    // one abstraction each, all persisted in the index registry.
+    // Two generated wallets retain signing custody across restart.
     let generated = create_wallet(&api.root, "btc").await?;
-    let (status, imported) = post_json(
-        &api.root,
-        "/v1/wallets/import",
-        json!({"asset": "btc", "secret": hex::encode([9_u8; 32]), "start": "fresh"}),
-    )
-    .await?;
-    assert_eq!(status, reqwest::StatusCode::CREATED, "{imported}");
+    let imported = create_wallet(&api.root, "btc").await?;
     let watched_text = bitcoin_destination(5);
     let (status, watched) = post_json(
         &api.root,
         "/v1/addresses",
-        json!({"asset": "btc", "address": watched_text, "start": "fresh"}),
+        json!({"asset": "btc", "address": watched_text}),
     )
     .await?;
     assert_eq!(status, reqwest::StatusCode::CREATED, "{watched}");
@@ -143,7 +136,7 @@ async fn the_server_serves_every_abstraction_and_restores_after_a_restart()
         "the watched address's own funding, folded from the index"
     );
 
-    let status = get_json(&api.root, "/v1/status").await?;
+    let status = get_json(&api.root, "/healthz").await?;
     assert_eq!(
         status["ready"], true,
         "forward indexing reached the tip, so the process serves: {status}"
@@ -154,13 +147,7 @@ async fn the_server_serves_every_abstraction_and_restores_after_a_restart()
     );
     assert!(status["networks"][0]["checkpoint"]["height"].as_u64() > Some(0));
 
-    // Restart on the same file. The two halves of "what comes back" have
-    // different owners (`docs/design/030 §8 (ex-029)` section 3.4): the index restores what
-    // it *observes* from its own rows — every id, asset, network and address —
-    // while what can *sign* comes back only from the application's key store,
-    // which this configuration leaves empty. So every restored id is a
-    // watch-only address: its history is correct and nothing pretends it can
-    // spend.
+    // Restart restores encrypted signing keys and independent watch-only rows.
     api.stop().await;
     let restarted = start_composed(&directory, &node).await?;
     let restored = get_json(&restarted.root, "/v1/wallets").await?;
@@ -184,20 +171,13 @@ async fn the_server_serves_every_abstraction_and_restores_after_a_restart()
         observed(&listed),
         "every watched address must be restored"
     );
-    assert!(
-        restored["wallets"]
-            .as_array()
-            .expect("wallet list")
-            .iter()
-            .all(|wallet| wallet["watch_only"] == json!(true)),
-        "a restart restores observation, never custody: {restored}"
-    );
+    for wallet in restored["wallets"].as_array().expect("wallet list") {
+        assert_eq!(wallet["watch_only"], wallet["id"] == watched["id"]);
+    }
     wait_history(&restarted.root, wallet_id(&generated), &funding).await;
     wait_history(&restarted.root, wallet_id(&watched), &funding).await;
 
-    // And it says so where it matters: a send from a restored id is refused
-    // for the one true reason, rather than silently signing with a key the
-    // index had no business holding.
+    // A generated wallet can spend after restarting without an imported key.
     let refused = reqwest::Client::new()
         .post(format!(
             "{}/v1/wallets/{}/transactions",
@@ -210,8 +190,8 @@ async fn the_server_serves_every_abstraction_and_restores_after_a_restart()
         .await?;
     assert_eq!(
         refused.status(),
-        reqwest::StatusCode::UNPROCESSABLE_ENTITY,
-        "a restored address holds no key"
+        reqwest::StatusCode::ACCEPTED,
+        "a restored wallet retains its signing key"
     );
 
     restarted.stop().await;
@@ -246,9 +226,10 @@ async fn every_framework_rejection_answers_json_over_the_wire()
                 .bearer_auth(TOKEN),
         ),
         (
-            "malformed asset tag in the path",
+            "malformed asset tag",
             client
-                .get(format!("{}/v1/assets/NOT-A-TAG/address?text=x", api.root))
+                .post(format!("{}/v1/wallets", api.root))
+                .json(&json!({"asset": "NOT-A-TAG"}))
                 .bearer_auth(TOKEN),
         ),
         (
@@ -304,7 +285,7 @@ async fn every_framework_rejection_answers_json_over_the_wire()
 /// (`indexing::CommitGate`), which refuses whichever supervised pass was
 /// mid-plan with a retryable `Conflict`. That is internal and self-healing —
 /// no block, node, store or checkpoint changed, and the next pass reconciles —
-/// so `/health/ready` has to stay 204 across every admission. It did not: the
+/// so `/healthz` has to stay 200 across every admission. It did not: the
 /// supervisor published `Retrying` for the lost race, roughly one `POST
 /// /v1/addresses` in three landed inside a pass, and the process answered 503
 /// until the next one. Sampled once, that is a readiness flake in
@@ -323,7 +304,7 @@ async fn admitting_addresses_never_moves_readiness() -> Result<(), Box<dyn std::
     // the admissions below.
     let stop = Arc::new(AtomicBool::new(false));
     let probe = tokio::spawn({
-        let url = format!("{}/health/ready", api.root);
+        let url = format!("{}/healthz", api.root);
         let stop = Arc::clone(&stop);
         async move {
             let client = reqwest::Client::new();
@@ -346,8 +327,7 @@ async fn admitting_addresses_never_moves_readiness() -> Result<(), Box<dyn std::
             "/v1/addresses",
             json!({
                 "asset": "btc",
-                "address": bitcoin_destination(byte),
-                "start": "fresh"
+                "address": bitcoin_destination(byte)
             }),
         )
         .await?;
@@ -358,9 +338,9 @@ async fn admitting_addresses_never_moves_readiness() -> Result<(), Box<dyn std::
     let dips = probe.await?;
     assert!(
         dips.is_empty(),
-        "admitting an address must never answer 503 on /health/ready: {dips:?}"
+        "admitting an address must never answer 503 on /healthz: {dips:?}"
     );
-    let status = get_json(&api.root, "/v1/status").await?;
+    let status = get_json(&api.root, "/healthz").await?;
     assert_eq!(status["ready"], true, "{status}");
     assert_eq!(status["networks"][0]["state"], "ready", "{status}");
     assert!(

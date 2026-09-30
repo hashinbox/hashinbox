@@ -14,6 +14,7 @@ use serde_json::{Value, value::RawValue};
 
 use crate::{
     Batch, Bounds, BoxFuture, CallResult, Client, Error, ErrorKind, Failure, RawJson, Request,
+    Statistics,
 };
 
 /// JSON-RPC over HTTP against one endpoint: one execution per call, no retry
@@ -26,6 +27,7 @@ use crate::{
 pub struct Http {
     client: HttpClient,
     header_names: Vec<String>,
+    statistics: Statistics,
 }
 
 impl fmt::Debug for Http {
@@ -54,13 +56,21 @@ impl Http {
         Ok(Self {
             client,
             header_names,
+            statistics: Statistics::default(),
         })
+    }
+
+    /// A handle to this endpoint's attempts and outcomes, shared by every clone.
+    #[must_use]
+    pub fn statistics(&self) -> Statistics {
+        self.statistics.clone()
     }
 
     async fn execute(&self, request: Request) -> Result<CallResult, Error> {
         let call = request.into_call();
         let params = Params::new(call.params)?;
-        match self
+        self.statistics.begin();
+        let result = match self
             .client
             .request::<Box<RawValue>, _>(&call.method, params)
             .await
@@ -68,7 +78,9 @@ impl Http {
             Ok(value) => Ok(Ok(RawJson(value.get().as_bytes().to_vec()))),
             Err(RpcError::Call(error)) => Ok(Err(Failure::from(error))),
             Err(source) => Err(Error::from_rpc(source)),
-        }
+        };
+        self.statistics.call(&result);
+        result
     }
 
     /// Every call is serialized before the first byte leaves, so an invalid
@@ -86,18 +98,23 @@ impl Http {
                     )
                 })?;
         }
-        let responses = self
+        self.statistics.begin();
+        let result = self
             .client
             .batch_request::<Box<RawValue>>(builder)
             .await
-            .map_err(Error::from_rpc)?;
-        Ok(responses
-            .into_iter()
-            .map(|entry| match entry {
-                Ok(value) => Ok(RawJson(value.get().as_bytes().to_vec())),
-                Err(error) => Err(Failure::from(error.into_owned())),
-            })
-            .collect())
+            .map_err(Error::from_rpc)
+            .map(|responses| {
+                responses
+                    .into_iter()
+                    .map(|entry| match entry {
+                        Ok(value) => Ok(RawJson(value.get().as_bytes().to_vec())),
+                        Err(error) => Err(Failure::from(error.into_owned())),
+                    })
+                    .collect()
+            });
+        self.statistics.batch(&result);
+        result
     }
 }
 

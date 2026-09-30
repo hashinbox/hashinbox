@@ -9,7 +9,7 @@
 /// A file's `PRAGMA user_version` is the number of steps applied to it, so step
 /// `n` is applied exactly once, in one transaction with the bump that records
 /// it.
-pub(super) const MIGRATIONS: [&str; 2] = [REPOSITORY, WATCHED_ADDRESS];
+pub(super) const MIGRATIONS: [&str; 3] = [REPOSITORY, WATCHED_ADDRESS, BALANCES];
 
 /// The schema this build creates, whole, in one step.
 ///
@@ -62,20 +62,10 @@ pub(super) const MIGRATIONS: [&str; 2] = [REPOSITORY, WATCHED_ADDRESS];
 ///   answer for the other; here the columns say it, and the `CHECK` forbids the
 ///   one combination that means nothing.
 ///
-/// **No balance column, and the absence is the decision.** A settled total is
-/// the fold over `balance_movement`, recomputed per read. `watch` used to carry
-/// a second copy of it — `balance_credits` and `balance_debits`, seeded at
-/// registration and moved forward by every commit's inserts — so that an
-/// observed holding read one row rather than walking its rows. That is two
-/// answers to one question, and `balance_movement`'s leading key is
-/// `(chain, network, address, asset, ...)` in a `WITHOUT ROWID` B-tree, so the
-/// walk it avoided is an index range scan over exactly the rows being summed.
-/// The pair also had to be the *pair* rather than a net, precisely because a
-/// netted running total would have had to clamp a deficit at zero and lose it;
-/// recomputing has no such choice to make, and a deficit is what
-/// `Completeness::Overdrawn` reports.
+/// Absolute balances are added and seeded by the third transactional step.
+/// Signed atomic text preserves deficits while historical credits are outstanding.
 ///
-/// **No `balance_basis` either, for the same reason at a different scale.** The
+/// **No persisted attestation without a writer for its evidence.** The
 /// column held an *attested* basis — `1` when an independent read of the same
 /// subject at the same block agreed with the fold — and nothing in the
 /// persistence layer could ever write it. The only thing in this SDK that
@@ -247,3 +237,6 @@ const REPOSITORY: &str = "
 const WATCHED_ADDRESS: &str = "
     CREATE INDEX watch_address ON watch (chain, network, address);
 ";
+
+/// Watched holdings keep their signed net; Rust seeds exact values in this step.
+const BALANCES: &str = "ALTER TABLE watch ADD COLUMN balance TEXT NOT NULL DEFAULT '0';";

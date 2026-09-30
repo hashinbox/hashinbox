@@ -29,8 +29,9 @@ pub struct ForwardRange {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Birthday {
     /// This key or address has never been used, so observation begins at the
-    /// block after the current checkpoint. An assertion of fact: a caller who
-    /// does not know cannot honestly write it.
+    /// block after the current checkpoint, or after a verified source tip when
+    /// no checkpoint exists. Repeating a registration keeps its original birthday.
+    /// An assertion of fact: a caller who does not know cannot honestly write it.
     Fresh,
     /// Observe from this native position.
     At(BlockPosition),

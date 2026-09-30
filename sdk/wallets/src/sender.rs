@@ -8,14 +8,53 @@ use crate::{Author, MAX_TRANSFERS, Wallet, WalletError, WalletErrorKind};
 pub type SendFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<TransactionId>, SendError>> + Send + 'a>>;
 
+/// How much of a wallet's asset to send.
+///
+/// `All` resolves under the chain's send reservation, after earlier transfers
+/// from the same source and their fees. Ethereum reserves maximum EIP-1559
+/// fees, so unused gas and fee refunds may leave a residue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Amount {
+    /// An exact positive amount in display units.
+    Exact(Decimal),
+    /// Every available atomic unit after transfers and required fees.
+    All,
+}
+
+impl From<Decimal> for Amount {
+    fn from(value: Decimal) -> Self {
+        Self::Exact(value)
+    }
+}
+
+impl std::str::FromStr for Amount {
+    type Err = <Decimal as std::str::FromStr>::Err;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "all" => Ok(Self::All),
+            _ => value.parse().map(Self::Exact),
+        }
+    }
+}
+
+impl fmt::Display for Amount {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exact(value) => value.fmt(formatter),
+            Self::All => formatter.write_str("all"),
+        }
+    }
+}
+
 /// One requested value transfer from an already-created wallet.
 pub struct Transfer {
     /// The sending wallet.
     pub wallet: Arc<dyn Wallet>,
     /// A destination in the wallet's network.
     pub to: Address,
-    /// Display units of the wallet's asset.
-    pub amount: Decimal,
+    /// Exact display units, or all available funds after fees.
+    pub amount: Amount,
 }
 
 /// A batch failure with what was already accepted, so a caller never resends it.
@@ -63,6 +102,29 @@ impl SendError {
             )),
             _ => Ok(()),
         }
+    }
+
+    /// Requires a sweep to be the final item from its source in this batch.
+    ///
+    /// # Errors
+    /// An item-scoped invalid-batch failure before any chain call when an
+    /// earlier item already swept this source, including a second sweep.
+    pub fn check_selection(transfers: &[Transfer]) -> Result<(), Self> {
+        for (index, item) in transfers.iter().enumerate() {
+            if transfers[..index].iter().any(|earlier| {
+                earlier.amount == Amount::All && earlier.wallet.address() == item.wallet.address()
+            }) {
+                return Err(Self::item(
+                    index,
+                    Vec::new(),
+                    WalletError::new(
+                        WalletErrorKind::InvalidBatch,
+                        "a sweep must be the final transfer from its source",
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Creates a failure for one original item in an ordered batch.

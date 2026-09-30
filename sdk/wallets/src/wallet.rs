@@ -1,9 +1,9 @@
 use std::any::Any;
 
-use base::{BoxFuture, Broadcaster, Decimal, Signer, TransactionBuilder, TransactionId};
+use base::{BoxFuture, Broadcaster, Signer, TransactionBuilder, TransactionId};
 use indexing::{Address, Holder};
 
-use crate::WalletError;
+use crate::{Amount, WalletError};
 
 /// The future every wallet capability returns: [`BoxFuture`] of this crate's
 /// [`WalletError`], so the traits stay `dyn`-safe.
@@ -35,9 +35,8 @@ pub trait TransactionFactory: Send + Sync {
 /// [`crate::Wallets::parse`] is the way to obtain: it only ever produces
 /// addresses of that asset's network.
 pub trait SingleSender: Send + Sync {
-    /// Sends `amount` (display units) and returns the transaction id.
-    fn send<'a>(&'a self, destination: Address, amount: Decimal)
-    -> FutureResult<'a, TransactionId>;
+    /// Sends an exact amount or all available funds and returns the transaction id.
+    fn send<'a>(&'a self, destination: Address, amount: Amount) -> FutureResult<'a, TransactionId>;
 }
 
 /// What every wallet is, whatever its asset: an address holding one asset,

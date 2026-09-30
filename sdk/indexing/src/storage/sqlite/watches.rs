@@ -402,17 +402,7 @@ impl Observation {
 
     /// Adds this row to `tables`' network, with nothing inspected for it.
     ///
-    /// **Nothing about the address's balance is written here, and nothing needs
-    /// to be.** History is written for *every* endpoint of every movement,
-    /// watched or not, so an address routinely already has rows of its own
-    /// before anything observes it — from every time it was somebody else's
-    /// counterparty, or from a watch that was withdrawn. Those rows are what the
-    /// fold reads, so registering an observation of the address changes the
-    /// number it reports by nothing at all. A running total kept on this row
-    /// would have had to be seeded from them instead, and would have been short
-    /// by all of them for good if it were not: the backfill reads from the
-    /// birthday and never revisits the blocks below it, and re-presenting rows
-    /// that are already stored reports nothing new.
+    /// Seeds the persisted total from retained effects in this same transaction.
     fn insert(&self, transaction: &Transaction<'_>, tables: &Tables) -> Result<(), IndexError> {
         transaction
             .execute(
@@ -428,7 +418,8 @@ impl Observation {
                 ],
             )
             .map(drop)
-            .map_err(Self::taken_already)
+            .map_err(Self::taken_already)?;
+        tables.seed_total(transaction, (&self.address, &self.asset))
     }
 
     /// A uniqueness the read inside this transaction did not see: the identity

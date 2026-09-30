@@ -41,10 +41,19 @@ impl FactorySender {
     fn request(&self, transfer: Transfer) -> Result<SendRequest, WalletError> {
         let from = Address::try_from(transfer.wallet.address())?;
         let to = self.config.destination(&transfer.to)?;
-        let amount = Satoshi::from_decimal(&transfer.amount)
-            .map_err(|error| WalletError::new(WalletErrorKind::InvalidAmount, error.message))?;
-        let native = transaction::Transfer::new(to, amount);
-        Ok(SendRequest::new(transfer.wallet, from, native))
+        match transfer.amount {
+            wallets::Amount::Exact(amount) => {
+                let amount = Satoshi::from_decimal(&amount).map_err(|error| {
+                    WalletError::new(WalletErrorKind::InvalidAmount, error.message)
+                })?;
+                Ok(SendRequest::new(
+                    transfer.wallet,
+                    from,
+                    transaction::Transfer::new(to, amount),
+                ))
+            }
+            wallets::Amount::All => Ok(SendRequest::sweep(transfer.wallet, from, to)),
+        }
     }
 
     async fn execute(
@@ -52,6 +61,7 @@ impl FactorySender {
         transfers: Vec<Transfer>,
     ) -> Result<Vec<base::TransactionId>, SendError> {
         SendError::check_count(transfers.len())?;
+        SendError::check_selection(&transfers)?;
         let items = transfers
             .into_iter()
             .enumerate()
@@ -93,6 +103,7 @@ impl Authorship for FactorySender {
 
 #[cfg(test)]
 mod tests {
+    use base::Networked;
     use bitcoin::{ScriptBuf, consensus};
     use futures_executor::block_on;
     use indexing::{IndexError, IndexErrorKind};
@@ -203,6 +214,131 @@ mod tests {
         let failure = block_on(factory.authorship().unwrap().send(batch)).unwrap_err();
         assert_operation(&failure, WalletErrorKind::Unavailable, "moved");
         assert_eq!(node.events(), ["fees", address(1).as_str()]);
+    }
+
+    #[test]
+    fn sweep_spends_every_free_output_without_change() {
+        let alice = address(1);
+        let node = Arc::new(Node {
+            outputs: Ok(vec![(alice.clone(), 100_000), (alice, 100_000)]),
+            ..Node::default()
+        });
+        let factory = node.factory();
+        let wallet = block_on(factory.create(crypto::SecretBytes::new([1; 32]))).unwrap();
+        let to = address(2).canonical(&Network::Regtest.canonical());
+        let batch = vec![Transfer {
+            wallet,
+            to: to.clone(),
+            amount: wallets::Amount::All,
+        }];
+        block_on(factory.authorship().unwrap().send(batch)).unwrap();
+        let submitted = node.submitted.lock().unwrap();
+        let transaction: bitcoin::Transaction =
+            consensus::deserialize(submitted[0].envelope.as_bytes()).unwrap();
+        assert_eq!(transaction.input.len(), 2);
+        assert_eq!(transaction.output.len(), 1);
+        assert_eq!(transaction.output[0].value.to_sat(), 199_822);
+        assert_eq!(
+            transaction.output[0].script_pubkey,
+            address(2).script_pubkey(Network::Regtest).unwrap()
+        );
+    }
+
+    #[test]
+    fn sweep_excludes_outputs_reserved_by_an_accepted_send() {
+        let alice = address(1);
+        let node = Arc::new(Node {
+            outputs: Ok(vec![(alice.clone(), 100_000), (alice, 100_000)]),
+            ..Node::default()
+        });
+        let factory = node.factory();
+        let wallet = block_on(factory.create(crypto::SecretBytes::new([1; 32]))).unwrap();
+        let to = address(2).canonical(&Network::Regtest.canonical());
+        let sender = factory.authorship().unwrap();
+        block_on(sender.send(vec![Transfer {
+            wallet: wallet.clone(),
+            to: to.clone(),
+            amount: "0.00001".parse().unwrap(),
+        }]))
+        .unwrap();
+        block_on(sender.send(vec![Transfer {
+            wallet,
+            to,
+            amount: wallets::Amount::All,
+        }]))
+        .unwrap();
+        let submitted = node.submitted.lock().unwrap();
+        let first: bitcoin::Transaction =
+            consensus::deserialize(submitted[0].envelope.as_bytes()).unwrap();
+        let sweep: bitcoin::Transaction =
+            consensus::deserialize(submitted[1].envelope.as_bytes()).unwrap();
+        assert_eq!(sweep.input.len(), 1);
+        assert_ne!(
+            first.input[0].previous_output,
+            sweep.input[0].previous_output
+        );
+        assert_eq!(sweep.output.len(), 1);
+        assert_eq!(sweep.output[0].value.to_sat(), 99_890);
+    }
+
+    #[test]
+    fn an_empty_sweep_is_an_invalid_amount_without_submission() {
+        let node = Arc::new(Node::default());
+        let factory = node.factory();
+        let wallet = block_on(factory.create(crypto::SecretBytes::new([1; 32]))).unwrap();
+        let to = address(2).canonical(&Network::Regtest.canonical());
+        let failure = block_on(factory.authorship().unwrap().send(vec![Transfer {
+            wallet,
+            to,
+            amount: wallets::Amount::All,
+        }]))
+        .unwrap_err();
+        assert_eq!(failure.source.kind, WalletErrorKind::InvalidAmount);
+        assert!(failure.source.message.contains("no available UTXOs"));
+        assert!(node.submitted.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mixed_sweep_keeps_fixed_payments_and_never_drops_a_dust_remainder() {
+        for total in [100_000, 1_001] {
+            let node = Arc::new(Node {
+                outputs: Ok(vec![(address(1), total)]),
+                ..Node::default()
+            });
+            let factory = node.factory();
+            let wallet = block_on(factory.create(crypto::SecretBytes::new([1; 32]))).unwrap();
+            let to = address(2).canonical(&Network::Regtest.canonical());
+            let batch = vec![
+                Transfer {
+                    wallet: wallet.clone(),
+                    to: to.clone(),
+                    amount: "0.00001".parse().unwrap(),
+                },
+                Transfer {
+                    wallet,
+                    to,
+                    amount: wallets::Amount::All,
+                },
+            ];
+            let sent = block_on(factory.authorship().unwrap().send(batch));
+            if total == 1_001 {
+                assert!(sent.is_err());
+                assert!(node.submitted.lock().unwrap().is_empty());
+                continue;
+            }
+            sent.unwrap();
+            let submitted = node.submitted.lock().unwrap();
+            let transaction: bitcoin::Transaction =
+                consensus::deserialize(submitted[0].envelope.as_bytes()).unwrap();
+            assert_eq!(
+                transaction
+                    .output
+                    .iter()
+                    .map(|output| output.value.to_sat())
+                    .collect::<Vec<_>>(),
+                [1_000, 98_859]
+            );
+        }
     }
 
     #[test]

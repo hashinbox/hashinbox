@@ -41,11 +41,13 @@ pub(crate) struct Outbox {
 
 /// One transfer, its sender, the fee limits it is built within, and the
 /// signer that controls the sender.
+#[derive(Clone)]
 pub(crate) struct SendRequest {
     from: Address,
     transfer: Transfer,
     limits: FeeLimits,
     signer: Arc<dyn Signer>,
+    sweep: bool,
 }
 
 impl SendRequest {
@@ -61,7 +63,52 @@ impl SendRequest {
             transfer,
             limits,
             signer,
+            sweep: false,
         }
+    }
+}
+
+impl SendRequest {
+    /// A sweep whose exact amount is resolved while its sender is reserved.
+    pub(crate) fn sweep(
+        signer: Arc<dyn Signer>,
+        from: Address,
+        to: Address,
+        asset: crate::native::AssetKind,
+        limits: FeeLimits,
+    ) -> Self {
+        Self {
+            from,
+            transfer: Transfer {
+                asset,
+                to,
+                amount: crate::native::Wei::ZERO,
+            },
+            limits,
+            signer,
+            sweep: true,
+        }
+    }
+}
+
+impl SendRequest {
+    /// A positive remainder of this holding after earlier items and this fee.
+    fn remainder(
+        &self,
+        funds: &Funds,
+        balance: &crate::native::Wei,
+        fee: &crate::native::Wei,
+    ) -> Result<crate::native::Wei, Error> {
+        funds
+            .remaining(&self.from, &self.transfer.asset, balance)
+            .and_then(|amount| amount.checked_sub(fee))
+            .filter(|amount| amount != &crate::native::Wei::ZERO)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InsufficientFunds,
+                    "Ethereum sweep has no available funds after transfers and maximum fees",
+                )
+            })
     }
 }
 
@@ -102,7 +149,19 @@ impl Outbox {
         items: Vec<SendRequest>,
     ) -> Result<Vec<base::TransactionId>, SendError> {
         let admission = self.reserve(&items).await.map_err(unsubmitted)?;
-        let batch = self.prepare(&items).await.map_err(unsubmitted)?;
+        let batch = self.prepare(&items).await.map_err(|(index, error)| {
+            if items[index].sweep && error.kind == ErrorKind::InsufficientFunds {
+                return SendError::item(
+                    index,
+                    Vec::new(),
+                    wallets::WalletError::new(
+                        wallets::WalletErrorKind::InvalidAmount,
+                        error.message,
+                    ),
+                );
+            }
+            unsubmitted((index, error))
+        })?;
         self.reservations
             .register(&admission, &batch)
             .map_err(|error| unsubmitted((0, error)))?;
@@ -191,22 +250,86 @@ impl Outbox {
         items: &[SendRequest],
     ) -> Result<Vec<PreparedTransaction>, (usize, Error)> {
         let nonces = self.nonces(items).await?;
+        let mut resolved = items.to_vec();
         let mut contexts = Vec::with_capacity(items.len());
         let mut funds = Funds::default();
-        for (index, (item, nonce)) in items.iter().zip(nonces).enumerate() {
+        for (index, (item, nonce)) in resolved.iter_mut().zip(nonces).enumerate() {
             let context = self
-                .context(item, nonce)
+                .resolve(item, nonce, &funds)
                 .await
+                .map_err(|error| (index, error))?;
+            funds
+                .require(index, &item.transfer, &context)
                 .map_err(|error| (index, error))?;
             contexts.push(context);
         }
-        for (index, (item, context)) in items.iter().zip(&contexts).enumerate() {
-            funds
-                .require(index, &item.transfer, context)
-                .map_err(|error| (index, error))?;
-        }
         funds.afford(self.accounts.as_ref()).await?;
-        Self::sign_each(items, contexts).await
+        Self::sign_each(&resolved, contexts).await
+    }
+
+    /// Quotes an affordable positive transfer, resolves its remainder, and
+    /// checks the destination's actual value-dependent execution before signing.
+    async fn resolve(
+        &self,
+        item: &mut SendRequest,
+        nonce: u64,
+        funds: &Funds,
+    ) -> Result<BuildContext, Error> {
+        use crate::native::{AssetKind, Wei, rpc::View};
+        let balance = if item.sweep {
+            Some(
+                self.accounts
+                    .balance(item.from.clone(), &item.transfer.asset, View::Pending)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        if let Some(balance) = &balance {
+            let ceiling = match item.transfer.asset {
+                AssetKind::Native => item.limits.max_total_fee(),
+                AssetKind::Erc20(_) => &Wei::ZERO,
+            };
+            item.transfer.amount = item.remainder(funds, balance, ceiling)?;
+        }
+        let context = self.context(item, nonce).await?;
+        if let Some(balance) = balance
+            && item.transfer.asset == AssetKind::Native
+        {
+            let fee = context
+                .max_fee_per_gas
+                .checked_mul_u64(context.gas_limit)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::FeeUnavailable,
+                        "Ethereum maximum fee overflows U256",
+                    )
+                })?;
+            item.transfer.amount = item.remainder(funds, &balance, &fee)?;
+            self.validate_sweep(item, nonce, &context).await?;
+        }
+        Ok(context)
+    }
+
+    /// The final value must execute inside the already reserved gas budget.
+    /// No zero-value destination assumption or unbounded quote loop is needed.
+    async fn validate_sweep(
+        &self,
+        item: &SendRequest,
+        nonce: u64,
+        budget: &BuildContext,
+    ) -> Result<(), Error> {
+        let checked = self.context(item, nonce).await?;
+        if checked.gas_limit > budget.gas_limit
+            || checked.max_fee_per_gas > budget.max_fee_per_gas
+            || checked.max_priority_fee_per_gas > budget.max_priority_fee_per_gas
+        {
+            return Err(Error::new(
+                ErrorKind::FeeUnavailable,
+                "Ethereum sweep execution exceeds its reserved maximum fee budget",
+            ));
+        }
+        Ok(())
     }
 
     /// One nonce per item: each sender's range starts at the later of its
@@ -314,7 +437,7 @@ mod tests {
     use wallets::WalletErrorKind;
 
     use super::*;
-    use crate::native::AssetKind;
+    use crate::native::{AssetKind, Wei};
     use crate::sender::stub::{Action, CHAIN_ID, Node, item, native, signer, token};
 
     struct UnusedSigner;
@@ -332,6 +455,107 @@ mod tests {
             transfer,
             FeeLimits::default(),
         )
+    }
+
+    fn sweep_limits() -> FeeLimits {
+        FeeLimits::new(
+            1024,
+            0,
+            2,
+            Wei::from_u128(1),
+            Wei::from_u128(1),
+            Wei::from_u128(2),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sweep_resolves_after_fixed_amounts_and_all_maximum_fees() {
+        use alloy_eips::Decodable2718;
+        let key = Arc::new(signer(1));
+        let node = Arc::new(Node {
+            reject_zero: true,
+            ..Node::default()
+        });
+        node.set_balance(key.address(), &AssetKind::Native, 100);
+        let sweep = SendRequest::sweep(
+            key.clone(),
+            key.address().clone(),
+            native(1).to,
+            AssetKind::Native,
+            sweep_limits(),
+        );
+        let batch = node
+            .outbox()
+            .prepare(&[item(&key, native(10)), sweep])
+            .await
+            .unwrap();
+        let decoded = alloy_consensus::TxEnvelope::decode_2718_exact(
+            batch[1].transaction.envelope.as_bytes(),
+        )
+        .unwrap();
+        let transaction = decoded.as_eip1559().unwrap().tx();
+        assert_eq!(transaction.value, alloy_primitives::U256::from(88));
+        assert_eq!(transaction.nonce, 1);
+        let quoted = node.transfers.lock().unwrap();
+        assert_eq!(
+            quoted
+                .iter()
+                .map(|transfer| transfer.amount.clone())
+                .collect::<Vec<_>>(),
+            [Wei::from_u128(10), Wei::from_u128(87), Wei::from_u128(88)]
+        );
+        assert!(node.broadcasts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn token_sweep_does_not_subtract_native_gas_from_token_units() {
+        let key = Arc::new(signer(1));
+        let node = Arc::new(Node::default());
+        let contract = Address::from_bytes([9; 20]);
+        let asset = AssetKind::Erc20(contract.clone());
+        node.set_balance(key.address(), &asset, 100);
+        node.set_balance(key.address(), &AssetKind::Native, 2);
+        let sweep = SendRequest::sweep(
+            key.clone(),
+            key.address().clone(),
+            native(1).to,
+            asset,
+            FeeLimits::default(),
+        );
+        node.outbox()
+            .prepare(&[item(&key, token(&contract, 10)), sweep])
+            .await
+            .unwrap();
+        assert_eq!(node.transfers.lock().unwrap()[1].amount, Wei::from_u128(90));
+    }
+
+    #[tokio::test]
+    async fn sweep_refuses_changed_execution_budget_and_empty_remainder_before_signing() {
+        let key = Arc::new(signer(1));
+        for balance in [1, 100] {
+            let node = Arc::new(Node::default());
+            node.set_balance(key.address(), &AssetKind::Native, balance);
+            node.gas_limits.lock().unwrap().extend([1, 2]);
+            let sweep = SendRequest::sweep(
+                Arc::new(UnusedSigner),
+                key.address().clone(),
+                native(1).to,
+                AssetKind::Native,
+                sweep_limits(),
+            );
+            let failure = node.outbox().prepare(&[sweep]).await.err().unwrap();
+            assert_eq!(failure.0, 0);
+            assert_eq!(
+                failure.1.kind,
+                if balance == 1 {
+                    ErrorKind::InsufficientFunds
+                } else {
+                    ErrorKind::FeeUnavailable
+                }
+            );
+            assert!(node.broadcasts.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]

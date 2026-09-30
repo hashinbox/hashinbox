@@ -10,8 +10,8 @@ This is for interaction with user.
 
 - Follow explicit user decisions first; current source, manifests and tests establish
   implemented behavior and exact APIs, not proof that every design is correct.
-- Read the relevant contracts: `docs/SYSTEM_REQUIREMENTS.md`, `ARCHITECTURE.md`,
-  `docs/INDEXING.md`, `docs/API.md`, `docs/CHAIN_LAYOUT.md`, and the owning README.
+- Read `docs/SYSTEM_REQUIREMENTS.md`, `ARCHITECTURE.md` and the owning README;
+  the generated `docs/openapi.json` describes HTTP.
   Resolve stale documentation against the code and user requirements; do not preserve
   obsolete architecture because a document describes it. ADRs record history.
 - Pre-release: replace obsolete internal APIs/formats directly; no compatibility
@@ -43,7 +43,7 @@ separate indexer service, raw-block archive or multi-writer deployment.
 
 Concrete chains are selected at composition, never in business/HTTP code; chains do
 not depend on each other. Native chain modules know no indexing/wallet SDK models.
-Keep chain layouts and scenarios consistent with `docs/CHAIN_LAYOUT.md` and
+Keep chain layouts and scenarios consistent with sibling crates and
 `scripts/check-chains.sh`. Construct long-lived dependencies once, not in handlers.
 
 ## Indexing requirements
@@ -82,10 +82,10 @@ These are ownership requirements, including where current code still differs.
 - SQLite and memory stay inside `storage/`, independently feature-gated; memory is a
   legitimate backend. Fixtures and contract suites belong in `tests/`, not public API.
   The layout and import rules of `storage/` are in `ARCHITECTURE.md`, "Dependency direction".
-- Repository target: persist absolute balances; use unified balance movements with
-  optional transaction identity for transactionless credits; preserve spent-output facts
-  so historical replay cannot resurrect outputs. Current recomputation is not fulfillment
-  of the stored-balance requirement. Do not invent synthetic transactions or account UTXOs.
+- Persist signed absolute watched balances atomically with unified balance movements;
+  transactionless credits have no transaction identity. Preserve spent-output facts so
+  historical replay cannot resurrect outputs. Verification must not silently repair
+  totals. Do not invent synthetic transactions or account UTXOs.
 - After-commit listeners are optional notifications, not reliable transactional delivery;
   callbacks cannot veto commits. Custom repositories own transactional reactions.
 

@@ -47,8 +47,9 @@ pub use output::{IndexedOutput, OutputChanges, OutputId, OutputKey};
 pub use source::{BlockInterpreter, BlockSource, ChainTips, FeeSettlement, NativeBlock};
 // What a store implements: the required ports, the capabilities, their rows.
 pub use storage::{
-    BalanceQuery, BalanceStore, IndexStore, IndexedBatch, Inspection, OutputStore, Progress,
-    PurgedRows, Purging, Repository, WatchProgress, WatchStore,
+    Activity, ActivityKind, ActivityPage, ActivityPosition, ActivityQuery, ActivityTransaction,
+    BalanceQuery, BalanceStore, Direction, IndexStore, IndexedBatch, Inspection, OutputStore,
+    Progress, PurgedRows, Purging, Repository, WatchProgress, WatchStore,
 };
 // What an application calls: the index, the two facts only it holds, and the
 // hook. The queries and their vocabulary are the repository's, from `storage`.

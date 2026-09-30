@@ -91,11 +91,26 @@ impl Rpc {
     /// [`ErrorKind::Endpoints`] when a node is unusable or one of its
     /// `${NAME}` references has no value in `secrets`.
     pub fn transport(&self, secrets: &dyn Secrets) -> Result<Transport, Error> {
+        self.monitored(secrets).map(|(transport, _)| transport)
+    }
+
+    /// Builds the transport and exposes each endpoint's statistics in configured order.
+    /// Handles contain no endpoint URL or credentials.
+    ///
+    /// # Errors
+    /// The same endpoint and secret validation failures as [`Self::transport`].
+    pub fn monitored(
+        &self,
+        secrets: &dyn Secrets,
+    ) -> Result<(Transport, Vec<json_rpc::Statistics>), Error> {
         let mut clients = Vec::with_capacity(self.endpoints.len());
+        let mut statistics = Vec::with_capacity(self.endpoints.len());
         for endpoint in &self.endpoints {
-            clients.push(endpoint.connect(secrets)?);
+            let client = endpoint.connect(secrets)?;
+            statistics.push(client.statistics());
+            clients.push(client);
         }
-        Ok(self.repeat.wrap(Failover::new(clients)?))
+        Ok((self.repeat.wrap(Failover::new(clients)?), statistics))
     }
 }
 

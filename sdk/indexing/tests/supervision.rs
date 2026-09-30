@@ -25,6 +25,7 @@ use tokio::sync::watch;
 #[derive(Clone)]
 enum Outcome {
     Ready,
+    Status(Box<SyncStatus>),
     CatchingUp,
     /// The pass succeeded and its backfill did not: forward indexing reached
     /// the tip, and the historical range the network still owes was refused.
@@ -116,6 +117,7 @@ impl Indexing for Probe {
         let network = self.network.clone();
         Box::pin(async move {
             let (phase, backfill) = match outcome {
+                Outcome::Status(status) => return Ok(*status),
                 Outcome::Ready => (SyncPhase::Ready, None),
                 Outcome::CatchingUp => (SyncPhase::CatchingUp, None),
                 Outcome::BackfillFails => (SyncPhase::Ready, Some(refused())),
@@ -139,18 +141,21 @@ impl Indexing for Probe {
 /// Records every event and publishes the snapshot a test waits on.
 struct Recorder {
     events: Mutex<Vec<(String, NetworkState, NetworkState)>>,
-    health: watch::Sender<SyncHealth>,
+    report: Arc<indexing::SyncReport>,
 }
 
 impl SyncMonitor for Recorder {
+    fn network_observed(&self, health: &indexing::NetworkHealth) {
+        self.report.network_observed(health);
+    }
+
     fn network_changed(&self, event: &NetworkEvent) {
         self.events.lock().expect("events").push((
             event.health.status.network.chain.to_string(),
             event.previous,
             event.health.state,
         ));
-        self.health
-            .send_modify(|health| health.apply(&event.health));
+        self.report.network_changed(event);
     }
 }
 
@@ -216,10 +221,11 @@ impl Supervised {
             .map(|probe| Arc::clone(probe) as Arc<dyn Indexing>)
             .collect();
         let composer = Arc::new(Index::of(indexers).expect("disjoint networks compose"));
-        let (snapshot, health) = watch::channel(SyncHealth::starting(composer.networks()));
+        let (report, readiness) = indexing::SyncReport::watching(composer.networks());
+        let health = readiness.receiver();
         let recorder = Arc::new(Recorder {
             events: Mutex::new(Vec::new()),
-            health: snapshot,
+            report,
         });
         let supervisor = Supervisor::new(
             composer,
@@ -778,4 +784,59 @@ async fn started(probe: &Arc<Probe>) {
     tokio::time::timeout(Duration::from_secs(5), begun)
         .await
         .expect("the unit starts its first pass");
+}
+
+#[tokio::test]
+async fn ready_snapshots_advance_without_extra_transition_notifications() {
+    let network = network("advancing");
+    let ready = |position: u64| {
+        let block = |at| BlockRef {
+            position: BlockPosition(at),
+            height: BlockHeight(at),
+            hash: BlockHash(at.to_be_bytes().to_vec()),
+            parent: None,
+            timestamp: None,
+        };
+        Outcome::Status(Box::new(SyncStatus {
+            network: network.clone(),
+            checkpoint: Some(block(position)),
+            pending_tip: Some(block(position + 1)),
+            observed_tip: Some(block(position + 1)),
+            phase: SyncPhase::Ready,
+            unmatched_spends: Vec::new(),
+            backfill: None,
+        }))
+    };
+    let probe = Arc::new(Probe::new(&network, [ready(4), ready(8)], Outcome::Parks));
+    let supervised = Supervised::new(vec![probe.clone()]);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while probe.calls() < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both ready passes completed");
+    let current = supervised.health.borrow().networks()[0].clone();
+    assert_eq!(
+        current
+            .status
+            .checkpoint
+            .as_ref()
+            .map(|block| block.position),
+        Some(BlockPosition(8))
+    );
+    assert_eq!(
+        current
+            .status
+            .pending_tip
+            .as_ref()
+            .map(|block| block.position),
+        Some(BlockPosition(9))
+    );
+    assert_eq!(
+        supervised.events().len(),
+        1,
+        "only the initial Ready transition is an event"
+    );
+    supervised.shut_down().await;
 }

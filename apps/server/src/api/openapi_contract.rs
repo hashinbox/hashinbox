@@ -9,12 +9,11 @@ use serde_json::{Value, json};
 
 use super::{
     asset::Asset,
-    contract::{Address, Block, Completeness, Network, Start},
+    contract::{Address, Block, Completeness, Network},
     error::ErrorBody,
+    health::{Backfill, IndexFailure, IndexState, NetworkCheckpoint},
     history::{Fee, Movement, MovementKind, Transaction, TransactionPage},
     openapi,
-    sync::ResumeAccepted,
-    sync::{Backfill, BackfillCancelled, IndexFailure, IndexState, NetworkCheckpoint},
     wallet::Balance,
 };
 
@@ -80,7 +79,7 @@ fn every_protected_operation_declares_the_bearer_security_scheme() {
         "bearer"
     );
 
-    let public = ["/health/live", "/health/ready", "/openapi.json"];
+    let public = ["/healthz", "/openapi.json"];
     for (path, method, operation) in operations(&document) {
         let declared = operation["security"] == json!([{"bearerAuth": []}]);
         if public.contains(&path.as_str()) {
@@ -138,63 +137,32 @@ fn every_operation_has_a_unique_id_a_summary_and_described_responses() {
             );
         }
     }
-    assert_eq!(ids.len(), 17, "every route method has one operation");
+    assert_eq!(ids.len(), 11, "every route method has one operation");
 }
 
-/// A generator needs a named schema per union member: an anonymous inline
-/// object inside a `oneOf` becomes an unnamed client type.
+/// The closed state enum publishes one shape per wire discriminator.
 #[test]
-fn the_status_union_is_named_and_discriminated() {
+fn the_status_union_preserves_the_three_wire_shapes() {
     let document = document();
     let status = &document["components"]["schemas"]["Status"];
-
-    assert_eq!(status["discriminator"]["propertyName"], "kind");
-    assert_eq!(
-        status["discriminator"]["mapping"],
-        json!({
-            "pending": "#/components/schemas/PendingStatus",
-            "confirmed": "#/components/schemas/ConfirmedStatus",
-            "failed": "#/components/schemas/FailedStatus",
-        })
-    );
     let members = status["oneOf"].as_array().expect("status members");
     assert_eq!(members.len(), 3);
-    for member in members {
-        assert!(member["$ref"].is_string(), "{member} must be a reference");
-    }
-    for (name, kind) in [
-        ("PendingStatus", "pending"),
-        ("ConfirmedStatus", "confirmed"),
-        ("FailedStatus", "failed"),
-    ] {
-        let schema = &document["components"]["schemas"][name];
-        assert_eq!(schema["type"], "object", "{name}");
-        assert!(
-            schema["required"]
-                .as_array()
-                .is_some_and(|required| required.iter().any(|value| value == "kind")),
-            "{name} must require its discriminator"
-        );
-        let reference = schema["properties"]["kind"]["$ref"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{name}.kind must be a reference"));
-        let referenced = reference.rsplit('/').next().expect("component name");
-        assert_eq!(
-            document["components"]["schemas"][referenced]["enum"],
-            json!([kind]),
-            "{name}.kind is exactly `{kind}`"
-        );
-    }
-
-    for (name, schema) in document["components"]["schemas"]
-        .as_object()
-        .expect("schemas")
-    {
-        for member in schema["oneOf"].as_array().into_iter().flatten() {
-            assert!(
-                member.get("properties").is_none(),
-                "{name} publishes an anonymous object inside a oneOf"
-            );
+    for kind in ["pending", "confirmed", "failed"] {
+        let member = members
+            .iter()
+            .find(|member| member["properties"]["kind"]["enum"] == json!([kind]))
+            .expect("kind shape");
+        let required = member["required"].as_array().expect("required fields");
+        for field in [
+            "kind",
+            "block",
+            if kind == "failed" {
+                "reason"
+            } else {
+                "confirmations"
+            },
+        ] {
+            assert!(required.contains(&json!(field)), "{kind} requires {field}");
         }
     }
 }
@@ -301,23 +269,6 @@ fn required_properties_match_what_serde_emits() {
             .expect("backfill"),
         ),
         (
-            "ResumeAccepted",
-            serde_json::to_value(ResumeAccepted {
-                network: network.clone(),
-                cleared: None,
-            })
-            .expect("resume"),
-        ),
-        (
-            "BackfillCancelled",
-            serde_json::to_value(BackfillCancelled {
-                network: network.clone(),
-                watches: 2,
-                stopped: None,
-            })
-            .expect("cancelled backfill"),
-        ),
-        (
             "Transaction",
             serde_json::to_value(Transaction {
                 network,
@@ -355,67 +306,6 @@ fn required_properties_match_what_serde_emits() {
 
 /// Every add path states a birthday, in one shared vocabulary, and a caller
 /// that omits it is refused by the parser rather than given a default.
-#[test]
-fn every_add_path_requires_a_start_and_spells_it_the_same_way() {
-    let document = document();
-    let start = &document["components"]["schemas"]["Start"];
-    let members = start["oneOf"].as_array().expect("start members");
-
-    assert_eq!(members.len(), 2, "a sentinel and a position, nothing else");
-    assert_eq!(members[0]["type"], "string");
-    assert_eq!(members[0]["enum"], json!(["fresh"]));
-    assert_eq!(members[1]["type"], "integer");
-    assert_eq!(members[1]["format"], "int64");
-    assert_eq!(members[1]["minimum"], json!(0));
-
-    for schema in ["CreateWallet", "ImportWallet", "WatchAddress"] {
-        assert_eq!(
-            document["components"]["schemas"][schema]["properties"]["start"]["$ref"],
-            json!("#/components/schemas/Start"),
-            "{schema}.start is the shared vocabulary"
-        );
-        assert!(
-            document["components"]["schemas"][schema]["required"]
-                .as_array()
-                .is_some_and(|required| required.iter().any(|value| value == "start")),
-            "{schema} must require a stated birthday"
-        );
-    }
-
-    // The sentinel is `fresh`, never `tip`: it asserts that the key has no
-    // past, which is a fact about the key and not about the chain.
-    assert!(
-        !document.to_string().contains("\"tip\""),
-        "the birthday sentinel is `fresh`"
-    );
-
-    // And the schema is what the parser actually does: one string or one
-    // integer, with no wrapper object around either.
-    assert_eq!(
-        serde_json::to_value(Start::Fresh).expect("fresh"),
-        json!("fresh")
-    );
-    assert_eq!(
-        serde_json::to_value(Start::At(842_000)).expect("a position"),
-        json!(842_000),
-    );
-    assert_eq!(
-        serde_json::from_value::<Start>(json!(0)).expect("genesis"),
-        Start::At(0),
-        "zero is genesis, which is why the sentinel cannot be a number"
-    );
-    for refused in [
-        json!("tip"),
-        json!(-1),
-        json!({"state": "fresh"}),
-        json!(null),
-    ] {
-        assert!(
-            serde_json::from_value::<Start>(refused.clone()).is_err(),
-            "{refused} is not a stated birthday"
-        );
-    }
-}
 
 /// Both reads that can be short report it, in the same three words.
 #[test]

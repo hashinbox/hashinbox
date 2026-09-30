@@ -42,10 +42,12 @@ pub(crate) struct Outbox {
 }
 
 /// One transfer, its sender, and the signer that controls the sender.
+#[derive(Clone)]
 pub(crate) struct SendRequest {
     from: Address,
     transfer: Transfer,
     signer: Arc<dyn Signer>,
+    sweep: bool,
 }
 
 impl SendRequest {
@@ -55,7 +57,28 @@ impl SendRequest {
             from,
             transfer,
             signer,
+            sweep: false,
         }
+    }
+}
+
+impl SendRequest {
+    /// A remainder request, resolved and validated before signing.
+    pub(crate) fn sweep(
+        signer: Arc<dyn Signer>,
+        from: Address,
+        to: Address,
+    ) -> Result<Self, WalletError> {
+        super::destination(&from, &to)?;
+        Ok(Self {
+            from,
+            transfer: Transfer {
+                to,
+                amount: Lamport::ZERO,
+            },
+            signer,
+            sweep: true,
+        })
     }
 }
 
@@ -210,10 +233,57 @@ impl Outbox {
             .lifetime(min_slot)
             .await
             .map_err(|_| unavailable("Solana transaction preparation failed"))?;
-        let messages = self.messages(items, &lifetime.value)?;
-        let (min_slot, fees) = self.fees(&messages, lifetime.slot).await?;
+        let mut resolved = items.to_vec();
+        let mut messages = self.messages(&resolved, &lifetime.value)?;
+        let (mut min_slot, fees) = self.fees(&messages, lifetime.slot).await?;
+        Self::resolve(&mut resolved, &balances, &fees)?;
+        if items.iter().any(|item| item.sweep) {
+            for (item, (message, bytes, memo)) in resolved.iter().zip(&mut messages) {
+                *message =
+                    UnsignedTransaction::new(&item.from, &item.transfer, *memo, &lifetime.value);
+                *bytes = message
+                    .bytes()
+                    .map_err(|_| unavailable("Solana sweep message encoding failed"))?;
+            }
+            let (floor, final_fees) = self.fees(&messages, min_slot).await?;
+            min_slot = floor;
+            if final_fees != fees {
+                return Err(unavailable(
+                    "Solana sweep fee changed while resolving its amount",
+                ));
+            }
+        }
+        let items = resolved.as_slice();
+        let transactions = Self::sign_each(items, messages, min_slot, &lifetime.value).await?;
+        let mut floor_slot = min_slot;
+        for (index, transaction) in transactions.iter().enumerate() {
+            floor_slot = self.simulate(index, transaction, floor_slot).await?;
+        }
+        Ok((SignedBatch::simulated(transactions, floor_slot), fees))
+    }
+
+    /// Resolves source-final sweeps without counting incoming batch transfers.
+    fn resolve(
+        items: &mut [SendRequest],
+        balances: &[Lamport],
+        fees: &[Lamport],
+    ) -> Result<(), SendError> {
         let mut funds = Funds::default();
-        for (index, item) in items.iter().enumerate() {
+        for (index, item) in items.iter_mut().enumerate() {
+            if item.sweep {
+                let short = || {
+                    item_error(
+                        index,
+                        WalletErrorKind::InvalidAmount,
+                        "Solana sweep has no available funds after transfers and fees",
+                    )
+                };
+                let amount = funds
+                    .remaining(&item.from, balances[index], fees[index])
+                    .ok_or_else(short)?;
+                item.transfer =
+                    Transfer::new(item.transfer.to.clone(), amount).map_err(|_| short())?;
+            }
             funds
                 .require(
                     &item.from,
@@ -223,12 +293,7 @@ impl Outbox {
                 )
                 .map_err(|error| scoped(index, error))?;
         }
-        let transactions = Self::sign_each(items, messages, min_slot, &lifetime.value).await?;
-        let mut floor_slot = min_slot;
-        for (index, transaction) in transactions.iter().enumerate() {
-            floor_slot = self.simulate(index, transaction, floor_slot).await?;
-        }
-        Ok((SignedBatch::simulated(transactions, floor_slot), fees))
+        Ok(())
     }
 
     /// Each item's spendable balance, from one bracket of every account the
@@ -259,11 +324,11 @@ impl Outbox {
     /// and the last slot.
     async fn fees(
         &self,
-        messages: &[(UnsignedTransaction, Vec<u8>)],
+        messages: &[(UnsignedTransaction, Vec<u8>, Memo)],
         mut min_slot: u64,
     ) -> Result<(u64, Vec<Lamport>), SendError> {
         let mut fees = Vec::with_capacity(messages.len());
-        for (_, bytes) in messages {
+        for (_, bytes, _) in messages {
             let fee = self
                 .preflight
                 .fee(bytes, min_slot)
@@ -280,7 +345,7 @@ impl Outbox {
         &self,
         items: &[SendRequest],
         lifetime: &Lifetime,
-    ) -> Result<Vec<(UnsignedTransaction, Vec<u8>)>, SendError> {
+    ) -> Result<Vec<(UnsignedTransaction, Vec<u8>, Memo)>, SendError> {
         let mut memos = BTreeSet::new();
         let mut encoded = BTreeSet::new();
         let mut messages = Vec::with_capacity(items.len());
@@ -302,21 +367,21 @@ impl Outbox {
             if !encoded.insert(bytes.clone()) {
                 return Err(item_transaction(index, "Solana messages must be distinct"));
             }
-            messages.push((message, bytes));
+            messages.push((message, bytes, memo));
         }
         Ok(messages)
     }
 
     async fn sign_each(
         items: &[SendRequest],
-        messages: Vec<(UnsignedTransaction, Vec<u8>)>,
+        messages: Vec<(UnsignedTransaction, Vec<u8>, Memo)>,
         min_slot: u64,
         lifetime: &Lifetime,
     ) -> Result<Vec<SignedTransaction>, SendError> {
         let mut ids = BTreeSet::new();
         let mut envelopes = BTreeSet::new();
         let mut transactions = Vec::with_capacity(items.len());
-        for (index, (item, (message, _))) in items.iter().zip(messages).enumerate() {
+        for (index, (item, (message, _, _))) in items.iter().zip(messages).enumerate() {
             let signed = message
                 .sign(&item.from, lifetime.clone(), min_slot, item.signer.as_ref())
                 .await
@@ -476,6 +541,7 @@ mod tests {
                 amount: Lamport::from_atomic(lamports),
             },
             signer: key.clone(),
+            sweep: false,
         }
     }
 
@@ -669,6 +735,70 @@ mod tests {
             "unsupported Solana source account",
         );
         assert!(!busy(&outbox, signer.address()));
+        script.exhausted();
+    }
+
+    #[tokio::test]
+    async fn sweep_prices_final_bytes_and_preserves_lifetime_memo_and_context_floors() {
+        let signer = key(7);
+        let to = key(8).address().clone();
+        let memo = Memo::from_bytes([3; Memo::LENGTH]);
+        let transfer = |amount| Transfer {
+            to: to.clone(),
+            amount: Lamport::from_atomic(amount),
+        };
+        let provisional =
+            UnsignedTransaction::new(signer.address(), &transfer(0), memo, &lifetime());
+        let final_message =
+            UnsignedTransaction::new(signer.address(), &transfer(95), memo, &lifetime());
+        let final_bytes = final_message.bytes().unwrap();
+        let expected = final_message
+            .sign(signer.address(), lifetime(), 9, signer.as_ref())
+            .await
+            .unwrap();
+        let mut exchanges = bracketed(&[signer.address(), &to], json!([wallet(100), null]));
+        exchanges.push(fee(&provisional.bytes().unwrap(), 7, 8));
+        exchanges.push(fee(&final_bytes, 8, 9));
+        exchanges.push(simulation(
+            &expected,
+            9,
+            json!({"context":{"slot":11},"value":{"err":null}}),
+        ));
+        let script = Script::exchanges(exchanges);
+        let request = SendRequest::sweep(signer.clone(), signer.address().clone(), to).unwrap();
+        let (SignedBatch(prepared), fees) = outbox(&script, Registrar::closed())
+            .with_memos([memo])
+            .prepare(&[request])
+            .await
+            .unwrap();
+        assert_eq!(prepared[0].transaction, expected);
+        assert_eq!(prepared[0].floor_slot, 11);
+        assert_eq!(fees, [Lamport::from_atomic(5)]);
+        script.exhausted();
+    }
+
+    #[test]
+    fn sweep_resolves_after_prior_amounts_and_fees_and_refuses_empty_funds() {
+        let signer = key(7);
+        let to = key(8).address().clone();
+        let script = Script::exchanges(Vec::<Exchange>::new());
+        for balance in [20, 100] {
+            let mut items = [
+                item(&signer, &to, 10),
+                SendRequest::sweep(signer.clone(), signer.address().clone(), to.clone()).unwrap(),
+            ];
+            let answer = Outbox::resolve(
+                &mut items,
+                &[Lamport::from_atomic(balance); 2],
+                &[Lamport::from_atomic(5); 2],
+            );
+            if balance == 20 {
+                assert_eq!(answer.unwrap_err().failed_index, Some(1));
+            } else {
+                answer.unwrap();
+                assert_eq!(items[1].transfer.amount, Lamport::from_atomic(80));
+            }
+        }
         script.exhausted();
     }
 

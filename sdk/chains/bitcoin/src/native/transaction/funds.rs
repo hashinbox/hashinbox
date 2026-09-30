@@ -17,12 +17,18 @@ pub struct Funds {
     pub transfers: Vec<Transfer>,
     /// Receives this source's change.
     pub change: Address,
+    /// Receives the entire residual after fixed transfers and this source's fee
+    /// share. Unlike change, a dust residual is rejected rather than discarded.
+    pub sweep: Option<Address>,
 }
 
 impl Funds {
     /// Inputs minus transfers, sorting the inputs into display order.
     pub(super) fn surplus(&mut self) -> Result<u64, Error> {
-        if self.available.is_empty() || self.transfers.is_empty() {
+        if self.available.is_empty() && self.sweep.is_some() {
+            return Err(Error::insufficient("Bitcoin sweep has no available UTXOs"));
+        }
+        if self.available.is_empty() || (self.transfers.is_empty() && self.sweep.is_none()) {
             return Err(Error::invalid_transaction(
                 "each Bitcoin grouped source needs inputs and recipients",
             ));
@@ -58,6 +64,7 @@ mod tests {
             ],
             transfers: vec![Transfer::new(address.clone(), Satoshi::from_atomic(25_000))],
             change: address.clone(),
+            sweep: None,
         };
         assert_eq!(funds.surplus().unwrap(), 75_000);
         assert_eq!(

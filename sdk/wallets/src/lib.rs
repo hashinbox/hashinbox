@@ -24,7 +24,7 @@ pub use factory::{AddressParser, Dependency, FactoryProfile, Generation, Origin,
 pub use history::{History, ObservedTransaction, TransactionPage, TransactionStatus};
 pub use indexing::{Holder, Page, Subject};
 pub use pending::PendingJoin;
-pub use sender::{Authorship, SendError, SendFuture, Sender, Transfer};
+pub use sender::{Amount, Authorship, SendError, SendFuture, Sender, Transfer};
 #[cfg(feature = "submissions")]
 pub use submissions::Submissions;
 pub use wallet::{Author, FutureResult, SingleSender, TransactionFactory, Wallet};

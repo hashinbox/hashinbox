@@ -48,7 +48,7 @@ impl Config {
     /// The database file as the backend requires it: absolute, resolved
     /// against the working directory. Validation runs it so a path that cannot
     /// be resolved fails at configuration time, before any chain connects.
-    fn resolved_path(&self) -> Result<PathBuf, AnyError> {
+    pub(crate) fn resolved_path(&self) -> Result<PathBuf, AnyError> {
         if self.path.as_os_str().is_empty() {
             return Err("storage path must not be empty".into());
         }
@@ -144,5 +144,44 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+    #[tokio::test]
+    async fn network_purge_preserves_encrypted_application_keys() {
+        use indexing::Purging as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("server.db");
+        let config: Config = serde_json::from_value(serde_json::json!({"path": path})).unwrap();
+        let store = config.open().await.unwrap();
+        let registry = crate::registry::Registry::open(
+            &path,
+            zeroize::Zeroizing::new("offline fixture passphrase".into()),
+        )
+        .await
+        .unwrap();
+        registry
+            .keep(
+                "saved-key",
+                &"btc".parse().unwrap(),
+                wallets::SecretBytes::new([42; 32]),
+            )
+            .await
+            .unwrap();
+        store
+            .repository()
+            .purge_network(&Network::new(
+                indexing::ChainName::new("bitcoin"),
+                "regtest",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(registry.ids().await, ["saved-key"]);
+        drop(registry);
+        let reopened = crate::registry::Registry::open(
+            &path,
+            zeroize::Zeroizing::new("offline fixture passphrase".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reopened.ids().await, ["saved-key"]);
     }
 }

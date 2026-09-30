@@ -496,6 +496,7 @@ contract!(
 
 contract!(
     BalanceContract,
+    activity_pages_preserve_every_effect_and_native_order,
     folds_the_movements_of_one_holding,
     never_charges_a_settled_fee_twice,
     charges_a_fee_to_the_fee_asset_only,
@@ -506,6 +507,7 @@ contract!(
     an_observed_total_starts_from_the_rows_already_stored,
     a_repeated_commit_moves_an_observed_total_by_nothing,
     an_observed_deficit_reads_as_overdrawn,
+    a_watched_total_preserves_deficits_until_credits_arrive,
     a_movement_named_like_a_fee_still_commits,
     a_birthday_at_the_first_block_claims_nothing_uninspected,
 );

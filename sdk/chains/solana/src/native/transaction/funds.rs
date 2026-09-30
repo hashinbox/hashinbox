@@ -12,6 +12,15 @@ pub struct Funds {
 }
 
 impl Funds {
+    /// The observed balance left after earlier batch items and this fee.
+    /// Incoming transfers in the batch are deliberately not funding.
+    #[must_use]
+    pub fn remaining(&self, from: &Address, balance: Lamport, fee: Lamport) -> Option<Lamport> {
+        balance
+            .checked_sub(self.required.get(from).copied().unwrap_or(Lamport::ZERO))?
+            .checked_sub(fee)
+    }
+
     /// Adds one transfer of `amount` plus `fee` from `from`, whose observed
     /// balance is `balance`, and checks the sender can still pay everything
     /// added so far.

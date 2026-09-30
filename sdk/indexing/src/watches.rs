@@ -133,7 +133,9 @@ impl Watches {
     ///
     /// `persisted` is the checkpoint the caller just read; the permit's own
     /// checkpoint is the one a `Birthday::Fresh` birthday is derived from, and no
-    /// block may move past it while the permit is held.
+    /// block may move past it while the permit is held. `fallback` is a verified
+    /// source tip used only when the permit still has no committed checkpoint;
+    /// it never becomes the admission gate's expected checkpoint.
     pub(crate) async fn add(
         &self,
         store: &dyn WatchStore,
@@ -141,6 +143,7 @@ impl Watches {
         subject: &dyn Holder,
         start: Birthday,
         persisted: Option<BlockRef>,
+        fallback: Option<&BlockRef>,
     ) -> Result<Watch, IndexError> {
         self.validate(subject)?;
         let permit = self.admission.publication(persisted).await?;
@@ -151,7 +154,7 @@ impl Watches {
             id: id.to_owned(),
             address: subject.address().clone(),
             asset: subject.asset().clone(),
-            start: Self::birthday(start, permit.checkpoint())?,
+            start: Self::birthday(start, permit.checkpoint().or(fallback))?,
         };
         // Refused here, synchronously, under the permit that fixed the
         // checkpoint the answer is relative to. A start the index cannot
@@ -288,12 +291,13 @@ impl Watches {
     ///
     /// Two short reads rather than one held lock: the publication permit
     /// [`Self::add`] holds already excludes every other registration.
-    fn existing(
+    pub(crate) fn existing(
         &self,
         id: &str,
         subject: &dyn Holder,
         start: Birthday,
     ) -> Result<Option<Watch>, IndexError> {
+        self.validate(subject)?;
         let restated = |watch: &Watch| {
             watch.address == *subject.address()
                 && watch.asset == *subject.asset()
@@ -323,7 +327,11 @@ impl Watches {
     ) -> Result<crate::BlockPosition, IndexError> {
         match (start, checkpoint) {
             (Birthday::At(position), _) => Ok(position),
-            (Birthday::Fresh, None) => Ok(crate::BlockPosition(0)),
+            (Birthday::Fresh, None) => Err(IndexError::new(
+                IndexErrorKind::Store,
+                "a fresh watch requires a checkpoint or verified source tip",
+                false,
+            )),
             (Birthday::Fresh, Some(block)) => block.position.checked_successor().ok_or_else(|| {
                 IndexError::new(
                     IndexErrorKind::Store,

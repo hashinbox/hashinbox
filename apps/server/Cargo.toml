@@ -34,6 +34,8 @@ hex.workspace = true
 http-server = { path = "../../packages/http-server" }
 indexing = { path = "../../sdk/indexing" }
 json-rpc = { path = "../../packages/json-rpc" }
+ring = "=0.17.14"
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "cache"] }
 sdk-config = { path = "../../sdk/config", features = ["toml"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true

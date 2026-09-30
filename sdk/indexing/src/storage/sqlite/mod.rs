@@ -52,6 +52,7 @@
 //! interleave into, and the whole compare-and-set vocabulary — versions,
 //! conditions, stored versions — is unnecessary rather than merely cheaper.
 
+mod activity;
 mod balance;
 mod blocks;
 mod effects;

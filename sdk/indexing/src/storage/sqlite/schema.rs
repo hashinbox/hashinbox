@@ -10,7 +10,7 @@
 
 use rusqlite::{Connection, types::FromSql};
 
-use super::{Database, IndexError, failure, steps::MIGRATIONS, store};
+use super::{Database, IndexError, Tables, failure, steps::MIGRATIONS, store};
 
 /// `PRAGMA application_id` of every file this adapter creates. A file carrying
 /// any other value is some other application's and is refused rather than
@@ -81,14 +81,28 @@ impl Database {
             return Err(store("sqlite file carries a schema newer than this build"));
         }
         for (index, step) in MIGRATIONS.iter().enumerate().skip(applied) {
-            let version = index + 1;
-            connection
-                .execute_batch(&format!(
-                    "BEGIN; {step} PRAGMA user_version = {version}; COMMIT;"
-                ))
-                .map_err(|error| failure(&error, "failed to apply a sqlite schema step"))?;
+            Self::step(connection, index + 1, step)?;
         }
         Ok(())
+    }
+
+    /// The schema change, exact data migration and version become visible together.
+    fn step(connection: &Connection, version: usize, step: &str) -> Result<(), IndexError> {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| failure(&error, "failed to begin a schema step"))?;
+        transaction
+            .execute_batch(step)
+            .map_err(|error| failure(&error, "failed to apply a sqlite schema step"))?;
+        if version == 3 {
+            Tables::seed_balances(&transaction)?;
+        }
+        transaction
+            .execute_batch(&format!("PRAGMA user_version = {version};"))
+            .map_err(|error| failure(&error, "failed to record a schema step"))?;
+        transaction
+            .commit()
+            .map_err(|error| failure(&error, "failed to commit a schema step"))
     }
 
     /// Whether the file already holds an object of its own.
@@ -167,6 +181,73 @@ mod schema_test {
             error.message,
             "sqlite file carries a schema newer than this build"
         );
+    }
+
+    #[test]
+    fn version_two_balances_migrate_exactly_and_reads_use_the_saved_total() {
+        use super::super::{
+            Repository,
+            database_test::{block_on, network},
+        };
+        use crate::{Address, AssetId, BalanceQuery, BalanceStore, Completeness};
+        let directory = TempDir::new().expect("directory");
+        let path = directory.path().join("version-two.db");
+        let old = Connection::open(&path).expect("old file");
+        for step in MIGRATIONS.iter().take(2) {
+            old.execute_batch(step).expect("old schema");
+        }
+        old.execute_batch(&format!(
+            "
+            PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = 2;
+            INSERT INTO watch (chain,network,asset,address,id,birthday) VALUES
+                ('chain','testnet','native','a','a',0), ('chain','testnet','native','b','b',0);
+            INSERT INTO balance_movement VALUES
+                ('chain','testnet','a','native',1,'tx','credit',0,1,0,0,
+                 '18446744073709551616',NULL),
+                ('chain','testnet','a','native',1,'tx','debit',1,1,1,0,'1',NULL),
+                ('chain','testnet','b','native',1,'tx','debit',1,1,2,0,'12',NULL);"
+        ))
+        .expect("old rows");
+        drop(old);
+        let repository = Repository::new(Database::open(&path).expect("migration"));
+        let inspect = Connection::open(&path).expect("inspect");
+        let saved: Vec<String> = inspect
+            .prepare("SELECT balance FROM watch ORDER BY address")
+            .expect("query")
+            .query_map([], |row| row.get(0))
+            .expect("rows")
+            .collect::<rusqlite::Result<_>>()
+            .expect("amounts");
+        assert_eq!(saved, ["18446744073709551615", "-12"]);
+        // Deliberately corrupt the independent verification input. A normal read
+        // must use the saved total; the explicit verification must detect disagreement.
+        inspect
+            .execute("UPDATE balance_movement SET amount = '0'", [])
+            .expect("mutation");
+        let read = |address: &str| {
+            block_on(repository.balance(BalanceQuery {
+                address: Address::new(network(), address),
+                asset: AssetId {
+                    chain: network().chain,
+                    asset: "native".to_owned(),
+                },
+            }))
+            .expect("persisted read")
+        };
+        assert_eq!(read("a").amount.to_string(), "18446744073709551615");
+        assert_eq!(read("b").completeness, Completeness::Overdrawn);
+        let error = block_on(repository.verify_balance(BalanceQuery {
+            address: Address::new(network(), "a"),
+            asset: AssetId {
+                chain: network().chain,
+                asset: "native".to_owned(),
+            },
+        }))
+        .expect_err("independent verification detects changed effects");
+        assert_eq!(error.kind, crate::IndexErrorKind::Store);
+        assert!(!error.retryable);
+        drop(repository);
+        drop(Database::open(&path).expect("migration must not seed again on reopen"));
     }
 
     /// The three settings a benchmark is only honest with.

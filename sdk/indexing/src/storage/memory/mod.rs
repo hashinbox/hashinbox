@@ -47,6 +47,8 @@
 //! Atomicity is expressed the only way a map-backed store can: a commit mutates
 //! a copy and installs it, so a rejected change leaves every row as it was.
 
+mod activity;
+mod balances;
 mod commits;
 mod observations;
 
@@ -73,7 +75,8 @@ struct Tables {
     /// `sqlite`'s keyset page reads, rather than a sort this store would have to
     /// perform.
     history: HistoryRows,
-    credits: BTreeMap<(Network, String, BlockHeight, MovementId), BlockCredit>,
+    credits:
+        BTreeMap<(Network, String, BlockHeight, MovementId), (crate::BlockPosition, BlockCredit)>,
     outputs: BTreeMap<(Network, String, OutputId), IndexedOutput>,
     /// Every outpoint a required spend has named, matched or not, so no
     /// historical write can put one of them back.
@@ -98,6 +101,7 @@ struct Tables {
     /// file.
     identities: BTreeMap<String, Network>,
     watches: BTreeMap<(Network, AssetId, String), Watch>,
+    balances: BTreeMap<(Network, AssetId, String), num_bigint::BigInt>,
     /// How far each observation has been inspected, by its own identity. One row
     /// per observation, not per address: a claim belongs to the watch that earned
     /// it under its own birthday.
@@ -324,35 +328,24 @@ impl BalanceStore for Repository {
     fn balance<'a>(&'a self, query: BalanceQuery) -> BoxFuture<'a, Result<Balance, IndexError>> {
         Box::pin(async move {
             query.validate()?;
-            self.read(|tables| Self::folded(&query, tables))
+            self.read(|tables| Self::settled(&query, tables))
         })
     }
 }
 
 impl Repository {
-    /// Every stored transaction of the subject, and every credit its block
-    /// made it with no transaction to name, applied to one [`Fold`].
-    fn folded(query: &BalanceQuery, tables: &Tables) -> Result<Balance, IndexError> {
-        let mut ledger = Fold::new(query);
-        let settlement = tables
-            .settlements
-            .get(&query.address.network)
-            .copied()
-            .unwrap_or(FeeSettlement::Charged);
-        let rows = tables
-            .history
-            .iter()
-            .filter(|((network, address, ..), _)| Self::owns(network, address, &query.address));
-        for (_, transaction) in rows {
-            ledger.apply(transaction, settlement)?;
-        }
-        let credited = tables
-            .credits
-            .iter()
-            .filter(|((network, address, ..), _)| Self::owns(network, address, &query.address));
-        for (_, credit) in credited {
-            ledger.apply_credit(credit)?;
-        }
+    /// The stored watched amount (or an unwatched fold), with one snapshot's provenance.
+    fn settled(query: &BalanceQuery, tables: &Tables) -> Result<Balance, IndexError> {
+        let key = (
+            query.address.network.clone(),
+            query.asset.clone(),
+            query.address.value.clone(),
+        );
+        let net = match tables.balances.get(&key) {
+            Some(net) => net.clone(),
+            None => Self::recomputed(query, tables)?,
+        };
+        let ledger = Fold::from_net(query, net);
         let mut balance = ledger.balance(tables.checkpoints.get(&query.address.network).cloned());
         // Provenance only ever weakens the arithmetic's own answer: `Overdrawn`
         // is a proof the rows carry, and a claim about the range cannot talk it

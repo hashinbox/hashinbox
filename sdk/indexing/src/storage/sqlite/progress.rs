@@ -12,11 +12,6 @@
 //! redoing, so what this refuses is a claim whose author was reading a different
 //! value (`docs/design/030 §8 (ex-032)`, `crate::Progress`).
 //!
-//! **No balance is written here, and that is the design.** A settled total is
-//! the fold in `effects.rs` over the `balance_movement` rows this same commit
-//! wrote, recomputed per read. The alternative — a running pair maintained
-//! forward on this row — was a second answer to one question that had to be
-//! kept equal to the first by hand, and it is gone.
 
 use rusqlite::{Connection, Transaction, params};
 
@@ -100,7 +95,7 @@ impl Tables {
     pub(super) fn disclaim(&self, transaction: &Transaction<'_>) -> Result<(), IndexError> {
         transaction
             .execute(
-                "UPDATE watch SET
+                "UPDATE watch SET balance = '0',
                      indexed_position = NULL, indexed_height = NULL, indexed_hash = NULL,
                      indexed_parent_position = NULL, indexed_parent_hash = NULL,
                      indexed_timestamp = NULL

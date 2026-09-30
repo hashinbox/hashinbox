@@ -198,7 +198,11 @@ impl Signer for Fixture {
 }
 
 impl SingleSender for Fixture {
-    fn send<'a>(&'a self, _to: Address, _amount: Decimal) -> FutureResult<'a, TransactionId> {
+    fn send<'a>(
+        &'a self,
+        _to: Address,
+        _amount: wallets::Amount,
+    ) -> FutureResult<'a, TransactionId> {
         Box::pin(async { Ok(TransactionId::new("single")) })
     }
 }

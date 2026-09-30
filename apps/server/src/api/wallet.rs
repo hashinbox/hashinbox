@@ -1,5 +1,3 @@
-use std::fmt;
-
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
@@ -7,19 +5,17 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use utoipa_axum::{router::OpenApiRouter, routes};
-use zeroize::Zeroize;
 
 use super::{
     Payments,
     asset::AssetTag,
-    contract::{Completeness, Start, Wallet, WalletPath},
+    contract::{Completeness, Wallet, WalletPath},
     error::{Error, ErrorBody},
 };
 
 pub(super) fn routes() -> OpenApiRouter<Payments> {
     OpenApiRouter::new()
         .routes(routes!(create, list))
-        .routes(routes!(import))
         .routes(routes!(read))
         .routes(routes!(balance))
 }
@@ -31,10 +27,6 @@ struct CreateWallet {
     /// The configured asset tag the new wallet holds (`GET /v1/assets`).
     #[schema(value_type = String, pattern = "^[a-z0-9][a-z0-9-]{0,31}$")]
     asset: AssetTag,
-    /// Where to begin observing the new address. A generated key has no past,
-    /// so `"fresh"` is the honest answer; a position is accepted because the
-    /// same body registers a key an operator may have used elsewhere first.
-    start: Start,
 }
 
 #[utoipa::path(
@@ -42,12 +34,8 @@ struct CreateWallet {
     path = "/v1/wallets",
     operation_id = "create_wallet",
     summary = "Generate a wallet for one configured asset",
-    description = "Generates a wallet of one configured asset. The key never leaves the server; \
-        it is persisted unencrypted in the storage registry so the wallet survives a restart \
-        (development custody, not an HSM or KMS). `start` states the birthday to index from: \
-        `\"fresh\"` for a key with no past, or a native block position, whose earlier history \
-        is then backfilled. The call is \
-        not idempotent: a retried request mints a second wallet and a second key.",
+    description = "Generates a wallet, encrypts its key in the application registry, then \
+        watches it from creation. Keys never leave the server. Retrying creates another wallet.",
     request_body = CreateWallet,
     security(("bearerAuth" = [])),
     responses(
@@ -67,89 +55,20 @@ async fn create(
     request: Result<Json<CreateWallet>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Wallet>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let wallet = payments
+    let material = payments
         .wallets
-        .create(&request.asset)
+        .secret(&request.asset)
         .await
         .map_err(Error::by_asset)?;
-    payments
-        .registered(wallet, request.asset, request.start)
-        .await
-}
-
-/// Secret key text in its chain's textual form; redacted in `Debug` and
-/// zeroized on drop. It is never serialized.
-#[derive(Deserialize)]
-#[serde(transparent)]
-struct SecretText(String);
-
-impl fmt::Debug for SecretText {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SecretText(<redacted>)")
-    }
-}
-
-impl Drop for SecretText {
-    fn drop(&mut self) {
-        self.0.zeroize();
-    }
-}
-
-/// `POST /v1/wallets/import` body: register a wallet from a caller-held key.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-struct ImportWallet {
-    /// The configured asset tag the wallet holds.
-    #[schema(value_type = String, pattern = "^[a-z0-9][a-z0-9-]{0,31}$")]
-    asset: AssetTag,
-    /// The private key in the textual form the asset's chain defines
-    /// (`docs/API.md` lists the built-in chains' forms).
-    #[schema(value_type = String, format = Password)]
-    secret: SecretText,
-    /// Where to begin observing the imported address: a native block position
-    /// for a key with history, or `"fresh"` for one that has never been used.
-    start: Start,
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/wallets/import",
-    operation_id = "import_wallet",
-    summary = "Register a wallet from a caller-held private key",
-    description = "Registers a wallet from a private key. The asset's chain parses the key text; \
-        the wallet is indexed from `start` — a native block position, whose history below the \
-        checkpoint is backfilled, or `\"fresh\"` for the block after the current checkpoint — \
-        and persisted unencrypted in the storage registry (development custody, not an HSM or \
-        KMS). A position further below the checkpoint than the index's policy allows answers \
-        400 naming the earliest acceptable start.",
-    request_body = ImportWallet,
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 201, description = "Wallet imported and registered for indexing", body = Wallet),
-        (status = 400, description = "Malformed body, asset tag, or key text", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Asset is not configured", body = ErrorBody),
-        (status = 409, description = "Wallet ID or address is already registered",
-            body = ErrorBody),
-        (status = 503, description = "Wallet registration is unavailable", body = ErrorBody)
-    ),
-    tag = "wallets"
-)]
-async fn import(
-    State(payments): State<Payments>,
-    request: Result<Json<ImportWallet>, JsonRejection>,
-) -> Result<(StatusCode, Json<Wallet>), Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
-    let secret =
-        wallets::SecretBytes::from_hex(&request.secret.0).map_err(|_| Error::invalid_secret())?;
     let wallet = payments
         .wallets
-        .from(&request.asset, secret)
+        .from(
+            &request.asset,
+            wallets::SecretBytes::new(material.as_bytes()),
+        )
         .await
         .map_err(Error::by_asset)?;
-    payments
-        .registered(wallet, request.asset, request.start)
-        .await
+    payments.registered(wallet, request.asset, material).await
 }
 
 /// `GET /v1/wallets`: every wallet and watched address.

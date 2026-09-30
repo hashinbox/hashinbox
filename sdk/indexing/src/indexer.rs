@@ -231,7 +231,7 @@ where
 /// by the hot set every pass reads.
 impl<S, I, R> Watching for Indexer<S, I, R>
 where
-    S: Send + Sync,
+    S: BlockSource,
     I: BlockInterpreter,
     R: Repository,
 {
@@ -243,9 +243,30 @@ where
     ) -> BoxFuture<'a, Result<Watch, IndexError>> {
         Box::pin(async move {
             self.watches.load(&self.repository).await?;
+            if let Some(existing) = self.watches.existing(id, subject, start)? {
+                return Ok(existing);
+            }
             let persisted = self.repository.checkpoint(self.network()).await?;
+            let fallback = if start == Birthday::Fresh && persisted.is_none() {
+                let tip = self.source.tip().await?;
+                if self.source.canonical_at(tip.position).await?.as_ref() != Some(&tip) {
+                    return Err(IndexError::disconnected(
+                        "fresh watch tip is no longer canonical",
+                    ));
+                }
+                Some(tip)
+            } else {
+                None
+            };
             self.watches
-                .add(&self.repository, id, subject, start, persisted)
+                .add(
+                    &self.repository,
+                    id,
+                    subject,
+                    start,
+                    persisted,
+                    fallback.as_ref(),
+                )
                 .await
         })
     }

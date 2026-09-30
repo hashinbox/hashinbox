@@ -595,3 +595,156 @@ fn a_listener_that_registers_another_listener_does_not_deadlock() {
         Some(2)
     );
 }
+
+/// Only recent sparse slots exist; asking for the genesis range is terminal.
+#[derive(Clone)]
+struct Pruned {
+    tip: Arc<std::sync::atomic::AtomicU64>,
+    offline: Arc<AtomicBool>,
+    pause: Option<Arc<(AtomicBool, std::sync::Barrier, std::sync::Barrier)>>,
+}
+
+impl Pruned {
+    fn reference(position: u64) -> BlockRef {
+        let mut reference = block(position);
+        reference.height = BlockHeight(if position == 100 { 10 } else { 11 });
+        reference.parent = Some(BlockParent {
+            position: BlockPosition(if position == 100 { 97 } else { 100 }),
+            hash: BlockHash(
+                (if position == 100 { 97_u64 } else { 100 })
+                    .to_be_bytes()
+                    .to_vec(),
+            ),
+        });
+        reference
+    }
+}
+
+impl ChainTips for Pruned {
+    fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, indexing::SourceError>> {
+        Box::pin(async move {
+            assert!(!self.offline.load(Ordering::SeqCst), "unexpected RPC");
+            let position = self.tip.load(Ordering::SeqCst);
+            if let Some(pause) = &self.pause
+                && pause.0.swap(false, Ordering::SeqCst)
+            {
+                pause.1.wait();
+                pause.2.wait();
+            }
+            Ok(Self::reference(position))
+        })
+    }
+
+    fn confirmed_tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, indexing::SourceError>> {
+        self.tip()
+    }
+}
+
+impl BlockSource for Pruned {
+    type Block = Block;
+
+    fn blocks<'a>(
+        &'a self,
+        start: BlockPosition,
+        end: BlockPosition,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<Block>, indexing::SourceError>> {
+        Box::pin(async move {
+            if start.0 < 100 {
+                return Err(indexing::SourceError::new(
+                    "required position was pruned",
+                    false,
+                ));
+            }
+            Ok([100, 103]
+                .into_iter()
+                .filter(|position| start.0 <= *position && *position <= end.0)
+                .take(limit)
+                .map(|position| Block(Self::reference(position)))
+                .collect())
+        })
+    }
+
+    fn canonical_at<'a>(
+        &'a self,
+        position: BlockPosition,
+    ) -> BoxFuture<'a, Result<Option<BlockRef>, indexing::SourceError>> {
+        Box::pin(async move {
+            assert!(!self.offline.load(Ordering::SeqCst), "unexpected RPC");
+            Ok(matches!(position.0, 100 | 103).then(|| Self::reference(position.0)))
+        })
+    }
+}
+
+#[test]
+fn fresh_before_first_sync_uses_the_verified_tip_without_requiring_pruned_history() {
+    use indexing::Checkpoint;
+    let memory = memory::Repository::new();
+    let source = Pruned {
+        tip: Arc::new(std::sync::atomic::AtomicU64::new(100)),
+        offline: Arc::new(AtomicBool::new(false)),
+        pause: None,
+    };
+    let index = Indexer::new(
+        source.clone(),
+        Interpreter,
+        memory.clone(),
+        SyncConfig::new(&network(), SyncPolicy::new(100)).expect("config"),
+    );
+    let owner = subject("new");
+    let watched = block_on(index.watch("new", &owner, Birthday::Fresh)).expect("watch");
+    assert_eq!(watched.start, BlockPosition(101));
+    assert_eq!(
+        block_on(index.checkpoint(&network())).expect("checkpoint"),
+        None,
+        "the source tip must not masquerade as a persisted CAS checkpoint"
+    );
+    source.offline.store(true, Ordering::SeqCst);
+    assert_eq!(
+        block_on(index.watch("new", &owner, Birthday::Fresh)).expect("repeat"),
+        watched
+    );
+    source.offline.store(false, Ordering::SeqCst);
+    block_on(index.sync()).expect("anchor without pruned history");
+    source.tip.store(103, Ordering::SeqCst);
+    block_on(index.sync()).expect("sparse successor");
+    assert_eq!(indexed(&memory, &owner.address).len(), 1);
+    source.offline.store(true, Ordering::SeqCst);
+    let later = block_on(index.watch("later", &subject("later"), Birthday::Fresh))
+        .expect("persisted checkpoint needs no RPC");
+    assert_eq!(later.start, BlockPosition(104));
+}
+
+#[test]
+fn a_commit_during_fresh_tip_lookup_overrides_the_fallback_birthday() {
+    let pause = Arc::new((
+        AtomicBool::new(true),
+        std::sync::Barrier::new(2),
+        std::sync::Barrier::new(2),
+    ));
+    let source = Pruned {
+        tip: Arc::new(std::sync::atomic::AtomicU64::new(100)),
+        offline: Arc::new(AtomicBool::new(false)),
+        pause: Some(pause.clone()),
+    };
+    let index = Arc::new(Indexer::new(
+        source.clone(),
+        Interpreter,
+        memory::Repository::new(),
+        SyncConfig::new(&network(), SyncPolicy::new(100)).expect("config"),
+    ));
+    let registering = index.clone();
+    let thread = std::thread::spawn(move || {
+        block_on(registering.watch("new", &subject("new"), Birthday::Fresh))
+    });
+    pause.1.wait();
+    source.tip.store(103, Ordering::SeqCst);
+    block_on(index.sync()).expect("commit while the RPC is in flight");
+    pause.2.wait();
+    let watch = thread.join().expect("thread").expect("watch");
+    assert_eq!(
+        watch.start,
+        BlockPosition(104),
+        "the gate's committed line wins"
+    );
+}

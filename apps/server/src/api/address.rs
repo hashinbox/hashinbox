@@ -9,7 +9,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::{
     Payments,
     asset::AssetTag,
-    contract::{Start, Wallet},
+    contract::Wallet,
     error::{Error, ErrorBody},
 };
 
@@ -26,10 +26,6 @@ struct WatchAddress {
     asset: AssetTag,
     /// Address text in any form the asset's chain accepts.
     address: String,
-    /// Where to begin observing the address: a native block position, whose
-    /// history below the checkpoint is backfilled, or `"fresh"` for an
-    /// address that has never been used.
-    start: Start,
 }
 
 #[utoipa::path(
@@ -37,12 +33,8 @@ struct WatchAddress {
     path = "/v1/addresses",
     operation_id = "watch_address",
     summary = "Observe an address without its key",
-    description = "Observes an address of a configured asset without a key. The entry is a \
-        watch-only wallet: its history (`GET /v1/wallets/{id}/transactions`) is indexed from \
-        `start` — a native block position, whose earlier history is backfilled, or `\"fresh\"` \
-        for the block after the current checkpoint. A position further below the checkpoint \
-        than the index's policy allows answers 400 naming the earliest acceptable start. Sends \
-        answer 422.",
+    description = "Observes an address from registration without its key. The entry is \
+        watch-only; sending from it answers 422.",
     request_body = WatchAddress,
     security(("bearerAuth" = [])),
     responses(
@@ -61,7 +53,5 @@ async fn watch(
     request: Result<Json<WatchAddress>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Wallet>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    payments
-        .observed(request.asset, &request.address, request.start)
-        .await
+    payments.observed(request.asset, &request.address).await
 }

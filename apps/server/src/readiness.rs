@@ -49,6 +49,10 @@ impl Health {
 }
 
 impl SyncMonitor for Health {
+    fn network_observed(&self, health: &indexing::NetworkHealth) {
+        self.report.network_observed(health);
+    }
+
     fn network_changed(&self, event: &NetworkEvent) {
         let health = &event.health;
         eprintln!(

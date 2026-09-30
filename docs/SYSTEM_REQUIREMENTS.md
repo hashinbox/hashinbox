@@ -1,216 +1,143 @@
 # System requirements
 
-Canonical scope, ownership rules, and behavioral invariants. `ARCHITECTURE.md` explains the
-structure; current source and rustdoc are authoritative for exact signatures. Per-chain module
-layout is in `docs/CHAIN_LAYOUT.md`. Indexing and storage detail: `docs/INDEXING.md`. HTTP
-surface and configuration: `docs/API.md`.
+Product scope and acceptance criteria. [ARCHITECTURE.md](../ARCHITECTURE.md)
+defines ownership; crate READMEs and source define exact APIs. OpenAPI is generated
+from the server. Historical plans do not override these requirements.
 
-## Product boundary
+## Product
 
-One API process (`payment-server`, `apps/server`) MUST:
+One `payment-server` process composes Bitcoin, Ethereum and Solana, an embedded
+index, one SQLite file and an encrypted application wallet registry. It must:
 
-1. initialize Bitcoin, Ethereum, and Solana RPC clients and embedded indexers;
-2. generate, import, or watch addresses through one chain-neutral wallet collection keyed by
-   `payment_api::AssetTag`;
-3. return a wallet's canonical address, exact balance, and complete paginated history;
-4. send one transfer or a non-empty ordered batch;
-5. continuously index the authoritative wallet address/birthday set;
-6. survive restarts without losing checkpoints, history, live outputs, or retained reorg recovery;
-7. expose business and HTTP behavior without naming a concrete chain after composition.
+- Create wallets, persist their keys, and return canonical public addresses.
+- Observe public addresses without keys; index from explicit resolved birthdays.
+- Return exact confirmed/pending balances and paginated transaction history, with
+  honest completeness. Balance uses chain-defined finality, not an HTTP-selected
+  confirmation depth; this supersedes the older optional depth-refold proposal.
+- Submit fixed transfers or explicit spend-all transfers, singly or in ordered batches.
+- Restore signing capability, watches, progress and indexed facts after restart.
+- Keep other networks running when one indexer fails or quarantines.
 
-Out of scope (MUST NOT exist): deposit records, ledgers or user credits, collection/sweep jobs,
-reservations, gas sponsorship, payment state machines, durable outgoing-operation or
-request-idempotency stores, hardware wallets, remote signers, HSM/KMS or production custody,
-separate wallet/indexer processes or internal transports, public migration commands, HA or
-multi-writer deployments.
+The final HTTP surface is `/healthz`, `/v1/assets`, `/v1/wallets`,
+`/v1/wallets/{id}`, `/v1/wallets/{id}/balance`,
+`/v1/wallets/{id}/transactions`, `/v1/transactions`, and `/v1/addresses`,
+plus the generated OpenAPI document. Remove HTTP import/address-parse conveniences,
+status/resume/backfill-cancel operations and caller-supplied creation birthdays.
+SDK/configuration imports and explicit birthdays remain available to embedders.
 
-Pre-release policy: replace obsolete internal Rust and wire formats directly. No compatibility
-aliases, legacy readers, or `V1`/`V2` DTOs. **The on-disk index format is not an exception and
-is not a compatibility contract.** This requirement previously carved one out -- the stored redb
-layout was durable and MUST be preserved, because a deployment's existing index file had to keep
-reading -- and it is deliberately revoked, not quietly dropped, by the move to one SQLite store
-(`docs/design/030 §8 (ex-031)`). There is one storage backend, there is no reader for any earlier format, and
-there is no upgrade path from one: no deployment exists, so the exception protected nothing and
-cost every stored record a shape frozen for the life of the file. What replaces it is ordinary:
-the file carries `PRAGMA user_version`, a schema step may alter what an earlier step wrote, and a
-file this build cannot account for is refused rather than interpreted. External chain, HTTP, and
-JSON-RPC standards remain compatibility contracts.
+No business ledger, payment state machine, automatic collection/sweep job, gas
+sponsorship, durable outgoing-operation/idempotency store, hardware wallet,
+HSM/KMS/remote custody, raw-block archive, separate indexer service, HA or
+multi-writer deployment. Chain-owned reservations are necessary send coordination,
+not a business reservation service. Encryption does not claim production custody.
 
-## Layering
+Pre-release internal APIs may change directly; no compatibility aliases or invented
+versioned DTOs. SQLite migrations are ordered, transactional and versioned; reject
+foreign or unknown-newer files. No legacy redb reader is required. Preserve
+application tables, registrations and unrelated networks during network recovery.
+External chain, JSON-RPC and HTTP standards remain compatibility contracts.
 
-| Layer | MUST | MUST NOT |
-|---|---|---|
-| `packages/*` | stay useful outside blockchain projects; JSON-RPC delegates framing to `jsonrpsee` and owns only bounded transport, retry, and ordered failover | import SDK or app crates; carry chain names, wallet DTOs, or indexing records |
-| `sdk/base` | hold only semantics shared by substantially different chains (identity values, amounts, block coordinates) | import a chain, RPC, indexing, or wallets; define a universal RPC or transaction |
-| `sdk/chains/*` | own native addresses, network checks, RPC, blocks, transactions, signing, fees, wallet factories, and indexing interpretation; use mature protocol libraries | leak native DTOs, envelopes, or outbox state into generic crates; depend on another chain |
-| `sdk/indexing` (root) | define storage-independent sync, filters, history, checkpoints, outputs, and the store ports | know stored records, HTTP, wallets, or business labels |
-| `sdk/indexing/src/storage/sqlite` (feature `sqlite`) | own every table, column, statement and schema step, and hold each whole operation in one transaction | expose stored rows through the crate's public API; own a sync task or filter registry |
-| `sdk/indexing/src/supervisor` (feature `supervisor`) | drive one task per `SyncUnit`, own the per-network state machine, backoff, quarantine, and the `SyncMonitor` callback, until shutdown | own storage or wallets; end on one chain's failure |
-| `sdk/wallets` | own `Wallets<A>`, the factory per asset key, wallet and watch entries, public metadata, birthdays, history presentation, and the chain-neutral submission-supervision port | own indexing persistence, a background runtime, or a custody policy of its own |
-| `apps/api` | own the HTTP routes, wire models, and OpenAPI contract over `wallets` and `indexing` | depend on a chain crate, a storage crate, or a closed asset/chain enum |
-| `apps/server` | be the only executable and composition root; name chains only in `src/chains{.rs,/}` | be depended on; hide the object graph behind a facade |
+## Ownership
 
-Each chain crate MUST be deletable without breaking generic crates or other chains. Do not
-universalize UTXO inputs, EVM nonces/envelopes, or Solana messages; a generic
-`Transaction { from, to, amount }` loses consensus-significant data.
+- Packages contain reusable mechanics and never import SDK/apps. Base values contain
+  no universal RPC/transaction model and import no concrete chain, indexing or wallets.
+- Chains own native RPC, protocol models, signatures, fees, finality, send pipelines
+  and indexing translation. Native modules name no SDK wallet/indexing models.
+- Indexing owns watches, bounded scanning, continuity, confirmation and pending facts.
+  Required persistence is only `WatchStore + IndexStore`; custom sinks need no queries.
+- Repository models, calculations and queries belong under indexing `storage/`.
+  SQLite and memory stay there as independently feature-gated shipped backends;
+  shared contract suites belong in `tests/`.
+- Wallets collect factories and orchestrate batches. They own no custody, stored watch
+  list or ID-to-wallet map. Sending is an optional factory capability (`Authorship`).
+- Configuration parses documents and constructs transports through registered chains;
+  it imports no concrete chain. Wallet/index contracts remain transport-independent.
+- Server selects concrete chains only in `src/chains.rs`; HTTP modules import no
+  concrete chain or indexing backend. HTTP owns DTOs, validation, limits and encoding.
+  Secrets never appear in responses, schemas, logs, errors or ordinary `Debug`.
 
-## Wallets
+## Observation and indexing
 
-- `Wallets<A>`: `A` is the asset key (`payment_api::AssetTag` in the server:
-  `[a-z0-9][a-z0-9-]{0,31}`, one tag per factory, named by configuration). One registration,
-  `Wallets::add(asset, factory)`, = one `WalletFactory` (its `FactoryProfile` supplies one
-  `Network`, one `base::AssetId`, and one `Sender`; never decimals, a ticker, or a balance).
-  Duplicate asset keys fail. It takes no index,
-  no storage and no wallet id: it unifies factories and stores nothing else (docs/design/030 §8 (ex-029)).
-- Factories own native key generation, validation, and address text; no caller knows an address
-  encoding. Key *text* is chain-neutral: every supported chain's import format is 32 bytes as 64
-  hexadecimal characters, so callers decode with `crypto::SecretBytes::from_hex` and
-  `WalletFactory::create` checks the length and the curve. `Wallets::create` drops the material
-  and returns the wallet; `Wallets::secret(tag)` returns fresh material to a caller that asks for a
-  key before a wallet. Neither keeps anything, and neither reaches the index.
-  Secrets MUST stay out of responses, schemas, logs, errors, and ordinary `Debug`. A key supplied
-  to `POST /v1/wallets/import` is request input, zeroized after parsing.
-- **Observation is the index's, not the wallet map's.** `indexing::Watching::watch(id, &dyn Holder,
-  Start)` writes one `Watch` row through `indexing::WatchStore` — id, address, birthday, `AssetId`,
-  and **no key material** — and inserts into the hot set each `Service` reads on every pass. That
-  set is keyed by watch identity, so one address is observed once per asset and a wallet holding a
-  chain's own currency and a token at it is two observations over one inspection. A
-  `wallets::Wallet` is a `Holder`; so is a bare `indexing::Subject { address, asset }`, which is
-  what a watch-only address is. `Indexing::sync` takes no selection.
-- **A watch can be withdrawn.** This requirement previously read "There is no `unwatch`", and it is
-  deliberately revoked, not quietly dropped, by `indexing::Watching::unwatch`. Both grounds it
-  rested on are gone: the durable watch port's method budget was spent on an `advance` that was
-  never built (progress is written in the commit's own transaction, `docs/design/030` step 12), and
-  the fate of an unwatched address's committed history is no longer undefined -- it is *kept*.
-  `unwatch` stops future inspection and deletes no indexed row: the history, the live outputs and
-  the credits of the address stay, so the act is reversible, and the address may be watched again
-  under any id from any birthday. What it does drop is that observation's own
-  `indexed_through` (`WatchStore::forget`), because the row claims every applicable block from its
-  birthday through that block was inspected *for that observation*, and that holds only while the
-  observation exists. Another observation of the same address keeps its own claim, earned under its
-  own birthday -- progress is per observation, so there is no shared row for a withdrawal to orphan,
-  while *inspection* stays address-scoped because `BlockInterpreter::inspect` takes addresses and no
-  asset. A re-watch therefore reads its range again -- bounded by the same `max_backfill_blocks`,
-  idempotent where the rows exist, and never settling a gap. It takes the same `PublicationPermit`
-  a `watch` takes, so a batch
-  mid-inspection for that address is discarded rather than written after the row is gone, and it is
-  idempotent: an id nothing watches is not an error. What replaced the refusal is narrower than the
-  refusal was: rows nothing claims are tolerated, a second removal path beside the offline
-  `--rescan` is still forbidden, and an application that has lost the id cannot reach those rows
-  through the HTTP surface at all.
-- **An operator can stop asking for a range.** `indexing::Backfilling::cancel(&network)`, reached as
-  `POST /v1/status/backfill/cancel`, settles every range that network owes: each affected watch is
-  left as one created now would be -- same id, same address, birthday at the checkpoint's successor,
-  **nothing inspected** -- and nothing indexed is removed. Settling by re-registration rather than by
-  writing a claim is what makes it honest: a watch born above the line owes nothing below it, and
-  `indexed_through` stays `None` until a block is actually inspected. It is a durable write and
-  therefore MUST NOT live
-  on `SyncControl`, which is a signal with no store handle. The raised birthday is what keeps each
-  read's `completeness` honest once the range below it will never be read
-  (`docs/design/024` section 7).
-- **The order between the two durable facts about one id is a requirement.** `index.watch` MUST
-  commit before the caller files the key. A crash between them leaves a watched address with no
-  key — a watch-only address with correct history, repairable by re-importing the key — never a key
-  nothing observes.
-- `Wallets::assets`, `asset`, `parse`, and `secret` answer by tag, so an application never needs a
-  chain enum or a wallet id to validate input. `Wallets::create` and `Wallets::from` return
-  `Arc<dyn Wallet>` and keep nothing, so addressing, signing, balance and history are all
-  reachable from the value the caller holds, without naming a chain crate. Sending and building a
-  transaction are not: they belong to `Author`, which `Wallets::author(asset, wallet)` alone hands
-  out. The id -> wallet map is the application's (`payment_api::Signers`); a container for it MUST
-  NOT be added back to `wallets`.
-- `Wallets::accepts(asset, &dyn Wallet)` and `Wallets::send_all(asset, transfers)` prove membership
-  through `WalletFactory::validate` (`Origin`) — same type, configuration and shared handles —
-  rather than through a tag recorded when a wallet was filed.
-- `Start::Fresh` starts at the checked successor of the current checkpoint position, or 0 without a
-  checkpoint; a skipped position activates at the next produced block. Nothing to fill in.
-  `Start::At(p)` states an explicit birthday, and one below the checkpoint is filled in rather than
-  discarded.
-- **Progress per observation MUST be one contiguous, hash-verified block.**
-  `WatchProgress::indexed_through` means every applicable block from that observation's birthday
-  through that block was inspected for it, empty ones included. There is no second position and no
-  expressible gap, which is what one reference can honestly describe.
-  `WatchProgress::caught_up(checkpoint)` is **the one predicate** that decides both whether an
-  observation is inspected for the blocks arriving now and whether reads touching it may claim
-  completeness; its doc comment states both possible behaviours and which is chosen. The accepted
-  cost is latency: an observation reading its own past does not see a payment arriving today until it
-  reaches the present. A second notion of "still catching up" MUST NOT be introduced beside it, and
-  existing coverage MUST be closed or re-read rather than relabelled -- a position carries no block
-  hash, so it cannot become one (`docs/design/030 §8 (ex-032)`).
-- Every add path MUST state a birthday and MUST NOT default one: `start` is a required property of
-  `POST /v1/wallets`, `POST /v1/wallets/import` and `POST /v1/addresses`, and a required field of
-  each `wallets[]` configuration entry, spelled the same way in both — the string `"fresh"` or a
-  native block position. A start further below the checkpoint than `SyncPolicy::max_backfill_blocks`
-  allows is refused synchronously by the call that made it, naming the earliest acceptable start,
-  so a caller-supplied birthday can never become an unbounded background task.
-- `WatchStore` and `Watch` are reusable SDK capabilities (`indexing::sqlite` implements
-  `WatchStore` over one registration table keyed `(chain, network, asset, address)`, with its
-  identity unique across the file). They MUST NOT move into `apps/api` or `apps/server`.
-- Wallet capabilities: `indexing::Holder` and `Signer` are every wallet's; `SingleSender` and
-  `TransactionFactory` are `Author`'s, the capability of a wallet whose asset this system also
-  spends. A balance is not one of them: `indexing::Balances::balance` folds it from the index, so a
-  watched address with no key answers it exactly as a wallet does.
-  Code needing one capability takes that trait, not `dyn Wallet`.
-- **Whether an asset is spent at all is declared once, by its factory.** `FactoryProfile::
-  authorship` returns `Option<Authorship>`: the batch `Sender` and the `Author` upgrade of one of
-  its own wallets. An asset this system receives and reports — a Solana SPL holding today — MUST
-  declare `None`, and `Wallets::{author, send_all}` then refuse its tag at lookup. A chain MUST NOT
-  carry its own refusal for an asset it does not send: an unspendable asset has no path to a
-  builder or a send pipeline to refuse, because `Arc<dyn Wallet>` carries neither.
-- History is the repository's, joined to the index's overlay by
-  `indexing::ObservedHistory`: `indexing::History::history(&dyn Holder, Page)` (the selection
-  contract is documented once, on `HistoryQuery`) and `apps/api` converts the page, scaling every
-  movement and every fee by the `base::Unit` its own `AssetId` resolves to in the `base::Units`
-  each chain's `Config` declared. `limit` counts matching transactions only.
-- `indexing::Listener::committed(&BlockCommit)` is the one reaction hook: a list, synchronous,
-  notification-only, at most once and never retracted, carrying the block, its transactions, its
-  output changes and its unknown spends. A veto belongs in an `IndexStore`, and a store is a
-  constructor argument, never a runtime registration.
-- One chain-neutral address, `base::Address { network, value }`; `value` is always the chain's
-  canonical text (Ethereum lowercase `0x` hex, Bitcoin canonical text of its network, Solana
-  Base58), so string equality is address equality. User input is parsed only by the wallet's
-  factory (`AddressParser::parse_address`, a `WalletFactory` supertrait, reached through `Wallets::parse`
-  or, without a store or a node, through the chain's own `WalletConfig`, which implements the same
-  trait and is what the factory delegates to); stored and
-  filtered addresses convert back to native addresses strictly (exact canonical text).
-- Restart MUST resume with the same address/birthday set that produced the checkpoint. The index
-  does this itself, from its own `WatchStore` rows -- each with the block through which it has been
-  inspected, from one snapshot -- before its first pass; a caller re-states
-  nothing. Adding a *historical* address to an existing checkpoint still requires an explicit
-  rescan of that network.
+- One repository serves every network; no database, schema, pool or repository per
+  asset. Every operation isolates its exact `(chain, network)`.
+- A watch is ID, canonical address, asset and inclusive birthday, with no key material.
+  Same-address native/token registrations remain distinct observations. IDs are unique;
+  exact repeats preserve progress, conflicting definitions fail.
+- Persist observations before publishing them to scanning. Coordinate watch/unwatch
+  and sync, including uncertain writes. A cancelled await does not prove rollback.
+- Track contiguous hash-verified per-watch progress, including empty blocks. Resume
+  after saved progress or at the birthday. New watches never reset existing ones.
+  Share fetches across overlapping ranges without skipping any watch's history.
+- `Birthday::Fresh` is an assertion that the address has no past. Resolve it to the
+  checked successor of the admitted checkpoint, or the verified source tip when no
+  checkpoint exists. Never silently turn it into genesis on a pruned source.
+  `Birthday::At` preserves the supplied native position and checks configured limits.
+- Native position controls traversal/birthdays/restart; produced height controls
+  confirmation. Positions may be sparse. Preserve block hash and paired parent
+  position/hash. Inspect the first produced block at or after a sparse birthday.
+- Historical watches catch up before joining forward selection. Forward work receives
+  the bounded pass budget first; missing history remains explicit and does not stop
+  healthy forward indexing. A historic addition does not require a network purge.
+- Unwatch stops observation and drops its progress, retaining indexed facts. Re-watch
+  re-inspects from its own birthday. Cancellation raises an owing watch's birthday
+  atomically to after the checkpoint, with no invented progress and no fact deletion.
+- Confirmed boundary is Bitcoin depth, Ethereum finalized, Solana rooted. Commit only
+  confirmed facts. Pending blocks remain in memory and are rebuilt after restart.
+- Verify canonical hashes before resuming. Pending forks truncate memory without store
+  rollback. Confirmed forks require explicit offline recovery of that network only.
+- One commit atomically records facts, outputs, checkpoint and affected watch progress;
+  expected-state conflicts fail, identical retries are harmless. Reinspection for a
+  new watch preserves existing transactions and other watches' progress.
+- Preserve all transaction movements, native transaction ordering, failed fees and
+  transactionless credits. Never invent a transaction ID for a block credit or a
+  synthetic UTXO for an account. Historical replay must not resurrect spent outputs.
+- Callbacks after commit are notification-only and cannot veto or guarantee external
+  delivery. Custom repositories can persist application reactions transactionally;
+  distinguish duplicate retries from new watch associations.
 
-### Key custody
+## Repository reads
 
-**The index holds no key material.** This reverses the earlier rule that it did
-(`docs/design/030 §8 (ex-029)` §3.4): once the registry row exists for indexing reasons, a key in it is a
-category error, and the same custody ruling this section already made about everything else now
-applies to it. One rule, no per-chain exception — Bitcoin, Ethereum **and** Solana alike:
+- Persist signed absolute totals for watched holdings, atomically with new movements.
+  Deficits are evidence of missing history; do not discard them by storing zero.
+  Public unsigned balances report zero with `Overdrawn` where necessary.
+- Money uses checked atomic integers and exact decimals, never floats or SQLite
+  integer aggregation over u256 text. Display units resolve by `(Network, AssetId)`.
+- Explicit verification compares persisted totals with an independent fold; it does
+  not silently repair them. Registration/re-watch seeds totals from retained facts.
+- Each query reads facts, checkpoint and completeness in one snapshot. Consumers must
+  not rely on the indexer to correct a misleading repository answer.
+- Complete history requires proven coverage from the origin through the answer's
+  checkpoint. Birthday-only coverage is incomplete; an overdrawn result stays so.
+- Verified opening balance requires retained evidence for the same holding and exact
+  canonical block, an explicit writer and invalidation/replay rules. It proves an
+  opening amount, not complete historical transactions. Never add unwritten evidence
+  columns or let a node witness overwrite the indexed number.
+- A separate optional repository activity query exposes balance movements, including
+  credits with no transaction. Transaction history continues to contain transactions.
+- Pending-inclusive consumers combine pending samples with repository results using
+  the result's own checkpoint and revision checks. Commits may neither omit nor
+  double-count a block; historical output reads must not claim premature spendability.
+- History pagination preserves native order and matching-transaction limits. Catch-up
+  inserts must not be presented as a completed export. Native fees retain their own
+  asset when projecting token history.
 
-- A `Watch` row carries an id, an address, a birthday and an `AssetId`. There is no
-  material field, and nothing writes one.
-- A wallet generated or imported through the HTTP API is held in this process's memory for as long
-  as the process runs, and nowhere else. After a restart its id reads back with
-  `watch_only: true`, its history is intact, and a send from it answers `422`.
-- A wallet listed in `wallets[]` startup configuration is reconstructed from its environment
-  variable on every boot: that list is the application's key store, and it is what makes a wallet
-  able to sign across a restart.
-- A watched address has no key at all, which is the same state a restarted API-created wallet is
-  in.
-- Material never appears in a response, a schema, a log, an error, or `Debug`.
+## Wallet custody
 
-This is development custody in the process's own memory and the operator's own configuration, not
-an HSM, KMS, or production custody claim (§Product boundary). The same statement appears in
-`docs/API.md` §Routes ("Key custody") and `ARCHITECTURE.md` §Wallets; those three MUST agree.
+The server owns encrypted application tables in the same SQLite file, with a schema
+version independent of indexing. Require an environment-sourced passphrase; no
+implicit plaintext mode. Use authenticated encryption, random salt/nonces, and
+zeroizing key/plaintext memory. Fail closed on wrong passphrase or modified rows.
 
-**Custody is the caller's problem, and this is settled.** Keep the key you send to
-`POST /v1/wallets/import`; treat `POST /v1/wallets` as development-only unless you add the
-generated key to `wallets[]` yourself. The SDK MUST NOT grow a key store, an encryption-at-rest
-option, or a key-management policy of its own; a deployment that needs one puts it in front of the
-API.
+Creation is registry-first, observation-second, publication-last. A crash before
+observation leaves a private unserved key; no read may publish it as a usable wallet.
+A successful creation must survive restart with the same ID/address and ability to
+sign. Restore only keys matching durable observations; watch-only addresses remain
+watch-only. Offline index purge preserves keys. No endpoint exports a key.
 
-The index holds no key material at all. There is no export path and none is owed: the
-subcommand that once read the pre-`029` row was deleted with the redb backend, because no
-deployment exists that could hold such a file. Key custody is the API caller's.
+Factories generate/validate native keys and canonical addresses. `Wallets::create`
+and `from` retain neither instances nor IDs. The server's `Signers` is its map.
+Membership validation checks native type, configuration and shared dependencies;
+asset tags alone are not proof that wallets share an outbox.
 
 ## Sending
 
@@ -251,7 +178,7 @@ deployment exists that could hold such a file. Key custody is the API caller's.
 - Parse addresses with the `bitcoin` crate and enforce the configured network; startup checks
   network (no genesis-hash check).
 - Keep exact outpoints and every input/output; history exposes inputs and outputs as separate
-  movements. Reorg rollback restores spent outputs exactly.
+  movements. Pending reorgs restore the spendable view without rewriting confirmed storage.
 - Sign only implemented script/address kinds; verify each input belongs to its signer. Fees are
   checked integer satoshis.
 
@@ -260,7 +187,7 @@ deployment exists that could hold such a file. Key custody is the API caller's.
 - Startup verifies chain ID (no genesis-hash check). Build validates chain ID, nonce, gas, and
   EIP-1559 fees; recovered signer MUST equal the sender. Values are exact `U256`.
 - A factory selects exactly one asset: native ETH or one allowlisted ERC-20. Generated wallets
-  use independent keys; importing one EOA as both ETH and a token is rejected.
+  use independent keys; same-address native/token observations remain distinct holdings.
 - Token startup verifies chain ID, deployed code, decimals, and a balance read at one canonical
   block through one endpoint (hence USDC requires exactly one RPC endpoint).
 - ERC-20 send: target only the configured contract, zero value, simulate the exact call, accept
@@ -272,14 +199,10 @@ deployment exists that could hold such a file. Key custody is the API caller's.
   factories). `eth_sendRawTransaction` is one attempt on the first endpoint, no failover; an
   ambiguous envelope blocks that sender until exact-hash lookup or byte-identical replay resolves.
 
-### Solana (native SOL only)
+### Solana
 
-- SPL Token / Token-2022 are rejected as unsupported. Keys are Ed25519; import accepts exactly one
-  32-byte seed as 64 lowercase hex characters from an environment variable. Custody is the same as
-  every other chain's (§Wallets, §Key custody): a wallet generated through the API writes its
-  observation, and no key material anywhere, through the index's `WatchStore`, so after a restart it
-  reads back watch-only; a `wallets[]` startup import is rebuilt from the environment and writes the
-  same key-free row.
+- SOL sending is supported; allowlisted SPL holdings are receive-only and expose no
+  authorship capability. Keys are Ed25519; imports use exactly one 32-byte seed.
 - Addresses are 32 bytes in canonical plain Base58. Amounts are checked `u64` lamports
   (1 SOL = 10^9) with exact decimal conversion.
 - Use the modular `solana-*` crates; no `solana-client`, monolithic SDK, handwritten wire
@@ -333,65 +256,81 @@ Submission:
   unchanged checkpoint) proves absence. Missing evidence blocks indefinitely. Reconciliation
   retries on checkpoint notifications with backoff 500 ms to 10 s.
 
-## Composition and lifecycle (`apps/server`)
 
-1. Validate the complete closed configuration.
-2. Construct one long-lived client per chain; verify every chain identity (and Solana Memo) before
-   any storage access.
-3. Open the configured storage: one SQLite file, opened off the runtime, whose application id is
-   validated and whose schema steps are applied in order before any chain reaches it.
-4. Build one repository over it, serving every network: each operation names the network it is
-   about, so there is no per-network handle and no per-asset one. That one value is the
-   `WatchStore` (`add`, `all`, `forget`, `reanchor`) and `IndexStore` (`checkpoint`, plus the one `commit`) every
-   index requires, plus the consumer capabilities this server's chains read.
-5. Build chain services and one `Index` -- `Index::over(repository).chain(..).build()?` for a caller
-   composing synchronously, `Index::of(indexers)` for one that composed some other way; either way
-   construction rejects a duplicate network without launching a task. Share it through narrow
-   `Indexing`/`Checkpoint` views, with `History`, `Balances` and `OutputStore` held per network.
-6. Build `Wallets` over the `Index`, register one factory per asset tag, restore every
-   persisted wallet and every observation from the store, then import every configured wallet
-   before the first sync.
-7. Start the indexing supervisor and the submission tasks; bind HTTP only after every network has
-   settled - reached Ready with a persisted checkpoint at least once, or become Quarantined.
-8. Supervise HTTP, sync, cancellation, and graceful shutdown in one process.
+### Spend-all requests
 
-- Solana submission tasks register through an application-owned `mpsc` queue and `JoinSet`;
-  registration succeeds only after the task is tracked. No handler or SDK object detaches an
-  untracked task.
-- One chain's terminal indexing failure quarantines that network and nothing else: the other chains
-  keep syncing, `GET /v1/status` reports the state and the reason per network, and the process
-  does not exit. Readiness is `all(Ready | Quarantined) && any(Ready)`; every network quarantined
-  answers 503 and still does not exit, because a restart cannot fix a deterministic failure and
-  exiting also kills the surface that explains it. `SyncControl::resume` is the only way out of a
-  quarantine. A supervisor task that ends unexpectedly still publishes not-ready and closes
-  admission; with a guarded envelope, shutdown waits (no deadline) while reconciliation stays
-  available. Force-kill is the only other exit and accepts duplicate-payment risk.
-- Readiness follows **forward** indexing only. History a network still owes below its checkpoint,
-  for an address watched from before it was registered, MUST NOT hold `GET /health/ready` at 503
-  or keep the listener from binding: such a range can be one a pruned node will never serve, and
-  the rest of the chain is answerable. It is reported as `GET /v1/status`'s `networks[].backfill`
-  — the owed range, how many addresses wait on it, and why the last attempt stopped — and every
-  read it weakens reports `completeness` rather than a complete-looking answer
-  (`docs/design/024` section 7). "Has not reached its tip" and "cannot finish one old range" stay
-  distinct states.
-- Graceful shutdown order: not-ready, stop HTTP admission, close registration, drain handlers,
-  wait for guarded envelopes, then stop sync and storage.
+- Wire `amount: "all"` and SDK `Amount::All` use the existing single/batch outbox.
+  Exact amounts remain exact. Do not read an HTTP balance and race a later fixed send.
+- At most one spend-all per source; it must be that source's final occurrence.
+  Reject ambiguous selection before RPC; incoming batch transfers are not funding.
+- Bitcoin uses all spendable unreserved inputs, subtracts deterministic fees and prior
+  fixed outputs, and sends the remainder to the requested destination with no source
+  change. Empty/dust remainders fail; never silently drop the sweep output.
+- Ethereum reserves cumulative maximum gas fees, resolves under the source's nonce
+  reservation, and validates the final value-dependent transaction. Token remainder
+  and native gas are separate. EIP-1559 refunds can leave ETH; promise no exact-zero
+  residue. Preserve nonce ordering, accepted prefixes and exact-envelope ambiguity.
+- Solana resolves after account acquisition/fee pricing, rebuilds the same memo and
+  lifetime with final amounts, validates final fees/context floors and simulates before
+  submission. SPL sending remains unsupported.
+- Watch-only sends return 422; an empty sweep returns 400. Fee bounds still apply.
 
-## Testing
+## Composition, health and lifecycle
 
-- Gates are listed in `AGENTS.md` (fmt, check, test, clippy, doc, `linter check .`).
-- Default tests use owned RPC doubles and temporary repositories and never call a public network.
-- Repository contract tests run every shared scenario against both shipped stores -- the SQLite
-  file and `indexing::memory::Repository` -- as a pair of tests per scenario in
-  `sdk/indexing/tests/repository_contract.rs`, so they stay statements about the ports:
-  dense and sparse coordinates, atomic parent, foreign-network rejection, all-or-nothing commits,
-  checkpoint-bound pagination, cursor stability under interleaved writes, and the offline purge.
-- Route tests (`apps/api/tests/route_contract.rs`) serve the real router over test doubles of
-  `WalletFactory`, `Wallet`, and `Indexing`: no chain and no storage are needed to cover every
-  route.
-- System tests run the composed binary against RPC doubles over one temporary index file
-  (`apps/server/tests/{acceptance,wallet_api,server_api}.rs`): birthdays, restart restoration of
-  generated, imported, and watched addresses, retained reorg, one and batch sends, readiness,
-  shutdown, cross-chain network isolation, native/token coexistence, registry preservation.
-- The real-validator Solana suite (`apps/server/tests/solana_node.rs`, pinned Agave
-  `solana-test-validator`) is manual until a CI workflow owns the pinned tools.
+1. Validate closed configuration, credentials and server security.
+2. Construct long-lived clients; verify all network identities and required native
+   capabilities before opening storage. No per-request dependency construction.
+3. Open the SQLite file off the async executor, validate its identity and migrate.
+4. Compose all network indexers over one repository, plus factories and query handles.
+   Duplicate networks/assets fail without launching background tasks.
+5. Unlock application keys, restore signers and observations, and register configured
+   wallets before the first pass. Keep the SDK independent of custody policy.
+6. Start indexing and supervised submissions. Bind HTTP once every network has settled
+   at least once, Ready or Quarantined. Incomplete historical catch-up does not gate it.
+7. Supervise serving, cancellation, task failures and joins. One indexer's failure must
+   not terminate healthy networks.
+
+Retry transient failures with bounded jittered backoff; quarantine terminal errors and
+panics without automatic retry. Readiness is `all(Ready | Quarantined) && any(Ready)`;
+all-quarantined returns 503 while the process remains observable. Startup retry deadline
+is not currently a product requirement.
+
+`GET /healthz` is public, memory-only, 200 when ready and 503 otherwise. Include
+network state/checkpoint/pending/failure/owed-history and per-endpoint attempts,
+failures, consecutive failures and sanitized last failure. Do not publish URLs,
+credentials, request content or remote error prose. Refresh state snapshots as passes
+advance; notification callbacks keep their transition/failure cadence.
+
+The SDK can resume a live quarantine. For the server, fixing its cause and restarting
+is the operator resume workflow: a new CLI process cannot control an old process's
+RAM. This supersedes the proposed `--resume`; do not add an administration transport
+solely to preserve that name. Confirmed reorgs require offline `--rescan`; durable
+backfill cancellation is an offline operator operation, not a product HTTP route.
+Recovery must preserve keys, registrations and other networks and run no listener or
+supervisor. Invalid targets fail before mutation.
+
+Submission registration succeeds only once tasks are tracked. Shutdown marks unready,
+stops HTTP admission, closes registration and drains handlers/submissions while
+indexing can still reconcile. Only then stop and join indexing/storage. Ambiguous
+payments have no invented shutdown deadline or promise of durable outgoing recovery.
+Blocking database work runs off async executors with bounded admission.
+
+## Verification
+
+- Run every AGENTS gate, feature-isolation checks, submissions tests, OpenAPI comparison
+  and a fresh MCP report; unconfigured/failed linter rules are not passes.
+- Default tests own RPC doubles/temp stores and never contact public networks.
+- Run shared repository contracts against SQLite and memory: atomicity, duplicate and
+  uncertain commits, migration/restart, signed totals, activity, birthdays, sparse
+  coordinates, pending/confirmed forks, paging, network isolation and offline purge.
+- Test the real router's validation/auth/errors, fixed/all single/batch requests,
+  watch-only/empty refusals, secret exclusion, memory-only health and RPC failure stats.
+- Restart a created wallet over the same encrypted file and prove it can still sign
+  and spend; prove wrong-password/corruption refusal and interrupted registration privacy.
+- Execute all six examples and server create/receive/read/restart/send against owned
+  local Bitcoin, Anvil and checksum-pinned Solana validators. A compile is not runtime
+  proof; preserve logs and report precisely which behavior ran.
+- Keep exact-chain guarantees covered: Bitcoin input/change/maturity/fee ownership,
+  Ethereum native/token movements and nonce ambiguity, Solana memo/lifetime/context
+  floors and complete finalized-history recovery. Observe fee-training and node-history
+  preconditions honestly; never replace a failing real scenario with only a mock.

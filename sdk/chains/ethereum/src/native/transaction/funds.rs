@@ -67,6 +67,14 @@ impl Funds {
         Ok(())
     }
 
+    /// The observed balance left after this source's earlier batch items,
+    /// including native maximum fees. Incoming transfers never contribute.
+    #[must_use]
+    pub fn remaining(&self, from: &Address, asset: &AssetKind, balance: &Wei) -> Option<Wei> {
+        let prior = self.required.get(&(from.clone(), asset.clone()));
+        balance.checked_sub(&prior.map_or(Wei::ZERO, |value| value.amount.clone()))
+    }
+
     /// Every sender's requirement, ordered by its first contributing item.
     #[must_use]
     pub fn requirements(self) -> Vec<Requirement> {

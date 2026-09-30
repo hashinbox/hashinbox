@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::rejection::{JsonRejection, PathRejection, QueryRejection},
+    extract::rejection::{JsonRejection, QueryRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -99,19 +99,6 @@ impl Error {
         Self::invalid_request("query parameters must match the documented schema")
     }
 
-    /// An unparsable path segment (an asset tag that is not a tag at all).
-    pub(super) fn invalid_path(_error: PathRejection) -> Self {
-        Self::invalid_request("path parameters must match the documented schema")
-    }
-
-    /// Secret text that is not key material: every supported chain writes a
-    /// key as 64 hexadecimal characters, so the one parse is
-    /// [`wallets::SecretBytes::from_hex`] and the curve check belongs to the
-    /// asset's factory. The message never echoes what was sent.
-    pub(super) fn invalid_secret() -> Self {
-        Self::invalid_request("wallet secret must be hexadecimal key material")
-    }
-
     pub(super) fn invalid_batch(failed_index: usize, message: impl Into<String>) -> Self {
         Self {
             failed_index: Some(failed_index),
@@ -125,11 +112,6 @@ impl Error {
 
     pub(super) fn not_found(message: impl Into<String>) -> Self {
         Self::new(Failure::NotFound, message)
-    }
-
-    /// A request the current state refuses rather than performs: a 409.
-    pub(super) fn conflict(message: impl Into<String>) -> Self {
-        Self::new(Failure::Conflict, message)
     }
 
     /// A wallet error of an operation selected by asset tag: an unregistered

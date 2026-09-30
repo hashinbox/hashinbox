@@ -14,6 +14,12 @@ use crate::{NetworkHealth, NetworkState};
 /// decision an operator makes out of band is
 /// [`SyncControl::resume`](super::SyncControl::resume).
 pub trait SyncMonitor: Send + Sync + 'static {
+    /// Samples the latest network status after every completed pass or state update.
+    /// This is a snapshot hook, separate from transition notifications. The default
+    /// does nothing, so event-only monitors retain their existing cadence.
+    /// Implementations must return promptly and perform no I/O.
+    fn network_observed(&self, _health: &NetworkHealth) {}
+
     /// Reports one network's transition, or one more failed attempt on it.
     ///
     /// Fires on every state change and on every failed attempt, and never once

@@ -41,14 +41,24 @@ where
 /// `POST /v1/wallets/{id}/transactions` body: one transfer from the path's wallet.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
-struct Transfer {
+pub(super) struct Transfer {
     /// Recipient address text, as the wallet's chain writes it.
     destination: String,
-    /// Exact decimal in display units of the wallet's asset.
+    /// Exact decimal in display units, or `all` for the available balance after fees.
     amount: String,
 }
 
 impl Transfer {
+    /// Shared single/batch wire amount: exact display units or the explicit drain request.
+    pub(super) fn amount(text: &str) -> Result<wallets::Amount, Error> {
+        if text == "all" {
+            return Ok(wallets::Amount::All);
+        }
+        text.parse::<base::Decimal>()
+            .map(wallets::Amount::Exact)
+            .map_err(|_| Error::invalid_request("amount must be an exact base-10 decimal or all"))
+    }
+
     /// The destination parsed by the custody's own asset, and the amount.
     ///
     /// The parse only ever produces addresses of that asset's network, which
@@ -57,11 +67,8 @@ impl Transfer {
         self,
         payments: &Payments,
         custody: &Custody,
-    ) -> Result<(base::Address, base::Decimal), Error> {
-        let amount = self
-            .amount
-            .parse()
-            .map_err(|_| Error::invalid_request("amount must be an exact base-10 decimal"))?;
+    ) -> Result<(base::Address, wallets::Amount), Error> {
+        let amount = Self::amount(&self.amount)?;
         let destination = payments.destination(custody, &self.destination)?;
         Ok((destination, amount))
     }
@@ -128,7 +135,7 @@ pub(crate) struct BatchedTransfer {
     pub(super) wallet_id: String,
     /// Recipient address text, as the wallet's chain writes it.
     pub(super) destination: String,
-    /// Exact decimal in display units of the wallet's asset.
+    /// Exact decimal in display units, or `all` to sweep spendable funds.
     pub(super) amount: String,
 }
 

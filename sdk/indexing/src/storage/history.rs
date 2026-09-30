@@ -53,10 +53,12 @@ pub(crate) fn require_limit(limit: usize) -> Result<(), IndexError> {
 /// and hands back what it read; the page is the first `limit` of them, and it
 /// has a successor exactly when the spare row came back. How the rows are
 /// fetched and what a cursor is made of stay the store's own.
+#[cfg(any(feature = "sqlite", feature = "memory"))]
 pub(crate) struct Probe {
     limit: usize,
 }
 
+#[cfg(any(feature = "sqlite", feature = "memory"))]
 impl Probe {
     /// The probe for a page of `limit` rows.
     pub(crate) const fn new(limit: usize) -> Self {

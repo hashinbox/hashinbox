@@ -78,5 +78,14 @@ repository, not to the index.
   checkpoint, it claims no whole history for that address and refuses to list
   its spendable outputs. `Inspection` is the rule both shipped repositories ask.
   The index never sees a query's answer, so it cannot correct one.
+- Shipped repositories keep exact signed totals for watched holdings, updated
+  atomically from newly inserted facts. Registration seeds retained history;
+  replay adds nothing, and unresolved deficits remain `Overdrawn`. Unwatched
+  holdings are computed from retained facts. SQLite migrates existing totals
+  transactionally before opening. Concrete repositories also offer `activity`:
+  exact credit/debit pages including self-transfer sides, charged fees and
+  transactionless withdrawals, with native ordering and snapshot coverage.
+  Concrete repositories offer `verify_balance`
+  for an explicit independent comparison; verification never repairs rows.
 - The SQLite repository needs a Tokio runtime, because each operation runs on
   `spawn_blocking`.

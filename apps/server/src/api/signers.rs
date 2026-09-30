@@ -22,10 +22,8 @@ impl Signers {
 
     /// Files `wallet` under `id`.
     ///
-    /// Call it *after* `index.watch` has committed the row: a crash between
-    /// the two then leaves a watched address with no key, which is exactly a
-    /// watch-only address, rather than a key nothing observes
-    /// (`docs/design/030 §8 (ex-029)` section 3.3).
+    /// The registry already holds the key and the watch is committed. On restart
+    /// those two durable facts reconstruct this in-memory signing handle.
     ///
     /// # Errors
     ///
@@ -49,7 +47,7 @@ impl Signers {
 
     /// The wallet of `id`, or `None` when this process holds no key for it.
     #[must_use]
-    pub(super) fn get(&self, id: &str) -> Option<Arc<dyn wallets::Wallet>> {
+    pub(crate) fn get(&self, id: &str) -> Option<Arc<dyn wallets::Wallet>> {
         self.0.read().ok().and_then(|held| held.get(id).cloned())
     }
 

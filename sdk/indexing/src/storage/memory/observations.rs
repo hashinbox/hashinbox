@@ -164,6 +164,7 @@ impl Repository {
             watch.asset.clone(),
             watch.address.value.clone(),
         );
+        tables.balances.remove(&key);
         if tables.watches.remove(&key).is_some() {
             drop(tables.identities.remove(&watch.id));
         }
@@ -211,6 +212,12 @@ impl Repository {
                 "an address is already registered for this identity or network",
             )),
             (None, None) => {
+                let query = crate::BalanceQuery {
+                    address: watch.address.clone(),
+                    asset: watch.asset.clone(),
+                };
+                let net = Self::recomputed(&query, tables)?;
+                tables.balances.insert(key.clone(), net);
                 tables.identities.insert(watch.id.clone(), network);
                 tables.watches.insert(key, watch.clone());
                 Ok(())

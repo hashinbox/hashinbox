@@ -18,8 +18,8 @@ names its chains.
 Every scenario uses all three nodes. Start them, then run one:
 
 ```bash
-bitcoind -regtest -txindex -rpcuser=bitcoin -rpcpassword=bitcoin -rpcport=18443
-anvil --host 127.0.0.1 --chain-id 31337 --hardfork cancun --timestamp 0
+bitcoind -regtest -txindex -rpcuser=bitcoin -rpcpassword=bitcoin -rpcport=18443 -fallbackfee=0.00001
+anvil --host 127.0.0.1 --chain-id 31337 --hardfork cancun --timestamp 0 --block-time 1
 solana-test-validator --reset
 
 cargo run -p payment-examples --example wallet
@@ -31,7 +31,30 @@ cargo run -p payment-examples --example wallet
 | Anvil | any | 8545 |
 | Solana test validator | any | 8899 |
 
-Index files are written to `.index-data/` in the working directory.
+Index files are written to `.index-data/` in the working directory. Use a fresh
+working directory when resetting the nodes: an index from another local chain is
+not reusable. Scenarios which generate new keys also need a fresh index on rerun.
+
+Before either transfer scenario, train Bitcoin Core's fee estimator using its
+local wallet. Empty blocks alone cannot supply fee observations:
+
+```bash
+btc() { bitcoin-cli -regtest -rpcuser=bitcoin -rpcpassword=bitcoin "$@"; }
+btc createwallet example-funding
+address=$(btc -rpcwallet=example-funding getnewaddress)
+btc generatetoaddress 101 "$address" >/dev/null
+for block in $(seq 1 24); do
+    for transaction in $(seq 1 40); do
+        btc -rpcwallet=example-funding sendtoaddress "$address" 0.01 >/dev/null
+    done
+    btc generatetoaddress 1 "$address" >/dev/null
+done
+btc estimatesmartfee 6 conservative
+```
+
+The final reply must contain `feerate`. `fallbackfee` only funds these training
+transactions in the local node's wallet; SDK sends still use the estimator.
+Repeat training if enough empty blocks make the estimate unavailable again.
 
 ## Notes
 
@@ -43,5 +66,5 @@ Index files are written to `.index-data/` in the working directory.
   `main.rs` asks the node for the hash and substitutes it. A real deployment
   writes the hash it expects.
 - Never point an example at a funded key or a public endpoint. Funding uses the
-  local node's own RPC (`generatetoaddress`, Anvil's development key,
+  local node's own RPC (`generatetoaddress`, Anvil's unlocked development account,
   `requestAirdrop`).

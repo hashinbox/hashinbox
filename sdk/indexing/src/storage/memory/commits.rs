@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Address, BlockCredit, BlockHeight, BlockRef, BoxFuture, IndexError, IndexErrorKind, IndexStore,
+    Address, BlockCredit, BlockRef, BoxFuture, IndexError, IndexErrorKind, IndexStore,
     IndexedBatch, Network, OutputChanges, OutputKey, Progress, PurgedRows, Purging,
 };
 
@@ -71,8 +71,7 @@ impl Purging for Repository {
                 // goes with them; the observations themselves are application
                 // state and stay. Not counted: it is index state, not a row a
                 // rescan re-creates.
-                tables.progress.retain(|(bound, ..), _| bound != network);
-                tables.settlements.remove(network);
+                tables.disclaim(network);
                 Ok(PurgedRows {
                     checkpoint,
                     history,
@@ -98,6 +97,9 @@ impl Repository {
         if tables.checkpoints.get(network).as_ref() != batch.expected_checkpoint().as_ref() {
             return Err(conflict("checkpoint changed before commit"));
         }
+        tables
+            .settlements
+            .insert(network.clone(), batch.settlement());
         let mut unknown = Vec::new();
         // Block by block, creations before spends, in the order the chain built
         // them: an output created and then spent inside one batch leaves a
@@ -105,12 +107,7 @@ impl Repository {
         // created it cannot offer it again.
         for canonical in batch.blocks() {
             self.fill_history(canonical.transactions(), tables)?;
-            self.fill_credits(
-                network,
-                canonical.credits(),
-                canonical.block().height,
-                tables,
-            )?;
+            self.fill_credits(network, canonical.credits(), canonical.block(), tables)?;
             unknown.extend(self.fill_outputs(network, canonical.outputs(), tables)?);
         }
         for claim in batch.progress() {
@@ -119,11 +116,6 @@ impl Repository {
         if let Some(line) = batch.checkpoint() {
             drop(tables.checkpoints.insert(network.clone(), line.clone()));
         }
-        // The chain rule the batch stated, kept so the fold applies the same one
-        // a store of effects would have written into its rows.
-        tables
-            .settlements
-            .insert(network.clone(), batch.settlement());
         Ok(unknown)
     }
 
@@ -179,6 +171,7 @@ impl Repository {
                 "a committed transaction disagrees with the stored one",
             )),
             None => {
+                Self::accrue_transaction(tables, address, transaction)?;
                 drop(tables.history.insert(key, transaction.clone()));
                 Ok(())
             }
@@ -191,19 +184,22 @@ impl Repository {
         &self,
         network: &Network,
         credits: &[BlockCredit],
-        height: BlockHeight,
+        block: &BlockRef,
         tables: &mut Tables,
     ) -> Result<(), IndexError> {
         for credit in credits {
-            let key = Self::credit_key(network, credit, height);
+            let key = Self::credit_key(network, credit, block.height);
             match tables.credits.get(&key) {
-                Some(stored) if stored == credit => {}
+                Some((position, stored)) if *position == block.position && stored == credit => {}
                 Some(_) => {
                     return Err(Self::corrupt(
                         "a committed block credit disagrees with the stored one",
                     ));
                 }
-                None => drop(tables.credits.insert(key, credit.clone())),
+                None => {
+                    Self::accrue_credit(tables, credit)?;
+                    drop(tables.credits.insert(key, (block.position, credit.clone())));
+                }
             }
         }
         Ok(())
@@ -257,7 +253,7 @@ impl Repository {
 
     /// A stored row that disagrees with the one being written: terminal, because
     /// retrying cannot repair it.
-    fn corrupt(message: &'static str) -> IndexError {
+    pub(super) fn corrupt(message: &'static str) -> IndexError {
         IndexError::new(IndexErrorKind::Store, message, false)
     }
 }

@@ -108,7 +108,10 @@ async fn main() -> Result<(), AnyError> {
     let (stop, stopped) = watch::channel(false);
     let (monitor, mut readiness) = SyncReport::watching(index.networks());
     let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
-    readiness.settled().await.ok_or("synchronization stopped")?;
+    let health = readiness.settled().await.ok_or("synchronization stopped")?;
+    if let Some(error) = health.networks().iter().find_map(|row| row.failure.clone()) {
+        return Err(error.into());
+    }
 
     // 7. What the composed index holds: one checkpoint per network, the
     //    addresses it observes there, and each wallet's history.

@@ -2814,6 +2814,8 @@ dependencies = [
  "indexing",
  "json-rpc",
  "reqwest",
+ "ring",
+ "rusqlite",
  "sdk-config",
  "serde",
  "serde_json",

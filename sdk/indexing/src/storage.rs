@@ -29,6 +29,7 @@
 //! configured network: each operation names the network it is about, and rows
 //! of one network are invisible to reads of another.
 
+mod activity;
 mod balance;
 mod commit;
 mod history;
@@ -40,8 +41,13 @@ mod reads;
 pub mod sqlite;
 mod watch;
 
+pub use activity::{
+    Activity, ActivityKind, ActivityPage, ActivityPosition, ActivityQuery, ActivityTransaction,
+    Direction,
+};
 pub use balance::{Balance, Completeness, Fold, MovementEffect, PendingValue};
 pub use commit::{IndexStore, IndexedBatch, Progress};
+#[cfg(any(feature = "sqlite", feature = "memory"))]
 pub(crate) use history::Probe;
 pub use history::{CanonicalPage, ConfirmedHistory, HistoryPosition, HistoryQuery, Page};
 pub use outputs::{OutputCursor, OutputPage, OutputRequest};

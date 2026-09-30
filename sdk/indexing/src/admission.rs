@@ -34,6 +34,27 @@ impl State {
         }
     }
 
+    /// Hydrates publication from a store read without regressing a completed commit.
+    fn observe(&mut self, persisted: Option<BlockRef>) -> Result<(), IndexError> {
+        if !self.initialized || self.recovery {
+            self.persisted = persisted;
+            self.initialized = true;
+            self.recovery = false;
+            return Ok(());
+        }
+        let incoming = persisted.as_ref().map(|block| block.position);
+        let current = self.persisted.as_ref().map(|block| block.position);
+        if incoming == current && persisted != self.persisted {
+            return Err(IndexError::retryable_conflict(
+                "repository and admission disagree on the committed block",
+            ));
+        }
+        if incoming > current {
+            self.persisted = persisted;
+        }
+        Ok(())
+    }
+
     /// The number naming the selection `coverage` describes, new only when that
     /// selection covers a block it did not cover before.
     ///
@@ -208,12 +229,8 @@ impl CommitGate {
                 if busy {
                     reload = None;
                 }
-                if let Some(persisted) = reload.take()
-                    && (!state.initialized || state.recovery || state.persisted != persisted)
-                {
-                    state.persisted = persisted;
-                    state.initialized = true;
-                    state.recovery = false;
+                if let Some(persisted) = reload.take() {
+                    state.observe(persisted)?;
                 }
                 if !busy {
                     state.publication = true;
@@ -700,6 +717,20 @@ mod tests {
             assert!(state.publication);
             assert_eq!(state.persisted, persisted);
         }
+    }
+
+    #[test]
+    fn publication_rejects_a_different_block_at_the_committed_position() {
+        let admission = Arc::new(CommitGate::new());
+        admission
+            .plan(Some(block(7)), |_| Ok(Vec::new()))
+            .expect("plan");
+        let mut divergent = block(7);
+        divergent.hash = crate::BlockHash(vec![255]);
+        let result = block_on(admission.publication(Some(divergent)));
+        assert!(matches!(result, Err(error) if error.kind == crate::IndexErrorKind::Conflict));
+        let publication = block_on(admission.publication(Some(block(6)))).expect("stale read");
+        assert_eq!(publication.checkpoint(), Some(&block(7)));
     }
 
     #[test]

@@ -38,7 +38,19 @@ impl FactorySender {
     fn request(&self, transfer: Transfer) -> Result<SendRequest, WalletError> {
         let from = Address::try_from(transfer.wallet.address())?;
         let to = Address::try_from(&transfer.to)?;
-        let amount = Wei::from_decimal(&transfer.amount, self.config.decimals)
+        let amount = match transfer.amount {
+            wallets::Amount::Exact(amount) => amount,
+            wallets::Amount::All => {
+                return Ok(SendRequest::sweep(
+                    transfer.wallet,
+                    from,
+                    to,
+                    self.config.asset.clone(),
+                    self.config.fee_limits.clone(),
+                ));
+            }
+        };
+        let amount = Wei::from_decimal(&amount, self.config.decimals)
             .map_err(|error| WalletError::new(WalletErrorKind::InvalidAmount, error.message))?;
         let native = transaction::Transfer {
             asset: self.config.asset.clone(),
@@ -58,6 +70,7 @@ impl FactorySender {
         transfers: Vec<Transfer>,
     ) -> Result<Vec<base::TransactionId>, SendError> {
         SendError::check_count(transfers.len())?;
+        SendError::check_selection(&transfers)?;
         let items = transfers
             .into_iter()
             .enumerate()
@@ -173,7 +186,7 @@ mod tests {
         let (sender, wallet) = direct_sender(&node);
         let first = transfer(wallet.clone());
         let mut second = transfer(wallet.clone());
-        second.amount = base::Decimal::zero();
+        second.amount = base::Decimal::zero().into();
         let mut third = transfer(wallet);
         third.to.value = "not-an-address".to_owned();
 

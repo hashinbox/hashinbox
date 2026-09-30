@@ -1,131 +1,127 @@
-//! The offline rescan: `payment-server <config.toml> --rescan <chain>/<network>`.
-//!
-//! One network's indexing rows are removed and the process exits. Nothing else
-//! happens: no node is contacted, no supervisor starts, and the HTTP listener
-//! is never bound. That is the point rather than an implementation detail —
-//! purging a network while the API serves history from it would hand clients
-//! an empty history that looks authoritative, and the checkpoint-bound cursors
-//! would conflict mid-page (`docs/design/019` section 5.3).
-//!
-//! It is the only way back from a terminal `ConfirmedReorg`: a Bitcoin reorg
-//! deeper than the configured `chains.bitcoin.confirmation_depth`, which
-//! quarantines that one network for good. The address registry is untouched,
-//! so the next ordinary start finds no checkpoint and re-indexes the network
-//! from the earliest registered start position.
-
-use std::{ffi::OsString, fmt};
-
-use base::{ChainName, Network};
-use indexing::Purging as _;
+//! Offline operator actions. Stop the server first; these never connect to RPC,
+//! start the supervisor or bind a listener. Application keys are never purged.
 
 use crate::config::{AnyError, Config};
+use base::{ChainName, Network};
+use indexing::{IndexStore as _, Purging as _, WatchStore as _};
+use std::{ffi::OsString, fmt};
 
-/// One `--rescan <chain>/<network>` request, parsed but not yet checked
-/// against the configuration.
-pub(crate) struct Rescan {
-    network: Network,
+/// One explicit operator action over the configured file.
+pub(crate) enum Operation {
+    Rescan(Network),
+    CancelBackfill(Network),
 }
 
-impl Rescan {
-    const FLAG: &'static str = "--rescan";
-
-    /// Reads whatever follows the configuration path: nothing at all (an
-    /// ordinary server start), or exactly `--rescan <chain>/<network>`.
-    ///
-    /// Only the spelling is checked here, so a malformed argument is refused
-    /// before the configuration file is even read.
+impl Operation {
     pub(crate) fn parse(
         arguments: impl Iterator<Item = OsString>,
     ) -> Result<Option<Self>, AnyError> {
         let arguments = arguments.collect::<Vec<_>>();
-        if arguments.is_empty() {
-            return Ok(None);
+        match arguments.as_slice() {
+            [] => Ok(None),
+            [flag, target] if flag == "--rescan" || flag == "--cancel-backfill" => {
+                let text = target.to_str().ok_or("network argument is not UTF-8")?;
+                let network = Self::network(text)?;
+                Ok(Some(if flag == "--rescan" {
+                    Self::Rescan(network)
+                } else {
+                    Self::CancelBackfill(network)
+                }))
+            }
+            _ => Err(crate::USAGE.into()),
         }
-        let [flag, target] = arguments.as_slice() else {
-            return Err(crate::USAGE.into());
-        };
-        if *flag != *Self::FLAG {
-            return Err(crate::USAGE.into());
-        }
-        let Some(target) = target.to_str() else {
-            return Err(Self::malformed("the argument is not valid UTF-8"));
-        };
-        Self::named(target).map(Some)
     }
 
-    /// Splits `<chain>/<network>` into the identity a repository is opened
-    /// with. Both halves are chain-owned canonical text, never a pattern:
-    /// this tool deletes, so it names exactly one network or none.
-    fn named(target: &str) -> Result<Self, AnyError> {
-        let Some((chain, name)) = target.split_once('/') else {
-            return Err(Self::malformed(target));
-        };
+    fn network(text: &str) -> Result<Network, AnyError> {
+        let malformed = || format!("operator command takes one <chain>/<network> argument: {text}");
+        let (chain, name) = text.split_once('/').ok_or_else(malformed)?;
         if chain.trim().is_empty() || name.trim().is_empty() || name.contains('/') {
-            return Err(Self::malformed(target));
+            return Err(malformed().into());
         }
-        Ok(Self {
-            network: Network::new(ChainName::new(chain), name),
-        })
+        Ok(Network::new(ChainName::new(chain), name))
     }
 
-    fn malformed(target: &str) -> AnyError {
-        format!("--rescan takes one <chain>/<network> argument, such as bitcoin/mainnet: {target}")
-            .into()
-    }
-
-    /// Removes this network's checkpoint, history, movements, and live
-    /// outputs, and reports what it removed on standard output.
-    ///
-    /// Says what it is about to do first, because the delete is not
-    /// reversible. Refuses a network the file does not configure rather than
-    /// opening a repository for it: a typo must not silently create and then
-    /// empty a namespace of its own.
-    ///
-    /// # Errors
-    ///
-    /// The refusal above, a storage backend that cannot be opened, or a
-    /// removal the backend refused. Nothing is removed unless all of it is.
-    pub(crate) async fn purge(&self, config: &Config) -> Result<(), AnyError> {
+    pub(crate) async fn run(&self, config: &Config) -> Result<(), AnyError> {
         let configured = config.chains()?.networks();
-        if !configured.contains(&self.network) {
+        let (Self::Rescan(network) | Self::CancelBackfill(network)) = self;
+        if !configured.contains(network) {
+            let listed = configured
+                .iter()
+                .map(|network| format!("{}/{}", network.chain, network.name))
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(format!(
-                "{self} is not a configured network; this file configures {}",
-                Self::listed(&configured)
+                "{self} is not a configured network; this file configures {listed}"
             )
             .into());
         }
-        println!(
-            "payment-server: removing every indexing row of {self}. \
-             The address registry and every other network are left alone, \
-             and nothing is served while this runs."
-        );
         let store = config.storage.open().await?;
-        let removed = store.repository().purge_network(&self.network).await?;
-        println!(
-            "removed {} checkpoint, {} history, {} movement, {} block-credit, \
-             and {} output rows",
-            removed.checkpoint,
-            removed.history,
-            removed.movements,
-            removed.credits,
-            removed.outputs
-        );
-        println!("the next start re-indexes {self} from the earliest observed start");
+        let repository = store.repository();
+        match self {
+            Self::Rescan(network) => {
+                let removed = repository.purge_network(network).await?;
+                println!(
+                    "removed {} checkpoint, {} history, {} movement, {} block-credit, and {} output rows \
+                     from {self}; watches and application keys preserved",
+                    removed.checkpoint,
+                    removed.history,
+                    removed.movements,
+                    removed.credits,
+                    removed.outputs
+                );
+            }
+            Self::CancelBackfill(network) => {
+                let count = Self::cancel(&repository, network).await?;
+                println!(
+                    "cancelled backfill for {count} watches on {self}; \
+                     indexed facts and application keys preserved"
+                );
+            }
+        }
         Ok(())
     }
 
-    fn listed(networks: &[Network]) -> String {
-        networks
-            .iter()
-            .map(|network| format!("{}/{}", network.chain, network.name))
-            .collect::<Vec<_>>()
-            .join(", ")
+    /// Re-anchors only genuinely unfinished watches, using the same durable
+    /// progress predicate as the scanner; there is no running pass to coordinate.
+    async fn cancel(
+        repository: &crate::storage::Repository,
+        network: &Network,
+    ) -> Result<usize, AnyError> {
+        let Some(checkpoint) = repository.checkpoint(network).await? else {
+            return Ok(0);
+        };
+        let rows = repository.all(network).await?;
+        let owing = rows
+            .into_iter()
+            .filter(|progress| !progress.caught_up(Some(&checkpoint)))
+            .collect::<Vec<_>>();
+        if owing.is_empty() {
+            return Ok(0);
+        }
+        let birthday = checkpoint
+            .position
+            .checked_successor()
+            .ok_or("checkpoint has no successor")?;
+        let renewed = owing
+            .into_iter()
+            .map(|progress| indexing::Watch {
+                start: birthday,
+                ..progress.watch
+            })
+            .collect::<Vec<_>>();
+        let count = renewed.len();
+        repository.cancel_backfill(renewed).await?;
+        Ok(count)
     }
 }
 
-impl fmt::Display for Rescan {
+impl fmt::Display for Operation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}/{}", self.network.chain, self.network.name)
+        match self {
+            Self::Rescan(network) | Self::CancelBackfill(network) => {
+                write!(formatter, "{}/{}", network.chain, network.name)
+            }
+        }
     }
 }
 
@@ -149,8 +145,8 @@ mod tests {
         values.iter().map(OsString::from).collect()
     }
 
-    fn parse<const N: usize>(values: [&str; N]) -> Result<Option<Rescan>, AnyError> {
-        Rescan::parse(arguments(values).into_iter())
+    fn parse<const N: usize>(values: [&str; N]) -> Result<Option<Operation>, AnyError> {
+        Operation::parse(arguments(values).into_iter())
     }
 
     /// A configuration whose only chain is Solana, on one index file inside
@@ -236,7 +232,7 @@ mod tests {
             vec!["--purge", "solana/localnet"],
             vec!["solana/localnet"],
         ] {
-            Rescan::parse(invalid.iter().map(OsString::from))
+            Operation::parse(invalid.iter().map(OsString::from))
                 .err()
                 .unwrap_or_else(|| panic!("{invalid:?} must be refused"));
         }
@@ -249,7 +245,7 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("{target} must be refused"));
             assert!(
-                error.to_string().starts_with("--rescan takes one"),
+                error.to_string().starts_with("operator command takes one"),
                 "{error}"
             );
         }
@@ -268,7 +264,7 @@ mod tests {
             .expect("a rescan");
 
         let error = refused
-            .purge(&config)
+            .run(&config)
             .await
             .expect_err("an unconfigured network must be refused");
 
@@ -312,7 +308,7 @@ mod tests {
         parse(["--rescan", "solana/localnet"])
             .expect("a well-formed target")
             .expect("a rescan")
-            .purge(&config)
+            .run(&config)
             .await
             .expect("the configured network is purged");
 
@@ -341,5 +337,66 @@ mod tests {
             );
         }
         drop(held);
+    }
+    #[tokio::test]
+    async fn cancellation_preserves_other_networks_facts_and_keys() {
+        let directory = tempfile::tempdir().expect("directory");
+        let held = TcpListener::bind("127.0.0.1:0").expect("occupied listener");
+        let config = written(directory.path(), held.local_addr().expect("address").port()).await;
+        let target = Network::new(ChainName::new("solana"), "localnet");
+        let other = Network::new(ChainName::new("bitcoin"), "regtest");
+        let store = config.storage.open().await.expect("store");
+        let repository = store.repository();
+        for network in [&target, &other] {
+            repository
+                .commit(indexed(network))
+                .await
+                .expect("checkpoint");
+            let mut watch = registration(network);
+            watch.start = BlockPosition(0);
+            repository.add(vec![watch]).await.expect("late watch");
+        }
+        let sentinel =
+            rusqlite::Connection::open(directory.path().join("payment.db")).expect("connection");
+        sentinel
+            .execute_batch(
+                "CREATE TABLE app_sentinel(secret TEXT);
+             INSERT INTO app_sentinel VALUES ('untouched')",
+            )
+            .expect("application row");
+        let before = repository.all(&other).await.expect("other watches");
+        parse(["--cancel-backfill", "solana/localnet"])
+            .expect("command")
+            .expect("operation")
+            .run(&config)
+            .await
+            .expect("cancelled without binding or RPC");
+        assert_eq!(repository.all(&other).await.expect("other"), before);
+        let target_rows = repository.all(&target).await.expect("target");
+        assert_eq!(target_rows[0].watch.start, BlockPosition(2));
+        assert_eq!(
+            Operation::cancel(&repository, &target)
+                .await
+                .expect("idempotent"),
+            0
+        );
+        for network in [&target, &other] {
+            assert_eq!(
+                repository
+                    .checkpoint(network)
+                    .await
+                    .expect("checkpoint")
+                    .expect("retained")
+                    .position,
+                BlockPosition(1)
+            );
+        }
+        assert_eq!(
+            sentinel
+                .query_row("SELECT secret FROM app_sentinel", [], |row| row
+                    .get::<_, String>(0))
+                .expect("application row"),
+            "untouched"
+        );
     }
 }

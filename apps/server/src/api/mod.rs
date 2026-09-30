@@ -7,7 +7,6 @@ mod health;
 mod history;
 mod openapi;
 mod signers;
-mod sync;
 mod transaction;
 mod wallet;
 
@@ -19,7 +18,6 @@ mod route_contract;
 pub(crate) use asset::AssetTag;
 pub(crate) use contract::Start;
 pub(crate) use signers::Signers;
-pub(crate) use sync::Resume;
 
 use error::Error;
 
@@ -55,12 +53,11 @@ pub(crate) type Wallets = wallets::Wallets<AssetTag>;
     servers((url = "/", description = "The payment server's own origin")),
     modifiers(&BearerAuth),
     tags(
-        (name = "assets", description = "Configured assets and address parsing"),
-        (name = "wallets", description = "Wallets, imports, and balances"),
+        (name = "assets", description = "Configured assets"),
+        (name = "wallets", description = "Wallets and balances"),
         (name = "addresses", description = "Watch-only addresses"),
         (name = "transactions", description = "History, single transfers, and batches"),
-        (name = "status", description = "Index readiness, checkpoints, and clearing a quarantine"),
-        (name = "health", description = "Liveness and readiness probes"),
+        (name = "health", description = "Readiness, network state, and RPC statistics"),
         (name = "openapi", description = "This document")
     )
 )]
@@ -106,6 +103,7 @@ pub(crate) struct Payments {
     wallets: Arc<Wallets>,
     units: Arc<base::Units>,
     signers: Arc<Signers>,
+    registry: Arc<crate::registry::Registry>,
     index: Arc<indexing::Index>,
     /// The one history read these routes make, for whichever network the wallet
     /// belongs to.
@@ -123,8 +121,8 @@ pub(crate) struct Payments {
     /// collected by `wallets::Composition` — never reached for through `index`,
     /// which can route one and is not what owns the answer.
     balance: Arc<dyn wallets::Balances>,
-    resume: Arc<dyn Resume>,
     health: watch::Receiver<indexing::SyncHealth>,
+    rpc: Vec<(base::Network, Vec<json_rpc::Statistics>)>,
 }
 
 /// Everything [`Payments`] is built from, one field per field of it, so a
@@ -142,19 +140,20 @@ pub(crate) struct PaymentsParams {
     /// The wallets this process holds keys for; one missing from it is
     /// watch-only.
     pub(crate) signers: Arc<Signers>,
+    /// Encrypted application-owned keys, committed before watch publication.
+    pub(crate) registry: Arc<crate::registry::Registry>,
     /// What observes every configured network (`wallets::Composition::index`):
-    /// watches, checkpoints and backfill cancellation — never a stored query.
+    /// watches and checkpoints — never a stored query.
     pub(crate) index: Arc<indexing::Index>,
     /// One history page, routed per network (`wallets::Composition::history`).
     pub(crate) history: Arc<dyn wallets::History>,
     /// One balance, routed per network (`wallets::Composition::balance`).
     pub(crate) balance: Arc<dyn wallets::Balances>,
-    /// What clears one network's quarantine, usually `indexing::SyncControl`:
-    /// the write side of what `health` reports (`docs/design/019` section 5.3).
-    pub(crate) resume: Arc<dyn Resume>,
     /// The channel the composition root publishes each network's state on; `GET
-    /// /health/ready` answers 204 only while it is ready and its sender alive.
+    /// /healthz` answers 200 only while it is ready and its sender alive.
     pub(crate) health: watch::Receiver<indexing::SyncHealth>,
+    /// Endpoint counters supplied by configured RPC clients; no URLs or credentials.
+    pub(crate) rpc: Vec<(base::Network, Vec<json_rpc::Statistics>)>,
 }
 
 impl Payments {
@@ -165,21 +164,23 @@ impl Payments {
             wallets,
             units,
             signers,
+            registry,
             index,
             history,
             balance,
-            resume,
             health,
+            rpc,
         } = params;
         Self {
             wallets,
             units,
             signers,
+            registry,
             index,
             history,
             balance,
-            resume,
             health,
+            rpc,
         }
     }
 
@@ -236,28 +237,21 @@ impl Payments {
         Ok(Custody { watch, tag, wallet })
     }
 
-    /// Mints an id for `wallet`, has the index observe it, then files the key.
-    ///
-    /// The order is the contract: `index.watch` commits the durable row
-    /// *before* the key is kept, so a crash between them leaves a watch-only
-    /// address — visible, correct history, repaired by re-importing the key —
-    /// rather than a key nothing observes (`docs/design/030 §8 (ex-029)` section 3.3).
-    ///
-    /// `start` is the caller's, and the index refuses one further below the
-    /// checkpoint than its policy allows, synchronously, naming the earliest
-    /// it would accept — so a caller-supplied birthday cannot wedge readiness.
-    ///
-    /// # Errors
-    ///
-    /// The index's error, and a 409 when the minted id is somehow taken.
+    /// Persists a generated/imported key, publishes its watch, then installs
+    /// the signing handle. A rejected or cancelled watch leaves a private key
+    /// row but no wallet route; a committed watch is recoverable at boot.
     pub(crate) async fn registered(
         &self,
         wallet: Arc<dyn wallets::Wallet>,
         tag: AssetTag,
-        start: contract::Start,
+        material: wallets::SecretBytes,
     ) -> Result<(axum::http::StatusCode, axum::Json<contract::Wallet>), Error> {
         let id = uuid::Uuid::now_v7().to_string();
-        let watch = self.index.watch(&id, wallet.as_ref(), start.into()).await?;
+        self.registry.keep(&id, &tag, material).await?;
+        let watch = self
+            .index
+            .watch(&id, wallet.as_ref(), indexing::Birthday::Fresh)
+            .await?;
         self.signers.keep(id, wallet.clone())?;
         let custody = Custody {
             watch,
@@ -280,7 +274,6 @@ impl Payments {
         &self,
         tag: AssetTag,
         text: &str,
-        start: contract::Start,
     ) -> Result<(axum::http::StatusCode, axum::Json<contract::Wallet>), Error> {
         let info = self.wallets.asset(&tag).map_err(Error::by_asset)?;
         let address = self.wallets.parse(&tag, text).map_err(Error::by_asset)?;
@@ -289,31 +282,16 @@ impl Payments {
             asset: info.id,
         };
         let id = uuid::Uuid::now_v7().to_string();
-        let watch = self.index.watch(&id, &subject, start.into()).await?;
+        let watch = self
+            .index
+            .watch(&id, &subject, indexing::Birthday::Fresh)
+            .await?;
         let custody = Custody {
             watch,
             tag,
             wallet: None,
         };
         Ok((axum::http::StatusCode::CREATED, axum::Json(custody.into())))
-    }
-
-    /// Stops asking for the history `network` still owes, and reports how many
-    /// watches that settled.
-    ///
-    /// The one operator decision the reported range leaves open. `GET /v1/status`
-    /// publishes a range a node may never serve, and nothing in the index ever
-    /// gives up on it; this is the answer back. It deletes nothing: each affected
-    /// watch keeps its id, its address and every row already indexed for it, and
-    /// only its birthday moves up to the checkpoint, which is what stops the
-    /// reads claiming a range nobody read (`docs/design/024` section 7).
-    ///
-    /// # Errors
-    ///
-    /// The index's own error.
-    pub(crate) async fn cancel(&self, network: &base::Network) -> Result<u64, Error> {
-        let cancelled = indexing::Backfilling::cancel_backfill(&*self.index, network).await?;
-        Ok(u64::try_from(cancelled.len()).unwrap_or(u64::MAX))
     }
 
     /// The canonical destination of `text` in the custody's own asset network.
@@ -343,10 +321,7 @@ impl Payments {
     ) -> Result<(AssetTag, wallets::Transfer), Error> {
         let custody = self.custody(&item.wallet_id).await?;
         let wallet = custody.signing()?.clone();
-        let amount = item
-            .amount
-            .parse()
-            .map_err(|_| Error::invalid_request("amount must be an exact base-10 decimal"))?;
+        let amount = transaction::Transfer::amount(&item.amount)?;
         let to = self.destination(&custody, &item.destination)?;
         Ok((custody.tag, wallets::Transfer { wallet, to, amount }))
     }
@@ -394,14 +369,10 @@ impl Payments {
     pub(crate) async fn balance(&self, custody: &Custody) -> Result<wallet::Balance, Error> {
         let unit = self
             .units
-            .of(&custody.watch.asset)
+            .of(&custody.watch.address.network, &custody.watch.asset)
             .ok_or_else(Error::undeclared)?;
         let balance = self.balance.balance(custody).await?;
         wallet::Balance::new(balance, unit)
-    }
-
-    fn ready(&self) -> bool {
-        self.health.has_changed().is_ok() && self.health.borrow().ready()
     }
 }
 
@@ -484,7 +455,6 @@ fn protected_routes() -> OpenApiRouter<Payments> {
         .merge(address::routes())
         .merge(history::routes())
         .merge(transaction::routes())
-        .merge(sync::routes())
 }
 
 fn public_routes() -> OpenApiRouter<Payments> {
@@ -504,18 +474,12 @@ mod tests {
         let document = document();
 
         for (path, method) in [
-            (http_server::LIVENESS_PATH, "get"),
-            (http_server::READINESS_PATH, "get"),
+            ("/healthz", "get"),
             ("/openapi.json", "get"),
             ("/v1/assets", "get"),
-            ("/v1/assets/{asset}/address", "get"),
             ("/v1/wallets", "post"),
             ("/v1/wallets", "get"),
-            ("/v1/wallets/import", "post"),
             ("/v1/addresses", "post"),
-            ("/v1/status", "get"),
-            ("/v1/status/resume", "post"),
-            ("/v1/status/backfill/cancel", "post"),
             ("/v1/wallets/{id}", "get"),
             ("/v1/wallets/{id}/balance", "get"),
             ("/v1/wallets/{id}/transactions", "get"),
@@ -530,31 +494,21 @@ mod tests {
             "Asset",
             "AssetList",
             "Backfill",
-            "BackfillCancelled",
             "Balance",
             "Completeness",
             "BatchAccepted",
             "BatchedTransfer",
             "Block",
-            "ConfirmedStatus",
-            "CancelBackfill",
             "CreateWallet",
             "ErrorBody",
-            "FailedStatus",
             "Fee",
-            "ImportWallet",
-            "Listing",
             "Movement",
             "MovementKind",
             "Network",
             "NetworkCheckpoint",
             "ParentBlock",
-            "PendingStatus",
-            "ResumeAccepted",
-            "ResumeNetwork",
-            "Start",
             "Status",
-            "SyncReport",
+            "Report",
             "Transaction",
             "TransactionPage",
             "Transfer",
@@ -618,13 +572,10 @@ mod tests {
 
         for schema in [
             "CreateWallet",
-            "ImportWallet",
             "Transfer",
             "BatchedTransfer",
             "TransferBatch",
             "WatchAddress",
-            "CancelBackfill",
-            "ResumeNetwork",
         ] {
             assert_eq!(
                 document.pointer(&format!(
@@ -643,13 +594,7 @@ mod tests {
         let document = document();
 
         assert_exact_required_properties(&document, "Network", &["chain", "name"]);
-        for schema in [
-            "Wallet",
-            "Listing",
-            "Address",
-            "Transaction",
-            "NetworkCheckpoint",
-        ] {
+        for schema in ["Wallet", "Address", "Transaction", "NetworkCheckpoint"] {
             assert_eq!(
                 document.pointer(&format!(
                     "/components/schemas/{schema}/properties/network/$ref"
@@ -683,7 +628,7 @@ mod tests {
                 .pointer("/components/schemas/WalletAsset")
                 .is_none()
         );
-        for schema in ["CreateWallet", "ImportWallet", "WatchAddress"] {
+        for schema in ["CreateWallet", "WatchAddress"] {
             let asset = &document["components"]["schemas"][schema]["properties"]["asset"];
             assert_eq!(asset["type"], "string", "{schema}.asset is an open tag");
             assert_eq!(asset["pattern"], "^[a-z0-9][a-z0-9-]{0,31}$");
@@ -692,10 +637,6 @@ mod tests {
                 "{schema}.asset lists no assets"
             );
         }
-        assert_eq!(
-            document["components"]["schemas"]["ImportWallet"]["properties"]["secret"]["format"],
-            "password"
-        );
         for chain in ["bitcoin", "ethereum", "solana", "btc", "usdc"] {
             assert!(
                 !text
@@ -833,28 +774,6 @@ mod tests {
     }
 
     /// Arbitrary caller text is a query parameter, never a path segment.
-    #[test]
-    fn address_parsing_takes_its_text_from_the_query_string() {
-        let document = document();
-        let parameters = document
-            .pointer("/paths/~1v1~1assets~1{asset}~1address/get/parameters")
-            .and_then(Value::as_array)
-            .expect("address parameters");
-        let located = |name: &str| {
-            parameters
-                .iter()
-                .find(|parameter| parameter["name"] == name)
-                .map(|parameter| parameter["in"].as_str().unwrap_or_default().to_owned())
-        };
-        assert_eq!(located("asset").as_deref(), Some("path"));
-        assert_eq!(located("text").as_deref(), Some("query"));
-        assert!(
-            document["paths"]
-                .as_object()
-                .is_some_and(|paths| !paths.contains_key("/v1/assets/{asset}/addresses/{text}")),
-            "address text must not travel in a path segment"
-        );
-    }
 
     fn document() -> Value {
         serde_json::to_value(openapi()).expect("OpenAPI contract must serialize")

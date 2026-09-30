@@ -264,6 +264,7 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
         };
         let stalled = Self::stalled(&next.status).is_some();
         self.health.clone_from(&next);
+        self.monitor.network_observed(&next);
         if previous != next.state
             || next.state == NetworkState::Retrying
             || next.failure.is_some()

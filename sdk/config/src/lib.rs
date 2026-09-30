@@ -10,7 +10,7 @@ mod repeat;
 mod rpc;
 
 pub use cadence::Cadence;
-pub use chain::{Chain, Chains};
+pub use chain::{Chain, Chains, RpcStatistics};
 pub use document::Document;
 pub use error::{Error, ErrorKind};
 pub use registry::{Registry, Sections};

@@ -29,13 +29,14 @@ use wallets::{
 };
 use wallets::{ObservedTransaction, TransactionPage, TransactionStatus};
 
-use super::{AssetTag, Payments, PaymentsParams, Resume, Signers, router};
+use super::{AssetTag, Payments, PaymentsParams, Signers, router};
 
 const TOKEN: &str = "route-contract-secret";
 
 #[derive(Default)]
 struct Calls {
     transfers: Mutex<Vec<Decimal>>,
+    sweeps: Mutex<usize>,
     broadcasts: Mutex<usize>,
     batches: Mutex<Vec<usize>>,
 }
@@ -455,6 +456,10 @@ impl Sender for FixtureSender {
                 .lock()
                 .expect("fixture batch lock")
                 .push(transfers.len());
+            *calls.sweeps.lock().unwrap() += transfers
+                .iter()
+                .filter(|transfer| matches!(transfer.amount, wallets::Amount::All))
+                .count();
             Ok(vec![TransactionId::new("fixture-batch")])
         })
     }
@@ -487,14 +492,13 @@ impl wallets::SingleSender for FixtureWallet {
     fn send<'a>(
         &'a self,
         _destination: Address,
-        amount: Decimal,
+        amount: wallets::Amount,
     ) -> wallets::FutureResult<'a, TransactionId> {
         Box::pin(async move {
-            self.calls
-                .transfers
-                .lock()
-                .expect("fixture transfer lock")
-                .push(amount);
+            match amount {
+                wallets::Amount::Exact(amount) => self.calls.transfers.lock().unwrap().push(amount),
+                wallets::Amount::All => *self.calls.sweeps.lock().unwrap() += 1,
+            }
             *self
                 .calls
                 .broadcasts
@@ -523,33 +527,11 @@ impl wallets::TransactionFactory for FixtureWallet {
 }
 
 struct Fixture {
+    payments: Payments,
+    registry: Arc<crate::registry::Registry>,
     app: Router,
     ready: watch::Sender<SyncHealth>,
     calls: Arc<Calls>,
-    resumed: Arc<FixtureResume>,
-}
-
-/// The supervisor handle the status route resumes through, recording every
-/// network it was asked for so a test can prove the route reached it.
-#[derive(Default)]
-struct FixtureResume {
-    networks: Mutex<Vec<Network>>,
-}
-
-impl Resume for FixtureResume {
-    fn resume(&self, network: &Network) -> Result<(), IndexError> {
-        self.networks
-            .lock()
-            .expect("fixture resume list")
-            .push(network.clone());
-        Ok(())
-    }
-}
-
-impl FixtureResume {
-    fn networks(&self) -> Vec<Network> {
-        self.networks.lock().expect("fixture resume list").clone()
-    }
 }
 
 /// Every fixture network in one state, as the supervisor's monitor would
@@ -588,17 +570,8 @@ fn stalled() -> SyncHealth {
     health
 }
 
-/// `row` with `pending` held above its confirmed line and `observed` as the
-/// tip its last pass indexed towards.
-fn held_above(mut row: NetworkHealth, pending: BlockRef, observed: BlockRef) -> NetworkHealth {
-    row.status.pending_tip = Some(pending);
-    row.status.observed_tip = Some(observed);
-    row.status.phase = indexing::SyncPhase::Ready;
-    row
-}
-
 fn reported(network: &Network, state: NetworkState) -> NetworkHealth {
-    NetworkHealth {
+    let mut row = NetworkHealth {
         state,
         failure: (state == NetworkState::Quarantined).then(|| {
             IndexError::new(
@@ -610,7 +583,9 @@ fn reported(network: &Network, state: NetworkState) -> NetworkHealth {
         attempts: u32::from(state == NetworkState::Quarantined),
         since: 1_758_614_400,
         ..NetworkHealth::starting(network)
-    }
+    };
+    row.status.checkpoint = Some(block(8));
+    row
 }
 
 fn fixture(initially_ready: bool) -> Fixture {
@@ -670,16 +645,17 @@ fn fixture_with_generation_error(
     } else {
         NetworkState::CatchingUp
     }));
-    let resumed = Arc::new(FixtureResume::default());
+    let registry = crate::registry::Registry::fixture();
     let payments = Payments::from_params(PaymentsParams {
         wallets: Arc::new(wallets),
         units: Arc::new(units()),
         signers: Arc::new(Signers::new()),
+        registry: registry.clone(),
         index,
         history,
         balance,
-        resume: Arc::clone(&resumed) as Arc<dyn Resume>,
         health: receiver,
+        rpc: vec![],
     });
     let token = http_server::BearerToken::new(TOKEN).expect("fixture bearer token");
     let config = http_server::Config::new(
@@ -689,10 +665,11 @@ fn fixture_with_generation_error(
         http_server::RequestLimits::default(),
     );
     Fixture {
+        payments: payments.clone(),
+        registry,
         app: router(payments, &config).expect("fixture router must build"),
         ready,
         calls,
-        resumed,
     }
 }
 
@@ -703,7 +680,7 @@ async fn unconfigured_wallet_asset_is_not_found() {
         &fixture.app,
         "POST",
         "/v1/wallets",
-        Some(json!({"asset": "usdc", "start": "fresh"})),
+        Some(json!({"asset": "usdc"})),
         true,
     )
     .await;
@@ -749,7 +726,7 @@ async fn wallet_generation_errors_preserve_status_and_message() {
             &fixture.app,
             "POST",
             "/v1/wallets",
-            Some(json!({"asset": "btc", "start": "fresh"})),
+            Some(json!({"asset": "btc"})),
             true,
         )
         .await;
@@ -783,7 +760,7 @@ async fn invalid_wallet_asset_uses_the_json_error_contract() {
             &fixture.app,
             "POST",
             "/v1/wallets",
-            Some(json!({"asset": asset, "start": "fresh"})),
+            Some(json!({"asset": asset})),
             true,
         )
         .await;
@@ -793,17 +770,11 @@ async fn invalid_wallet_asset_uses_the_json_error_contract() {
 }
 
 #[tokio::test]
-async fn readiness_reflects_runtime_state_while_liveness_stays_available() {
+async fn health_reports_readiness_from_runtime_state() {
     let fixture = fixture(false);
 
     assert_eq!(
-        request(&fixture.app, "GET", "/health/live", None, false)
-            .await
-            .status,
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(
-        request(&fixture.app, "GET", "/health/ready", None, false)
+        request(&fixture.app, "GET", "/healthz", None, false)
             .await
             .status,
         StatusCode::SERVICE_UNAVAILABLE
@@ -815,10 +786,10 @@ async fn readiness_reflects_runtime_state_while_liveness_stays_available() {
         .expect("readiness receiver exists");
 
     assert_eq!(
-        request(&fixture.app, "GET", "/health/ready", None, false)
+        request(&fixture.app, "GET", "/healthz", None, false)
             .await
             .status,
-        StatusCode::NO_CONTENT
+        StatusCode::OK
     );
 }
 
@@ -833,13 +804,13 @@ async fn one_quarantined_network_keeps_the_others_ready_and_reports_its_failure(
         .expect("readiness receiver exists");
 
     assert_eq!(
-        request(&fixture.app, "GET", "/health/ready", None, false)
+        request(&fixture.app, "GET", "/healthz", None, false)
             .await
             .status,
-        StatusCode::NO_CONTENT,
+        StatusCode::OK,
         "a quarantined network must not hold readiness at 503 forever"
     );
-    let status = json_body(&request(&fixture.app, "GET", "/v1/status", None, true).await);
+    let status = json_body(&request(&fixture.app, "GET", "/healthz", None, true).await);
     assert_eq!(status["ready"], true);
     let networks = status["networks"].as_array().expect("networks");
     assert_eq!(networks[0]["state"], "ready");
@@ -864,7 +835,7 @@ async fn one_quarantined_network_keeps_the_others_ready_and_reports_its_failure(
         .send(health(NetworkState::Quarantined))
         .expect("readiness receiver exists");
     assert_eq!(
-        request(&fixture.app, "GET", "/health/ready", None, false)
+        request(&fixture.app, "GET", "/healthz", None, false)
             .await
             .status,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -878,15 +849,9 @@ async fn closed_readiness_is_unavailable_even_when_the_last_value_was_true() {
         let fixture = fixture(last_value);
         drop(fixture.ready);
 
-        let response = request(&fixture.app, "GET", "/health/ready", None, false).await;
+        let response = request(&fixture.app, "GET", "/healthz", None, false).await;
         assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(response.body.is_empty());
-        assert_eq!(
-            request(&fixture.app, "GET", "/health/live", None, false)
-                .await
-                .status,
-            StatusCode::NO_CONTENT
-        );
+        assert_eq!(json_body(&response)["ready"], false);
     }
 }
 
@@ -897,7 +862,7 @@ async fn openapi_serves_the_merged_contract_without_authentication() {
 
     assert_eq!(response.status, StatusCode::OK);
     let document = json_body(&response);
-    for path in ["/openapi.json", "/health/ready", "/v1/wallets/{id}"] {
+    for path in ["/openapi.json", "/healthz", "/v1/wallets/{id}"] {
         assert!(document["paths"][path]["get"].is_object(), "{path}");
     }
     assert!(document["components"]["schemas"]["Wallet"].is_object());
@@ -931,7 +896,7 @@ async fn wallet_routes_delegate_to_the_wallet_collection() {
         &fixture.app,
         "POST",
         "/v1/wallets",
-        Some(json!({"asset": "btc", "start": "fresh"})),
+        Some(json!({"asset": "btc"})),
         false,
     )
     .await;
@@ -941,7 +906,7 @@ async fn wallet_routes_delegate_to_the_wallet_collection() {
         &fixture.app,
         "POST",
         "/v1/wallets",
-        Some(json!({"asset": "btc", "start": "fresh"})),
+        Some(json!({"asset": "btc"})),
         true,
     )
     .await;
@@ -960,7 +925,7 @@ async fn wallet_routes_delegate_to_the_wallet_collection() {
         &fixture.app,
         "POST",
         "/v1/wallets",
-        Some(json!({"asset": "usdc", "start": "fresh"})),
+        Some(json!({"asset": "usdc"})),
         true,
     )
     .await;
@@ -976,7 +941,7 @@ async fn wallet_routes_delegate_to_the_wallet_collection() {
         &fixture.app,
         "POST",
         "/v1/wallets",
-        Some(json!({"asset": "sol", "start": "fresh"})),
+        Some(json!({"asset": "sol"})),
         true,
     )
     .await;
@@ -1486,111 +1451,13 @@ async fn assets_are_listed_from_the_registered_factories() {
 }
 
 #[tokio::test]
-async fn address_text_is_parsed_by_the_asset_without_a_wallet() {
-    let fixture = fixture(true);
-    let parsed = request(
-        &fixture.app,
-        "GET",
-        "/v1/assets/sol/address?text=FIXTURE-Watched",
-        None,
-        true,
-    )
-    .await;
-    assert_eq!(parsed.status, StatusCode::OK);
-    assert_eq!(
-        json_body(&parsed),
-        json!({
-            "network": {"chain": "solana", "name": "localnet"},
-            "value": "fixture-watched"
-        })
-    );
-    for (path, status) in [
-        ("/v1/assets/sol/address?text=nope", StatusCode::BAD_REQUEST),
-        (
-            "/v1/assets/doge/address?text=fixture-a",
-            StatusCode::NOT_FOUND,
-        ),
-        (
-            "/v1/assets/DOGE/address?text=fixture-a",
-            StatusCode::BAD_REQUEST,
-        ),
-    ] {
-        assert_eq!(
-            request(&fixture.app, "GET", path, None, true).await.status,
-            status,
-            "{path}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn imported_wallets_are_parsed_by_the_asset_and_never_echo_the_secret() {
-    let fixture = fixture(true);
-    let imported = request(
-        &fixture.app,
-        "POST",
-        "/v1/wallets/import",
-        Some(json!({"asset": "usdc", "secret": "2a", "start": "fresh"})),
-        true,
-    )
-    .await;
-    assert_eq!(imported.status, StatusCode::CREATED);
-    let wallet = json_body(&imported);
-    assert_eq!(wallet["asset"], "usdc");
-    assert_eq!(wallet["network"]["chain"], "ethereum");
-    assert_eq!(wallet["address"], "fixture-2a");
-    assert_eq!(wallet["watch_only"], false);
-    assert!(!String::from_utf8_lossy(&imported.body).contains("\"2a\""));
-
-    for (body, status, message) in [
-        (
-            json!({"asset": "usdc", "secret": "secret-text", "start": "fresh"}),
-            StatusCode::BAD_REQUEST,
-            "wallet secret must be hexadecimal key material",
-        ),
-        (
-            json!({"asset": "doge", "secret": "2a", "start": "fresh"}),
-            StatusCode::NOT_FOUND,
-            "wallet asset is not configured",
-        ),
-        (
-            json!({"asset": "usdc", "secret": "2b", "start_position": 1}),
-            StatusCode::BAD_REQUEST,
-            "request body must match the documented JSON schema",
-        ),
-    ] {
-        let response = request(&fixture.app, "POST", "/v1/wallets/import", Some(body), true).await;
-        assert_eq!(response.status, status);
-        assert_eq!(json_body(&response), json!({"message": message}));
-        assert!(!String::from_utf8_lossy(&response.body).contains("secret-text"));
-    }
-    // The index owns the watch list, so one address is watched once whatever
-    // id a second import would mint — which is the 409 the contract has always
-    // documented, now answered the same way with and without a registry.
-    let duplicate = request(
-        &fixture.app,
-        "POST",
-        "/v1/wallets/import",
-        Some(json!({"asset": "usdc", "secret": "2a", "start": "fresh"})),
-        true,
-    )
-    .await;
-    assert_eq!(
-        duplicate.status,
-        StatusCode::CONFLICT,
-        "one address is watched once"
-    );
-    assert_no_transaction_calls(&fixture.calls);
-}
-
-#[tokio::test]
 async fn watched_addresses_have_history_and_balance_but_no_sends() {
     let fixture = fixture(true);
     let watched = request(
         &fixture.app,
         "POST",
         "/v1/addresses",
-        Some(json!({"asset": "btc", "address": "FIXTURE-Watched", "start": "fresh"})),
+        Some(json!({"asset": "btc", "address": "FIXTURE-Watched"})),
         true,
     )
     .await;
@@ -1652,11 +1519,11 @@ async fn watched_addresses_have_history_and_balance_but_no_sends() {
 
     for (body, status) in [
         (
-            json!({"asset": "btc", "address": "not-an-address", "start": "fresh"}),
+            json!({"asset": "btc", "address": "not-an-address"}),
             StatusCode::BAD_REQUEST,
         ),
         (
-            json!({"asset": "doge", "address": "fixture-a", "start": "fresh"}),
+            json!({"asset": "doge", "address": "fixture-a"}),
             StatusCode::NOT_FOUND,
         ),
     ] {
@@ -1666,40 +1533,10 @@ async fn watched_addresses_have_history_and_balance_but_no_sends() {
 }
 
 #[tokio::test]
-async fn wallet_list_holds_generated_imported_and_watched_entries() {
-    let fixture = fixture(true);
-    let generated = generated_wallet_id(&fixture).await;
-    let empty = request(&fixture.app, "GET", "/v1/wallets", None, true).await;
-    assert_eq!(empty.status, StatusCode::OK);
-    assert_eq!(
-        json_body(&empty)["wallets"].as_array().map(Vec::len),
-        Some(1)
-    );
-    request(
-        &fixture.app,
-        "POST",
-        "/v1/addresses",
-        Some(json!({"asset": "sol", "address": "fixture-watched", "start": "fresh"})),
-        true,
-    )
-    .await;
-    let listed = json_body(&request(&fixture.app, "GET", "/v1/wallets", None, true).await);
-    let wallets = listed["wallets"].as_array().expect("wallet list");
-    assert_eq!(wallets.len(), 2);
-    assert_eq!(
-        wallets[0]["id"],
-        generated.as_str(),
-        "UUIDv7 IDs list in creation order"
-    );
-    assert_eq!(wallets[1]["watch_only"], true);
-    assert_eq!(wallets[1]["network"]["chain"], "solana");
-}
-
-#[tokio::test]
 async fn status_reports_readiness_and_every_indexed_checkpoint() {
     let fixture = fixture(false);
-    let response = request(&fixture.app, "GET", "/v1/status", None, true).await;
-    assert_eq!(response.status, StatusCode::OK);
+    let response = request(&fixture.app, "GET", "/healthz", None, true).await;
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
     let status = json_body(&response);
     assert_eq!(status["ready"], false);
     let networks = status["networks"].as_array().expect("networks");
@@ -1712,166 +1549,8 @@ async fn status_reports_readiness_and_every_indexed_checkpoint() {
         .ready
         .send(health(NetworkState::Ready))
         .expect("readiness receiver exists");
-    let status = json_body(&request(&fixture.app, "GET", "/v1/status", None, true).await);
+    let status = json_body(&request(&fixture.app, "GET", "/healthz", None, true).await);
     assert_eq!(status["ready"], true);
-}
-
-/// The whole `GET /v1/status` body, byte for byte: every field of every row,
-/// in the order the serializer writes them.
-///
-/// The OpenAPI document cannot hold this. It names the fields and their types,
-/// and says nothing of their order or of what a free-form string carries, so a
-/// change to how `indexing` composes a network's health would pass the
-/// document check and still move the body. What the index holds and the wire
-/// does not publish (the tip a pass indexed towards, the phase it answered)
-/// must stay off it.
-#[tokio::test]
-async fn the_status_body_is_the_same_bytes_whatever_composes_the_health() {
-    let fixture = fixture(false);
-    let mut health = stalled();
-    health.apply(&held_above(
-        reported(&solana_network(), NetworkState::Quarantined),
-        block(9),
-        block(10),
-    ));
-    health.apply(&NetworkHealth {
-        state: NetworkState::Retrying,
-        failure: Some(IndexError::new(
-            IndexErrorKind::Source,
-            "node is unreachable",
-            true,
-        )),
-        attempts: 3,
-        ..reported(&ethereum_network(), NetworkState::Retrying)
-    });
-    fixture
-        .ready
-        .send(health)
-        .expect("readiness receiver exists");
-
-    let response = request(&fixture.app, "GET", "/v1/status", None, true).await;
-
-    assert_eq!(response.status, StatusCode::OK);
-    let block = |height: u8| {
-        let hash = format!("{height:02x}").repeat(32);
-        format!(r#"{{"position":{height},"height":{height},"hash":"{hash}","parent":null}}"#)
-    };
-    let row = |network: &str, pending: &str, rest: &[&str]| {
-        format!(
-            r#"{{"network":{network},"checkpoint":{},"pending_block":{pending},{}}}"#,
-            block(8),
-            rest.concat(),
-        )
-    };
-    let rows = [
-        row(
-            r#"{"chain":"bitcoin","name":"regtest"}"#,
-            "null",
-            &[
-                r#""state":"ready","failure":null,"#,
-                r#""backfill":{"pending":1,"resume":2,"anchor":8,"failure":{"#,
-                r#""kind":"source","retryable":true,"attempts":0,"since":1758614400,"#,
-                r#""message":"block is not available on this node"}}"#,
-            ],
-        ),
-        row(
-            r#"{"chain":"solana","name":"localnet"}"#,
-            &block(9),
-            &[
-                r#""state":"quarantined","failure":{"#,
-                r#""kind":"invalid_block","retryable":false,"attempts":1,"since":1758614400,"#,
-                r#""message":"block contains a duplicate transaction"},"#,
-                r#""backfill":null"#,
-            ],
-        ),
-        row(
-            r#"{"chain":"ethereum","name":"mainnet"}"#,
-            "null",
-            &[
-                r#""state":"retrying","failure":{"#,
-                r#""kind":"source","retryable":true,"attempts":3,"since":1758614400,"#,
-                r#""message":"node is unreachable"},"#,
-                r#""backfill":null"#,
-            ],
-        ),
-    ];
-    assert_eq!(
-        std::str::from_utf8(&response.body).expect("a UTF-8 body"),
-        format!(r#"{{"ready":false,"networks":[{}]}}"#, rows.join(",")),
-    );
-}
-
-/// A birthday the caller states reaches the index verbatim, and one the index
-/// will not read is refused by the call that made it.
-///
-/// This is the whole of what keeps a caller-supplied `start` from wedging
-/// readiness: the range a watch may owe is bounded synchronously, under the
-/// permit that fixed the checkpoint it is relative to, so no background pass
-/// inherits a request that can never finish (`docs/design/024` section 7).
-#[tokio::test]
-async fn a_stated_birthday_reaches_the_index_and_an_unreadable_one_is_refused() {
-    let fixture = fixture(true);
-
-    for (route, body) in [
-        ("/v1/wallets", json!({"asset": "btc", "start": 4})),
-        (
-            "/v1/wallets/import",
-            json!({"asset": "usdc", "secret": "2a", "start": 4}),
-        ),
-        (
-            "/v1/addresses",
-            json!({"asset": "sol", "address": "fixture-early", "start": 4}),
-        ),
-    ] {
-        let response = request(&fixture.app, "POST", route, Some(body), true).await;
-        assert_eq!(
-            response.status,
-            StatusCode::BAD_REQUEST,
-            "{route} must refuse a start the index will not read"
-        );
-        assert_eq!(
-            json_body(&response)["message"],
-            "the earliest acceptable start is 5",
-            "{route} passes the index's own refusal through, naming a start that works"
-        );
-    }
-
-    let accepted = request(
-        &fixture.app,
-        "POST",
-        "/v1/wallets",
-        Some(json!({"asset": "btc", "start": EARLIEST_START})),
-        true,
-    )
-    .await;
-    assert_eq!(accepted.status, StatusCode::CREATED);
-}
-
-/// An omitted birthday is a parse failure, not a default: the decision that
-/// every add path states one is enforced by the parser.
-#[tokio::test]
-async fn an_add_path_without_a_start_is_refused_by_the_parser() {
-    let fixture = fixture(true);
-
-    for (route, body) in [
-        ("/v1/wallets", json!({"asset": "btc"})),
-        (
-            "/v1/wallets/import",
-            json!({"asset": "usdc", "secret": "2a"}),
-        ),
-        (
-            "/v1/addresses",
-            json!({"asset": "sol", "address": "fixture-late"}),
-        ),
-        ("/v1/wallets", json!({"asset": "btc", "start": "tip"})),
-    ] {
-        let response = request(&fixture.app, "POST", route, Some(body), true).await;
-        assert_eq!(
-            response.status,
-            StatusCode::BAD_REQUEST,
-            "{route} must not invent a birthday"
-        );
-    }
 }
 
 /// The availability floor at the HTTP edge: a range this node can never serve
@@ -1884,7 +1563,7 @@ async fn a_network_that_owes_an_unservable_range_is_still_ready_and_says_so() {
         .send(stalled())
         .expect("readiness receiver exists");
 
-    let status = json_body(&request(&fixture.app, "GET", "/v1/status", None, true).await);
+    let status = json_body(&request(&fixture.app, "GET", "/healthz", None, true).await);
 
     assert_eq!(
         status["ready"], true,
@@ -1907,246 +1586,8 @@ async fn a_network_that_owes_an_unservable_range_is_still_ready_and_says_so() {
         "a network that owes nothing says so"
     );
 
-    let probe = request(
-        &fixture.app,
-        "GET",
-        http_server::READINESS_PATH,
-        None,
-        false,
-    )
-    .await;
-    assert_eq!(probe.status, StatusCode::NO_CONTENT);
-}
-
-/// The operator's way back from a quarantine, which before this route existed
-/// was restarting the process (`docs/design/019` section 5.3).
-#[tokio::test]
-async fn resume_clears_one_quarantined_network_and_reports_what_it_cleared() {
-    let fixture = fixture(false);
-    fixture
-        .ready
-        .send(health(NetworkState::Quarantined))
-        .expect("readiness receiver exists");
-
-    let response = request(
-        &fixture.app,
-        "POST",
-        "/v1/status/resume",
-        Some(json!({"network": {"chain": "bitcoin", "name": "regtest"}})),
-        true,
-    )
-    .await;
-
-    assert_eq!(response.status, StatusCode::ACCEPTED);
-    assert_eq!(
-        json_body(&response),
-        json!({
-            "network": {"chain": "bitcoin", "name": "regtest"},
-            "cleared": {
-                "kind": "invalid_block",
-                "retryable": false,
-                "attempts": 1,
-                "since": 1_758_614_400,
-                "message": "block contains a duplicate transaction"
-            }
-        })
-    );
-    // Exactly the one network asked for: resuming every chain blindly is a
-    // different capability from resuming the one an operator repaired.
-    assert_eq!(fixture.resumed.networks(), vec![network()]);
-}
-
-#[tokio::test]
-async fn resume_of_an_unconfigured_network_is_not_found() {
-    let fixture = fixture(false);
-    fixture
-        .ready
-        .send(health(NetworkState::Quarantined))
-        .expect("readiness receiver exists");
-
-    let response = request(
-        &fixture.app,
-        "POST",
-        "/v1/status/resume",
-        Some(json!({"network": {"chain": "bitcoin", "name": "mainnet"}})),
-        true,
-    )
-    .await;
-
-    assert_eq!(response.status, StatusCode::NOT_FOUND);
-    assert_eq!(
-        json_body(&response),
-        json!({"message": "index network is not configured"})
-    );
-    assert!(fixture.resumed.networks().is_empty());
-}
-
-/// A resume is an answer to a quarantine, so a network that has none is a
-/// conflict rather than an accepted no-op: `202` there would report an action
-/// that did not happen.
-#[tokio::test]
-async fn resume_of_a_network_that_is_not_quarantined_conflicts() {
-    for state in [
-        NetworkState::Ready,
-        NetworkState::CatchingUp,
-        NetworkState::Retrying,
-    ] {
-        let fixture = fixture(false);
-        fixture
-            .ready
-            .send(health(state))
-            .expect("readiness receiver exists");
-
-        let response = request(
-            &fixture.app,
-            "POST",
-            "/v1/status/resume",
-            Some(json!({"network": {"chain": "bitcoin", "name": "regtest"}})),
-            true,
-        )
-        .await;
-
-        assert_eq!(response.status, StatusCode::CONFLICT, "{state:?}");
-        assert_eq!(
-            json_body(&response),
-            json!({"message": "index network is not quarantined; nothing to resume"}),
-            "{state:?}"
-        );
-        assert!(fixture.resumed.networks().is_empty(), "{state:?}");
-    }
-}
-
-/// The operator's answer to the range the previous test publishes: stop asking.
-///
-/// It settles the range and leaves the watch where one created now would begin,
-/// which is what stops an address's reads claiming history nobody read. Nothing
-/// indexed is removed, and the id is the same one afterwards.
-#[tokio::test]
-async fn cancelling_a_backfill_settles_the_range_and_keeps_the_watch() {
-    let fixture = fixture(true);
-    let watched = json_body(
-        &request(
-            &fixture.app,
-            "POST",
-            "/v1/addresses",
-            Some(json!({"asset": "btc", "address": "fixture-late", "start": 5})),
-            true,
-        )
-        .await,
-    );
-    let id = watched["id"].as_str().expect("a watched id").to_owned();
-    fixture
-        .ready
-        .send(stalled())
-        .expect("readiness receiver exists");
-
-    let response = request(
-        &fixture.app,
-        "POST",
-        "/v1/status/backfill/cancel",
-        Some(json!({"network": {"chain": "bitcoin", "name": "regtest"}})),
-        true,
-    )
-    .await;
-
-    assert_eq!(response.status, StatusCode::ACCEPTED);
-    assert_eq!(
-        json_body(&response),
-        json!({
-            "network": {"chain": "bitcoin", "name": "regtest"},
-            "watches": 1,
-            "stopped": {
-                "pending": 1,
-                "resume": 2,
-                "anchor": 8,
-                "failure": {
-                    "kind": "source",
-                    "retryable": true,
-                    "attempts": 0,
-                    "since": 1_758_614_400,
-                    "message": "block is not available on this node"
-                }
-            }
-        }),
-        "the response names the range it stopped asking for, as the report held it"
-    );
-    // The watch is still there, under the same id: cancelling a range is not
-    // unwatching an address.
-    let wallet = json_body(
-        &request(
-            &fixture.app,
-            "GET",
-            &format!("/v1/wallets/{id}"),
-            None,
-            true,
-        )
-        .await,
-    );
-    assert_eq!(wallet["id"], json!(id));
-    assert_eq!(wallet["address"], watched["address"]);
-}
-
-/// A cancellation is an answer to a range, so a network that owes none is a
-/// conflict rather than an accepted no-op, exactly as a resume is.
-#[tokio::test]
-async fn cancelling_a_backfill_no_network_owes_conflicts() {
-    let fixture = fixture(true);
-
-    let response = request(
-        &fixture.app,
-        "POST",
-        "/v1/status/backfill/cancel",
-        Some(json!({"network": {"chain": "bitcoin", "name": "regtest"}})),
-        true,
-    )
-    .await;
-
-    assert_eq!(response.status, StatusCode::CONFLICT);
-    assert_eq!(
-        json_body(&response),
-        json!({"message": "index network owes no history; nothing to cancel"})
-    );
-
-    let unconfigured = request(
-        &fixture.app,
-        "POST",
-        "/v1/status/backfill/cancel",
-        Some(json!({"network": {"chain": "bitcoin", "name": "mainnet"}})),
-        true,
-    )
-    .await;
-    assert_eq!(unconfigured.status, StatusCode::NOT_FOUND);
-
-    let unauthorized = request(
-        &fixture.app,
-        "POST",
-        "/v1/status/backfill/cancel",
-        Some(json!({"network": {"chain": "bitcoin", "name": "regtest"}})),
-        false,
-    )
-    .await;
-    assert_eq!(unauthorized.status, StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn resume_without_a_bearer_token_is_unauthorized() {
-    let fixture = fixture(false);
-    fixture
-        .ready
-        .send(health(NetworkState::Quarantined))
-        .expect("readiness receiver exists");
-
-    let response = request(
-        &fixture.app,
-        "POST",
-        "/v1/status/resume",
-        Some(json!({"network": {"chain": "bitcoin", "name": "regtest"}})),
-        false,
-    )
-    .await;
-
-    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
-    assert!(fixture.resumed.networks().is_empty());
+    let probe = request(&fixture.app, "GET", "/healthz", None, false).await;
+    assert_eq!(probe.status, StatusCode::OK);
 }
 
 async fn generated_wallet_id(fixture: &Fixture) -> String {
@@ -2154,7 +1595,7 @@ async fn generated_wallet_id(fixture: &Fixture) -> String {
         &fixture.app,
         "POST",
         "/v1/wallets",
-        Some(json!({"asset": "btc", "start": "fresh"})),
+        Some(json!({"asset": "btc"})),
         true,
     )
     .await;
@@ -2193,7 +1634,7 @@ fn units() -> base::Units {
         .into_iter()
         .map(|network| {
             (
-                base::AssetId::native(network.chain),
+                (network.clone(), base::AssetId::native(network.chain)),
                 base::Unit::native(&COIN),
             )
         })
@@ -2342,9 +1783,9 @@ async fn every_rejection_answers_the_json_error_contract() {
     // 3. An asset tag that is not a tag, in the path.
     let bad_tag = request(
         &fixture.app,
-        "GET",
-        "/v1/assets/NOT-A-TAG/address?text=fixture-a",
-        None,
+        "POST",
+        "/v1/wallets",
+        Some(json!({"asset": "NOT-A-TAG"})),
         true,
     )
     .await;
@@ -2459,4 +1900,221 @@ fn the_route_module_names_no_chain_or_storage_crate() {
         }
     }
     assert!(checked > 5, "every route file must be checked");
+}
+
+#[tokio::test]
+async fn key_commits_before_a_rejected_watch_and_is_never_published() {
+    let fixture = fixture(true);
+    let first = request(
+        &fixture.app,
+        "POST",
+        "/v1/wallets",
+        Some(json!({"asset": "btc"})),
+        true,
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::CREATED);
+    let first_id = json_body(&first)["id"].as_str().unwrap().to_owned();
+    let response = request(
+        &fixture.app,
+        "POST",
+        "/v1/wallets",
+        Some(json!({"asset": "btc"})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    let ids = fixture
+        .registry
+        .ids()
+        .await
+        .into_iter()
+        .filter(|id| id != &first_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids.len(),
+        1,
+        "the key was already persisted before the watch refused"
+    );
+    let restored = Signers::new();
+    fixture
+        .registry
+        .restore(
+            &fixture.payments.wallets,
+            &fixture.payments.index,
+            &restored,
+        )
+        .await
+        .unwrap();
+    assert!(
+        restored.get(&ids[0]).is_none(),
+        "boot leaves the orphan private"
+    );
+    let listed = request(&fixture.app, "GET", "/v1/wallets", None, true).await;
+    assert_eq!(json_body(&listed)["wallets"].as_array().unwrap().len(), 1);
+    assert_eq!(json_body(&listed)["wallets"][0]["id"], first_id);
+    for resource in ["", "/balance", "/transactions"] {
+        let response = request(
+            &fixture.app,
+            "GET",
+            &format!("/v1/wallets/{}{resource}", ids[0]),
+            None,
+            true,
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
+async fn durable_key_never_appears_in_wallet_responses() {
+    let fixture = fixture(true);
+    let created = request(
+        &fixture.app,
+        "POST",
+        "/v1/wallets",
+        Some(json!({"asset": "btc"})),
+        true,
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let id = json_body(&created)["id"].as_str().unwrap().to_owned();
+    assert_eq!(fixture.registry.ids().await, [id.clone()]);
+    let listed = request(&fixture.app, "GET", "/v1/wallets", None, true).await;
+    let fetched = request(
+        &fixture.app,
+        "GET",
+        &format!("/v1/wallets/{id}"),
+        None,
+        true,
+    )
+    .await;
+    for response in [created, listed, fetched] {
+        let text = String::from_utf8(response.body.to_vec()).unwrap();
+        for private in ["secret", "material", "ciphertext", &hex::encode([7; 32])] {
+            assert!(
+                !text.contains(private),
+                "wallet response reveals signing material"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn all_is_preserved_for_single_and_batch_transfers() {
+    let fixture = fixture(true);
+    let id = generated_wallet_id(&fixture).await;
+    let transfer = json!({"destination": "fixture-destination", "amount": "all"});
+    let single = request(
+        &fixture.app,
+        "POST",
+        &format!("/v1/wallets/{id}/transactions"),
+        Some(transfer),
+        true,
+    )
+    .await;
+    assert_eq!(single.status, StatusCode::ACCEPTED);
+    let body = json!({"transfers": [{
+        "wallet_id": id,
+        "destination": "fixture-destination",
+        "amount": "all"
+    }]});
+    let batch = request(&fixture.app, "POST", "/v1/transactions", Some(body), true).await;
+    assert_eq!(batch.status, StatusCode::ACCEPTED);
+    assert_eq!(*fixture.calls.sweeps.lock().expect("sweeps"), 2);
+    assert!(
+        fixture
+            .calls
+            .transfers
+            .lock()
+            .expect("exact amounts")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn retired_routes_and_caller_birthdays_are_refused() {
+    let fixture = fixture(true);
+    for (method, path) in [
+        ("GET", "/v1/status"),
+        ("POST", "/v1/status/resume"),
+        ("POST", "/v1/status/backfill/cancel"),
+        ("POST", "/v1/wallets/import"),
+        ("GET", "/v1/assets/btc/address?text=fixture-a"),
+    ] {
+        assert_eq!(
+            request(&fixture.app, method, path, None, true).await.status,
+            if path == "/v1/wallets/import" {
+                StatusCode::METHOD_NOT_ALLOWED
+            } else {
+                StatusCode::NOT_FOUND
+            },
+            "{path}"
+        );
+    }
+    for (path, body) in [
+        ("/v1/wallets", json!({"asset":"btc", "start":"fresh"})),
+        (
+            "/v1/addresses",
+            json!({"asset":"btc", "address":"fixture-a", "start":0}),
+        ),
+    ] {
+        assert_eq!(
+            request(&fixture.app, "POST", path, Some(body), true)
+                .await
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
+
+#[tokio::test]
+async fn health_reads_rpc_counters_after_the_endpoint_has_stopped() {
+    use json_rpc::Client as _;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("local node");
+    let url = format!("http://{}", listener.local_addr().expect("address"));
+    let app = axum::Router::new().route("/", axum::routing::post(|axum::Json(request): axum::Json<Value>| async move {
+        axum::Json(json!({"jsonrpc":"2.0", "id":request["id"], "error":{"code":-32001,"message":"private-provider-detail"}}))
+    }));
+    let node = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("local response");
+    });
+    let client = json_rpc::Endpoint::new(&url)
+        .connect(&std::collections::BTreeMap::new())
+        .expect("client");
+    let statistics = client.statistics();
+    assert!(
+        client
+            .request(json_rpc::Request::once("tip", json!([])))
+            .await
+            .expect("envelope")
+            .is_err()
+    );
+    node.abort();
+    let _ = node.await;
+    let mut fixture = fixture(true);
+    fixture
+        .payments
+        .rpc
+        .push((network(), vec![statistics.clone()]));
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("bind"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        Some(http_server::BearerToken::new(TOKEN).expect("token")),
+        http_server::RequestLimits::default(),
+    );
+    let app = router(fixture.payments, &config).expect("router");
+    let response = request(&app, "GET", "/healthz", None, false).await;
+    assert_eq!(response.status, StatusCode::OK);
+    let body = json_body(&response);
+    assert_eq!(body["rpc"][0]["attempts"], 1);
+    assert_eq!(body["rpc"][0]["failures"], 1);
+    assert_eq!(body["rpc"][0]["consecutive_failures"], 1);
+    assert_eq!(statistics.snapshot().attempts, 1, "health did not call RPC");
+    let wire = body.to_string();
+    assert!(!wire.contains("private-provider-detail"));
+    assert!(!wire.contains(&url));
 }

@@ -54,3 +54,9 @@ An application that reads a configuration file registers the chain instead:
   outputs of a submission whose outcome is unknown stay reserved until the index
   shows them spent or the node refuses the transaction, so a second send cannot
   spend them twice. Reservations live in memory and are lost on restart.
+
+A send accepts `wallets::Amount::All` to spend every mature, unreserved indexed
+output. Input pagination and reservation stay in the existing outbox. The
+sweep pays its residual after fees to its destination with no change; a dust
+residual is refused. In batches, the sweep must be its source's final item,
+after any fixed payments.

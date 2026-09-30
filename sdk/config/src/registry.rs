@@ -168,6 +168,7 @@ mod tests {
         fn connect<'a>(
             self: Box<Self>,
             _secrets: &'a dyn json_rpc::Secrets,
+            _statistics: &'a mut Vec<json_rpc::Statistics>,
         ) -> BoxFuture<'a, Result<Box<dyn wallets::Connection<&'static str, ()>>, Error>> {
             Box::pin(async { Err(Error::refused("a fixture chain contacts no node")) })
         }

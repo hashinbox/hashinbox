@@ -46,14 +46,13 @@ impl FactorySender {
 
     /// The send request of one authored transfer; the wallet signs it.
     fn request(&self, transfer: Transfer) -> Result<SendRequest, WalletError> {
-        let from = Address::try_from(transfer.wallet.address()).map_err(|_| {
-            WalletError::new(
-                WalletErrorKind::Unsupported,
-                "wallet is not a Solana wallet",
-            )
-        })?;
+        let from = Address::try_from(transfer.wallet.address())?;
         let to = Address::try_from(&transfer.to)?;
-        let native = native_transfer(&from, to, &transfer.amount, self.config.decimals)?;
+        let amount = match transfer.amount {
+            wallets::Amount::Exact(amount) => amount,
+            wallets::Amount::All => return SendRequest::sweep(transfer.wallet, from, to),
+        };
+        let native = native_transfer(&from, to, &amount, self.config.decimals)?;
         Ok(SendRequest::new(transfer.wallet, from, native))
     }
 
@@ -62,6 +61,7 @@ impl FactorySender {
         transfers: Vec<Transfer>,
     ) -> Result<Vec<base::TransactionId>, SendError> {
         SendError::check_count(transfers.len())?;
+        SendError::check_selection(&transfers)?;
         let items = transfers
             .into_iter()
             .enumerate()
@@ -118,18 +118,7 @@ pub(crate) fn native_transfer(
     amount: &Decimal,
     decimals: u32,
 ) -> Result<transaction::Transfer, WalletError> {
-    if !to.is_on_curve() {
-        return Err(WalletError::new(
-            WalletErrorKind::Unsupported,
-            "unsupported Solana native destination",
-        ));
-    }
-    if &to == from {
-        return Err(WalletError::new(
-            WalletErrorKind::AddressMismatch,
-            "Solana source and destination must differ",
-        ));
-    }
+    destination(from, &to)?;
     let amount = Lamport::from_decimal(amount, decimals).map_err(|_| {
         WalletError::new(
             WalletErrorKind::InvalidAmount,
@@ -137,6 +126,23 @@ pub(crate) fn native_transfer(
         )
     })?;
     Ok(transaction::Transfer::new(to, amount)?)
+}
+
+/// The native send boundary, shared by exact transfers and unresolved sweeps.
+fn destination(from: &Address, to: &Address) -> Result<(), WalletError> {
+    if !to.is_on_curve() {
+        return Err(WalletError::new(
+            WalletErrorKind::Unsupported,
+            "unsupported Solana native destination",
+        ));
+    }
+    if to == from {
+        return Err(WalletError::new(
+            WalletErrorKind::AddressMismatch,
+            "Solana source and destination must differ",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -259,7 +265,7 @@ mod tests {
         assert_eq!(error.failed_index, Some(1));
         assert_eq!(error.source.kind, WalletErrorKind::InvalidAddress);
         let mut batch = transfers(&wallet, 2);
-        batch[0].amount = Decimal::zero();
+        batch[0].amount = Decimal::zero().into();
         let error = factory.authorship().unwrap().send(batch).await.unwrap_err();
         assert_eq!(
             (error.failed_index, error.source.kind),
@@ -282,7 +288,7 @@ mod tests {
             let amount: Decimal = "0.00001".parse().unwrap();
             let first_ambiguous = if single_first {
                 wallet
-                    .send(to.clone(), amount.clone())
+                    .send(to.clone(), amount.clone().into())
                     .await
                     .expect_err("single ambiguity")
                     .ambiguous_transaction_id
@@ -302,7 +308,7 @@ mod tests {
                     .source
             } else {
                 wallet
-                    .send(to, amount)
+                    .send(to, amount.into())
                     .await
                     .expect_err("single must see it")
             };

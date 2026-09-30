@@ -53,8 +53,14 @@ pub(crate) struct Outbox {
 /// One transfer, its sender, and the signer that controls the sender.
 pub(crate) struct SendRequest {
     from: Address,
-    transfer: Transfer,
+    transfer: Payment,
     signer: Arc<dyn Signer>,
+}
+
+/// The requested amount, before input selection determines a sweep's value.
+enum Payment {
+    Exact(Transfer),
+    All(Address),
 }
 
 /// One send signed and ready to submit: the signed bytes, the fee they pay,
@@ -75,6 +81,7 @@ struct Payer {
     address: Address,
     signer: Arc<dyn Signer>,
     transfers: Vec<Transfer>,
+    sweep: Option<Address>,
 }
 
 impl SendRequest {
@@ -82,7 +89,18 @@ impl SendRequest {
     pub(crate) fn new(signer: Arc<dyn Signer>, from: Address, transfer: Transfer) -> Self {
         Self {
             from,
-            transfer,
+            transfer: Payment::Exact(transfer),
+            signer,
+        }
+    }
+}
+
+impl SendRequest {
+    /// Every spendable output of `from`, with its residual paid to `to`.
+    pub(crate) fn sweep(signer: Arc<dyn Signer>, from: Address, to: Address) -> Self {
+        Self {
+            from,
+            transfer: Payment::All(to),
             signer,
         }
     }
@@ -127,12 +145,21 @@ impl Outbox {
         &self,
         items: Vec<SendRequest>,
     ) -> Result<Vec<base::TransactionId>, SendError> {
+        let sweep = items
+            .iter()
+            .any(|item| matches!(item.transfer, Payment::All(_)));
         let failed = |error: TransactionError| SendError::grouped(Vec::new(), error.into());
+        let preparation = |mut error: TransactionError| {
+            if sweep && error.kind == TransactionErrorKind::InsufficientFunds {
+                error.kind = TransactionErrorKind::InvalidAmount;
+            }
+            failed(error)
+        };
         let SignedBatch {
             transaction,
             admission,
             ..
-        } = self.prepare(items).await.map_err(failed)?;
+        } = self.prepare(items).await.map_err(preparation)?;
         let id = self
             .dispatch
             .run(admission.settlement(transaction))
@@ -193,7 +220,7 @@ impl Outbox {
     /// Prepare, reserve, and sign: nothing leaves the process until the
     /// node's mempool would accept the signed transaction.
     async fn prepare(&self, items: Vec<SendRequest>) -> Result<SignedBatch, TransactionError> {
-        let payers = payers(items);
+        let payers = payers(items)?;
         let addresses = payers
             .iter()
             .map(|payer| payer.address.clone())
@@ -247,14 +274,21 @@ impl Outbox {
         mut available: Vec<Utxo>,
         fee_rate: FeeRate,
     ) -> Result<UnsignedTransaction, Error> {
-        if let [payer] = payers {
+        if let [payer] = payers
+            && (payer.sweep.is_none() || payer.transfers.is_empty())
+        {
             let context = BuildContext {
                 network: self.network,
                 available,
                 change: payer.address.clone(),
                 fee_rate,
             };
-            return Builder::new(payer.transfers.clone(), context).build();
+            return match &payer.sweep {
+                Some(to) => Builder::new(vec![Transfer::new(to.clone(), Satoshi::ZERO)], context)
+                    .draining()
+                    .build(),
+                None => Builder::new(payer.transfers.clone(), context).build(),
+            };
         }
         let funds = payers
             .iter()
@@ -267,6 +301,7 @@ impl Outbox {
                     available: owned,
                     transfers: payer.transfers.clone(),
                     change: payer.address.clone(),
+                    sweep: payer.sweep.clone(),
                 }
             })
             .collect();
@@ -302,19 +337,31 @@ impl Outbox {
 }
 
 /// Groups `items` by sender, in first-seen order.
-fn payers(items: Vec<SendRequest>) -> Vec<Payer> {
+fn payers(items: Vec<SendRequest>) -> Result<Vec<Payer>, Error> {
     let mut payers: Vec<Payer> = Vec::new();
     for item in items {
-        match payers.iter_mut().find(|payer| payer.address == item.from) {
-            Some(payer) => payer.transfers.push(item.transfer),
-            None => payers.push(Payer {
+        let index = payers.iter().position(|payer| payer.address == item.from);
+        let index = index.unwrap_or_else(|| {
+            payers.push(Payer {
                 address: item.from,
                 signer: item.signer,
-                transfers: vec![item.transfer],
-            }),
+                transfers: Vec::new(),
+                sweep: None,
+            });
+            payers.len() - 1
+        });
+        let payer = &mut payers[index];
+        if payer.sweep.is_some() {
+            return Err(Error::invalid_transaction(
+                "a sweep must be the final transfer from its source",
+            ));
+        }
+        match item.transfer {
+            Payment::Exact(transfer) => payer.transfers.push(transfer),
+            Payment::All(to) => payer.sweep = Some(to),
         }
     }
-    payers
+    Ok(payers)
 }
 
 #[cfg(test)]

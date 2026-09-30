@@ -9,8 +9,9 @@
 mod api;
 mod chains;
 mod config;
+mod operator;
 mod readiness;
-mod rescan;
+mod registry;
 mod storage;
 
 use std::{env, future::IntoFuture, sync::Arc};
@@ -18,23 +19,9 @@ use std::{env, future::IntoFuture, sync::Arc};
 use api::{Payments, Signers};
 use config::{AnyError, Config};
 use indexing::Supervisor;
-use indexing::SyncControl;
 use indexing::SyncReport;
 use tokio::sync::{oneshot, watch};
 use wallets::Submissions;
-
-/// The supervisor handle behind `POST /v1/status/resume`.
-///
-/// The routes name no runtime and so do not name [`SyncControl`], which
-/// `indexing`'s `supervisor` feature owns; the port `api` declares instead is
-/// implemented here, at the composition root.
-struct Resume(SyncControl);
-
-impl api::Resume for Resume {
-    fn resume(&self, network: &base::Network) -> Result<(), indexing::IndexError> {
-        self.0.resume(network)
-    }
-}
 
 /// Printed instead of serving, so a typed client can be generated without a
 /// node, a database, or a bound port.
@@ -42,7 +29,7 @@ const OPENAPI_FLAG: &str = "--openapi";
 
 /// Every way the binary may be invoked; every refusal of an argument prints it.
 pub(crate) const USAGE: &str = "usage: payment-server <config.toml> \
-                                [--rescan <chain>/<network>] \
+                                [--rescan <chain>/<network> | --cancel-backfill <chain>/<network>] \
                                 | payment-server --openapi";
 
 #[tokio::main]
@@ -54,13 +41,14 @@ async fn main() -> Result<(), AnyError> {
         return Ok(());
     }
     // Before the configuration is read, so a typo never reaches a node or a store.
-    let rescan = rescan::Rescan::parse(arguments)?;
+    let operation = operator::Operation::parse(arguments)?;
     let config = Config::read(path).await?;
     // Offline: no chain connects, no supervisor runs, no listener binds.
-    if let Some(rescan) = rescan {
-        return rescan.purge(&config).await;
+    if let Some(operation) = operation {
+        return operation.run(&config).await;
     }
     let server = config.server()?;
+    let passphrase = config.passphrase()?;
     let bind = config.bind;
 
     // Owns every background send task a chain hands over, so the shutdown
@@ -76,15 +64,18 @@ async fn main() -> Result<(), AnyError> {
         println!("{notice}");
     }
     let registrar: Arc<dyn wallets::SubmissionRegistrar> = submissions.clone();
-    let wallets::Composition {
-        index: indexer,
-        history,
-        balance,
-        schedules,
-        wallets,
-        units,
-    } = chains
-        .compose(
+    let (
+        wallets::Composition {
+            index: indexer,
+            history,
+            balance,
+            schedules,
+            wallets,
+            units,
+        },
+        rpc,
+    ) = chains
+        .compose_with_statistics(
             &config::Environment,
             || config.storage.open(),
             |store: &storage::Store| Ok(store.repository()),
@@ -92,14 +83,15 @@ async fn main() -> Result<(), AnyError> {
         )
         .await?;
     let wallets = Arc::new(wallets);
-    // Each configured wallet states the three facts it always stated, now each
-    // to its owner: the factory makes it, the index observes it from its
-    // explicit birthday, and this process keeps the key — in that order, so a
-    // crash leaves a watch-only address rather than an unobserved key
-    // (`docs/design/030 §8 (ex-029)` section 3.3).
+    // Unlock stored keys before serving. Restore only IDs with durable watches;
+    // a key whose watch never committed remains an unpublished orphan.
+    let registry = registry::Registry::open(&config.storage.resolved_path()?, passphrase).await?;
     let signers = Arc::new(Signers::new());
+    registry.restore(&wallets, &indexer, &signers).await?;
     for configured in config.wallets {
-        configured.import(&wallets, &*indexer, &signers).await?;
+        configured
+            .import(&wallets, &*indexer, &signers, &registry)
+            .await?;
     }
     let (shutdown, shutdown_rx) = watch::channel(false);
     let (report, mut settling) = SyncReport::watching(indexer.networks());
@@ -110,10 +102,6 @@ async fn main() -> Result<(), AnyError> {
     let routes_index = indexer.clone();
     let monitor = Arc::new(readiness::Health::new(Arc::clone(&report)));
     let supervisor = Supervisor::new(indexer, schedules, monitor);
-    // Taken before `run` consumes the supervisor: it is the operator's one
-    // way back from a quarantine without restarting the process
-    // (`docs/design/019` section 5.3).
-    let resume: Arc<dyn api::Resume> = Arc::new(Resume(supervisor.control()));
     let mut synchronization = Some(tokio::spawn(supervisor.run(shutdown_rx)));
 
     // Every network must have settled — reached its tip once, or been
@@ -121,7 +109,7 @@ async fn main() -> Result<(), AnyError> {
     // hold the gate: it cannot heal by itself, and the other chains work.
     // Nor does history still owed below a checkpoint, which the wallets
     // imported above can ask for: settling follows forward indexing, and the
-    // owed range is reported on `GET /v1/status` instead of holding the
+    // owed range is reported on `GET /healthz` instead of holding the
     // listener unbound for a range a pruned node can never serve
     // (`docs/design/024` section 7).
     let startup_result: Option<Result<(), AnyError>> = tokio::select! {
@@ -150,11 +138,12 @@ async fn main() -> Result<(), AnyError> {
         wallets,
         units: Arc::new(units),
         signers,
+        registry,
         index: routes_index,
         history,
         balance,
-        resume,
         health,
+        rpc,
     });
     let router = api::router(payments, &server)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;

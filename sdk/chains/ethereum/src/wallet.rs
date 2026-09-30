@@ -452,10 +452,20 @@ impl SingleSender for Wallet {
     fn send<'a>(
         &'a self,
         destination: base::Address,
-        amount: Decimal,
+        amount: wallets::Amount,
     ) -> FutureResult<'a, base::TransactionId> {
         Box::pin(async move {
-            let request = self.request(Address::try_from(&destination)?, &amount)?;
+            let to = Address::try_from(&destination)?;
+            let request = match amount {
+                wallets::Amount::Exact(amount) => self.request(to, &amount)?,
+                wallets::Amount::All => SendRequest::sweep(
+                    self.key.clone(),
+                    self.key.address().clone(),
+                    to,
+                    self.config.asset.clone(),
+                    self.config.fee_limits.clone(),
+                ),
+            };
             let accepted = self.outbox.send(vec![request]).await.map_err(|error| {
                 let mut source = error.source;
                 source.ambiguous_transaction_id = error.ambiguous_transaction_id;

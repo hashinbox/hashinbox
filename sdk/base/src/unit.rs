@@ -5,11 +5,11 @@
 //! that reports it. The scale belongs to the asset, not to a wallet: a chain
 //! declares it for its own currency and an ERC-20 or SPL token declares its
 //! own, checked against the contract when the chain connects. [`Units`] is
-//! that declaration, keyed by [`AssetId`], as a composition root folds it.
+//! that declaration, keyed by network and [`AssetId`], as a composition root folds it.
 
 use std::collections::{BTreeMap, btree_map};
 
-use crate::{Asset, AssetId, Decimal, DecimalError};
+use crate::{Asset, AssetId, Decimal, DecimalError, Network};
 
 /// The unit one asset's amounts are counted in: how many digits separate an
 /// atomic amount from a display one, and what a caller calls it.
@@ -59,38 +59,38 @@ impl Unit {
     }
 }
 
-/// Every configured asset's unit, by identity.
+/// Every configured asset's unit, by network and asset identity.
 ///
 /// One value answers "how much is this amount" for every asset a process was
 /// configured with, whichever chain declared it, so an edge that holds an
-/// [`AssetId`] — one on every movement, every fee, and every balance — needs
-/// nothing else to report it.
+/// [`AssetId`] and its containing address or transaction network can report it.
+/// Identical token text on different networks may declare different decimals.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Units(BTreeMap<AssetId, Unit>);
+pub struct Units(BTreeMap<(Network, AssetId), Unit>);
 
 impl Units {
-    /// The unit of `asset`, when a configured chain declared it.
+    /// The unit of `asset` on exactly `network`, when that pair was declared.
     #[must_use]
-    pub fn of(&self, asset: &AssetId) -> Option<&Unit> {
-        self.0.get(asset)
+    pub fn of(&self, network: &Network, asset: &AssetId) -> Option<&Unit> {
+        self.0.get(&(network.clone(), asset.clone()))
     }
 }
 
-impl FromIterator<(AssetId, Unit)> for Units {
-    fn from_iter<T: IntoIterator<Item = (AssetId, Unit)>>(declared: T) -> Self {
+impl FromIterator<((Network, AssetId), Unit)> for Units {
+    fn from_iter<T: IntoIterator<Item = ((Network, AssetId), Unit)>>(declared: T) -> Self {
         Self(declared.into_iter().collect())
     }
 }
 
-impl Extend<(AssetId, Unit)> for Units {
-    fn extend<T: IntoIterator<Item = (AssetId, Unit)>>(&mut self, declared: T) {
+impl Extend<((Network, AssetId), Unit)> for Units {
+    fn extend<T: IntoIterator<Item = ((Network, AssetId), Unit)>>(&mut self, declared: T) {
         self.0.extend(declared);
     }
 }
 
 impl IntoIterator for Units {
-    type Item = (AssetId, Unit);
-    type IntoIter = btree_map::IntoIter<AssetId, Unit>;
+    type Item = ((Network, AssetId), Unit);
+    type IntoIter = btree_map::IntoIter<(Network, AssetId), Unit>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -115,11 +115,46 @@ mod tests {
         8,
     );
 
+    fn network() -> Network {
+        Network::new(ChainName::new("example"), "mainnet")
+    }
+
     fn token() -> AssetId {
         AssetId {
             chain: ChainName::new("example"),
             asset: "token".to_owned(),
         }
+    }
+
+    #[test]
+    fn the_same_token_on_two_networks_keeps_each_scale() {
+        let main = network();
+        let test = Network::new(main.chain.clone(), "testnet");
+        let mut units = Units::from_iter([((main.clone(), token()), Unit::token(6))]);
+        units.extend([((test.clone(), token()), Unit::token(18))]);
+        let atomic = Decimal::from(1_000_000_u64);
+        assert_eq!(
+            units
+                .of(&main, &token())
+                .unwrap()
+                .display(&atomic)
+                .unwrap()
+                .to_string(),
+            "1"
+        );
+        assert_eq!(
+            units
+                .of(&test, &token())
+                .unwrap()
+                .display(&atomic)
+                .unwrap()
+                .to_string(),
+            "0.000000000001"
+        );
+        assert_eq!(
+            units.of(&Network::new(main.chain.clone(), "missing"), &token()),
+            None
+        );
     }
 
     #[test]
@@ -138,19 +173,19 @@ mod tests {
     fn an_amount_is_scaled_by_its_own_assets_precision() {
         let units = Units::from_iter([
             (
-                AssetId::native(ChainName::new("example")),
+                (network(), AssetId::native(ChainName::new("example"))),
                 Unit::native(&COIN),
             ),
-            (token(), Unit::token(6)),
+            ((network(), token()), Unit::token(6)),
         ]);
 
         let coin = units
-            .of(&AssetId::native(ChainName::new("example")))
+            .of(&network(), &AssetId::native(ChainName::new("example")))
             .expect("the declared currency")
             .display(&Decimal::from(123_000_000_u64))
             .expect("an exact amount");
         let token = units
-            .of(&token())
+            .of(&network(), &token())
             .expect("the declared token")
             .display(&Decimal::from(1_500_000_u64))
             .expect("an exact amount");
@@ -162,12 +197,15 @@ mod tests {
     #[test]
     fn an_undeclared_asset_has_no_unit_and_a_fractional_amount_is_refused() {
         let mut units = Units::default();
-        units.extend([(token(), Unit::token(6))]);
+        units.extend([((network(), token()), Unit::token(6))]);
         let fractional: Decimal = "0.1".parse().expect("decimal");
 
-        assert_eq!(units.of(&AssetId::native(ChainName::new("example"))), None);
+        assert_eq!(
+            units.of(&network(), &AssetId::native(ChainName::new("example"))),
+            None
+        );
         let error = units
-            .of(&token())
+            .of(&network(), &token())
             .expect("the declared token")
             .display(&fractional)
             .expect_err("a fraction is not an atomic amount");
@@ -176,7 +214,7 @@ mod tests {
             "amount has more than 0 fractional digits"
         );
         assert_eq!(
-            Units::from_iter(units).of(&token()),
+            Units::from_iter(units).of(&network(), &token()),
             Some(&Unit::token(6)),
             "the declarations survive being folded into another map"
         );

@@ -66,3 +66,9 @@ tokens = [{ mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', asset = 'usdc
 - The node must serve the Memo-v3 program, and `connect` refuses one that does
   not. Each transfer carries a memo with a random token, so two transfers of the
   same amount to the same address are distinct transactions.
+
+A native send accepts `wallets::Amount::All` as its source's final batch item.
+The outbox resolves the bracketed balance after earlier transfers and fees,
+rebuilds the final message with the same memo and lifetime, and verifies its
+fee before signing and simulation. A zero remainder is refused. SPL assets
+remain read-only; sweep does not provide token transaction authorship.

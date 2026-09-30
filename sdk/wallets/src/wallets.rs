@@ -272,6 +272,7 @@ where
             Self::check(&factory, transfer)
                 .map_err(|error| SendError::item(index, Vec::new(), error))?;
         }
+        SendError::check_selection(&transfers)?;
         Ok((authorship, transfers))
     }
 
@@ -294,7 +295,7 @@ where
     /// Accepts one item: a positive amount, a destination of the factory's own
     /// network, and a wallet the factory made.
     fn check(factory: &Factory, transfer: &Transfer) -> Result<(), WalletError> {
-        if transfer.amount <= Decimal::zero() {
+        if matches!(&transfer.amount, crate::Amount::Exact(amount) if amount <= &Decimal::zero()) {
             return Err(WalletError::new(
                 WalletErrorKind::InvalidAmount,
                 "amount must be positive",
@@ -324,8 +325,8 @@ pub(crate) mod tests {
     use std::sync::Mutex;
 
     use base::{
-        Address, Broadcaster, ChainName, Decimal, SignFuture, SignRequest, Signer,
-        TransactionBuilder, TransactionError, TransactionId, TransactionSnapshot,
+        Address, Broadcaster, ChainName, SignFuture, SignRequest, Signer, TransactionBuilder,
+        TransactionError, TransactionId, TransactionSnapshot,
     };
     use futures_executor::block_on;
     use indexing::{AssetId, Holder};
@@ -491,7 +492,7 @@ pub(crate) mod tests {
         fn send<'a>(
             &'a self,
             _destination: Address,
-            _amount: Decimal,
+            _amount: crate::Amount,
         ) -> FutureResult<'a, TransactionId> {
             Box::pin(async { Ok(TransactionId::new("single")) })
         }
@@ -709,6 +710,29 @@ pub(crate) mod tests {
                 ("second".to_owned(), "0.5".to_owned()),
             ]]
         );
+    }
+
+    #[test]
+    fn sweep_is_last_for_its_source_and_stays_unresolved_for_the_sender() {
+        let (wallets, sender) = map();
+        let wallet = block_on(wallets.create(&"coin")).unwrap();
+        let to = wallets.parse(&"coin", "destination").unwrap();
+        for tail in ["all", "1"] {
+            let batch = vec![
+                transfer(&wallet, to.clone(), "all"),
+                transfer(&wallet, to.clone(), tail),
+            ];
+            let failure = block_on(wallets.send_all(&"coin", batch)).unwrap_err();
+            assert_eq!(failure.failed_index, Some(1));
+            assert_eq!(failure.source.kind, WalletErrorKind::InvalidBatch);
+            assert!(sender.batches().is_empty());
+        }
+        let batch = vec![
+            transfer(&wallet, to.clone(), "1"),
+            transfer(&wallet, to, "all"),
+        ];
+        block_on(wallets.send_all(&"coin", batch)).unwrap();
+        assert_eq!(sender.batches()[0][1].1, "all");
     }
 
     /// Every item is checked before anything is sent, and the first failure

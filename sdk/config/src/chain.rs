@@ -1,10 +1,14 @@
 use std::{fmt, future::Future, sync::Arc};
 
 use base::{BoxFuture, Network};
-use json_rpc::Secrets;
+use json_rpc::{Secrets, Statistics};
 use wallets::{Composition, Connection, SubmissionRegistrar};
 
 use crate::{Error, ErrorKind};
+
+/// Endpoint statistics grouped by network, in configured endpoint order.
+/// Consumers label endpoints by ordinal; no URL or credential is retained.
+pub type RpcStatistics = Vec<(Network, Vec<Statistics>)>;
 
 /// One chain's configuration, with the chain crate that declared it erased.
 ///
@@ -49,6 +53,7 @@ pub trait Chain<A, R>: Send + 'static {
     fn connect<'a>(
         self: Box<Self>,
         secrets: &'a dyn Secrets,
+        statistics: &'a mut Vec<Statistics>,
     ) -> BoxFuture<'a, Result<Box<dyn Connection<A, R>>, Error>>;
 }
 
@@ -158,14 +163,25 @@ impl<A: 'static, R: 'static> Chains<A, R> {
         self,
         secrets: &dyn Secrets,
     ) -> Result<Vec<Box<dyn Connection<A, R>>>, Error> {
+        self.connect_observed(secrets, &mut Vec::new()).await
+    }
+
+    async fn connect_observed(
+        self,
+        secrets: &dyn Secrets,
+        statistics: &mut RpcStatistics,
+    ) -> Result<Vec<Box<dyn Connection<A, R>>>, Error> {
         let mut connections = Vec::with_capacity(self.chains.len());
         for (name, chain) in self.chains {
+            let network = chain.network();
+            let mut endpoints = Vec::new();
             connections.push(
                 chain
-                    .connect(secrets)
+                    .connect(secrets, &mut endpoints)
                     .await
                     .map_err(|error| error.in_section(&name))?,
             );
+            statistics.push((network, endpoints));
         }
         Ok(connections)
     }
@@ -222,7 +238,36 @@ where
         O: FnOnce() -> F,
         F: Future<Output = Result<S, E>>,
     {
-        let verification = async { self.connect(secrets).await.map_err(E::from) };
-        Composition::verify_then_build(verification, open, repository, registrar).await
+        self.compose_with_statistics(secrets, open, repository, registrar)
+            .await
+            .map(|(composition, _)| composition)
+    }
+
+    /// Composes every chain and returns its endpoint counters beside the runtime.
+    /// Statistics stay with deployment composition, outside the wallet capability layer.
+    ///
+    /// # Errors
+    /// The same identity, storage and composition failures as [`Self::compose`].
+    pub async fn compose_with_statistics<S, E, O, F>(
+        self,
+        secrets: &dyn Secrets,
+        open: O,
+        repository: impl FnOnce(&S) -> Result<R, E>,
+        registrar: &Arc<dyn SubmissionRegistrar>,
+    ) -> Result<(Composition<A>, RpcStatistics), E>
+    where
+        E: From<wallets::WalletError> + From<Error>,
+        O: FnOnce() -> F,
+        F: Future<Output = Result<S, E>>,
+    {
+        let mut statistics = Vec::new();
+        let verification = async {
+            self.connect_observed(secrets, &mut statistics)
+                .await
+                .map_err(E::from)
+        };
+        let composition =
+            Composition::verify_then_build(verification, open, repository, registrar).await?;
+        Ok((composition, statistics))
     }
 }

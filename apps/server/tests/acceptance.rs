@@ -401,3 +401,38 @@ async fn bitcoin_batch_uses_each_source_wallet() -> Result<(), Box<dyn std::erro
     node.stop().await;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generated_wallet_survives_restart_and_spends_without_configured_keys()
+-> Result<(), Box<dyn std::error::Error>> {
+    let bitcoin = BitcoinNode::start().await;
+    let storage = Arc::new(TempDir::new()?);
+    let chains = || json!({"bitcoin": bitcoin_index(&bitcoin)});
+    let first = start_api_in(chains(), json!([]), &[], storage.clone()).await?;
+    let wallet = create_wallet(&first.root, "btc").await?;
+    let id = wallet_id(&wallet).to_owned();
+    assert_eq!(wallet["watch_only"], false);
+    let empty = reqwest::Client::new()
+        .post(format!("{}/v1/wallets/{id}/transactions", first.root))
+        .bearer_auth(TOKEN)
+        .json(&json!({"destination": bitcoin_destination(9), "amount": "all"}))
+        .send()
+        .await?;
+    assert_eq!(empty.status(), reqwest::StatusCode::BAD_REQUEST);
+    let transaction = bitcoin.fund(vec![FundingOutput::new(
+        wallet["address"].as_str().unwrap(),
+        100_000,
+    )]);
+    bitcoin.mine();
+    wait_history(&first.root, &id, &transaction).await;
+    first.stop().await;
+    let second = start_api_in(chains(), json!([]), &[], storage).await?;
+    assert_eq!(wallet_summary(&second.root, &id).await?, wallet);
+    let sent = send(&second.root, &id, &bitcoin_destination(9), "all").await?;
+    assert!(!sent.is_empty(), "restored key signs and submits");
+    bitcoin.confirm();
+    wait_balance(&second.root, &id, "0").await;
+    second.stop().await;
+    bitcoin.stop().await;
+    Ok(())
+}

@@ -9,6 +9,7 @@
 
 [bitcoin]
 network = 'regtest'
+confirmation_depth = 6
 rpc.endpoints = ['http://bitcoin:bitcoin@127.0.0.1:18443']
 
 [ethereum]

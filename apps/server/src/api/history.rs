@@ -69,8 +69,14 @@ impl Movement {
     /// One indexed movement in display units, scaled by the unit its own
     /// asset resolves to in `units`. The index reports exact atomic amounts
     /// and never learns an asset's decimals, so this happens here alone.
-    fn new(movement: indexing::ValueMovement, units: &base::Units) -> Result<Self, Error> {
-        let unit = units.of(&movement.asset).ok_or_else(Error::undeclared)?;
+    fn new(
+        movement: indexing::ValueMovement,
+        network: &indexing::Network,
+        units: &base::Units,
+    ) -> Result<Self, Error> {
+        let unit = units
+            .of(network, &movement.asset)
+            .ok_or_else(Error::undeclared)?;
         Ok(Self {
             id: movement.id.0.clone(),
             kind: movement.kind().into(),
@@ -101,8 +107,14 @@ impl Fee {
     /// One indexed fee in the chain's native asset and its display units,
     /// which [`TransactionPage::denominated`] settled for the whole page
     /// before any of it was converted.
-    fn new(fee: indexing::NetworkFee, units: &base::Units) -> Result<Self, Error> {
-        let unit = units.of(&fee.asset).ok_or_else(Error::undeclared)?;
+    fn new(
+        fee: indexing::NetworkFee,
+        network: &indexing::Network,
+        units: &base::Units,
+    ) -> Result<Self, Error> {
+        let unit = units
+            .of(network, &fee.asset)
+            .ok_or_else(Error::undeclared)?;
         Ok(Self {
             asset: Asset::new(&fee.asset, unit),
             amount: unit
@@ -114,86 +126,32 @@ impl Fee {
     }
 }
 
-/// Where a history transaction stands relative to its chain's confirmed line:
-/// one named schema per `kind`, discriminated by that field.
+/// Where a history transaction stands relative to its chain's confirmed line.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(untagged)]
-#[schema(discriminator(property_name = "kind", mapping(
-    ("pending" = "#/components/schemas/PendingStatus"),
-    ("confirmed" = "#/components/schemas/ConfirmedStatus"),
-    ("failed" = "#/components/schemas/FailedStatus"),
-)))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Status {
     /// In a canonical block above the confirmed line; it may still revert.
-    Pending(PendingStatus),
+    Pending {
+        /// The including block.
+        block: Block,
+        /// Blocks from inclusion to the newest indexed block, inclusive.
+        confirmations: u64,
+    },
     /// Committed at or below the confirmed line; it will not revert.
-    Confirmed(ConfirmedStatus),
+    Confirmed {
+        /// The including block.
+        block: Block,
+        /// Blocks from inclusion to the newest indexed block, inclusive.
+        confirmations: u64,
+    },
     /// Included but failed on chain.
-    Failed(FailedStatus),
-}
-
-/// `kind: "pending"`.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
-enum PendingKind {
-    #[default]
-    Pending,
-}
-
-/// `kind: "confirmed"`.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
-enum ConfirmedKind {
-    #[default]
-    Confirmed,
-}
-
-/// `kind: "failed"`.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
-enum FailedKind {
-    #[default]
-    Failed,
-}
-
-/// In a canonical block above the confirmed line. It may still revert, and it
-/// is reported in `pending` rather than `transactions`.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PendingStatus {
-    /// Always `pending`.
-    kind: PendingKind,
-    /// The including block.
-    block: Block,
-    /// Blocks from the including block to the newest block the index knows
-    /// of, inclusive.
-    confirmations: u64,
-}
-
-/// Committed at or below the chain's confirmed line: it will not revert.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ConfirmedStatus {
-    /// Always `confirmed`.
-    kind: ConfirmedKind,
-    /// The including block.
-    block: Block,
-    /// Blocks from the including block to the newest block the index knows
-    /// of, inclusive.
-    confirmations: u64,
-}
-
-/// Included but failed on chain.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct FailedStatus {
-    /// Always `failed`.
-    kind: FailedKind,
-    /// The including block.
-    block: Block,
-    /// Chain-reported failure reason, when available; always present.
-    #[schema(required)]
-    reason: Option<String>,
+    Failed {
+        /// The including block.
+        block: Block,
+        /// Chain-reported failure reason, when available; always present.
+        #[schema(required)]
+        reason: Option<String>,
+    },
 }
 
 impl From<wallets::TransactionStatus> for Status {
@@ -202,24 +160,21 @@ impl From<wallets::TransactionStatus> for Status {
             wallets::TransactionStatus::Pending {
                 block,
                 confirmations,
-            } => Self::Pending(PendingStatus {
-                kind: PendingKind::Pending,
+            } => Self::Pending {
                 block: block.into(),
                 confirmations,
-            }),
+            },
             wallets::TransactionStatus::Confirmed {
                 block,
                 confirmations,
-            } => Self::Confirmed(ConfirmedStatus {
-                kind: ConfirmedKind::Confirmed,
+            } => Self::Confirmed {
                 block: block.into(),
                 confirmations,
-            }),
-            wallets::TransactionStatus::Failed { block, reason } => Self::Failed(FailedStatus {
-                kind: FailedKind::Failed,
+            },
+            wallets::TransactionStatus::Failed { block, reason } => Self::Failed {
                 block: block.into(),
                 reason,
-            }),
+            },
         }
     }
 }
@@ -250,11 +205,11 @@ impl Transaction {
             movements: transaction
                 .movements
                 .into_iter()
-                .map(|movement| Movement::new(movement, units))
+                .map(|movement| Movement::new(movement, &transaction.transaction_id.network, units))
                 .collect::<Result<Vec<_>, _>>()?,
             fee: transaction
                 .fee
-                .map(|fee| Fee::new(fee, units))
+                .map(|fee| Fee::new(fee, &transaction.transaction_id.network, units))
                 .transpose()?,
         })
     }
@@ -497,8 +452,11 @@ mod tests {
     /// 6-decimal token of the same network.
     fn units() -> base::Units {
         base::Units::from_iter([
-            (AssetId::native(network().chain), base::Unit::native(&COIN)),
-            (token(), base::Unit::token(6)),
+            (
+                (network(), AssetId::native(network().chain)),
+                base::Unit::native(&COIN),
+            ),
+            ((network(), token()), base::Unit::token(6)),
         ])
     }
 
@@ -575,10 +533,10 @@ mod tests {
         assert_eq!(transaction.fee.as_ref().expect("fee").amount, "0.01");
         assert!(matches!(
             transaction.status,
-            Status::Confirmed(ConfirmedStatus {
+            Status::Confirmed {
                 confirmations: 7,
                 ..
-            })
+            }
         ));
         let status = serde_json::to_value(&transaction.status).expect("status serializes");
         assert_eq!(status["kind"], "confirmed");
@@ -596,9 +554,7 @@ mod tests {
     /// Each status's whole body, byte for byte: its fields, their order, and
     /// the `null` a failure without a reason still writes.
     ///
-    /// The OpenAPI document pins the three schemas by name and cannot pin this:
-    /// it says nothing of field order, and nothing of which member a body reads
-    /// back as.
+    /// Schema generation cannot prove exact wire bytes or deserialization.
     #[test]
     fn each_status_is_the_same_bytes_and_reads_back_as_itself() {
         let block = BlockRef {
@@ -657,6 +613,9 @@ mod tests {
                 status,
                 "{kind} reads back as the member that wrote it"
             );
+            let mut extra = serde_json::to_value(&status).expect("wire value");
+            extra["unexpected"] = true.into();
+            assert!(serde_json::from_value::<Status>(extra).is_err());
         }
     }
 
