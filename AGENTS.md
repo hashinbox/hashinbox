@@ -1,7 +1,10 @@
 # Repository guide
 
-Build a small, reliable SDK for third parties and `apps/api`; prefer less code,
+Build a small, reliable SDK for third parties and `apps/server`; prefer less code,
 clear ownership and observable correctness.
+
+Nobody wants to read long messages, speak like caveman short sentences, bulltet points, fast to mentally grab.
+This is for interaction with user.
 
 ## Ground truth
 
@@ -27,8 +30,8 @@ separate indexer service, raw-block archive or multi-writer deployment.
 
 | Owner | Responsibility |
 | --- | --- |
-| `apps/server` | Executable and composition root: concrete chains, configuration, storage choice, supervision, readiness and shutdown |
-| `apps/api` | Thin HTTP/OpenAPI adapters, wire models and process signing map; no concrete chain/storage dependency |
+| `apps/server` | The one application, a binary with no library target; composition root: concrete chains (`src/chains.rs` only), configuration, storage choice, supervision, readiness and shutdown |
+| `apps/server/src/api/` | Thin HTTP/OpenAPI adapters, wire models and process signing map; names no concrete chain, `sdk_config` or storage backend (`scripts/check-chains.sh` check 8) |
 | `sdk/base` | Small chain-neutral values and signing/broadcast contracts; no chains, RPC, indexing or wallets |
 | `sdk/chains/*` | Native protocol, RPC, addresses, signing, transaction construction/broadcast and indexing translation |
 | `sdk/wallets` | Factory collection, wallet capabilities and batch orchestration; no custody or durable watch ownership |
@@ -78,6 +81,7 @@ These are ownership requirements, including where current code still differs.
   do not rely on the indexer to repair an unsafe or misleading repository answer.
 - SQLite and memory stay inside `storage/`, independently feature-gated; memory is a
   legitimate backend. Fixtures and contract suites belong in `tests/`, not public API.
+  The layout and import rules of `storage/` are in `ARCHITECTURE.md`, "Dependency direction".
 - Repository target: persist absolute balances; use unified balance movements with
   optional transaction identity for transactionless credits; preserve spent-output facts
   so historical replay cannot resurrect outputs. Current recomputation is not fulfillment

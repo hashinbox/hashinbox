@@ -1,7 +1,7 @@
 //! One network's [`Watch`] rows: the hot set a pass reads, the admission that
 //! orders a new watch against a commit, and the durable mirror.
 //!
-//! The set stays in memory because [`NetworkAdmission::plan`] captures it
+//! The set stays in memory because [`CommitGate::plan`] captures it
 //! through a *synchronous* closure and holds no guard across an await, while
 //! [`WatchStore::all`] is async. The store is therefore the mirror, read once
 //! before the first pass, not the authority a pass consults (`docs/design/030 §8 (ex-029)`
@@ -10,30 +10,27 @@
 //! signatures and not of the code that happens to call them.
 //!
 //! The store is not held as a field: every method that needs it takes it, so a
-//! [`crate::Service`] can be assembled without one and the set has no opinion
+//! [`crate::Indexer`] can be assembled without one and the set has no opinion
 //! about which of the repository's capabilities reached it.
-
-#[path = "watch_set.rs"]
-mod set;
 
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicBool, Ordering},
 };
 
-pub(crate) use set::Backlog;
-use set::Set;
+pub(crate) use crate::watch_set::OwedRange;
+use crate::watch_set::WatchRows;
 
 use crate::{
-    Address, BlockRef, Holder, IndexError, IndexErrorKind, Network, NetworkAdmission, Progress,
-    Start, SyncPlan, SyncPolicy, Watch, WatchStore,
+    Birthday, BlockRef, CommitGate, Holder, IndexError, IndexErrorKind, Network, Progress,
+    SyncPlan, SyncPolicy, Watch, WatchStore,
 };
 
 /// The collection of what one network observes.
 pub(crate) struct Watches {
     network: Network,
-    admission: Arc<NetworkAdmission>,
-    set: RwLock<Set>,
+    admission: Arc<CommitGate>,
+    set: RwLock<WatchRows>,
     policy: SyncPolicy,
     loaded: AtomicBool,
 }
@@ -43,8 +40,8 @@ impl Watches {
     pub(crate) fn new(network: Network, policy: SyncPolicy) -> Self {
         Self {
             network,
-            admission: Arc::new(NetworkAdmission::new()),
-            set: RwLock::new(Set::default()),
+            admission: Arc::new(CommitGate::new()),
+            set: RwLock::new(WatchRows::default()),
             policy,
             loaded: AtomicBool::new(false),
         }
@@ -57,8 +54,8 @@ impl Watches {
     /// pairing is taken over: the set owns it from here on.
     ///
     /// Merge-only for the rows and authoritative for the progress
-    /// ([`Set::restore`]), which is also what makes it safe to run again after
-    /// [`Self::stale`].
+    /// ([`WatchRows::restore`]), which is also what makes it safe to run again after
+    /// [`Self::mark_stale`].
     pub(crate) async fn load(&self, store: &dyn WatchStore) -> Result<(), IndexError> {
         if self.loaded.load(Ordering::Acquire) {
             return Ok(());
@@ -77,16 +74,19 @@ impl Watches {
     /// refusal is the only way to find out. Re-reading is what turns a permanent
     /// refusal into one retryable pass (`docs/design/030 §8 (ex-032)`, the expected-progress
     /// guard).
-    pub(crate) fn stale(&self) {
+    pub(crate) fn mark_stale(&self) {
         self.loaded.store(false, Ordering::Release);
     }
 
-    /// Every observation still reading its own past ([`Set::behind`]).
-    pub(crate) fn behind(&self, checkpoint: Option<&BlockRef>) -> Result<Vec<Backlog>, IndexError> {
+    /// Every observation still reading its own past ([`WatchRows::behind`]).
+    pub(crate) fn behind(
+        &self,
+        checkpoint: Option<&BlockRef>,
+    ) -> Result<Vec<OwedRange>, IndexError> {
         self.with(|set| set.behind(checkpoint))
     }
 
-    /// The claims one committed block proves ([`Set::forward`]).
+    /// The claims one committed block proves ([`WatchRows::forward`]).
     pub(crate) fn forward(
         &self,
         line: Option<&BlockRef>,
@@ -104,28 +104,8 @@ impl Watches {
         self.with_mut(|set| set.advanced(proved))
     }
 
-    /// Whether the index is still filling in `address`'s history
-    /// ([`Set::backfilling`]).
-    pub(crate) fn backfilling(
-        &self,
-        address: &Address,
-        checkpoint: Option<&BlockRef>,
-    ) -> Result<bool, IndexError> {
-        self.with(|set| set.backfilling(address, checkpoint))
-    }
-
-    /// Whether any observation of `address` began at the chain's first block,
-    /// which is the whole of what an index can check a completeness claim
-    /// against.
-    pub(crate) fn observed_from_the_first_block(
-        &self,
-        address: &Address,
-    ) -> Result<bool, IndexError> {
-        self.with(|set| set.observed_from_the_first_block(address))
-    }
-
     /// The captured plan for this pass: filters, checkpoint and revision
-    /// together, under the admission handshake ([`Set::filters`]).
+    /// together, under the admission handshake ([`WatchRows::filters`]).
     pub(crate) fn plan(&self, checkpoint: Option<BlockRef>) -> Result<SyncPlan, IndexError> {
         self.admission
             .plan(checkpoint, |line| self.with(|set| set.filters(line)))
@@ -133,7 +113,7 @@ impl Watches {
 
     /// Every row, in id order, as [`crate::Watching::watched`] returns them.
     pub(crate) fn rows(&self) -> Result<Vec<Watch>, IndexError> {
-        self.with(Set::watches)
+        self.with(WatchRows::watches)
     }
 
     /// Rejects a network this set does not hold.
@@ -152,14 +132,14 @@ impl Watches {
     /// revision bump that invalidates any plan captured before it.
     ///
     /// `persisted` is the checkpoint the caller just read; the permit's own
-    /// checkpoint is the one a `Start::Fresh` birthday is derived from, and no
+    /// checkpoint is the one a `Birthday::Fresh` birthday is derived from, and no
     /// block may move past it while the permit is held.
     pub(crate) async fn add(
         &self,
         store: &dyn WatchStore,
         id: &str,
         subject: &dyn Holder,
-        start: Start,
+        start: Birthday,
         persisted: Option<BlockRef>,
     ) -> Result<Watch, IndexError> {
         self.validate(subject)?;
@@ -226,7 +206,7 @@ impl Watches {
     /// Stops asking for every range this network still owes, and reports the
     /// watches it re-anchored.
     ///
-    /// The contract is [`crate::Backfilling::cancel`]. Each affected observation
+    /// The contract is [`crate::Backfilling::cancel_backfill`]. Each affected observation
     /// is re-anchored to the block after the checkpoint with **nothing inspected
     /// for it**, which is the one honest way to settle a range without claiming
     /// to have read it: a watch born above the line owes nothing below it, and
@@ -234,7 +214,7 @@ impl Watches {
     /// Nothing indexed is deleted, and no coverage note has to be written at all
     /// — which is the machinery contiguous progress removed here.
     ///
-    /// **One durable call, and that is a property of [`WatchStore::reanchor`]
+    /// **One durable call, and that is a property of [`WatchStore::cancel_backfill`]
     /// rather than of this function.** Raising a birthday used to be a
     /// [`WatchStore::forget`] followed by a [`WatchStore::add`], because nothing
     /// else could change one; those two pass through a state in which the
@@ -246,7 +226,7 @@ impl Watches {
     /// has renounced, which reads honestly, re-anchors again on a repeat of the
     /// same idempotent call, and is refused by the expected-progress guard the
     /// moment it tries to claim anything (`crate::Progress`).
-    pub(crate) async fn cancel(
+    pub(crate) async fn cancel_backfill(
         &self,
         store: &dyn WatchStore,
         persisted: Option<BlockRef>,
@@ -256,7 +236,7 @@ impl Watches {
             // Nothing is owed below a line the network does not have.
             return Ok(Vec::new());
         };
-        let birthday = Self::birthday(Start::Fresh, Some(&checkpoint))?;
+        let birthday = Self::birthday(Birthday::Fresh, Some(&checkpoint))?;
         let renewed = self
             .owing(&checkpoint)?
             .into_iter()
@@ -268,7 +248,7 @@ impl Watches {
         if renewed.is_empty() {
             return Ok(Vec::new());
         }
-        store.reanchor(renewed.clone()).await?;
+        store.cancel_backfill(renewed.clone()).await?;
         self.with_mut(|set| {
             for watch in &renewed {
                 set.attach(watch.clone());
@@ -291,7 +271,7 @@ impl Watches {
         self.with(|set| {
             set.behind(Some(checkpoint))
                 .into_iter()
-                .filter_map(|owed| set.identified(&owed.watch))
+                .filter_map(|owed| set.identified(&owed.watch_id))
                 .collect()
         })
     }
@@ -312,12 +292,12 @@ impl Watches {
         &self,
         id: &str,
         subject: &dyn Holder,
-        start: Start,
+        start: Birthday,
     ) -> Result<Option<Watch>, IndexError> {
         let restated = |watch: &Watch| {
             watch.address == *subject.address()
                 && watch.asset == *subject.asset()
-                && !matches!(start, Start::At(position) if position != watch.start)
+                && !matches!(start, Birthday::At(position) if position != watch.start)
         };
         if let Some(watch) = self.with(|set| set.identified(id))? {
             return if restated(&watch) {
@@ -338,13 +318,13 @@ impl Watches {
     }
 
     fn birthday(
-        start: Start,
+        start: Birthday,
         checkpoint: Option<&BlockRef>,
     ) -> Result<crate::BlockPosition, IndexError> {
         match (start, checkpoint) {
-            (Start::At(position), _) => Ok(position),
-            (Start::Fresh, None) => Ok(crate::BlockPosition(0)),
-            (Start::Fresh, Some(block)) => block.position.checked_successor().ok_or_else(|| {
+            (Birthday::At(position), _) => Ok(position),
+            (Birthday::Fresh, None) => Ok(crate::BlockPosition(0)),
+            (Birthday::Fresh, Some(block)) => block.position.checked_successor().ok_or_else(|| {
                 IndexError::new(
                     IndexErrorKind::Store,
                     "checkpoint position has no successor for a new watch",
@@ -381,19 +361,19 @@ impl Watches {
     ///
     /// **Both closures are synchronous, and that is the invariant.** Neither is
     /// an `async fn`, neither takes or returns a future, and neither can return
-    /// the guard — a borrow of the [`Set`] does not outlive the call — so no guard
+    /// the guard — a borrow of the [`WatchRows`] does not outlive the call — so no guard
     /// is ever held across an await and no pass observes the set half-published.
     /// These two are the *only* access to `self.set`, which puts that property in
     /// their signatures instead of in the code that calls them: there is no way
     /// here to obtain a guard, so there is nothing for an `.await` to be written
     /// after (`docs/design/030 §8 (ex-029)` section 5.3, `docs/design/033` section 5.7).
-    fn with<T>(&self, read: impl FnOnce(&Set) -> T) -> Result<T, IndexError> {
+    fn with<T>(&self, read: impl FnOnce(&WatchRows) -> T) -> Result<T, IndexError> {
         let set = self.set.read().map_err(|_| Self::poisoned())?;
         Ok(read(&set))
     }
 
     /// Changes the hot set under the lock, under [`Self::with`]'s invariant.
-    fn with_mut<T>(&self, change: impl FnOnce(&mut Set) -> T) -> Result<T, IndexError> {
+    fn with_mut<T>(&self, change: impl FnOnce(&mut WatchRows) -> T) -> Result<T, IndexError> {
         let mut set = self.set.write().map_err(|_| Self::poisoned())?;
         Ok(change(&mut set))
     }
@@ -411,8 +391,8 @@ impl Watches {
 /// state.
 ///
 /// Those two, and no others, because those two are the calls that make a row
-/// appear or disappear. [`Watches::cancel`] changes a row that exists into a row
-/// that exists ([`WatchStore::reanchor`]), so it has no outcome in which the
+/// appear or disappear. [`Watches::cancel_backfill`] changes a row that exists into a row
+/// that exists ([`WatchStore::cancel_backfill`]), so it has no outcome in which the
 /// store holds a row the running set has never seen — which is the case this
 /// whole mechanism is about.
 ///
@@ -426,9 +406,9 @@ impl Watches {
 ///
 /// So the outcome is settled the one way it can be: **read it back**. Each named
 /// row leaves the hot set and the mirror is marked stale
-/// ([`Watches::stale`]), so the next [`Watches::load`] — the first thing every
+/// ([`Watches::mark_stale`]), so the next [`Watches::load`] — the first thing every
 /// pass and every `Watching` call does — re-reads [`WatchStore::all`] and
-/// [`Set::restore`] inserts whichever of those rows the store actually holds,
+/// [`WatchRows::restore`] inserts whichever of those rows the store actually holds,
 /// whole, with its birthday and its progress, because the id is absent. That is
 /// the same authoritative-reload path a refused commit already takes, and
 /// detaching first is what makes a merge-only restore authoritative for exactly
@@ -468,6 +448,6 @@ impl Drop for Reconciliation<'_> {
                 set.detach(id);
             }
         }));
-        self.watches.stale();
+        self.watches.mark_stale();
     }
 }

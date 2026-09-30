@@ -2,8 +2,8 @@
 //!
 //! The three steps are the same on every chain: a [`Config`] value — built in
 //! code or deserialized from any `serde` format — [`Config::connect`]s to a
-//! node and verifies its identity, and the verified [`Node`] then
-//! [`Node::compose`]s over an opened repository into a
+//! node and verifies its identity, and the verified [`ChainHandle`] then
+//! [`ChainHandle::compose`]s over an opened repository into a
 //! [`wallets::ComposedChain`]. No storage is opened on the first step, which is
 //! what lets an application check every chain's identity before it opens
 //! anything (`docs/design/030 §8 (ex-028)` section 10.1). [`wallets::Composition`] is what
@@ -21,7 +21,7 @@ use wallets::{ComposedChain, Connection, SubmissionRegistrar};
 /// [`indexing::Repository`] is the minimum any index needs — registration and
 /// committing — and the rest is what Bitcoin's own consumers read: the balance
 /// fold, the repository's own history query ([`indexing::ConfirmedHistory`])
-/// that this chain joins to its overlay for the page `apps/api` projects, and
+/// that this chain joins to its overlay for the page `apps/server` projects, and
 /// the live outputs coin selection spends. Trait bounds, never a backend: this
 /// file names no store implementation. Named here rather than in `wallets`,
 /// because it is this
@@ -169,11 +169,11 @@ impl<A: Ord> Config<A> {
     ///
     /// [`Self::validate`]'s refusals, and whatever `RpcClient::connect`
     /// reports when the node serves another network.
-    pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<Node<A>, Error> {
+    pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<ChainHandle<A>, Error> {
         self.validate()?;
         let transport = self.rpc.transport(secrets)?;
         let rpc = RpcClient::connect(transport, &self.network).await?;
-        Ok(Node { config: self, rpc })
+        Ok(ChainHandle { config: self, rpc })
     }
 
     const fn default_confirmation_depth() -> u64 {
@@ -192,7 +192,7 @@ impl<A> Config<A> {
 
     /// The wallet configuration this deployment's factory is built from: the
     /// network, the address type, and the fee ceilings. One function, so
-    /// [`Config::validate`] refuses exactly what [`Node::compose`] would
+    /// [`Config::validate`] refuses exactly what [`ChainHandle::compose`] would
     /// build.
     fn wallet(&self) -> WalletConfig {
         WalletConfig::new(&self.network)
@@ -244,16 +244,16 @@ impl<A: FromStr> Config<A> {
     }
 }
 
-/// A Bitcoin node whose network identity has been verified. It holds the
-/// checked configuration and the connected client, and builds this chain's
-/// parts once storage is open.
-pub struct Node<A> {
+/// A checked configuration and the client connected under it, to a node
+/// whose network identity has been verified. It builds this chain's parts
+/// once storage is open.
+pub struct ChainHandle<A> {
     config: Config<A>,
     rpc: RpcClient<Transport>,
 }
 
-impl<A> Node<A> {
-    /// The chain-neutral identity of the network this node serves, which is
+impl<A> ChainHandle<A> {
+    /// The chain-neutral identity of the network the node serves, which is
     /// the repository [`Self::compose`] needs.
     #[must_use]
     pub fn network(&self) -> base::Network {
@@ -286,29 +286,24 @@ impl<A> Node<A> {
         let params = IndexerParams {
             sync: config.cadence.policy,
             confirmed_depth: config.confirmation_depth,
-            ..IndexerParams::new(rpc.clone(), repository)
+            ..IndexerParams::new(rpc.clone(), repository.clone())
         };
         let indexer = Arc::new(crate::indexer(params)?);
         indexer.checkpoint(&config.network.canonical()).await?;
         let wallet = config.wallet();
-        // The repository's own unspent rows, with this index's pending blocks
-        // folded in and its two gates taken, so change is spendable at depth one
-        // and nothing is offered while the address's own history is still being
-        // read. A reader of its own, not a capability of the index: the rows are
-        // the store's, and what this adds is the half the store cannot know.
-        let outputs = Arc::new(indexer.outputs());
-        let factory = WalletFactory::new(wallet, &rpc, outputs)?;
-        // The repository's own confirmed pages joined to this index's overlay:
-        // the only value that holds both halves is the one just built.
-        let history = Arc::new(indexer.history());
-        // A reader of its own for the same reason: the fold is the store's own
-        // total, completed by this index's overlay, and a consumer asks the
-        // fold rather than the indexer that happens to hold both halves.
-        let balance = Arc::new(indexer.balances());
+        // The repository's own answers, each completed by the blocks this
+        // index holds above its confirmed line. Paired here because this is
+        // the place that holds both: the rows are the store's, the pending
+        // blocks are the index's, and the index answers no query itself.
+        let reads = Arc::new(wallets::PendingJoin::new(repository, indexer.clone()));
+        // The unspent rows with the pending blocks folded in, so change is
+        // spendable at depth one. The store itself refuses them while the
+        // address's own history is still being read.
+        let factory = WalletFactory::new(wallet, &rpc, reads.clone())?;
         Ok(ComposedChain {
             index: indexer,
-            history,
-            balance,
+            history: reads.clone(),
+            balance: reads,
             factories: vec![(config.asset, Box::new(factory) as Box<_>)],
             units,
             poll: config.cadence.poll,
@@ -316,10 +311,10 @@ impl<A> Node<A> {
     }
 }
 
-/// [`Node::compose`] with this chain's type erased, so one vector holds every
+/// [`ChainHandle::compose`] with this chain's type erased, so one vector holds every
 /// configured chain and [`wallets::Composition`] folds them without naming any
 /// of them. An application writes none of this.
-impl<A: Send + 'static, R: Store> Connection<A, R> for Node<A> {
+impl<A: Send + 'static, R: Store> Connection<A, R> for ChainHandle<A> {
     fn compose<'a>(
         self: Box<Self>,
         repository: R,

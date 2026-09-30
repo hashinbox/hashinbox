@@ -16,13 +16,12 @@ use std::sync::{
 use base::Decimal;
 use futures_executor::block_on;
 use indexing::{
-    Address, AssetId, Balance, BalanceQuery, BalanceStore, Balances, BlockHash, BlockHeight,
-    BlockInterpreter, BlockParent, BlockPosition, BlockRef, BlockSource, BoxFuture, CanonicalPage,
-    ChainName, Completeness, ConfirmedHistory, FeeSettlement, HistoryQuery, IndexError,
-    IndexErrorKind, IndexStore, IndexedBatch, IndexedBlock, InterpretedBlock, MovementId, Network,
-    ObservationDraft, ObservationDraftStatus, OutputChanges, OutputKey, Page, PurgedRows, Purging,
-    Service, Start, Subject, SyncConfig, SyncPhase, SyncPolicy, SyncStatus, TransactionRef,
-    ValueMovement, Watching, memory,
+    Address, AssetId, Balance, BalanceQuery, BalanceStore, Birthday, BlockHash, BlockHeight,
+    BlockInterpreter, BlockParent, BlockPosition, BlockRef, BlockSource, BoxFuture, ChainName,
+    Completeness, ConfirmedHistory, FeeSettlement, HistoryQuery, IndexError, IndexErrorKind,
+    Indexer, InterpretedBlock, MovementId, NativeBlock, Network, ObservationDraft,
+    ObservationDraftStatus, Page, Subject, SyncConfig, SyncPhase, SyncPolicy, SyncStatus,
+    TransactionRef, ValueMovement, Watching, memory,
 };
 
 /// Every block above `pruned` exists, and the source counts what a pass asked
@@ -54,7 +53,7 @@ impl Source {
 #[derive(Clone, Debug)]
 struct Block(BlockRef);
 
-impl IndexedBlock for Block {
+impl NativeBlock for Block {
     fn block_ref(&self) -> BlockRef {
         self.0.clone()
     }
@@ -88,7 +87,7 @@ fn block(height: u64) -> BlockRef {
     }
 }
 
-impl indexing::ChainTip for Source {
+impl indexing::ChainTips for Source {
     fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, indexing::SourceError>> {
         Box::pin(async move { Ok(block(self.tip)) })
     }
@@ -194,103 +193,11 @@ impl BlockInterpreter for Interpreter {
                 fee: None,
             })
             .collect();
-        Ok(InterpretedBlock {
-            block: reference,
-            transactions,
-            outputs: OutputChanges::default(),
-            credits: Vec::new(),
-        })
+        InterpretedBlock::new(&network(), reference, transactions)
     }
 }
 
-/// The in-memory store with one answer changed: its fold always claims
-/// whatever completeness it was built with.
-///
-/// Two gates are checked through it and they are different gates, which is why
-/// the claim is a field rather than a constant. A store claiming
-/// [`Completeness::VerifiedOpening`] — evidence about the *total* at one block —
-/// tests the backfill gate, which weakens any claim while an address's rows are
-/// still arriving. A store claiming [`Completeness::CompleteHistory`] —
-/// evidence about the *range* — tests the birthday gate, which refuses that
-/// claim outright for an observation that began above the chain's first block.
-/// Nothing in the tree produces either yet, so without this the gates would be
-/// tested vacuously.
-#[derive(Clone)]
-struct Optimistic(memory::Repository, Completeness);
-
-impl BalanceStore for Optimistic {
-    fn balance<'a>(&'a self, query: BalanceQuery) -> BoxFuture<'a, Result<Balance, IndexError>> {
-        Box::pin(async move {
-            let mut balance = self.0.balance(query).await?;
-            balance.completeness = self.1;
-            Ok(balance)
-        })
-    }
-}
-
-impl IndexStore for Optimistic {
-    fn checkpoint<'a>(
-        &'a self,
-        network: &'a Network,
-    ) -> BoxFuture<'a, Result<Option<BlockRef>, IndexError>> {
-        self.0.checkpoint(network)
-    }
-
-    fn commit<'a>(
-        &'a self,
-        batch: IndexedBatch,
-    ) -> BoxFuture<'a, Result<Vec<OutputKey>, IndexError>> {
-        self.0.commit(batch)
-    }
-}
-
-impl Purging for Optimistic {
-    fn purge_network<'a>(
-        &'a self,
-        network: &'a Network,
-    ) -> BoxFuture<'a, Result<PurgedRows, IndexError>> {
-        self.0.purge_network(network)
-    }
-}
-
-impl ConfirmedHistory for Optimistic {
-    fn history<'a>(
-        &'a self,
-        query: HistoryQuery,
-    ) -> BoxFuture<'a, Result<CanonicalPage, IndexError>> {
-        self.0.history(query)
-    }
-}
-
-impl indexing::WatchStore for Optimistic {
-    fn add<'a>(&'a self, watches: Vec<indexing::Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
-        self.0.add(watches)
-    }
-
-    fn all<'a>(
-        &'a self,
-        network: &'a Network,
-    ) -> BoxFuture<'a, Result<Vec<indexing::WatchProgress>, IndexError>> {
-        self.0.all(network)
-    }
-
-    fn forget<'a>(
-        &'a self,
-        network: &'a Network,
-        watch: &'a indexing::Watch,
-    ) -> BoxFuture<'a, Result<(), IndexError>> {
-        self.0.forget(network, watch)
-    }
-
-    fn reanchor<'a>(
-        &'a self,
-        watches: Vec<indexing::Watch>,
-    ) -> BoxFuture<'a, Result<(), IndexError>> {
-        self.0.reanchor(watches)
-    }
-}
-
-type Index<R> = Service<Source, Interpreter, R>;
+type Index<R> = Indexer<Source, Interpreter, R>;
 
 fn service<R: Clone>(repository: R, source: Source, policy: SyncPolicy) -> Arc<Index<R>> {
     watching(repository, source, policy, Interpreter::default())
@@ -304,7 +211,7 @@ fn watching<R: Clone>(
     policy: SyncPolicy,
     interpreter: Interpreter,
 ) -> Arc<Index<R>> {
-    Arc::new(Service::new(
+    Arc::new(Indexer::new(
         source,
         interpreter,
         repository,
@@ -328,23 +235,17 @@ where
     block_on(indexing::Indexing::sync(&**index)).expect("pass")
 }
 
-/// What a consumer reads: the reader over this index, which joins the
-/// repository's own confirmed page to the blocks the index still holds.
-fn indexed<R>(index: &Arc<Index<R>>, address: &str) -> Vec<String>
-where
-    R: indexing::ConfirmedHistory + Clone,
-{
-    let reader = index.history();
-    block_on(indexing::History::history(
-        &reader,
-        &subject(address),
-        Page::first(100),
-    ))
-    .expect("history")
-    .transactions
-    .into_iter()
-    .map(|entry| entry.transaction_id.id.to_string())
-    .collect()
+/// What the index wrote: the repository's own confirmed page of `address`,
+/// which is where a pass's commits are read back. No query goes through the
+/// index.
+fn indexed(repository: &memory::Repository, address: &str) -> Vec<String> {
+    let query = HistoryQuery::new(&subject(address), Page::first(100));
+    block_on(repository.history(query))
+        .expect("history")
+        .transactions
+        .into_iter()
+        .map(|entry| entry.transaction_id.id.to_string())
+        .collect()
 }
 
 /// Ten blocks indexed with nothing watched, so the store holds a checkpoint
@@ -371,13 +272,16 @@ fn an_address_watched_from_its_own_past_ends_up_with_that_history() {
     let index = caught_up(&memory, source(10));
     let late = subject("late");
 
-    block_on(index.watch("late-1", &late, Start::At(BlockPosition(2)))).expect("watch");
-    assert!(indexed(&index, "late").is_empty(), "nothing is indexed yet");
+    block_on(index.watch("late-1", &late, Birthday::At(BlockPosition(2)))).expect("watch");
+    assert!(
+        indexed(&memory, "late").is_empty(),
+        "nothing is indexed yet"
+    );
 
     let status = pass(&index);
 
     assert_eq!(
-        indexed(&index, "late").len(),
+        indexed(&memory, "late").len(),
         9,
         "blocks 2 through 10 are indexed for an address watched at 2"
     );
@@ -394,7 +298,7 @@ fn a_fresh_watch_owes_nothing_and_reads_no_historical_block() {
     let index = caught_up(&memory, source.clone());
     let read = source.fetched.load(Ordering::Relaxed);
 
-    block_on(index.watch("fresh-1", &subject("fresh"), Start::Fresh)).expect("watch");
+    block_on(index.watch("fresh-1", &subject("fresh"), Birthday::Fresh)).expect("watch");
     let status = pass(&index);
 
     assert!(status.backfill.is_none(), "a fresh watch owes nothing");
@@ -405,60 +309,88 @@ fn a_fresh_watch_owes_nothing_and_reads_no_historical_block() {
     );
 }
 
+/// What the repository claims about the history behind `of`'s rows, from the
+/// snapshot it folds them in.
+///
+/// Asked of the store and of nothing else. An index used to weaken this answer
+/// on its way to a caller, from its own in-memory watch set; it no longer sees
+/// the answer at all, so whatever is asserted below is what the store derived
+/// from the progress the passes recorded in it.
+fn claimed(repository: &memory::Repository, of: &Subject) -> Balance {
+    block_on(repository.balance(BalanceQuery::new(of))).expect("the settled balance")
+}
+
 /// A balance folded over a range still being filled in does not claim to be
-/// complete, whatever the store claims.
+/// complete, and nothing but the store says so.
+///
+/// The observation begins at the chain's first block, so the claim it is
+/// working towards *is* a whole history, and the batch is three blocks, so one
+/// pass leaves it part-way: progress is recorded, and it is behind the line.
+/// A store that read "born at the first block, and something was inspected" as
+/// the whole claim answers `CompleteHistory` here, over eight blocks nothing has
+/// read.
 #[test]
 fn a_balance_over_an_incomplete_range_never_claims_complete() {
     let memory = memory::Repository::new();
-    let repository = Optimistic(memory.clone(), Completeness::VerifiedOpening);
-    let index = service(repository, source(10), SyncPolicy::new(100));
-    assert_eq!(pass(&index).phase, SyncPhase::Ready);
-
+    let source = source(10);
+    caught_up(&memory, source.clone());
     let late = subject("late");
-    block_on(index.watch("late-1", &late, Start::At(BlockPosition(2)))).expect("watch");
+    let bounded = memory_service(&memory, source.clone(), SyncPolicy::new(3));
+    block_on(bounded.watch("late-1", &late, Birthday::At(BlockPosition(0)))).expect("watch");
 
-    let during = block_on(index.balances().balance(&late)).expect("balance mid-backfill");
+    assert_eq!(
+        claimed(&memory, &late).completeness,
+        Completeness::Incomplete,
+        "nothing has been inspected for it yet"
+    );
+
+    let owed = pass(&bounded).backfill.expect("the range is not read out");
+    assert_eq!(
+        owed.inspected, 3,
+        "blocks 0 to 2, and progress recorded there"
+    );
+    let during = claimed(&memory, &late);
+    assert_eq!(during.observed_at, Some(block(10)));
     assert_eq!(
         during.completeness,
         Completeness::Incomplete,
-        "the store claimed Complete; the index will not pass it on while it \
-         is still writing this address's rows"
+        "the fold is stamped with a line eight blocks above what was read"
     );
 
-    assert!(pass(&index).backfill.is_none(), "the gap closes");
+    let straight = memory_service(&memory, source, SyncPolicy::new(100));
+    assert!(pass(&straight).backfill.is_none(), "the gap closes");
 
-    let after = block_on(index.balances().balance(&late)).expect("balance after");
+    let after = claimed(&memory, &late);
     assert_eq!(
         after.completeness,
-        Completeness::VerifiedOpening,
-        "once nothing is owed the gate stops applying"
+        Completeness::CompleteHistory,
+        "once nothing is owed the claim is earned"
     );
-    assert_eq!(after.amount, Decimal::from(90_u64), "nine credits of ten");
+    assert_eq!(
+        after.amount,
+        Decimal::from(110_u64),
+        "eleven credits of ten"
+    );
 }
 
 /// The token observed at an address reads as incomplete while the *native*
 /// observation of the same address is still reading its own past.
 ///
-/// The gate is address-scoped rather than per observation, and that is the
+/// The claim is address-scoped rather than per observation, and that is the
 /// honest answer rather than a looser one: one inspection of an address serves
 /// every asset observed at it (`indexing::BlockInterpreter::inspect` takes
 /// addresses and no asset), so the rows a token fold reads are the rows the
-/// native catch-up is still inserting. A gate keyed by the observation would
+/// native catch-up is still inserting. A claim keyed by the observation would
 /// call the token holding authoritative out of rows that are still arriving.
 ///
-/// Both ends of the scenario read `Complete`, which is what stops the middle
-/// assertion from passing for the trivial reason that nothing ever claims it:
-/// the store here claims `Complete` always, and the only thing that changes
-/// between the three reads is what the address owes.
+/// Both ends of the scenario read `CompleteHistory`, which is what stops the
+/// middle assertion from passing for the trivial reason that nothing ever
+/// claims it: the only thing that changes between the three reads is what the
+/// address owes.
 #[test]
 fn a_token_read_is_weakened_while_its_native_sibling_catches_up() {
     let memory = memory::Repository::new();
-    let index = service(
-        Optimistic(memory, Completeness::VerifiedOpening),
-        source(10),
-        SyncPolicy::new(100),
-    );
-    assert_eq!(pass(&index).phase, SyncPhase::Ready);
+    let index = caught_up(&memory, source(10));
     let late = subject("late");
     let token = Subject {
         address: Address::new(network(), "late"),
@@ -468,24 +400,21 @@ fn a_token_read_is_weakened_while_its_native_sibling_catches_up() {
         },
     };
 
-    // Born above the line, so this observation owes nothing at all.
-    block_on(index.watch("late-token", &token, Start::Fresh)).expect("the token observation");
+    block_on(index.watch("late-token", &token, Birthday::At(BlockPosition(0))))
+        .expect("the token observation");
+    assert!(pass(&index).backfill.is_none(), "the token's range closes");
     assert_eq!(
-        block_on(index.balances().balance(&token))
-            .expect("the token balance")
-            .completeness,
-        Completeness::VerifiedOpening,
-        "nothing is owed at this address yet, so nothing weakens the claim"
+        claimed(&memory, &token).completeness,
+        Completeness::CompleteHistory,
+        "nothing is owed at this address, so nothing weakens the claim"
     );
 
     // A second observation of the same address, born below the line.
-    block_on(index.watch("late-native", &late, Start::At(BlockPosition(2))))
+    block_on(index.watch("late-native", &late, Birthday::At(BlockPosition(2))))
         .expect("the native observation");
 
     assert_eq!(
-        block_on(index.balances().balance(&token))
-            .expect("the token balance mid-backfill")
-            .completeness,
+        claimed(&memory, &token).completeness,
         Completeness::Incomplete,
         "the token owes nothing of its own, and the rows it folds are the ones \
          the native catch-up at the same address is still inserting"
@@ -494,59 +423,35 @@ fn a_token_read_is_weakened_while_its_native_sibling_catches_up() {
     assert!(pass(&index).backfill.is_none(), "the native range closes");
 
     assert_eq!(
-        block_on(index.balances().balance(&token))
-            .expect("the token balance after")
-            .completeness,
-        Completeness::VerifiedOpening,
-        "and the gate stops applying once the address owes nothing again"
+        claimed(&memory, &token).completeness,
+        Completeness::CompleteHistory,
+        "and the claim is earned again once the address owes nothing"
     );
 }
 
-/// **The obligation `034` left open, now satisfied — and the reason the two
-/// completeness claims had to be named apart.**
+/// **Honest balance completeness with arbitrary birthdays**: a partial total
+/// must never be presented as authoritative.
 ///
-/// The obligation is *honest balance completeness with arbitrary birthdays*: a
-/// partial total must never be presented as authoritative. This fixture is the
-/// shape that used to break it — every block from 0 credits the address, the
-/// observation starts at 2, so blocks 0 and 1 are credits the index will never
-/// read, and the fold is short by exactly them. Once the range *above* the
-/// birthday closes nothing weakens the claim any more, so a store's claim
-/// reached the caller over a total that was provably incomplete.
+/// This fixture is the shape that used to break it — every block from 0 credits
+/// the address, the observation starts at 2, so blocks 0 and 1 are credits the
+/// index will never read, and the fold is short by exactly them. Once the range
+/// *above* the birthday closes nothing is owed any more, and the claim is still
+/// refused: not weakened until a backfill finishes, refused, because the range
+/// below a birthday is one no backfill will ever read.
 ///
-/// It was open because one name covered two claims. `Complete` was documented
-/// as "the start is proven to be at or before the address's first use" while
-/// the only thing that ever produced it — a node read agreeing with the fold at
-/// one block — proves the *total* there and nothing about the start. There was
-/// therefore no claim for the index to check, because the claim it would have
-/// had to refuse was the same value the one real producer emitted.
-///
-/// Splitting them gives the index something checkable.
-/// [`Completeness::CompleteHistory`] is a statement about the *range*, and the
-/// index holds the one fact that bounds it: the observation's own birthday. A
-/// whole-history claim over a birthday above the chain's first block is refused
-/// — not weakened until the backfill finishes, refused, because the range below
-/// a birthday is one no backfill will ever read.
-/// [`Completeness::VerifiedOpening`] is untouched by that rule, which is what
-/// keeps the assertion in
-/// `a_balance_over_an_incomplete_range_never_claims_complete` above true and
-/// unchanged: that gate is about rows not read *yet*, this one about rows that
-/// will never be read at all, and they are different gates over different
-/// claims.
+/// The store holds the one fact that bounds the claim, the observation's own
+/// birthday, in the row it reads beside the fold. So it is the store that
+/// refuses, and no index checks it afterwards.
 #[test]
-fn a_complete_claim_is_checked_against_the_birthday_it_was_earned_under() {
+fn a_whole_history_is_never_claimed_over_a_birthday_above_the_first_block() {
     let memory = memory::Repository::new();
-    let index = service(
-        Optimistic(memory, Completeness::CompleteHistory),
-        source(10),
-        SyncPolicy::new(100),
-    );
-    assert_eq!(pass(&index).phase, SyncPhase::Ready);
+    let index = caught_up(&memory, source(10));
     let late = subject("late");
 
-    block_on(index.watch("late-1", &late, Start::At(BlockPosition(2)))).expect("watch");
+    block_on(index.watch("late-1", &late, Birthday::At(BlockPosition(2)))).expect("watch");
     assert!(pass(&index).backfill.is_none(), "the range above 2 closes");
 
-    let balance = block_on(index.balances().balance(&late)).expect("balance");
+    let balance = claimed(&memory, &late);
     assert_eq!(
         balance.amount,
         Decimal::from(90_u64),
@@ -559,30 +464,23 @@ fn a_complete_claim_is_checked_against_the_birthday_it_was_earned_under() {
     );
 }
 
-/// The other half of the same gate: an observation that *did* start at the
-/// chain's first block keeps the claim, so the refusal above is a check and not
+/// The other half of the same rule: an observation that *did* start at the
+/// chain's first block earns the claim, so the refusal above is a check and not
 /// a blanket refusal.
 ///
-/// Without this the gate would pass by never letting anything through, which is
+/// Without this the rule would pass by never letting anything through, which is
 /// the failure mode a one-sided assertion cannot tell from a working check.
 #[test]
-fn a_complete_claim_survives_a_birthday_at_the_first_block() {
+fn a_whole_history_is_claimed_over_a_birthday_at_the_first_block() {
     let memory = memory::Repository::new();
-    let index = service(
-        Optimistic(memory, Completeness::CompleteHistory),
-        source(10),
-        SyncPolicy::new(100),
-    );
-    assert_eq!(pass(&index).phase, SyncPhase::Ready);
+    let index = caught_up(&memory, source(10));
     let early = subject("early");
 
-    block_on(index.watch("early-1", &early, Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("early-1", &early, Birthday::At(BlockPosition(0)))).expect("watch");
     assert!(pass(&index).backfill.is_none(), "the whole range closes");
 
     assert_eq!(
-        block_on(index.balances().balance(&early))
-            .expect("balance")
-            .completeness,
+        claimed(&memory, &early).completeness,
         Completeness::CompleteHistory,
         "every block the address could have acted in was inspected for it",
     );
@@ -594,7 +492,8 @@ fn one_pass_reads_no_more_blocks_than_its_batch_size() {
     let memory = memory::Repository::new();
     let source = source(10);
     let index = caught_up(&memory, source.clone());
-    block_on(index.watch("late-1", &subject("late"), Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(0))))
+        .expect("watch");
 
     let bounded = memory_service(&memory, source.clone(), SyncPolicy::new(3));
     let read = source.fetched.load(Ordering::Relaxed);
@@ -610,7 +509,7 @@ fn one_pass_reads_no_more_blocks_than_its_batch_size() {
     assert_eq!(backfill.inspected, 3);
     assert_eq!(backfill.resume, BlockPosition(3));
     assert_eq!(backfill.anchor, BlockPosition(10));
-    assert_eq!(indexed(&bounded, "late").len(), 3);
+    assert_eq!(indexed(&memory, "late").len(), 3);
 }
 
 /// A backfill interrupted by a restart resumes where it stopped and reaches
@@ -621,17 +520,18 @@ fn an_interrupted_backfill_reaches_the_same_end_state() {
         let memory = memory::Repository::new();
         let source = source(10);
         let index = caught_up(&memory, source.clone());
-        block_on(index.watch("late-1", &subject("late"), Start::At(BlockPosition(0))))
+        block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(0))))
             .expect("watch");
         let straight = memory_service(&memory, source, SyncPolicy::new(100));
         assert!(pass(&straight).backfill.is_none());
-        indexed(&straight, "late")
+        indexed(&memory, "late")
     };
 
     let memory = memory::Repository::new();
     let source = source(10);
     let index = caught_up(&memory, source.clone());
-    block_on(index.watch("late-1", &subject("late"), Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(0))))
+        .expect("watch");
 
     // Three blocks, then the process dies: a new service over the same store,
     // told nothing by anyone.
@@ -651,7 +551,7 @@ fn an_interrupted_backfill_reaches_the_same_end_state() {
         "the resumed pass reads blocks 3 to 10 and never rereads 0 to 2"
     );
 
-    let mut resumed_history = indexed(&resumed, "late");
+    let mut resumed_history = indexed(&memory, "late");
     let mut expected = uninterrupted;
     resumed_history.sort();
     expected.sort();
@@ -666,7 +566,8 @@ fn a_settled_backfill_is_not_swept_again_after_a_restart() {
     let memory = memory::Repository::new();
     let source = source(10);
     let index = caught_up(&memory, source.clone());
-    block_on(index.watch("late-1", &subject("late"), Start::At(BlockPosition(2)))).expect("watch");
+    block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(2))))
+        .expect("watch");
     assert!(pass(&index).backfill.is_none());
     drop(index);
 
@@ -680,7 +581,7 @@ fn a_settled_backfill_is_not_swept_again_after_a_restart() {
         read,
         "and no block is fetched to find that out"
     );
-    assert_eq!(indexed(&restarted, "late").len(), 9);
+    assert_eq!(indexed(&memory, "late").len(), 9);
 }
 
 /// A second observation of a watched address, born below what is already
@@ -706,10 +607,14 @@ fn a_lower_birthday_registered_before_a_restart_is_not_lost_to_recorded_progress
     let index = caught_up(&memory, source.clone());
 
     // The first observation settles its own range, durably.
-    block_on(index.watch("late-native", &subject("late"), Start::At(BlockPosition(7))))
-        .expect("the first observation");
+    block_on(index.watch(
+        "late-native",
+        &subject("late"),
+        Birthday::At(BlockPosition(7)),
+    ))
+    .expect("the first observation");
     assert!(pass(&index).backfill.is_none(), "7..10 is settled");
-    assert_eq!(indexed(&index, "late").len(), 4, "blocks 7 to 10");
+    assert_eq!(indexed(&memory, "late").len(), 4, "blocks 7 to 10");
 
     // A second asset at the same address, from further back, and then the
     // process dies before any pass can record the wider claim.
@@ -720,7 +625,7 @@ fn a_lower_birthday_registered_before_a_restart_is_not_lost_to_recorded_progress
             asset: "token".into(),
         },
     };
-    block_on(index.watch("late-token", &token, Start::At(BlockPosition(2))))
+    block_on(index.watch("late-token", &token, Birthday::At(BlockPosition(2))))
         .expect("the second observation");
     drop(index);
 
@@ -736,7 +641,7 @@ fn a_lower_birthday_registered_before_a_restart_is_not_lost_to_recorded_progress
         "and it read blocks to do it, rather than settling a range it never saw"
     );
     assert_eq!(
-        indexed(&restarted, "late").len(),
+        indexed(&memory, "late").len(),
         9,
         "blocks 2 to 10, not just the 7 to 10 the first observation claimed"
     );
@@ -766,22 +671,22 @@ fn one_pass_serves_three_observations_from_their_own_positions() {
     let index = caught_up(&memory, source.clone());
 
     // Z, born at 10, reads all the way to the line and joins the front.
-    block_on(index.watch("z", &subject("z"), Start::At(BlockPosition(10)))).expect("z");
+    block_on(index.watch("z", &subject("z"), Birthday::At(BlockPosition(10)))).expect("z");
     assert!(pass(&index).backfill.is_none(), "z closes its whole range");
-    let z_history = indexed(&index, "z").len();
+    let z_history = indexed(&memory, "z").len();
     assert_eq!(z_history, 21, "blocks 10 through 30");
 
     // X, born at 20, reads exactly six blocks and stops: one bounded pass.
-    block_on(index.watch("x", &subject("x"), Start::At(BlockPosition(20)))).expect("x");
+    block_on(index.watch("x", &subject("x"), Birthday::At(BlockPosition(20)))).expect("x");
     let bounded = service(memory.clone(), source.clone(), SyncPolicy::new(6));
     let stopped = pass(&bounded).backfill.expect("x still owes 26 to 30");
     assert_eq!(stopped.inspected, 6, "blocks 20 through 25");
     assert_eq!(stopped.resume, BlockPosition(26), "x resumes at 26");
-    assert_eq!(indexed(&bounded, "x").len(), 6);
+    assert_eq!(indexed(&memory, "x").len(), 6);
     drop(bounded);
 
     // Y, born at 22, has had nothing inspected for it at all.
-    block_on(index.watch("y", &subject("y"), Start::At(BlockPosition(22)))).expect("y");
+    block_on(index.watch("y", &subject("y"), Birthday::At(BlockPosition(22)))).expect("y");
     drop(index);
 
     let interpreter = Interpreter::default();
@@ -817,10 +722,10 @@ fn one_pass_serves_three_observations_from_their_own_positions() {
             .collect::<Vec<_>>(),
         "22 to 25 inspected for y alone, 26 to 30 for x and y, and nothing for z"
     );
-    assert_eq!(indexed(&one, "y").len(), 9, "y: blocks 22 through 30");
-    assert_eq!(indexed(&one, "x").len(), 11, "x: blocks 20 through 30");
+    assert_eq!(indexed(&memory, "y").len(), 9, "y: blocks 22 through 30");
+    assert_eq!(indexed(&memory, "x").len(), 11, "x: blocks 20 through 30");
     assert_eq!(
-        indexed(&one, "z").len(),
+        indexed(&memory, "z").len(),
         z_history,
         "and z is untouched: adding y reset neither of the others"
     );
@@ -834,7 +739,7 @@ fn a_start_below_the_policy_limit_is_refused_synchronously() {
     let index = memory_service(&memory, source(10), SyncPolicy::new(100).with_backfill(4));
     assert_eq!(pass(&index).phase, SyncPhase::Ready);
 
-    let error = block_on(index.watch("late-1", &subject("late"), Start::At(BlockPosition(2))))
+    let error = block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(2))))
         .expect_err("a start nine blocks below the checkpoint");
 
     assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
@@ -844,7 +749,7 @@ fn a_start_below_the_policy_limit_is_refused_synchronously() {
         "the refusal names a start that would work: {}",
         error.message
     );
-    block_on(index.watch("late-1", &subject("late"), Start::At(BlockPosition(6))))
+    block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(6))))
         .expect("the named start is accepted");
 }
 
@@ -864,7 +769,7 @@ fn a_fresh_watch_owes_nothing_so_a_restart_never_sweeps_it() {
     let memory = memory::Repository::new();
     let source = source(10);
     let index = caught_up(&memory, source.clone());
-    block_on(index.watch("fresh-1", &subject("fresh"), Start::Fresh)).expect("watch");
+    block_on(index.watch("fresh-1", &subject("fresh"), Birthday::Fresh)).expect("watch");
     assert!(
         pass(&index).backfill.is_none(),
         "a fresh watch owes nothing"
@@ -884,7 +789,7 @@ fn a_fresh_watch_owes_nothing_so_a_restart_never_sweeps_it() {
         10,
         "blocks 11 through 20, read once by the forward phase and not swept again"
     );
-    assert_eq!(indexed(&ahead, "fresh").len(), 10, "blocks 11 through 20");
+    assert_eq!(indexed(&memory, "fresh").len(), 10, "blocks 11 through 20");
     drop(ahead);
 
     let restarted = memory_service(&memory, moved.clone(), SyncPolicy::new(100));
@@ -897,7 +802,7 @@ fn a_fresh_watch_owes_nothing_so_a_restart_never_sweeps_it() {
         read,
         "and no block is re-read to find that out"
     );
-    assert_eq!(indexed(&restarted, "fresh").len(), 10);
+    assert_eq!(indexed(&memory, "fresh").len(), 10);
 }
 
 /// A historical range with a produced block missing from the middle settles
@@ -913,7 +818,8 @@ fn a_fresh_watch_owes_nothing_so_a_restart_never_sweeps_it() {
 fn a_historical_range_missing_a_produced_block_settles_nothing() {
     let memory = memory::Repository::new();
     let index = caught_up(&memory, source(10));
-    block_on(index.watch("late-1", &subject("late"), Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(0))))
+        .expect("watch");
     drop(index);
 
     // The same node, having lost one block in the middle of the range.
@@ -929,7 +835,7 @@ fn a_historical_range_missing_a_produced_block_settles_nothing() {
 
     let backfill = status.backfill.expect("the range is still owed");
     let failure = backfill.failure.expect("and the pass says why");
-    assert_eq!(failure.kind, IndexErrorKind::CannotConnect);
+    assert_eq!(failure.kind, IndexErrorKind::Disconnected);
     assert!(failure.retryable, "a node may serve the block next time");
     assert_eq!(
         backfill.resume,
@@ -937,7 +843,7 @@ fn a_historical_range_missing_a_produced_block_settles_nothing() {
         "nothing was settled, so the whole range is still owed"
     );
     assert!(
-        indexed(&gapped, "late").is_empty(),
+        indexed(&memory, "late").is_empty(),
         "and no row of the partial reading was written"
     );
     assert_eq!(
@@ -960,7 +866,8 @@ fn a_historical_range_missing_a_produced_block_settles_nothing() {
 fn a_resumed_historical_read_must_follow_what_the_observation_recorded() {
     let memory = memory::Repository::new();
     let index = caught_up(&memory, source(10));
-    block_on(index.watch("late-1", &subject("late"), Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(0))))
+        .expect("watch");
     let bounded = memory_service(&memory, source(10), SyncPolicy::new(3));
     assert_eq!(
         pass(&bounded).backfill.expect("owed").resume,
@@ -983,7 +890,7 @@ fn a_resumed_historical_read_must_follow_what_the_observation_recorded() {
         .expect("the rest of the range is still owed");
     assert_eq!(
         backfill.failure.expect("and the pass says why").kind,
-        IndexErrorKind::CannotConnect
+        IndexErrorKind::Disconnected
     );
     assert_eq!(
         backfill.resume,
@@ -991,7 +898,7 @@ fn a_resumed_historical_read_must_follow_what_the_observation_recorded() {
         "the observation still resumes at the block it never read"
     );
     assert_eq!(
-        indexed(&gapped, "late").len(),
+        indexed(&memory, "late").len(),
         3,
         "and it holds exactly the three blocks it did read"
     );
@@ -1011,7 +918,8 @@ fn a_backfill_the_source_cannot_serve_reports_its_failure() {
         ..source(10)
     };
     let index = caught_up(&memory, pruned.clone());
-    block_on(index.watch("late-1", &subject("late"), Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(0))))
+        .expect("watch");
 
     let status = pass(&index);
 
@@ -1048,7 +956,8 @@ fn a_backfill_the_source_cannot_serve_still_answers_for_the_tip() {
         ..source(10)
     };
     let index = caught_up(&memory, pruned);
-    block_on(index.watch("late-1", &subject("late"), Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(0))))
+        .expect("watch");
 
     let status = pass(&index);
 
@@ -1075,7 +984,8 @@ fn an_unfinished_backfill_does_not_withhold_the_tip() {
     let memory = memory::Repository::new();
     let source = source(10);
     let index = caught_up(&memory, source.clone());
-    block_on(index.watch("late-1", &subject("late"), Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(0))))
+        .expect("watch");
 
     let bounded = memory_service(&memory, source, SyncPolicy::new(3));
     let status = pass(&bounded);

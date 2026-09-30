@@ -1,7 +1,7 @@
 //! The pass itself: read the chain's two lines, reconcile what is held above
 //! the confirmed one, run both phases, commit what fell below it.
 //!
-//! It is a procedure over the state [`Service`] already owns — its watches, its
+//! It is a procedure over the state [`Indexer`] already owns — its watches, its
 //! pending blocks, its chain adapter and its store — and not a second object
 //! holding a second copy of them. Nothing here is handed a watch set; it reads
 //! its own.
@@ -16,7 +16,7 @@
 //!
 //! The two things they would otherwise each need a copy of are here instead:
 //! [`scan`](crate::scan) is the one procedure that turns a block into facts, and
-//! [`Service::apply`] is the one commit lifecycle both directions reach —
+//! [`Indexer::commit_batch`] is the one commit lifecycle both directions reach —
 //! permit, write, the line the batch leaves behind, the claims the watch set
 //! takes over, and the reconciliation an uncertain outcome needs. What is left
 //! per direction is what genuinely differs: holding a block above the line and
@@ -26,16 +26,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     BlockCommit, BlockHeight, BlockInterpreter, BlockPosition, BlockRef, BlockSource,
-    CanonicalBlock, IndexError, IndexErrorKind, IndexStore, IndexedBatch, IndexedBlock,
-    OutputChanges, OutputKey, Repository, Service, SyncPhase, SyncPlan, SyncStatus,
-    overlay::Frontier,
+    CanonicalBlock, IndexError, IndexErrorKind, IndexStore, IndexedBatch, Indexer, NativeBlock,
+    OutputChanges, OutputKey, Repository, SyncPhase, SyncPlan, SyncStatus, pending,
 };
 
 /// What one pass has committed so far: the line it left behind, and the
 /// required spends it could not account for along the way.
-pub(crate) struct Outcome {
+pub(crate) struct CommitTally {
     pub(crate) checkpoint: Option<BlockRef>,
-    pub(crate) unknown_spends: Vec<OutputKey>,
+    pub(crate) unmatched_spends: Vec<OutputKey>,
 }
 
 /// The stretch of chain one pass works over: the confirmed block it may
@@ -48,7 +47,7 @@ pub(crate) struct BlockWindow {
 
 /// The highest confirmed line one service has been told about.
 ///
-/// The only history either guard on [`crate::ChainTip::confirmed_tip`] keeps,
+/// The only history either guard on [`crate::ChainTips::confirmed_tip`] keeps,
 /// and the whole of what the backwards guard needs: two numbers per network,
 /// in memory, reset by a restart — which is correct, because a restart cannot
 /// vouch for what a previous process was told.
@@ -64,7 +63,7 @@ impl Drop for RunningGuard<'_> {
     }
 }
 
-impl<S, I, R> Service<S, I, R>
+impl<S, I, R> Indexer<S, I, R>
 where
     S: BlockSource<Block = I::Block>,
     I: BlockInterpreter,
@@ -100,12 +99,12 @@ where
         self.confirm_checkpoint(checkpoint.as_ref()).await?;
         self.reinspect(&plan).await?;
         self.unwind().await?;
-        let mut committed = Outcome {
+        let mut committed = CommitTally {
             checkpoint,
-            unknown_spends: Vec::new(),
+            unmatched_spends: Vec::new(),
         };
         let applied = self.catch_up(&window, &mut committed, &plan).await?;
-        self.commit(&window, &mut committed, &mut plan).await?;
+        self.commit_held(&window, &mut committed, &mut plan).await?;
         // Forward first, and with the budget it needs: filling in history gets
         // what is left of the batch, which on a network that is behind its tip
         // is nothing at all.
@@ -115,7 +114,7 @@ where
     }
 }
 
-impl<S, I, R> Service<S, I, R>
+impl<S, I, R> Indexer<S, I, R>
 where
     S: BlockSource<Block = I::Block>,
     I: BlockInterpreter,
@@ -124,7 +123,7 @@ where
     fn status(
         &self,
         window: &BlockWindow,
-        committed: Outcome,
+        committed: CommitTally,
         backfill: Option<crate::BackfillStatus>,
     ) -> Result<SyncStatus, IndexError> {
         let pending_tip = self.pending.tip()?;
@@ -149,7 +148,7 @@ where
             } else {
                 SyncPhase::CatchingUp
             },
-            unknown_spends: committed.unknown_spends,
+            unmatched_spends: committed.unmatched_spends,
             backfill,
         })
     }
@@ -157,7 +156,7 @@ where
     /// The window this pass may work over: the source's observed and confirmed
     /// tips, checked against each other and against what it said last time.
     ///
-    /// [`crate::ChainTip::confirmed_tip`] states two things about the line it
+    /// [`crate::ChainTips::confirmed_tip`] states two things about the line it
     /// returns: it is never above the source's own tip, and it never moves
     /// backwards. Both are cheap to believe and expensive to be wrong about —
     /// either one broken means committing a block that can still revert — so
@@ -235,12 +234,7 @@ where
         let Some(local) = checkpoint else {
             return Ok(());
         };
-        let canonical = self
-            .source
-            .canonical_at(local.position)
-            .await
-            .map_err(IndexError::from)?;
-        if canonical.as_ref() == Some(local) {
+        if self.is_canonical(local).await? {
             return Ok(());
         }
         Err(IndexError::confirmed_reorg(format!(
@@ -258,12 +252,7 @@ where
     /// `canonical_at`, and only a real reorg walks down.
     async fn unwind(&self) -> Result<(), IndexError> {
         for block in self.pending.descending()? {
-            let canonical = self
-                .source
-                .canonical_at(block.position)
-                .await
-                .map_err(IndexError::from)?;
-            if canonical.as_ref() == Some(&block) {
+            if self.is_canonical(&block).await? {
                 return Ok(());
             }
             self.pending.unwind(block.position)?;
@@ -292,14 +281,14 @@ where
             return Ok(());
         }
         // Built off to the side and swapped in as one change. Each recovery is
-        // an await and may be a full refetch, so emptying the shared overlay
+        // an await and may be a full refetch, so emptying the shared collection
         // first left every read in between looking at a partial set of the
         // blocks above the line, and a recovery that failed left that partial
-        // set published until a later pass repaired it. The rebuilt overlay is
+        // set published until a later pass repaired it. The rebuilt one is
         // reachable by nothing until `replace` installs it.
-        let rebuilt = Frontier::default();
+        let rebuilt = pending::Blocks::default();
         for block in self.pending.ascending()? {
-            let source_block = self.recover(block).await?;
+            let source_block = self.refetch(block).await?;
             let addresses = plan.active_addresses(source_block.block_ref().position);
             self.admit(&rebuilt, source_block, &addresses, plan).await?;
         }
@@ -320,14 +309,14 @@ where
     /// whose next required block this one is or passes, advanced to it. An empty
     /// block advances them exactly as a busy one does, which is what makes
     /// `indexed_through` mean *inspected* rather than *matched*.
-    async fn commit(
+    async fn commit_held(
         &self,
         window: &BlockWindow,
-        committed: &mut Outcome,
+        committed: &mut CommitTally,
         plan: &mut SyncPlan,
     ) -> Result<(), IndexError> {
-        while let Some(facts) = self.pending.confirmed(window.confirmed.position)? {
-            let block = facts.block().clone();
+        while let Some(canonical) = self.pending.confirmed(window.confirmed.position)? {
+            let block = canonical.block().clone();
             // A commit whose outcome was lost leaves the store's own line at or
             // above this block: it is written, its claims are recorded, and
             // there is nothing left to do but stop holding it. Presenting it
@@ -341,7 +330,7 @@ where
                 self.pending.committed(&block)?;
                 continue;
             }
-            self.extend(facts, committed, plan).await?;
+            self.commit_held_block(canonical, committed, plan).await?;
         }
         Ok(())
     }
@@ -349,7 +338,7 @@ where
     /// Commits one held block, under a permit, and takes over what it proved.
     ///
     /// The precondition is formed here, at the write, out of the checkpoint this
-    /// pass holds for the network: the overlay carries facts and knows nothing
+    /// pass holds for the network: a pending block carries facts and knows nothing
     /// about what authorises committing them. `committed.checkpoint` is the
     /// store's own checkpoint as this pass read it, advanced by each block it has
     /// committed since, so it is exactly the block this one must extend — and
@@ -358,31 +347,31 @@ where
     /// What is forward-specific is only what is left here: the block stops being
     /// held above the line, the line this pass works from moves with it, and
     /// listeners hear about it. Everything a landed commit settles in *either*
-    /// direction is [`Self::apply`]'s.
-    async fn extend(
+    /// direction is [`Self::commit_batch`]'s.
+    async fn commit_held_block(
         &self,
-        facts: CanonicalBlock,
-        committed: &mut Outcome,
+        canonical: CanonicalBlock,
+        committed: &mut CommitTally,
         plan: &mut SyncPlan,
     ) -> Result<(), IndexError> {
-        let block = facts.block().clone();
+        let block = canonical.block().clone();
         // Storage consumes the facts, so keep the ones a listener needs — but
         // only when one is actually registered.
-        let changed = self
-            .listeners
-            .listening()
-            .then(|| (facts.transactions().to_vec(), facts.outputs().clone()));
+        let changed = self.listeners.listening().then(|| {
+            let transactions = canonical.transactions().iter().cloned().collect();
+            (transactions, canonical.outputs().clone())
+        });
         let proved = self
             .watches
             .forward(committed.checkpoint.as_ref(), &block)?;
         let batch = IndexedBatch::new(
             self.config.network.clone(),
             committed.checkpoint.clone(),
-            vec![facts],
+            vec![canonical],
             proved,
             self.interpreter.settlement(),
         )?;
-        let unknown = self.apply(plan, committed, batch).await?;
+        let unknown = self.commit_batch(plan, committed, batch).await?;
         self.pending.committed(&block)?;
         plan.advance(block.clone());
         committed.checkpoint = Some(block.clone());
@@ -418,10 +407,10 @@ where
     /// `Progress`). A future cancelled or failed between the permit's `start` and
     /// its completion leaves the outcome *unknown* rather than refused, and the
     /// permit's own drop guard is what records that the admission needs a reload.
-    pub(super) async fn apply(
+    pub(super) async fn commit_batch(
         &self,
         plan: &SyncPlan,
-        committed: &mut Outcome,
+        committed: &mut CommitTally,
         batch: IndexedBatch,
     ) -> Result<Vec<OutputKey>, IndexError> {
         let line = batch.checkpoint().cloned();
@@ -430,14 +419,14 @@ where
         permit.start();
         let unknown = self.repository.commit(batch).await.inspect_err(|error| {
             if error.kind == IndexErrorKind::Conflict {
-                self.watches.stale();
+                self.watches.mark_stale();
             }
         })?;
         permit.complete(line)?;
         // Durable, so the set may take the claims over: they and the facts that
         // justify them were one transaction.
         self.watches.advanced(&proved)?;
-        committed.unknown_spends.extend(unknown.iter().cloned());
+        committed.unmatched_spends.extend(unknown.iter().cloned());
         Ok(unknown)
     }
 
@@ -451,7 +440,7 @@ where
         &self,
         block: BlockRef,
         changed: Option<(Vec<crate::CanonicalTransaction>, OutputChanges)>,
-        unknown_spends: Vec<OutputKey>,
+        unmatched_spends: Vec<OutputKey>,
     ) {
         let Some((transactions, outputs)) = changed else {
             return;
@@ -461,7 +450,7 @@ where
             block,
             transactions,
             outputs,
-            unknown_spends,
+            unmatched_spends,
         });
     }
 }

@@ -116,13 +116,13 @@ impl Tables {
         // later one therefore leaves a row marked spent rather than no row at
         // all — which is what stops a replay of the creating block from offering
         // it again, and is the whole reason the batch no longer folds.
-        for facts in batch.blocks() {
-            let position = Self::stored(facts.block().position.0)?;
-            let height = Self::stored(facts.block().height.0)?;
-            self.refill(transaction, facts, batch.settlement())?;
-            self.refill_credits(transaction, facts.credits(), (height, position))?;
-            self.fill_outputs(transaction, &facts.outputs().created)?;
-            unknown.extend(self.spend(transaction, facts.outputs())?);
+        for canonical in batch.blocks() {
+            let position = Self::stored(canonical.block().position.0)?;
+            let height = Self::stored(canonical.block().height.0)?;
+            self.refill(transaction, canonical, batch.settlement())?;
+            self.refill_credits(transaction, canonical.credits(), (height, position))?;
+            self.fill_outputs(transaction, &canonical.outputs().created)?;
+            unknown.extend(self.spend(transaction, canonical.outputs())?);
         }
         for claim in batch.progress() {
             self.advance(transaction, claim)?;
@@ -154,10 +154,10 @@ impl Tables {
     fn refill(
         &self,
         transaction: &Transaction<'_>,
-        facts: &CanonicalBlock,
+        canonical: &CanonicalBlock,
         settlement: FeeSettlement,
     ) -> Result<(), IndexError> {
-        for entry in facts.transactions() {
+        for entry in canonical.transactions() {
             let place = self.insert_fact(transaction, entry)?;
             self.participants(transaction, entry, settlement, &place)?;
         }
@@ -337,13 +337,12 @@ mod blocks_test {
         batch_of(
             (height > 1).then(|| block(height - 1)),
             InterpretedBlock {
-                block: block(height),
-                transactions: vec![draft(height)],
                 outputs: OutputChanges {
                     created: vec![output(height)],
                     ..OutputChanges::default()
                 },
-                credits: Vec::new(),
+                ..InterpretedBlock::new(&network(), block(height), vec![draft(height)])
+                    .expect("unique transaction ids")
             },
         )
         .expect("a connected fixture block")
@@ -518,15 +517,14 @@ mod blocks_test {
         let recreated = batch_of(
             Some(block(1)),
             InterpretedBlock {
-                block: block(2),
-                transactions: vec![draft(2)],
                 outputs: OutputChanges {
                     // The block's own history and movements are written first
                     // and this is refused after them.
                     created: vec![again],
                     ..OutputChanges::default()
                 },
-                credits: Vec::new(),
+                ..InterpretedBlock::new(&network(), block(2), vec![draft(2)])
+                    .expect("unique transaction ids")
             },
         )
         .expect("a valid block that the store must refuse");
@@ -685,14 +683,13 @@ mod throughput_test {
         let next = created.iter().take(SPENT).map(IndexedOutput::key).collect();
         (
             InterpretedBlock {
-                block: reference(height, parent),
-                transactions: transactions(height),
                 outputs: OutputChanges {
                     created,
                     spent: spend,
                     tracked_spends: Vec::new(),
                 },
-                credits: Vec::new(),
+                ..InterpretedBlock::new(&network(), reference(height, parent), transactions(height))
+                    .expect("unique transaction ids")
             },
             next,
         )
@@ -731,7 +728,7 @@ mod throughput_test {
         let mut worst = Duration::ZERO;
         for height in above + 1..=above + blocks {
             let (interpreted, next) = interpret(height, parent.as_ref(), spend);
-            let block = interpreted.block.clone();
+            let block = interpreted.block.reference().clone();
             let batch = batch_of(parent.clone(), interpreted).expect("a valid profile block");
             let one = Instant::now();
             block_on(repository.commit(batch)).expect("profile block");
@@ -877,20 +874,16 @@ mod throughput_test {
         let mut failures = 0;
         for height in 1..=200 {
             let block = reference(height, parent.as_ref());
-            let facts = CanonicalBlock::new(
+            let canonical = CanonicalBlock::new(
                 network.clone(),
-                InterpretedBlock {
-                    block: block.clone(),
-                    transactions: Vec::new(),
-                    outputs: OutputChanges::default(),
-                    credits: Vec::new(),
-                },
+                InterpretedBlock::new(network, block.clone(), Vec::new())
+                    .expect("unique transaction ids"),
             )
             .expect("a valid block");
             let batch = IndexedBatch::new(
                 network.clone(),
                 parent.clone(),
-                vec![facts],
+                vec![canonical],
                 Vec::new(),
                 FeeSettlement::Charged,
             )

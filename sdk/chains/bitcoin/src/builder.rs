@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::native::{
     Address, AssetKind, BTC, CHAIN_NAME, Satoshi, SignedTransaction, block::Outpoint,
 };
-use crate::sender::Item;
+use crate::sender::SendRequest;
 use crate::wallet::Wallet;
 
 /// Builds one transaction from one Bitcoin wallet: add transfers, snapshot
@@ -75,8 +75,8 @@ impl TransferBuilder {
             .map_err(|error| invalid(error.message))
     }
 
-    /// One outbox item per configured transfer, all from this wallet.
-    fn configured(&self) -> Result<Vec<Item>, TransactionError> {
+    /// One send request per configured transfer, all from this wallet.
+    fn configured(&self) -> Result<Vec<SendRequest>, TransactionError> {
         if self.transfers.is_empty() {
             return Err(TransactionError::new(
                 TransactionErrorKind::InvalidTransaction,
@@ -86,7 +86,7 @@ impl TransferBuilder {
         self.transfers
             .iter()
             .map(|(to, amount)| {
-                self.wallet.item(to.clone(), amount).map_err(|error| {
+                self.wallet.request(to.clone(), amount).map_err(|error| {
                     TransactionError::new(TransactionErrorKind::InvalidAmount, error.message)
                 })
             })
@@ -101,9 +101,9 @@ impl TransferBuilder {
         let transfers = self
             .transfers
             .iter()
-            .map(|(destination, amount)| {
+            .map(|(to, amount)| {
                 serde_json::json!({
-                    "destination": destination.as_str(),
+                    "to": to.as_str(),
                     "amount": amount.to_string(),
                 })
             })
@@ -111,9 +111,9 @@ impl TransferBuilder {
         Ok(TransactionSnapshot::new(
             Self::SNAPSHOT_KIND,
             serde_json::json!({
-                "scope": {
+                "network": {
                     "chain": self.wallet.config.network.chain.as_str(),
-                    "network": self.wallet.config.network.name.as_str(),
+                    "name": self.wallet.config.network.name.as_str(),
                 },
                 "source": self.from().as_str(),
                 "asset": {"kind": "native", "ticker": BTC.ticker, "decimals": BTC.decimals},
@@ -136,7 +136,7 @@ impl TransferBuilder {
             .map_err(|error| invalid(format!("invalid Bitcoin snapshot: {error}")))?;
         let source = self.from().as_str();
         if body.network.chain != CHAIN_NAME.as_str()
-            || body.network.network != self.wallet.config.network.name
+            || body.network.name != self.wallet.config.network.name
             || body.source != source
             || body.change != source
             || !body.asset.is_btc()
@@ -151,7 +151,7 @@ impl TransferBuilder {
         body.transfers
             .into_iter()
             .map(|transfer| {
-                let to = Address::parse(&transfer.destination, self.wallet.config.native)
+                let to = Address::parse(&transfer.to, self.wallet.config.native)
                     .map_err(|error| invalid(error.message))?;
                 let amount = transfer.amount.parse::<Decimal>().map_err(invalid)?;
                 Satoshi::from_decimal(&amount).map_err(invalid)?;
@@ -227,10 +227,6 @@ fn invalid(error: impl std::fmt::Display) -> TransactionError {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SnapshotBody {
-    /// The persisted key is `scope`; the field is `network`, because that noun
-    /// was retired and snapshots written by earlier builds must keep
-    /// deserializing.
-    #[serde(rename = "scope")]
     network: NetworkBody,
     source: String,
     asset: Asset,
@@ -242,7 +238,7 @@ struct SnapshotBody {
 #[serde(deny_unknown_fields)]
 struct NetworkBody {
     chain: String,
-    network: String,
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -262,7 +258,7 @@ impl Asset {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SnapshotTransfer {
-    destination: String,
+    to: String,
     amount: String,
 }
 
@@ -473,8 +469,8 @@ mod tests {
         assert_eq!(restored.draft().unwrap().snapshot, snapshot);
         let mut other = snapshot.value().clone();
         for (field, value) in [
-            ("/scope/network", serde_json::json!("mainnet")),
-            ("/scope/chain", serde_json::json!("ethereum")),
+            ("/network/name", serde_json::json!("mainnet")),
+            ("/network/chain", serde_json::json!("ethereum")),
             (
                 "/source",
                 serde_json::json!("1BoatSLRHtKNngkdXEeobR76b53LETtpyT"),
@@ -497,11 +493,11 @@ mod tests {
         for (transfers, message) in [
             (serde_json::json!([]), "Bitcoin snapshot has no transfers"),
             (
-                serde_json::json!([{"destination": own, "amount": "-1"}]),
+                serde_json::json!([{"to": own, "amount": "-1"}]),
                 "currency amount must not be negative",
             ),
             (
-                serde_json::json!([{"destination": own, "amount": "0.000000001"}]),
+                serde_json::json!([{"to": own, "amount": "0.000000001"}]),
                 "amount has more than 8 fractional digits",
             ),
         ] {

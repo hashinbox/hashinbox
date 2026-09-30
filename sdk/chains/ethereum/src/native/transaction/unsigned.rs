@@ -4,24 +4,14 @@ use crate::native::{Address, Error, ErrorKind, Wei};
 /// A built, unsigned EIP-1559 transaction: every field that will be signed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnsignedTransaction {
-    /// The chain the transaction signs for.
-    pub chain_id: u64,
-    /// The sender's nonce.
-    pub nonce: u64,
-    /// The sender; the signature must recover to it.
-    pub from: Address,
+    /// The chain, sender, nonce, gas limit and fees it was built under.
+    pub context: BuildContext,
     /// Recipient or contract; `None` creates a contract.
     pub to: Option<Address>,
     /// Ether attached.
     pub value: Wei,
     /// Calldata.
     pub input: Vec<u8>,
-    /// Gas limit.
-    pub gas_limit: u64,
-    /// Max fee per gas.
-    pub max_fee_per_gas: Wei,
-    /// Priority fee per gas.
-    pub max_priority_fee_per_gas: Wei,
 }
 
 impl UnsignedTransaction {
@@ -45,15 +35,10 @@ impl UnsignedTransaction {
             ));
         }
         Ok(Self {
-            chain_id: context.chain_id,
-            nonce: context.nonce,
-            from: context.from.clone(),
+            context: context.clone(),
             to: Some(transfer.target().clone()),
             value: transfer.value(),
             input: transfer.input(),
-            gas_limit: context.gas_limit,
-            max_fee_per_gas: context.max_fee_per_gas.clone(),
-            max_priority_fee_per_gas: context.max_priority_fee_per_gas.clone(),
         })
     }
 }
@@ -88,18 +73,10 @@ mod tests {
         let transaction =
             UnsignedTransaction::new(&request, &context).expect("valid transfer must build");
 
-        assert_eq!(transaction.chain_id, context.chain_id);
-        assert_eq!(transaction.nonce, context.nonce);
-        assert_eq!(transaction.from, context.from);
+        assert_eq!(transaction.context, context);
         assert_eq!(transaction.to, Some(request.target().clone()));
         assert_eq!(transaction.value, request.value());
         assert_eq!(transaction.input, request.input());
-        assert_eq!(transaction.gas_limit, context.gas_limit);
-        assert_eq!(transaction.max_fee_per_gas, context.max_fee_per_gas);
-        assert_eq!(
-            transaction.max_priority_fee_per_gas,
-            context.max_priority_fee_per_gas
-        );
     }
 
     #[test]

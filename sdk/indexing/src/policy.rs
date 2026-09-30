@@ -16,12 +16,12 @@ const MAX_BACKFILL_BLOCKS: u64 = 100_000;
 /// Two numbers, both of them bounds on work: how much one pass may read, and
 /// how much history a single new watch may ask for. Rollback retention and the
 /// confirmation line are gone because the chain now answers them itself — the
-/// line is [`ChainTip::confirmed_tip`], stated by the source rather than
+/// line is [`ChainTips::confirmed_tip`], stated by the source rather than
 /// guessed at in a configuration file, and retention described a journal that
 /// no longer exists, because nothing the store holds is ever undone
 /// (`docs/design/030 §8 (ex-025)`).
 ///
-/// [`ChainTip::confirmed_tip`]: crate::ChainTip::confirmed_tip
+/// [`ChainTips::confirmed_tip`]: crate::ChainTips::confirmed_tip
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SyncPolicy {
     /// Maximum blocks read in one `sync` pass, so a pass stays bounded.
@@ -104,7 +104,7 @@ impl SyncPolicy {
     }
 }
 
-/// A network and its validated [`SyncPolicy`]: everything a [`crate::Service`]
+/// A network and its validated [`SyncPolicy`]: everything a [`crate::Indexer`]
 /// needs besides its source, interpreter, and repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncConfig {

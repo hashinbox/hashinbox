@@ -32,7 +32,7 @@ use std::{
 use indexing::{
     Address, AssetId, BlockCredit, BlockPosition, BlockRef, BoxFuture, CanonicalTransaction,
     Decimal, Holder, IndexError, IndexErrorKind, IndexStore, IndexedBatch, Network, OutputChanges,
-    OutputId, OutputKey, Progress, Watch, WatchProgress, WatchStore,
+    OutputId, OutputKey, Progress, Transactions, Watch, WatchProgress, WatchStore,
 };
 
 /// One store, serving every network it is handed to; not `Clone`, because the
@@ -162,7 +162,7 @@ impl WatchStore for Sink {
         })
     }
 
-    fn reanchor<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
+    fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
         Box::pin(async move {
             Self::one_network(&watches)?;
             // The withdrawal and the registration are staged together and
@@ -319,10 +319,10 @@ impl Sink {
     /// can settle less than the write it is redoing, so what is refused is a claim
     /// whose author was reading a different value.
     fn advance(rows: &mut Rows, network: &Network, claim: &Progress) -> Result<(), IndexError> {
-        if rows.ids.get(&claim.watch) != Some(network) {
+        if rows.ids.get(&claim.watch_id) != Some(network) {
             return Err(moved("this batch names an observation nothing here holds"));
         }
-        let key = (network.clone(), claim.watch.clone());
+        let key = (network.clone(), claim.watch_id.clone());
         if rows.progress.get(&key) != claim.expected.as_ref() {
             return Err(moved("recorded progress changed before this batch"));
         }
@@ -341,7 +341,7 @@ impl Sink {
     fn land(
         rows: &mut Rows,
         position: BlockPosition,
-        transactions: &[CanonicalTransaction],
+        transactions: &Transactions<CanonicalTransaction>,
         credits: &[BlockCredit],
     ) {
         let sent = transactions
@@ -421,7 +421,7 @@ impl Sink {
 // ---------------------------------------------------------------------------
 // THIS CONSUMER'S OWN QUERY API.
 //
-// Not `indexing::History` and not `indexing::Balances`: three plain questions in
+// Not `wallets::History` and not `wallets::Balances`: three plain questions in
 // the vocabulary of a deposit watcher. This is what "the queries are a consumer
 // capability" means once a consumer writes its own store — it implements no read
 // port it never wanted, it just asks.
@@ -448,9 +448,9 @@ impl Sink {
     /// first block it still needs.
     ///
     /// One question, asked of the index's own vocabulary:
-    /// `WatchProgress::caught_up` is the predicate the pass and every read gate
-    /// use, so a consumer asking "who is behind" gets the same answer they do
-    /// rather than a second opinion.
+    /// `WatchProgress::caught_up` is the predicate the pass and the shipped
+    /// stores' own claims use, so a consumer asking "who is behind" gets the
+    /// same answer they do rather than a second opinion.
     #[must_use]
     pub fn catching_up(&self, network: &Network) -> Vec<(String, BlockPosition)> {
         let line = self

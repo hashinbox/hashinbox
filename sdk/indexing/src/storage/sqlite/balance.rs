@@ -3,7 +3,7 @@
 //! Not a `SUM()`, and it never becomes one. An amount here is u256-capable and
 //! stored as canonical base-10 text, while SQLite's only integer is a signed
 //! 64-bit one (`docs/design/030 §8 (ex-031)` section 1.4), so the arithmetic is
-//! [`Ledger`]'s and stays in Rust -- including the overdraw branch, which is the
+//! [`Fold`]'s and stays in Rust -- including the overdraw branch, which is the
 //! index reporting that it is missing credits rather than an error to swallow.
 //!
 //! **One collection now, and no chain rule.** The fold used to walk every
@@ -20,18 +20,13 @@
 //! itself short, which is the sole producer [`crate::Completeness::Overdrawn`]
 //! has.
 
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, Transaction};
 
-use super::{Repository, Tables, failure};
+use super::{Repository, Tables};
 use crate::{
-    Balance, BalanceQuery, BalanceStore, BlockPosition, BlockRef, BoxFuture, Completeness, Decimal,
-    Effect, Holder, IndexError, Ledger,
+    Balance, BalanceQuery, BalanceStore, BlockRef, BoxFuture, Completeness, Decimal, Fold, Holder,
+    IndexError, Inspection, MovementEffect,
 };
-
-/// The six progress columns of a `watch` row, which [`Tables::coordinates`]
-/// reads as one block reference.
-const PROGRESS: &str = "indexed_position, indexed_height, indexed_hash, \
-     indexed_parent_position, indexed_parent_hash, indexed_timestamp";
 
 impl BalanceStore for Repository {
     /// Reads the checkpoint and folds the holding inside **one** deferred
@@ -70,21 +65,21 @@ impl Tables {
         let (read, checkpoint) = self.snapshot(connection)?;
         let subject = (query.address.value.as_str(), query.asset.asset.as_str());
         let totals = self.totals(&read, subject)?;
-        let mut ledger = Ledger::new(query);
-        ledger.record(&Effect::Credit(Decimal::from_atomic(totals.0, 0)))?;
-        ledger.record(&Effect::Debit(Decimal::from_atomic(totals.1, 0)))?;
+        let mut ledger = Fold::new(query);
+        ledger.record(&MovementEffect::Credit(Decimal::from_atomic(totals.0, 0)))?;
+        ledger.record(&MovementEffect::Debit(Decimal::from_atomic(totals.1, 0)))?;
         let mut balance = ledger.balance(checkpoint);
         // Provenance only ever *weakens* the answer the arithmetic produced, and
         // never the other way round: `Overdrawn` is a proof the rows carry and a
         // claim about provenance cannot talk it away.
         if balance.completeness != Completeness::Overdrawn {
-            balance.completeness = self.provenance(&read, subject)?;
+            balance.completeness = self.provenance(&read, query, balance.observed_at.as_ref())?;
         }
         Ok(balance)
     }
 
-    /// What the observation of `subject` can claim about the history behind its
-    /// total, or [`Completeness::Incomplete`] when nothing observes it.
+    /// What the observations of `of`'s address can claim about the history
+    /// behind its rows, at the `checkpoint` of the snapshot `read` holds.
     ///
     /// **Answered once for both reads.** A balance and a history page are two
     /// projections of one address's stored rows, so what the store can prove
@@ -94,59 +89,21 @@ impl Tables {
     /// complete-looking page against an incomplete-looking total would have no
     /// way to tell which of them was lying.
     ///
-    /// **Computed, never stored.** A whole-history claim is a conjunction of two
-    /// facts the `watch` row already carries: observation began at the chain's
-    /// first block, **and** every block up to the line the answer is read at has
-    /// been inspected for it. Dropping the second half is how a fresh row with no
-    /// progress at all came to read as authoritative — a birthday says where
-    /// inspection would start, not that any of it happened.
-    ///
-    /// The conjunction is `WatchProgress::caught_up`, the same comparison the
-    /// pass and the index's own read gate ask, so a store and an index can never
-    /// disagree about what "still catching up" means.
-    ///
-    /// [`Completeness::VerifiedOpening`] is not reachable from here and there is
-    /// no column for it. It is an attestation — an independent read of the same
-    /// holding at the same block agreeing with this fold — and the only thing in
-    /// this SDK that produces one is `chain_ethereum::BalanceWitness`, which
-    /// reads a node and mutates a [`Balance`] on its way to a caller. A column
-    /// nothing can write is dead schema, and it costs nothing to add beside the
-    /// writer that needs it (`docs/design/034` steps 9-12).
+    /// **Computed, never stored.** A whole-history claim is a conjunction of
+    /// facts the `watch` rows already carry and the line this snapshot was read
+    /// at: observation began at the chain's first block, progress has been
+    /// recorded for it, **and** no observation of the address is still behind
+    /// that line. The rule is [`Inspection`]'s and both stores ask it; what is
+    /// this store's own is that the rows it is asked over come from the same
+    /// transaction as the answer they qualify, which is why no index has to
+    /// repair the claim afterwards.
     pub(super) fn provenance(
         &self,
         read: &Transaction<'_>,
-        subject: (&str, &str),
+        of: &dyn Holder,
+        checkpoint: Option<&BlockRef>,
     ) -> Result<Completeness, IndexError> {
-        let (address, asset) = subject;
-        let mut statement = read
-            .prepare_cached(&format!(
-                "SELECT birthday, {PROGRESS} FROM watch
-                 WHERE chain = ?1 AND network = ?2 AND asset = ?3 AND address = ?4"
-            ))
-            .map_err(|error| failure(&error, "failed to prepare an observation read"))?;
-        let mut rows = statement
-            .query(params![self.chain(), self.name(), asset, address])
-            .map_err(|error| failure(&error, "failed to read an observation"))?;
-        let Some(row) = Self::step(&mut rows)? else {
-            return Ok(Completeness::Incomplete);
-        };
-        let birthday = BlockPosition(Self::restored(Self::column(row, 0)?)?);
-        let indexed_through = match Self::column::<Option<i64>>(row, 1)? {
-            None => None,
-            Some(_) => Some(Self::block(Self::coordinates(row, 1).map_err(
-                |error| failure(&error, "failed to read recorded progress"),
-            )?)?),
-        };
-        Ok(Self::claimed(birthday, indexed_through.as_ref()))
-    }
-
-    /// Whether a row observed from `birthday` and inspected through
-    /// `indexed_through` holds the address's whole history.
-    fn claimed(birthday: BlockPosition, indexed_through: Option<&BlockRef>) -> Completeness {
-        let inspected = indexed_through.is_some_and(|block| block.position >= birthday);
-        if birthday == BlockPosition(0) && inspected {
-            return Completeness::CompleteHistory;
-        }
-        Completeness::Incomplete
+        let observations = self.observing(read, &of.address().value)?;
+        Ok(Inspection::new(&observations, checkpoint).completeness(of))
     }
 }

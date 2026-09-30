@@ -30,30 +30,31 @@ impl UnsignedTransaction {
                     format!("Ethereum signing failed: {error}"),
                 )
             })?;
-        SignedTransaction::from_signature(native, &self.from, signed.signature)
+        SignedTransaction::from_signature(native, &self.context.from, signed.signature)
     }
 
     fn eip1559(&self) -> Result<TxEip1559, Error> {
-        let max_fee_per_gas = self.max_fee_per_gas.checked_to_u128().ok_or_else(|| {
+        let context = &self.context;
+        let max_fee_per_gas = context.max_fee_per_gas.checked_to_u128().ok_or_else(|| {
             Error::new(
                 ErrorKind::InvalidTransaction,
                 "Ethereum max fee per gas exceeds u128",
             )
         })?;
-        let max_priority_fee_per_gas =
-            self.max_priority_fee_per_gas
-                .checked_to_u128()
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::InvalidTransaction,
-                        "Ethereum priority fee exceeds u128",
-                    )
-                })?;
+        let max_priority_fee_per_gas = context
+            .max_priority_fee_per_gas
+            .checked_to_u128()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidTransaction,
+                    "Ethereum priority fee exceeds u128",
+                )
+            })?;
 
         Ok(TxEip1559 {
-            chain_id: self.chain_id,
-            nonce: self.nonce,
-            gas_limit: self.gas_limit,
+            chain_id: context.chain_id,
+            nonce: context.nonce,
+            gas_limit: context.gas_limit,
             max_fee_per_gas,
             max_priority_fee_per_gas,
             to: self.to.as_ref().map_or(TxKind::Create, |address| {
@@ -115,7 +116,7 @@ impl SignedTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::Wei;
+    use crate::native::{Wei, transaction::BuildContext};
     use alloy_primitives::U256;
 
     struct MustNotSign;
@@ -130,15 +131,17 @@ mod tests {
     fn eip1559_preserves_call_creation_and_full_width_value() {
         for to in [None, Some(crate::native::Address::from_bytes([2; 20]))] {
             let transaction = UnsignedTransaction {
-                chain_id: u64::MAX,
-                nonce: 42,
-                from: crate::native::Address::from_bytes([1; 20]),
+                context: BuildContext {
+                    chain_id: u64::MAX,
+                    from: crate::native::Address::from_bytes([1; 20]),
+                    nonce: 42,
+                    gas_limit: 123_456,
+                    max_fee_per_gas: Wei::from_u128(u128::MAX),
+                    max_priority_fee_per_gas: Wei::from_u128(u128::MAX - 1),
+                },
                 to,
                 value: Wei::from_atomic([255; 32]),
                 input: vec![0, 127, 255],
-                gas_limit: 123_456,
-                max_fee_per_gas: Wei::from_u128(u128::MAX),
-                max_priority_fee_per_gas: Wei::from_u128(u128::MAX - 1),
             };
             let native = transaction.eip1559().expect("representable fees");
             assert_eq!(native.chain_id, u64::MAX);
@@ -174,15 +177,17 @@ mod tests {
             ),
         ] {
             let transaction = UnsignedTransaction {
-                chain_id: 1,
-                nonce: 0,
-                from: crate::native::Address::from_bytes([1; 20]),
+                context: BuildContext {
+                    chain_id: 1,
+                    from: crate::native::Address::from_bytes([1; 20]),
+                    nonce: 0,
+                    gas_limit: 21_000,
+                    max_fee_per_gas: max_fee,
+                    max_priority_fee_per_gas: priority,
+                },
                 to: Some(crate::native::Address::from_bytes([2; 20])),
                 value: Wei::ZERO,
                 input: Vec::new(),
-                gas_limit: 21_000,
-                max_fee_per_gas: max_fee,
-                max_priority_fee_per_gas: priority,
             };
             let error = futures_executor::block_on(transaction.sign(&MustNotSign))
                 .expect_err("oversized fees must not reach the signer");
@@ -225,15 +230,17 @@ mod tests {
 
     fn signing_request() -> (UnsignedTransaction, SignRequest) {
         let transaction = UnsignedTransaction {
-            chain_id: 1,
-            nonce: 42,
-            from: crate::native::Address::from_bytes([1; 20]),
+            context: BuildContext {
+                chain_id: 1,
+                from: crate::native::Address::from_bytes([1; 20]),
+                nonce: 42,
+                gas_limit: 21_000,
+                max_fee_per_gas: Wei::from_u128(10),
+                max_priority_fee_per_gas: Wei::from_u128(3),
+            },
             to: Some(crate::native::Address::from_bytes([2; 20])),
             value: Wei::from_u128(7),
             input: vec![0, 127, 255],
-            gas_limit: 21_000,
-            max_fee_per_gas: Wei::from_u128(10),
-            max_priority_fee_per_gas: Wei::from_u128(3),
         };
         let request = SignRequest {
             payload: SignablePayload::Digest(Digest {
@@ -330,7 +337,7 @@ mod tests {
         let (mut transaction, expected) = signing_request();
         let signature = AlloySignature::new(U256::from(1), U256::from(2), false);
         let native = transaction.eip1559().unwrap().into_signed(signature);
-        transaction.from =
+        transaction.context.from =
             crate::native::Address::from_bytes(native.recover_signer().unwrap().into_array());
         let signer = ReplySigner::recoverable(expected, signature.as_bytes().to_vec());
         let signed = futures_executor::block_on(transaction.sign(&signer)).unwrap();

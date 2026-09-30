@@ -1,20 +1,20 @@
-//! Every scenario states its chains in its own `config.toml`, and nowhere
-//! else. `examples/local.rs` is the one file that names a chain crate — three
-//! registration lines, the same three `apps/server/src/chains.rs` has — so
-//! after setup one `indexing::Index` and one `wallets::Wallets` serve every
-//! chain. That is what the examples are there to show, so it is checked rather
-//! than reviewed (docs/CHAIN_LAYOUT.md section 8).
+//! Every scenario is self-contained: its `main.rs` names the chains the
+//! application links and its `config.toml` configures them. Which chains an
+//! application links is its own decision, so the two halves are written in two
+//! places, and what is checked here is that they agree: a scenario composes
+//! exactly the chains its own document configures, no more and no fewer.
 //!
 //! The chain list comes from `sdk/chains/`, so a new chain crate fails every
 //! scenario until each one configures a section for it, and the scenario list
 //! comes from the `[[example]]` entries of `examples/Cargo.toml`.
 //!
-//! `custom_store` is the one scenario whose `main.rs` still names chain
-//! crates: it assembles an index by hand instead of from the document, which
-//! is its whole subject. That is asserted as an equality rather than skipped,
-//! so no other scenario can drift into it and `custom_store` cannot quietly
-//! stop being the exception — and where it does name a chain, the old rule
-//! still holds: one setup function per chain, named after the chain.
+//! A scenario hands its sections to `sdk_config::Registry`, one
+//! `register::<chain_<name>::Config<_>>("<name>")` line per chain.
+//! `custom_store` is the one scenario that registers nothing: it assembles an
+//! index by hand, which is its whole subject. That is asserted as an equality
+//! rather than skipped, so no other scenario can drift into it, and where it
+//! names a chain the rule is one setup function per chain, named after the
+//! chain.
 
 use std::{collections::BTreeSet, fs, path::Path};
 
@@ -75,16 +75,47 @@ impl Scenario {
         names
     }
 
-    /// Whether this scenario's document configures a chain under its own name.
-    fn configures(&self, chain: &str) -> bool {
+    /// The sections this scenario's document configures: every top-level
+    /// table header. `[solana.rpc]` is a table inside a section and
+    /// `[[tokens]]` is an array of them, so neither is a section.
+    fn configured(&self) -> BTreeSet<&str> {
         self.document
             .lines()
-            .any(|line| line.trim() == format!("[{chain}]"))
+            .filter_map(|line| line.trim().strip_prefix('[')?.strip_suffix(']'))
+            .filter(|name| !name.is_empty() && name.chars().all(Self::continues))
+            .collect()
     }
 
-    /// Every `chain_<name>::` mention with the function it sits in, free or in
-    /// an `impl` block. A function ends at the first `}` on its own
-    /// indentation, which is what `cargo fmt` guarantees.
+    /// Every `register::<chain_<crate>::Config<_>>("<section>")` of the
+    /// source, as the crate it names and the section it registers it for, in
+    /// source order. Comment lines register nothing.
+    fn registrations(&self) -> Vec<(&str, &str)> {
+        let mut found = Vec::new();
+        for line in self.code() {
+            let Some((_, rest)) = line.split_once("register::<chain_") else {
+                continue;
+            };
+            let section = rest
+                .split_once(">>(\"")
+                .and_then(|(_, quoted)| quoted.split_once('"'));
+            let Some((section, _)) = section else {
+                continue;
+            };
+            found.push((Self::word(rest), section));
+        }
+        found
+    }
+
+    /// The source without its comment lines.
+    fn code(&self) -> impl Iterator<Item = &str> {
+        self.source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+    }
+
+    /// Every `chain_<name>::` mention outside a registration, with the
+    /// function it sits in, free or in an `impl` block. A function ends at the
+    /// first `}` on its own indentation, which is what `cargo fmt` guarantees.
     ///
     /// The `::` is required, because naming a chain crate is what the rule is
     /// about: `chain_id` is a key of Ethereum's own configuration section, and
@@ -93,7 +124,10 @@ impl Scenario {
         const PREFIX: &str = "chain_";
         let mut found = Vec::new();
         let mut owner: Option<(&str, usize)> = None;
-        for line in self.source.lines() {
+        for line in self.code() {
+            if line.contains("register::<chain_") {
+                continue;
+            }
             owner = Self::signature(line).or(owner);
             let name = owner.map(|(name, _)| name);
             found.extend(line.match_indices(PREFIX).filter_map(|(at, _)| {
@@ -136,7 +170,7 @@ fn every_scenario_configures_every_chain() {
     for scenario in Scenario::all() {
         for chain in Scenario::chains() {
             assert!(
-                scenario.configures(&chain),
+                scenario.configured().contains(chain.as_str()),
                 "{}/config.toml must configure {chain} under a [{chain}] section",
                 scenario.name
             );
@@ -145,22 +179,64 @@ fn every_scenario_configures_every_chain() {
 }
 
 #[test]
-fn only_the_scenario_that_assembles_by_hand_names_a_chain_crate() {
-    let naming: BTreeSet<String> = Scenario::all()
+fn every_scenario_composes_exactly_the_chains_it_configures() {
+    for scenario in Scenario::all() {
+        let registered = scenario.registrations();
+        let assembled = scenario.mentions();
+        let composed: BTreeSet<&str> = registered
+            .iter()
+            .map(|(chain, _)| *chain)
+            .chain(assembled.iter().map(|(chain, _)| *chain))
+            .collect();
+        assert_eq!(
+            composed,
+            scenario.configured(),
+            "{}/main.rs must compose exactly the chains {0}/config.toml configures, \
+             no more and no fewer",
+            scenario.name
+        );
+    }
+}
+
+#[test]
+fn a_registration_names_each_configured_chain_once_under_its_section() {
+    for scenario in Scenario::all() {
+        let mut registered = scenario.registrations();
+        if registered.is_empty() {
+            continue;
+        }
+        registered.sort_unstable();
+        let configured: Vec<_> = scenario
+            .configured()
+            .into_iter()
+            .map(|section| (section, section))
+            .collect();
+        assert_eq!(
+            registered, configured,
+            "{}/main.rs registers each chain {0}/config.toml configures exactly once, \
+             as register::<chain_<name>::Config<_>>(\"<name>\")",
+            scenario.name
+        );
+    }
+}
+
+#[test]
+fn only_the_scenario_that_assembles_by_hand_registers_nothing() {
+    let assembling: BTreeSet<String> = Scenario::all()
         .into_iter()
-        .filter(|scenario| !scenario.mentions().is_empty())
+        .filter(|scenario| scenario.registrations().is_empty())
         .map(|scenario| scenario.name)
         .collect();
     assert_eq!(
-        naming,
+        assembling,
         BTreeSet::from(["custom_store".to_owned()]),
-        "a scenario states its chains in its config.toml; only custom_store, \
-         which assembles its index by hand, may name a chain crate"
+        "a scenario registers its chains; only custom_store, which assembles \
+         its index by hand, may name a chain crate any other way"
     );
 }
 
 #[test]
-fn a_chain_crate_is_named_only_in_its_own_setup_function() {
+fn outside_a_registration_a_chain_crate_is_named_only_in_its_own_setup_function() {
     for scenario in Scenario::all() {
         let stray: Vec<_> = scenario
             .mentions()
@@ -176,17 +252,33 @@ fn a_chain_crate_is_named_only_in_its_own_setup_function() {
 }
 
 #[test]
-fn the_shared_setup_library_registers_every_chain_under_its_document_name() {
-    let source = fs::read_to_string(Scenario::root().join("local.rs")).expect("local.rs");
-    let compact: String = source.split_whitespace().collect();
-    for chain in Scenario::chains() {
-        let registration = format!("register::<chain_{chain}::Config<Asset>>(\"{chain}\")");
-        assert_eq!(
-            compact.matches(&registration).count(),
-            1,
-            "local.rs registers {chain} exactly once, under the name its sections use"
-        );
-    }
+fn a_registration_is_read_with_its_crate_and_its_section() {
+    let scenario = Scenario {
+        name: "fixture".to_owned(),
+        document: concat!(
+            "# [commented]\n",
+            "[bitcoin]\n",
+            "rpc.endpoints = ['http://127.0.0.1:1']\n",
+            "[solana]\n",
+            "[solana.rpc]\n",
+            "[[solana.tokens]]\n",
+        )
+        .to_owned(),
+        source: concat!(
+            "fn main() {\n",
+            "    registry.register::<chain_bitcoin::Config<String>>(\"bitcoin\");\n",
+            "    // registry.register::<chain_solana::Config<String>>(\"solana\");\n",
+            "    registry.register::<chain_tron::Config<Asset>>(\"solana\");\n",
+            "}\n",
+        )
+        .to_owned(),
+    };
+    assert_eq!(scenario.configured(), BTreeSet::from(["bitcoin", "solana"]));
+    assert_eq!(
+        scenario.registrations(),
+        [("bitcoin", "bitcoin"), ("tron", "solana")]
+    );
+    assert_eq!(scenario.mentions(), []);
 }
 
 #[test]
@@ -197,7 +289,7 @@ fn a_mention_is_attributed_to_the_function_that_encloses_it() {
         source: concat!(
             "impl Setup {\n",
             "    async fn bitcoin() {\n",
-            "        use chain_bitcoin::Indexer;\n",
+            "        use chain_bitcoin::indexer;\n",
             "    }\n",
             "}\n",
             "\n",

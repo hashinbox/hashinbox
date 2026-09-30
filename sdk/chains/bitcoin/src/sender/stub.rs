@@ -10,10 +10,10 @@ use std::{
 use base::{BlockHash, BlockHeight, BlockPosition, BlockRef, BoxFuture, Decimal, SecretBytes};
 use indexing::{
     AssetId, IndexError, IndexedOutput, OutputId, OutputPage, OutputRequest, OutputStore,
-    TransactionPage,
 };
+use wallets::TransactionPage;
 
-use super::{Item, Outbox, UtxoReader};
+use super::{Outbox, SendRequest, UtxoReader};
 use crate::native::{
     Address, AddressType, CHAIN_NAME, Error, KeyPair, Network, Satoshi, SignedTransaction,
     TransactionId,
@@ -101,9 +101,9 @@ impl Node {
     }
 
     /// `satoshis` from [`Node::address`]`(byte)` to `to`, signed by its key.
-    pub(crate) fn item(byte: u8, to: &Address, satoshis: u64) -> Item {
+    pub(crate) fn item(byte: u8, to: &Address, satoshis: u64) -> SendRequest {
         let transfer = Transfer::new(to.clone(), Satoshi::from_atomic(satoshis));
-        Item::new(Arc::new(Self::key(byte)), Self::address(byte), transfer)
+        SendRequest::new(Arc::new(Self::key(byte)), Self::address(byte), transfer)
     }
 
     /// The key of secret `[byte; 32]`.
@@ -208,7 +208,7 @@ impl OutputStore for Node {
     }
 }
 
-impl indexing::History for Node {
+impl wallets::History for Node {
     fn history<'a>(
         &'a self,
         _of: &'a dyn indexing::Holder,

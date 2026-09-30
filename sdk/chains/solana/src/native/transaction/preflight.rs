@@ -36,6 +36,10 @@ pub trait Preflight: Send + Sync {
     ) -> BoxFuture<'a, Result<u64, Error>>;
 }
 
+/// A lifetime as the node spells it. The blockhash stays text until the
+/// context floor holds and the text proves canonical, so a stale reply is
+/// refused as stale before it is refused as malformed, and [`Lifetime`]
+/// never learns the node's encoding.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LifetimeWire {

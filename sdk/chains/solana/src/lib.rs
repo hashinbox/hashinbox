@@ -14,8 +14,8 @@ mod source;
 mod wallet;
 
 pub use builder::TransferBuilder;
-pub use config::{Config, Node, Store};
-pub use indexer::{Indexer, IndexerParams, indexer};
+pub use config::{ChainHandle, Config, Store};
+pub use indexer::{IndexerParams, indexer};
 pub use interpreter::BlockInterpreter;
 pub use native::{
     Address, AssetKind, CHAIN_NAME, Error, ErrorKind, GenesisHash, KeyPair, Lamport, NETWORKS,

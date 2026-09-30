@@ -8,7 +8,7 @@
 //!
 //! Fetching is also the only thing that ever wants a *native* block twice, so
 //! the cache of those ([`NativeBlocks`]) is here and nowhere else: the
-//! interpreted facts above the confirmed line ([`crate::overlay::Frontier`])
+//! interpreted facts above the confirmed line ([`crate::pending::Blocks`])
 //! are this crate's own types and are kept unconditionally, while the chain's
 //! raw blocks are a bounded, discardable head start on a refetch.
 
@@ -18,8 +18,8 @@ use std::{
 };
 
 use crate::{
-    BlockInterpreter, BlockPosition, BlockRef, BlockSource, IndexError, IndexErrorKind,
-    IndexedBlock, Service,
+    BlockInterpreter, BlockPosition, BlockRef, BlockSource, IndexError, IndexErrorKind, Indexer,
+    NativeBlock,
 };
 
 /// How many of the newest native blocks are kept.
@@ -32,9 +32,9 @@ const RETAINED_BLOCKS: usize = 16;
 
 /// The newest native blocks this pass fetched, newest last.
 ///
-/// Pure memoization of [`Service::one_block`]: every entry can be thrown
+/// Pure memoization of [`Indexer::one_block`]: every entry can be thrown
 /// away and refetched, which is exactly what falling out of the window does.
-/// Entries are keyed by the whole [`BlockRef`], so a block the overlay
+/// Entries are keyed by the whole [`BlockRef`], so a pending block that was
 /// unwound can never be handed back for the hash that replaced it; it just
 /// ages out unread.
 pub(crate) struct NativeBlocks<B> {
@@ -90,14 +90,14 @@ impl<B> NativeBlocks<B> {
     }
 }
 
-impl<S, I, R> Service<S, I, R>
+impl<S, I, R> Indexer<S, I, R>
 where
     S: BlockSource<Block = I::Block>,
     I: BlockInterpreter,
 {
-    /// The native block behind a reference the overlay reclaimed, refetched
+    /// The native block behind a pending block's reference, refetched
     /// when the cache no longer holds it.
-    pub(super) async fn recover(&self, block: BlockRef) -> Result<I::Block, IndexError> {
+    pub(super) async fn refetch(&self, block: BlockRef) -> Result<I::Block, IndexError> {
         match self.native.take(&block)? {
             Some(raw) => Ok(Arc::unwrap_or_clone(raw)),
             None => self.one_block(block.position, block.position).await,
@@ -111,7 +111,7 @@ where
     ) -> Result<I::Block, IndexError> {
         let blocks = self.fetch_blocks(start, end, 1).await?;
         let [block]: [I::Block; 1] = blocks.try_into().map_err(|_| {
-            IndexError::cannot_connect("source did not return the required produced block")
+            IndexError::disconnected("source did not return the required produced block")
         })?;
         Ok(block)
     }
@@ -128,7 +128,7 @@ where
             .await
             .map_err(IndexError::from)?;
         if blocks.len() > limit {
-            return Err(IndexError::cannot_connect(
+            return Err(IndexError::invalid_answer(
                 "source exceeded the returned-block limit",
             ));
         }
@@ -139,7 +139,7 @@ where
                 || position > end
                 || previous.is_some_and(|previous| position <= previous);
             if invalid_position {
-                return Err(IndexError::cannot_connect(
+                return Err(IndexError::invalid_answer(
                     "source blocks are outside the range or not strictly increasing",
                 ));
             }

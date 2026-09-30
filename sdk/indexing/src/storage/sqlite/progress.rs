@@ -61,12 +61,12 @@ impl Tables {
         transaction: &Transaction<'_>,
         claim: &Progress,
     ) -> Result<(), IndexError> {
-        if !self.registered(transaction, &claim.watch)? {
+        if !self.registered(transaction, &claim.watch_id)? {
             return Err(conflict(
                 "indexed progress names an observation this store does not hold",
             ));
         }
-        if self.recorded(transaction, &claim.watch)?.as_ref() != claim.expected.as_ref() {
+        if self.recorded(transaction, &claim.watch_id)?.as_ref() != claim.expected.as_ref() {
             return Err(conflict("recorded progress changed before this commit"));
         }
         let (position, height, hash, parent_position, parent_hash, timestamp) =
@@ -82,7 +82,7 @@ impl Tables {
                 statement.execute(params![
                     self.chain(),
                     self.name(),
-                    claim.watch,
+                    claim.watch_id,
                     position,
                     height,
                     hash,
@@ -147,8 +147,8 @@ mod progress_test {
     use crate::{
         Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, CanonicalBlock,
         FeeSettlement, IndexErrorKind, IndexStore, IndexedBatch, InterpretedBlock, MovementId,
-        NetworkFee, ObservationDraft, ObservationDraftStatus, OutputChanges, TransactionRef,
-        ValueMovement, Watch, WatchStore,
+        NetworkFee, ObservationDraft, ObservationDraftStatus, TransactionRef, ValueMovement, Watch,
+        WatchStore,
     };
 
     fn block(height: u64) -> BlockRef {
@@ -172,13 +172,14 @@ mod progress_test {
     /// One block as the interpreter reports it for the address that was not
     /// watched when it was committed; `amount` is what makes a re-presented
     /// block disagree with the stored one.
-    fn facts(height: u64, amount: u64) -> CanonicalBlock {
+    fn canonical(height: u64, amount: u64) -> CanonicalBlock {
         let asset = AssetId::native(network().chain);
         CanonicalBlock::new(
             network(),
-            InterpretedBlock {
-                block: block(height),
-                transactions: vec![ObservationDraft {
+            InterpretedBlock::new(
+                &network(),
+                block(height),
+                vec![ObservationDraft {
                     transaction_id: TransactionRef::new(network(), format!("block-{height}")),
                     transaction_order: 0,
                     status: ObservationDraftStatus::Included,
@@ -195,9 +196,8 @@ mod progress_test {
                         payer: Some(address("payer")),
                     }),
                 }],
-                outputs: OutputChanges::default(),
-                credits: Vec::new(),
-            },
+            )
+            .expect("unique transaction ids"),
         )
         .expect("valid fixture facts")
     }
@@ -234,12 +234,8 @@ mod progress_test {
         for height in 1..=5 {
             let empty = CanonicalBlock::new(
                 network(),
-                InterpretedBlock {
-                    block: block(height),
-                    transactions: Vec::new(),
-                    outputs: OutputChanges::default(),
-                    credits: Vec::new(),
-                },
+                InterpretedBlock::new(&network(), block(height), Vec::new())
+                    .expect("unique transaction ids"),
             )
             .expect("a valid fixture block");
             let batch = IndexedBatch::new(
@@ -256,9 +252,9 @@ mod progress_test {
         let first = IndexedBatch::new(
             network(),
             Some(block(5)),
-            vec![facts(5, 10)],
+            vec![canonical(5, 10)],
             vec![Progress {
-                watch: late.id.clone(),
+                watch_id: late.id.clone(),
                 expected: None,
                 indexed_through: block(5),
             }],
@@ -276,7 +272,7 @@ mod progress_test {
         let disagreeing = IndexedBatch::new(
             network(),
             Some(block(5)),
-            vec![facts(3, 10), facts(4, 10), facts(5, 99)],
+            vec![canonical(3, 10), canonical(4, 10), canonical(5, 99)],
             Vec::new(),
             FeeSettlement::Charged,
         )

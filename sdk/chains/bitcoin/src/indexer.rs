@@ -1,21 +1,8 @@
 //! The Bitcoin indexer: [`indexer`] over [`IndexerParams`].
 
-use indexing::{IndexError, Service, SyncConfig, SyncPolicy};
+use indexing::{IndexError, Indexer, SyncConfig, SyncPolicy};
 
 use crate::{BlockInterpreter, RpcClient, Source};
-
-/// One Bitcoin network's indexer: source, interpreter, and repository.
-///
-/// `indexing::Service` itself, over this chain's block source and interpreter,
-/// rather than a newtype that forwarded every capability to one. Store it as
-/// `Arc<dyn indexing::Indexing>` or combine several in an `indexing::Index`.
-/// Unlike an account chain it also hands out a reader over the UTXOs it
-/// materializes (`Service::outputs`, an `indexing::ObservedOutputs` with the
-/// pending overlay folded in so a wallet can spend its own change at depth one),
-/// which `crate::WalletFactory` spends as its `Arc<dyn indexing::OutputStore>`.
-/// A reader rather than an impl on the index, because the rows are the store's:
-/// what the index adds is the half above its own confirmed line.
-pub type Indexer<C, R> = Service<Source<C>, BlockInterpreter, R>;
 
 /// Everything one Bitcoin indexer needs. Fields are public; [`Self::new`]
 /// fills the chain defaults.
@@ -87,19 +74,31 @@ impl<C, R> IndexerParams<C, R> {
 /// Builds the indexer `params` describes, for the client's own network. No
 /// I/O: the client was verified when it connected.
 ///
-/// A function rather than an inherent constructor, because [`Indexer`] is an
-/// alias for `indexing::Service` and this crate does not own that type;
-/// [`IndexerParams`] stays what it is, the argument, rather than becoming a
-/// factory for its own product.
+/// `indexing::Indexer` itself, over this chain's block source and interpreter,
+/// rather than a newtype that forwarded every capability to one. Store it as
+/// `Arc<dyn indexing::Indexing>` or combine several in an `indexing::Index`.
+/// Unlike an account chain it also materializes UTXOs. Reading them is the
+/// repository's (`indexing::OutputStore`), and `wallets::PendingJoin` folds this
+/// index's pending blocks into that page so a wallet can spend its own change at
+/// depth one; `crate::WalletFactory` spends the result as its
+/// `Arc<dyn indexing::OutputStore>`. Not an impl on the index, because the rows
+/// are the store's: what the index adds is the half above its own confirmed
+/// line.
+///
+/// A function rather than an inherent constructor, because this crate does
+/// not own [`Indexer`]; [`IndexerParams`] stays what it is, the argument,
+/// rather than becoming a factory for its own product.
 ///
 /// # Errors
 ///
 /// `InvalidRequest` for an invalid [`SyncPolicy`] or confirmation depth.
-pub fn indexer<C, R>(params: IndexerParams<C, R>) -> Result<Indexer<C, R>, IndexError> {
+pub fn indexer<C, R>(
+    params: IndexerParams<C, R>,
+) -> Result<Indexer<Source<C>, BlockInterpreter, R>, IndexError> {
     params.validate_depth()?;
     let network = *params.rpc.network();
     let depth = params.confirmed_depth;
-    Ok(Service::new(
+    Ok(Indexer::new(
         Source::new(params.rpc, depth),
         BlockInterpreter::new(&network)?,
         params.repository,

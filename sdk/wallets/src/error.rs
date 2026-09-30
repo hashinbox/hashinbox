@@ -2,7 +2,7 @@ use std::{error, fmt};
 
 use base::TransactionId;
 
-/// Chain-neutral wallet failure classes; `payment-api` maps them to HTTP.
+/// Chain-neutral wallet failure classes; `payment-server` maps them to HTTP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WalletErrorKind {
     /// No factory for the asset, a foreign wallet, or an unsupported request.
@@ -106,7 +106,7 @@ impl From<indexing::IndexError> for WalletError {
             indexing::IndexErrorKind::Source
             | indexing::IndexErrorKind::Store
             | indexing::IndexErrorKind::InvalidBlock
-            | indexing::IndexErrorKind::CannotConnect
+            | indexing::IndexErrorKind::Disconnected
             | indexing::IndexErrorKind::ConfirmedReorg => WalletErrorKind::Unavailable,
         };
         Self::new(kind, error.message)

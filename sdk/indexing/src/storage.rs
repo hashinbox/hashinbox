@@ -8,7 +8,7 @@
 //! (`docs/design/030 §8 (ex-032)`, "Required repository interfaces").
 //!
 //! **The rest are consumer capabilities**, and [`reads`] is all three of them.
-//! They are what *this* workspace's consumers need — `apps/api`'s balance route,
+//! They are what *this* workspace's consumers need — `apps/server`'s balance route,
 //! Bitcoin's change selection, the rescan tool — and they are three traits so
 //! that needing none of them is a legal store rather than a stubbed one.
 //!
@@ -20,23 +20,32 @@
 //! for it. A sink that is neither cheap to clone nor clonable at all is held as
 //! `Arc<MySink>`, which implements each port by forwarding to it.
 //!
-//! Everything above this module is the vocabulary a chain produces and an
-//! application reads; everything below it is a store. Two are shipped and
+//! Everything above this module is the vocabulary a chain produces; everything
+//! below it is a store, or what every store is asked and answers with: [`Balance`],
+//! [`CanonicalPage`] and the output requests, in the files beside this one.
+//! Two stores are shipped and
 //! either, both or neither may be built: [`sqlite`] on one embedded SQL file,
 //! and [`memory`] on ordinary maps and no file at all. One store serves every
 //! configured network: each operation names the network it is about, and rows
 //! of one network are invisible to reads of another.
 
+mod balance;
 mod commit;
+mod history;
 #[cfg(feature = "memory")]
 pub mod memory;
+mod outputs;
 mod reads;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 mod watch;
 
+pub use balance::{Balance, Completeness, Fold, MovementEffect, PendingValue};
 pub use commit::{IndexStore, IndexedBatch, Progress};
-pub use reads::{BalanceQuery, BalanceStore, OutputStore, PurgedRows, Purging};
+pub(crate) use history::Probe;
+pub use history::{CanonicalPage, ConfirmedHistory, HistoryPosition, HistoryQuery, Page};
+pub use outputs::{OutputCursor, OutputPage, OutputRequest};
+pub use reads::{BalanceQuery, BalanceStore, Inspection, OutputStore, PurgedRows, Purging};
 pub use watch::{WatchProgress, WatchStore};
 
 /// The whole of what an index requires of a store.

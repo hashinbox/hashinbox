@@ -142,8 +142,6 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
             let block = fixture.block(height);
             let created = fixture.output("owner", &format!("block-{height}"), BlockHeight(height));
             let interpreted = InterpretedBlock {
-                block,
-                transactions: vec![fixture.paid("owner", BlockHeight(height))],
                 outputs: OutputChanges {
                     created: vec![created],
                     ..OutputChanges::default()
@@ -154,22 +152,28 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
                     amount: Decimal::from(height),
                     to: fixture.address("owner"),
                 }],
+                ..InterpretedBlock::new(
+                    network,
+                    block,
+                    vec![fixture.paid("owner", BlockHeight(height))],
+                )
+                .expect("unique transaction ids")
             };
             let checkpoint = (height > 1).then(|| fixture.block(1));
-            let facts =
+            let canonical =
                 CanonicalBlock::new(network.clone(), interpreted).expect("valid fixture facts");
             // Each block also advances the observation, so the purge has a claim
             // to reset as well as rows to remove. There is no separate progress
             // write to make: a claim rides on the block that proved it.
             let proved = vec![Progress {
-                watch: Self::watch(fixture).id,
+                watch_id: Self::watch(fixture).id,
                 expected: checkpoint.clone(),
                 indexed_through: fixture.block(height),
             }];
             let batch = IndexedBatch::new(
                 network.clone(),
                 checkpoint,
-                vec![facts],
+                vec![canonical],
                 proved,
                 FeeSettlement::Charged,
             )

@@ -24,7 +24,7 @@ pub(crate) struct Utxos {
     /// The checkpoint every page was read at.
     pub(crate) checkpoint: BlockRef,
     /// Mature, unique outputs in index order.
-    pub(crate) utxos: Vec<Utxo>,
+    pub(crate) outputs: Vec<Utxo>,
 }
 
 /// Reads the index's outputs for one network and keeps only spendable UTXOs.
@@ -33,8 +33,9 @@ pub(crate) struct UtxoReader {
     outputs: Arc<dyn OutputStore>,
 }
 
-/// What one address read is checked against.
-struct Read<'a> {
+/// The address one read is for, in each form an indexed output of it is
+/// checked against.
+struct Owner<'a> {
     address: &'a Address,
     canonical: base::Address,
     script: Vec<u8>,
@@ -54,9 +55,9 @@ impl UtxoReader {
     pub(crate) async fn read(&self, addresses: &[Address]) -> Result<Utxos, IndexError> {
         let mut checkpoint = None;
         let mut seen = BTreeSet::new();
-        let mut utxos = Vec::new();
+        let mut outputs = Vec::new();
         for address in addresses {
-            let read = Read {
+            let owner = Owner {
                 address,
                 canonical: address.canonical(&self.network),
                 script: address
@@ -64,7 +65,7 @@ impl UtxoReader {
                     .map_err(|error| corrupt(error.message))?
                     .into_bytes(),
             };
-            utxos.extend(self.address(&read, &mut checkpoint, &mut seen).await?);
+            outputs.extend(self.address(&owner, &mut checkpoint, &mut seen).await?);
         }
         let checkpoint = checkpoint.ok_or_else(|| {
             IndexError::new(
@@ -73,12 +74,15 @@ impl UtxoReader {
                 true,
             )
         })?;
-        Ok(Utxos { checkpoint, utxos })
+        Ok(Utxos {
+            checkpoint,
+            outputs,
+        })
     }
 
     async fn address(
         &self,
-        read: &Read<'_>,
+        owner: &Owner<'_>,
         checkpoint: &mut Option<BlockRef>,
         seen: &mut BTreeSet<Outpoint>,
     ) -> Result<Vec<Utxo>, IndexError> {
@@ -87,7 +91,7 @@ impl UtxoReader {
         loop {
             let request = OutputRequest {
                 network: self.network.canonical(),
-                address: read.canonical.clone(),
+                address: owner.canonical.clone(),
                 after: after.clone(),
                 limit: PAGE_SIZE,
             };
@@ -107,7 +111,7 @@ impl UtxoReader {
                 ));
             }
             for output in page.outputs {
-                utxos.extend(self.utxo(output, read, current, seen)?);
+                utxos.extend(self.utxo(output, owner, current, seen)?);
             }
             let Some(next) = page.next else {
                 return Ok(utxos);
@@ -124,17 +128,17 @@ impl UtxoReader {
         }
     }
 
-    /// Rejects an indexed output that is not `read.address`'s native coin.
-    fn check_owner(output: &IndexedOutput, read: &Read<'_>) -> Result<(), IndexError> {
-        if output.address != read.canonical
+    /// Rejects an indexed output that is not `owner.address`'s native coin.
+    fn check_owner(output: &IndexedOutput, owner: &Owner<'_>) -> Result<(), IndexError> {
+        if output.address != owner.canonical
             || output.asset != AssetId::native(CHAIN_NAME)
-            || !output.id.transaction.belongs_to(&read.canonical.network)
+            || !output.id.transaction.belongs_to(&owner.canonical.network)
         {
             return Err(corrupt(
                 "indexed output does not belong to the requested Bitcoin address and asset",
             ));
         }
-        if output.evidence != read.script {
+        if output.evidence != owner.script {
             return Err(corrupt(
                 "indexed output locking script does not match its Bitcoin address",
             ));
@@ -159,15 +163,15 @@ impl UtxoReader {
             .ok_or_else(|| corrupt("indexed output height is exhausted"))
     }
 
-    /// `output` as a UTXO of `read.address`; `None` while it is an immature coinbase.
+    /// `output` as a UTXO of `owner.address`; `None` while it is an immature coinbase.
     fn utxo(
         &self,
         output: IndexedOutput,
-        read: &Read<'_>,
+        owner: &Owner<'_>,
         checkpoint: &BlockRef,
         seen: &mut BTreeSet<Outpoint>,
     ) -> Result<Option<Utxo>, IndexError> {
-        Self::check_owner(&output, read)?;
+        Self::check_owner(&output, owner)?;
         let transaction_id = output
             .id
             .transaction
@@ -195,7 +199,7 @@ impl UtxoReader {
             output: Output {
                 value: Satoshi::from_atomic(value),
                 script_pubkey: output.evidence,
-                address: Some(read.address.clone()),
+                address: Some(owner.address.clone()),
             },
         }))
     }
@@ -331,7 +335,7 @@ mod tests {
 
         let read = block_on(reader.read(std::slice::from_ref(&owner))).expect("pending change");
 
-        assert_eq!(read.utxos.len(), 1);
+        assert_eq!(read.outputs.len(), 1);
         assert_eq!(read.checkpoint, checkpoint(10));
     }
 
@@ -345,7 +349,7 @@ mod tests {
 
         let read = block_on(reader.read(std::slice::from_ref(&owner))).expect("immature coinbase");
 
-        assert!(read.utxos.is_empty());
+        assert!(read.outputs.is_empty());
     }
 
     #[test]
@@ -431,11 +435,11 @@ mod tests {
         )]);
         let spendable = block_on(reader.read(std::slice::from_ref(&owner))).unwrap();
         assert_eq!(spendable.checkpoint, checkpoint(100));
-        assert_eq!(spendable.utxos.len(), 1);
+        assert_eq!(spendable.outputs.len(), 1);
         assert_eq!(
-            spendable.utxos[0].output.value,
+            spendable.outputs[0].output.value,
             Satoshi::from_atomic(100_000)
         );
-        assert_eq!(spendable.utxos[0].output.address, Some(owner));
+        assert_eq!(spendable.outputs[0].output.address, Some(owner));
     }
 }

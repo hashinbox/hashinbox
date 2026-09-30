@@ -2,43 +2,39 @@
 //! registered chain parse its own section (`chains`, the only module that
 //! names a chain), composes every chain's RPC client, indexer, and wallet
 //! factories over one storage backend, and serves the public HTTP API
-//! (`payment_api`) after each index is ready. Everything after composition
-//! goes through `wallets::Wallets` and `indexing::Indexing`.
+//! (`api`, which names no chain, no configuration reader and no storage
+//! backend) after each index is ready. Everything after composition goes
+//! through `wallets::Wallets` and `indexing::Indexing`.
 
+mod api;
 mod chains;
 mod config;
 mod readiness;
 mod rescan;
 mod storage;
-mod submissions;
 
 use std::{env, future::IntoFuture, sync::Arc};
 
+use api::{Payments, Signers};
 use config::{AnyError, Config};
 use indexing::Supervisor;
 use indexing::SyncControl;
-use indexing::SyncHealth;
-use payment_api::{AssetTag, Payments, Signers};
+use indexing::SyncReport;
 use tokio::sync::{oneshot, watch};
-
-const SUBMISSION_CAPACITY: usize = 64;
+use wallets::Submissions;
 
 /// The supervisor handle behind `POST /v1/status/resume`.
 ///
-/// `payment_api` depends on `indexing` with no features and so cannot name
-/// [`SyncControl`], which the `supervisor` feature owns; the port it declares
-/// instead is implemented here, where both crates are already in scope.
+/// The routes name no runtime and so do not name [`SyncControl`], which
+/// `indexing`'s `supervisor` feature owns; the port `api` declares instead is
+/// implemented here, at the composition root.
 struct Resume(SyncControl);
 
-impl payment_api::Resume for Resume {
+impl api::Resume for Resume {
     fn resume(&self, network: &base::Network) -> Result<(), indexing::IndexError> {
         self.0.resume(network)
     }
 }
-
-/// The wallet factories the whole process shares, keyed by configured asset
-/// tags. The composition root owns them and hands the HTTP layer a handle.
-pub(crate) type Wallets = wallets::Wallets<AssetTag>;
 
 /// Printed instead of serving, so a typed client can be generated without a
 /// node, a database, or a bound port.
@@ -54,7 +50,7 @@ async fn main() -> Result<(), AnyError> {
     let mut arguments = env::args_os().skip(1);
     let path = arguments.next().ok_or(USAGE)?;
     if path == *OPENAPI_FLAG {
-        println!("{}", serde_json::to_string_pretty(&payment_api::openapi())?);
+        println!("{}", serde_json::to_string_pretty(&api::openapi())?);
         return Ok(());
     }
     // Before the configuration is read, so a typo never reaches a node or a store.
@@ -67,8 +63,9 @@ async fn main() -> Result<(), AnyError> {
     let server = config.server()?;
     let bind = config.bind;
 
-    let (submission_supervisor, submission_registrar, submission_closer) =
-        submissions::Supervisor::new(SUBMISSION_CAPACITY)?;
+    // Owns every background send task a chain hands over, so the shutdown
+    // sequence below can refuse new ones and wait for the running ones.
+    let submissions = Arc::new(Submissions::new());
     // Every configured chain identity is verified before storage is opened.
     let chains = config.chains()?;
     // The one safety number an operator chooses is Bitcoin's confirmation
@@ -78,7 +75,7 @@ async fn main() -> Result<(), AnyError> {
     for notice in chains.notices() {
         println!("{notice}");
     }
-    let registrar: Arc<dyn wallets::SubmissionRegistrar> = Arc::new(submission_registrar);
+    let registrar: Arc<dyn wallets::SubmissionRegistrar> = submissions.clone();
     let wallets::Composition {
         index: indexer,
         history,
@@ -104,20 +101,19 @@ async fn main() -> Result<(), AnyError> {
     for configured in config.wallets {
         configured.import(&wallets, &*indexer, &signers).await?;
     }
-    let mut submission_tasks = Some(tokio::spawn(submission_supervisor.run()));
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let networks = indexer.networks().to_vec();
-    let (health, mut health_rx) = watch::channel(SyncHealth::starting(&networks));
-    let health_control = health.clone();
+    let (report, mut settling) = SyncReport::watching(indexer.networks());
+    let health = settling.receiver();
     // The routes watch addresses on, and read checkpoints from, the same
     // composed index the supervisor drives. Neither query they serve goes
     // through it: each is its own handle, routed per network by the composition.
     let routes_index = indexer.clone();
-    let supervisor = Supervisor::new(indexer, schedules, Arc::new(readiness::Health::new(health)));
+    let monitor = Arc::new(readiness::Health::new(Arc::clone(&report)));
+    let supervisor = Supervisor::new(indexer, schedules, monitor);
     // Taken before `run` consumes the supervisor: it is the operator's one
     // way back from a quarantine without restarting the process
     // (`docs/design/019` section 5.3).
-    let resume: Arc<dyn payment_api::Resume> = Arc::new(Resume(supervisor.control()));
+    let resume: Arc<dyn api::Resume> = Arc::new(Resume(supervisor.control()));
     let mut synchronization = Some(tokio::spawn(supervisor.run(shutdown_rx)));
 
     // Every network must have settled — reached its tip once, or been
@@ -128,51 +124,29 @@ async fn main() -> Result<(), AnyError> {
     // owed range is reported on `GET /v1/status` instead of holding the
     // listener unbound for a range a pruned node can never serve
     // (`docs/design/024` section 7).
-    let startup_result = loop {
-        if health_rx.borrow().settled() {
-            break None;
+    let startup_result: Option<Result<(), AnyError>> = tokio::select! {
+        settled = settling.settled() => {
+            settled.is_none().then(|| Err("index readiness channel closed".into()))
         }
-        tokio::select! {
-            changed = health_rx.changed() => {
-                if changed.is_err() {
-                    break Some(Err("index readiness channel closed".into()));
-                }
-            }
-            result = synchronization.as_mut().expect("synchronization task") => {
-                synchronization = None;
-                break Some(match result {
-                    Ok(()) => Err("index synchronization stopped during startup".into()),
-                    Err(error) => Err(error.into()),
-                });
-            }
-            result = submission_tasks.as_mut().expect("submission task") => {
-                submission_tasks = None;
-                break Some(match result {
-                    Ok(Ok(())) => Err("submission supervision stopped during startup".into()),
-                    Ok(Err(error)) => Err(error.into()),
-                    Err(error) => Err(error.into()),
-                });
-            }
-            signal = tokio::signal::ctrl_c() => {
-                break Some(signal.map_err(Into::into));
-            }
+        result = synchronization.as_mut().expect("synchronization task") => {
+            synchronization = None;
+            Some(match result {
+                Ok(()) => Err("index synchronization stopped during startup".into()),
+                Err(error) => Err(error.into()),
+            })
         }
+        signal = tokio::signal::ctrl_c() => Some(signal.map_err(Into::into)),
     };
     if let Some(result) = startup_result {
-        health_control.send_replace(SyncHealth::starting(&networks));
-        if let Some(task) = submission_tasks.take() {
-            let Ok(()) = submission_closer.close().await else {
-                return Err("could not close submission registration".into());
-            };
-            task.await??;
-        }
+        report.reset();
+        submissions.drain().await?;
         if let Some(task) = synchronization.take() {
             let _ = shutdown.send(true);
             task.await?;
         }
         return result;
     }
-    let payments = Payments::from_params(payment_api::PaymentsParams {
+    let payments = Payments::from_params(api::PaymentsParams {
         wallets,
         units: Arc::new(units),
         signers,
@@ -180,9 +154,9 @@ async fn main() -> Result<(), AnyError> {
         history,
         balance,
         resume,
-        health: health_rx,
+        health,
     });
-    let router = payment_api::router(payments, &server)?;
+    let router = api::router(payments, &server)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let (stop_http, stop_http_rx) = oneshot::channel();
     let serving = axum::serve(listener, router)
@@ -200,14 +174,6 @@ async fn main() -> Result<(), AnyError> {
                 Err(error) => Err(error.into()),
             }, false)
         }
-        completed = submission_tasks.as_mut().expect("submission task") => {
-            submission_tasks = None;
-            (match completed {
-                Ok(Ok(())) => Err("submission supervision stopped unexpectedly".into()),
-                Ok(Err(error)) => Err(error.into()),
-                Err(error) => Err(error.into()),
-            }, false)
-        }
         signal = tokio::signal::ctrl_c() => (signal.map_err(Into::into), false),
     };
     // The shutdown order, as seven consecutive statements. It was a state
@@ -216,27 +182,21 @@ async fn main() -> Result<(), AnyError> {
     // sequence existed to drain un-awaited. Straight-line code cannot skip.
     //
     // 1. Stop reporting ready, so no new work is admitted.
-    health_control.send_replace(SyncHealth::starting(&networks));
+    report.reset();
     // 2. Ask HTTP to stop accepting.
     if !http_done {
         let _ = stop_http.send(());
     }
     // 3. Close submission registration, so no chain hands over more work.
-    if submission_tasks.is_some() && submission_closer.close().await.is_err() {
-        result = result.and(Err("could not close submission registration".into()));
-    }
+    submissions.close();
     // 4. Drain the handlers already in flight.
     if !http_done && let Err(error) = serving.await {
         result = result.and(Err(error.into()));
     }
     // 5. Drain the submissions they registered, while indexing can still
     //    reconcile an ambiguous one.
-    if let Some(task) = submission_tasks.take() {
-        match task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => result = result.and(Err(error.into())),
-            Err(error) => result = result.and(Err(error.into())),
-        }
+    if let Err(error) = submissions.drain().await {
+        result = result.and(Err(error.into()));
     }
     // 6. Only then stop indexing, and 7. join it.
     if let Some(task) = synchronization.take() {

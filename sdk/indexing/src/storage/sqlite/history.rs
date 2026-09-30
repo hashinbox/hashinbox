@@ -35,7 +35,7 @@ use rusqlite::{Connection, Row, Transaction, params};
 use super::{Repository, Tables, failure, store, tables::Place};
 use crate::{
     Address, BoxFuture, CanonicalPage, CanonicalStatus, CanonicalTransaction, ConfirmedHistory,
-    HistoryPosition, HistoryQuery, Holder, IndexError, NetworkFee,
+    HistoryPosition, HistoryQuery, Holder, IndexError, NetworkFee, storage::Probe,
 };
 
 /// Fewest rows one query reads while filling a page: a page of a busy address
@@ -87,19 +87,10 @@ impl Tables {
         request: &HistoryQuery,
     ) -> Result<CanonicalPage, IndexError> {
         let (read, checkpoint) = self.snapshot(connection)?;
-        let subject = (request.address.value.as_str(), request.asset.asset.as_str());
-        let completeness = self.provenance(&read, subject)?;
-        let mut transactions = self.matching(&read, request)?;
-        let has_more = transactions.len() > request.limit;
-        transactions.truncate(request.limit);
-        let next = transactions
-            .last()
-            .filter(|_| has_more)
-            .map(|transaction| HistoryPosition {
-                height: transaction.block().height,
-                transaction_order: transaction.transaction_order,
-                transaction: transaction.transaction_id.clone(),
-            });
+        let completeness = self.provenance(&read, request, checkpoint.as_ref())?;
+        let probe = Probe::new(request.limit);
+        let matches = self.matching(&read, request, &probe)?;
+        let (transactions, next) = probe.page(matches, |last| last.into());
         Ok(CanonicalPage {
             checkpoint,
             transactions,
@@ -108,15 +99,17 @@ impl Tables {
         })
     }
 
-    /// Up to `limit + 1` transactions after the position that match `request`,
-    /// in history order, each as [`HistoryQuery::select`] returns it.
+    /// The transactions after the position that match `request`, in history
+    /// order and at least as many as `probe` asks for when that many exist,
+    /// each as [`HistoryQuery::select`] returns it.
     fn matching(
         &self,
         read: &Transaction<'_>,
         request: &HistoryQuery,
+        probe: &Probe,
     ) -> Result<Vec<CanonicalTransaction>, IndexError> {
         let mut after = Self::anchored(request.after.as_ref())?;
-        let chunk = request.limit.saturating_add(1).max(MIN_CHUNK);
+        let chunk = probe.rows().max(MIN_CHUNK);
         let mut matches = Vec::new();
         loop {
             let entries = self.entries(read, &request.address.value, None, &after, chunk)?;
@@ -125,7 +118,7 @@ impl Tables {
                 after = place;
                 matches.extend(request.select(entry));
             }
-            if exhausted || matches.len() > request.limit {
+            if exhausted || probe.answered(matches.len()) {
                 return Ok(matches);
             }
         }

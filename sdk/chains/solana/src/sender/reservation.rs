@@ -45,12 +45,16 @@ pub(crate) struct Settlement {
     payers: BTreeSet<Address>,
 }
 
-/// One signed transaction and the batch minimum slot it was signed at — the
+/// One signed transaction and the floor its batch's simulation reached — the
 /// same role, under the same name, as bitcoin's and ethereum's
 /// `PreparedTransaction` (`docs/CHAIN_LAYOUT.md` section 6).
+///
+/// Two slots, two names: `transaction.min_slot` is the slot the transaction
+/// was built at, and `floor_slot` is where simulation left the batch, at or
+/// after it. Submission reads at the floor.
 pub(crate) struct PreparedTransaction {
     pub(crate) transaction: SignedTransaction,
-    pub(crate) min_slot: u64,
+    pub(crate) floor_slot: u64,
 }
 
 #[derive(Default)]
@@ -97,9 +101,8 @@ impl Reservations {
         self.lock().submitting.remove(payer);
     }
 
-    /// Holds `transaction`, signed at the batch's `min_slot`, for a later
-    /// broadcast.
-    pub(crate) fn hold(&self, transaction: SignedTransaction, min_slot: u64) {
+    /// Holds `prepared` for a later broadcast.
+    pub(crate) fn hold(&self, prepared: PreparedTransaction) {
         let mut state = self.lock();
         if state.held.len() >= HELD {
             let expiring = state
@@ -111,17 +114,11 @@ impl Reservations {
                 state.held.remove(&id);
             }
         }
-        state.held.insert(
-            transaction.id,
-            PreparedTransaction {
-                transaction,
-                min_slot,
-            },
-        );
+        state.held.insert(prepared.transaction.id, prepared);
     }
 
     /// The held transaction `id` with exactly the bytes `envelope`, and its
-    /// batch minimum slot, removed from the hold.
+    /// simulated floor, removed from the hold.
     pub(crate) fn take(
         &self,
         id: &TransactionId,

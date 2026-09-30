@@ -136,8 +136,8 @@ mod tests {
     use indexing::{
         Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef,
         CanonicalBlock, Decimal, IndexStore as _, IndexedBatch, InterpretedBlock, MovementId,
-        ObservationDraft, ObservationDraftStatus, OutputChanges, TransactionRef, ValueMovement,
-        Watch, WatchStore as _,
+        ObservationDraft, ObservationDraftStatus, TransactionRef, ValueMovement, Watch,
+        WatchStore as _,
     };
     use serde_json::{Value, json};
 
@@ -180,8 +180,9 @@ mod tests {
     /// One committed block crediting `owner`: a checkpoint and one history
     /// entry, so the reported counts cannot all be zero by accident.
     fn indexed(network: &Network) -> IndexedBatch {
-        let interpreted = InterpretedBlock {
-            block: BlockRef {
+        let interpreted = InterpretedBlock::new(
+            network,
+            BlockRef {
                 position: BlockPosition(1),
                 height: BlockHeight(1),
                 hash: BlockHash(vec![1]),
@@ -191,7 +192,7 @@ mod tests {
                 }),
                 timestamp: Some(1_000),
             },
-            transactions: vec![ObservationDraft {
+            vec![ObservationDraft {
                 transaction_id: TransactionRef::new(network.clone(), "credit"),
                 transaction_order: 0,
                 status: ObservationDraftStatus::Included,
@@ -203,9 +204,8 @@ mod tests {
                 )],
                 fee: None,
             }],
-            outputs: OutputChanges::default(),
-            credits: Vec::new(),
-        };
+        )
+        .expect("unique transaction ids");
         let facts = CanonicalBlock::new(network.clone(), interpreted).expect("valid fixture facts");
         IndexedBatch::new(
             network.clone(),

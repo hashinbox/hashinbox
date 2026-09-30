@@ -51,7 +51,7 @@ pub(crate) struct Outbox {
 }
 
 /// One transfer, its sender, and the signer that controls the sender.
-pub(crate) struct Item {
+pub(crate) struct SendRequest {
     from: Address,
     transfer: Transfer,
     signer: Arc<dyn Signer>,
@@ -77,7 +77,7 @@ struct Payer {
     transfers: Vec<Transfer>,
 }
 
-impl Item {
+impl SendRequest {
     /// `transfer` from `from`, signed by `signer`.
     pub(crate) fn new(signer: Arc<dyn Signer>, from: Address, transfer: Transfer) -> Self {
         Self {
@@ -125,7 +125,7 @@ impl Outbox {
     /// When the outcome is unknown, it carries the local transaction ID.
     pub(crate) async fn send(
         &self,
-        items: Vec<Item>,
+        items: Vec<SendRequest>,
     ) -> Result<Vec<base::TransactionId>, SendError> {
         let failed = |error: TransactionError| SendError::grouped(Vec::new(), error.into());
         let SignedBatch {
@@ -152,7 +152,7 @@ impl Outbox {
     /// transactions needs and cannot read off the envelope.
     pub(crate) async fn sign(
         &self,
-        items: Vec<Item>,
+        items: Vec<SendRequest>,
     ) -> Result<(SignedTransaction, Satoshi, Vec<Outpoint>), TransactionError> {
         let SignedBatch {
             transaction,
@@ -192,7 +192,7 @@ impl Outbox {
 
     /// Prepare, reserve, and sign: nothing leaves the process until the
     /// node's mempool would accept the signed transaction.
-    async fn prepare(&self, items: Vec<Item>) -> Result<SignedBatch, TransactionError> {
+    async fn prepare(&self, items: Vec<SendRequest>) -> Result<SignedBatch, TransactionError> {
         let payers = payers(items);
         let addresses = payers
             .iter()
@@ -302,7 +302,7 @@ impl Outbox {
 }
 
 /// Groups `items` by sender, in first-seen order.
-fn payers(items: Vec<Item>) -> Vec<Payer> {
+fn payers(items: Vec<SendRequest>) -> Vec<Payer> {
     let mut payers: Vec<Payer> = Vec::new();
     for item in items {
         match payers.iter_mut().find(|payer| payer.address == item.from) {

@@ -42,13 +42,13 @@ pub(crate) struct Outbox {
 }
 
 /// One transfer, its sender, and the signer that controls the sender.
-pub(crate) struct Item {
+pub(crate) struct SendRequest {
     from: Address,
     transfer: Transfer,
     signer: Arc<dyn Signer>,
 }
 
-impl Item {
+impl SendRequest {
     /// `transfer` from `from`, signed by `signer`.
     pub(crate) fn new(signer: Arc<dyn Signer>, from: Address, transfer: Transfer) -> Self {
         Self {
@@ -59,10 +59,22 @@ impl Item {
     }
 }
 
-/// What a signed batch needs for submission.
-struct SignedBatch {
-    min_slot: u64,
-    transactions: Vec<SignedTransaction>,
+/// Signed transactions in submission order, each with the floor simulation
+/// left the whole batch at.
+struct SignedBatch(Vec<PreparedTransaction>);
+
+impl SignedBatch {
+    /// `transactions`, the last of them simulated at the slot `floor_slot`.
+    fn simulated(transactions: Vec<SignedTransaction>, floor_slot: u64) -> Self {
+        let prepared = transactions
+            .into_iter()
+            .map(|transaction| PreparedTransaction {
+                transaction,
+                floor_slot,
+            })
+            .collect();
+        Self(prepared)
+    }
 }
 
 impl Outbox {
@@ -94,7 +106,7 @@ impl Outbox {
     /// outcome is unknown, that item's local transaction ID.
     pub(crate) async fn send(
         &self,
-        items: Vec<Item>,
+        items: Vec<SendRequest>,
     ) -> Result<Vec<base::TransactionId>, SendError> {
         let admission = self.reserve(&items)?;
         let (prepared, _) = self.prepare(&items).await?;
@@ -111,25 +123,20 @@ impl Outbox {
     /// As [`Self::send`], in the single-transaction contract's error.
     pub(crate) async fn sign(
         &self,
-        item: Item,
+        item: SendRequest,
     ) -> Result<(SignedTransaction, Lamport), TransactionError> {
         self.sign_one(item)
             .await
             .map_err(crate::error::send_failure)
     }
 
-    async fn sign_one(&self, item: Item) -> Result<(SignedTransaction, Lamport), SendError> {
+    async fn sign_one(&self, item: SendRequest) -> Result<(SignedTransaction, Lamport), SendError> {
         let items = [item];
         let _admission = self.reserve(&items)?;
-        let (
-            SignedBatch {
-                min_slot,
-                mut transactions,
-            },
-            mut fees,
-        ) = self.prepare(&items).await?;
-        let transaction = transactions.remove(0);
-        self.reservations.hold(transaction.clone(), min_slot);
+        let (SignedBatch(mut prepared), mut fees) = self.prepare(&items).await?;
+        let prepared = prepared.remove(0);
+        let transaction = prepared.transaction.clone();
+        self.reservations.hold(prepared);
         Ok((transaction, fees.remove(0)))
     }
 
@@ -155,10 +162,7 @@ impl Outbox {
         id: &TransactionId,
         envelope: &Envelope,
     ) -> Result<base::TransactionId, SendError> {
-        let PreparedTransaction {
-            transaction,
-            min_slot,
-        } = self.reservations.take(id, envelope).ok_or_else(|| {
+        let prepared = self.reservations.take(id, envelope).ok_or_else(|| {
             SendError::definite(
                 WalletErrorKind::Transaction,
                 "Solana transaction was not prepared by this wallet factory or was broadcast",
@@ -166,12 +170,8 @@ impl Outbox {
         })?;
         let admission = self
             .reservations
-            .admit(std::slice::from_ref(&transaction.from), false)?;
-        let prepared = SignedBatch {
-            min_slot,
-            transactions: vec![transaction],
-        };
-        let accepted = self.submit(prepared, admission).await?;
+            .admit(std::slice::from_ref(&prepared.transaction.from), false)?;
+        let accepted = self.submit(SignedBatch(vec![prepared]), admission).await?;
         <[_; 1]>::try_from(accepted)
             .map(|[id]| id)
             .map_err(|_| unavailable("Solana submission returned an invalid result count"))
@@ -190,7 +190,7 @@ impl Outbox {
         }
     }
 
-    fn reserve(&self, items: &[Item]) -> Result<Admission, SendError> {
+    fn reserve(&self, items: &[SendRequest]) -> Result<Admission, SendError> {
         let payers = items
             .iter()
             .map(|item| item.from.clone())
@@ -200,7 +200,10 @@ impl Outbox {
 
     /// Prepare and sign: nothing leaves the process until every item passed.
     /// Returns the batch and each item's priced fee, in item order.
-    async fn prepare(&self, items: &[Item]) -> Result<(SignedBatch, Vec<Lamport>), SendError> {
+    async fn prepare(
+        &self,
+        items: &[SendRequest],
+    ) -> Result<(SignedBatch, Vec<Lamport>), SendError> {
         let (min_slot, balances) = self.balances(items).await?;
         let lifetime = self
             .preflight
@@ -221,22 +224,16 @@ impl Outbox {
                 .map_err(|error| scoped(index, error))?;
         }
         let transactions = Self::sign_each(items, messages, min_slot, &lifetime.value).await?;
-        let mut min_slot = min_slot;
+        let mut floor_slot = min_slot;
         for (index, transaction) in transactions.iter().enumerate() {
-            min_slot = self.simulate(index, transaction, min_slot).await?;
+            floor_slot = self.simulate(index, transaction, floor_slot).await?;
         }
-        Ok((
-            SignedBatch {
-                min_slot,
-                transactions,
-            },
-            fees,
-        ))
+        Ok((SignedBatch::simulated(transactions, floor_slot), fees))
     }
 
     /// Each item's spendable balance, from one bracket of every account the
     /// batch touches, and the bracket's slot.
-    async fn balances(&self, items: &[Item]) -> Result<(u64, Vec<Lamport>), SendError> {
+    async fn balances(&self, items: &[SendRequest]) -> Result<(u64, Vec<Lamport>), SendError> {
         let query = items
             .iter()
             .flat_map(|item| [item.from.clone(), item.transfer.to.clone()])
@@ -281,7 +278,7 @@ impl Outbox {
     /// One distinct message per item, each with a fresh unique memo.
     fn messages(
         &self,
-        items: &[Item],
+        items: &[SendRequest],
         lifetime: &Lifetime,
     ) -> Result<Vec<(UnsignedTransaction, Vec<u8>)>, SendError> {
         let mut memos = BTreeSet::new();
@@ -311,7 +308,7 @@ impl Outbox {
     }
 
     async fn sign_each(
-        items: &[Item],
+        items: &[SendRequest],
         messages: Vec<(UnsignedTransaction, Vec<u8>)>,
         min_slot: u64,
         lifetime: &Lifetime,
@@ -362,10 +359,7 @@ impl Outbox {
         prepared: SignedBatch,
         admission: Admission,
     ) -> Result<Vec<base::TransactionId>, SendError> {
-        let SignedBatch {
-            min_slot,
-            transactions,
-        } = prepared;
+        let SignedBatch(transactions) = prepared;
         let first = transactions.first().ok_or_else(|| {
             SendError::definite(
                 WalletErrorKind::InvalidBatch,
@@ -374,7 +368,6 @@ impl Outbox {
         })?;
         let dispatch = Dispatch {
             submitter: self.submitter.clone(),
-            min_slot,
         };
         dispatch.live(0, first, Vec::new(), "registration").await?;
         let settlement = admission.settlement();
@@ -465,12 +458,18 @@ mod tests {
 
     type Exchange = (&'static str, Value, Value);
 
+    /// The slot every fixture transaction is built at, and the later floor
+    /// simulation leaves its batch at. They differ so that a read made at the
+    /// wrong one of the two fails its scripted exchange.
+    const BUILD_SLOT: u64 = 8;
+    const FLOOR_SLOT: u64 = 11;
+
     fn outbox(script: &Script, registrar: Arc<dyn SubmissionRegistrar>) -> Outbox {
         build(script.client(), registrar, Arc::new(Resolution::default()))
     }
 
-    fn item(key: &Arc<KeyPair>, to: &Address, lamports: u64) -> Item {
-        Item {
+    fn item(key: &Arc<KeyPair>, to: &Address, lamports: u64) -> SendRequest {
+        SendRequest {
             from: key.address().clone(),
             transfer: Transfer {
                 to: to.clone(),
@@ -540,7 +539,7 @@ mod tests {
     fn height(value: Value) -> Exchange {
         (
             "getBlockHeight",
-            json!([{"commitment":"confirmed", "minContextSlot":11}]),
+            json!([{"commitment":"confirmed", "minContextSlot":FLOOR_SLOT}]),
             value,
         )
     }
@@ -550,7 +549,7 @@ mod tests {
             "sendTransaction",
             json!([STANDARD.encode(transaction.envelope.as_bytes()), {
                 "encoding": "base64", "skipPreflight": false, "preflightCommitment": "confirmed",
-                "minContextSlot": 11, "maxRetries": 0,
+                "minContextSlot": FLOOR_SLOT, "maxRetries": 0,
             }]),
             returned,
         )
@@ -589,13 +588,7 @@ mod tests {
             .reservations
             .admit(std::slice::from_ref(&transactions[0].from), false)
             .expect("reservation");
-        (
-            SignedBatch {
-                min_slot: 11,
-                transactions,
-            },
-            admission,
-        )
+        (SignedBatch::simulated(transactions, FLOOR_SLOT), admission)
     }
 
     fn assert_definite(
@@ -697,13 +690,20 @@ mod tests {
             json!({"context":{"slot":9},"value":{"err":null}}),
         ));
         let script = Script::exchanges(exchanges);
-        let (prepared, fees) = outbox(&script, Registrar::closed())
+        let (SignedBatch(prepared), fees) = outbox(&script, Registrar::closed())
             .with_memos([Memo::from_bytes([3; Memo::LENGTH])])
             .prepare(&[item(&signer, &to, 10)])
             .await
             .expect("complete preparation");
-        assert_eq!(prepared.min_slot, 9);
-        assert_eq!(prepared.transactions, [expected]);
+        let [prepared] = <[_; 1]>::try_from(prepared)
+            .ok()
+            .expect("one prepared transaction");
+        assert_eq!(
+            prepared.transaction.min_slot, 8,
+            "built at the last fee read"
+        );
+        assert_eq!(prepared.floor_slot, 9, "simulation advanced the floor");
+        assert_eq!(prepared.transaction, expected);
         assert_eq!(fees, [Lamport::from_atomic(5)]);
         script.exhausted();
     }
@@ -875,8 +875,8 @@ mod tests {
     async fn an_empty_submission_is_invalid_and_releases_its_reservation() {
         let script = Script::exchanges([]);
         let outbox = outbox(&script, Registrar::closed());
-        let (mut empty, admission) = prepared(&outbox, vec![signed(&key(7), 3, 11)]);
-        empty.transactions.clear();
+        let (mut empty, admission) = prepared(&outbox, vec![signed(&key(7), 3, BUILD_SLOT)]);
+        empty.0.clear();
         let error = outbox.submit(empty, admission).await.unwrap_err();
         assert_definite(
             &error,
@@ -905,7 +905,7 @@ mod tests {
         ] {
             let script = Script::exchanges([height(value)]);
             let outbox = outbox(&script, Registrar::closed());
-            let (prepared, admission) = prepared(&outbox, vec![signed(&key(7), 3, 11)]);
+            let (prepared, admission) = prepared(&outbox, vec![signed(&key(7), 3, BUILD_SLOT)]);
             let error = outbox.submit(prepared, admission).await.unwrap_err();
             assert_definite(&error, index, WalletErrorKind::Unavailable, message);
             assert!(!busy(&outbox, key(7).address()));
@@ -917,7 +917,7 @@ mod tests {
     async fn dropping_the_send_before_acknowledgement_never_activates_and_releases_the_sender() {
         let script = Script::exchanges([height(json!(44))]);
         let outbox = outbox(&script, Registrar::withholding());
-        let (prepared, admission) = prepared(&outbox, vec![signed(&key(7), 3, 11)]);
+        let (prepared, admission) = prepared(&outbox, vec![signed(&key(7), 3, BUILD_SLOT)]);
         let mut waiting = Box::pin(outbox.submit(prepared, admission));
         let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
@@ -929,7 +929,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_registered_task_broadcasts_exact_bytes_and_returns_the_local_id() {
-        let transaction = signed(&key(7), 3, 11);
+        let transaction = signed(&key(7), 3, BUILD_SLOT);
         let script = Script::exchanges([
             height(json!(44)),
             send(&transaction, json!(transaction.id.to_string())),
@@ -949,7 +949,10 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_identical_replay_hands_the_unknown_outcome_to_recovery() {
-        let (first, second) = (signed(&key(7), 3, 11), signed(&key(7), 4, 11));
+        let (first, second) = (
+            signed(&key(7), 3, BUILD_SLOT),
+            signed(&key(7), 4, BUILD_SLOT),
+        );
         let mismatch = json!(Signature::from([8; 64]).to_string());
         let absent = json!({"context":{"slot":15},"value":[null]});
         let mut exchanges = vec![
@@ -1008,7 +1011,7 @@ mod tests {
             (absent.clone(), Some(json!(45)), false),
             (absent, Some(json!("unavailable")), false),
         ] {
-            let transaction = signed(&key(7), 3, 11);
+            let transaction = signed(&key(7), 3, BUILD_SLOT);
             let mut exchanges = vec![
                 send(&transaction, json!(Signature::from([8; 64]).to_string())),
                 status(&transaction, status_value),
@@ -1019,12 +1022,8 @@ mod tests {
             let (prepared, admission) = prepared(&outbox, vec![transaction.clone()]);
             let dispatch = Dispatch {
                 submitter: outbox.submitter.clone(),
-                min_slot: prepared.min_slot,
             };
-            match dispatch
-                .run(prepared.transactions, admission.settlement())
-                .await
-            {
+            match dispatch.run(prepared.0, admission.settlement()).await {
                 Outcome::Complete(result) => {
                     assert!(observed);
                     assert_eq!(result.unwrap(), [base::TransactionId::from(transaction.id)]);
@@ -1059,18 +1058,18 @@ mod tests {
                 "Solana block height is unavailable before dispatch",
             ),
         ] {
-            let (first, second) = (signed(&key(7), 3, 11), signed(&key(7), 4, 11));
+            let (first, second) = (
+                signed(&key(7), 3, BUILD_SLOT),
+                signed(&key(7), 4, BUILD_SLOT),
+            );
             let script =
                 Script::exchanges([send(&first, json!(first.id.to_string())), height(value)]);
             let outbox = outbox(&script, Registrar::closed());
             let (prepared, admission) = prepared(&outbox, vec![first.clone(), second]);
             let dispatch = Dispatch {
                 submitter: outbox.submitter.clone(),
-                min_slot: prepared.min_slot,
             };
-            let Outcome::Complete(result) = dispatch
-                .run(prepared.transactions, admission.settlement())
-                .await
+            let Outcome::Complete(result) = dispatch.run(prepared.0, admission.settlement()).await
             else {
                 panic!("an undispatched second item has no unknown outcome");
             };
@@ -1089,7 +1088,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_the_waiter_after_registration_leaves_the_task_running() {
-        let transaction = signed(&key(7), 3, 11);
+        let transaction = signed(&key(7), 3, BUILD_SLOT);
         let script = Script::exchanges([
             height(json!(44)),
             send(&transaction, json!(transaction.id.to_string())),
@@ -1104,6 +1103,48 @@ mod tests {
         assert!(waiter.await.is_err());
         registrar.task().run().await;
         assert!(!busy(&outbox, key(7).address()));
+        script.exhausted();
+    }
+
+    /// The two slots of one held transaction, told apart: it is built at the
+    /// last fee read and broadcast at the floor simulation reached after it.
+    #[tokio::test]
+    async fn a_held_transaction_is_broadcast_at_the_floor_above_its_build_slot() {
+        let signer = key(7);
+        let to = key(8).address().clone();
+        let unsigned = message(&signer, &to, 3);
+        let bytes = unsigned.bytes().unwrap();
+        let expected = unsigned
+            .sign(signer.address(), lifetime(), BUILD_SLOT, signer.as_ref())
+            .await
+            .unwrap();
+        let mut exchanges = bracketed(&[signer.address(), &to], json!([wallet(100), null]));
+        exchanges.push(fee(&bytes, 7, BUILD_SLOT));
+        exchanges.push(simulation(
+            &expected,
+            BUILD_SLOT,
+            json!({"context":{"slot":FLOOR_SLOT},"value":{"err":null}}),
+        ));
+        exchanges.push(height(json!(44)));
+        exchanges.push(send(&expected, json!(expected.id.to_string())));
+        let script = Script::exchanges(exchanges);
+        let registrar = Registrar::accepting();
+        let outbox = Arc::new(
+            outbox(&script, registrar.clone()).with_memos([Memo::from_bytes([3; Memo::LENGTH])]),
+        );
+        let (signed, _) = outbox.sign(item(&signer, &to, 10)).await.expect("signed");
+        assert_eq!(signed, expected);
+        assert_eq!(signed.min_slot, BUILD_SLOT);
+
+        let broadcasting = outbox.clone();
+        let waiter =
+            tokio::spawn(async move { broadcasting.broadcast(&signed.id, &signed.envelope).await });
+        tokio::task::yield_now().await;
+        registrar.task().run().await;
+        assert_eq!(
+            waiter.await.unwrap().expect("broadcast"),
+            base::TransactionId::from(expected.id)
+        );
         script.exhausted();
     }
 
@@ -1160,6 +1201,6 @@ mod tests {
     }
 
     fn signed_by(byte: u8) -> SignedTransaction {
-        signed(&key(byte), 5, 11)
+        signed(&key(byte), 5, BUILD_SLOT)
     }
 }

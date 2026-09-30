@@ -147,7 +147,7 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
     /// at the top of the loop instead.
     fn applied(&mut self, result: Result<SyncStatus, IndexError>) -> Option<Duration> {
         let error = match result {
-            Ok(status) => return self.progressed(&status),
+            Ok(status) => return self.progressed(status),
             Err(error) => error,
         };
         self.attempts = self.attempts.saturating_add(1);
@@ -175,9 +175,9 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
         retrying.then_some(Self::jittered(self.schedule.retry(self.attempts)))
     }
 
-    fn progressed(&mut self, status: &SyncStatus) -> Option<Duration> {
+    fn progressed(&mut self, status: SyncStatus) -> Option<Duration> {
         let now = Self::now();
-        let stalled = Self::stalled(status).is_some();
+        let stalled = Self::stalled(&status).is_some();
         self.attempts = if stalled {
             self.attempts.saturating_add(1)
         } else {
@@ -189,18 +189,14 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
         };
         self.publish(
             NetworkHealth {
-                network: status.network.clone(),
                 state,
-                checkpoint: status.checkpoint.clone(),
-                pending_tip: status.pending_tip.clone(),
-                observed_tip: status.observed_tip.clone(),
                 // The pass succeeded, so forward indexing has no failure
-                // to report; a backfill's does travel, on the row that
+                // to report; a backfill's does travel, on the status that
                 // names the range it belongs to.
                 failure: None,
-                backfill: status.backfill.clone(),
                 attempts: self.attempts,
                 since: now,
+                status,
             },
             now,
         );
@@ -225,10 +221,10 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
     /// It is deliberately not a state change, and deliberately not a hold on
     /// readiness either. Forward synchronization is what an operator's
     /// clients read and it is healthy, so the network reports whatever the
-    /// tip says it is; the failure travels on
-    /// [`NetworkHealth::backfill`](crate::NetworkHealth::backfill), beside
-    /// the range that is stuck, instead of being dropped or turned into an
-    /// outage (`docs/design/024` sections 7 and 8).
+    /// tip says it is; the failure travels on the status
+    /// [`NetworkHealth`] keeps, beside the range that is stuck, instead of
+    /// being dropped or turned into an outage (`docs/design/024` sections 7
+    /// and 8).
     fn stalled(status: &SyncStatus) -> Option<&IndexError> {
         status.backfill.as_ref()?.failure.as_ref()
     }
@@ -257,7 +253,7 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
     /// attempts that did not get anywhere, and a unit whose state never
     /// changes would otherwise report the first one and then go quiet.
     fn publish(&mut self, mut next: NetworkHealth, now: u64) {
-        if next.network != self.health.network {
+        if next.status.network != self.health.status.network {
             return;
         }
         let previous = self.health.state;
@@ -266,10 +262,7 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
         } else {
             now
         };
-        let stalled = next
-            .backfill
-            .as_ref()
-            .is_some_and(|backfill| backfill.failure.is_some());
+        let stalled = Self::stalled(&next.status).is_some();
         self.health.clone_from(&next);
         if previous != next.state
             || next.state == NetworkState::Retrying

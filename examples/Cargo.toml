@@ -7,14 +7,9 @@ description = "Runnable scenarios: one directory per scenario, every chain insid
 readme = "README.md"
 publish = false
 
-# `local.rs` is the examples' non-chain setup, shared by every scenario as the
-# `local` library: the deployment document each one configures its chains
-# from, the index file, and the node transport. A scenario directory is one
-# `[[example]]` — its `main.rs` — beside the `config.toml` that states its
-# chains.
-[lib]
-name = "local"
-path = "local.rs"
+# A scenario directory is one `[[example]]`: its `main.rs`, beside the
+# `config.toml` that states its chains. Each is self-contained, so the package
+# has no library.
 
 [dependencies]
 base = { path = "../sdk/base" }
@@ -22,12 +17,11 @@ chain-bitcoin = { path = "../sdk/chains/bitcoin" }
 chain-ethereum = { path = "../sdk/chains/ethereum" }
 chain-solana = { path = "../sdk/chains/solana" }
 sdk-config = { path = "../sdk/config", features = ["toml"] }
-wallets = { path = "../sdk/wallets" }
+wallets = { path = "../sdk/wallets", features = ["submissions"] }
 indexing = { path = "../sdk/indexing" }
 json-rpc = { path = "../packages/json-rpc" }
-serde = { workspace = true, features = ["derive", "std"] }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["fs", "sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 
 [[example]]
 name = "wallet"

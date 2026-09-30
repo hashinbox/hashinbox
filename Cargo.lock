@@ -2778,28 +2778,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
-name = "payment-api"
-version = "0.1.0"
-dependencies = [
- "axum",
- "base",
- "base64",
- "hex",
- "http-body-util",
- "http-server",
- "indexing",
- "serde",
- "serde_json",
- "tokio",
- "tower 0.5.2",
- "utoipa",
- "utoipa-axum",
- "uuid",
- "wallets",
- "zeroize",
-]
-
-[[package]]
 name = "payment-examples"
 version = "0.1.0"
 dependencies = [
@@ -2810,7 +2788,6 @@ dependencies = [
  "indexing",
  "json-rpc",
  "sdk-config",
- "serde",
  "serde_json",
  "tokio",
  "wallets",
@@ -2825,16 +2802,17 @@ dependencies = [
  "alloy-primitives",
  "axum",
  "base",
+ "base64",
  "bitcoin",
  "chain-bitcoin",
  "chain-ethereum",
  "chain-solana",
  "futures-executor",
  "hex",
+ "http-body-util",
  "http-server",
  "indexing",
  "json-rpc",
- "payment-api",
  "reqwest",
  "sdk-config",
  "serde",
@@ -2842,7 +2820,12 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tower 0.5.2",
+ "utoipa",
+ "utoipa-axum",
+ "uuid",
  "wallets",
+ "zeroize",
 ]
 
 [[package]]

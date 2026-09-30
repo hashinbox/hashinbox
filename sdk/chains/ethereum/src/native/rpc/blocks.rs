@@ -133,7 +133,8 @@ impl<C: json_rpc::Client> Client<C> {
         let head = Self::head(&raw, Some(BlockHeight(position.0)), true)?;
         let receipts = self.receipts(&head).await?;
         let traces = self.traces(&head).await?;
-        let block = RawBlock::new(head.reference, raw.into_bytes(), receipts, traces);
+        let network = self.network().clone();
+        let block = RawBlock::new(head.reference, network, raw.into_bytes(), receipts, traces);
         block.parse().map_err(Error::unusable)?;
         Ok(Some(block))
     }

@@ -11,7 +11,8 @@
 //! accepted, so a conflicting definition anywhere leaves no row behind.
 
 use crate::{
-    BoxFuture, Holder, IndexError, IndexErrorKind, Network, Watch, WatchProgress, WatchStore,
+    Address, BoxFuture, Holder, IndexError, IndexErrorKind, Network, Watch, WatchProgress,
+    WatchStore,
 };
 
 use super::{Repository, Tables, conflict};
@@ -56,7 +57,7 @@ impl WatchStore for Repository {
         })
     }
 
-    fn reanchor<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
+    fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
         Box::pin(async move {
             Self::one_network(&watches)?;
             // One `apply`, so the withdrawal and the registration are staged
@@ -135,6 +136,20 @@ impl Repository {
                     .cloned(),
                 watch: watch.clone(),
             })
+            .collect()
+    }
+
+    /// Every observation of `address`, whatever its asset, each beside the
+    /// progress recorded for it.
+    ///
+    /// What a query of the address's rows is honest with
+    /// ([`crate::Inspection`]). It is read under the same lock as
+    /// those rows, so a claim about how far the address has been inspected is a
+    /// claim about the very rows returned.
+    pub(super) fn observing(tables: &Tables, address: &Address) -> Vec<WatchProgress> {
+        Self::paired(tables, &address.network)
+            .into_iter()
+            .filter(|observed| observed.watch.address == *address)
             .collect()
     }
 

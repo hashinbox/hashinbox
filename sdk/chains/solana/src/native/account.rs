@@ -62,7 +62,7 @@ impl Account {
 /// read pinned between a slot before it and a slot after it. It is not a
 /// balance witness — Solana has none, because an account cannot be read at a
 /// past slot (`docs/CHAIN_LAYOUT.md` section 6) — and the name deliberately
-/// does not borrow ethereum's `Witness`, which attests a folded balance and
+/// does not borrow ethereum's `BalanceWitness`, which attests a folded balance and
 /// answers a different question (`docs/DEFECT_PATTERNS.md` section 2.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bracket {

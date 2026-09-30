@@ -103,10 +103,15 @@ impl Repository {
         // them: an output created and then spent inside one batch leaves a
         // recorded spend rather than nothing at all, so replaying the block that
         // created it cannot offer it again.
-        for facts in batch.blocks() {
-            self.fill_history(facts.transactions(), tables)?;
-            self.fill_credits(network, facts.credits(), facts.block().height, tables)?;
-            unknown.extend(self.fill_outputs(network, facts.outputs(), tables)?);
+        for canonical in batch.blocks() {
+            self.fill_history(canonical.transactions(), tables)?;
+            self.fill_credits(
+                network,
+                canonical.credits(),
+                canonical.block().height,
+                tables,
+            )?;
+            unknown.extend(self.fill_outputs(network, canonical.outputs(), tables)?);
         }
         for claim in batch.progress() {
             Self::advance(network, claim, tables)?;
@@ -130,12 +135,12 @@ impl Repository {
     /// different value — never one that went down (`docs/design/030 §8 (ex-032)`,
     /// [`Progress`]).
     fn advance(network: &Network, claim: &Progress, tables: &mut Tables) -> Result<(), IndexError> {
-        if tables.identities.get(&claim.watch) != Some(network) {
+        if tables.identities.get(&claim.watch_id) != Some(network) {
             return Err(conflict(
                 "indexed progress names an observation this store does not hold",
             ));
         }
-        let key = (network.clone(), claim.watch.clone());
+        let key = (network.clone(), claim.watch_id.clone());
         if tables.progress.get(&key) != claim.expected.as_ref() {
             return Err(conflict("recorded progress changed before this commit"));
         }
@@ -149,7 +154,7 @@ impl Repository {
     /// duplicate.
     fn fill_history(
         &self,
-        transactions: &[crate::CanonicalTransaction],
+        transactions: &crate::Transactions<crate::CanonicalTransaction>,
         tables: &mut Tables,
     ) -> Result<(), IndexError> {
         for transaction in transactions {

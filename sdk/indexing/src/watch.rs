@@ -2,16 +2,19 @@
 
 use crate::{Address, AssetId, BlockPosition, BoxFuture, Holder, IndexError, Network};
 
-/// One observed address and the first block a pass must inspect for it.
+/// The range one address is inspected for at the front of the chain: the
+/// address, and the first block a pass must inspect for it.
 ///
-/// The reduced form of a [`Watch`] that a pass actually needs, read from the
-/// index's own watch set rather than handed in by a caller. `start_position` is
-/// the address's *next required* block — the successor of whatever was last
-/// inspected for it, or its birthday when nothing was — and not simply the
-/// birthday, which is why this is derived from
-/// [`crate::WatchProgress`] rather than from a [`Watch`] alone.
+/// One item of work, not a predicate, and the forward counterpart of the range
+/// an observation still owes below the line. It is the reduced form of a
+/// [`Watch`] that a pass actually needs, read from the index's own watch set
+/// rather than handed in by a caller. `start_position` is the address's *next
+/// required* block — the successor of whatever was last inspected for it, or
+/// its birthday when nothing was — and not simply the birthday, which is why
+/// this is derived from [`crate::WatchProgress`] rather than from a [`Watch`]
+/// alone. The range has no end of its own: it runs to wherever the pass stops.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AddressFilter {
+pub struct ForwardRange {
     /// The address to index, in its network's canonical text.
     pub address: Address,
     /// The first block this pass must inspect for the address: the successor of
@@ -24,7 +27,7 @@ pub struct AddressFilter {
 /// No default and no `Option`: a birthday below the checkpoint was once
 /// accepted silently and indexed nothing (`docs/design/024` section 1.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Start {
+pub enum Birthday {
     /// This key or address has never been used, so observation begins at the
     /// block after the current checkpoint. An assertion of fact: a caller who
     /// does not know cannot honestly write it.
@@ -78,7 +81,7 @@ pub trait Watching: Send + Sync {
     /// nothing observes (`docs/design/030 §8 (ex-029)` section 3.3).
     ///
     /// Re-watching the same address under the same id is a no-op; a known
-    /// address under another id, another `Start::At`, or a known id on another
+    /// address under another id, another `Birthday::At`, or a known id on another
     /// address, is `Conflict`.
     ///
     /// # Errors
@@ -91,7 +94,7 @@ pub trait Watching: Send + Sync {
         &'a self,
         id: &'a str,
         subject: &'a dyn Holder,
-        start: Start,
+        start: Birthday,
     ) -> BoxFuture<'a, Result<Watch, IndexError>>;
 
     /// Stops observing whatever `id` watches, and returns the row it removed.
@@ -106,9 +109,11 @@ pub trait Watching: Send + Sync {
     /// `GET /v1/wallets/{id}/balance` and the history page answer `404` the
     /// moment the row is gone, exactly as they do for an id that was never
     /// watched. An SDK caller holding the bare address still reads them, because
-    /// [`crate::History`] and [`crate::Balances`] answer for a
-    /// [`Holder`](crate::Holder) and consult no watch list — which is the same
-    /// reason they answer for an address this process watched a moment ago.
+    /// [`crate::ConfirmedHistory`] and [`crate::BalanceStore`] answer for an
+    /// address and asset and are keyed by no watch — which is the same reason
+    /// they answer for an address this process watched a moment ago. What the
+    /// rows may *claim* goes with the observation: a holding nothing observes
+    /// is never [`crate::Completeness::CompleteHistory`].
     ///
     /// The one thing it does remove is the *claim*:
     /// [`crate::WatchProgress::indexed_through`]
@@ -121,7 +126,7 @@ pub trait Watching: Send + Sync {
     /// address keeps its own, earned under its own birthday.
     ///
     /// **The address may be watched again**, under any id and from any
-    /// [`Start`], and it then reads its range again rather than inheriting a
+    /// [`Birthday`], and it then reads its range again rather than inheriting a
     /// settled claim: bounded by the same
     /// [`SyncPolicy::max_backfill_blocks`](crate::SyncPolicy) the first watch was
     /// bounded by, and idempotent where the rows already exist (verified, not

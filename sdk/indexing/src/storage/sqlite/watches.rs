@@ -99,7 +99,7 @@ impl WatchStore for Repository {
     /// One transaction for the batch, and a **narrowed** write inside it: the
     /// birthday it now carries and the claim that birthday invalidates, and
     /// nothing else.
-    fn reanchor<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
+    fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
         Box::pin(async move {
             let Some(network) = Self::one_network(&watches)? else {
                 return Ok(());
@@ -110,7 +110,7 @@ impl WatchStore for Repository {
                 .map(Observation::of)
                 .collect::<Result<Vec<_>, _>>()?;
             self.database
-                .transaction(move |transaction| tables.reanchor(transaction, &rows))
+                .transaction(move |transaction| tables.cancel_backfill(transaction, &rows))
                 .await
         })
     }
@@ -145,15 +145,48 @@ impl Tables {
     /// Every observation of this network, with the progress recorded for it, in
     /// one statement.
     fn observations(&self, connection: &Connection) -> Result<Vec<WatchProgress>, IndexError> {
+        let selected = format!(
+            "SELECT {COLUMNS} FROM watch
+             WHERE chain = ?1 AND network = ?2
+             ORDER BY asset, address"
+        );
+        self.observed(connection, &selected, params![self.chain(), self.name()])
+    }
+
+    /// Every observation of `address`, whatever its asset, with the progress
+    /// recorded for it, read inside the caller's own snapshot.
+    ///
+    /// What a query of the address's rows is honest with
+    /// ([`crate::Inspection`]): the rows and the observations
+    /// they were written for come from one transaction, so a claim about how far
+    /// the address has been inspected is a claim about the very rows returned.
+    /// The `watch_address` index is what keeps it a lookup rather than a walk of
+    /// the network's whole watch list on every read.
+    pub(super) fn observing(
+        &self,
+        read: &Connection,
+        address: &str,
+    ) -> Result<Vec<WatchProgress>, IndexError> {
+        let selected = format!(
+            "SELECT {COLUMNS} FROM watch
+             WHERE chain = ?1 AND network = ?2 AND address = ?3
+             ORDER BY asset"
+        );
+        self.observed(read, &selected, params![self.chain(), self.name(), address])
+    }
+
+    /// The observations `selected` names, each with its recorded progress.
+    fn observed(
+        &self,
+        connection: &Connection,
+        selected: &str,
+        bound: impl rusqlite::Params,
+    ) -> Result<Vec<WatchProgress>, IndexError> {
         let mut statement = connection
-            .prepare_cached(&format!(
-                "SELECT {COLUMNS} FROM watch
-                 WHERE chain = ?1 AND network = ?2
-                 ORDER BY asset, address"
-            ))
+            .prepare_cached(selected)
             .map_err(|error| failure(&error, "failed to prepare a watch read"))?;
         let mut rows = statement
-            .query(params![self.chain(), self.name()])
+            .query(bound)
             .map_err(|error| failure(&error, "failed to read the watch list"))?;
         let mut observed = Vec::new();
         while let Some(row) = Self::step(&mut rows)? {
@@ -206,7 +239,7 @@ impl Tables {
     /// one precondition is monotonicity — a birthday below the stored one is
     /// refused — which still holds under repeat, because raising to a birthday
     /// already stored is a no-op.
-    fn reanchor(
+    fn cancel_backfill(
         &self,
         transaction: &Transaction<'_>,
         rows: &[Observation],

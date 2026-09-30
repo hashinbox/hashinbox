@@ -14,13 +14,14 @@ mod withdrawal;
 use base::BlockRef;
 
 pub(crate) use head::Head;
+pub use head::ListedTransaction;
 pub use log::Log;
 pub use receipt::Receipt;
 pub use trace::{Balance, Trace};
 pub use transaction::{Fee, Movement, Transaction};
 pub use withdrawal::Withdrawal;
 
-use crate::native::Error;
+use crate::native::{Error, Network};
 
 /// One parsed block: its reference and transactions in block order.
 pub type Block = base::Block<Transaction>;
@@ -31,8 +32,10 @@ pub type Transactions = base::Transactions<Transaction>;
 ///
 /// The payload is the JSON-RPC `result` bytes of `eth_getBlockByNumber` (with
 /// full transactions), of each transaction receipt in block order, and of the
-/// block's `debug_traceBlockByHash` prestate diff. Keeping bytes rather than
-/// parsed facts makes replay independent of this parser.
+/// block's `debug_traceBlockByHash` prestate diff, plus the network they were
+/// read from: nothing in the bytes names it, and EVM chains share block
+/// formats, so it is stated by the client that verified the chain ID. Keeping
+/// bytes rather than parsed facts makes replay independent of this parser.
 ///
 /// Traces are an order of magnitude larger than the block that carries them
 /// and are held for one indexing pass only: nothing writes a `RawBlock` to
@@ -40,6 +43,7 @@ pub type Transactions = base::Transactions<Transaction>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawBlock {
     reference: BlockRef,
+    network: Network,
     block: Vec<u8>,
     receipts: Vec<Vec<u8>>,
     traces: Vec<u8>,
@@ -50,12 +54,14 @@ impl RawBlock {
     #[must_use]
     pub const fn new(
         reference: BlockRef,
+        network: Network,
         block: Vec<u8>,
         receipts: Vec<Vec<u8>>,
         traces: Vec<u8>,
     ) -> Self {
         Self {
             reference,
+            network,
             block,
             receipts,
             traces,
@@ -66,6 +72,12 @@ impl RawBlock {
     #[must_use]
     pub const fn reference(&self) -> &BlockRef {
         &self.reference
+    }
+
+    /// The network the evidence was read from.
+    #[must_use]
+    pub const fn network(&self) -> &Network {
+        &self.network
     }
 
     /// The `eth_getBlockByNumber` result bytes.
@@ -125,12 +137,12 @@ impl RawBlock {
             .into_iter()
             .zip(receipts)
             .zip(traces)
-            .map(|((sent, receipt), trace)| Transaction::new(sent, receipt, trace))
+            .map(|((listed, receipt), trace)| Transaction::new(listed, receipt, trace))
             .collect::<Result<Vec<_>, _>>()?;
         let transactions = Transactions::new(transactions).map_err(|_| {
             Error::invalid_block("Ethereum block contains duplicate transaction hashes")
         })?;
-        Ok(Block::new(head.reference, transactions))
+        Ok(Block::new(&self.network, head.reference, transactions))
     }
 }
 
@@ -140,7 +152,6 @@ mod tests {
     use base::{BlockHash, BlockHeight, BlockParent, BlockPosition, MovementKind};
     use serde_json::{Value, json};
 
-    use super::head::Sent;
     use super::*;
     use crate::native::{Address, AssetKind, TransactionId, Wei, erc20::TRANSFER_TOPIC};
 
@@ -164,25 +175,25 @@ mod tests {
                 }),
                 timestamp: Some(100),
             },
-            transactions: vec![Sent {
+            transactions: vec![ListedTransaction {
                 id: TransactionId::from_bytes([0xcc; 32]),
                 from: Address::from_bytes([0x11; 20]),
                 to: Some(Address::from_bytes([0x22; 20])),
-                value: U256::from(42_u8),
+                value: Wei::from_u128(42),
                 index: 0,
             }],
         }
     }
 
-    fn receipt_value(sent: &Sent, log_indexes: &[u64]) -> Value {
+    fn receipt_value(listed: &ListedTransaction, log_indexes: &[u64]) -> Value {
         let logs = log_indexes
             .iter()
             .map(|index| {
                 json!({
                     "blockHash": B256::from([0xaa; 32]).to_string(),
                     "blockNumber": "0xa",
-                    "transactionHash": sent.id.to_string(),
-                    "transactionIndex": format!("0x{:x}", sent.index),
+                    "transactionHash": listed.id.to_string(),
+                    "transactionIndex": format!("0x{:x}", listed.index),
                     "removed": false,
                     "address": Address::from_bytes([0x33; 20]).to_string(),
                     "topics": [],
@@ -192,12 +203,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         json!({
-            "transactionHash": sent.id.to_string(),
-            "transactionIndex": format!("0x{:x}", sent.index),
+            "transactionHash": listed.id.to_string(),
+            "transactionIndex": format!("0x{:x}", listed.index),
             "blockHash": B256::from([0xaa; 32]).to_string(),
             "blockNumber": "0xa",
-            "from": sent.from.to_string(),
-            "to": sent.to.as_ref().map(ToString::to_string),
+            "from": listed.from.to_string(),
+            "to": listed.to.as_ref().map(ToString::to_string),
             "contractAddress": null,
             "status": "0x1",
             "gasUsed": "0x5208",
@@ -548,6 +559,7 @@ mod tests {
         let reference = Head::parse(&block, None, true).unwrap().reference;
         RawBlock::new(
             reference,
+            Network::new(31_337, "anvil"),
             block,
             vec![serde_json::to_vec(&receipt).unwrap()],
             serde_json::to_vec(&traces).unwrap(),
@@ -760,6 +772,7 @@ mod tests {
         failed["status"] = json!("0x0");
         let raw = RawBlock::new(
             raw.reference().clone(),
+            raw.network().clone(),
             raw.block().to_vec(),
             vec![serde_json::to_vec(&failed).unwrap()],
             raw.traces().to_vec(),
@@ -852,6 +865,28 @@ mod tests {
             .expect("a trace without the recipient still parses");
     }
 
+    /// The parsed block belongs to the network its evidence was read from,
+    /// and to no other: the same bytes retained for two networks parse into
+    /// two different blocks.
+    #[test]
+    fn a_parsed_block_carries_the_network_of_its_evidence() {
+        let raw = raw_block("0x0", "0x1", Vec::new());
+        let anvil = raw.parse().unwrap();
+        assert_eq!(anvil.network().chain, crate::native::CHAIN_NAME);
+        assert_eq!(anvil.network().name, "anvil");
+
+        let elsewhere = RawBlock::new(
+            raw.reference().clone(),
+            Network::new(11_155_111, "sepolia"),
+            raw.block().to_vec(),
+            raw.receipts().to_vec(),
+            raw.traces().to_vec(),
+        );
+        let sepolia = elsewhere.parse().unwrap();
+        assert_eq!(sepolia.network().name, "sepolia");
+        assert_ne!(anvil, sepolia);
+    }
+
     #[test]
     fn parse_rejects_a_mismatched_reference_and_fee_overflow() {
         let raw = raw_block("0x0", "0x1", Vec::new());
@@ -859,6 +894,7 @@ mod tests {
         reference.timestamp = Some(1);
         let moved = RawBlock::new(
             reference,
+            raw.network().clone(),
             raw.block().to_vec(),
             raw.receipts().to_vec(),
             raw.traces().to_vec(),
@@ -887,6 +923,7 @@ mod tests {
         }]);
         let shanghai = RawBlock::new(
             raw.reference().clone(),
+            raw.network().clone(),
             serde_json::to_vec(&body).unwrap(),
             raw.receipts().to_vec(),
             raw.traces().to_vec(),

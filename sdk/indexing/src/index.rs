@@ -21,8 +21,8 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
-    Backfilling, BlockRef, BoxFuture, Checkpoint, Holder, IndexError, IndexErrorKind, Indexing,
-    Listener, Network, Start, SyncPhase, SyncStatus, Watch, Watching,
+    Backfilling, Birthday, BlockRef, BoxFuture, Checkpoint, Holder, IndexError, IndexErrorKind,
+    Indexing, Listener, Network, SyncPhase, SyncStatus, Watch, Watching,
 };
 
 /// One index over any number of independently implemented chains.
@@ -326,7 +326,7 @@ impl<C: Indexing + ?Sized> Watching for Index<C> {
         &'a self,
         id: &'a str,
         subject: &'a dyn Holder,
-        start: Start,
+        start: Birthday,
     ) -> BoxFuture<'a, Result<Watch, IndexError>> {
         match self.indexer(&subject.address().network) {
             Ok(indexer) => indexer.watch(id, subject, start),
@@ -337,7 +337,7 @@ impl<C: Indexing + ?Sized> Watching for Index<C> {
     /// An id is unique across the whole composition, so an unwatch asks each
     /// unit in turn and stops at the one that held it. Nothing else can find it:
     /// the caller has an id and not a network, which is exactly how
-    /// `apps/api` addresses a wallet.
+    /// `apps/server` addresses a wallet.
     fn unwatch<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<Watch>, IndexError>> {
         Box::pin(async move {
             for unit in &self.units {
@@ -363,9 +363,12 @@ impl<C: Indexing + ?Sized> Watching for Index<C> {
 /// A cancellation routes on its own network, exactly as a read does: one
 /// network's owed range is nothing to do with another's.
 impl<C: Indexing + ?Sized> Backfilling for Index<C> {
-    fn cancel<'a>(&'a self, network: &'a Network) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
+    fn cancel_backfill<'a>(
+        &'a self,
+        network: &'a Network,
+    ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
         match self.indexer(network) {
-            Ok(indexer) => indexer.cancel(network),
+            Ok(indexer) => indexer.cancel_backfill(network),
             Err(error) => Box::pin(async move { Err(error) }),
         }
     }

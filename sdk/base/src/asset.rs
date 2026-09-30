@@ -1,6 +1,16 @@
 use crate::{ChainName, ChainNetwork};
 
 /// One asset within one chain family; the chain's own currency is [`AssetId::native`].
+///
+/// It names no network, on purpose. The chain's own currency is one asset on
+/// every network of that chain, and a chain builds a token's identity from the
+/// chain name and the token's own text alone. Which network an amount of it
+/// sits on is said by the value beside it: the [`crate::Address`] that holds
+/// it or the [`crate::TransactionRef`] that moved it. Whoever pairs the two
+/// checks only that the chains agree.
+///
+/// The same token text on two networks of one chain is therefore one
+/// `AssetId`: a map keyed by `AssetId` alone cannot tell them apart.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AssetId {
     /// The chain family the asset lives on.

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::{BackfillStatus, BlockRef, IndexError, Network};
+use crate::{IndexError, Network, SyncPhase, SyncStatus};
 
 /// What one network's indexing is doing.
 ///
@@ -24,60 +24,50 @@ pub enum NetworkState {
     Quarantined,
 }
 
-/// One network's current indexing health.
+/// One network's current indexing health: its standing condition, and what the
+/// last pass that completed reported.
 ///
-/// Five of its fields are also [`crate::SyncStatus`]'s (`network`,
-/// `checkpoint`, `pending_tip`, `observed_tip`, `backfill`) and are copied from
-/// one to the other in `supervisor/unit.rs`. **That is deliberate and is not an
-/// oversight.** A `SyncStatus` is what one pass returned; a `NetworkHealth` is
-/// the standing condition a caller reads between passes, which is why
-/// [`NetworkState`] has two variants `SyncPhase` does not and why this file
-/// compiles without the `supervisor` feature. A nested `SyncStatus` would put
-/// its `phase` beside this type's `state` redundantly, and
-/// `apps/api`'s `/v1/status` projects these fields onto a wire type, so the
-/// change would be wire-visible for about thirty lines (`docs/design/033`
-/// section 5.12).
+/// A [`SyncStatus`] is what one pass returned; this is what a caller reads
+/// between passes, so it holds that status whole rather than restating it, and
+/// adds the four facts no pass can report about itself. `status.phase` is the
+/// answer of that pass and nothing later: `state` is what the network is doing
+/// now, which is why it has two variants [`SyncPhase`] does not, and the two
+/// disagree whenever a pass has failed since.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkHealth {
-    /// The network this health describes.
-    pub network: Network,
     /// What the network is doing.
     pub state: NetworkState,
-    /// The last durably committed block: the network's confirmed line, frozen
-    /// while quarantined.
-    pub checkpoint: Option<BlockRef>,
-    /// The newest block held above the confirmed line, or `None` when nothing
-    /// is. Read beside `checkpoint`, it shows that a checkpoint below the tip
-    /// is the confirmation depth rather than lag.
-    pub pending_tip: Option<BlockRef>,
-    /// The source tip the last successful pass indexed towards.
-    pub observed_tip: Option<BlockRef>,
     /// The error that is holding *forward* indexing back; `None` while it is
     /// healthy. Its `kind`, `retryable` and `message` are the whole of what a
     /// probe or a status route reports.
     ///
     /// A backfill failure never appears here. It is not why the network is in
     /// its state — the state is about the tip, and the tip is fine — so it
-    /// travels on [`NetworkHealth::backfill`] with the range it belongs to.
+    /// travels on the status's [`SyncStatus::backfill`] with the range it
+    /// belongs to.
     pub failure: Option<IndexError>,
-    /// The history this network still owes addresses watched from below its
-    /// checkpoint, and why the last attempt at it stopped; `None` when
-    /// nothing is owed.
-    ///
-    /// It is reported rather than gating, and this is the whole of the
-    /// availability decision: a range a pruned node can never serve would
-    /// otherwise hold every chain's readiness down for the life of the
-    /// process, while forward indexing answered every question a client
-    /// actually asks. An operator reads the stuck range here; a caller reads
-    /// the same fact as [`Completeness`](crate::Completeness) on the balance
-    /// or the history page it weakens (`docs/design/024` section 7).
-    pub backfill: Option<BackfillStatus>,
     /// Consecutive attempts that got nowhere: failed passes, and passes whose
     /// backfill failed. `0` while nothing is failing.
     pub attempts: u32,
     /// Unix seconds at which `state` was entered. Supplied by the driving
     /// loop: this crate owns no clock.
     pub since: u64,
+    /// What the last completed pass reported: the network, its confirmed line,
+    /// the newest block held above it, the tip it indexed towards and the
+    /// history it still owes. Before the first pass it names the network and
+    /// nothing else.
+    ///
+    /// A failed pass never rewrites it, so the checkpoint stays frozen where
+    /// indexing got to while the network is retrying or quarantined.
+    ///
+    /// The owed backfill is reported rather than gating, and this is the whole
+    /// of the availability decision: a range a pruned node can never serve
+    /// would otherwise hold every chain's readiness down for the life of the
+    /// process, while forward indexing answered every question a client
+    /// actually asks. An operator reads the stuck range here; a caller reads
+    /// the same fact as [`Completeness`](crate::Completeness) on the balance
+    /// or the history page it weakens (`docs/design/024` section 7).
+    pub status: SyncStatus,
 }
 
 /// Every configured network's health and the readiness it implies.
@@ -95,15 +85,19 @@ impl NetworkHealth {
     #[must_use]
     pub fn starting(network: &Network) -> Self {
         Self {
-            network: network.clone(),
             state: NetworkState::CatchingUp,
-            checkpoint: None,
-            pending_tip: None,
-            observed_tip: None,
             failure: None,
-            backfill: None,
             attempts: 0,
             since: 0,
+            status: SyncStatus {
+                network: network.clone(),
+                checkpoint: None,
+                pending_tip: None,
+                observed_tip: None,
+                phase: SyncPhase::CatchingUp,
+                unmatched_spends: Vec::new(),
+                backfill: None,
+            },
         }
     }
 }
@@ -126,7 +120,7 @@ impl SyncHealth {
         let Some(row) = self
             .networks
             .iter_mut()
-            .find(|row| row.network == health.network)
+            .find(|row| row.status.network == health.status.network)
         else {
             return;
         };
@@ -135,7 +129,7 @@ impl SyncHealth {
             health.state,
             NetworkState::Ready | NetworkState::Quarantined
         ) {
-            self.settled.insert(health.network.clone());
+            self.settled.insert(health.status.network.clone());
         }
     }
 
@@ -162,11 +156,17 @@ impl SyncHealth {
                 .any(|row| row.state == NetworkState::Ready)
     }
 
-    /// Whether every network has settled: reached `Ready` at least once, or
-    /// become `Quarantined`. This is the gate a startup sequence waits on;
-    /// `Retrying` is expected to heal and keeps holding it.
+    /// Whether every network has settled at some point: reached `Ready` at least
+    /// once, or become `Quarantined`. This is the gate a startup sequence waits
+    /// on; `Retrying` is expected to heal and keeps holding it.
+    ///
+    /// **A latch, not a predicate over the current states.** [`Self::apply`]
+    /// records a network the first time it reports `Ready` or `Quarantined` and
+    /// nothing ever clears that record, so a network that settled and then fell
+    /// behind again still counts here. What the networks are doing *now* is
+    /// [`Self::ready`].
     #[must_use]
-    pub fn settled(&self) -> bool {
+    pub fn ever_settled(&self) -> bool {
         self.settled.len() == self.networks.len()
     }
 }
@@ -210,7 +210,7 @@ mod tests {
             health.apply(&reported(&second, states[1]));
             assert_eq!(health.ready(), ready, "{states:?}");
             assert!(
-                health.settled()
+                health.ever_settled()
                     || states.contains(&NetworkState::CatchingUp)
                     || states.contains(&NetworkState::Retrying)
             );
@@ -221,13 +221,13 @@ mod tests {
     fn a_network_stays_settled_after_it_falls_behind_again() {
         let only = network("only");
         let mut health = SyncHealth::starting(std::slice::from_ref(&only));
-        assert!(!health.settled());
+        assert!(!health.ever_settled());
 
         health.apply(&reported(&only, NetworkState::Ready));
-        assert!(health.settled());
+        assert!(health.ever_settled());
 
         health.apply(&reported(&only, NetworkState::CatchingUp));
-        assert!(health.settled(), "settling is reached once, not held");
+        assert!(health.ever_settled(), "settling is reached once, not held");
         assert!(!health.ready());
     }
 
@@ -238,6 +238,6 @@ mod tests {
         health.apply(&reported(&network("other"), NetworkState::Ready));
 
         assert_eq!(health.networks(), [NetworkHealth::starting(&only)]);
-        assert!(!health.settled());
+        assert!(!health.ever_settled());
     }
 }

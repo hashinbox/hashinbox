@@ -8,10 +8,13 @@ use json_rpc::{Batch, CallResult, RawJson, Request};
 use serde_json::{Value, json};
 
 use base::{BlockHash, BlockHeight, BlockPosition, BlockRef, BoxFuture, Networked};
-use indexing::{Checkpoint, History, IndexError, Network, TransactionPage};
+use indexing::{Checkpoint, IndexError, Network};
 use solana_hash::Hash;
 
-use wallets::{RegistrationError, RegistrationFuture, SubmissionRegistrar, SubmissionTask};
+use wallets::{
+    History, RegistrationError, RegistrationFuture, SubmissionRegistrar, SubmissionTask,
+    TransactionPage,
+};
 
 use super::{Outbox, recovery::Settler, reservation::Reservations};
 use crate::native::{

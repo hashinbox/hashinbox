@@ -9,7 +9,7 @@
 /// A file's `PRAGMA user_version` is the number of steps applied to it, so step
 /// `n` is applied exactly once, in one transaction with the bump that records
 /// it.
-pub(super) const MIGRATIONS: [&str; 1] = [REPOSITORY];
+pub(super) const MIGRATIONS: [&str; 2] = [REPOSITORY, WATCHED_ADDRESS];
 
 /// The schema this build creates, whole, in one step.
 ///
@@ -21,8 +21,9 @@ pub(super) const MIGRATIONS: [&str; 1] = [REPOSITORY];
 /// copied it into this one would be migrating a file nothing ever wrote —
 /// executable proof of an equivalence between a live shape and a shape this
 /// build never produces, which proves nothing about either. The file this
-/// build creates carries `PRAGMA user_version = 1` and one whose version it
-/// cannot account for is refused rather than interpreted (`schema.rs`).
+/// build creates carries the number of steps in [`MIGRATIONS`] as its
+/// `PRAGMA user_version`, and one whose version it cannot account for is
+/// refused rather than interpreted (`schema.rs`).
 ///
 /// Everything below is framed by `(chain, network)` as its leading key columns,
 /// which is what makes `purge_network` one `DELETE ... WHERE` per table, and is
@@ -37,7 +38,7 @@ pub(super) const MIGRATIONS: [&str; 1] = [REPOSITORY];
 ///   bought a foreign key, a cascade and one extra read per recorded claim;
 ///   folded in, `WatchStore::all`'s "one consistent snapshot" is a single
 ///   statement with nothing to pair. `id` keeps a file-wide unique index rather
-///   than a per-network one, because `payment_api`'s identity map is global.
+///   than a per-network one, because `payment-server`'s identity map is global.
 /// - `network_checkpoint` is the network's confirmed line, a table of its own
 ///   because individual watches may still be catching up to it — which is
 ///   `WatchProgress::caught_up`.
@@ -79,7 +80,7 @@ pub(super) const MIGRATIONS: [&str; 1] = [REPOSITORY];
 /// subject at the same block agreed with the fold — and nothing in the
 /// persistence layer could ever write it. The only thing in this SDK that
 /// produces an attestation is `chain_ethereum::BalanceWitness`, which reads a
-/// node and mutates a `Balance` value on its way to a caller; persisting what it
+/// node and reports to its caller whether the two agreed; persisting what it
 /// learned means giving it a store to write to, and that is an ownership change
 /// (`docs/design/034` steps 9-12) rather than a schema one. The evidence columns
 /// `034` section 3.1 paired with it were never created for the same reason:
@@ -230,4 +231,19 @@ const REPOSITORY: &str = "
     CREATE INDEX output_unspent
         ON output (chain, network, address, transaction_id, output_index)
         WHERE spent = 0;
+";
+
+/// Every observation of one address, as a lookup.
+///
+/// `watch` is keyed `(chain, network, asset, address)`, which serves the read
+/// that names an asset and no other. A balance, a history page and a spendable
+/// set each ask how far *the address* has been inspected — whatever asset each
+/// observation of it is in — inside the snapshot they answer from, and without
+/// this that question walks the network's whole watch list on every read.
+///
+/// A step of its own rather than an edit to the first: the array is
+/// append-only, and a file the first step already created is brought forward
+/// by this one.
+const WATCHED_ADDRESS: &str = "
+    CREATE INDEX watch_address ON watch (chain, network, address);
 ";

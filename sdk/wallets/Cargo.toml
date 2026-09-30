@@ -6,10 +6,17 @@ rust-version.workspace = true
 description = "Chain-neutral wallet contracts and the Wallets registry: factories, balances, history, and batch sends."
 readme = "README.md"
 
+[features]
+# The default registrar: `wallets::Submissions`, which spawns the send work a
+# chain hands over and drains it. Off, the crate carries no async runtime, which
+# is what the chain crates and `sdk/config` link.
+submissions = ["dep:tokio", "tokio/rt"]
+
 [dependencies]
 base = { path = "../base" }
 crypto = { path = "../../packages/crypto" }
 indexing = { path = "../indexing", default-features = false }
+tokio = { version = "=1.49.0", default-features = false, optional = true }
 
 [dev-dependencies]
 futures-executor.workspace = true

@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "examples",
-    "apps/api",
     "apps/server",
     "sdk/base",
     "sdk/chains/bitcoin",

@@ -2,23 +2,17 @@ use std::collections::BTreeSet;
 
 use base::{Identified, MovementKind};
 
-use super::{Receipt, Trace, head::Sent};
+use super::{Receipt, Trace, head::ListedTransaction};
 use crate::native::{Address, AssetKind, Error, TransactionId, Wei};
 
 /// One parsed transaction as included in a block, with its receipt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Transaction {
-    id: TransactionId,
     fee: Fee,
     residuals: Vec<Movement>,
-    /// The sender, who pays the fee.
-    pub from: Address,
-    /// `None` for contract creation.
-    pub to: Option<Address>,
-    /// Ether attached to the transaction.
-    pub value: Wei,
-    /// Position in the block.
-    pub index: u64,
+    /// The transaction as the block lists it: sender, recipient, attached
+    /// ether and position.
+    pub listed: ListedTransaction,
     /// Execution result: status, gas, created contract, logs.
     pub receipt: Receipt,
     /// Every ether balance this transaction changed, as the node executed it.
@@ -55,7 +49,11 @@ pub struct Movement {
 }
 
 impl Transaction {
-    pub(super) fn new(sent: Sent, receipt: Receipt, trace: Trace) -> Result<Self, Error> {
+    pub(super) fn new(
+        listed: ListedTransaction,
+        receipt: Receipt,
+        trace: Trace,
+    ) -> Result<Self, Error> {
         let amount = receipt
             .effective_gas_price
             .checked_mul_u64(receipt.gas_used)
@@ -65,14 +63,10 @@ impl Transaction {
         let mut transaction = Self {
             fee: Fee {
                 amount,
-                payer: Some(sent.from.clone()),
+                payer: Some(listed.from.clone()),
             },
             residuals: Vec::new(),
-            id: sent.id,
-            from: sent.from,
-            to: sent.to,
-            value: Wei::from_u256(sent.value),
-            index: sent.index,
+            listed,
             receipt,
             trace,
         };
@@ -83,7 +77,7 @@ impl Transaction {
     /// The transaction hash.
     #[must_use]
     pub const fn id(&self) -> &TransactionId {
-        &self.id
+        &self.listed.id
     }
 
     /// Whether the receipt status is 1.
@@ -101,8 +95,8 @@ impl Transaction {
     /// Accounts this transaction touches directly: sender, recipient, created contract.
     pub fn parties(&self) -> impl Iterator<Item = &Address> {
         [
-            Some(&self.from),
-            self.to.as_ref(),
+            Some(&self.listed.from),
+            self.listed.to.as_ref(),
             self.receipt.contract_address.as_ref(),
         ]
         .into_iter()
@@ -129,7 +123,7 @@ impl Transaction {
             .receipt
             .logs
             .iter()
-            .filter_map(|log| log.movement(&self.id));
+            .filter_map(|log| log.movement(&self.listed.id));
         self.value()
             .into_iter()
             .chain(tokens)
@@ -143,16 +137,17 @@ impl Transaction {
     /// it stays the only one derived from them: the trace confirms it rather
     /// than restating it, or every plain transfer would count twice.
     fn value(&self) -> Option<Movement> {
-        self.to
+        self.listed
+            .to
             .as_ref()
             .or(self.receipt.contract_address.as_ref())
-            .filter(|_| !self.value.is_zero())
+            .filter(|_| !self.listed.value.is_zero())
             .map(|to| Movement {
-                id: format!("{}:value", self.id),
+                id: format!("{}:value", self.listed.id),
                 kind: MovementKind::Transfer,
                 asset: AssetKind::Native,
-                amount: self.value.clone(),
-                from: Some(self.from.clone()),
+                amount: self.listed.value.clone(),
+                from: Some(self.listed.from.clone()),
                 to: Some(to.clone()),
             })
     }
@@ -231,7 +226,7 @@ impl Transaction {
             return Ok(None);
         };
         Ok(Some(Movement::residual(
-            format!("{}:residual:{address}", self.id),
+            format!("{}:residual:{address}", self.listed.id),
             address,
             credited,
             amount,
@@ -277,6 +272,6 @@ impl Identified for Transaction {
     type Id = TransactionId;
 
     fn id(&self) -> &TransactionId {
-        &self.id
+        &self.listed.id
     }
 }

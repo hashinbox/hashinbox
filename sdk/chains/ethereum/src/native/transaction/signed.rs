@@ -69,18 +69,11 @@ impl SignedTransaction {
             ));
         }
 
-        let max_fee_per_gas = Wei::from_u128(transaction.max_fee_per_gas);
-        let maximum_total_fee = max_fee_per_gas
-            .checked_mul_u64(transaction.gas_limit)
-            .ok_or_else(|| {
-                invalid("signed EIP-1559 maximum total fee overflows the Ethereum amount range")
-            })?;
         Ok(FeeInspection {
             chain_id: transaction.chain_id,
             gas_limit: transaction.gas_limit,
-            max_fee_per_gas,
+            max_fee_per_gas: Wei::from_u128(transaction.max_fee_per_gas),
             max_priority_fee_per_gas: Wei::from_u128(transaction.max_priority_fee_per_gas),
-            maximum_total_fee,
         })
     }
 }
@@ -103,10 +96,9 @@ impl fmt::Debug for SignedTransaction {
 /// It is `native`'s own fee-authorization surface, for a caller driving
 /// `native` directly and for `tests/transaction_adapter.rs`, which asserts
 /// that what the wallet signed matches its configured fee limits. The
-/// The adapter's transfer builder reads one field of it, reporting
-/// `maximum_total_fee` as `base::SignedTransaction::fee`, decoded from the
-/// exact envelope rather than from the build context, so the figure is the
-/// one that was signed.
+/// adapter's transfer builder reports [`Self::maximum_total_fee`] as
+/// `base::SignedTransaction::fee`, from the exact envelope rather than from
+/// the build context, so the figure is the one that was signed.
 #[derive(Clone, PartialEq, Eq)]
 pub struct FeeInspection {
     /// The chain the envelope signs for.
@@ -117,8 +109,24 @@ pub struct FeeInspection {
     pub max_fee_per_gas: Wei,
     /// Signed priority fee per gas.
     pub max_priority_fee_per_gas: Wei,
+}
+
+impl FeeInspection {
     /// `gas_limit * max_fee_per_gas`: the most this transaction can cost.
-    pub maximum_total_fee: Wei,
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidTransaction`] when the product exceeds 256 bits.
+    pub fn maximum_total_fee(&self) -> Result<Wei, Error> {
+        self.max_fee_per_gas
+            .checked_mul_u64(self.gas_limit)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidTransaction,
+                    "signed EIP-1559 maximum total fee overflows the Ethereum amount range",
+                )
+            })
+    }
 }
 
 #[cfg(test)]

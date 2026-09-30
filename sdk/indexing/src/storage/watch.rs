@@ -3,7 +3,7 @@
 //! The index owns its watch list and keeps it hot in memory, because the
 //! admission handshake captures it synchronously; this is where that list
 //! survives a restart. [`crate::Watching::watch`] writes the observations and a
-//! [`crate::Service`] reads them back, with their recorded progress, once
+//! [`crate::Indexer`] reads them back, with their recorded progress, once
 //! before its first pass.
 //!
 //! One read, not two. A watch and how far it has been inspected are one fact
@@ -99,12 +99,13 @@ impl WatchProgress {
     ///   and a rule for closing it.
     ///
     /// Flipping the trade is changing this one comparison. Everything that
-    /// depends on it — the selection a pass inspects each block for, and the
-    /// [`Completeness`](crate::Completeness) gate on every balance and history
-    /// read — asks here rather than deciding for itself, so the two can never
-    /// disagree about what "still catching up" means. A watch that is still
-    /// catching up **must** read as incomplete; a wallet reading `Complete` with
-    /// a short history would be worse than the latency it replaced.
+    /// depends on it — the selection a pass inspects each block for, and what
+    /// a store may claim or must refuse on a balance, a history page and a
+    /// spendable set ([`Inspection`](crate::Inspection)) — asks here rather
+    /// than deciding for itself, so the two can never disagree about what
+    /// "still catching up" means. A watch that is still catching up **must**
+    /// read as incomplete; a wallet reading `Complete` with a short history
+    /// would be worse than the latency it replaced.
     ///
     /// A network with no committed block has no line to be behind, so nothing is
     /// owed below it.
@@ -207,7 +208,7 @@ pub trait WatchStore: Send + Sync {
     /// Moves every observation in `watches` to the birthday it now carries and
     /// discards the progress recorded for it, **in one transaction**.
     ///
-    /// The durable half of [`crate::Backfilling::cancel`]. A range nobody is
+    /// The durable half of [`crate::Backfilling::cancel_backfill`]. A range nobody is
     /// going to read is settled by raising the observation's birthday above it,
     /// and the claim earned under the old birthday goes with it, because it
     /// described a range that is no longer owed. Nothing else is touched: the
@@ -242,7 +243,7 @@ pub trait WatchStore: Send + Sync {
     /// [`crate::IndexErrorKind::InvalidRequest`] for a blank address, an asset of
     /// another chain than its address, or a batch spanning more than one network,
     /// and the store's own error.
-    fn reanchor<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>>;
+    fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>>;
 }
 
 /// A watch store held behind a reference count is a watch store.
@@ -271,8 +272,8 @@ impl<T: WatchStore + ?Sized> WatchStore for std::sync::Arc<T> {
         (**self).forget(network, watch)
     }
 
-    fn reanchor<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
-        (**self).reanchor(watches)
+    fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
+        (**self).cancel_backfill(watches)
     }
 }
 
@@ -335,7 +336,7 @@ mod tests {
         assert!(exhausted.caught_up(Some(&line(u64::MAX))));
     }
 
-    /// The predicate every selection and every read gate asks: a watch owing a
+    /// The predicate every selection and every store's claim asks: a watch owing a
     /// block at or below the line is behind, one whose next block is above it is
     /// current, and a network with no line at all is owed nothing.
     #[test]

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use base::{MovementKind, Networked};
 use indexing::{
     BlockInterpreter as Interpret, IndexError, InterpretedBlock, MovementId, Network, NetworkFee,
-    ObservationDraft, ObservationDraftStatus, OutputChanges, ValueMovement,
+    ObservationDraft, ObservationDraftStatus, ValueMovement,
 };
 
 use crate::native::{
@@ -142,12 +142,7 @@ impl Interpret for BlockInterpreter {
                 transactions.push(self.observation(transaction, order));
             }
         }
-        Ok(InterpretedBlock {
-            block: block.reference().clone(),
-            transactions,
-            outputs: OutputChanges::default(),
-            credits: Vec::new(),
-        })
+        InterpretedBlock::new(parsed.network(), block.reference().clone(), transactions)
     }
 }
 
@@ -257,7 +252,9 @@ mod tests {
             "blockHeight": 4,
         }))
         .expect("fixture block serializes");
-        RawBlock::new(BlockPosition(7), raw).expect("fixture block parses")
+        let genesis = "11111111111111111111111111111111";
+        let network = crate::native::Network::new("localnet", genesis.parse().expect("a hash"));
+        RawBlock::new(BlockPosition(7), network, raw).expect("fixture block parses")
     }
 
     fn selected(byte: u8) -> base::Address {
@@ -342,9 +339,9 @@ mod tests {
             json!([token_balance(1, 1, "400000"), token_balance(2, 2, "600000")]),
             vec![token_transfer(1, 2, 600_000)],
         );
-        let draft = &inspect(vec![value], &[selected(2)])
-            .expect("a watched owner is reached through the token balances alone")
-            .transactions[0];
+        let reported = inspect(vec![value], &[selected(2)])
+            .expect("a watched owner is reached through the token balances alone");
+        let draft = &reported.block.transactions()[0];
         assert_eq!(draft.transaction_id.id.as_str(), signature(50));
         assert_eq!(draft.status, ObservationDraftStatus::Included);
         assert_eq!(draft.movements.len(), 1);
@@ -371,9 +368,9 @@ mod tests {
             json!([token_balance(2, 2, "600000")]),
             vec![token_instruction(7, &[2, 0], 600_000)],
         );
-        let draft = &inspect(vec![created], &[selected(2)])
-            .expect("a missing pre entry is zero, not a rejection")
-            .transactions[0];
+        let reported = inspect(vec![created], &[selected(2)])
+            .expect("a missing pre entry is zero, not a rejection");
+        let draft = &reported.block.transactions()[0];
         assert_eq!(draft.movements.len(), 1);
         assert_eq!(
             draft.movements[0].id,
@@ -392,9 +389,9 @@ mod tests {
             json!([]),
             vec![token_instruction(8, &[1, 0], 600_000)],
         );
-        let draft = &inspect(vec![closed], &[selected(1)])
-            .expect("a missing post entry is zero, not a rejection")
-            .transactions[0];
+        let reported = inspect(vec![closed], &[selected(1)])
+            .expect("a missing post entry is zero, not a rejection");
+        let draft = &reported.block.transactions()[0];
         assert_eq!(draft.movements.len(), 1);
         assert_eq!(
             draft.movements[0].id,
@@ -416,9 +413,9 @@ mod tests {
             json!([token_balance(2, 2, "600000")]),
             vec![token_transfer(1, 2, 600_000)],
         );
-        let draft = &inspect(vec![partial], &[selected(2)])
-            .expect("a null preTokenBalances must not halt indexing")
-            .transactions[0];
+        let reported = inspect(vec![partial], &[selected(2)])
+            .expect("a null preTokenBalances must not halt indexing");
+        let draft = &reported.block.transactions()[0];
         assert_eq!(draft.movements.len(), 1);
         assert_eq!(
             draft.movements[0].id,
@@ -442,7 +439,7 @@ mod tests {
             }
             let interpreted = inspect(vec![value], &[selected(2)])
                 .expect("a node that records no token balances must not halt indexing");
-            assert!(interpreted.transactions.is_empty());
+            assert!(interpreted.block.transactions().is_empty());
         }
     }
 
@@ -456,9 +453,9 @@ mod tests {
         );
         value["meta"]["postBalances"] = json!([94_990, 2_039_280, 2_039_290, 1, 1]);
 
-        let draft = &inspect(vec![value], &[selected(2)])
-            .expect("SOL and a token move in one transaction")
-            .transactions[0];
+        let reported =
+            inspect(vec![value], &[selected(2)]).expect("SOL and a token move in one transaction");
+        let draft = &reported.block.transactions()[0];
         assert_eq!(
             draft
                 .movements
@@ -496,9 +493,9 @@ mod tests {
             json!([token_balance(1, 1, "400000"), token_balance(2, 2, "600000")]),
             vec![token_instruction(19, &[1, 2, 0], 600_000)],
         );
-        let draft = &inspect(vec![value], &[selected(2)])
-            .expect("an undecoded token effect is data, not a rejection")
-            .transactions[0];
+        let reported = inspect(vec![value], &[selected(2)])
+            .expect("an undecoded token effect is data, not a rejection");
+        let draft = &reported.block.transactions()[0];
         assert_eq!(
             draft
                 .movements
@@ -571,7 +568,7 @@ mod tests {
 
         let interpreted =
             inspect(Vec::new(), &[selected(2)]).expect("a usable filter interprets an empty block");
-        assert!(interpreted.transactions.is_empty());
+        assert!(interpreted.block.transactions().is_empty());
     }
 
     /// A draft's `transaction_order` is its place in the **block**, not its
@@ -600,10 +597,14 @@ mod tests {
         let transactions = vec![paying(1, 3, 4), paying(2, 5, 6), paying(3, 1, 2)];
 
         let narrow = inspect(transactions.clone(), &[selected(2)]).expect("one selected slot");
-        assert_eq!(narrow.transactions.len(), 1, "one transaction is selected");
-        assert_eq!(narrow.transactions[0].transaction_order, 2);
         assert_eq!(
-            narrow.transactions[0].transaction_id.id.as_str(),
+            narrow.block.transactions().len(),
+            1,
+            "one transaction is selected"
+        );
+        assert_eq!(narrow.block.transactions()[0].transaction_order, 2);
+        assert_eq!(
+            narrow.block.transactions()[0].transaction_id.id.as_str(),
             signature(3)
         );
 
@@ -612,7 +613,8 @@ mod tests {
         let wide = inspect(transactions, &[selected(2), selected(4), selected(6)])
             .expect("every slot selected");
         let orders: Vec<u64> = wide
-            .transactions
+            .block
+            .transactions()
             .iter()
             .map(|draft| draft.transaction_order)
             .collect();
@@ -625,7 +627,7 @@ mod tests {
         assert!(interpreted.outputs.created.is_empty());
         assert!(interpreted.outputs.spent.is_empty());
         assert!(interpreted.outputs.tracked_spends.is_empty());
-        let draft = &interpreted.transactions[0];
+        let draft = &interpreted.block.transactions()[0];
         assert_eq!(draft.transaction_id.id.as_str(), signature(9));
         assert_eq!(draft.status, ObservationDraftStatus::Included);
         assert_eq!(draft.movements.len(), 1);
@@ -661,7 +663,7 @@ mod tests {
 
         let interpreted = inspect(vec![value], &[selected(2)]).expect("version-zero transfer");
         assert_eq!(
-            interpreted.transactions[0].movements[0].to(),
+            interpreted.block.transactions()[0].movements[0].to(),
             Some(&selected(2))
         );
     }
@@ -680,7 +682,7 @@ mod tests {
         value["transaction"]["message"]["header"]["numRequiredSignatures"] = json!(2);
 
         let interpreted = inspect(vec![value], &[selected(2)]).expect("distinct payer and source");
-        let draft = &interpreted.transactions[0];
+        let draft = &interpreted.block.transactions()[0];
         assert_eq!(draft.transaction_id.id.as_str(), signature(17));
         assert_eq!(
             draft.fee.as_ref().and_then(|fee| fee.payer.as_ref()),
@@ -724,7 +726,7 @@ mod tests {
         }]);
 
         let interpreted = inspect(vec![value], &[selected(2)]).expect("complete inner transfers");
-        let movements = &interpreted.transactions[0].movements;
+        let movements = &interpreted.block.transactions()[0].movements;
         assert_eq!(movements.len(), 4);
         assert_eq!(movements[1].from(), Some(&selected(3)));
         assert_eq!(movements[1].to(), Some(&selected(4)));
@@ -754,7 +756,7 @@ mod tests {
         value["meta"]["innerInstructions"] = Value::Null;
 
         let payer = inspect(vec![value.clone()], &[selected(1)]).expect("failed payer history");
-        let draft = &payer.transactions[0];
+        let draft = &payer.block.transactions()[0];
         assert!(draft.movements.is_empty());
         assert!(matches!(
             draft.status,
@@ -770,7 +772,7 @@ mod tests {
         );
 
         let endpoint = inspect(vec![value], &[selected(2)]).expect("attempted endpoint ignored");
-        assert!(endpoint.transactions.is_empty());
+        assert!(endpoint.block.transactions().is_empty());
     }
 
     #[test]
@@ -784,10 +786,10 @@ mod tests {
             3,
         );
         let interpreted = inspect(vec![value], &[selected(1)]).expect("fee-only success");
-        assert_eq!(interpreted.transactions.len(), 1);
-        assert!(interpreted.transactions[0].movements.is_empty());
+        assert_eq!(interpreted.block.transactions().len(), 1);
+        assert!(interpreted.block.transactions()[0].movements.is_empty());
         assert_eq!(
-            interpreted.transactions[0]
+            interpreted.block.transactions()[0]
                 .fee
                 .as_ref()
                 .and_then(|fee| fee.payer.as_ref()),
@@ -810,7 +812,7 @@ mod tests {
         value["meta"]["innerInstructions"] = Value::Null;
 
         let interpreted = inspect(vec![value], &[selected(8)]).expect("readonly mention ignored");
-        assert!(interpreted.transactions.is_empty());
+        assert!(interpreted.block.transactions().is_empty());
     }
 
     #[test]
@@ -829,9 +831,9 @@ mod tests {
         );
         incomplete["meta"]["innerInstructions"] = Value::Null;
 
-        let draft = &inspect(vec![incomplete], &[selected(3)])
-            .expect("a node without inner instructions must not halt the chain")
-            .transactions[0];
+        let reported = inspect(vec![incomplete], &[selected(3)])
+            .expect("a node without inner instructions must not halt the chain");
+        let draft = &reported.block.transactions()[0];
         let ids = draft
             .movements
             .iter()
@@ -870,9 +872,9 @@ mod tests {
             3,
         );
 
-        let draft = &inspect(vec![value], &[selected(2)])
-            .expect("a residual is data, not a rejection")
-            .transactions[0];
+        let reported =
+            inspect(vec![value], &[selected(2)]).expect("a residual is data, not a rejection");
+        let draft = &reported.block.transactions()[0];
         assert_eq!(draft.transaction_id.id.as_str(), signature(15));
         assert_eq!(draft.status, ObservationDraftStatus::Included);
         assert_eq!(draft.movements.len(), 2);
@@ -910,14 +912,14 @@ mod tests {
         let settlement = BlockInterpreter::new(&network())
             .expect("the fixture network is Solana")
             .settlement();
-        let mut ledger = indexing::Ledger::new(&subject);
-        for draft in &interpreted.transactions {
+        let mut ledger = indexing::Fold::new(&subject);
+        for draft in interpreted.block.transactions() {
             let status = match &draft.status {
                 ObservationDraftStatus::Included => indexing::CanonicalStatus::Included {
-                    block: interpreted.block.clone(),
+                    block: interpreted.block.reference().clone(),
                 },
                 ObservationDraftStatus::Failed { reason } => indexing::CanonicalStatus::Failed {
-                    block: interpreted.block.clone(),
+                    block: interpreted.block.reference().clone(),
                     reason: reason.clone(),
                 },
             };
@@ -934,7 +936,7 @@ mod tests {
                 )
                 .expect("interpreted amounts are storable");
         }
-        ledger.balance(Some(interpreted.block.clone()))
+        ledger.balance(Some(interpreted.block.reference().clone()))
     }
 
     #[test]
@@ -965,7 +967,10 @@ mod tests {
         // 15 is exactly the account's own post − pre, which is the runtime's
         // answer and the one number the residual exists to preserve.
         assert_eq!(credited.completeness, indexing::Completeness::Incomplete);
-        assert_eq!(credited.observed_at, Some(interpreted.block.clone()));
+        assert_eq!(
+            credited.observed_at,
+            Some(interpreted.block.reference().clone())
+        );
 
         // The third account funded the residual and is debited for it; a fold
         // that starts after it was funded goes negative, which is reported
@@ -995,9 +1000,8 @@ mod tests {
         );
         value["transaction"]["message"]["header"]["numReadonlyUnsignedAccounts"] = json!(2);
 
-        let draft = &inspect(vec![value], &[selected(2)])
-            .expect("transfer and residual coexist")
-            .transactions[0];
+        let reported = inspect(vec![value], &[selected(2)]).expect("transfer and residual coexist");
+        let draft = &reported.block.transactions()[0];
         assert_eq!(
             draft
                 .movements

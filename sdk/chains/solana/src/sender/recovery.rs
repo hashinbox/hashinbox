@@ -9,9 +9,10 @@ use std::{sync::Arc, time::Duration};
 
 use base::{BlockRef, BoxFuture};
 use indexing::{
-    AssetId, BlockCommit, Checkpoint, History, HistoryPosition, Listener, Network, Page, Subject,
+    AssetId, BlockCommit, Checkpoint, HistoryPosition, Listener, Network, Page, Subject,
 };
 use tokio::sync::watch;
+use wallets::History;
 
 use super::reservation::Reservations;
 use crate::native::{SignedTransaction, rpc::Submitter};
@@ -24,9 +25,9 @@ use crate::native::{SignedTransaction, rpc::Submitter};
 /// indexing-only caller never allocates. It is *one entry* of the service's
 /// listener list, so a caller's own listener is announced beside it rather
 /// than displacing it.
-pub(crate) struct Progress(watch::Sender<Option<BlockRef>>);
+pub(crate) struct CommitSignal(watch::Sender<Option<BlockRef>>);
 
-impl Progress {
+impl CommitSignal {
     /// The hook to register with `indexing::Indexing::listen`, and the
     /// receiver [`Recovery::new`] takes.
     pub(crate) fn channel() -> (Arc<dyn Listener>, watch::Receiver<Option<BlockRef>>) {
@@ -35,7 +36,7 @@ impl Progress {
     }
 }
 
-impl Listener for Progress {
+impl Listener for CommitSignal {
     fn committed(&self, commit: &BlockCommit) {
         self.0.send_replace(Some(commit.block.clone()));
     }
@@ -231,7 +232,7 @@ mod tests {
 
     fn recovery(script: &Script, index: Index, reservations: Reservations) -> Recovery {
         let index = Arc::new(index);
-        let (_announce, receiver) = Progress::channel();
+        let (_announce, receiver) = CommitSignal::channel();
         Recovery::new(
             Arc::new(script.client()),
             index.clone(),
@@ -257,14 +258,14 @@ mod tests {
         }
 
         let seen = Arc::new(Seen::default());
-        let (announce, progress) = Progress::channel();
+        let (announce, progress) = CommitSignal::channel();
         let block = checkpoint(7);
         let commit = BlockCommit {
             network: network(),
             block: block.clone(),
             transactions: Vec::new(),
             outputs: indexing::OutputChanges::default(),
-            unknown_spends: Vec::new(),
+            unmatched_spends: Vec::new(),
         };
         for listener in [announce, seen.clone() as Arc<dyn Listener>] {
             listener.committed(&commit);

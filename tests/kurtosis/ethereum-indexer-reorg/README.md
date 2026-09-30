@@ -15,7 +15,7 @@ JSON-RPC polling, which is the only transport the Ethereum chain crate uses.
 The fork this scenario causes is **pre-finality by construction**, which is
 exactly the region the indexer keeps in memory: Ethereum's confirmed line is the
 node's own `finalized` block, the server commits nothing above it, and the whole
-reorg therefore happens in the pending overlay without touching a stored row
+reorg therefore happens in the pending blocks without touching a stored row
 (`docs/design/030 §8 (ex-025)`). A fork that reached a *finalized* block would be a consensus
 failure, not a reorg, and the server would quarantine that network with a
 terminal `confirmed_reorg`.

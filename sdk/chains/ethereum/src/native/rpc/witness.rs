@@ -47,16 +47,17 @@ pub enum Attestation {
     },
 }
 
-/// Asks one node what a holding was worth at one canonical block.
+/// Asks one node what a holding was worth at one canonical block, and
+/// reports whether that agrees with a folded amount.
 ///
-/// It holds only the account reads; the block, the address, the asset and
-/// the amount to check are the question, not the witness.
-pub struct Witness<'a> {
+/// It holds only the account reads, borrowed for one question; the block,
+/// the address, the asset and the amount to check are the question.
+pub struct Attester<'a> {
     accounts: &'a dyn Accounts,
 }
 
-impl<'a> Witness<'a> {
-    /// A witness over `accounts`.
+impl<'a> Attester<'a> {
+    /// An attester that reads through `accounts`.
     #[must_use]
     pub const fn new(accounts: &'a dyn Accounts) -> Self {
         Self { accounts }
@@ -69,7 +70,7 @@ impl<'a> Witness<'a> {
     /// reorganised `at` out refuses rather than answering about a different
     /// chain; that refusal is [`Attestation::Unavailable`], never agreement.
     ///
-    /// This returns no `Result` on purpose. A witness that could fail a
+    /// This returns no `Result` on purpose. An attester that could fail a
     /// balance read would make the node part of the answer again, which is
     /// the arrangement `docs/design/021` exists to end. Every failure is an
     /// absence of proof.
@@ -130,7 +131,7 @@ mod tests {
             ),
         ]);
         let rpc = script.client();
-        let witness = Witness::new(&rpc);
+        let witness = Attester::new(&rpc);
         let token = AssetKind::Erc20(Address::from_bytes([0x0b; 20]));
         for asset in [AssetKind::Native, token] {
             assert_eq!(
@@ -153,7 +154,7 @@ mod tests {
         let rpc = script.client();
         // The fold missed one unit: the node says 43 where it folded 42.
         assert_eq!(
-            block_on(Witness::new(&rpc).attest(
+            block_on(Attester::new(&rpc).attest(
                 address(),
                 &AssetKind::Native,
                 &at(),
@@ -174,7 +175,7 @@ mod tests {
             "block is not canonical",
         )]);
         let rpc = script.client();
-        let attestation = block_on(Witness::new(&rpc).attest(
+        let attestation = block_on(Attester::new(&rpc).attest(
             address(),
             &AssetKind::Native,
             &at(),

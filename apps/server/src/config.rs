@@ -9,11 +9,11 @@
 
 use std::{collections::BTreeSet, env, error::Error, net::SocketAddr, path::Path};
 
-use payment_api::{AssetTag, Start};
 use sdk_config::{Chains, Document, Sections};
 use serde::Deserialize;
 
 use crate::{
+    api::{AssetTag, Signers, Start, Wallets},
     chains,
     storage::{self, Repository},
 };
@@ -140,9 +140,9 @@ impl ConfiguredWallet {
     /// checks the length and the curve.
     pub(crate) async fn import(
         self,
-        wallets: &crate::Wallets,
+        wallets: &Wallets,
         index: &dyn indexing::Watching,
-        signers: &payment_api::Signers,
+        signers: &Signers,
     ) -> Result<(), AnyError> {
         let text = env::var(&self.secret_env)
             .map_err(|_| "configured wallet secret environment variable is unavailable")?;

@@ -18,12 +18,12 @@ use std::{
 
 use futures_executor::block_on;
 use indexing::{
-    Address, AssetId, BlockCommit, BlockHash, BlockHeight, BlockInterpreter, BlockParent,
-    BlockPosition, BlockRef, BlockSource, BoxFuture, ChainName, ChainTip, Decimal, History, Holder,
-    IndexError, IndexErrorKind, IndexedBlock, IndexedOutput, Indexing, InterpretedBlock, Listener,
-    MovementId, Network, ObservationDraft, ObservationDraftStatus, OutputChanges, OutputId,
-    OutputKey, Service, Start, Subject, SyncConfig, SyncPolicy, TransactionRef, ValueMovement,
-    Watching, memory,
+    Address, AssetId, Birthday, BlockCommit, BlockHash, BlockHeight, BlockInterpreter, BlockParent,
+    BlockPosition, BlockRef, BlockSource, BoxFuture, ChainName, ChainTips, ConfirmedHistory,
+    Decimal, Holder, IndexError, IndexErrorKind, IndexedOutput, Indexer, Indexing,
+    InterpretedBlock, Listener, MovementId, NativeBlock, Network, ObservationDraft,
+    ObservationDraftStatus, OutputChanges, OutputId, OutputKey, Subject, SyncConfig, SyncPolicy,
+    TransactionRef, ValueMovement, Watching, memory,
 };
 
 /// Every block this source serves, one per position, each crediting the
@@ -34,7 +34,7 @@ struct Source(u64);
 #[derive(Clone, Debug)]
 struct Block(BlockRef);
 
-impl IndexedBlock for Block {
+impl NativeBlock for Block {
     fn block_ref(&self) -> BlockRef {
         self.0.clone()
     }
@@ -72,7 +72,7 @@ fn block(height: u64) -> BlockRef {
     }
 }
 
-impl ChainTip for Source {
+impl ChainTips for Source {
     fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, indexing::SourceError>> {
         Box::pin(async move { Ok(block(self.0)) })
     }
@@ -169,14 +169,12 @@ impl BlockInterpreter for Interpreter {
             _ => Vec::new(),
         };
         Ok(InterpretedBlock {
-            block: reference,
-            transactions,
             outputs: OutputChanges {
                 created,
                 spent,
                 tracked_spends: Vec::new(),
             },
-            credits: Vec::new(),
+            ..InterpretedBlock::new(&network(), reference, transactions)?
         })
     }
 }
@@ -184,8 +182,8 @@ impl BlockInterpreter for Interpreter {
 fn service(
     memory: &memory::Repository,
     tip: u64,
-) -> Arc<Service<Source, Interpreter, memory::Repository>> {
-    Arc::new(Service::new(
+) -> Arc<Indexer<Source, Interpreter, memory::Repository>> {
+    Arc::new(Indexer::new(
         Source(tip),
         Interpreter,
         memory.clone(),
@@ -193,18 +191,15 @@ fn service(
     ))
 }
 
-/// What a consumer reads: the history reader over this index, which is the
-/// repository's own page joined to the blocks the index still holds.
-fn indexed(
-    index: &Arc<Service<Source, Interpreter, memory::Repository>>,
-    owner: &Address,
-) -> Vec<TransactionRef> {
+/// What the index wrote: the repository's own confirmed page of `owner`, which
+/// is where a pass's commits are read back. No query goes through the index.
+fn indexed(repository: &memory::Repository, owner: &Address) -> Vec<TransactionRef> {
     let subject = indexing::Subject {
         address: owner.clone(),
         asset: asset(),
     };
-    let reader = index.history();
-    block_on(reader.history(&subject, indexing::Page::first(50)))
+    let query = indexing::HistoryQuery::new(&subject, indexing::Page::first(50));
+    block_on(repository.history(query))
         .expect("history")
         .transactions
         .into_iter()
@@ -221,13 +216,14 @@ fn a_watched_wallet_and_a_watched_address_are_indexed_and_survive_a_restart() {
     let observed = subject("observed");
     let index = service(&memory, 3);
 
-    block_on(index.watch("wallet-1", &wallet, Start::At(BlockPosition(0)))).expect("wallet");
-    block_on(index.watch("observed-1", &observed, Start::At(BlockPosition(0)))).expect("address");
+    block_on(index.watch("wallet-1", &wallet, Birthday::At(BlockPosition(0)))).expect("wallet");
+    block_on(index.watch("observed-1", &observed, Birthday::At(BlockPosition(0))))
+        .expect("address");
     block_on(index.sync()).expect("first pass");
 
     for subject in [&wallet, &observed] {
         assert!(
-            !indexed(&index, subject.address()).is_empty(),
+            !indexed(&memory, subject.address()).is_empty(),
             "{} must be indexed",
             subject.address().value
         );
@@ -256,7 +252,7 @@ fn a_watched_wallet_and_a_watched_address_are_indexed_and_survive_a_restart() {
     block_on(restarted.sync()).expect("restarted pass");
     for subject in [&wallet, &observed] {
         assert_eq!(
-            indexed(&restarted, subject.address()).len(),
+            indexed(&memory, subject.address()).len(),
             6,
             "{} keeps being indexed after the restart",
             subject.address().value
@@ -271,19 +267,19 @@ fn re_watching_is_a_no_op_and_every_collision_is_a_conflict() {
     let memory = memory::Repository::new();
     let index = service(&memory, 1);
     let owner = subject("owner");
-    let first = block_on(index.watch("id", &owner, Start::At(BlockPosition(2)))).expect("watch");
+    let first = block_on(index.watch("id", &owner, Birthday::At(BlockPosition(2)))).expect("watch");
 
     assert_eq!(
-        block_on(index.watch("id", &owner, Start::At(BlockPosition(2)))).expect("re-watch"),
+        block_on(index.watch("id", &owner, Birthday::At(BlockPosition(2)))).expect("re-watch"),
         first,
         "re-stating the same watch changes nothing"
     );
     for (id, start) in [("id", BlockPosition(9)), ("other", BlockPosition(2))] {
-        let error = block_on(index.watch(id, &owner, Start::At(start)))
+        let error = block_on(index.watch(id, &owner, Birthday::At(start)))
             .expect_err("a known address is watched once");
         assert_eq!(error.kind, IndexErrorKind::Conflict);
     }
-    let error = block_on(index.watch("id", &subject("elsewhere"), Start::Fresh))
+    let error = block_on(index.watch("id", &subject("elsewhere"), Birthday::Fresh))
         .expect_err("a known id names one address");
     assert_eq!(error.kind, IndexErrorKind::Conflict);
     assert_eq!(block_on(index.watched(&network())).expect("rows"), [first]);
@@ -313,13 +309,13 @@ fn unwatching_stops_inspection_keeps_every_row_and_can_be_undone() {
     let index = service(&memory, 3);
     let owner = subject("owner");
     block_on(index.sync()).expect("a checkpoint to owe history below");
-    block_on(index.watch("owner", &owner, Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("owner", &owner, Birthday::At(BlockPosition(0)))).expect("watch");
     assert_eq!(
         owed(&*index),
         None,
         "the pass settles the range it owed, so nothing is left"
     );
-    let filled = indexed(&index, owner.address());
+    let filled = indexed(&memory, owner.address());
     assert_eq!(filled.len(), 4, "blocks 0..=3 were read for it");
 
     assert_eq!(
@@ -337,7 +333,7 @@ fn unwatching_stops_inspection_keeps_every_row_and_can_be_undone() {
             .is_empty()
     );
     assert_eq!(
-        indexed(&index, owner.address()),
+        indexed(&memory, owner.address()),
         filled,
         "nothing indexed was deleted; the rows are simply unclaimed"
     );
@@ -354,7 +350,7 @@ fn unwatching_stops_inspection_keeps_every_row_and_can_be_undone() {
     );
     block_on(restarted.sync()).expect("pass");
     assert_eq!(
-        indexed(&restarted, owner.address()),
+        indexed(&memory, owner.address()),
         filled,
         "blocks 4 and 5 were never inspected for an address nothing watched"
     );
@@ -363,14 +359,14 @@ fn unwatching_stops_inspection_keeps_every_row_and_can_be_undone() {
     // the range is read again rather than inherited — which is what stops blocks
     // 4 and 5, committed while nothing watched the address, from being settled
     // by a claim that was true only up to block 3.
-    block_on(restarted.watch("owner", &owner, Start::At(BlockPosition(0)))).expect("re-watch");
+    block_on(restarted.watch("owner", &owner, Birthday::At(BlockPosition(0)))).expect("re-watch");
     assert_eq!(
         owed(&*restarted),
         None,
         "the re-watch's whole range is read in the pass that follows it"
     );
     assert_eq!(
-        indexed(&restarted, owner.address()).len(),
+        indexed(&memory, owner.address()).len(),
         6,
         "blocks 4 and 5 are there too, and re-reading 0..=3 duplicated nothing"
     );
@@ -386,14 +382,15 @@ fn cancelling_a_backfill_settles_its_range_and_leaves_the_watch_at_the_checkpoin
     let owner = subject("owner");
     block_on(index.sync()).expect("a checkpoint to owe history below");
     assert!(
-        block_on(indexing::Backfilling::cancel(&*index, &network()))
+        block_on(indexing::Backfilling::cancel_backfill(&*index, &network()))
             .expect("cancel")
             .is_empty(),
         "a network that owes nothing is cancelled without touching a watch"
     );
-    block_on(index.watch("owner", &owner, Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("owner", &owner, Birthday::At(BlockPosition(0)))).expect("watch");
 
-    let cancelled = block_on(indexing::Backfilling::cancel(&*index, &network())).expect("cancel");
+    let cancelled =
+        block_on(indexing::Backfilling::cancel_backfill(&*index, &network())).expect("cancel");
 
     assert_eq!(
         cancelled
@@ -401,7 +398,7 @@ fn cancelling_a_backfill_settles_its_range_and_leaves_the_watch_at_the_checkpoin
             .map(|watch| (watch.id.clone(), watch.start))
             .collect::<Vec<_>>(),
         [("owner".to_owned(), BlockPosition(4))],
-        "the watch is left where a `Start::Fresh` one added now would begin"
+        "the watch is left where a `Birthday::Fresh` one added now would begin"
     );
     assert_eq!(
         block_on(index.watched(&network())).expect("rows"),
@@ -410,16 +407,16 @@ fn cancelling_a_backfill_settles_its_range_and_leaves_the_watch_at_the_checkpoin
     );
     assert_eq!(owed(&*index), None, "the range is no longer asked for");
     assert!(
-        indexed(&index, owner.address()).is_empty(),
+        indexed(&memory, owner.address()).is_empty(),
         "nothing below the cancelled range was read"
     );
 
     // And the range can be asked for again, at the price of reading it.
     block_on(index.unwatch("owner")).expect("unwatch");
-    block_on(index.watch("owner", &owner, Start::At(BlockPosition(0)))).expect("re-watch");
+    block_on(index.watch("owner", &owner, Birthday::At(BlockPosition(0)))).expect("re-watch");
     assert_eq!(owed(&*index), None);
     assert_eq!(
-        indexed(&index, owner.address()).len(),
+        indexed(&memory, owner.address()).len(),
         4,
         "a cancelled range is resumable: the claim was dropped, never the ability"
     );
@@ -442,7 +439,7 @@ fn every_listener_is_told_what_each_commit_changed() {
     let memory = memory::Repository::new();
     let index = service(&memory, 2);
     let owner = subject("owner");
-    block_on(index.watch("owner", &owner, Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("owner", &owner, Birthday::At(BlockPosition(0)))).expect("watch");
     let first = Arc::new(Seen::default());
     let second = Arc::new(Seen::default());
     index.listen(first.clone());
@@ -463,10 +460,10 @@ fn every_listener_is_told_what_each_commit_changed() {
         assert!(commits.iter().all(|commit| commit.network == network()));
         assert_eq!(commits[1].transactions.len(), 1, "what it indexed");
         assert_eq!(commits[1].outputs.created.len(), 1, "what became spendable");
-        assert!(commits[1].unknown_spends.is_empty());
+        assert!(commits[1].unmatched_spends.is_empty());
         assert_eq!(
             commits[2]
-                .unknown_spends
+                .unmatched_spends
                 .iter()
                 .map(|key| key.output.transaction.id.as_str())
                 .collect::<Vec<_>>(),
@@ -498,7 +495,8 @@ fn a_slow_listener_delays_its_own_chain_and_cannot_await() {
 
     let memory = memory::Repository::new();
     let index = service(&memory, 2);
-    block_on(index.watch("owner", &subject("owner"), Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("owner", &subject("owner"), Birthday::At(BlockPosition(0))))
+        .expect("watch");
     let slow = Arc::new(Slow(Duration::from_millis(20), Mutex::new(0)));
     index.listen(slow.clone());
 
@@ -539,7 +537,7 @@ fn a_listener_that_registers_another_listener_does_not_deadlock() {
     /// Registers `late` from inside `committed`, once, which is the re-entrant
     /// call a list held across the dispatch cannot take.
     struct Reentrant {
-        index: Weak<Service<Source, Interpreter, memory::Repository>>,
+        index: Weak<Indexer<Source, Interpreter, memory::Repository>>,
         late: Arc<Seen>,
         registered: AtomicBool,
     }
@@ -556,7 +554,8 @@ fn a_listener_that_registers_another_listener_does_not_deadlock() {
 
     let memory = memory::Repository::new();
     let index = service(&memory, 2);
-    block_on(index.watch("owner", &subject("owner"), Start::At(BlockPosition(0)))).expect("watch");
+    block_on(index.watch("owner", &subject("owner"), Birthday::At(BlockPosition(0))))
+        .expect("watch");
     let late = Arc::new(Seen::default());
     index.listen(Arc::new(Reentrant {
         index: Arc::downgrade(&index),

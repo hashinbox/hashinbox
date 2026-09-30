@@ -48,7 +48,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Progress {
     /// The observation this advances, by its own identity ([`crate::Watch::id`]).
-    pub watch: String,
+    pub watch_id: String,
     /// The `indexed_through` the store must still hold, or `None` when the
     /// author believes nothing has been recorded for this observation yet.
     pub expected: Option<BlockRef>,
@@ -115,7 +115,7 @@ impl IndexedBatch {
     /// chain onto the checkpoint, or for progress that claims a block above the
     /// line this batch leaves behind, retreats from its own expectation, or
     /// names a block neither `blocks` nor the resulting checkpoint holds,
-    /// [`IndexErrorKind::CannotConnect`] when a block above the checkpoint does
+    /// [`IndexErrorKind::Disconnected`] when a block above the checkpoint does
     /// not extend it, and [`IndexErrorKind::InvalidRequest`] for two claims on
     /// one observation.
     pub fn new(
@@ -160,9 +160,9 @@ impl IndexedBatch {
     ) -> Result<Option<BlockRef>, IndexError> {
         let mut line = expected.cloned();
         let mut previous = None;
-        for facts in blocks {
-            let block = facts.block();
-            if facts.network() != network {
+        for canonical in blocks {
+            let block = canonical.block();
+            if canonical.network() != network {
                 return Err(IndexError::new(
                     IndexErrorKind::NetworkMismatch,
                     "an indexed block belongs to another network",
@@ -187,7 +187,7 @@ impl IndexedBatch {
             if filled {
                 continue;
             }
-            facts.connects_to(line.as_ref())?;
+            canonical.connects_to(line.as_ref())?;
             line = Some(block.clone());
         }
         Ok(line)
@@ -203,7 +203,7 @@ impl IndexedBatch {
         for (index, claim) in progress.iter().enumerate() {
             if progress[..index]
                 .iter()
-                .any(|held| held.watch == claim.watch)
+                .any(|held| held.watch_id == claim.watch_id)
             {
                 return Err(IndexError::new(
                     IndexErrorKind::InvalidRequest,
@@ -268,7 +268,7 @@ impl IndexedBatch {
         blocks: &[CanonicalBlock],
         block: &BlockRef,
     ) -> bool {
-        checkpoint == Some(block) || blocks.iter().any(|facts| facts.block() == block)
+        checkpoint == Some(block) || blocks.iter().any(|canonical| canonical.block() == block)
     }
 
     /// The network every block and claim in the batch belongs to.
@@ -331,7 +331,7 @@ fn unjustified(message: &str) -> IndexError {
 ///
 /// The store is append-only while a network is running. Every block it receives
 /// is at or below the chain's confirmed line
-/// ([`crate::ChainTip::confirmed_tip`]), so no row it holds is ever undone and
+/// ([`crate::ChainTips::confirmed_tip`]), so no row it holds is ever undone and
 /// it needs no rollback data of any kind (`docs/design/030 §8 (ex-025)`). Undoing is
 /// [`crate::Purging::purge_network`], which is not part of a pass at all.
 ///
@@ -341,8 +341,9 @@ fn unjustified(message: &str) -> IndexError {
 /// conditions on **inside one transaction**, and a reader port does the same
 /// with its rows ([`crate::ConfirmedHistory`], [`crate::BalanceStore`],
 /// [`crate::OutputStore`]). This is a contract, not an implementation note:
-/// `crate::reads`' read path samples the pending overlay, reads the store, and
-/// then narrows the overlay by the checkpoint *the store's own answer carried*.
+/// a consumer completing an answer with the pending blocks samples them, reads
+/// the store, and then narrows the sample by the checkpoint *the store's own
+/// answer carried* ([`crate::PendingSample::above`]).
 /// A store that answered rows at one instant and its checkpoint at another
 /// would make that narrowing admit a block into both halves or neither, which
 /// is the double-count `docs/design/030 §8 (ex-032)` collision 5 records. SQLite takes it by
@@ -465,9 +466,7 @@ mod tests {
     use base::ChainName;
 
     use super::*;
-    use crate::{
-        BlockHash, BlockHeight, BlockParent, BlockPosition, InterpretedBlock, OutputChanges,
-    };
+    use crate::{BlockHash, BlockHeight, BlockParent, BlockPosition, InterpretedBlock};
 
     fn network() -> Network {
         Network::new(ChainName::new("test"), "mainnet")
@@ -487,22 +486,18 @@ mod tests {
     }
 
     /// The facts of an empty block at `height`, already validated.
-    fn facts(height: u64) -> CanonicalBlock {
+    fn canonical(height: u64) -> CanonicalBlock {
         CanonicalBlock::new(
             network(),
-            InterpretedBlock {
-                block: block(height),
-                transactions: Vec::new(),
-                outputs: OutputChanges::default(),
-                credits: Vec::new(),
-            },
+            InterpretedBlock::new(&network(), block(height), Vec::new())
+                .expect("unique transaction ids"),
         )
         .expect("valid facts")
     }
 
     fn advance(watch: &str, expected: Option<BlockRef>, through: u64) -> Progress {
         Progress {
-            watch: watch.to_owned(),
+            watch_id: watch.to_owned(),
             expected,
             indexed_through: block(through),
         }
@@ -510,16 +505,13 @@ mod tests {
 
     #[test]
     fn a_block_above_the_checkpoint_must_extend_it() {
-        let mut interpreted = InterpretedBlock {
-            block: block(2),
-            transactions: Vec::new(),
-            outputs: OutputChanges::default(),
-            credits: Vec::new(),
-        };
-        interpreted.block.parent = Some(BlockParent {
+        let mut reference = block(2);
+        reference.parent = Some(BlockParent {
             position: BlockPosition(1),
             hash: BlockHash(vec![99]),
         });
+        let interpreted =
+            InterpretedBlock::new(&network(), reference, Vec::new()).expect("no transactions");
         let forked = CanonicalBlock::new(network(), interpreted).expect("valid facts");
 
         let error = IndexedBatch::new(
@@ -531,7 +523,7 @@ mod tests {
         )
         .expect_err("a disconnected block");
 
-        assert_eq!(error.kind, IndexErrorKind::CannotConnect);
+        assert_eq!(error.kind, IndexErrorKind::Disconnected);
         assert!(error.retryable);
     }
 
@@ -543,7 +535,7 @@ mod tests {
         let filling = IndexedBatch::new(
             network(),
             Some(block(5)),
-            vec![facts(2), facts(3)],
+            vec![canonical(2), canonical(3)],
             Vec::new(),
             FeeSettlement::Charged,
         )
@@ -554,7 +546,7 @@ mod tests {
         let extending = IndexedBatch::new(
             network(),
             Some(block(5)),
-            vec![facts(6), facts(7)],
+            vec![canonical(6), canonical(7)],
             Vec::new(),
             FeeSettlement::Charged,
         )
@@ -564,7 +556,7 @@ mod tests {
         let first = IndexedBatch::new(
             network(),
             None,
-            vec![facts(0), facts(1)],
+            vec![canonical(0), canonical(1)],
             Vec::new(),
             FeeSettlement::Charged,
         )
@@ -577,7 +569,7 @@ mod tests {
         let replayed = IndexedBatch::new(
             network(),
             Some(block(5)),
-            vec![facts(5)],
+            vec![canonical(5)],
             Vec::new(),
             FeeSettlement::Charged,
         )
@@ -590,7 +582,7 @@ mod tests {
         let error = IndexedBatch::new(
             network(),
             Some(block(5)),
-            vec![facts(3), facts(2)],
+            vec![canonical(3), canonical(2)],
             Vec::new(),
             FeeSettlement::Charged,
         )
@@ -599,12 +591,12 @@ mod tests {
 
         let elsewhere = CanonicalBlock::new(
             Network::new(ChainName::new("other"), "mainnet"),
-            InterpretedBlock {
-                block: block(2),
-                transactions: Vec::new(),
-                outputs: OutputChanges::default(),
-                credits: Vec::new(),
-            },
+            InterpretedBlock::new(
+                &Network::new(ChainName::new("other"), "mainnet"),
+                block(2),
+                Vec::new(),
+            )
+            .expect("unique transaction ids"),
         )
         .expect("valid facts");
         let error = IndexedBatch::new(
@@ -705,7 +697,7 @@ mod tests {
             Some(block(10)),
             Vec::new(),
             vec![Progress {
-                watch: "w".to_owned(),
+                watch_id: "w".to_owned(),
                 expected: None,
                 indexed_through: impossible,
             }],
@@ -726,7 +718,7 @@ mod tests {
         IndexedBatch::new(
             network(),
             Some(block(10)),
-            vec![facts(4)],
+            vec![canonical(4)],
             vec![advance("w", None, 4)],
             FeeSettlement::Charged,
         )

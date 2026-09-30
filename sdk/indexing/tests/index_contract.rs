@@ -1,22 +1,24 @@
 //! Contract coverage for `Index`: assembly over one store, network routing of
-//! reads and watches, and
-//! the status report it accepts from each child.
+//! checkpoints and watches, and the status report it accepts from each child.
+//!
+//! No query is routed, and none can be: a balance, a history page and a
+//! spendable set are a repository's reads, and the capabilities a consumer
+//! declares for their pending-inclusive forms live with the consumer
+//! (`wallets::History`, `wallets::Balances`), where this crate cannot name
+//! them.
 
 use std::sync::{Arc, Mutex};
 
 use futures_executor::block_on;
 use indexing::{
-    Address, Balance, Balances, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef,
-    BoxFuture, ChainName, Checkpoint, Completeness, History, Holder, Index, IndexError,
-    IndexErrorKind, Indexing, Network, Page, PendingValue, Start, Subject, SyncPhase, SyncStatus,
-    TransactionPage, Watch, Watching,
+    Address, Birthday, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, BoxFuture,
+    ChainName, Checkpoint, Holder, Index, IndexError, IndexErrorKind, Indexing, Network, Subject,
+    SyncPhase, SyncStatus, Watch, Watching,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Call {
     Checkpoint(Network),
-    History(Box<Subject>, Page),
-    Balance(Box<Subject>),
     Watch(Box<Watch>),
     Unwatch(String),
     Watched(Network),
@@ -59,41 +61,6 @@ impl Checkpoint for Probe {
     }
 }
 
-impl History for Probe {
-    fn history<'a>(
-        &'a self,
-        of: &'a dyn Holder,
-        page: Page,
-    ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
-        self.record(Call::History(Box::new(recorded(of)), page));
-        let checkpoint = self.checkpoint.clone();
-        Box::pin(async move {
-            Ok(TransactionPage {
-                checkpoint: Some(checkpoint),
-                transactions: Vec::new(),
-                pending: Vec::new(),
-                next: None,
-                completeness: indexing::Completeness::Incomplete,
-            })
-        })
-    }
-}
-
-impl Balances for Probe {
-    fn balance<'a>(&'a self, of: &'a dyn Holder) -> BoxFuture<'a, Result<Balance, IndexError>> {
-        self.record(Call::Balance(Box::new(recorded(of))));
-        let checkpoint = self.checkpoint.clone();
-        Box::pin(async move {
-            Ok(Balance {
-                amount: indexing::Decimal::zero(),
-                observed_at: Some(checkpoint),
-                pending: PendingValue::none(),
-                completeness: Completeness::Incomplete,
-            })
-        })
-    }
-}
-
 impl Indexing for Probe {
     fn network(&self) -> &Network {
         &self.network
@@ -109,7 +76,7 @@ impl Indexing for Probe {
             pending_tip: None,
             observed_tip: Some(self.checkpoint.clone()),
             phase: SyncPhase::Ready,
-            unknown_spends: Vec::new(),
+            unmatched_spends: Vec::new(),
             backfill: None,
         };
         Box::pin(async move { Ok(status) })
@@ -121,15 +88,15 @@ impl Watching for Probe {
         &'a self,
         id: &'a str,
         subject: &'a dyn Holder,
-        start: Start,
+        start: Birthday,
     ) -> BoxFuture<'a, Result<Watch, IndexError>> {
         let watch = Watch {
             id: id.to_owned(),
             address: subject.address().clone(),
             asset: subject.asset().clone(),
             start: match start {
-                Start::At(position) => position,
-                Start::Fresh => self.checkpoint.position,
+                Birthday::At(position) => position,
+                Birthday::Fresh => self.checkpoint.position,
             },
         };
         self.record(Call::Watch(Box::new(watch.clone())));
@@ -161,17 +128,12 @@ impl Watching for Probe {
 }
 
 impl indexing::Backfilling for Probe {
-    fn cancel<'a>(&'a self, network: &'a Network) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
+    fn cancel_backfill<'a>(
+        &'a self,
+        network: &'a Network,
+    ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
         self.record(Call::Cancel(network.clone()));
         Box::pin(async { Ok(Vec::new()) })
-    }
-}
-
-/// The holder a probe recorded, as a comparable value.
-fn recorded(of: &dyn Holder) -> Subject {
-    Subject {
-        address: of.address().clone(),
-        asset: of.asset().clone(),
     }
 }
 
@@ -231,9 +193,12 @@ where
     );
 
     let owner = address(network, "owner");
-    let watched =
-        block_on(indexer.watch("owner", &subject(&owner), Start::At(BlockPosition(height))))
-            .expect("watch");
+    let watched = block_on(indexer.watch(
+        "owner",
+        &subject(&owner),
+        Birthday::At(BlockPosition(height)),
+    ))
+    .expect("watch");
     assert_eq!(watched.address, owner);
     assert_eq!(watched.start, BlockPosition(height));
     assert!(
@@ -292,7 +257,7 @@ fn routes_each_networked_operation_to_its_indexer() {
     assert_eq!(checkpoint, Some(block(4)));
 
     let owner = address(&second_network, "owner");
-    let watched = block_on(index.watch("owner", &subject(&owner), Start::Fresh)).expect("watch");
+    let watched = block_on(index.watch("owner", &subject(&owner), Birthday::Fresh)).expect("watch");
     assert_eq!(watched.address, owner);
 
     assert_eq!(first.calls(), vec![Call::Checkpoint(first_network)]);
@@ -438,9 +403,12 @@ fn rejects_operations_for_an_unconfigured_network() {
     .expect("one network composes");
 
     let checkpoint_error = block_on(index.checkpoint(&missing)).expect_err("missing checkpoint");
-    let watch_error =
-        block_on(index.watch("owner", &subject(&address(&missing, "owner")), Start::Fresh))
-            .expect_err("missing watch network");
+    let watch_error = block_on(index.watch(
+        "owner",
+        &subject(&address(&missing, "owner")),
+        Birthday::Fresh,
+    ))
+    .expect_err("missing watch network");
     let watched_error = block_on(index.watched(&missing)).expect_err("missing watched network");
 
     assert_eq!(checkpoint_error.kind, IndexErrorKind::NetworkMismatch);
@@ -471,7 +439,7 @@ fn routes_each_watch_and_combines_statuses_from_every_indexer() {
         ("second", &second_owner, BlockPosition(5)),
         ("first", &first_owner, BlockPosition(2)),
     ] {
-        block_on(index.watch(id, &subject(owner), Start::At(start))).expect("watch");
+        block_on(index.watch(id, &subject(owner), Birthday::At(start))).expect("watch");
     }
     let statuses = block_on(index.sync()).expect("composed sync");
 
@@ -559,7 +527,7 @@ fn a_failing_unit_does_not_stop_the_units_after_it() {
             &'a self,
             _id: &'a str,
             _subject: &'a dyn Holder,
-            _start: Start,
+            _start: Birthday,
         ) -> BoxFuture<'a, Result<Watch, IndexError>> {
             unreachable!("this scenario never watches")
         }
@@ -577,7 +545,7 @@ fn a_failing_unit_does_not_stop_the_units_after_it() {
     }
 
     impl indexing::Backfilling for Refusing {
-        fn cancel<'a>(
+        fn cancel_backfill<'a>(
             &'a self,
             _network: &'a Network,
         ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
@@ -639,40 +607,6 @@ fn rejects_a_child_whose_status_is_not_about_its_own_network() {
         }
     }
 
-    impl History for Reporting {
-        fn history<'a>(
-            &'a self,
-            _of: &'a dyn Holder,
-            _page: Page,
-        ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
-            Box::pin(async {
-                Ok(TransactionPage {
-                    checkpoint: None,
-                    transactions: Vec::new(),
-                    pending: Vec::new(),
-                    next: None,
-                    completeness: indexing::Completeness::Incomplete,
-                })
-            })
-        }
-    }
-
-    impl Balances for Reporting {
-        fn balance<'a>(
-            &'a self,
-            _of: &'a dyn Holder,
-        ) -> BoxFuture<'a, Result<Balance, IndexError>> {
-            Box::pin(async {
-                Ok(Balance {
-                    amount: indexing::Decimal::zero(),
-                    observed_at: None,
-                    pending: PendingValue::none(),
-                    completeness: Completeness::Incomplete,
-                })
-            })
-        }
-    }
-
     impl Indexing for Reporting {
         fn network(&self) -> &Network {
             &self.network
@@ -691,7 +625,7 @@ fn rejects_a_child_whose_status_is_not_about_its_own_network() {
             &'a self,
             _id: &'a str,
             _subject: &'a dyn Holder,
-            _start: Start,
+            _start: Birthday,
         ) -> BoxFuture<'a, Result<Watch, IndexError>> {
             Box::pin(async { unreachable!("this fixture only reports statuses") })
         }
@@ -709,7 +643,7 @@ fn rejects_a_child_whose_status_is_not_about_its_own_network() {
     }
 
     impl indexing::Backfilling for Reporting {
-        fn cancel<'a>(
+        fn cancel_backfill<'a>(
             &'a self,
             _network: &'a Network,
         ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
@@ -725,7 +659,7 @@ fn rejects_a_child_whose_status_is_not_about_its_own_network() {
         pending_tip: None,
         observed_tip: Some(block(3)),
         phase: SyncPhase::Ready,
-        unknown_spends: Vec::new(),
+        unmatched_spends: Vec::new(),
         backfill: None,
     };
     for status in [
@@ -765,75 +699,5 @@ fn rejects_a_child_whose_status_is_not_about_its_own_network() {
             .expect("a complete report passes")
             .len(),
         1
-    );
-}
-
-/// A child that folds a balance does not make its composition fold one.
-///
-/// The same statement the history test below makes, now that a balance is the
-/// other query a consumer holds per network rather than reaches for through the
-/// thing doing the indexing. `Index` routes a balance nowhere: the fold is the
-/// repository's own answer completed by one index's overlay, so a consumer
-/// serving several networks collects one fold per network
-/// (`wallets::Composition::balance`) and asks the one that owns the subject.
-///
-/// Stated as a value of the capability, so the assertion is that `Probe` — which
-/// *does* implement [`Balances`] — composes into an `Index` that answers no
-/// balance. A restored `impl Balances for Index` would make the `Arc<dyn
-/// Balances>` below reachable from the composition and this test would stop
-/// saying anything; that it is built from the child is the point.
-///
-/// It also removes the bound the composition used to carry. While `Index`
-/// implemented its reads for a child trait that included [`Balances`], a
-/// composition demanded *every* query capability of every child before it would
-/// route any one of them; `Index<dyn Indexing>` asks for none.
-#[test]
-fn a_composition_does_not_answer_a_balance() {
-    let configured = network("unrouted-balance");
-    let probe = Arc::new(Probe::new(configured.clone(), 7));
-    let index =
-        Index::of(vec![Arc::clone(&probe) as Arc<dyn Indexing>]).expect("one network composes");
-    let owner = subject(&address(&configured, "owner"));
-
-    // The consumer asks the fold it holds for this network, never the index.
-    let fold: Arc<dyn Balances> = probe.clone();
-    let balance = block_on(fold.balance(&owner)).expect("the fold answers");
-
-    assert_eq!(balance.observed_at, Some(block(7)));
-    assert_eq!(index.networks(), std::slice::from_ref(&configured));
-    assert_eq!(
-        probe.calls(),
-        vec![Call::Balance(Box::new(owner))],
-        "the balance came from the unit that owns the network, not from a route"
-    );
-}
-
-/// A child that answers history does not make its composition answer one: the
-/// capability stops at the unit, because no indexer trait carries it and
-/// `Index` no longer forwards it.
-///
-/// Stated as a value of the one trait `Index` has left, so the assertion is that
-/// `Probe` — which *does* implement [`History`] — composes into an `Index` whose
-/// only read is a balance. A restored `impl History for Index` would make the
-/// `Arc<dyn History>` below reachable from the composition and this test would
-/// stop saying anything; that it is built from the child is the point.
-#[test]
-fn a_composition_does_not_answer_a_history_page() {
-    let configured = network("unrouted-history");
-    let probe = Arc::new(Probe::new(configured.clone(), 7));
-    let index =
-        Index::of(vec![Arc::clone(&probe) as Arc<dyn Indexing>]).expect("one network composes");
-    let owner = subject(&address(&configured, "owner"));
-
-    // The consumer asks the reader it holds for this network, never the index.
-    let reader: Arc<dyn History> = probe.clone();
-    let page = block_on(reader.history(&owner, Page::first(25))).expect("the reader answers");
-
-    assert_eq!(page.checkpoint, Some(block(7)));
-    assert_eq!(index.networks(), std::slice::from_ref(&configured));
-    assert_eq!(
-        probe.calls(),
-        vec![Call::History(Box::new(owner), Page::first(25))],
-        "the page came from the unit that owns the network, not from a route"
     );
 }

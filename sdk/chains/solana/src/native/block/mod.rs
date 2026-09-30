@@ -20,7 +20,7 @@ pub use token::TokenBalance;
 pub use transaction::{AccountKey, Balance, Fee, Transaction};
 
 use self::wire::Reply;
-use crate::native::Error;
+use crate::native::{Error, Network};
 
 /// One parsed block: its reference and transactions in block order.
 pub type Block = base::Block<Transaction>;
@@ -31,35 +31,48 @@ pub type Transactions = base::Transactions<Transaction>;
 /// reorg recovery.
 ///
 /// The payload is the JSON-RPC `result` bytes of `getBlock` (`json`
-/// encoding, full transactions, no rewards). Keeping bytes rather than parsed
-/// facts makes replay independent of this parser; only the header is checked
-/// when the block is fetched.
+/// encoding, full transactions, no rewards), plus the network they were read
+/// from: nothing in the bytes names it, so it is stated by the client that
+/// verified the genesis hash. Keeping bytes rather than parsed facts makes
+/// replay independent of this parser; only the header is checked when the
+/// block is fetched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawBlock {
     reference: BlockRef,
+    network: Network,
     bytes: Vec<u8>,
 }
 
 impl RawBlock {
     /// Checks the header of the `getBlock` result `bytes` for `position` and
-    /// keeps the exact bytes.
+    /// keeps the exact bytes, as read from `network`.
     ///
     /// # Errors
     ///
     /// [`crate::native::ErrorKind::InvalidBlock`] for a non-canonical hash,
     /// a missing produced height, a negative time, or a parent slot that does
     /// not precede `position`.
-    pub fn new(position: BlockPosition, bytes: Vec<u8>) -> Result<Self, Error> {
+    pub fn new(position: BlockPosition, network: Network, bytes: Vec<u8>) -> Result<Self, Error> {
         let wire = Reply::decode(&bytes)
             .map_err(|_| Error::invalid_block("Solana getBlock result has an invalid shape"))?;
         let reference = wire.reference(position)?;
-        Ok(Self { reference, bytes })
+        Ok(Self {
+            reference,
+            network,
+            bytes,
+        })
     }
 
     /// The block this evidence is.
     #[must_use]
     pub const fn reference(&self) -> &BlockRef {
         &self.reference
+    }
+
+    /// The network the evidence was read from.
+    #[must_use]
+    pub const fn network(&self) -> &Network {
+        &self.network
     }
 
     /// The `getBlock` result bytes.
@@ -89,7 +102,11 @@ impl RawBlock {
         let transactions = Transactions::new(transactions).map_err(|_| {
             Error::invalid_block("Solana block contains duplicate first signatures")
         })?;
-        Ok(Block::new(self.reference.clone(), transactions))
+        Ok(Block::new(
+            &self.network,
+            self.reference.clone(),
+            transactions,
+        ))
     }
 
     /// Fails unless this block is the next produced block after `previous`:
@@ -193,10 +210,32 @@ mod tests {
         })
     }
 
+    fn cluster(slug: &str) -> Network {
+        let genesis = "11111111111111111111111111111111";
+        Network::new(slug, genesis.parse().unwrap())
+    }
+
+    fn retained(position: u64, bytes: Vec<u8>) -> Result<RawBlock, Error> {
+        RawBlock::new(BlockPosition(position), cluster("localnet"), bytes)
+    }
+
     fn message(position: u64, value: Value) -> String {
-        RawBlock::new(BlockPosition(position), raw(value))
-            .unwrap_err()
-            .message
+        retained(position, raw(value)).unwrap_err().message
+    }
+
+    /// The parsed block belongs to the network its evidence was read from,
+    /// and to no other: the same bytes retained for two clusters parse into
+    /// two different blocks.
+    #[test]
+    fn a_parsed_block_carries_the_network_of_its_evidence() {
+        let localnet = retained(7, raw(block())).unwrap().parse().unwrap();
+        assert_eq!(localnet.network().chain, crate::native::CHAIN_NAME);
+        assert_eq!(localnet.network().name, "localnet");
+
+        let elsewhere = RawBlock::new(BlockPosition(7), cluster("devnet"), raw(block()));
+        let devnet = elsewhere.unwrap().parse().unwrap();
+        assert_eq!(devnet.network().name, "devnet");
+        assert_ne!(localnet, devnet);
     }
 
     #[test]
@@ -204,7 +243,7 @@ mod tests {
         let mut value = block();
         let bytes = [255; 32];
         value["blockhash"] = json!(Hash::new_from_array(bytes).to_string());
-        let parsed = RawBlock::new(BlockPosition(7), raw(value.clone())).unwrap();
+        let parsed = retained(7, raw(value.clone())).unwrap();
         assert_eq!(parsed.reference().hash.0, bytes);
         value["blockHeight"] = json!(null);
         for invalid in [
@@ -231,7 +270,7 @@ mod tests {
     #[test]
     fn retains_exact_raw_result_and_builds_sparse_reference() {
         let bytes = raw(block());
-        let parsed = RawBlock::new(BlockPosition(7), bytes.clone()).unwrap();
+        let parsed = retained(7, bytes.clone()).unwrap();
         assert_eq!(parsed.bytes(), bytes);
         assert_eq!(parsed.reference().position, BlockPosition(7));
         assert_eq!(parsed.reference().height, BlockHeight(4));
@@ -262,7 +301,7 @@ mod tests {
         missing.as_object_mut().unwrap().remove("transactions");
         cases.push(missing);
         for malformed in cases {
-            let error = RawBlock::new(BlockPosition(7), raw(malformed)).unwrap_err();
+            let error = retained(7, raw(malformed)).unwrap_err();
             assert_eq!(
                 (error.kind, error.retryable),
                 (ErrorKind::InvalidBlock, false)
@@ -274,7 +313,7 @@ mod tests {
     fn accepts_only_a_zero_parent_for_genesis_and_non_negative_time() {
         let mut genesis = block();
         genesis["parentSlot"] = json!(0);
-        assert!(RawBlock::new(BlockPosition(0), raw(genesis)).is_ok());
+        assert!(retained(0, raw(genesis)).is_ok());
 
         let mut bad_genesis = block();
         bad_genesis["parentSlot"] = json!(1);

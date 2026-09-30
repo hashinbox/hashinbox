@@ -16,8 +16,8 @@ use wallets::{
     Author, Authorship, SendError, SendFuture, Sender, Transfer, WalletError, WalletErrorKind,
 };
 
-pub(crate) use outbox::{Item, Outbox};
-pub(crate) use recovery::{Progress, Recovery};
+pub(crate) use outbox::{Outbox, SendRequest};
+pub(crate) use recovery::{CommitSignal, Recovery};
 pub(crate) use registration::Spawner;
 pub(crate) use reservation::Reservations;
 
@@ -27,23 +27,25 @@ use crate::WalletConfig;
 use crate::native::{Address, Lamport, transaction};
 use crate::wallet::Wallet;
 
-/// Resolves every transfer before any chain call, then hands the batch to
-/// the outbox, which reserves each sender for the whole batch.
+/// One factory's `wallets::Sender` and `wallets::Authorship`: its
+/// configuration and the outbox it shares with its siblings. It resolves
+/// every transfer before any chain call, then hands the batch to the outbox,
+/// which reserves each sender for the whole batch.
 ///
 /// Only a native SOL factory builds one: an SPL factory declares no
 /// `wallets::Authorship`, so a token batch does not exist to refuse.
-pub(crate) struct Batch {
+pub(crate) struct FactorySender {
     config: WalletConfig,
     outbox: Arc<Outbox>,
 }
 
-impl Batch {
+impl FactorySender {
     pub(crate) const fn new(config: WalletConfig, outbox: Arc<Outbox>) -> Self {
         Self { config, outbox }
     }
 
-    /// The outbox item of one authored transfer; the wallet signs it.
-    fn item(&self, transfer: Transfer) -> Result<Item, WalletError> {
+    /// The send request of one authored transfer; the wallet signs it.
+    fn request(&self, transfer: Transfer) -> Result<SendRequest, WalletError> {
         let from = Address::try_from(transfer.wallet.address()).map_err(|_| {
             WalletError::new(
                 WalletErrorKind::Unsupported,
@@ -52,7 +54,7 @@ impl Batch {
         })?;
         let to = Address::try_from(&transfer.to)?;
         let native = native_transfer(&from, to, &transfer.amount, self.config.decimals)?;
-        Ok(Item::new(transfer.wallet, from, native))
+        Ok(SendRequest::new(transfer.wallet, from, native))
     }
 
     async fn execute(
@@ -64,7 +66,7 @@ impl Batch {
             .into_iter()
             .enumerate()
             .map(|(index, transfer)| {
-                self.item(transfer)
+                self.request(transfer)
                     .map_err(|error| SendError::item(index, Vec::new(), error))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -72,13 +74,13 @@ impl Batch {
     }
 }
 
-impl Sender for Batch {
+impl Sender for FactorySender {
     fn send<'a>(&'a self, transfers: Vec<Transfer>) -> SendFuture<'a> {
         Box::pin(self.execute(transfers))
     }
 }
 
-impl Authorship for Batch {
+impl Authorship for FactorySender {
     /// The wallet's own authoring capability, recovered by the one type that
     /// makes it. Membership is `WalletFactory::validate`'s answer, which
     /// `wallets::Wallets::author` has already taken; this repeats only the

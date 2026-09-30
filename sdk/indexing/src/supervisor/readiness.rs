@@ -3,22 +3,18 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::{NetworkEvent, SyncMonitor};
-use crate::{Network, NetworkHealth, SyncHealth};
+use crate::{Network, SyncHealth};
 
-/// The monitor that keeps one [`SyncHealth`] snapshot current, and the
-/// [`Readiness`] a caller waits on.
+/// The monitor that keeps one [`SyncHealth`] snapshot current, and publishes
+/// it to the [`Readiness`] a caller waits on.
 ///
-/// Every consumer of a [`Supervisor`](super::Supervisor) needs the same two
-/// things: somewhere for a transition to land, and a way to wait until the
-/// composition can answer questions. Writing that twice is how two callers
-/// come to disagree about what "ready" means, so the snapshot and the waiting
-/// live here and the rule itself stays where it always was —
-/// [`SyncHealth::ready`] and [`SyncHealth::settled`] own it.
+/// Every consumer of a [`Supervisor`](super::Supervisor) needs somewhere for a
+/// transition to land and a way to wait until the index has caught up. The
+/// rule itself stays where it was: [`SyncHealth`] owns it.
 ///
-/// It does no I/O, as [`SyncMonitor`] requires, and it logs nothing: a library
-/// crate must not write to standard output. An application that wants a line
-/// per transition implements [`SyncMonitor`] itself and calls [`Self::publish`]
-/// from it, which is what `apps/server` does.
+/// It does no I/O, as [`SyncMonitor`] requires, and it writes nothing: an
+/// application that wants a line per transition implements [`SyncMonitor`]
+/// itself and forwards each event here.
 pub struct SyncReport {
     snapshot: watch::Sender<SyncHealth>,
     /// What every network looks like before it has reported, kept so
@@ -26,12 +22,7 @@ pub struct SyncReport {
     starting: SyncHealth,
 }
 
-/// Waits until the networks a [`SyncReport`] watches reach a standing
-/// condition, and hands the same snapshot to a consumer that polls it.
-///
-/// Both waiters resolve to `None` once the report is dropped: the supervisor
-/// that owned it has stopped, so nothing further will ever be published and a
-/// caller waiting for readiness would otherwise wait for good.
+/// Waits until every network a [`SyncReport`] watches has settled.
 pub struct Readiness(watch::Receiver<SyncHealth>);
 
 impl SyncReport {
@@ -40,28 +31,12 @@ impl SyncReport {
     ///
     /// The networks are the composition's own
     /// ([`Index::networks`](crate::Index::networks)); a transition on any
-    /// other is ignored, because the snapshot describes the composition it was
-    /// built from and nothing else.
+    /// other is ignored.
     #[must_use]
     pub fn watching(networks: &[Network]) -> (Arc<Self>, Readiness) {
         let starting = SyncHealth::starting(networks);
         let (snapshot, readiness) = watch::channel(starting.clone());
-        (
-            Arc::new(Self {
-                snapshot,
-                starting,
-            }),
-            Readiness(readiness),
-        )
-    }
-
-    /// Records one network's health in the snapshot.
-    ///
-    /// This is the whole of [`SyncMonitor::network_changed`]'s body, exposed
-    /// so an application that wants its own diagnostics beside it can wrap
-    /// this type instead of keeping a second channel.
-    pub fn publish(&self, health: &NetworkHealth) {
-        self.snapshot.send_modify(|snapshot| snapshot.apply(health));
+        (Arc::new(Self { snapshot, starting }), Readiness(readiness))
     }
 
     /// Reports every network as unreported again, so nothing reads as ready.
@@ -77,27 +52,25 @@ impl SyncReport {
 
 impl SyncMonitor for SyncReport {
     fn network_changed(&self, event: &NetworkEvent) {
-        self.publish(&event.health);
+        self.snapshot
+            .send_modify(|snapshot| snapshot.apply(&event.health));
     }
 }
 
 impl Readiness {
-    /// Waits until the composition can serve complete history for the chains
-    /// it still answers for ([`SyncHealth::ready`]).
-    pub async fn ready(&mut self) -> Option<SyncHealth> {
-        self.reached(SyncHealth::ready).await
-    }
-
-    /// Waits until every network has settled ([`SyncHealth::settled`]): the
-    /// gate a startup sequence binds its listener behind.
+    /// Waits until every network has settled ([`SyncHealth::ever_settled`]):
+    /// it reached its node's tip once, or it was quarantined. Returns at once
+    /// when that already holds.
+    ///
+    /// A quarantined network does not hold this back, because it will not
+    /// recover on its own; the snapshot returned says which networks are
+    /// `Ready` and why the others are not.
+    ///
+    /// `None` once the [`SyncReport`] is gone: the supervisor that owned it
+    /// has stopped, so waiting any longer would wait for good.
     pub async fn settled(&mut self) -> Option<SyncHealth> {
-        self.reached(SyncHealth::settled).await
-    }
-
-    /// What every network is right now, without waiting for anything.
-    #[must_use]
-    pub fn snapshot(&self) -> SyncHealth {
-        self.0.borrow().clone()
+        let settled = self.0.wait_for(SyncHealth::ever_settled).await.ok()?;
+        Some(SyncHealth::clone(&settled))
     }
 
     /// The same snapshot for a consumer that polls rather than waits, such as
@@ -106,22 +79,12 @@ impl Readiness {
     pub fn receiver(&self) -> watch::Receiver<SyncHealth> {
         self.0.clone()
     }
-
-    /// The first published snapshot `reached` accepts, or the one already
-    /// published when it accepts that.
-    async fn reached(&mut self, reached: fn(&SyncHealth) -> bool) -> Option<SyncHealth> {
-        self.0
-            .wait_for(|health| reached(health))
-            .await
-            .ok()
-            .map(|health| SyncHealth::clone(&health))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ChainName, NetworkState};
+    use crate::{ChainName, NetworkHealth, NetworkState};
 
     fn network(chain: &str) -> Network {
         Network {
@@ -141,49 +104,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_waits_for_every_network_the_report_watches() {
+    async fn the_waiter_wakes_when_the_last_network_settles() {
         let (first, second) = (network("first"), network("second"));
-        let (report, mut readiness) =
-            SyncReport::watching(&[first.clone(), second.clone()]);
-        report.network_changed(&event(&first, NetworkState::Ready));
-        assert!(!readiness.snapshot().ready(), "one network is mid-flight");
+        let (report, mut readiness) = SyncReport::watching(&[first.clone(), second.clone()]);
+        let waiting = tokio::spawn(async move { readiness.settled().await });
 
-        let waiting = tokio::spawn(async move { readiness.ready().await });
+        report.network_changed(&event(&first, NetworkState::Ready));
+        report.network_changed(&event(&second, NetworkState::Retrying));
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "one network has reached its tip and the other is still trying"
+        );
+
         report.network_changed(&event(&second, NetworkState::Ready));
 
-        let reached = waiting.await.expect("waiter").expect("a published snapshot");
-        assert!(reached.ready());
-        assert!(reached.settled());
+        let settled = waiting.await.expect("waiter").expect("a live report");
+        assert!(settled.ready());
+        assert!(
+            settled
+                .networks()
+                .iter()
+                .all(|row| row.state == NetworkState::Ready)
+        );
     }
 
     #[tokio::test]
-    async fn a_quarantined_network_settles_without_being_ready() {
+    async fn a_quarantined_network_does_not_hold_the_waiter_back() {
+        let (first, second) = (network("first"), network("second"));
+        let (report, mut readiness) = SyncReport::watching(&[first.clone(), second.clone()]);
+        let waiting = tokio::spawn(async move { readiness.settled().await });
+
+        report.network_changed(&event(&first, NetworkState::Quarantined));
+        report.network_changed(&event(&second, NetworkState::Ready));
+        tokio::task::yield_now().await;
+
+        assert!(waiting.is_finished(), "a quarantine heals by no waiting");
+        let settled = waiting.await.expect("waiter").expect("a live report");
+        assert_eq!(settled.networks()[0].state, NetworkState::Quarantined);
+        assert!(settled.ready(), "the healthy network still serves");
+    }
+
+    #[tokio::test]
+    async fn every_network_quarantined_still_settles() {
         let only = network("only");
         let (report, mut readiness) = SyncReport::watching(std::slice::from_ref(&only));
+        let waiting = tokio::spawn(async move { readiness.settled().await });
 
         report.network_changed(&event(&only, NetworkState::Quarantined));
+        tokio::task::yield_now().await;
 
+        assert!(waiting.is_finished(), "nothing is left to wait for");
+        let settled = waiting.await.expect("waiter").expect("a live report");
         assert!(
-            readiness.settled().await.is_some(),
-            "a quarantined network settles: it will not heal by itself"
-        );
-        assert!(
-            !readiness.snapshot().ready(),
-            "nothing useful can be served when every network is quarantined"
+            !settled.ready(),
+            "and the snapshot says nothing can be served"
         );
     }
 
     #[tokio::test]
-    async fn a_reset_report_is_not_ready_again() {
+    async fn a_transition_on_an_unwatched_network_settles_nothing() {
+        let (report, readiness) = SyncReport::watching(&[network("watched")]);
+
+        report.network_changed(&event(&network("other"), NetworkState::Ready));
+
+        assert!(!readiness.receiver().borrow().ever_settled());
+    }
+
+    #[tokio::test]
+    async fn a_reset_report_has_to_settle_again() {
         let only = network("only");
-        let (report, readiness) = SyncReport::watching(std::slice::from_ref(&only));
+        let (report, mut readiness) = SyncReport::watching(std::slice::from_ref(&only));
         report.network_changed(&event(&only, NetworkState::Ready));
-        assert!(readiness.snapshot().ready());
+        assert!(readiness.settled().await.is_some());
 
         report.reset();
 
-        assert!(!readiness.snapshot().ready());
-        assert!(!readiness.snapshot().settled());
+        let snapshot = readiness.receiver().borrow().clone();
+        assert!(!snapshot.ready());
+        assert!(!snapshot.ever_settled());
     }
 
     #[tokio::test]
@@ -192,7 +191,6 @@ mod tests {
 
         drop(report);
 
-        assert!(readiness.ready().await.is_none());
         assert!(readiness.settled().await.is_none());
     }
 }

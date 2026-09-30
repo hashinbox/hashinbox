@@ -12,10 +12,9 @@
 //! What is left here is three registration lines. A fourth chain is a fourth
 //! line; nothing else in this binary would change.
 
-use payment_api::AssetTag;
 use sdk_config::Registry;
 
-use crate::storage::Repository;
+use crate::{api::AssetTag, storage::Repository};
 
 /// Which chain owns which section of `chains` in the configuration document.
 ///

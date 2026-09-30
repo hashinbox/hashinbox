@@ -12,7 +12,7 @@ its concepts, its API map, a compiling usage example, and its neighbours. Layers
 | `crypto` | `packages/crypto` | Secret key material, secp256k1 and Ed25519 keys, ECDSA/Schnorr/Ed25519 signing, the signing request/result vocabulary, and the in-process key pair every chain signs through | packages | [README](packages/crypto/README.md) |
 | `decimal` | `packages/decimal` | Exact base-10 amounts: canonical positional text, numeric ordering, atomic-unit conversion | packages | [README](packages/decimal/README.md) |
 | `json-rpc` | `packages/json-rpc` | Bounded JSON-RPC transport: one URL per node; retry and failover are decorators | packages | [README](packages/json-rpc/README.md) |
-| `http-server` | `packages/http-server` | Axum server hardening: bearer auth, transport security, limits; the two health route paths (`payment-api` serves them) | packages | [README](packages/http-server/README.md) |
+| `http-server` | `packages/http-server` | Axum server hardening: bearer auth, transport security, limits; the two health route paths (`payment-server` serves them) | packages | [README](packages/http-server/README.md) |
 | `sdk-config` | `sdk/config` | The configuration document and the registry that hands each named section to the chain that registered for it; `Rpc`, `Repetition`, `Cadence` as plain data; TOML behind feature `toml` (off by default). It names no chain crate | config | [README](sdk/config/README.md) |
 | `base` | `sdk/base` | Chain-neutral values and capabilities: address, network, asset, amount, block, sign, broadcast | base | [README](sdk/base/README.md) |
 | `indexing` | `sdk/indexing` | Append-only, chain-neutral sync into history, checkpoint, and outputs, with the blocks above each chain's confirmed line held in memory; the store and chain contracts, the SQLite store that implements them (feature `sqlite`), and the supervisor that drives them (feature `supervisor`) | indexing | [README](sdk/indexing/README.md) |
@@ -20,8 +20,7 @@ its concepts, its API map, a compiling usage example, and its neighbours. Layers
 | `chain-bitcoin` | `sdk/chains/bitcoin` | Bitcoin: RPC, blocks, UTXO wallets, send pipeline | chains | [README](sdk/chains/bitcoin/README.md) |
 | `chain-ethereum` | `sdk/chains/ethereum` | Ethereum: RPC, blocks, ETH and ERC-20 wallets, send pipeline | chains | [README](sdk/chains/ethereum/README.md) |
 | `chain-solana` | `sdk/chains/solana` | Solana: RPC, finalized blocks, SOL wallets, send pipeline | chains | [README](sdk/chains/solana/README.md) |
-| `payment-api` | `apps/api` | The HTTP routes, wire models, and OpenAPI contract over `wallets` and `indexing`; no chain, no storage | api | [README](apps/api/README.md) |
-| `payment-server` | `apps/server` | The one executable: config, storage, chain composition, supervision, serving `payment-api` | server | [README](apps/server/README.md) |
+| `payment-server` | `apps/server` | The one application, a binary with no library target: config, storage, chain composition, supervision, and the HTTP routes, wire models, and OpenAPI contract it serves (`src/api/`, over `wallets` and `indexing`; no chain, no storage) | server | [README](apps/server/README.md) |
 | `payment-examples` | `examples` | Runnable scenarios: one directory per scenario, every chain inside it as setup | examples | [README](examples/README.md) |
 
 How they fit: a chain crate implements the `indexing` contracts (`BlockSource`,
@@ -33,10 +32,13 @@ history, each completed by the blocks its index holds above the confirmed line;
 
 ## One process and one composition root
 
-`apps/server` is the only executable and composition root; `apps/api` is a
-library of routes that may not depend on a chain crate (`linter.toml` layers
-`api` and `server`). Inside `apps/server`, only `src/chains.rs` names a chain
-crate (`scripts/check-chains.sh` check 8).
+`apps/server` is the only application crate, the only executable and the
+composition root: a distributable binary that loads its configuration and
+serves the HTTP API, with no library target. Its routes are the module
+`src/api/`, which may not name a chain crate, `sdk_config` or a storage
+backend. Inside `apps/server`, only `src/chains.rs` names a chain crate. Both
+are held by `scripts/check-chains.sh` check 8, because `linter.toml` layers are
+Cargo packages and cannot see inside one.
 
 Each chain composes itself: its `Config<A>`, `connect` and `compose` live in
 its own crate's `src/config.rs` (`docs/CHAIN_LAYOUT.md` section 4), so a
@@ -86,10 +88,10 @@ wallet/indexer HTTP protocol.
 ```text
 main (apps/server)
   |- Storage: one SQLite file
-  |    `- one Repository, every network ---+-> Bitcoin Service ---+
-  |       (WatchStore + IndexStore, plus   |-> Ethereum Service -+-> Index
-  |        the reads this server's chains   `-> Solana Service ----/
-  |        need; also the durable mirror of each Service's watch list)
+  |    `- one Repository, every network ---+-> Bitcoin Indexer ---+
+  |       (WatchStore + IndexStore, plus   |-> Ethereum Indexer -+-> Index
+  |        the reads this server's chains   `-> Solana Indexer ----/
+  |        need; also the durable mirror of each Indexer's watch list)
   |
   |- "btc"  -> Bitcoin factory/sender ---\
   |- "eth"  -> Ethereum factory/sender ---+-> Wallets<AssetTag>
@@ -97,7 +99,7 @@ main (apps/server)
   `- "sol"  -> Solana factory/sender ----/      wallet and keeps nothing)
 
 sync task: Supervisor -> Index                  (each unit reads its own watch list)
-HTTP (apps/api): State { Wallets, Signers, Arc<Index>, History, Balances, readiness }
+HTTP (src/api):  State { Wallets, Signers, Arc<Index>, History, Balances, readiness }
                  Signers is the id -> wallet map: what this process can sign
 ```
 
@@ -137,7 +139,7 @@ three endpoint rounds with 250 ms initial backoff capped at 2 seconds; a
 deployment may set `repeat = 'off'`, and a `Repetition::Forbidden` call is one
 execution against one endpoint regardless.
 
-`apps/server` chooses `payment_api::AssetTag` (`[a-z0-9][a-z0-9-]{0,31}`) for the
+`apps/server` chooses its own `api::AssetTag` (`[a-z0-9][a-z0-9-]{0,31}`) for the
 generic asset-key parameter of `Wallets`; the configuration names the tag of
 each factory and the wire contract carries it as an open string validated
 against the registered tags. Native ETH and an allowlisted ERC-20 such as USDC are
@@ -151,8 +153,9 @@ An asset is a fact within canonical history, not a persistence boundary. Native
 and token wallets on one chain share that chain/network repository handle;
 they never receive separate schemas, pools, or repositories. A history page is
 one repository query by address and asset (`indexing::HistoryQuery`), which
-`indexing::History::history` builds from a `Holder` and a `Page`, answered by
-`indexing::ObservedHistory` over that repository and its index's overlay.
+`wallets::History::history` builds from a `Holder` and a `Page`, answered by
+`wallets::PendingJoin` over that repository and a sample of the blocks its index
+holds above the confirmed line (`indexing::Pending`).
 
 Ethereum requires a node that traces blocks, and this is a composition concern
 too. Contract-initiated ether is named by no transaction field and no log, so
@@ -164,17 +167,20 @@ section, which under per-chain isolation leaves Bitcoin and Solana composing and
 indexing normally. The traces stay in the in-memory `RawBlock` for one
 interpretation pass; nothing persists them.
 
-A balance is the index's fold over the movements it stores, never a second
+A balance is the repository's fold over the movements it stores, never a second
 number read from a node, so the question "how much of the history behind it can
-the index prove it holds" is answered separately by `indexing::Completeness`.
-`Incomplete` is the honest default on all three chains: an address watched
+the repository prove it holds" is answered separately by
+`indexing::Completeness`, by the repository, from the snapshot the fold was read
+in. `Incomplete` is the honest default on all three chains: an address watched
 from a start position later than its first funding folds low and nothing in the
-rows says so. Exactly one thing can raise that to `VerifiedOpening`, and only on
-Ethereum: `chain_ethereum::BalanceWitness` asks one node what it computes for
-the same holding at the *same block the fold settled at*, pinned by block hash
-with `requireCanonical`, and reports whether the two agree. It never changes the
-amount and it cannot fail the read; disagreement is reported rather than
-resolved. Bitcoin Core has no address index and Solana cannot read an account at
+rows says so. One piece of independent evidence exists, and only on Ethereum:
+`chain_ethereum::BalanceWitness` asks one node what it computes for the same
+holding at the *same block the fold settled at*, pinned by block hash with
+`requireCanonical`, and reports whether the two agree as an `Attestation`. It is
+not a value of `Completeness` and it is written onto no balance: no repository
+can make or persist it, so what an agreement is worth is its caller's to decide.
+It never changes the amount and it cannot fail the read; disagreement is
+reported rather than resolved. Bitcoin Core has no address index and Solana cannot read an account at
 a past slot, so neither chain has an oracle to pin. Two balance causes remain
 open, both Ethereum's: consensus-layer withdrawals are parsed from the block
 body (`RawBlock::withdrawals`) but have no home in `InterpretedBlock`, which
@@ -187,28 +193,27 @@ allowlisted contract on one canonical block through the verified
 separately, token-enabled composition admits exactly one Ethereum RPC endpoint.
 
 The concrete `Arc<Index>` is cloned into the sync task and into `Wallets`,
-which reads it as `Checkpoint`. The Bitcoin index hands out a reader over its
-own repository's `OutputStore` (`Service::outputs`), which its `WalletFactory`
-spends; `Index` does not force UTXO semantics onto account chains, and routes no
-query at all. These are views of already-composed state, not parallel
+which reads it as `Checkpoint`. Bitcoin's composition joins its repository's
+`OutputStore` to its index's pending blocks (`wallets::PendingJoin`), which its
+`WalletFactory` spends; `Index` does not force UTXO semantics onto account
+chains, and routes no query at all. These are views of already-composed state, not parallel
 registries.
 
 ## Dependency direction
 
 ```text
 apps/server
-  -> apps/api
-  -> sdk/chains/{bitcoin,ethereum,solana}
+  -> sdk/chains/{bitcoin,ethereum,solana}    (src/chains.rs only)
   -> sdk/config                              (with feature "toml")
   -> sdk/wallets
   -> sdk/indexing
   -> packages/{http-server,json-rpc}
 
-apps/api
+apps/server/src/api                          (a module, held by check-chains.sh check 8)
   -> sdk/{base,indexing,wallets}
   -> packages/http-server
 
-examples -> the same crates as apps/server, without apps/api
+examples -> the same crates as apps/server
 
 sdk/chains/{bitcoin,ethereum,solana}
   -> sdk/base
@@ -239,9 +244,21 @@ sdk/base -> packages/{crypto,decimal}
   the two implementations of them, `sqlite` on a file and `memory` on maps --
   the one abstraction with a second implementation -- and the root is everything else, the
   vocabulary,
-  the contracts, the pass and the supervisor that drives it. `apps/api` takes
-  it with `default-features = false` and sees the public root only.
-- Only `apps/server` depends on `apps/api`; nothing depends on `apps/server`.
+  the contracts, the pass and the supervisor that drives it. The routes in
+  `apps/server/src/api` use the public root only and name neither store.
+- Inside `sdk/indexing/src/storage/` three rules hold, and each is checked:
+  1. A store may import the shared storage files and the engine. Nothing
+     imports a store: not the engine, not a shared storage file, not another
+     store. Declaring the two modules in `storage.rs` and re-exporting them
+     from `lib.rs` as `indexing::sqlite` and `indexing::memory` is not
+     importing them, and test-only code may use both
+     (`scripts/check-chains.sh`, check 12).
+  2. Every directory directly under `storage/` is one store. Shared code is
+     files, never a folder (`layout` in `linter.toml`).
+  3. Every file directly in `storage/` is shared by every store. A store's
+     root module is inside its folder (`sqlite/mod.rs`), not beside it
+     (`sqlite.rs`) (`layout` in `linter.toml`).
+- Nothing depends on `apps/server`.
 
 ## Ownership
 
@@ -261,7 +278,7 @@ sdk/base -> packages/{crypto,decimal}
   ([ADR-0029](docs/adr/0029-wrap-a-proven-decimal-core.md));
 - `http-server` owns axum server hardening (authentication, transport
   security, request limits) and the two health route *paths*
-  (`LIVENESS_PATH`, `READINESS_PATH`); `apps/api/src/api/health.rs` serves and
+  (`LIVENESS_PATH`, `READINESS_PATH`); `apps/server/src/api/health.rs` serves and
   documents them, because readiness is an application fact;
 - `json-rpc` wraps `jsonrpsee` with a bounded one-endpoint transport plus
   `Retry` and `Failover` decorators over the same two-method `Client` trait.
@@ -382,42 +399,46 @@ Deleting one chain must leave the other chain and every generic crate coherent.
   together `Repository` — the consumer capabilities a store may offer beside
   them (`BalanceStore`, `OutputStore`, `Purging`), and the history query a
   repository may expose of its own (`ConfirmedHistory`);
-- the confirmed line each chain states about itself, the in-memory overlay of
-  blocks above it, and the reads that fold the two together;
+- the confirmed line each chain states about itself, the pending blocks held in
+  memory above it, and the sample of them a reader narrows by a store's answer;
 - single-network synchronization, including the half of a pass that fills in
   blocks *at or below* the checkpoint for an observation watched from before it
   was registered, through the same commit; and
 - the multi-network `Index`.
 
-`Service` is one network's whole indexer: it owns that network's watches, the
+`Indexer` is one network's whole indexer: it owns that network's watches, the
 blocks it holds above the confirmed line, its chain adapter and its reference to
 the store, and its bounded pass is a procedure over those fields rather than a
 call into a second object holding a second copy of them (`docs/design/030 §8 (ex-032)`). The
-pass therefore takes no watch set as an argument and shares no overlay with a
-reader. Scheduling, retry delays, quarantine and shutdown are not in it at all:
+pass therefore takes no watch set as an argument and shares no pending block
+with a reader. Scheduling, retry delays, quarantine and shutdown are not in it at all:
 they belong to the optional `Supervisor`, which calls `Indexing::sync` and owns
 no second implementation of scanning or committing — which is why the crate
 builds, and a caller drives bounded passes by hand, with the `supervisor`
 feature off.
 
-One-chain `Service`, each chain's own newtype, and `Index` all implement
-`indexing::Indexing` — observing, advancing, and saying where it got to, all of
+One network's `Indexer` implements `indexing::Indexing` — observing, advancing, and saying where it got to, all of
 which a `Repository` alone answers, and that is the whole of the indexer
 surface: no query is on it, so a store folding nothing is composed and
-supervised exactly like one that folds everything. Neither read `apps/api`
-serves is taken through it: `indexing::ObservedHistory` joins one repository's
-`ConfirmedHistory` pages to that index's overlay, `indexing::ObservedBalance`
-completes the same store's total with the same overlay, each chain builds one of each for its own
-network, and `wallets::Composition` collects them into the single
-`Arc<dyn History>` and `Arc<dyn Balances>` `apps/api` declares.
+supervised exactly like one that folds everything. Neither read the routes
+serve is taken through it. What an index exposes to a reader is its confirmed
+line (`Checkpoint`) and a sample of the blocks it holds above it
+(`indexing::Pending`); `wallets::PendingJoin` joins one repository's
+`ConfirmedHistory` pages, its balance fold and its live outputs to that sample —
+sampled before the repository is read and narrowed by the repository's own
+answer (`indexing::Checkpointed`), never by a checkpoint read beside it, so a
+commit landing inside a read is counted once. Each chain builds one for its own network, and `wallets::Composition`
+collects them into the single `Arc<dyn wallets::History>` and
+`Arc<dyn wallets::Balances>` the routes declare.
 `Index<C: ?Sized = dyn Indexing>` and `Supervisor<C: ?Sized = dyn Indexing>`
 are generic over the child trait with that default. There used to be a wider
-`Indexer: Indexing + Balances` above it, carried by every composed child and
-read by none of them — the courier of `docs/DEFECT_PATTERNS.md` section 1.1 —
-and removing it is what left one trait here.
+trait above it, `Indexing + Balances`, carried by every composed child and read
+by none of them — the courier of `docs/DEFECT_PATTERNS.md` section 1.1 — and
+removing it is what left one trait here. `Indexer` names the type and nothing
+else.
 
 The index owns its durable selection: `Watching::watch` writes the `WatchStore`
-row and each `Service` keeps the hot set its passes read, so nothing calls back
+row and each `Indexer` keeps the hot set its passes read, so nothing calls back
 into the caller to ask (`docs/design/030 §8 (ex-029)`). Wallet SDK and
 embedding-application code own identities, secrets, asset selection, and
 birthdays. A pass never queries custody state directly, and no watch row carries
@@ -469,7 +490,7 @@ with nothing proved.
 
 The durable set a pass writes is deliberately limited to checkpoint,
 address-primary canonical history, and live outputs. The blocks above the
-confirmed line are held interpreted in memory on the `Service`, never written:
+confirmed line are held interpreted in memory on the `Indexer`, never written:
 they are the blocks the pass already fetched and already interpreted, kept
 instead of thrown away, and a reorg shallower than the line is a truncation of
 that list with no store I/O at all. Confirmation, readiness, status, watches,
@@ -510,8 +531,8 @@ fact of the type system rather than four gates inside a chain.
 Three other owners answer what it stopped answering (`docs/design/030 §8 (ex-029)`):
 `indexing` owns the durable list of what is observed (`Watching::watch`), the
 chain owns building and signing, and the application owns the id -> wallet map
-and where keys live. In `payment-server` that map is `payment_api::Signers`,
-three methods over a `BTreeMap`, deliberately not a type in `wallets`: a
+and where keys live. In `payment-server` that map is `api::Signers`,
+two methods over a `BTreeMap`, deliberately not a type in `wallets`: a
 container there called anything at all would be `Wallets` renamed, which is the
 objection.
 
@@ -541,7 +562,7 @@ That is the property a batch actually needs, and it is stronger than a tag
 written down when a wallet was filed somewhere.
 
 A watched address is not a kind of wallet: it is the absence of a wallet beside
-an index watch row. `index.watch(id, &dyn Holder, Start)` takes a wallet or a
+an index watch row. `index.watch(id, &dyn Holder, Birthday)` takes a wallet or a
 bare `indexing::Subject { address, asset }`; both are indexed and both serve
 history, and "watch-only" is the derived fact that this process holds no key
 for a watched id.
@@ -553,13 +574,13 @@ is visible in `index.watched`, whose history is correct, and which re-importing
 the key repairs. The other order would leave a key nothing observes: a wallet
 reporting zero balance and empty history forever, with nothing saying why.
 
-For `payment-server`, `A` is `payment_api::AssetTag`, the user-facing tag of one
+For `payment-server`, `A` is its `api::AssetTag`, the user-facing tag of one
 registered factory. The map remains generic and other embedding applications may
 choose a different key type.
 
 A restart splits the same way. What is *observed* comes back from the index's
 own `WatchStore` rows — each with the block through which it has been inspected,
-from one snapshot — read once by each `Service` before its first pass, at no
+from one snapshot — read once by each `Indexer` before its first pass, at no
 cost to the caller. What can *sign* comes back only from the application's key
 store: `apps/server` rebuilds it from `config.wallets[]`, each entry naming the
 environment variable holding its key and the birthday to watch from. The index
@@ -568,7 +589,7 @@ subcommand went with the redb backend it was the only reader of.
 
 ### Public HTTP
 
-`apps/api` owns public routing, Utoipa schemas, transport validation,
+`apps/server/src/api` owns public routing, Utoipa schemas, transport validation,
 authentication, limits, HTTP errors, and encoding. HTTP state contains the
 abstract factory map, the wallets this process holds keys for (`Signers`), the
 composed `Arc<Index>` with the two query handles beside it, and readiness
@@ -585,7 +606,7 @@ wire types exist only for exact reuse; domain types remain with their domain.
 
 ```text
 Supervisor -> Index::sync (no selection argument)
-    -> chain Service, each against its own watch list
+    -> chain Indexer, each against its own watch list
     -> source tip and source confirmed tip
     -> verify committed checkpoint against canonical hash (else ConfirmedReorg)
     -> drop held blocks the source no longer calls canonical
@@ -605,7 +626,7 @@ Supervisor -> Index::sync (no selection argument)
                                plus the claims they prove, one transaction
 ```
 
-A `Start::At` below the checkpoint is honoured rather than discarded. Each
+A `Birthday::At` below the checkpoint is honoured rather than discarded. Each
 observation carries one contiguous, hash-verified `indexed_through` and resumes
 after it; a pass takes the lowest `next_required` across every observation that
 has not reached the line, reads one shared range up to the checkpoint, and
@@ -618,9 +639,11 @@ the present, and in exchange one reference describes the whole of what has been
 read. Forward progress spends the batch budget first, so a network behind its tip
 fills in nothing at all, and `SyncPolicy::max_backfill_blocks` refuses a start too
 far down at `watch` rather than in the background. `SyncStatus::backfill` says
-what is left, and the *same* `caught_up` predicate drives
-`Completeness::while_backfilling`, so a balance or a history page over that range
-cannot claim `Complete`. `docs/INDEXING.md` has the guarantees; `docs/design/024` has the
+what is left, and the *same* `caught_up` predicate is what each repository asks
+of its own watch rows, in the snapshot it answers from, before it claims
+anything about a range: a balance or a history page of an address still being
+inspected below the line cannot claim `CompleteHistory`, and its spendable
+outputs are refused until the inspection reaches the line. `docs/INDEXING.md` has the guarantees; `docs/design/024` has the
 argument.
 
 All configured historical wallets are registered before the first sync. A
@@ -765,8 +788,9 @@ Startup order is part of correctness:
 `SyncStatus` still reports only pass progress (`CatchingUp` or `Ready`), and it
 is still not where a failure lives. A failure is survivable now, so it has to
 be remembered somewhere: `indexing::NetworkHealth` is that cache, holding one
-network's `NetworkState`, its last checkpoint, the `IndexError` holding it
-back, its consecutive attempt count, and when the state was entered.
+network's `NetworkState`, the `IndexError` holding it back, its consecutive
+attempt count, when the state was entered, and the `SyncStatus` of the last
+pass it completed, which is where its last checkpoint is read.
 `indexing::SyncHealth` owns the readiness rule over every network.
 
 `indexing::Supervisor` drives **one task per `indexing::SyncUnit`**,
@@ -783,7 +807,7 @@ which is one per composed chain. One chain's failure is therefore only its own:
   operator fixed out of band, reachable without a restart as
   `POST /v1/status/resume` (the composition root takes the handle before
   `Supervisor::run` consumes the supervisor and hands it to the routes behind
-  `payment_api::Resume`, so the API crate still names no runtime); for
+  `api::Resume`, so the routes still name no runtime); for
   `ConfirmedReorg` it re-quarantines within one pass, correctly, and the offline
   `--rescan` above is the only remedy;
 - `Supervisor::run` returns only on shutdown. Indexing no longer fails startup

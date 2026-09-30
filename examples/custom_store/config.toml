@@ -1,8 +1,8 @@
 # The chains this scenario runs. Same file, same keys, as every other
-# scenario's — but this is the one scenario that reads the sections itself
-# (`local::Scenario::value`) rather than handing them to
-# `sdk_config::Registry`, because assembling an index by hand is what it is
-# showing. Its networks still come from here and nowhere else.
+# scenario's — but this is the one scenario that decodes each section itself
+# rather than handing them to `sdk_config::Registry`, because assembling an
+# index by hand is what it is showing. Its networks still come from here and
+# nowhere else.
 #
 # The keys it does not read are the chain's own defaults: the asset tag, the
 # address type, Bitcoin's six-block confirmation depth, and each chain's
@@ -20,9 +20,8 @@ rpc.endpoints = ['http://127.0.0.1:8545']
 [solana]
 network = 'localnet'
 # `solana-test-validator --reset` mints a new cluster every run, so no
-# checked-in file can state its genesis hash. examples/local.rs asks this
-# section's own node for it and substitutes the answer before the document is
-# parsed. A deployment writes the hash it expects; a node serving another
+# checked-in file can state its genesis hash. main.rs asks this section's own
+# node for it and substitutes the answer before the document is parsed. A deployment writes the hash it expects; a node serving another
 # cluster is refused.
 genesis_hash = '<genesis-hash-from-the-node>'
 rpc.endpoints = ['http://127.0.0.1:8899']

@@ -82,7 +82,7 @@ impl RawBlock {
         let transactions = Transactions::new(transactions).map_err(|_| {
             Error::invalid_block("Bitcoin block contains duplicate transaction IDs")
         })?;
-        Ok(Block::new(reference, transactions))
+        Ok(Block::new(&self.network, reference, transactions))
     }
 
     fn transactions(
@@ -557,6 +557,65 @@ mod tests {
         );
     }
 
+    /// Every input survives the parse as the block states it. The coinbase
+    /// input keeps its null outpoint and its sequence and spends nothing;
+    /// every other input keeps its outpoint and sequence, in consensus order,
+    /// beside the output it spends.
+    #[test]
+    fn a_coinbase_input_spends_nothing_and_other_inputs_keep_outpoint_and_sequence() {
+        let (address, script) = p2wpkh(7);
+        let mut funding = native(vec![OutPoint::null()], vec![(10_000, script)]);
+        funding.input[0].sequence = Sequence(0xffff_fffe);
+        let elsewhere = OutPoint::new(Txid::from_byte_array([3; 32]), 2);
+        let mut spending = native(
+            vec![elsewhere, OutPoint::new(funding.compute_txid(), 0)],
+            vec![(9_000, ScriptBuf::new())],
+        );
+        spending.input[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
+        spending.input[1].sequence = Sequence(5);
+        let prevouts = [compact(400, Some(&address)), None];
+        let value = block(vec![json(&funding, &[]), json(&spending, &prevouts)]);
+        let block = parse(&value).unwrap();
+        let transactions: Vec<_> = block.transactions().iter().collect();
+
+        assert!(transactions[0].coinbase);
+        assert_eq!(
+            transactions[0].inputs,
+            [Input {
+                outpoint: Outpoint::from(OutPoint::null()),
+                sequence: 0xffff_fffe,
+                previous: None,
+            }]
+        );
+        assert!(!transactions[1].coinbase);
+        let spent: Vec<_> = transactions[1]
+            .inputs
+            .iter()
+            .map(|input| {
+                let previous = input.previous.as_ref().expect("a resolved previous output");
+                (input.outpoint, input.sequence, previous.value)
+            })
+            .collect();
+        assert_eq!(
+            spent,
+            [
+                (
+                    Outpoint::from(elsewhere),
+                    Sequence::ENABLE_RBF_NO_LOCKTIME.to_consensus_u32(),
+                    Satoshi::from_atomic(400),
+                ),
+                (
+                    Outpoint {
+                        transaction_id: *transactions[0].id(),
+                        output_index: 0,
+                    },
+                    5,
+                    Satoshi::from_atomic(10_000),
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn inputs_keep_coinbase_outpoint_and_prevout_rules() {
         let (address, script) = p2wpkh(7);
@@ -703,6 +762,27 @@ mod tests {
             error.message,
             "Bitcoin null input is not a valid coinbase input"
         );
+    }
+
+    /// The parsed block belongs to the network its evidence was retained
+    /// for, and to no other: the same bytes retained for two networks parse
+    /// into two different blocks.
+    #[test]
+    fn a_parsed_block_carries_the_network_of_its_evidence() {
+        let value = block(Vec::new());
+        let regtest = parse(&value).unwrap();
+        assert_eq!(regtest.network().chain, crate::native::CHAIN_NAME);
+        assert_eq!(regtest.network().name, "regtest");
+
+        let retained = raw(&value);
+        let elsewhere = RawBlock::new(
+            retained.reference().clone(),
+            Network::Testnet4,
+            retained.block().to_vec(),
+        );
+        let testnet = elsewhere.parse().unwrap();
+        assert_eq!(testnet.network().name, "testnet4");
+        assert_ne!(regtest, testnet);
     }
 
     #[test]

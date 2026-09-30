@@ -213,8 +213,8 @@ impl Submitter for Node {
 
 /// `transfer` from `key`'s own address, signed by `key`, within the
 /// default fee limits.
-pub(crate) fn item(key: &Arc<KeyPair>, transfer: Transfer) -> super::Item {
-    super::Item::new(
+pub(crate) fn item(key: &Arc<KeyPair>, transfer: Transfer) -> super::SendRequest {
+    super::SendRequest::new(
         key.clone(),
         key.address().clone(),
         transfer,

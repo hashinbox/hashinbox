@@ -333,11 +333,11 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
     /// Commits `drafts` as the one block at `height`, against the line the
     /// fixture left at `checkpoint`.
     async fn commits(&self, height: u64, checkpoint: u64, drafts: Vec<ObservationDraft>) {
-        let facts = self.fixture.block_facts(height, drafts);
+        let canonical = self.fixture.canonical_block(height, drafts);
         let line = Some(self.fixture.block(checkpoint));
         self.fixture
             .repository
-            .commit(self.fixture.batch(line, facts))
+            .commit(self.fixture.batch(line, canonical))
             .await
             .expect("a block the fixture's line authorises");
     }
@@ -407,7 +407,7 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
         self.fixture
             .chain(self.drafts())
             .iter()
-            .flat_map(|facts| facts.transactions().to_vec())
+            .flat_map(|canonical| canonical.transactions().iter().cloned().collect::<Vec<_>>())
             .filter(|transaction| transaction.addresses().contains(&query.address))
             .filter_map(|transaction| query.select(transaction))
             .collect()
@@ -454,7 +454,7 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
             .collect()
     }
 
-    fn drafts(&self) -> Vec<ObservationDraft> {
+    pub(super) fn drafts(&self) -> Vec<ObservationDraft> {
         let (native, token) = (self.fixture.native(), self.fixture.token());
         let mut drafts = (1..=4)
             .map(|index| {

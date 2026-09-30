@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use base::{MovementKind, Networked};
 use indexing::{
     BlockCredit, BlockInterpreter as Interpret, IndexError, InterpretedBlock, MovementId, Network,
-    NetworkFee, ObservationDraft, ObservationDraftStatus, OutputChanges, ValueMovement,
+    NetworkFee, ObservationDraft, ObservationDraftStatus, ValueMovement,
 };
 
 use crate::native::{
@@ -50,7 +50,7 @@ impl BlockInterpreter {
             // parsed (`native/block/head.rs`, `native/block/receipt.rs`). Never
             // this loop's counter: `inspect` reports the selected transactions
             // only, so counting them would number the selection.
-            transaction_order: transaction.index,
+            transaction_order: transaction.listed.index,
             status,
             movements: movements
                 .into_iter()
@@ -150,11 +150,10 @@ impl Interpret for BlockInterpreter {
             .filter(|withdrawal| selected.contains(&withdrawal.address))
             .map(|withdrawal| self.credit(withdrawal))
             .collect();
+        let reference = block.reference().clone();
         Ok(InterpretedBlock {
-            block: block.reference().clone(),
-            transactions,
-            outputs: OutputChanges::default(),
             credits,
+            ..InterpretedBlock::new(parsed.network(), reference, transactions)?
         })
     }
 }
@@ -164,7 +163,7 @@ mod tests {
     use alloy_primitives::{U256, hex};
     use base::Decimal;
     use indexing::{
-        BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, IndexErrorKind, IndexedBlock,
+        BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, IndexErrorKind, NativeBlock,
     };
     use serde_json::{Value, json};
 
@@ -187,6 +186,11 @@ mod tests {
             chain: CHAIN_NAME,
             name: "test".to_owned(),
         }
+    }
+
+    /// The native network whose canonical identity is [`network`].
+    fn native_network() -> crate::native::Network {
+        crate::native::Network::new(31_337, "test")
     }
 
     fn hash(value: &str) -> [u8; 32] {
@@ -316,6 +320,7 @@ mod tests {
             Head::parse(&raw_block, Some(BlockHeight(10)), true).expect("test block must parse");
         RawBlock::new(
             head.reference,
+            native_network(),
             raw_block,
             vec![serde_json::to_vec(&receipt).expect("test receipt JSON must serialize")],
             serde_json::to_vec(&traces).expect("test trace JSON must serialize"),
@@ -330,7 +335,13 @@ mod tests {
         let raw_block = serde_json::to_vec(&value).expect("test block JSON must serialize");
         let head =
             Head::parse(&raw_block, Some(BlockHeight(10)), true).expect("test block must parse");
-        RawBlock::new(head.reference, raw_block, Vec::new(), b"[]".to_vec())
+        RawBlock::new(
+            head.reference,
+            native_network(),
+            raw_block,
+            Vec::new(),
+            b"[]".to_vec(),
+        )
     }
 
     fn canonical_address(value: &str) -> base::Address {
@@ -355,14 +366,14 @@ mod tests {
         let settlement = BlockInterpreter::new(&network())
             .expect("the fixture network is Ethereum")
             .settlement();
-        let mut ledger = indexing::Ledger::new(&subject);
-        for draft in &interpreted.transactions {
+        let mut ledger = indexing::Fold::new(&subject);
+        for draft in interpreted.block.transactions() {
             let status = match &draft.status {
                 ObservationDraftStatus::Included => indexing::CanonicalStatus::Included {
-                    block: interpreted.block.clone(),
+                    block: interpreted.block.reference().clone(),
                 },
                 ObservationDraftStatus::Failed { reason } => indexing::CanonicalStatus::Failed {
-                    block: interpreted.block.clone(),
+                    block: interpreted.block.reference().clone(),
                     reason: reason.clone(),
                 },
             };
@@ -384,7 +395,7 @@ mod tests {
                 .apply_credit(credit)
                 .expect("interpreted amounts are storable");
         }
-        ledger.balance(Some(interpreted.block.clone()))
+        ledger.balance(Some(interpreted.block.reference().clone()))
     }
 
     #[test]
@@ -423,6 +434,7 @@ mod tests {
         body["withdrawals"] = withdrawals;
         RawBlock::new(
             plain.reference().clone(),
+            plain.network().clone(),
             serde_json::to_vec(&body).expect("the fixture block serializes"),
             plain.receipts().to_vec(),
             plain.traces().to_vec(),
@@ -477,8 +489,10 @@ mod tests {
         // The transaction still reports its own value and nothing else: the
         // credit was not folded into it.
         let draft = interpreted
-            .transactions
-            .first()
+            .block
+            .transactions()
+            .iter()
+            .next()
             .expect("the value transfer");
         assert_eq!(draft.movements.len(), 1);
         assert_eq!(draft.movements[0].amount, Decimal::from(42_u64));
@@ -511,7 +525,7 @@ mod tests {
         let interpreted =
             inspect(&block, std::slice::from_ref(&beneficiary)).expect("block must interpret");
         assert!(
-            interpreted.transactions.is_empty(),
+            interpreted.block.transactions().is_empty(),
             "no transaction names this credit"
         );
         assert_eq!(interpreted.credits[0].id, MovementId("withdrawal:7".into()));
@@ -537,13 +551,16 @@ mod tests {
         let block = two_transaction_block();
         let selected = inspect(&block, &[canonical_address(TO)]).expect("block must interpret");
         assert_eq!(
-            selected.transactions.len(),
+            selected.block.transactions().len(),
             1,
             "one transaction is selected"
         );
-        assert_eq!(selected.transactions[0].transaction_order, 1);
+        assert_eq!(selected.block.transactions()[0].transaction_order, 1);
         assert_eq!(
-            selected.transactions[0].transaction_id.id.to_string(),
+            selected.block.transactions()[0]
+                .transaction_id
+                .id
+                .to_string(),
             SECOND_TX_HASH
         );
 
@@ -555,7 +572,8 @@ mod tests {
         )
         .expect("block must interpret");
         let orders: Vec<u64> = both
-            .transactions
+            .block
+            .transactions()
             .iter()
             .map(|draft| draft.transaction_order)
             .collect();
@@ -586,6 +604,7 @@ mod tests {
         let encode = |value: &Value| serde_json::to_vec(value).expect("test JSON must serialize");
         RawBlock::new(
             head.reference,
+            native_network(),
             raw_block,
             vec![encode(&first_receipt), encode(&second_receipt)],
             encode(&json!([first_trace, second_trace])),
@@ -600,8 +619,10 @@ mod tests {
         );
         let interpreted = inspect(&block, &[canonical_address(TO)]).expect("block must interpret");
         let draft = interpreted
-            .transactions
-            .first()
+            .block
+            .transactions()
+            .iter()
+            .next()
             .expect("relevant tx must emit");
         assert_eq!(draft.movements.len(), 1);
         assert_eq!(
@@ -640,8 +661,10 @@ mod tests {
         let interpreted =
             inspect(&block, std::slice::from_ref(&watcher)).expect("block must interpret");
         let draft = interpreted
-            .transactions
-            .first()
+            .block
+            .transactions()
+            .iter()
+            .next()
             .expect("a contract-initiated credit must admit its transaction");
         assert_eq!(
             draft.transaction_id,
@@ -704,7 +727,7 @@ mod tests {
         );
         let interpreted =
             inspect(&block, &[canonical_address(FROM)]).expect("full-width amounts must interpret");
-        let draft = &interpreted.transactions[0];
+        let draft = &interpreted.block.transactions()[0];
         let expected =
             "115792089237316195423570985008687907853269984665640564039457584007913129639935"
                 .parse::<Decimal>()
@@ -740,7 +763,7 @@ mod tests {
         );
         let interpreted =
             inspect(&priced, &[canonical_address(FROM)]).expect("a full-width fee must interpret");
-        let draft = &interpreted.transactions[0];
+        let draft = &interpreted.block.transactions()[0];
         assert!(draft.movements.is_empty());
         let expected_fee =
             "37103788360346070921249247515601288832377161834387998120553730227145015296000"
@@ -760,7 +783,7 @@ mod tests {
         let interpreted = inspect(&block, &[canonical_address(CONTRACT)])
             .expect("contract creation must interpret");
         assert_eq!(
-            interpreted.transactions[0].movements[0].to(),
+            interpreted.block.transactions()[0].movements[0].to(),
             Some(&address(CONTRACT).canonical(&network()))
         );
     }
@@ -791,7 +814,7 @@ mod tests {
             &[canonical_address(FROM), canonical_address(BENEFICIARY)],
         )
         .expect("failure must interpret");
-        let draft = &interpreted.transactions[0];
+        let draft = &interpreted.block.transactions()[0];
         assert!(matches!(
             draft.status,
             ObservationDraftStatus::Failed { .. }
@@ -823,7 +846,7 @@ mod tests {
         let interpreted = inspect(&block, &[canonical_address(CONTRACT)])
             .expect("unrelated transaction must still interpret");
 
-        assert!(interpreted.transactions.is_empty());
+        assert!(interpreted.block.transactions().is_empty());
     }
 
     #[test]
@@ -863,7 +886,7 @@ mod tests {
 
         let interpreted = inspect(&empty_block(), &[canonical_address(TO)])
             .expect("a usable filter interprets an empty block");
-        assert!(interpreted.transactions.is_empty());
+        assert!(interpreted.block.transactions().is_empty());
         assert!(interpreted.credits.is_empty());
     }
 
@@ -898,7 +921,7 @@ mod tests {
             receipt(true, Some(TO), None, "0x1", logs),
         );
         let interpreted = inspect(&block, &[canonical_address(FROM)]).expect("logs must interpret");
-        let movements = &interpreted.transactions[0].movements;
+        let movements = &interpreted.block.transactions()[0].movements;
         assert_eq!(movements.len(), 3);
         assert_eq!(movements[0].kind(), MovementKind::Transfer);
         assert_eq!(movements[1].kind(), MovementKind::Mint);
@@ -922,7 +945,7 @@ mod tests {
         );
         let interpreted = inspect(&block, &[canonical_address(FROM)])
             .expect("malformed token log must not poison the block");
-        assert!(interpreted.transactions[0].movements.is_empty());
+        assert!(interpreted.block.transactions()[0].movements.is_empty());
     }
 
     #[test]
@@ -967,6 +990,7 @@ mod tests {
         );
         let block = RawBlock::new(
             valid.reference().clone(),
+            valid.network().clone(),
             valid.block().to_vec(),
             vec![b"not-json".to_vec()],
             valid.traces().to_vec(),
@@ -979,6 +1003,7 @@ mod tests {
 
         let block = RawBlock::new(
             block.reference().clone(),
+            block.network().clone(),
             b"not-json".to_vec(),
             Vec::new(),
             Vec::new(),

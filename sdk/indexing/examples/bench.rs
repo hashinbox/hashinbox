@@ -157,14 +157,13 @@ fn interpret(
 
     (
         InterpretedBlock {
-            block,
-            transactions,
             outputs: OutputChanges {
                 created,
                 spent: spend,
                 tracked_spends: Vec::new(),
             },
-            credits: Vec::new(),
+            ..InterpretedBlock::new(&network(), block, transactions)
+                .expect("unique transaction ids")
         },
         next_spend,
     )
@@ -209,12 +208,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     for height in 1..=profile.blocks {
         let (interpreted, next_spend) = interpret(&profile, height, parent.as_ref(), spend);
-        let block = interpreted.block.clone();
-        let facts = CanonicalBlock::new(network(), interpreted)?;
+        let block = interpreted.block.reference().clone();
+        let canonical = CanonicalBlock::new(network(), interpreted)?;
         let addition = indexing::IndexedBatch::new(
             network(),
             parent.clone(),
-            vec![facts],
+            vec![canonical],
             Vec::new(),
             indexing::FeeSettlement::Charged,
         )?;

@@ -23,16 +23,16 @@ pub struct BuildContext {
     pub max_priority_fee_per_gas: Wei,
 }
 
-/// Builds and signs one EIP-1559 transaction from a [`Transfer`] and its
-/// [`BuildContext`]. Pure: no RPC.
+/// One [`Transfer`] bound to the [`BuildContext`] it will be signed under:
+/// the pair an EIP-1559 transaction is built and signed from. Pure: no RPC.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct Builder {
+pub struct BoundTransfer {
     transfer: Transfer,
     context: BuildContext,
 }
 
-impl Builder {
-    /// Pairs a transfer with its node-observed context.
+impl BoundTransfer {
+    /// Binds `transfer` to its node-observed `context`.
     #[must_use]
     pub const fn new(transfer: Transfer, context: BuildContext) -> Self {
         Self { transfer, context }

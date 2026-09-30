@@ -1,23 +1,8 @@
 //! The Solana indexer: [`indexer`] over [`IndexerParams`].
 
-use indexing::{IndexError, Service, SyncConfig, SyncPolicy};
+use indexing::{IndexError, Indexer, SyncConfig, SyncPolicy};
 
 use crate::{BlockInterpreter, RpcClient, Source};
-
-/// One Solana cluster's indexer: source, interpreter, and repository.
-///
-/// `indexing::Service` itself, over this chain's block source and interpreter,
-/// rather than a newtype that forwarded every capability to one: it implements
-/// `indexing::{Indexing, Checkpoint}` already, and hands out the history reader
-/// over its own store (`Service::history`). Store it as
-/// `Arc<dyn indexing::Indexing>` or combine several in an `indexing::Index`.
-///
-/// The commit announcements this chain's submission recovery waits on are not
-/// allocated here. They are one `indexing::Listener` that
-/// [`crate::WalletFactory::new`] registers on the indexer it is handed, so an
-/// indexing-only caller pays for no channel at all
-/// (`crate::sender::Progress`).
-pub type Indexer<C, R> = Service<Source<C>, BlockInterpreter, R>;
 
 /// Everything one Solana indexer needs. Fields are public; [`Self::new`]
 /// fills the chain defaults.
@@ -53,17 +38,31 @@ impl<C, R> IndexerParams<C, R> {
 /// Builds the indexer `params` describes, for the client's own cluster. No
 /// I/O: the client was verified when it connected.
 ///
-/// A function rather than an inherent constructor, because [`Indexer`] is an
-/// alias for `indexing::Service` and this crate does not own that type;
-/// [`IndexerParams`] stays what it is, the argument, rather than becoming a
-/// factory for its own product.
+/// `indexing::Indexer` itself, over this chain's block source and interpreter,
+/// rather than a newtype that forwarded every capability to one: it implements
+/// `indexing::{Indexing, Checkpoint, Pending}` already. It answers no query:
+/// a history page is its store's, joined to the blocks this index holds above
+/// the line by `wallets::PendingJoin`. Store it as
+/// `Arc<dyn indexing::Indexing>` or combine several in an `indexing::Index`.
+///
+/// The commit announcements this chain's submission recovery waits on are not
+/// allocated here. They are one `indexing::Listener` that
+/// [`crate::WalletFactory::new`] registers on the indexer it is handed, so an
+/// indexing-only caller pays for no channel at all
+/// (`crate::sender::CommitSignal`).
+///
+/// A function rather than an inherent constructor, because this crate does
+/// not own [`Indexer`]; [`IndexerParams`] stays what it is, the argument,
+/// rather than becoming a factory for its own product.
 ///
 /// # Errors
 ///
 /// `InvalidRequest` for an invalid [`SyncPolicy`].
-pub fn indexer<C, R>(params: IndexerParams<C, R>) -> Result<Indexer<C, R>, IndexError> {
+pub fn indexer<C, R>(
+    params: IndexerParams<C, R>,
+) -> Result<Indexer<Source<C>, BlockInterpreter, R>, IndexError> {
     let network = params.rpc.network().clone();
-    Ok(Service::new(
+    Ok(Indexer::new(
         Source::new(params.rpc),
         BlockInterpreter::new(&network)?,
         params.repository,

@@ -2,8 +2,8 @@
 //!
 //! The three steps are the same on every chain: a [`Config`] value — built in
 //! code or deserialized from any `serde` format — [`Config::connect`]s to a
-//! node and verifies its identity, and the verified [`Node`] then
-//! [`Node::compose`]s over an opened repository into a
+//! node and verifies its identity, and the resulting [`ChainHandle`] then
+//! [`ChainHandle::compose`]s over an opened repository into a
 //! [`wallets::ComposedChain`]. No storage is opened on the first step, which is
 //! what lets an application check every chain's identity before it opens
 //! anything (`docs/design/030 §8 (ex-028)` section 10.1). [`wallets::Composition`] is what
@@ -22,7 +22,7 @@ use wallets::{ComposedChain, Connection, SubmissionRegistrar};
 /// committing — and the rest is what this chain's own consumers read: the
 /// balance fold, and the repository's own history query
 /// ([`indexing::ConfirmedHistory`]) that this chain joins to its overlay so
-/// `apps/api` can project a page and its sender can prove a transaction absent.
+/// `apps/server` can project a page and its sender can prove a transaction absent.
 /// A trait bound, never a backend: this file names no store implementation. No
 /// [`indexing::OutputStore`]: an account chain produces no UTXO records, and
 /// asking for one would make a store carry a table it can never fill
@@ -171,7 +171,7 @@ impl<A: Ord> Config<A> {
     ///
     /// [`Self::validate`]'s refusals, and whatever the node reports when it
     /// serves another cluster or disagrees with a configured mint.
-    pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<Node<A>, Error> {
+    pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<ChainHandle<A>, Error> {
         self.validate()?;
         let network = self.cluster();
         let transport = self.rpc.transport(secrets)?;
@@ -179,7 +179,7 @@ impl<A: Ord> Config<A> {
         for token in &self.tokens {
             rpc.validate_token(&token.mint, token.decimals).await?;
         }
-        Ok(Node { config: self, rpc })
+        Ok(ChainHandle { config: self, rpc })
     }
 
     /// The cluster these two keys name.
@@ -234,16 +234,16 @@ impl<A: FromStr> Config<A> {
     }
 }
 
-/// A Solana node whose cluster identity has been verified. It holds the
-/// checked configuration and the connected client, and builds this chain's
-/// parts once storage is open.
-pub struct Node<A> {
+/// A checked configuration and the client connected under it, to a node
+/// whose cluster identity has been verified. It builds this chain's parts
+/// once storage is open.
+pub struct ChainHandle<A> {
     config: Config<A>,
     rpc: RpcClient<Transport>,
 }
 
-impl<A> Node<A> {
-    /// The chain-neutral identity of the cluster this node serves, which is
+impl<A> ChainHandle<A> {
+    /// The chain-neutral identity of the cluster its node serves, which is
     /// the repository [`Self::compose`] needs.
     #[must_use]
     pub fn network(&self) -> base::Network {
@@ -276,15 +276,18 @@ impl<A> Node<A> {
         let network = rpc.network().clone();
         let params = IndexerParams {
             sync: config.cadence.policy,
-            ..IndexerParams::new(rpc.clone(), repository)
+            ..IndexerParams::new(rpc.clone(), repository.clone())
         };
         let indexer = Arc::new(crate::indexer(params)?);
         indexer.checkpoint(&network.canonical()).await?;
-        // The repository's own confirmed pages joined to this index's overlay.
-        // Built here because this is the only place that holds both halves, and
-        // handed to whoever reads a page: the sender's absence proof, and
-        // `apps/api` through `ComposedChain`.
-        let history: Arc<dyn indexing::History> = Arc::new(indexer.history());
+        // The repository's own confirmed pages and balance fold, each
+        // completed by the blocks this index holds above its confirmed line.
+        // Paired here because this is the place that holds both halves — the
+        // rows are the store's, the pending blocks are the index's, and the
+        // index answers no query itself — and handed to whoever reads a page:
+        // the sender's absence proof, and `apps/server` through `ComposedChain`.
+        let reads = Arc::new(wallets::PendingJoin::new(repository, indexer.clone()));
+        let history: Arc<dyn wallets::History> = reads.clone();
         let wallet = WalletConfig::new(&network);
         let sol = WalletFactory::new(wallet.clone(), &rpc, &indexer, history.clone())?
             .with_registrar(registrar.clone());
@@ -294,14 +297,10 @@ impl<A> Node<A> {
             factories.push((token.asset, Box::new(sol.sibling(settings)?)));
         }
         factories.insert(0, (config.asset, Box::new(sol)));
-        // A reader of its own for the same reason: the fold is the store's own
-        // total, completed by this index's overlay, and a consumer asks the
-        // fold rather than the indexer that happens to hold both halves.
-        let balance = Arc::new(indexer.balances());
         Ok(ComposedChain {
             index: indexer,
             history,
-            balance,
+            balance: reads,
             factories,
             units,
             poll: config.cadence.poll,
@@ -309,10 +308,10 @@ impl<A> Node<A> {
     }
 }
 
-/// [`Node::compose`] with this chain's type erased, so one vector holds every
-/// configured chain and [`wallets::Composition`] folds them without naming any
-/// of them. An application writes none of this.
-impl<A: Send + 'static, R: Store> Connection<A, R> for Node<A> {
+/// [`ChainHandle::compose`] with this chain's type erased, so one vector holds
+/// every configured chain and [`wallets::Composition`] folds them without
+/// naming any of them. An application writes none of this.
+impl<A: Send + 'static, R: Store> Connection<A, R> for ChainHandle<A> {
     fn compose<'a>(
         self: Box<Self>,
         repository: R,

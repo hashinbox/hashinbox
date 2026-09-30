@@ -42,11 +42,21 @@ pub enum IndexErrorKind {
     Conflict,
     /// A request, address, or block belongs to another `(chain, network)` pair.
     NetworkMismatch,
-    /// Native block content violates its protocol or the canonical invariants.
+    /// Block content is wrong in itself, whatever the chain is doing: native
+    /// content violates its protocol or the canonical invariants, or a
+    /// source's answer contradicts what was asked of it (more blocks than the
+    /// limit, a block outside the range, positions that do not ascend, a
+    /// parent on genesis or none above it).
+    ///
+    /// The kind does not decide the retry, [`IndexError::retryable`] does:
+    /// content this crate already holds is terminal, because reading it again
+    /// reads the same bytes, while an answer a source gave is asked for again
+    /// on the next pass.
     InvalidBlock,
-    /// The source's blocks do not link to the checkpoint (usually a reorg in
-    /// flight); the next pass reconciles.
-    CannotConnect,
+    /// Well-formed blocks that do not join up: with the checkpoint, with the
+    /// block before them, or with what the source itself reported a moment
+    /// earlier. Usually a fork in flight; the next pass reconciles.
+    Disconnected,
     /// A block the store already committed is no longer canonical: the chain
     /// reorganized past its own confirmed line. Impossible on a chain with
     /// finality; on Bitcoin it means a reorg deeper than the configured
@@ -84,8 +94,17 @@ impl IndexError {
         Self::new(IndexErrorKind::InvalidBlock, message, false)
     }
 
-    pub(crate) fn cannot_connect(message: impl Into<String>) -> Self {
-        Self::new(IndexErrorKind::CannotConnect, message, true)
+    /// A source's answer that contradicts the request or itself. Nothing of
+    /// it was held or committed and the next pass asks the source again, so
+    /// unlike [`Self::invalid_block`] it is retried.
+    pub(crate) fn invalid_answer(message: impl Into<String>) -> Self {
+        Self::new(IndexErrorKind::InvalidBlock, message, true)
+    }
+
+    /// Blocks that do not join up while the chain is moving; the next pass
+    /// reads it again.
+    pub(crate) fn disconnected(message: impl Into<String>) -> Self {
+        Self::new(IndexErrorKind::Disconnected, message, true)
     }
 
     pub(crate) fn retryable_conflict(message: impl Into<String>) -> Self {
@@ -140,5 +159,19 @@ mod tests {
         assert_eq!(error.kind, IndexErrorKind::InvalidBlock);
         assert_eq!(error.message, "duplicate transaction id");
         assert!(!error.retryable);
+    }
+
+    /// A fork in flight and a source contradicting itself are told apart by
+    /// kind, and both are retried.
+    #[test]
+    fn a_fork_in_flight_and_a_contradicting_source_are_different_kinds() {
+        let fork = IndexError::disconnected("block does not connect to the checkpoint");
+        let lie = IndexError::invalid_answer("source exceeded the returned-block limit");
+
+        assert_eq!(fork.kind, IndexErrorKind::Disconnected);
+        assert_eq!(lie.kind, IndexErrorKind::InvalidBlock);
+        assert_ne!(fork.kind, lie.kind);
+        assert!(fork.retryable);
+        assert!(lie.retryable);
     }
 }

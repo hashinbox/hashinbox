@@ -21,7 +21,7 @@ use crate::native::{
     rpc::{Client, Submitter},
     transaction::{FeeRate, Preflight, Transfer},
 };
-use crate::sender::{Batch, Item, Outbox, UtxoReader};
+use crate::sender::{FactorySender, Outbox, SendRequest, UtxoReader};
 
 /// Which addresses one asset's wallets use and how they price fees.
 ///
@@ -155,9 +155,9 @@ pub struct WalletFactory {
 
 impl WalletFactory {
     /// Builds the send pipeline over `rpc` and coin selection over
-    /// `spendable`, which is the reader the chain's [`crate::Indexer`] hands out
-    /// (`indexing::Service::outputs`): the store's rows with this index's
-    /// pending overlay folded in, so a wallet can spend its own change at depth
+    /// `spendable`, which is the store's live outputs joined to the blocks the
+    /// chain's [`indexing::Indexer`] holds above its confirmed line
+    /// (`wallets::PendingJoin`), so a wallet can spend its own change at depth
     /// one. No I/O.
     ///
     /// # Errors
@@ -277,7 +277,7 @@ impl FactoryProfile for WalletFactory {
     /// Every asset this chain carries is one it also spends, so every factory
     /// declares one.
     fn authorship(&self) -> Option<Arc<dyn Authorship>> {
-        Some(Arc::new(Batch::new(
+        Some(Arc::new(FactorySender::new(
             self.config.clone(),
             self.outbox.clone(),
         )))
@@ -331,11 +331,15 @@ impl Wallet {
         }
     }
 
-    /// The outbox item that pays `amount` BTC from this wallet to `to`.
-    pub(crate) fn item(&self, to: Address, amount: &Decimal) -> Result<Item, WalletError> {
+    /// The send request that pays `amount` BTC from this wallet to `to`.
+    pub(crate) fn request(
+        &self,
+        to: Address,
+        amount: &Decimal,
+    ) -> Result<SendRequest, WalletError> {
         let amount = Satoshi::from_decimal(amount)
             .map_err(|error| WalletError::new(WalletErrorKind::InvalidAmount, error.message))?;
-        Ok(Item::new(
+        Ok(SendRequest::new(
             self.key.clone(),
             self.address.clone(),
             Transfer::new(to, amount),
@@ -386,8 +390,8 @@ impl SingleSender for Wallet {
     ) -> FutureResult<'a, base::TransactionId> {
         Box::pin(async move {
             let to = self.config.destination(&destination)?;
-            let item = self.item(to, &amount)?;
-            let accepted = self.outbox.send(vec![item]).await.map_err(|error| {
+            let request = self.request(to, &amount)?;
+            let accepted = self.outbox.send(vec![request]).await.map_err(|error| {
                 let mut source = error.source;
                 source.ambiguous_transaction_id = error.ambiguous_transaction_id;
                 source

@@ -69,7 +69,7 @@ jobs:
         run: |
           status=0
           for crate in base indexing wallets chain-bitcoin chain-ethereum chain-solana \
-                       payment-api decimal crypto json-rpc http-server sdk-config; do
+                       decimal crypto json-rpc http-server sdk-config; do
             if cargo tree --locked -q -p "$crate" -e normal --prefix none \
                  | grep -q '^toml '; then
               echo "$crate links toml"

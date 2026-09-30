@@ -43,6 +43,9 @@ pub struct SignatureStatus {
     pub failed: bool,
 }
 
+/// A status as the node spells it. [`SignatureStatus`] is what is left once
+/// [`StatusWire::coherent`] has checked it against the slots of the read: the
+/// commitment and the confirmation count are evidence for that check only.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusWire {

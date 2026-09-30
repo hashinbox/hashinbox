@@ -2,7 +2,7 @@
 //! API: `RawBlock` → `parse` → `Block` → `Transaction` → `movements`.
 //! Every chain has this file; only the `use` line and the fixture differ.
 
-use base::{BlockPosition, MovementKind};
+use base::{BlockPosition, MovementKind, Networked};
 use chain::{
     Address, Network, RpcClient,
     native::block::{Block, RawBlock, Transaction},
@@ -108,6 +108,7 @@ fn raw_block_parses_into_transactions_and_movements() {
         .unwrap()
         .expect("produced block");
     let block: Block = raw.parse().unwrap();
+    assert_eq!(block.network(), &network.canonical());
     assert_eq!(block.reference(), raw.reference());
     assert_eq!(block.reference().height.0, 8);
 

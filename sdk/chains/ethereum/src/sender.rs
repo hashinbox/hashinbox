@@ -15,25 +15,27 @@ use wallets::{
     Author, Authorship, SendError, SendFuture, Sender, Transfer, WalletError, WalletErrorKind,
 };
 
-pub(crate) use outbox::{Item, Outbox};
+pub(crate) use outbox::{Outbox, SendRequest};
 
 use crate::native::{Address, Wei, transaction};
 use crate::wallet::{Wallet, WalletConfig};
 
-/// Resolves every transfer before any chain call, then hands the batch to
-/// the outbox, which reserves each sender for the whole batch.
-pub(crate) struct Batch {
+/// One factory's `wallets::Sender` and `wallets::Authorship`: its
+/// configuration and the outbox it shares with its siblings. It resolves
+/// every transfer before any chain call, then hands the batch to the outbox,
+/// which reserves each sender for the whole batch.
+pub(crate) struct FactorySender {
     config: WalletConfig,
     outbox: Arc<Outbox>,
 }
 
-impl Batch {
+impl FactorySender {
     pub(crate) const fn new(config: WalletConfig, outbox: Arc<Outbox>) -> Self {
         Self { config, outbox }
     }
 
-    /// The outbox item of one authored transfer; the wallet signs it.
-    fn item(&self, transfer: Transfer) -> Result<Item, WalletError> {
+    /// The send request of one authored transfer; the wallet signs it.
+    fn request(&self, transfer: Transfer) -> Result<SendRequest, WalletError> {
         let from = Address::try_from(transfer.wallet.address())?;
         let to = Address::try_from(&transfer.to)?;
         let amount = Wei::from_decimal(&transfer.amount, self.config.decimals)
@@ -43,7 +45,7 @@ impl Batch {
             to,
             amount,
         };
-        Ok(Item::new(
+        Ok(SendRequest::new(
             transfer.wallet,
             from,
             native,
@@ -60,7 +62,7 @@ impl Batch {
             .into_iter()
             .enumerate()
             .map(|(index, transfer)| {
-                self.item(transfer)
+                self.request(transfer)
                     .map_err(|error| SendError::item(index, Vec::new(), error))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -68,13 +70,13 @@ impl Batch {
     }
 }
 
-impl Sender for Batch {
+impl Sender for FactorySender {
     fn send<'a>(&'a self, transfers: Vec<Transfer>) -> SendFuture<'a> {
         Box::pin(self.execute(transfers))
     }
 }
 
-impl Authorship for Batch {
+impl Authorship for FactorySender {
     /// The wallet's own authoring capability, recovered by the one type that
     /// makes it. Membership is `WalletFactory::validate`'s answer, which
     /// `wallets::Wallets::author` has already taken; this repeats only the

@@ -2,7 +2,7 @@
 //! API: `RawBlock` → `parse` → `Block` → `Transaction` → `movements`.
 //! Every chain has this file; only the `use` line and the fixture differ.
 
-use base::{BlockPosition, MovementKind};
+use base::{BlockPosition, MovementKind, Networked};
 use bitcoin::{
     Amount, OutPoint, ScriptBuf, Sequence, Transaction as NativeTransaction, TxIn, TxOut, Witness,
     absolute, consensus, hashes::Hash, hex::DisplayHex, transaction::Version,
@@ -108,6 +108,7 @@ fn raw_block_parses_into_transactions_and_movements() {
         .unwrap()
         .expect("produced block");
     let block: Block = raw.parse().unwrap();
+    assert_eq!(block.network(), &network.canonical());
     assert_eq!(block.reference(), raw.reference());
     assert_eq!(block.reference().height.0, 10);
 

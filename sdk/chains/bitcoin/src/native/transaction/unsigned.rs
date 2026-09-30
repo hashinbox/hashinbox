@@ -8,6 +8,11 @@ use super::{SighashType, SignedTransaction, Transfer};
 use crate::native::{Error, Network, block::Utxo};
 
 /// One input of an unsigned transaction: the output it spends and its sequence.
+///
+/// The output is always present, which is what separates this from a block's
+/// [`crate::native::block::Input`]: that one has no previous output for a
+/// coinbase input or for a transaction read outside a block, and neither can
+/// be signed, because the signature commits to the spent value and script.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Spend {
     /// The spent output.

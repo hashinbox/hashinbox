@@ -4,14 +4,14 @@
 //! every client reads and a backfill must never delay it
 //! ([`crate::backfill`]). Nothing here is durable: a block is validated,
 //! interpreted, and held above the confirmed line, and only
-//! `Service::commit` takes what fell below it.
+//! `Indexer::commit_held` takes what fell below it.
 
 use crate::{
-    BlockInterpreter, BlockSource, IndexError, IndexErrorKind, IndexedBlock, Service, SyncPlan,
-    pass::{BlockWindow, Outcome},
+    BlockInterpreter, BlockSource, IndexError, IndexErrorKind, Indexer, NativeBlock, SyncPlan,
+    pass::{BlockWindow, CommitTally},
 };
 
-impl<S, I, R> Service<S, I, R>
+impl<S, I, R> Indexer<S, I, R>
 where
     S: BlockSource<Block = I::Block>,
     I: BlockInterpreter,
@@ -20,7 +20,7 @@ where
     pub(super) async fn catch_up(
         &self,
         window: &BlockWindow,
-        committed: &mut Outcome,
+        committed: &mut CommitTally,
         plan: &SyncPlan,
     ) -> Result<usize, IndexError> {
         let mut applied = 0_usize;
@@ -46,7 +46,7 @@ where
             .fetch_blocks(start, window.observed.position, remaining)
             .await?;
         if blocks.is_empty() {
-            return Err(IndexError::cannot_connect(
+            return Err(IndexError::disconnected(
                 "source returned no produced block before its observed tip",
             ));
         }
@@ -64,7 +64,7 @@ where
     ///
     /// The anchor is the confirmed line, not the observed tip: an index with
     /// nothing to catch up on should start from a block it can commit at once,
-    /// and everything above the line is what the overlay is for. A birthday
+    /// and everything above the line is held as a pending block. A birthday
     /// below the line still wins, so a wallet created before the index existed
     /// is indexed from its own start.
     async fn initialize_checkpoint(
@@ -89,7 +89,7 @@ where
             let anchor = self.one_block(parent.position, parent.position).await?;
             let anchor_ref = anchor.block_ref();
             if anchor_ref.position != parent.position || anchor_ref.hash != parent.hash {
-                return Err(IndexError::cannot_connect(
+                return Err(IndexError::disconnected(
                     "birthday anchor does not match the first block parent",
                 ));
             }

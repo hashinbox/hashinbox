@@ -40,8 +40,9 @@ pub(crate) struct Admission {
 /// outputs reserved until their spend is indexed, [`Settlement::reject`] frees
 /// them, and dropping it otherwise keeps them for an unknown outcome.
 pub(crate) struct Settlement {
-    reservations: Reservations,
-    operation: u64,
+    /// The reservation being settled. Its record left `Preparing` when this
+    /// settlement began, so the admission's own drop releases nothing.
+    admission: Admission,
     transaction: SignedTransaction,
     unknown: bool,
     armed: bool,
@@ -61,8 +62,15 @@ struct State {
     held: VecDeque<PreparedTransaction>,
 }
 
+/// One send's reserved outputs, from selection until their spend is indexed.
+///
+/// Not a [`PreparedTransaction`] with a status: the inputs are reserved while
+/// the send is still `Preparing`, before anything is signed, and releasing
+/// them then needs the inputs without a transaction. The transaction arrives
+/// with submission; the inputs shrink as the index shows them spent.
 struct Record {
     inputs: Vec<(Outpoint, Address)>,
+    /// `None` until submission begins.
     transaction: Option<SignedTransaction>,
     status: Status,
 }
@@ -96,7 +104,7 @@ impl Reservations {
         let mut state = self.lock();
         state.prune(addresses, &read);
         let available = read
-            .utxos
+            .outputs
             .into_iter()
             .filter(|utxo| !state.outpoints.contains_key(&utxo.outpoint))
             .collect();
@@ -141,9 +149,13 @@ impl Reservations {
             record.status == Status::Unknown && record.transaction.as_ref() == Some(transaction)
         })?;
         record.status = Status::Submitting;
+        let operation = *operation;
+        drop(state);
         Some(Settlement {
-            reservations: self.clone(),
-            operation: *operation,
+            admission: Admission {
+                reservations: self.clone(),
+                operation,
+            },
             transaction: transaction.clone(),
             unknown: true,
             armed: true,
@@ -248,7 +260,7 @@ impl State {
     /// every settled record left without outputs.
     fn prune(&mut self, addresses: &[Address], read: &Utxos) {
         let unspent = read
-            .utxos
+            .outputs
             .iter()
             .map(|utxo| utxo.outpoint)
             .collect::<BTreeSet<_>>();
@@ -288,11 +300,17 @@ impl Admission {
             record.status = Status::Submitting;
         }
         Settlement {
-            reservations: self.reservations.clone(),
-            operation: self.operation,
+            admission: self,
             transaction,
             unknown: false,
             armed: true,
+        }
+    }
+
+    /// Moves this reservation's record, while it exists, to `status`.
+    fn mark(&self, status: Status) {
+        if let Some(record) = self.reservations.lock().records.get_mut(&self.operation) {
+            record.status = status;
         }
     }
 }
@@ -311,16 +329,15 @@ impl Settlement {
     /// The node has the transaction: its outputs stay reserved until the
     /// index shows them spent.
     pub(crate) fn accept(mut self) -> TransactionId {
-        if let Some(record) = self.reservations.lock().records.get_mut(&self.operation) {
-            record.status = Status::Accepted;
-        }
+        self.admission.mark(Status::Accepted);
         self.armed = false;
         self.transaction.id
     }
 
     /// The node definitely refused the transaction: its outputs are free.
     pub(crate) fn reject(mut self) {
-        self.reservations.lock().remove(self.operation);
+        let operation = self.admission.operation;
+        self.admission.reservations.lock().remove(operation);
         self.armed = false;
     }
 }
@@ -341,11 +358,8 @@ impl Drop for Admission {
 
 impl Drop for Settlement {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        if let Some(record) = self.reservations.lock().records.get_mut(&self.operation) {
-            record.status = Status::Unknown;
+        if self.armed {
+            self.admission.mark(Status::Unknown);
         }
     }
 }

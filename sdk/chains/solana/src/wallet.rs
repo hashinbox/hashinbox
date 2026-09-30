@@ -7,7 +7,7 @@ use base::{
     Broadcaster, Decimal, Networked, SecretBytes, SignFuture, SignRequest, Signer, Submission,
     TransactionError, TransactionFuture, TransactionSnapshot,
 };
-use indexing::Holder;
+use indexing::{Holder, Indexer};
 use wallets::{
     AddressParser, Authorship, Dependency, FactoryProfile, FutureResult, Generation, Origin,
     SingleSender, TransactionFactory, Wallet as WalletContract, WalletError, WalletErrorKind,
@@ -18,8 +18,10 @@ use crate::native::{
     rpc::{Accounts, Client},
 };
 use crate::sender::native_transfer;
-use crate::sender::{Batch, Item, Outbox, Progress, Recovery, Reservations, Spawner};
-use crate::{Indexer, TransferBuilder};
+use crate::sender::{
+    CommitSignal, FactorySender, Outbox, Recovery, Reservations, SendRequest, Spawner,
+};
+use crate::{BlockInterpreter, Source, TransferBuilder};
 
 /// Which asset one factory's wallets hold on which cluster.
 ///
@@ -113,9 +115,9 @@ impl AddressParser for WalletConfig {
 /// The indexer is read only to settle an unknown submission outcome: its
 /// checkpoint and its commit announcements. The sender's native history is the
 /// third thing it needs, and it is not the indexer's to give: a page is the
-/// repository's own query joined to that index's overlay, so this factory is
-/// handed the one narrow capability it reads — `indexing::History`, "page a
-/// holding's transactions from a position" — and names no store at all.
+/// repository's own query joined to that index's pending blocks, so this
+/// factory is handed the one narrow capability it reads — `wallets::History`,
+/// "page a holding's transactions from a position" — and names no store at all.
 pub struct WalletFactory {
     config: WalletConfig,
     accounts: Arc<dyn Accounts>,
@@ -133,7 +135,7 @@ impl WalletFactory {
     /// because the sender pays every fee and is therefore on its own
     /// transaction whatever it moved. It is passed in rather than read off
     /// `indexer` because confirmed-plus-pending is neither the index's alone nor
-    /// the repository's — `indexing::ObservedHistory` is what joins them, and the
+    /// the repository's — `wallets::PendingJoin` is what joins them, and the
     /// composition that owns both builds it.
     ///
     /// # Errors
@@ -143,12 +145,12 @@ impl WalletFactory {
     pub fn new<C, R>(
         config: WalletConfig,
         rpc: &Client<C>,
-        indexer: &Arc<Indexer<C, R>>,
-        history: Arc<dyn indexing::History>,
+        indexer: &Arc<Indexer<Source<C>, BlockInterpreter, R>>,
+        history: Arc<dyn wallets::History>,
     ) -> Result<Self, Error>
     where
         C: json_rpc::Client + 'static,
-        Indexer<C, R>: indexing::Checkpoint + 'static,
+        Indexer<Source<C>, BlockInterpreter, R>: indexing::Checkpoint + 'static,
     {
         if config.network != rpc.network().canonical() || indexer.network() != &config.network {
             return Err(Error::new(
@@ -163,7 +165,7 @@ impl WalletFactory {
         // their only consumer, and registered as one of the indexer's
         // listeners: an indexing-only caller never pays for this channel, and
         // a caller's own listener is announced beside it.
-        let (announce, progress) = Progress::channel();
+        let (announce, progress) = CommitSignal::channel();
         indexer.listen(announce);
         let recovery = Recovery::new(
             rpc.clone(),
@@ -329,7 +331,8 @@ impl FactoryProfile for WalletFactory {
     /// gate this file used to carry.
     fn authorship(&self) -> Option<Arc<dyn Authorship>> {
         matches!(self.config.asset, AssetKind::Native).then(|| {
-            Arc::new(Batch::new(self.config.clone(), self.outbox.clone())) as Arc<dyn Authorship>
+            let sender = FactorySender::new(self.config.clone(), self.outbox.clone());
+            Arc::new(sender) as Arc<dyn Authorship>
         })
     }
 }
@@ -356,15 +359,19 @@ impl Wallet {
         }
     }
 
-    /// The outbox item that sends `amount` SOL from this wallet to `to`.
+    /// The send request that sends `amount` SOL from this wallet to `to`.
     ///
     /// Native SOL is the only asset this integration authors, and it is also
     /// the only one whose factory declares a `wallets::Authorship`, so
     /// nothing can reach this from a token wallet.
-    pub(crate) fn item(&self, to: Address, amount: &Decimal) -> Result<Item, WalletError> {
+    pub(crate) fn request(
+        &self,
+        to: Address,
+        amount: &Decimal,
+    ) -> Result<SendRequest, WalletError> {
         let from = self.key.address().clone();
         let transfer = native_transfer(&from, to, amount, self.config.decimals)?;
-        Ok(Item::new(self.key.clone(), from, transfer))
+        Ok(SendRequest::new(self.key.clone(), from, transfer))
     }
 }
 
@@ -419,8 +426,8 @@ impl SingleSender for Wallet {
     ) -> FutureResult<'a, base::TransactionId> {
         Box::pin(async move {
             let to = Address::try_from(&destination).map_err(|_| invalid_address())?;
-            let item = self.item(to, &amount)?;
-            let accepted = self.outbox.send(vec![item]).await.map_err(|error| {
+            let request = self.request(to, &amount)?;
+            let accepted = self.outbox.send(vec![request]).await.map_err(|error| {
                 let mut source = error.source;
                 source.ambiguous_transaction_id = error.ambiguous_transaction_id;
                 source

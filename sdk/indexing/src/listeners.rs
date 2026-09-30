@@ -29,7 +29,7 @@ pub struct BlockCommit {
     /// Required spends committed without a matching indexed output: one
     /// address's history is provably short
     /// ([`IndexStore::commit`](crate::IndexStore::commit)).
-    pub unknown_spends: Vec<OutputKey>,
+    pub unmatched_spends: Vec<OutputKey>,
 }
 
 /// Notified after each block an index commits.
@@ -44,7 +44,8 @@ pub struct BlockCommit {
 ///
 /// Delivery is **at most once, and never retracted**. A listener that must not
 /// miss a block reads [`Checkpoint`](crate::Checkpoint) when it starts and
-/// catches up through [`History`](crate::History); this is a wake-up, not a
+/// catches up through the repository's own history
+/// ([`ConfirmedHistory`](crate::ConfirmedHistory)); this is a wake-up, not a
 /// log.
 pub trait Listener: Send + Sync {
     /// Called once per committed block, after the store returned.

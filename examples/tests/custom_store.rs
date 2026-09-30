@@ -10,7 +10,7 @@
 //! Four claims, in the order they matter:
 //!
 //! 1. a store that implements only `WatchStore` and `IndexStore` drives a real
-//!    `indexing::Service` — it observes, it commits, and it fills in history;
+//!    `indexing::Indexer` — it observes, it commits, and it fills in history;
 //! 2. `sync` is bounded: one pass commits at most its `SyncPolicy`'s batch;
 //! 3. a restart over the same store restores every observation, its birthday and
 //!    its recorded progress, and resumes instead of starting again;
@@ -25,12 +25,11 @@ use std::sync::{
 };
 
 use indexing::{
-    Address, AssetId, BlockHash, BlockHeight, BlockInterpreter, BlockParent, BlockPosition,
-    BlockRef, BlockSource, BoxFuture, ChainName, ChainTip, Checkpoint as _, Decimal, FeeSettlement,
-    IndexError, IndexErrorKind, IndexStore as _, IndexedBlock, Indexing as _, InterpretedBlock,
-    MovementId, Network, ObservationDraft, ObservationDraftStatus, OutputChanges, Service,
-    SourceError, Start, Subject, SyncConfig, SyncPolicy, TransactionRef, ValueMovement,
-    Watching as _,
+    Address, AssetId, Birthday, BlockHash, BlockHeight, BlockInterpreter, BlockParent,
+    BlockPosition, BlockRef, BlockSource, BoxFuture, ChainName, ChainTips, Checkpoint as _,
+    Decimal, FeeSettlement, IndexError, IndexErrorKind, IndexStore as _, Indexer, Indexing as _,
+    InterpretedBlock, MovementId, NativeBlock, Network, ObservationDraft, ObservationDraftStatus,
+    SourceError, Subject, SyncConfig, SyncPolicy, TransactionRef, ValueMovement, Watching as _,
 };
 use sink::Sink;
 
@@ -45,7 +44,7 @@ const DEPTH: u64 = 2;
 /// Blocks one pass may read. Smaller than `HEIGHT`, so boundedness is visible.
 const BATCH: usize = 4;
 
-/// The address every even block credits, observed from `Start::Fresh`.
+/// The address every even block credits, observed from `Birthday::Fresh`.
 const FRESH: &str = "address-fresh";
 
 /// The address every odd block credits, observed from a birthday in the past.
@@ -66,7 +65,7 @@ struct Block {
     to: Address,
 }
 
-impl IndexedBlock for Block {
+impl NativeBlock for Block {
     fn block_ref(&self) -> BlockRef {
         self.reference.clone()
     }
@@ -107,7 +106,7 @@ impl Feed {
     }
 }
 
-impl ChainTip for Feed {
+impl ChainTips for Feed {
     fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
         Box::pin(async { Ok(reference(HEIGHT.saturating_sub(1))) })
     }
@@ -148,7 +147,7 @@ impl BlockSource for Feed {
                 .blocks
                 .iter()
                 .find(|block| block.reference.position == position)
-                .map(IndexedBlock::block_ref))
+                .map(NativeBlock::block_ref))
         })
     }
 }
@@ -186,12 +185,7 @@ impl BlockInterpreter for Reader {
         } else {
             Vec::new()
         };
-        Ok(InterpretedBlock {
-            block: block.block_ref(),
-            transactions,
-            outputs: OutputChanges::default(),
-            credits: Vec::new(),
-        })
+        InterpretedBlock::new(&network(), block.block_ref(), transactions)
     }
 
     fn settlement(&self) -> FeeSettlement {
@@ -229,8 +223,8 @@ fn subject(text: &str) -> Subject {
 /// One index over `store`, exactly as the scenario builds one over a chain: the
 /// store is handed over as `Arc`, because it is not `Clone` and does not need to
 /// be.
-fn index(store: &Arc<Sink>, served: &Arc<AtomicUsize>) -> Service<Feed, Reader, Arc<Sink>> {
-    Service::new(
+fn index(store: &Arc<Sink>, served: &Arc<AtomicUsize>) -> Indexer<Feed, Reader, Arc<Sink>> {
+    Indexer::new(
         Feed::new(served),
         Reader,
         Arc::clone(store),
@@ -239,7 +233,7 @@ fn index(store: &Arc<Sink>, served: &Arc<AtomicUsize>) -> Service<Feed, Reader, 
 }
 
 /// The checkpoint position the index reached, or `None` before its first commit.
-async fn reached(index: &Service<Feed, Reader, Arc<Sink>>) -> Option<u64> {
+async fn reached(index: &Indexer<Feed, Reader, Arc<Sink>>) -> Option<u64> {
     index
         .checkpoint(&network())
         .await
@@ -248,7 +242,7 @@ async fn reached(index: &Service<Feed, Reader, Arc<Sink>>) -> Option<u64> {
 }
 
 /// Drives `index` until nothing more changes, at most `passes` times.
-async fn drive(index: &Service<Feed, Reader, Arc<Sink>>, passes: usize) {
+async fn drive(index: &Indexer<Feed, Reader, Arc<Sink>>, passes: usize) {
     let mut previous = None;
     for _ in 0..passes {
         index.sync().await.expect("a pass over the test chain");
@@ -269,7 +263,7 @@ async fn one_pass_commits_at_most_its_batch() {
     let store = Arc::new(Sink::new());
     let served = Arc::new(AtomicUsize::new(0));
     let unit = index(&store, &served);
-    unit.watch("fresh", &subject(FRESH), Start::Fresh)
+    unit.watch("fresh", &subject(FRESH), Birthday::Fresh)
         .await
         .expect("a fresh observation");
 
@@ -296,7 +290,7 @@ async fn a_restart_over_the_same_store_restores_every_observation() {
     let store = Arc::new(Sink::new());
     let served = Arc::new(AtomicUsize::new(0));
     let unit = index(&store, &served);
-    unit.watch("fresh", &subject(FRESH), Start::Fresh)
+    unit.watch("fresh", &subject(FRESH), Birthday::Fresh)
         .await
         .expect("a fresh observation");
     drive(&unit, 8).await;
@@ -310,7 +304,7 @@ async fn a_restart_over_the_same_store_restores_every_observation() {
     // A birthday the network has already passed: this is the case that owes a
     // catch-up, and therefore the only one with progress to restore.
     let past = unit
-        .watch("past", &subject(PAST), Start::At(BlockPosition(2)))
+        .watch("past", &subject(PAST), Birthday::At(BlockPosition(2)))
         .await
         .expect("an observation from the past");
     assert_eq!(
@@ -404,7 +398,7 @@ async fn one_batch_presented_twice_is_folded_once() {
     let store = Arc::new(Sink::new());
     let served = Arc::new(AtomicUsize::new(0));
     let unit = index(&store, &served);
-    unit.watch("fresh", &subject(FRESH), Start::Fresh)
+    unit.watch("fresh", &subject(FRESH), Birthday::Fresh)
         .await
         .expect("a fresh observation");
     drive(&unit, 8).await;
@@ -418,12 +412,12 @@ async fn one_batch_presented_twice_is_folded_once() {
     let block = Reader
         .inspect(&Feed::new(&served).blocks[0], &[address(FRESH)])
         .expect("one interpreted block");
-    let facts = indexing::CanonicalBlock::new(network(), block).expect("valid facts");
+    let canonical = indexing::CanonicalBlock::new(network(), block).expect("valid facts");
     let batch = || {
         indexing::IndexedBatch::new(
             network(),
             Some(checkpoint.clone()),
-            vec![facts.clone()],
+            vec![canonical.clone()],
             Vec::new(),
             FeeSettlement::Charged,
         )
@@ -449,12 +443,12 @@ async fn a_second_identity_cannot_claim_an_observed_address() {
     let store = Arc::new(Sink::new());
     let served = Arc::new(AtomicUsize::new(0));
     let unit = index(&store, &served);
-    unit.watch("fresh", &subject(FRESH), Start::Fresh)
+    unit.watch("fresh", &subject(FRESH), Birthday::Fresh)
         .await
         .expect("a fresh observation");
 
     let refusal = unit
-        .watch("other", &subject(FRESH), Start::Fresh)
+        .watch("other", &subject(FRESH), Birthday::Fresh)
         .await
         .expect_err("a second identity for one address");
 
@@ -480,7 +474,7 @@ async fn every_credit_a_block_makes_to_one_address_is_summed_once() {
     let store = Arc::new(Sink::new());
     let served = Arc::new(AtomicUsize::new(0));
     let unit = index(&store, &served);
-    unit.watch("fresh", &subject(FRESH), Start::Fresh)
+    unit.watch("fresh", &subject(FRESH), Birthday::Fresh)
         .await
         .expect("a fresh observation");
     drive(&unit, 8).await;
@@ -502,13 +496,12 @@ async fn every_credit_a_block_makes_to_one_address_is_summed_once() {
         amount: Decimal::from(amount),
         to: address(FRESH),
     };
-    let facts = indexing::CanonicalBlock::new(
+    let canonical = indexing::CanonicalBlock::new(
         network(),
         InterpretedBlock {
-            block: checkpoint.clone(),
-            transactions: Vec::new(),
-            outputs: OutputChanges::default(),
             credits: vec![credited("credit:0", 3), credited("credit:1", 5)],
+            ..InterpretedBlock::new(&network(), checkpoint.clone(), Vec::new())
+                .expect("unique transaction ids")
         },
     )
     .expect("two distinct credits in one block");
@@ -516,7 +509,7 @@ async fn every_credit_a_block_makes_to_one_address_is_summed_once() {
         indexing::IndexedBatch::new(
             network(),
             Some(checkpoint.clone()),
-            vec![facts.clone()],
+            vec![canonical.clone()],
             Vec::new(),
             FeeSettlement::Charged,
         )

@@ -1,4 +1,4 @@
-//! Contract coverage for `Service`: bounded sync over sparse positions, birthdays,
+//! Contract coverage for `Indexer`: bounded sync over sparse positions, birthdays,
 //! reorgs, and selection validation, over in-memory sources and stores.
 
 use std::{
@@ -12,20 +12,19 @@ use std::{
 };
 
 use futures_executor::block_on;
-use indexing::Balances;
 use indexing::{
-    Address, AddressFilter, BlockHash, BlockHeight, BlockInterpreter, BlockParent, BlockPosition,
-    BlockRef, BlockSource, BoxFuture, CanonicalPage, ChainName, ChainTip, ConfirmedHistory,
-    History, HistoryQuery, IndexError, IndexErrorKind, IndexStore, IndexedBlock, IndexedOutput,
-    Indexing, InterpretedBlock, Network, OutputChanges, OutputId, OutputKey, Purging, Service,
-    SourceError, Start, Subject, SyncConfig, SyncPhase, SyncPolicy, SyncStatus, TransactionRef,
-    Watching, memory,
+    Address, Birthday, BlockHash, BlockHeight, BlockInterpreter, BlockParent, BlockPosition,
+    BlockRef, BlockSource, BoxFuture, CanonicalBlock, CanonicalPage, ChainName, ChainTips,
+    Checkpoint, ConfirmedHistory, ForwardRange, HistoryQuery, IndexError, IndexErrorKind,
+    IndexStore, IndexedOutput, Indexer, Indexing, InterpretedBlock, NativeBlock, Network,
+    OutputChanges, OutputId, OutputKey, Pending, Purging, SourceError, Subject, SyncConfig,
+    SyncPhase, SyncPolicy, SyncStatus, TransactionRef, Watching, memory,
 };
 
 #[derive(Clone, Debug)]
 struct TestBlock(BlockRef);
 
-impl IndexedBlock for TestBlock {
+impl NativeBlock for TestBlock {
     fn block_ref(&self) -> BlockRef {
         self.0.clone()
     }
@@ -109,7 +108,7 @@ impl Source {
     }
 }
 
-impl ChainTip for Source {
+impl ChainTips for Source {
     fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
         self.tip_calls.fetch_add(1, Ordering::AcqRel);
         if let Some(hook) = &self.during_tip {
@@ -217,6 +216,9 @@ struct RepositoryState {
     outputs: BTreeMap<OutputKey, IndexedOutput>,
     /// Committed history, append-only like every real backend's.
     history: Vec<indexing::CanonicalTransaction>,
+    /// Every block a commit carried, in the order they arrived, exactly as they
+    /// were handed over.
+    committed: Vec<CanonicalBlock>,
     /// How far each observation has been inspected, keyed by its identity as
     /// every real backend keys it.
     progress: BTreeMap<String, BlockRef>,
@@ -263,7 +265,7 @@ impl indexing::IndexStore for Repository {
                 ));
             }
             for claim in batch.progress() {
-                if state.progress.get(&claim.watch) != claim.expected.as_ref() {
+                if state.progress.get(&claim.watch_id) != claim.expected.as_ref() {
                     return Err(IndexError::new(
                         IndexErrorKind::Conflict,
                         "recorded progress changed",
@@ -275,29 +277,32 @@ impl indexing::IndexStore for Repository {
             // built them: a batch no longer nets an output's whole life away,
             // so an output created here and spent in a later block of the same
             // batch leaves a spend behind rather than nothing.
-            let mut unknown_spends = Vec::new();
-            for facts in batch.blocks() {
-                state.history.extend(facts.transactions().iter().cloned());
-                let block = facts.block().clone();
+            let mut unmatched_spends = Vec::new();
+            for canonical in batch.blocks() {
+                state.committed.push(canonical.clone());
+                state
+                    .history
+                    .extend(canonical.transactions().iter().cloned());
+                let block = canonical.block().clone();
                 state.blocks.insert(block.height, block);
-                for output in &facts.outputs().created {
+                for output in &canonical.outputs().created {
                     state.outputs.insert(output.key(), output.clone());
                 }
-                for key in &facts.outputs().spent {
+                for key in &canonical.outputs().spent {
                     if state.outputs.remove(key).is_none() {
-                        unknown_spends.push(key.clone());
+                        unmatched_spends.push(key.clone());
                     }
                 }
             }
             for claim in batch.progress() {
                 state
                     .progress
-                    .insert(claim.watch.clone(), claim.indexed_through.clone());
+                    .insert(claim.watch_id.clone(), claim.indexed_through.clone());
             }
             if let Some(line) = batch.checkpoint() {
                 state.checkpoint = Some(line.clone());
             }
-            Ok(unknown_spends)
+            Ok(unmatched_spends)
         })
     }
 }
@@ -351,7 +356,7 @@ impl indexing::WatchStore for Repository {
 
     /// The birthday moves and the claim goes, under one lock: no row leaves the
     /// map, so there is no instant at which the address is watched by nothing.
-    fn reanchor<'a>(
+    fn cancel_backfill<'a>(
         &'a self,
         watches: Vec<indexing::Watch>,
     ) -> BoxFuture<'a, Result<(), IndexError>> {
@@ -407,6 +412,15 @@ impl Repository {
         (state.blocks.clone(), state.checkpoint.clone())
     }
 
+    /// Every block the index committed, as the store was handed it.
+    fn committed(&self) -> Vec<CanonicalBlock> {
+        self.state
+            .lock()
+            .expect("repository state")
+            .committed
+            .clone()
+    }
+
     fn outputs(&self) -> BTreeSet<OutputKey> {
         self.state
             .lock()
@@ -460,6 +474,13 @@ impl Repository {
     }
 }
 
+/// The live outputs, refused while the address is still being inspected below
+/// the line they would be read at.
+///
+/// The refusal is the store's own, as it is in both shipped stores: the
+/// observations and the rows are one lock here and one transaction there, so
+/// nothing downstream has to repair the answer. `indexing::Inspection` is the
+/// rule, asked the way a third party's store may ask it.
 impl indexing::OutputStore for Repository {
     fn list<'a>(
         &'a self,
@@ -467,6 +488,16 @@ impl indexing::OutputStore for Repository {
     ) -> BoxFuture<'a, Result<indexing::OutputPage, IndexError>> {
         Box::pin(async move {
             let state = self.state.lock().expect("repository state");
+            let observations = state
+                .watches
+                .values()
+                .filter(|watch| watch.address == request.address)
+                .map(|watch| indexing::WatchProgress {
+                    watch: watch.clone(),
+                    indexed_through: state.progress.get(&watch.id).cloned(),
+                })
+                .collect::<Vec<_>>();
+            indexing::Inspection::new(&observations, state.checkpoint.as_ref()).spendable()?;
             Ok(indexing::OutputPage {
                 checkpoint: state.checkpoint.clone(),
                 outputs: state
@@ -488,7 +519,7 @@ impl indexing::BalanceStore for Repository {
     ) -> BoxFuture<'a, Result<indexing::Balance, IndexError>> {
         Box::pin(async move {
             let state = self.state.lock().expect("repository state");
-            let mut ledger = indexing::Ledger::new(&query);
+            let mut ledger = indexing::Fold::new(&query);
             for transaction in &state.history {
                 ledger.apply(transaction, indexing::FeeSettlement::Charged)?;
             }
@@ -520,8 +551,10 @@ impl ConfirmedHistory for Repository {
 
 type Inspections = Arc<Mutex<Vec<(BlockHeight, Vec<Address>)>>>;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Interpreter {
+    /// The network every block this interpreter reports is stated to be of.
+    network: Network,
     inspections: Inspections,
     /// Output changes to report for one height, standing in for a chain whose
     /// interpreter classifies a spend of a selected address as required.
@@ -536,6 +569,17 @@ struct Interpreter {
 }
 
 impl Interpreter {
+    /// An interpreter of `network` that reports nothing until it is told to.
+    fn of(network: &Network) -> Self {
+        Self {
+            network: network.clone(),
+            inspections: Inspections::default(),
+            changes: Arc::default(),
+            drafts: Arc::default(),
+            withdrawals: Arc::default(),
+        }
+    }
+
     fn inspections(&self) -> Vec<(BlockHeight, Vec<Address>)> {
         self.inspections
             .lock()
@@ -571,6 +615,16 @@ impl Interpreter {
                 )],
                 fee: None,
             });
+    }
+
+    /// One more transaction for `block`, reported exactly as given.
+    fn reports_draft(&self, block: &BlockRef, draft: indexing::ObservationDraft) {
+        self.drafts
+            .lock()
+            .expect("interpreter drafts")
+            .entry(block.hash.0.clone())
+            .or_default()
+            .push(draft);
     }
 
     /// One credit of `amount` to `owner` that `block` made with no transaction
@@ -625,18 +679,58 @@ impl BlockInterpreter for Interpreter {
             .cloned()
             .unwrap_or_default();
         Ok(InterpretedBlock {
-            block: block.0.clone(),
-            transactions: self
-                .drafts
-                .lock()
-                .expect("interpreter drafts")
-                .get(&block.0.hash.0)
-                .cloned()
-                .unwrap_or_default(),
             outputs,
             credits: self.credited(&block.0, addresses),
+            ..InterpretedBlock::new(
+                &self.network,
+                block.0.clone(),
+                self.drafts
+                    .lock()
+                    .expect("interpreter drafts")
+                    .get(&block.0.hash.0)
+                    .cloned()
+                    .unwrap_or_default(),
+            )?
         })
     }
+}
+
+/// What `index` holds above `line`: the one reading of its pending blocks an
+/// index hands out.
+///
+/// For asserting what the index holds between passes, where nothing commits
+/// and `line` is whatever the scenario last saw. It is not how a read is
+/// composed: a read samples first, reads the store, and narrows by the
+/// checkpoint that answer came with (`wallets::PendingJoin`).
+fn held(index: &dyn Pending, line: Option<&BlockRef>) -> Vec<CanonicalBlock> {
+    index
+        .sampled()
+        .expect("a sample")
+        .above(&LastSeen(line.cloned()))
+}
+
+/// The line a scenario last saw, standing in for a store's answer.
+///
+/// Only for [`held`]: nothing commits between the passes it is asked about, so
+/// the line cannot have moved. A read has no such value to offer, and narrows
+/// by the answer itself.
+struct LastSeen(Option<BlockRef>);
+
+impl indexing::Checkpointed for LastSeen {
+    fn checkpoint(&self) -> Option<&BlockRef> {
+        self.0.as_ref()
+    }
+}
+
+/// Every amount the transactions of `blocks` move to `owner`, oldest first.
+fn credited(blocks: &[CanonicalBlock], owner: &Address) -> Vec<base::Decimal> {
+    blocks
+        .iter()
+        .flat_map(CanonicalBlock::transactions)
+        .flat_map(|transaction| &transaction.movements)
+        .filter(|movement| movement.to() == Some(owner))
+        .map(|movement| movement.amount.clone())
+        .collect()
 }
 
 /// Watches every filter of `selection` on `index`, then runs one pass.
@@ -645,22 +739,22 @@ impl BlockInterpreter for Interpreter {
 /// through `watch` instead of handing it to the pass. Re-watching the same
 /// address under the same id and start is a no-op, so a repeated pass states
 /// the same selection.
-fn pass(index: &dyn Indexing, selection: &[AddressFilter]) -> Result<SyncStatus, IndexError> {
+fn pass(index: &dyn Indexing, selection: &[ForwardRange]) -> Result<SyncStatus, IndexError> {
     watch_all(index, selection).expect("watch");
     block_on(index.sync())
 }
 
 /// The refusal `watch` answers for a selection no index will accept.
-fn watch_error(index: &dyn Watching, selection: &[AddressFilter]) -> IndexError {
+fn watch_error(index: &dyn Watching, selection: &[ForwardRange]) -> IndexError {
     watch_all(index, selection).expect_err("an index must refuse this selection")
 }
 
-fn watch_all(index: &dyn Watching, selection: &[AddressFilter]) -> Result<(), IndexError> {
+fn watch_all(index: &dyn Watching, selection: &[ForwardRange]) -> Result<(), IndexError> {
     for (position, filter) in selection.iter().enumerate() {
         block_on(index.watch(
             &format!("watch-{position}"),
             &subject(&filter.address),
-            Start::At(filter.start_position),
+            Birthday::At(filter.start_position),
         ))?;
     }
     Ok(())
@@ -759,7 +853,7 @@ fn source_contract_is_complete_bounded_and_position_addressed() {
     assert_eq!(
         blocks
             .iter()
-            .map(IndexedBlock::block_ref)
+            .map(NativeBlock::block_ref)
             .collect::<Vec<_>>(),
         [block(BlockHeight(1)), block(BlockHeight(2))]
     );
@@ -781,14 +875,14 @@ fn sparse_sync_uses_actual_blocks_and_resumes_a_bounded_prefix() {
     let own_network = network("sparse-chain");
     let owner = address(&own_network, "owner");
     let source = Source::sparse(sparse_chain());
-    let interpreter = Interpreter::default();
-    let service = Service::new(
+    let interpreter = Interpreter::of(&own_network);
+    let service = Indexer::new(
         source,
         interpreter.clone(),
         Repository::default(),
         bounded_config(own_network, 2),
     );
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: owner.clone(),
         start_position: BlockPosition(102),
     }];
@@ -814,14 +908,14 @@ fn sparse_sync_uses_actual_blocks_and_resumes_a_bounded_prefix() {
 fn sparse_birthday_anchor_consumes_the_only_batch_slot_and_survives_restart() {
     let own_network = network("anchor-prefix");
     let owner = address(&own_network, "owner");
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: owner.clone(),
         start_position: BlockPosition(102),
     }];
     let source = Source::sparse(sparse_chain());
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     let repository = Repository::default();
-    let initial = Service::new(
+    let initial = Indexer::new(
         source.clone(),
         interpreter.clone(),
         repository.clone(),
@@ -835,7 +929,7 @@ fn sparse_birthday_anchor_consumes_the_only_batch_slot_and_survives_restart() {
     drop(initial);
 
     let restarted_source = Source::sparse(sparse_chain());
-    let restarted = Service::new(
+    let restarted = Indexer::new(
         restarted_source.clone(),
         interpreter.clone(),
         repository,
@@ -864,16 +958,16 @@ fn sparse_birthday_anchor_consumes_the_only_batch_slot_and_survives_restart() {
 #[test]
 fn mismatched_birthday_anchor_fails_before_effects_and_allows_a_retry() {
     let own_network = network("anchor-mismatch");
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: address(&own_network, "owner"),
         start_position: BlockPosition(102),
     }];
     let mut invalid = sparse_chain();
     invalid[2].parent.as_mut().unwrap().hash = BlockHash(vec![99]);
     let source = Source::sparse(invalid);
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     let repository = Repository::default();
-    let service = Service::new(
+    let service = Indexer::new(
         source.clone(),
         interpreter.clone(),
         repository.clone(),
@@ -883,7 +977,7 @@ fn mismatched_birthday_anchor_fails_before_effects_and_allows_a_retry() {
     assert_eq!(
         error,
         IndexError::new(
-            IndexErrorKind::CannotConnect,
+            IndexErrorKind::Disconnected,
             "birthday anchor does not match the first block parent",
             true,
         )
@@ -902,8 +996,8 @@ fn mismatched_birthday_anchor_fails_before_effects_and_allows_a_retry() {
 fn future_birthday_establishes_only_an_empty_tip_anchor() {
     let own_network = network("future-birthday");
     let source = Source::new(4);
-    let interpreter = Interpreter::default();
-    let service = Service::new(
+    let interpreter = Interpreter::of(&own_network);
+    let service = Indexer::new(
         source.clone(),
         interpreter.clone(),
         Repository::default(),
@@ -911,7 +1005,7 @@ fn future_birthday_establishes_only_an_empty_tip_anchor() {
     );
     let status = pass(
         &service,
-        &[AddressFilter {
+        &[ForwardRange {
             address: address(&own_network, "future"),
             start_position: BlockPosition(5),
         }],
@@ -941,9 +1035,9 @@ fn malformed_source_parent_is_retryable_before_interpretation_or_commit() {
         ),
     ] {
         let own_network = network("malformed-source");
-        let interpreter = Interpreter::default();
+        let interpreter = Interpreter::of(&own_network);
         let repository = Repository::default();
-        let service = Service::new(
+        let service = Indexer::new(
             Source::sparse([block]),
             interpreter.clone(),
             repository.clone(),
@@ -954,13 +1048,157 @@ fn malformed_source_parent_is_retryable_before_interpretation_or_commit() {
             .expect_err("malformed source reference must fail before interpretation");
         assert_eq!(
             error,
-            IndexError::new(IndexErrorKind::CannotConnect, message, true)
+            IndexError::new(IndexErrorKind::InvalidBlock, message, true)
         );
         assert!(interpreter.inspections().is_empty());
         assert_eq!(
             block_on(repository.checkpoint(&own_network)).expect("checkpoint lookup"),
             None
         );
+    }
+}
+
+/// A source that answers every block request with the same blocks, whatever
+/// range and limit it was asked for.
+///
+/// [`Source`] cannot express this: it cuts its own answer to the range and the
+/// limit, so no scenario built on it can return a block the request excluded.
+struct Unbounded {
+    inner: Source,
+    answer: Vec<BlockRef>,
+}
+
+impl ChainTips for Unbounded {
+    fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
+        self.inner.tip()
+    }
+
+    fn confirmed_tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
+        self.inner.confirmed_tip()
+    }
+}
+
+impl BlockSource for Unbounded {
+    type Block = TestBlock;
+
+    fn blocks<'a>(
+        &'a self,
+        _start: BlockPosition,
+        _end: BlockPosition,
+        _limit: usize,
+    ) -> BoxFuture<'a, Result<Vec<Self::Block>, SourceError>> {
+        let answer = self.answer.iter().cloned().map(TestBlock).collect();
+        Box::pin(async move { Ok(answer) })
+    }
+
+    fn canonical_at<'a>(
+        &'a self,
+        position: BlockPosition,
+    ) -> BoxFuture<'a, Result<Option<BlockRef>, SourceError>> {
+        self.inner.canonical_at(position)
+    }
+}
+
+/// What one pass answers when the source serves `answer` to every request, and
+/// what it left behind: the refusal, how many blocks were interpreted, and the
+/// checkpoint afterwards.
+///
+/// An empty index anchors at the tip and asks for position 4 alone; one
+/// holding block 0 asks for positions 1 through 4, a hundred at most.
+fn refused(held: Option<BlockRef>, answer: Vec<BlockRef>) -> (IndexError, usize, Option<BlockRef>) {
+    let own_network = network("unbounded-source");
+    let interpreter = Interpreter::of(&own_network);
+    let repository = Repository::default();
+    repository.state.lock().unwrap().checkpoint = held;
+    let service = Indexer::new(
+        Unbounded {
+            inner: Source::new(4),
+            answer,
+        },
+        interpreter.clone(),
+        repository.clone(),
+        config(own_network.clone()),
+    );
+
+    let error = pass(&service, &[]).expect_err("the answer must be refused");
+
+    (
+        error,
+        interpreter.inspections().len(),
+        block_on(repository.checkpoint(&own_network)).expect("checkpoint lookup"),
+    )
+}
+
+/// An answer that is wrong in itself is an `InvalidBlock`: more blocks than
+/// were asked for, a block outside the range, positions that do not ascend.
+///
+/// Every block here is well formed and links to its parent, so nothing but the
+/// answer's own shape can be what fails. Sharing a kind with a fork in flight
+/// would leave an operator reading `kind` unable to tell a moving chain from a
+/// source contradicting the request it was given. It is retried all the same,
+/// and it gets no further than the fetch.
+#[test]
+fn an_answer_that_contradicts_its_request_is_a_retryable_invalid_block() {
+    let at = |height: u64| block(BlockHeight(height));
+    let misplaced = "source blocks are outside the range or not strictly increasing";
+    for (held, answer, message) in [
+        (
+            None,
+            vec![at(3), at(4)],
+            "source exceeded the returned-block limit",
+        ),
+        (None, vec![at(3)], misplaced),
+        (Some(at(0)), vec![at(2), at(1)], misplaced),
+        (Some(at(0)), vec![at(1), at(1)], misplaced),
+    ] {
+        let (error, inspected, checkpoint) = refused(held.clone(), answer);
+
+        assert_eq!(
+            error,
+            IndexError::new(IndexErrorKind::InvalidBlock, message, true)
+        );
+        assert_eq!(inspected, 0, "{message}");
+        assert_eq!(checkpoint, held, "{message}");
+    }
+}
+
+/// An answer whose blocks are well formed and within the request, but do not
+/// join up, is `Disconnected`: nothing where the source's own tip says a block
+/// is, a block that skips the one before it, a block the source no longer
+/// calls canonical. A chain that moved between two round trips explains every
+/// one of them, which is what separates them from the test above.
+#[test]
+fn an_answer_that_does_not_join_up_is_disconnected() {
+    let at = |height: u64| block(BlockHeight(height));
+    let replaced = BlockRef {
+        hash: BlockHash(vec![99]),
+        ..at(4)
+    };
+    for (held, answer, message) in [
+        (
+            None,
+            Vec::new(),
+            "source did not return the required produced block",
+        ),
+        (
+            Some(at(0)),
+            Vec::new(),
+            "source returned no produced block before its observed tip",
+        ),
+        (
+            Some(at(0)),
+            vec![at(2)],
+            "source block does not follow the block before it",
+        ),
+        (None, vec![replaced], "source block changed before commit"),
+    ] {
+        let (error, _, checkpoint) = refused(held.clone(), answer);
+
+        assert_eq!(
+            error,
+            IndexError::new(IndexErrorKind::Disconnected, message, true)
+        );
+        assert_eq!(checkpoint, held, "{message}");
     }
 }
 
@@ -977,8 +1215,8 @@ fn checkpoint_exhaustion_follows_parent_validation_and_precedes_interpretation()
         }
         let repository = Repository::default();
         repository.state.lock().unwrap().checkpoint = Some(checkpoint.clone());
-        let interpreter = Interpreter::default();
-        let service = Service::new(
+        let interpreter = Interpreter::of(&own_network);
+        let service = Indexer::new(
             Source::sparse([checkpoint.clone(), next]),
             interpreter.clone(),
             repository.clone(),
@@ -993,7 +1231,7 @@ fn checkpoint_exhaustion_follows_parent_validation_and_precedes_interpretation()
             )
         } else {
             IndexError::new(
-                IndexErrorKind::CannotConnect,
+                IndexErrorKind::InvalidBlock,
                 "non-genesis block is missing its parent",
                 true,
             )
@@ -1016,13 +1254,13 @@ fn a_reorg_above_the_line_changes_no_stored_byte() {
     // Two blocks pending: heights 51 and 52 are above the line, 50 is at it.
     let source = Source::sparse(sparse_chain()).confirming(2);
     let repository = Repository::default();
-    let service = Service::new(
+    let service = Indexer::new(
         source.clone(),
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         repository.clone(),
         config(own_network.clone()),
     );
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: owner,
         start_position: BlockPosition(100),
     }];
@@ -1049,13 +1287,13 @@ fn a_reorg_below_the_line_quarantines_the_network_with_an_actionable_message() {
     let owner = address(&own_network, "owner");
     let source = Source::sparse(sparse_chain());
     let repository = Repository::default();
-    let service = Service::new(
+    let service = Indexer::new(
         source.clone(),
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         repository.clone(),
         config(own_network),
     );
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: owner,
         start_position: BlockPosition(100),
     }];
@@ -1083,17 +1321,17 @@ fn a_reorg_below_the_line_quarantines_the_network_with_an_actionable_message() {
 fn a_rescanned_network_reindexes_from_its_registered_start() {
     let own_network = network("rescan");
     let owner = address(&own_network, "owner");
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: owner.clone(),
         start_position: BlockPosition(102),
     }];
     let source = Source::sparse(sparse_chain());
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     let repository = Repository::default();
     for block in &sparse_chain()[2..] {
         interpreter.credits(block, &owner, 5);
     }
-    let quarantined = Service::new(
+    let quarantined = Indexer::new(
         source.clone(),
         interpreter,
         repository.clone(),
@@ -1112,11 +1350,11 @@ fn a_rescanned_network_reindexes_from_its_registered_start() {
     assert_eq!(repository.stored(), (BTreeMap::new(), None));
 
     // A rescan is followed by an ordinary start: new process, same store.
-    let restarted = Interpreter::default();
+    let restarted = Interpreter::of(&own_network);
     for block in &replacement_chain()[2..] {
         restarted.credits(block, &owner, 5);
     }
-    let reindexing = Service::new(
+    let reindexing = Indexer::new(
         Source::sparse(replacement_chain()),
         restarted.clone(),
         repository.clone(),
@@ -1150,9 +1388,9 @@ fn a_rescanned_network_reindexes_from_its_registered_start() {
 fn a_confirmed_tip_above_the_observed_tip_is_a_retryable_source_failure() {
     let own_network = network("lying-source");
     let source = Ahead(Source::new(4));
-    let service = Service::new(
+    let service = Indexer::new(
         source,
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         Repository::default(),
         config(own_network),
     );
@@ -1200,7 +1438,7 @@ impl Advancing {
     }
 }
 
-impl ChainTip for Advancing {
+impl ChainTips for Advancing {
     fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
         let read = self.inner.tip();
         Box::pin(async move {
@@ -1263,9 +1501,9 @@ fn a_chain_that_advances_between_the_two_lines_is_not_a_lying_source() {
         Source::new(0).confirming(1),
         (0..=2).map(|height| block(BlockHeight(height))).collect(),
     );
-    let service = Service::new(
+    let service = Indexer::new(
         source,
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         Repository::default(),
         config(own_network),
     );
@@ -1293,10 +1531,10 @@ fn a_chain_that_advances_between_the_two_lines_is_not_a_lying_source() {
 fn a_restart_rebuilds_pending_with_the_ordinary_catch_up_and_no_extra_fetch() {
     let own_network = network("restart-pending");
     let repository = Repository::default();
-    let filters = Vec::<AddressFilter>::new();
-    let initial = Service::new(
+    let filters = Vec::<ForwardRange>::new();
+    let initial = Indexer::new(
         Source::new(4).confirming(2),
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         repository.clone(),
         config(own_network.clone()),
     );
@@ -1306,9 +1544,9 @@ fn a_restart_rebuilds_pending_with_the_ordinary_catch_up_and_no_extra_fetch() {
     drop(initial);
 
     let restarted_source = Source::new(4).confirming(2);
-    let restarted = Service::new(
+    let restarted = Indexer::new(
         restarted_source.clone(),
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         repository,
         config(own_network),
     );
@@ -1323,20 +1561,20 @@ fn a_restart_rebuilds_pending_with_the_ordinary_catch_up_and_no_extra_fetch() {
     );
 }
 
-/// Reading the pending overlay is not free of source failures: an outage
+/// Reading the pending blocks is not free of source failures: an outage
 /// leaves the committed checkpoint alone and the next pass repairs it.
 #[test]
 fn a_canonical_lookup_outage_preserves_the_checkpoint_and_allows_a_retry() {
     let own_network = network("lookup-outage");
     let source = Source::sparse(sparse_chain()).confirming(2);
     let repository = Repository::default();
-    let service = Service::new(
+    let service = Indexer::new(
         source.clone(),
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         repository.clone(),
         config(own_network.clone()),
     );
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: address(&own_network, "owner"),
         start_position: BlockPosition(100),
     }];
@@ -1364,7 +1602,7 @@ fn a_canonical_lookup_outage_preserves_the_checkpoint_and_allows_a_retry() {
 /// Adding a watch makes every held block's facts stale, so the pass interprets
 /// all of them again. That rebuild is a sequence of awaits — a cache lookup or a
 /// full refetch, plus one `canonical_at` per block — and it used to run by
-/// *emptying the shared overlay first* and re-admitting into it one block at a
+/// *emptying the shared collection first* and re-admitting into it one block at a
 /// time. Every read landing in that window saw a prefix of the blocks above the
 /// line: a pending transaction missing from a history page, a pending credit
 /// missing from a balance, and an output a pending block had spent offered as
@@ -1373,42 +1611,41 @@ fn a_canonical_lookup_outage_preserves_the_checkpoint_and_allows_a_retry() {
 /// window into a wrong answer with no end.
 ///
 /// So the failure is forced here, at the second of two held blocks, and what is
-/// asserted is that the overlay still answers with *both* of them. The rebuilt
+/// asserted is that the index still answers with *both* of them. The rebuilt
 /// collection is reachable by no reader until it is complete.
 #[test]
-fn a_failed_reinspection_leaves_the_whole_pending_overlay_standing() {
+fn a_failed_reinspection_leaves_every_pending_block_standing() {
     let own_network = network("atomic-reinspection");
     let owner = address(&own_network, "owner");
     let late = address(&own_network, "late");
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     interpreter.credits(&block(BlockHeight(3)), &owner, 5);
     interpreter.credits(&block(BlockHeight(4)), &owner, 7);
     let source = Source::new(4).confirming(2);
-    let service = Arc::new(Service::new(
+    let service = Arc::new(Indexer::new(
         source.clone(),
         interpreter,
         Repository::default(),
         config(own_network.clone()),
     ));
-    let reader = service.history();
-    let watched = vec![AddressFilter {
+    let watched = vec![ForwardRange {
         address: owner.clone(),
         start_position: BlockPosition(0),
     }];
-    let subject = indexing::Subject {
-        address: owner.clone(),
-        asset: indexing::AssetId::native(own_network.chain.clone()),
-    };
     let pending = || {
-        let balance = block_on(service.balances().balance(&subject)).expect("balance");
-        let page = block_on(reader.history(&subject, indexing::Page::first(10))).expect("history");
-        (page.pending.len(), balance.pending.incoming)
+        let line = block_on(service.checkpoint(&own_network)).expect("the confirmed line");
+        let held = held(&*service, line.as_ref());
+        (held.len(), credited(&held, &owner))
     };
+    let both = (
+        2,
+        vec![base::Decimal::from(5_u64), base::Decimal::from(7_u64)],
+    );
 
     pass(&*service, &watched).expect("first pass");
     assert_eq!(
         pending(),
-        (2, base::Decimal::from(12_u64)),
+        both,
         "heights 3 and 4 are above the confirmed line and both pending"
     );
 
@@ -1416,7 +1653,7 @@ fn a_failed_reinspection_leaves_the_whole_pending_overlay_standing() {
     // interpretation of the *newer* one cannot be finished.
     *source.canonical_failure.lock().unwrap() = Some(BlockPosition(4));
     let mut selection = watched.clone();
-    selection.push(AddressFilter {
+    selection.push(ForwardRange {
         address: late,
         start_position: BlockPosition(3),
     });
@@ -1425,8 +1662,8 @@ fn a_failed_reinspection_leaves_the_whole_pending_overlay_standing() {
 
     assert_eq!(
         pending(),
-        (2, base::Decimal::from(12_u64)),
-        "the overlay still holds both blocks, at the selection it was last \
+        both,
+        "both pending blocks are still held, at the selection it was last \
          wholly interpreted against"
     );
 }
@@ -1450,10 +1687,10 @@ fn a_failed_reinspection_leaves_the_whole_pending_overlay_standing() {
 fn an_observation_joining_the_front_reinterprets_the_blocks_above_the_line() {
     let own_network = network("catch-up-join");
     let late = address(&own_network, "late");
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     let source = Source::new(4).confirming(2);
     let repository = Repository::default();
-    let service = Service::new(
+    let service = Indexer::new(
         source.clone(),
         interpreter.clone(),
         repository.clone(),
@@ -1467,7 +1704,7 @@ fn an_observation_joining_the_front_reinterprets_the_blocks_above_the_line() {
 
     // An observation from the very beginning: below the line, so it is inspected
     // for what it owes and not for what is arriving.
-    block_on(service.watch("late", &subject(&late), Start::At(BlockPosition(0))))
+    block_on(service.watch("late", &subject(&late), Birthday::At(BlockPosition(0))))
         .expect("an observation below the line");
     block_on(service.sync()).expect("the pass that fills its range in");
     assert_eq!(
@@ -1500,44 +1737,60 @@ fn an_observation_joining_the_front_reinterprets_the_blocks_above_the_line() {
 }
 
 /// Both halves of the owner's question, across a reorg: what is settled, and
-/// what is on its way. The confirmed total never moves; the pending total
-/// follows the chain.
+/// what is on its way. The confirmed rows never move; the pending blocks follow
+/// the chain.
+///
+/// Each half is read from its owner — the settled rows from the repository, the
+/// blocks above the line from the index — and the sample is narrowed by the
+/// checkpoint the repository's own answer came with.
 #[test]
 fn confirmed_and_pending_value_are_both_correct_across_a_reorg() {
     let own_network = network("both-views");
     let owner = address(&own_network, "owner");
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     interpreter.credits(&block(BlockHeight(1)), &owner, 5);
     interpreter.credits(&block(BlockHeight(4)), &owner, 7);
     let source = Source::new(4).confirming(2);
     let repository = Repository::default();
-    let service = Arc::new(Service::new(
+    let service = Arc::new(Indexer::new(
         source.clone(),
         interpreter,
         repository.clone(),
         config(own_network.clone()),
     ));
-    let reader = service.history();
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: owner.clone(),
         start_position: BlockPosition(0),
     }];
-    let subject = indexing::Subject {
-        address: owner.clone(),
-        asset: indexing::AssetId::native(own_network.chain.clone()),
+    let subject = subject(&owner);
+    let read = || {
+        let sample = service.sampled().expect("a sample");
+        let query = HistoryQuery::new(&subject, indexing::Page::first(10));
+        let page = block_on(repository.history(query)).expect("history");
+        let balance = block_on(indexing::BalanceStore::balance(
+            &repository,
+            indexing::BalanceQuery::new(&subject),
+        ))
+        .expect("balance");
+        assert_eq!(page.checkpoint, balance.observed_at, "one line, both reads");
+        let above = sample.above(&page);
+        (page, balance, above)
     };
 
     pass(&*service, &filters).expect("first pass");
-    let page = block_on(reader.history(&subject, indexing::Page::first(10))).expect("history");
-    let balance = block_on(service.balances().balance(&subject)).expect("balance");
+    let (page, balance, above) = read();
     assert_eq!(page.checkpoint, Some(block(BlockHeight(2))));
     assert_eq!(page.transactions.len(), 1, "the credit at height 1 settled");
-    assert_eq!(page.pending.len(), 1, "the credit at height 4 has not");
     assert_eq!(balance.amount, base::Decimal::from(5_u64));
-    assert_eq!(balance.observed_at, Some(block(BlockHeight(2))));
-    assert_eq!(balance.pending.incoming, base::Decimal::from(7_u64));
-    assert_eq!(balance.pending.outgoing, base::Decimal::zero());
-    assert_eq!(balance.pending.block, Some(block(BlockHeight(4))));
+    assert_eq!(
+        credited(&above, &owner),
+        [base::Decimal::from(7_u64)],
+        "the credit at height 4 has not"
+    );
+    assert_eq!(
+        above.last().map(CanonicalBlock::block),
+        Some(&block(BlockHeight(4)))
+    );
     let settled = repository.stored();
 
     // Heights 3 and 4 are replaced by a chain that credits nothing.
@@ -1553,34 +1806,35 @@ fn confirmed_and_pending_value_are_both_correct_across_a_reorg() {
         });
         replacement.push(fork);
     }
+    let tip = replacement.last().cloned();
     source.replace(replacement);
 
     pass(&*service, &filters).expect("second pass");
-    let page =
-        block_on(reader.history(&subject, indexing::Page::first(10))).expect("history after");
-    let balance = block_on(service.balances().balance(&subject)).expect("balance after the reorg");
+    let (page, balance, above) = read();
     assert_eq!(repository.stored(), settled, "nothing durable moved");
     assert_eq!(page.transactions.len(), 1);
-    assert!(page.pending.is_empty(), "the pending credit is gone");
     assert_eq!(
         balance.amount,
         base::Decimal::from(5_u64),
         "settled is settled"
     );
-    assert_eq!(balance.pending.incoming, base::Decimal::zero());
+    assert!(
+        credited(&above, &owner).is_empty(),
+        "the pending credit is gone"
+    );
     assert_eq!(
-        balance.pending.block.map(|block| block.height),
-        Some(BlockHeight(4)),
-        "the overlay tracks the replacement chain"
+        above.last().map(CanonicalBlock::block),
+        tip.as_ref(),
+        "the pending blocks track the replacement chain"
     );
 }
 
-/// Value a block moved with no transaction to name it: pending above the
-/// confirmed line, settled below it, and a transaction nowhere.
+/// Value a block moved with no transaction to name it: held above the confirmed
+/// line, settled below it, and a transaction nowhere.
 ///
-/// The whole path for an `indexing::BlockCredit` — interpreter, pending overlay,
-/// balance read, commit, store fold — which nothing else drives end to end. Each
-/// link has its own test (`overlay.rs`'s pending fold, `balance.rs`'s ledger,
+/// The whole path for an `indexing::BlockCredit` — interpreter, pending blocks,
+/// commit, store fold — which nothing else drives end to end. Each link has its
+/// own test (`wallets`' pending fold, `balance.rs`'s ledger,
 /// `contracts::BalanceContract::folds_a_credit_no_transaction_names`,
 /// `BackfillContract::fills_in_a_credit_no_transaction_names`), and what a chain
 /// actually has is an Ethereum withdrawal arriving twelve blocks above the line
@@ -1593,24 +1847,40 @@ fn confirmed_and_pending_value_are_both_correct_across_a_reorg() {
 fn a_transactionless_credit_is_pending_above_the_line_and_then_settles() {
     let own_network = network("withdrawals");
     let beneficiary = address(&own_network, "beneficiary");
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     interpreter.withdraws(&block(BlockHeight(1)), &beneficiary, 5);
     interpreter.withdraws(&block(BlockHeight(4)), &beneficiary, 7);
     let source = Source::new(4).confirming(2);
-    let service = Arc::new(Service::new(
+    let memory = memory::Repository::new();
+    let service = Arc::new(Indexer::new(
         source.clone(),
         interpreter,
-        memory::Repository::new(),
+        memory.clone(),
         config(own_network.clone()),
     ));
-    let reader = service.history();
     let of = subject(&beneficiary);
-    block_on(service.watch("beneficiary", &of, Start::At(BlockPosition(0))))
+    block_on(service.watch("beneficiary", &of, Birthday::At(BlockPosition(0))))
         .expect("an observation from the beginning");
+    let read = || {
+        let sample = service.sampled().expect("a sample");
+        let balance = block_on(indexing::BalanceStore::balance(
+            &memory,
+            indexing::BalanceQuery::new(&of),
+        ))
+        .expect("balance");
+        let above = sample.above(&balance);
+        let arriving = above
+            .iter()
+            .flat_map(CanonicalBlock::credits)
+            .filter(|credit| credit.to == beneficiary)
+            .map(|credit| credit.amount.clone())
+            .collect::<Vec<_>>();
+        (balance, above, arriving)
+    };
 
     block_on(Indexing::sync(&*service)).expect("the first pass");
 
-    let balance = block_on(service.balances().balance(&of)).expect("balance");
+    let (balance, above, arriving) = read();
     assert_eq!(balance.observed_at, Some(block(BlockHeight(2))));
     assert_eq!(
         balance.amount,
@@ -1619,14 +1889,15 @@ fn a_transactionless_credit_is_pending_above_the_line_and_then_settles() {
          reaches"
     );
     assert_eq!(
-        balance.pending.incoming,
-        base::Decimal::from(7_u64),
-        "and the one at height 4 is reported as on its way rather than withheld \
+        arriving,
+        [base::Decimal::from(7_u64)],
+        "and the one at height 4 is held as on its way rather than withheld \
          for the whole depth of the line"
     );
-    let page = block_on(reader.history(&of, indexing::Page::first(10))).expect("history");
+    let query = HistoryQuery::new(&of, indexing::Page::first(10));
+    let page = block_on(memory.history(query)).expect("history");
     assert!(
-        page.transactions.is_empty() && page.pending.is_empty(),
+        page.transactions.is_empty() && above.iter().all(|held| held.transactions().is_empty()),
         "a credit is not a transaction and no chain can express one as the \
          other: an address with a balance and an empty history is the shape the \
          record exists for"
@@ -1636,20 +1907,20 @@ fn a_transactionless_credit_is_pending_above_the_line_and_then_settles() {
     source.replace((0..=6).map(|height| block(BlockHeight(height))));
     block_on(Indexing::sync(&*service)).expect("the pass that confirms height 4");
 
-    let balance = block_on(service.balances().balance(&of)).expect("balance after");
+    let (balance, _, arriving) = read();
     assert_eq!(
         balance.amount,
         base::Decimal::from(12_u64),
         "the settled total gained exactly the credit that was pending"
     );
-    assert_eq!(balance.pending.incoming, base::Decimal::zero());
+    assert!(arriving.is_empty());
 }
 
-/// A UTXO chain spends its own change at depth one, exactly as it did before
-/// the confirmed line existed: the durable table holds confirmed outputs and
-/// the overlay contributes the rest, so selection sees the same set.
+/// A UTXO chain spends its own change at depth one: the durable table holds
+/// confirmed outputs and the index holds the rest, as facts a consumer folds
+/// over the store's page (`wallets::PendingJoin`).
 #[test]
-fn an_output_created_above_the_line_is_visible_to_selection_at_depth_one() {
+fn an_output_created_above_the_line_is_held_for_selection_at_depth_one() {
     let own_network = network("change-at-depth-one");
     let owner = address(&own_network, "owner");
     let change = IndexedOutput {
@@ -1664,7 +1935,7 @@ fn an_output_created_above_the_line_is_visible_to_selection_at_depth_one() {
         created_at: BlockHeight(4),
         coinbase: false,
     };
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     interpreter.reports(
         BlockHeight(4),
         OutputChanges {
@@ -1673,13 +1944,13 @@ fn an_output_created_above_the_line_is_visible_to_selection_at_depth_one() {
         },
     );
     let repository = Repository::default();
-    let service = Service::new(
+    let service = Indexer::new(
         Source::new(4).confirming(2),
         interpreter,
         repository.clone(),
         config(own_network),
     );
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: owner,
         start_position: BlockPosition(0),
     }];
@@ -1687,12 +1958,9 @@ fn an_output_created_above_the_line_is_visible_to_selection_at_depth_one() {
     let status = pass(&service, &filters).expect("pass");
 
     assert_eq!(status.checkpoint, Some(block(BlockHeight(2))));
-    assert!(
-        !repository.outputs().contains(&change.key()),
-        "the durable table holds confirmed outputs only"
-    );
+    let sample = service.sampled().expect("a sample");
     let page = block_on(indexing::OutputStore::list(
-        &service.outputs(),
+        &repository,
         indexing::OutputRequest {
             network: change.address.network.clone(),
             address: change.address.clone(),
@@ -1700,14 +1968,21 @@ fn an_output_created_above_the_line_is_visible_to_selection_at_depth_one() {
             limit: 10,
         },
     ))
-    .expect("folded outputs");
+    .expect("the confirmed outputs");
+    assert!(
+        page.outputs.is_empty(),
+        "the durable table holds confirmed outputs only"
+    );
+    let created = sample
+        .above(&page)
+        .iter()
+        .flat_map(|held| held.outputs().created.clone())
+        .map(|output| output.id)
+        .collect::<Vec<_>>();
     assert_eq!(
-        page.outputs
-            .into_iter()
-            .map(|output| output.id)
-            .collect::<Vec<_>>(),
+        created,
         [change.id],
-        "the overlay makes the change spendable at depth one"
+        "the pending blocks carry the change, so it is spendable at depth one"
     );
 }
 
@@ -1725,13 +2000,18 @@ fn an_output_created_above_the_line_is_visible_to_selection_at_depth_one() {
 /// the consumer is coin selection: it pages the set and spends the union, so a
 /// row offered here becomes a transaction input. The page is refused until the
 /// inspection reaches the checkpoint it would be stamped with.
+///
+/// The refusal is the repository's, made from the progress the passes recorded
+/// in it; what this drives end to end is that the index records a partial
+/// catch-up as exactly that. Both shipped stores are held to the same refusal by
+/// `BackfillContract::offers_no_output_until_the_range_is_read`.
 #[test]
 fn a_partly_inspected_history_offers_no_spendable_output() {
     let own_network = network("partial-catch-up-outputs");
     let owner = address(&own_network, "late");
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     let repository = Repository::default();
-    let service = Service::new(
+    let service = Indexer::new(
         Source::new(8),
         interpreter.clone(),
         repository.clone(),
@@ -1766,7 +2046,7 @@ fn a_partly_inspected_history_offers_no_spendable_output() {
     );
 
     block_on(service.sync()).expect("the pass that anchors the checkpoint");
-    block_on(service.watch("late", &subject(&owner), Start::At(BlockPosition(0))))
+    block_on(service.watch("late", &subject(&owner), Birthday::At(BlockPosition(0))))
         .expect("an observation from the beginning");
     let status = block_on(service.sync()).expect("the pass that reads one owed block");
     assert_eq!(status.checkpoint, Some(block(BlockHeight(8))));
@@ -1780,7 +2060,7 @@ fn a_partly_inspected_history_offers_no_spendable_output() {
     );
 
     let error = block_on(indexing::OutputStore::list(
-        &service.outputs(),
+        &repository,
         indexing::OutputRequest {
             network: own_network,
             address: owner,
@@ -1791,14 +2071,14 @@ fn a_partly_inspected_history_offers_no_spendable_output() {
     .expect_err("a spendable set nothing can prove must not be offered");
 
     assert_eq!(error.kind, IndexErrorKind::Conflict);
-    // Named, not just classified: the output reader raises the same retryable
-    // `Conflict` when a cursor names a different overlay, and this scenario
-    // passes no cursor at all — so the message is what says which gate refused.
+    // Named, not just classified: a store raises the same retryable `Conflict`
+    // when the checkpoint moves under a cursor, and this scenario passes no
+    // cursor at all — so the message is what says which refusal this is.
     assert!(
         error
             .message
             .contains("not readable while this address's own history"),
-        "the inspection gate refused it, not the cursor gate: {}",
+        "the inspection refused it, not the cursor: {}",
         error.message
     );
     assert!(
@@ -1814,7 +2094,7 @@ struct Retreating {
     passes: AtomicUsize,
 }
 
-impl ChainTip for Retreating {
+impl ChainTips for Retreating {
     fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
         self.inner.tip()
     }
@@ -1851,7 +2131,7 @@ impl BlockSource for Retreating {
     }
 }
 
-/// `ChainTip::confirmed_tip` states the line never moves backwards, and a
+/// `ChainTips::confirmed_tip` states the line never moves backwards, and a
 /// source that moves it anyway is refused rather than believed: everything the
 /// store already committed above the retreated line was promised irreversible,
 /// and believing the retreat would let the next pass commit above a line the
@@ -1859,12 +2139,12 @@ impl BlockSource for Retreating {
 #[test]
 fn a_confirmed_tip_that_moves_backwards_is_a_retryable_source_failure() {
     let own_network = network("retreating-source");
-    let service = Service::new(
+    let service = Indexer::new(
         Retreating {
             inner: Source::new(4),
             passes: AtomicUsize::new(0),
         },
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         Repository::default(),
         config(own_network),
     );
@@ -1887,7 +2167,7 @@ fn a_confirmed_tip_that_moves_backwards_is_a_retryable_source_failure() {
 /// A source whose confirmed line is one block above its own tip.
 struct Ahead(Source);
 
-impl ChainTip for Ahead {
+impl ChainTips for Ahead {
     fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
         self.0.tip()
     }
@@ -1929,9 +2209,9 @@ fn fresh_wallet_sync_starts_at_its_earliest_birthday_not_genesis() {
     let own_network = network("any-chain");
     let first = address(&own_network, "first");
     let second = address(&own_network, "second");
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     let source = Source::new(4);
-    let service = Service::new(
+    let service = Indexer::new(
         source.clone(),
         interpreter.clone(),
         Repository::default(),
@@ -1941,11 +2221,11 @@ fn fresh_wallet_sync_starts_at_its_earliest_birthday_not_genesis() {
     let statuses = pass(
         &service,
         &[
-            AddressFilter {
+            ForwardRange {
                 address: first.clone(),
                 start_position: BlockPosition(3),
             },
-            AddressFilter {
+            ForwardRange {
                 address: second.clone(),
                 start_position: BlockPosition(4),
             },
@@ -1972,9 +2252,9 @@ fn fresh_wallet_sync_starts_at_its_earliest_birthday_not_genesis() {
 #[test]
 fn fresh_index_without_wallets_anchors_directly_at_the_tip() {
     let own_network = network("any-chain");
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     let source = Source::new(500);
-    let service = Service::new(
+    let service = Indexer::new(
         source.clone(),
         interpreter.clone(),
         Repository::default(),
@@ -1997,13 +2277,13 @@ fn caller_can_restore_the_same_filter_selection_after_restart() {
     let own_network = network("any-chain");
     let owner = address(&own_network, "owner");
     let repository = Repository::default();
-    let initial = Service::new(
+    let initial = Indexer::new(
         Source::new(4),
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         repository.clone(),
         config(own_network.clone()),
     );
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: owner.clone(),
         start_position: BlockPosition(3),
     }];
@@ -2011,9 +2291,9 @@ fn caller_can_restore_the_same_filter_selection_after_restart() {
     drop(initial);
 
     let restarted_source = Source::new(4);
-    let restarted = Service::new(
+    let restarted = Indexer::new(
         restarted_source.clone(),
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         repository.clone(),
         config(own_network.clone()),
     );
@@ -2030,9 +2310,9 @@ fn caller_can_restore_the_same_filter_selection_after_restart() {
     );
 
     let settled = Source::new(4);
-    let again = Service::new(
+    let again = Indexer::new(
         settled.clone(),
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         repository,
         config(own_network),
     );
@@ -2046,16 +2326,16 @@ fn caller_can_restore_the_same_filter_selection_after_restart() {
 #[test]
 fn watch_rejects_an_address_from_another_network() {
     let own_network = network("own-chain");
-    let service = Service::new(
+    let service = Indexer::new(
         Source::new(0),
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         Repository::default(),
         config(own_network),
     );
 
     let error = watch_error(
         &service,
-        &[AddressFilter {
+        &[ForwardRange {
             address: address(&network("other-chain"), "owner"),
             start_position: BlockPosition(0),
         }],
@@ -2083,16 +2363,16 @@ fn watch_rejects_empty_and_duplicate_addresses_before_source_io() {
     let own_network = network("own-chain");
     let duplicate = address(&own_network, "duplicate");
     let cases = [
-        vec![AddressFilter {
+        vec![ForwardRange {
             address: address(&own_network, ""),
             start_position: BlockPosition(0),
         }],
         vec![
-            AddressFilter {
+            ForwardRange {
                 address: duplicate.clone(),
                 start_position: BlockPosition(1),
             },
-            AddressFilter {
+            ForwardRange {
                 address: duplicate,
                 start_position: BlockPosition(2),
             },
@@ -2101,9 +2381,9 @@ fn watch_rejects_empty_and_duplicate_addresses_before_source_io() {
 
     for filters in cases {
         let source = Source::new(10);
-        let service = Service::new(
+        let service = Indexer::new(
             source.clone(),
-            Interpreter::default(),
+            Interpreter::of(&own_network),
             Repository::default(),
             config(own_network.clone()),
         );
@@ -2138,9 +2418,9 @@ fn watch_rejects_empty_and_duplicate_addresses_before_source_io() {
 fn a_cancelled_registration_is_reconciled_without_a_restart() {
     let own_network = network("lost-publication");
     let repository = Repository::default();
-    let service = Service::new(
+    let service = Indexer::new(
         Source::new(8),
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         repository.clone(),
         config(own_network.clone()),
     );
@@ -2148,7 +2428,7 @@ fn a_cancelled_registration_is_reconciled_without_a_restart() {
     let owner = subject(&address(&own_network, "late"));
     repository.pause_add();
 
-    let mut registration = service.watch("late", &owner, Start::At(BlockPosition(0)));
+    let mut registration = service.watch("late", &owner, Birthday::At(BlockPosition(0)));
     assert!(
         registration
             .as_mut()
@@ -2186,7 +2466,7 @@ fn a_cancelled_registration_is_reconciled_without_a_restart() {
 fn an_address_watched_while_the_tip_is_read_still_covers_its_birthday() {
     let own_network = network("late-chain");
     let late = address(&own_network, "late");
-    let watched: Arc<OnceLock<Arc<Service<Source, Interpreter, Repository>>>> =
+    let watched: Arc<OnceLock<Arc<Indexer<Source, Interpreter, Repository>>>> =
         Arc::new(OnceLock::new());
     let source = Source::new(2).during_tip({
         let watched = watched.clone();
@@ -2197,7 +2477,7 @@ fn an_address_watched_while_the_tip_is_read_still_covers_its_birthday() {
             // fixture's store and admission are both ready, so one poll
             // settles it, and a pending poll would be the defect itself.
             let late = subject(&late);
-            let mut watching = Box::pin(index.watch("late", &late, Start::At(BlockPosition(1))));
+            let mut watching = Box::pin(index.watch("late", &late, Birthday::At(BlockPosition(1))));
             match watching
                 .as_mut()
                 .poll(&mut Context::from_waker(Waker::noop()))
@@ -2209,8 +2489,8 @@ fn an_address_watched_while_the_tip_is_read_still_covers_its_birthday() {
             }
         }
     });
-    let interpreter = Interpreter::default();
-    let service = Arc::new(Service::new(
+    let interpreter = Interpreter::of(&own_network);
+    let service = Arc::new(Indexer::new(
         source,
         interpreter.clone(),
         Repository::default(),
@@ -2248,32 +2528,31 @@ impl indexing::Listener for Observations {
 
 /// **What a chain crate hands back is this, and nothing wrapping it.**
 ///
-/// A `Service` over a chain's own source and interpreter answers the whole
+/// A `Indexer` over a chain's own source and interpreter answers the whole
 /// `Indexing` surface — one network, one status, a listener list, the
-/// checkpoint — and hands out the readers for the queries its own store can
-/// answer, so the three chain newtypes that forwarded each of those to a
-/// `Service` in field `0`, and the macro that wrote the forwarding, were
-/// deleted with nothing to replace them.
+/// checkpoint — and the pending sample a consumer composes its reads from, so
+/// the three chain newtypes that forwarded each of those to a `Indexer` in
+/// field `0`, and the macro that wrote the forwarding, were deleted with nothing
+/// to replace them.
 #[test]
 fn the_service_alone_is_a_complete_indexer() {
     let own_network = network("unwrapped");
     let owner = address(&own_network, "owner");
-    let indexer = Arc::new(Service::new(
+    let indexer = Arc::new(Indexer::new(
         Source::new(2),
-        Interpreter::default(),
+        Interpreter::of(&own_network),
         Repository::default(),
         config(own_network.clone()),
     ));
-    let reader = indexer.history();
     let observations = Arc::new(Observations::default());
     indexing::Indexing::listen(&*indexer, observations.clone());
     assert_eq!(indexer.network(), &own_network);
-    let filters = vec![AddressFilter {
-        address: owner.clone(),
+    let filters = vec![ForwardRange {
+        address: owner,
         start_position: BlockPosition(0),
     }];
 
-    let fold = indexer.balances();
+    let pending: Arc<dyn Pending> = indexer.clone();
     let indexer: &dyn Indexing = &*indexer;
     let status = pass(indexer, &filters).expect("a pass through the trait object");
 
@@ -2281,21 +2560,76 @@ fn the_service_alone_is_a_complete_indexer() {
     assert_eq!(status.network, own_network);
     assert_eq!(status.phase, SyncPhase::Ready);
     assert!(observations.0.load(Ordering::SeqCst) > 0);
-    assert_eq!(
-        block_on(indexer.checkpoint(&own_network)).expect("checkpoint"),
-        Some(block(BlockHeight(2)))
+    let line = block_on(indexer.checkpoint(&own_network)).expect("checkpoint");
+    assert_eq!(line, Some(block(BlockHeight(2))));
+    assert!(
+        held(&*pending, line.as_ref()).is_empty(),
+        "instant finality, so nothing is held above the line"
     );
-    let subject = indexing::Subject {
-        address: owner,
-        asset: indexing::AssetId::native(own_network.chain.clone()),
-    };
-    let page = block_on(reader.history(&subject, indexing::Page::first(10))).expect("history");
-    assert!(page.transactions.is_empty());
-    // The balance is the store's, completed by this service's overlay, so it is
-    // read off the value that holds both — not through the `dyn Indexing` above.
-    let balance = block_on(fold.balance(&subject)).expect("balance");
-    assert_eq!(balance.amount, base::Decimal::zero());
-    assert_eq!(balance.completeness, indexing::Completeness::Incomplete);
+}
+
+/// The pending facts an index exposes are the very blocks its next commit
+/// writes: the same values, in the same order, and nothing else.
+///
+/// That is the whole of what is exposed, and it is why a consumer can compose a
+/// pending-inclusive answer without the index answering any query. A sample
+/// that was a projection of the held blocks rather than the blocks themselves
+/// could disagree with what the store is about to hold, and a read composed
+/// from it would show one thing above the line and another below it.
+#[test]
+fn the_pending_sample_is_the_blocks_the_next_commit_writes() {
+    let own_network = network("sampled-then-committed");
+    let owner = address(&own_network, "owner");
+    let interpreter = Interpreter::of(&own_network);
+    interpreter.credits(&block(BlockHeight(3)), &owner, 5);
+    interpreter.credits(&block(BlockHeight(4)), &owner, 7);
+    let source = Source::new(4).confirming(2);
+    let repository = Repository::default();
+    let service = Indexer::new(
+        source.clone(),
+        interpreter,
+        repository.clone(),
+        config(own_network.clone()),
+    );
+    let filters = vec![ForwardRange {
+        address: owner.clone(),
+        start_position: BlockPosition(0),
+    }];
+
+    let status = pass(&service, &filters).expect("the pass that holds two blocks");
+    assert_eq!(status.checkpoint, Some(block(BlockHeight(2))));
+    let before = repository.committed().len();
+    let sampled = held(&service, status.checkpoint.as_ref());
+    assert_eq!(
+        sampled
+            .iter()
+            .map(|held| held.block().clone())
+            .collect::<Vec<_>>(),
+        [block(BlockHeight(3)), block(BlockHeight(4))],
+        "everything above the line, oldest first"
+    );
+    assert_eq!(
+        credited(&sampled, &owner),
+        [base::Decimal::from(5_u64), base::Decimal::from(7_u64)],
+        "with the facts a consumer folds"
+    );
+
+    // The chain advances by two, so both held blocks fall to the line.
+    source.replace((0..=6).map(|height| block(BlockHeight(height))));
+    let status = pass(&service, &filters).expect("the pass that commits them");
+    assert_eq!(status.checkpoint, Some(block(BlockHeight(4))));
+
+    assert_eq!(
+        repository.committed()[before..],
+        sampled[..],
+        "the store was handed the blocks the sample held, unchanged"
+    );
+    assert!(
+        held(&service, status.checkpoint.as_ref())
+            .iter()
+            .all(|held| held.block().position > BlockPosition(4)),
+        "and what is held now is above the new line"
+    );
 }
 
 /// The defect of `docs/design/024` §1.3, end to end: watching an address that
@@ -2313,7 +2647,7 @@ fn a_spend_of_a_pre_birthday_output_is_reported_and_the_pass_completes() {
             index: 0,
         },
     };
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     interpreter.reports(
         BlockHeight(2),
         OutputChanges {
@@ -2321,13 +2655,13 @@ fn a_spend_of_a_pre_birthday_output_is_reported_and_the_pass_completes() {
             ..OutputChanges::default()
         },
     );
-    let service = Service::new(
+    let service = Indexer::new(
         Source::new(2),
         interpreter,
         Repository::default(),
         config(own_network),
     );
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: owner,
         start_position: BlockPosition(1),
     }];
@@ -2335,7 +2669,7 @@ fn a_spend_of_a_pre_birthday_output_is_reported_and_the_pass_completes() {
     let statuses = pass(&service, &filters).expect("the pass must not fail");
     assert_eq!(statuses.phase, SyncPhase::Ready);
     assert_eq!(statuses.checkpoint, Some(block(BlockHeight(2))));
-    assert_eq!(statuses.unknown_spends, [ghost]);
+    assert_eq!(statuses.unmatched_spends, [ghost]);
 }
 
 /// A pass that accounts for every spend reports nothing, so a caller can read
@@ -2356,7 +2690,7 @@ fn a_pass_that_matches_every_spend_reports_no_unknown_spend() {
         created_at: BlockHeight(1),
         coinbase: false,
     };
-    let interpreter = Interpreter::default();
+    let interpreter = Interpreter::of(&own_network);
     interpreter.reports(
         BlockHeight(1),
         OutputChanges {
@@ -2371,18 +2705,132 @@ fn a_pass_that_matches_every_spend_reports_no_unknown_spend() {
             ..OutputChanges::default()
         },
     );
-    let service = Service::new(
+    let service = Indexer::new(
         Source::new(2),
         interpreter,
         Repository::default(),
         config(own_network),
     );
-    let filters = vec![AddressFilter {
+    let filters = vec![ForwardRange {
         address: owner,
         start_position: BlockPosition(0),
     }];
 
     let statuses = pass(&service, &filters).expect("the pass must not fail");
     assert_eq!(statuses.phase, SyncPhase::Ready);
-    assert!(statuses.unknown_spends.is_empty());
+    assert!(statuses.unmatched_spends.is_empty());
+}
+
+/// An interpreter that answers about the block it was handed under a
+/// reference that moved: the same block, reported one second later.
+struct Relabelling(Interpreter);
+
+impl BlockInterpreter for Relabelling {
+    type Block = TestBlock;
+
+    fn settlement(&self) -> indexing::FeeSettlement {
+        self.0.settlement()
+    }
+
+    fn inspect(
+        &self,
+        block: &Self::Block,
+        addresses: &[Address],
+    ) -> Result<InterpretedBlock, IndexError> {
+        let mut moved = block.clone();
+        moved.0.timestamp = Some(1);
+        self.0.inspect(&moved, addresses)
+    }
+}
+
+/// The reference is compared after interpretation and before validation, so
+/// facts about any block but the one that was fetched stop the pass and leave
+/// nothing behind. The same index over the interpreter it wraps commits, which
+/// is what says the refusal is about the reference and nothing else.
+#[test]
+fn facts_reported_under_a_moved_reference_are_refused_and_nothing_is_kept() {
+    let own_network = network("relabelled");
+    let repository = Repository::default();
+    let service = Indexer::new(
+        Source::new(4),
+        Relabelling(Interpreter::of(&own_network)),
+        repository.clone(),
+        config(own_network.clone()),
+    );
+
+    let error = pass(&service, &[]).expect_err("the interpreter answered about another block");
+
+    assert_eq!(
+        error,
+        IndexError::new(
+            IndexErrorKind::InvalidBlock,
+            "interpreter changed the block reference",
+            false,
+        )
+    );
+    assert_eq!(repository.stored(), (BTreeMap::new(), None));
+
+    let faithful = Indexer::new(
+        Source::new(4),
+        Interpreter::of(&own_network),
+        repository.clone(),
+        config(own_network.clone()),
+    );
+    pass(&faithful, &[]).expect("the same chain, reported as it was fetched");
+    assert_eq!(
+        block_on(repository.checkpoint(&own_network)).expect("checkpoint lookup"),
+        Some(block(BlockHeight(4)))
+    );
+}
+
+/// Two transactions under one identifier never become a block's facts: the
+/// interpreter's own output cannot be assembled, so the pass stops inside
+/// `inspect` and the block that repeated it is not committed.
+///
+/// Block 3 carries one transaction and block 4 three, two of them under one
+/// identifier with a third between them, so neither "one transaction per
+/// block" nor "the repeat is adjacent" is what the refusal depends on.
+#[test]
+fn a_block_repeating_a_transaction_id_stops_the_pass_and_is_not_committed() {
+    let own_network = network("repeated-id");
+    let owner = address(&own_network, "owner");
+    let interpreter = Interpreter::of(&own_network);
+    interpreter.credits(&block(BlockHeight(3)), &owner, 2);
+    interpreter.credits(&block(BlockHeight(4)), &owner, 5);
+    interpreter.reports_draft(
+        &block(BlockHeight(4)),
+        indexing::ObservationDraft {
+            transaction_id: TransactionRef::new(own_network.clone(), "between"),
+            transaction_order: 1,
+            status: indexing::ObservationDraftStatus::Included,
+            movements: Vec::new(),
+            fee: None,
+        },
+    );
+    // `credits` names a transaction after its block, so this is the repeat.
+    interpreter.credits(&block(BlockHeight(4)), &owner, 7);
+    let repository = Repository::default();
+    let service = Indexer::new(
+        Source::new(4),
+        interpreter,
+        repository.clone(),
+        config(own_network.clone()),
+    );
+    let watched = vec![ForwardRange {
+        address: owner,
+        start_position: BlockPosition(3),
+    }];
+
+    let error = pass(&service, &watched).expect_err("one identifier, two transactions");
+
+    assert_eq!(
+        error,
+        IndexError::new(
+            IndexErrorKind::InvalidBlock,
+            "block contains a duplicate transaction",
+            false,
+        )
+    );
+    let (stored, _) = repository.stored();
+    assert!(!stored.contains_key(&BlockHeight(4)));
 }

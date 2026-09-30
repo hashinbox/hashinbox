@@ -1,7 +1,7 @@
 //! Finalized block reads over sparse slots.
 //!
 //! Solana skips slots, so a range of positions holds any number of produced
-//! blocks. Every read is one bounded pass: it enumerates produced slots
+//! blocks. Every read is one bounded acquisition: it enumerates produced slots
 //! with `getBlocks`, fetches each with `getBlock`, and proves with
 //! `getFirstAvailableBlock` before and after that nothing it relies on was
 //! pruned meanwhile.
@@ -17,7 +17,7 @@ use crate::native::{Error, ErrorKind, block::RawBlock};
 
 /// Maximum numeric slot span accepted by one finalized enumeration call.
 pub(crate) const MAX_ENUMERATION_SPAN: u64 = 500_000;
-const PASS_DEADLINE: Duration = Duration::from_secs(30);
+const ACQUISITION_DEADLINE: Duration = Duration::from_secs(30);
 const DESCENDING_WINDOW: u64 = 10_000;
 const MAX_ENUMERATIONS: u8 = 64;
 const MAX_FORWARD_WINDOW: u64 = 500_000;
@@ -28,9 +28,9 @@ impl<C: json_rpc::Client> Client<C> {
     /// # Errors
     ///
     /// A retryable [`ErrorKind::RpcUnavailable`] when the node, its
-    /// retention window, or the 30-second pass deadline gets in the way.
+    /// retention window, or the 30-second acquisition deadline gets in the way.
     pub async fn tip(&self) -> Result<BlockRef, Error> {
-        let tip = Pass::new(self).complete_tip().await?;
+        let tip = Acquisition::new(self).complete_tip().await?;
         Ok(tip.block.reference().clone())
     }
 
@@ -47,7 +47,9 @@ impl<C: json_rpc::Client> Client<C> {
         end: BlockPosition,
         limit: usize,
     ) -> Result<Vec<RawBlock>, Error> {
-        Pass::new(self).sparse_blocks(start, end, limit).await
+        Acquisition::new(self)
+            .sparse_blocks(start, end, limit)
+            .await
     }
 
     /// The finalized block at `position`; `None` for a skipped slot.
@@ -56,7 +58,7 @@ impl<C: json_rpc::Client> Client<C> {
     ///
     /// As [`Client::blocks`].
     pub async fn canonical_at(&self, position: BlockPosition) -> Result<Option<BlockRef>, Error> {
-        let block = Pass::new(self).canonical(position).await?;
+        let block = Acquisition::new(self).canonical(position).await?;
         Ok(block.map(|value| value.reference().clone()))
     }
 
@@ -71,9 +73,13 @@ impl<C: json_rpc::Client> Client<C> {
         let Some(raw) = self.finalized_block(position.0).await? else {
             return Ok(None);
         };
-        RawBlock::new(position, raw.get().as_bytes().to_vec())
-            .map(Some)
-            .map_err(Error::unusable)
+        RawBlock::new(
+            position,
+            self.network().clone(),
+            raw.get().as_bytes().to_vec(),
+        )
+        .map(Some)
+        .map_err(Error::unusable)
     }
 
     pub(crate) async fn first_available_block(&self) -> Result<u64, Error> {
@@ -133,8 +139,9 @@ impl<C: json_rpc::Client> Client<C> {
     }
 }
 
-/// One bounded source read: a deadline and an enumeration budget.
-struct Pass<'a, C> {
+/// One bounded source acquisition: the client it reads through, its
+/// deadline, and the enumerations it has spent of its budget.
+struct Acquisition<'a, C> {
     rpc: &'a Client<C>,
     deadline: Instant,
     enumerations: u8,
@@ -146,11 +153,11 @@ struct Tip {
     lower_bound: u64,
 }
 
-impl<'a, C: json_rpc::Client> Pass<'a, C> {
+impl<'a, C: json_rpc::Client> Acquisition<'a, C> {
     fn new(rpc: &'a Client<C>) -> Self {
         Self {
             rpc,
-            deadline: Instant::now() + PASS_DEADLINE,
+            deadline: Instant::now() + ACQUISITION_DEADLINE,
             enumerations: 0,
         }
     }
@@ -322,7 +329,9 @@ impl<'a, C: json_rpc::Client> Pass<'a, C> {
             .ok_or_else(|| {
                 Error::rpc("Solana selected finalized block became unavailable", true)
             })?;
-        RawBlock::new(BlockPosition(slot), raw.get().as_bytes().to_vec()).map_err(Error::unusable)
+        let network = self.rpc.network().clone();
+        RawBlock::new(BlockPosition(slot), network, raw.get().as_bytes().to_vec())
+            .map_err(Error::unusable)
     }
 
     async fn enumerate(&mut self, start: u64, end: u64, min_slot: u64) -> Result<Vec<u64>, Error> {
@@ -338,7 +347,7 @@ impl<'a, C: json_rpc::Client> Pass<'a, C> {
             .await
     }
 
-    /// `future` within the pass deadline; its own errors pass unchanged.
+    /// `future` within the deadline; its own errors pass unchanged.
     async fn within<T>(&self, future: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
         timeout_at(self.deadline, future)
             .await
@@ -367,7 +376,8 @@ mod tests {
     use crate::native::rpc::script::{Script, Scripted};
 
     fn raw(slot: u64, value: Value) -> RawBlock {
-        RawBlock::new(BlockPosition(slot), serde_json::to_vec(&value).unwrap()).unwrap()
+        let bytes = serde_json::to_vec(&value).unwrap();
+        RawBlock::new(BlockPosition(slot), Script::network(), bytes).unwrap()
     }
 
     #[tokio::test]
@@ -750,7 +760,7 @@ mod tests {
     #[tokio::test]
     async fn deadline_and_enumeration_budget_fail_retryably() {
         let rpc = Script::exchanges([]).client();
-        let mut expired = Pass {
+        let mut expired = Acquisition {
             rpc: &rpc,
             deadline: Instant::now() - Duration::from_millis(1),
             enumerations: 0,
@@ -759,7 +769,7 @@ mod tests {
         assert!(error.retryable);
         assert!(error.message.contains("deadline"));
 
-        let mut exhausted = Pass {
+        let mut exhausted = Acquisition {
             rpc: &rpc,
             deadline: Instant::now() + Duration::from_secs(1),
             enumerations: MAX_ENUMERATIONS,
@@ -843,7 +853,7 @@ mod tests {
     #[tokio::test]
     async fn within_passes_rpc_errors_through_unchanged() {
         let rpc = Script::exchanges([]).client();
-        let pass = Pass::new(&rpc);
+        let acquisition = Acquisition::new(&rpc);
         for error in [
             Error::new(ErrorKind::InvalidConfiguration, "terminal fixture"),
             Error::rpc("retryable fixture", true),
@@ -851,7 +861,7 @@ mod tests {
             Error::malformed("getBlock"),
             Error::below_min_slot(),
         ] {
-            let returned = pass
+            let returned = acquisition
                 .within::<()>(std::future::ready(Err(error.clone())))
                 .await
                 .expect_err("RPC error must remain an error");
@@ -862,8 +872,8 @@ mod tests {
     #[tokio::test]
     async fn within_preserves_successful_values() {
         let rpc = Script::exchanges([]).client();
-        let pass = Pass::new(&rpc);
-        let value = pass
+        let acquisition = Acquisition::new(&rpc);
+        let value = acquisition
             .within(std::future::ready(Ok(vec![3, 100, 107])))
             .await
             .expect("successful RPC must retain its value");
@@ -875,54 +885,58 @@ mod tests {
     async fn within_times_out_a_pending_future_at_the_existing_deadline() {
         let rpc = Script::exchanges([]).client();
         let deadline = Instant::now() - Duration::from_millis(1);
-        let pass = Pass {
+        let acquisition = Acquisition {
             rpc: &rpc,
             deadline,
             enumerations: 17,
         };
-        let value = pass.within(std::future::ready(Ok(42))).await.unwrap();
+        let value = acquisition
+            .within(std::future::ready(Ok(42)))
+            .await
+            .unwrap();
         assert_eq!(
             value, 42,
             "a ready future retains timeout_at polling precedence"
         );
-        let error = pass
+        let error = acquisition
             .within(std::future::pending::<Result<(), Error>>())
             .await
-            .expect_err("pending RPC must respect the elapsed pass deadline");
+            .expect_err("pending RPC must respect the elapsed acquisition deadline");
 
         assert_eq!(
             error.message,
             "Solana source exceeded its 30-second deadline"
         );
         assert!(error.retryable);
-        assert_eq!(pass.deadline, deadline);
-        assert_eq!(pass.enumerations, 17);
+        assert_eq!(acquisition.deadline, deadline);
+        assert_eq!(acquisition.enumerations, 17);
     }
 
     #[test]
     fn deadline_guard_is_strict_and_does_not_reset_attempt_state() {
         let rpc = Script::exchanges([]).client();
         let deadline = Instant::now();
-        let pass = Pass {
+        let acquisition = Acquisition {
             rpc: &rpc,
             deadline,
             enumerations: 17,
         };
 
         assert!(
-            pass.ensure_before_deadline(deadline - Duration::from_nanos(1))
+            acquisition
+                .ensure_before_deadline(deadline - Duration::from_nanos(1))
                 .is_ok()
         );
         for observed in [deadline, deadline + Duration::from_nanos(1)] {
-            let error = pass.ensure_before_deadline(observed).unwrap_err();
+            let error = acquisition.ensure_before_deadline(observed).unwrap_err();
             assert_eq!(
                 error.message,
                 "Solana source exceeded its 30-second deadline"
             );
             assert!(error.retryable);
         }
-        assert_eq!(pass.deadline, deadline);
-        assert_eq!(pass.enumerations, 17);
+        assert_eq!(acquisition.deadline, deadline);
+        assert_eq!(acquisition.enumerations, 17);
     }
 
     #[tokio::test]
@@ -931,19 +945,19 @@ mod tests {
         let rpc = scripted.client();
         let deadline = Instant::now() - Duration::from_nanos(1);
         for enumerations in [0, MAX_ENUMERATIONS] {
-            let mut pass = Pass {
+            let mut acquisition = Acquisition {
                 rpc: &rpc,
                 deadline,
                 enumerations,
             };
-            let error = pass.enumerate(1, 1, 1).await.unwrap_err();
+            let error = acquisition.enumerate(1, 1, 1).await.unwrap_err();
             assert_eq!(
                 error.message,
                 "Solana source exceeded its 30-second deadline"
             );
             assert!(error.retryable);
-            assert_eq!(pass.enumerations, enumerations);
-            assert_eq!(pass.deadline, deadline);
+            assert_eq!(acquisition.enumerations, enumerations);
+            assert_eq!(acquisition.deadline, deadline);
         }
         scripted.exhausted();
     }

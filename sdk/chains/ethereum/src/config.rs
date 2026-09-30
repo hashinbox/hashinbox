@@ -2,8 +2,8 @@
 //!
 //! The three steps are the same on every chain: a [`Config`] value — built in
 //! code or deserialized from any `serde` format — [`Config::connect`]s to a
-//! node and verifies its identity, and the verified [`Node`] then
-//! [`Node::compose`]s over an opened repository into a
+//! node and verifies its identity, and the verified [`ChainHandle`] then
+//! [`ChainHandle::compose`]s over an opened repository into a
 //! [`wallets::ComposedChain`]. No storage is opened on the first step, which is
 //! what lets an application check every chain's identity before it opens
 //! anything (`docs/design/030 §8 (ex-028)` section 10.1). [`wallets::Composition`] is what
@@ -22,7 +22,7 @@ use wallets::{ComposedChain, Connection, SubmissionRegistrar};
 /// committing — and the rest is what this chain's own consumers read: the
 /// balance fold, and the repository's own history query
 /// ([`indexing::ConfirmedHistory`]) that this chain joins to its overlay so
-/// `apps/api` can project a page and its sender can prove a transaction absent.
+/// `apps/server` can project a page and its sender can prove a transaction absent.
 /// A trait bound, never a backend: this file names no store implementation. No
 /// [`indexing::OutputStore`]: an account chain produces no UTXO records, and
 /// asking for one would make a store carry a table it can never fill
@@ -57,7 +57,7 @@ use sdk_config::{Cadence, Rpc, Transport};
 
 use crate::{
     IndexerParams, Network, RpcClient, WalletConfig, WalletFactory,
-    native::{Address, AssetKind, ETH, Error, ErrorKind, Wei, transaction::FeeLimits},
+    native::{Address, AssetKind, ETH, Error, ErrorKind, transaction::FeeLimits},
 };
 
 /// Everything one Ethereum network needs. Fields are public; [`Config::new`]
@@ -175,7 +175,7 @@ impl<A: Ord> Config<A> {
     /// [`Self::validate`]'s refusals, and whatever the node reports when it
     /// serves another chain ID, cannot trace a block, or disagrees with a
     /// configured token.
-    pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<Node<A>, Error> {
+    pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<ChainHandle<A>, Error> {
         self.validate()?;
         let network = Network::new(self.chain_id, self.network.as_str());
         let transport = self.rpc.transport(secrets)?;
@@ -184,7 +184,7 @@ impl<A: Ord> Config<A> {
         for token in &self.tokens {
             rpc.validate_token(&token.contract, token.decimals).await?;
         }
-        Ok(Node { config: self, rpc })
+        Ok(ChainHandle { config: self, rpc })
     }
 }
 
@@ -222,16 +222,16 @@ impl<A: FromStr> Config<A> {
     }
 }
 
-/// An Ethereum node whose chain identity has been verified. It holds the
-/// checked configuration and the connected client, and builds this chain's
-/// parts once storage is open.
-pub struct Node<A> {
+/// A checked configuration and the client connected under it, to a node
+/// whose chain identity has been verified. It builds this chain's parts once
+/// storage is open.
+pub struct ChainHandle<A> {
     config: Config<A>,
     rpc: RpcClient<Transport>,
 }
 
-impl<A> Node<A> {
-    /// The chain-neutral identity of the network this node serves, which is
+impl<A> ChainHandle<A> {
+    /// The chain-neutral identity of the network the node serves, which is
     /// the repository [`Self::compose`] needs.
     #[must_use]
     pub fn network(&self) -> base::Network {
@@ -264,7 +264,7 @@ impl<A> Node<A> {
         let network = rpc.network().clone();
         let params = IndexerParams {
             sync: config.cadence.policy,
-            ..IndexerParams::new(rpc.clone(), repository)
+            ..IndexerParams::new(rpc.clone(), repository.clone())
         };
         let indexer = Arc::new(crate::indexer(params)?);
         indexer.checkpoint(&network.canonical()).await?;
@@ -276,18 +276,17 @@ impl<A> Node<A> {
             factories.push((token.asset, Box::new(eth.sibling(settings)?)));
         }
         factories.insert(0, (config.asset, Box::new(eth)));
-        // The repository's own confirmed pages joined to this index's overlay.
-        // Ethereum's own wallets read no history; `apps/api` does, and a chain
-        // is the only place holding both halves of one network's answer.
-        let history = Arc::new(indexer.history());
-        // A reader of its own for the same reason: the fold is the store's own
-        // total, completed by this index's overlay, and a consumer asks the
-        // fold rather than the indexer that happens to hold both halves.
-        let balance = Arc::new(indexer.balances());
+        // The repository's own confirmed pages and balance fold, each
+        // completed by the blocks this index holds above its confirmed line.
+        // Ethereum's own wallets read neither; `apps/server` does, and a chain
+        // is the place holding both halves of one network's answer: the rows
+        // are the store's, the pending blocks are the index's, and the index
+        // answers no query itself.
+        let reads = Arc::new(wallets::PendingJoin::new(repository, indexer.clone()));
         Ok(ComposedChain {
             index: indexer,
-            history,
-            balance,
+            history: reads.clone(),
+            balance: reads,
             factories,
             units,
             poll: config.cadence.poll,
@@ -295,10 +294,10 @@ impl<A> Node<A> {
     }
 }
 
-/// [`Node::compose`] with this chain's type erased, so one vector holds every
+/// [`ChainHandle::compose`] with this chain's type erased, so one vector holds every
 /// configured chain and [`wallets::Composition`] folds them without naming any
 /// of them. An application writes none of this.
-impl<A: Send + 'static, R: Store> Connection<A, R> for Node<A> {
+impl<A: Send + 'static, R: Store> Connection<A, R> for ChainHandle<A> {
     fn compose<'a>(
         self: Box<Self>,
         repository: R,
@@ -381,57 +380,9 @@ impl<A> Token<A> {
 }
 
 /// The transaction-construction ceilings of one deployment, as a document
-/// states them: the same six numbers [`FeeLimits`] holds, before they are
-/// checked against each other.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Limits {
-    /// Largest accepted calldata size, in bytes.
-    pub max_input_bytes: usize,
-    /// Margin added to the node's gas estimate, in basis points.
-    pub gas_margin_basis_points: u32,
-    /// Largest accepted gas limit.
-    pub max_gas_limit: u64,
-    /// Largest accepted fee per gas, in wei.
-    pub max_fee_per_gas: u128,
-    /// Largest accepted priority fee per gas, in wei.
-    pub max_priority_fee_per_gas: u128,
-    /// Largest accepted worst-case fee of one transaction, in wei.
-    pub max_total_fee: u128,
-}
-
-impl Limits {
-    /// The checked ceilings these numbers describe.
-    ///
-    /// # Errors
-    ///
-    /// [`ErrorKind::InvalidConfiguration`] for a zero ceiling, a margin above
-    /// 100%, or a priority-fee ceiling above the max-fee ceiling.
-    pub fn build(&self) -> Result<FeeLimits, Error> {
-        FeeLimits::new(
-            self.max_input_bytes,
-            self.gas_margin_basis_points,
-            self.max_gas_limit,
-            Wei::from_u128(self.max_fee_per_gas),
-            Wei::from_u128(self.max_priority_fee_per_gas),
-            Wei::from_u128(self.max_total_fee),
-        )
-    }
-}
-
-impl Default for Limits {
-    /// The chain's own documented ceilings.
-    fn default() -> Self {
-        Self {
-            max_input_bytes: FeeLimits::MAX_INPUT_BYTES,
-            gas_margin_basis_points: FeeLimits::GAS_LIMIT_MARGIN_BASIS_POINTS,
-            max_gas_limit: FeeLimits::MAX_GAS_LIMIT,
-            max_fee_per_gas: FeeLimits::MAX_FEE_PER_GAS,
-            max_priority_fee_per_gas: FeeLimits::MAX_PRIORITY_FEE_PER_GAS,
-            max_total_fee: FeeLimits::MAX_TOTAL_FEE,
-        }
-    }
-}
+/// states them: [`FeeLimits`] before its six numbers are checked against each
+/// other, which [`Limits::build`] does.
+pub type Limits = FeeLimits<u128>;
 
 /// The registration hook: a document's `"ethereum"` section, parsed by this
 /// crate and handed back as something `sdk/config` can hold beside the other
@@ -476,6 +427,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::native::Wei;
 
     const CONTRACT: &str = "0x1111111111111111111111111111111111111111";
     const OTHER_CONTRACT: &str = "0x2222222222222222222222222222222222222222";
@@ -625,6 +577,72 @@ mod tests {
             config.validate().unwrap_err().message,
             "index polling and batch values must be positive"
         );
+    }
+
+    /// The `limits` section is six ceilings under six keys, and the keys are
+    /// the document's contract: `gas_margin_basis_points` is the one a
+    /// deployment's file states. The six are checked against each other when
+    /// the value is validated, not when it is parsed.
+    #[test]
+    fn limits_section_states_six_ceilings_and_contradictory_ones_are_refused() {
+        let stated = json!({
+            "max_input_bytes": 1024,
+            "gas_margin_basis_points": 1500,
+            "max_gas_limit": 1_000_000,
+            "max_fee_per_gas": 200,
+            "max_priority_fee_per_gas": 100,
+            "max_total_fee": 300
+        });
+        let mut value = section(None);
+        value["limits"] = stated.clone();
+        let config = parse(value).expect("consistent ceilings");
+        assert_eq!(
+            config.limits.build().expect("the stated ceilings"),
+            FeeLimits::new(
+                1024,
+                1500,
+                1_000_000,
+                Wei::from_u128(200),
+                Wei::from_u128(100),
+                Wei::from_u128(300),
+            )
+            .expect("the same ceilings")
+        );
+
+        let mut inverted = section(None);
+        inverted["limits"] = stated.clone();
+        inverted["limits"]["max_priority_fee_per_gas"] = json!(201);
+        let error = parse(inverted)
+            .err()
+            .expect("a tip ceiling above the fee ceiling");
+        assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
+        assert_eq!(
+            error.message,
+            "Ethereum priority-fee ceiling must not exceed the max-fee ceiling"
+        );
+
+        for (absent, present, expected) in [
+            (
+                "gas_margin_basis_points",
+                "gas_limit_margin_basis_points",
+                "unknown field `gas_limit_margin_basis_points`",
+            ),
+            (
+                "max_total_fee",
+                "max_input_bytes",
+                "missing field `max_total_fee`",
+            ),
+        ] {
+            let mut keys = stated.clone();
+            let moved = keys.as_object_mut().and_then(|keys| keys.remove(absent));
+            keys[present] = moved.expect("a stated ceiling");
+            let mut value = section(None);
+            value["limits"] = keys;
+            let error = serde_json::from_value::<Config<String>>(value)
+                .err()
+                .expect("a section with other keys");
+            assert!(error.to_string().starts_with(expected), "{error}");
+        }
     }
 
     #[test]

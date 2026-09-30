@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use base::{
-    Broadcaster, Decimal, Networked, SecretBytes, SignFuture, SignRequest, Signer, Submission,
-    TransactionError, TransactionFuture, TransactionSnapshot,
+    BlockRef, Broadcaster, Decimal, Networked, SecretBytes, SignFuture, SignRequest, Signer,
+    Submission, TransactionError, TransactionFuture, TransactionSnapshot,
 };
-use indexing::{Balance, Completeness, Holder};
+use indexing::Holder;
 use wallets::{
     AddressParser, Authorship, Dependency, FactoryProfile, FutureResult, Generation, Origin,
     SingleSender, TransactionFactory, Wallet as WalletContract, WalletError, WalletErrorKind,
@@ -16,10 +16,10 @@ use wallets::{
 use crate::TransferBuilder;
 use crate::native::{
     Address, AssetKind, ETH, Error, ErrorKind, KeyPair, Network, Wei,
-    rpc::{Accounts, Attestation, Client, Witness},
+    rpc::{Accounts, Attestation, Attester, Client},
     transaction::{FeeLimits, Transfer},
 };
-use crate::sender::{Batch, Item, Outbox};
+use crate::sender::{FactorySender, Outbox, SendRequest};
 
 /// What one asset's wallets send and how much they may spend on fees.
 ///
@@ -202,8 +202,7 @@ impl WalletFactory {
     }
 
     /// A witness over this factory's node for this factory's asset: the one
-    /// evidence that can promote a folded balance to
-    /// `indexing::Completeness::VerifiedOpening`.
+    /// independent evidence this SDK has about a folded balance.
     #[must_use]
     pub fn witness(&self) -> BalanceWitness {
         BalanceWitness {
@@ -222,28 +221,33 @@ impl WalletFactory {
     }
 }
 
-/// Vouches for a balance the index folded, without ever replacing it.
+/// Vouches for a balance a repository folded, without ever replacing it.
 ///
-/// The number a caller is given is the index's fold over the movements it
-/// stores (`indexing::Ledger`). This asks one node, at exactly the block that
+/// The number a caller is given is the fold over the movements a repository
+/// stores (`indexing::Fold`). This asks one node, at exactly the block that
 /// fold settled at, what it computes for the same holding — `eth_getBalance`
 /// for ether, `balanceOf` for a token, both pinned by block hash with
 /// `requireCanonical` — and reports whether the two agree.
 ///
-/// That is the only evidence in this SDK that can promote a fold to
-/// [`Completeness::VerifiedOpening`]. A fold alone cannot: an address funded before
-/// the index began watching it folds to a smaller number and nothing in the
-/// rows says so (`docs/design/021` section 7.1). Agreement at a canonical
-/// block says the rows and the chain's own state came out the same there,
-/// which is a claim about the start position and not merely about the
-/// arithmetic. It remains a claim about **that block**: `Balance::observed_at`
-/// names it, and nothing promotes a balance that has no block yet. Two errors
-/// that cancelled exactly would also agree; no cheaper evidence exists, and
-/// disagreement is always reported rather than swallowed.
+/// **It reports, and claims nothing.** The answer is an [`Attestation`], handed
+/// to whoever asked. It is not written onto the balance and it is not a value
+/// of `indexing::Completeness`: that claim is the repository's own, made from
+/// the rows it holds, and a node read is evidence no repository can persist or
+/// make. What an agreement is worth is the reader's to decide, and two facts
+/// bound it. It is evidence about the **total at one block** — the rows and the
+/// chain's own state came out the same there — and says nothing about how much
+/// of the address's history is indexed. And two errors that cancelled exactly
+/// would also agree, which is why agreement over a fold the repository reports
+/// as `Overdrawn` is a coincidence and not a proof: that fold has already
+/// proved itself short. A fold alone can show none of this: an address funded
+/// before the index began watching it folds to a smaller number and nothing in
+/// the rows says so (`docs/design/021` section 7.1). No cheaper evidence
+/// exists, and disagreement is always reported rather than swallowed.
 ///
-/// The two sides line up because both are settled: `Balance::amount` folds
-/// durable rows only and `Balance::pending` is what the blocks *above* that
-/// line move, which the node at the same block has not applied either.
+/// The two sides line up because both are settled: `indexing::Balance::amount`
+/// folds durable rows only and `indexing::Balance::pending` is what the blocks
+/// *above* that line move, which the node at the same block has not applied
+/// either.
 ///
 /// Ethereum is the only chain here that can do this at all: Bitcoin Core has
 /// no address index, and Solana cannot read an account at a past slot, so
@@ -255,26 +259,30 @@ pub struct BalanceWitness {
 }
 
 impl BalanceWitness {
-    /// `balance`, checked against an independent read of the same holding at
-    /// the same block.
+    /// Whether an independent read of `of`'s holding at `at` agrees with
+    /// `settled`, the amount a repository folded at that block.
     ///
-    /// `balance.amount` is never touched; on agreement, and only from
-    /// [`Completeness::Incomplete`], `balance.completeness` becomes
-    /// [`Completeness::VerifiedOpening`]. An overdrawn fold has already proved
-    /// itself incomplete and is never promoted.
+    /// `settled` and `at` are the two halves of one answer
+    /// (`indexing::Balance::amount` and `indexing::Balance::observed_at`), so
+    /// the node is asked about the very block the fold was read at.
     ///
     /// Nothing here can fail a balance read: every reason not to have proof
     /// — a wrong network or asset, an address this chain cannot parse, a
     /// network with no committed block, a node that refused the pin — is
     /// [`Attestation::Unavailable`].
-    pub async fn attest(&self, of: &dyn Holder, balance: &mut Balance) -> Attestation {
+    pub async fn attest(
+        &self,
+        of: &dyn Holder,
+        settled: &Decimal,
+        at: Option<&BlockRef>,
+    ) -> Attestation {
         let unavailable = |reason: &str| Attestation::Unavailable {
             reason: reason.to_owned(),
         };
         if of.address().network != self.network || of.asset() != &self.asset.id() {
             return unavailable("this witness holds another Ethereum network or asset");
         }
-        let Some(at) = balance.observed_at.clone() else {
+        let Some(at) = at else {
             return unavailable("the network has committed no block to vouch for");
         };
         let address = match Address::try_from(of.address()) {
@@ -285,13 +293,9 @@ impl BalanceWitness {
                 };
             }
         };
-        let attestation = Witness::new(self.accounts.as_ref())
-            .attest(address, &self.asset, &at, &balance.amount)
-            .await;
-        if attestation == Attestation::Agreed && balance.completeness == Completeness::Incomplete {
-            balance.completeness = Completeness::VerifiedOpening;
-        }
-        attestation
+        Attester::new(self.accounts.as_ref())
+            .attest(address, &self.asset, at, settled)
+            .await
     }
 }
 
@@ -340,7 +344,7 @@ impl FactoryProfile for WalletFactory {
     /// Every asset this chain carries is one it also spends, so every factory
     /// declares one.
     fn authorship(&self) -> Option<Arc<dyn Authorship>> {
-        Some(Arc::new(Batch::new(
+        Some(Arc::new(FactorySender::new(
             self.config.clone(),
             self.outbox.clone(),
         )))
@@ -386,9 +390,13 @@ impl Wallet {
         }
     }
 
-    /// The outbox item that sends `amount` of the configured asset from this
+    /// The send request that sends `amount` of the configured asset from this
     /// wallet to `to`.
-    pub(crate) fn item(&self, to: Address, amount: &Decimal) -> Result<Item, WalletError> {
+    pub(crate) fn request(
+        &self,
+        to: Address,
+        amount: &Decimal,
+    ) -> Result<SendRequest, WalletError> {
         let amount = Wei::from_decimal(amount, self.config.decimals)
             .map_err(|error| WalletError::new(WalletErrorKind::InvalidAmount, error.message))?;
         let transfer = Transfer {
@@ -396,7 +404,7 @@ impl Wallet {
             to,
             amount,
         };
-        Ok(Item::new(
+        Ok(SendRequest::new(
             self.key.clone(),
             self.key.address().clone(),
             transfer,
@@ -447,8 +455,8 @@ impl SingleSender for Wallet {
         amount: Decimal,
     ) -> FutureResult<'a, base::TransactionId> {
         Box::pin(async move {
-            let item = self.item(Address::try_from(&destination)?, &amount)?;
-            let accepted = self.outbox.send(vec![item]).await.map_err(|error| {
+            let request = self.request(Address::try_from(&destination)?, &amount)?;
+            let accepted = self.outbox.send(vec![request]).await.map_err(|error| {
                 let mut source = error.source;
                 source.ambiguous_transaction_id = error.ambiguous_transaction_id;
                 source
@@ -495,7 +503,7 @@ mod tests {
     use crate::native::{
         SignedTransaction, TransactionId, Wei,
         rpc::{Submitter, View},
-        transaction::{BuildContext, Builder, Preflight},
+        transaction::{BoundTransfer, BuildContext, Preflight},
     };
 
     struct InactiveDependencies;
@@ -543,12 +551,12 @@ mod tests {
         }
     }
 
-    impl indexing::History for InactiveDependencies {
+    impl wallets::History for InactiveDependencies {
         fn history<'a>(
             &'a self,
             _of: &'a dyn indexing::Holder,
             _page: indexing::Page,
-        ) -> BoxFuture<'a, Result<indexing::TransactionPage, IndexError>> {
+        ) -> BoxFuture<'a, Result<wallets::TransactionPage, IndexError>> {
             Box::pin(async { unreachable!("wallet generation must not read indexed history") })
         }
     }
@@ -657,15 +665,6 @@ mod tests {
         }
     }
 
-    fn folded(amount: u64, completeness: Completeness, at: Option<BlockRef>) -> Balance {
-        Balance {
-            amount: Decimal::from(amount),
-            observed_at: at,
-            pending: indexing::PendingValue::none(),
-            completeness,
-        }
-    }
-
     fn subject(asset: AssetKind) -> indexing::Subject {
         indexing::Subject {
             address: key()
@@ -676,23 +675,24 @@ mod tests {
     }
 
     #[test]
-    fn an_agreeing_witness_promotes_the_fold_to_complete_and_never_touches_the_amount() {
-        let mut balance = folded(42, Completeness::Incomplete, Some(settled()));
-        let attestation =
-            block_on(witness(Some(42)).attest(&subject(AssetKind::Native), &mut balance));
+    fn an_agreeing_witness_says_so() {
+        let attestation = block_on(witness(Some(42)).attest(
+            &subject(AssetKind::Native),
+            &Decimal::from(42_u64),
+            Some(&settled()),
+        ));
         assert_eq!(attestation, Attestation::Agreed);
-        assert_eq!(balance.completeness, Completeness::VerifiedOpening);
-        assert_eq!(balance.amount, Decimal::from(42_u64));
-        assert_eq!(balance.observed_at, Some(settled()));
     }
 
     #[test]
-    fn a_seeded_disagreement_is_reported_and_the_fold_stays_the_answer() {
+    fn a_seeded_disagreement_is_reported_with_both_amounts() {
         // The node computes one unit more than the index folded, which is
         // what a withdrawal-funded address or a rebasing token looks like.
-        let mut balance = folded(42, Completeness::Incomplete, Some(settled()));
-        let attestation =
-            block_on(witness(Some(43)).attest(&subject(AssetKind::Native), &mut balance));
+        let attestation = block_on(witness(Some(43)).attest(
+            &subject(AssetKind::Native),
+            &Decimal::from(42_u64),
+            Some(&settled()),
+        ));
         assert_eq!(
             attestation,
             Attestation::Disagreed {
@@ -700,46 +700,39 @@ mod tests {
                 witness: Decimal::from(43_u64),
             }
         );
-        assert_eq!(balance.amount, Decimal::from(42_u64));
-        assert_eq!(balance.completeness, Completeness::Incomplete);
     }
 
     #[test]
-    fn nothing_is_promoted_without_a_block_to_pin_or_out_of_a_proof_of_incompleteness() {
+    fn nothing_is_vouched_for_without_a_block_to_pin() {
         // No committed block: there is no state to name, so nothing is asked.
-        let mut unanchored = folded(0, Completeness::Incomplete, None);
         let attestation =
-            block_on(witness(Some(0)).attest(&subject(AssetKind::Native), &mut unanchored));
-        assert!(matches!(attestation, Attestation::Unavailable { .. }));
-        assert_eq!(unanchored.completeness, Completeness::Incomplete);
-
-        // An overdrawn fold has already proved itself short; agreement with a
-        // node that also says zero is a coincidence, not a promotion.
-        let mut overdrawn = folded(0, Completeness::Overdrawn, Some(settled()));
-        let attestation =
-            block_on(witness(Some(0)).attest(&subject(AssetKind::Native), &mut overdrawn));
-        assert_eq!(attestation, Attestation::Agreed);
-        assert_eq!(overdrawn.completeness, Completeness::Overdrawn);
+            block_on(witness(Some(0)).attest(&subject(AssetKind::Native), &Decimal::zero(), None));
+        assert_eq!(
+            attestation,
+            Attestation::Unavailable {
+                reason: "the network has committed no block to vouch for".to_owned(),
+            }
+        );
     }
 
     #[test]
     fn a_refused_pin_or_another_holding_proves_nothing_rather_than_failing_the_read() {
-        let mut balance = folded(42, Completeness::Incomplete, Some(settled()));
-        let refused = block_on(witness(None).attest(&subject(AssetKind::Native), &mut balance));
+        let amount = Decimal::from(42_u64);
+        let refused =
+            block_on(witness(None).attest(&subject(AssetKind::Native), &amount, Some(&settled())));
         assert!(matches!(refused, Attestation::Unavailable { .. }));
-        assert_eq!(balance.completeness, Completeness::Incomplete);
 
         // An ether witness cannot vouch for a token holding of the same
         // address, and says so instead of comparing the wrong two numbers.
         let token = AssetKind::Erc20(Address::from_bytes([0x0b; 20]));
-        let foreign = block_on(witness(Some(42)).attest(&subject(token), &mut balance));
+        let foreign =
+            block_on(witness(Some(42)).attest(&subject(token), &amount, Some(&settled())));
         assert_eq!(
             foreign,
             Attestation::Unavailable {
                 reason: "this witness holds another Ethereum network or asset".to_owned(),
             }
         );
-        assert_eq!(balance.completeness, Completeness::Incomplete);
     }
 
     #[test]
@@ -1036,7 +1029,7 @@ mod tests {
         let generated = generated.wallet;
         let created = block_on(factory.create(SecretBytes::new([1_u8; 32]))).unwrap();
         let local = key();
-        let transaction = Builder::new(
+        let transaction = BoundTransfer::new(
             Transfer {
                 asset: AssetKind::Native,
                 to: Address::from_bytes([0x22; 20]),

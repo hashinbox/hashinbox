@@ -1,30 +1,36 @@
 //! Indexing: three chains behind one `indexing::Index`, one
 //! `indexing::Supervisor` driving a task per chain, a `Listener` that is told
-//! what each commit changed, and what the index holds once every network is
-//! `Ready` — the checkpoint of every network, the addresses it watches, and
-//! each wallet's history. No funds move. Needs all three local nodes
+//! what each commit changed, and what the index holds once every network has
+//! reached its tip. No funds move. Needs all three local nodes
 //! (examples/README.md): `cargo run -p payment-examples --example indexing`
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use indexing::Supervisor;
 use indexing::{
-    BlockCommit, Checkpoint as _, Listener, Page, Start, TransactionPage, Watching as _,
+    Birthday, BlockCommit, Checkpoint as _, Listener, Page, Supervisor, SyncReport, Watching as _,
+    sqlite::{Database, Repository},
 };
-use local::{AnyError, Asset, Health, Scenario, Signers, Submissions};
+use json_rpc::Client as _;
+use sdk_config::{Document, Registry};
+use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
-use wallets::{Composition, SubmissionRegistrar};
+use wallets::{Composition, SubmissionRegistrar, Submissions, Wallet};
+
+type AnyError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The chains this scenario runs and the node of each.
+const CONFIG: &str = include_str!("config.toml");
 
 /// Each chain's asset tag and the one wallet this scenario indexes for it.
-const WALLETS: [(Asset, &str); 3] = [
-    (Asset::Btc, "btc-alice"),
-    (Asset::Eth, "eth-alice"),
-    (Asset::Sol, "sol-alice"),
+const WALLETS: [(&str, &str); 3] = [
+    ("btc", "btc-alice"),
+    ("eth", "eth-alice"),
+    ("sol", "sol-alice"),
 ];
 
 /// The reaction hook. Synchronous, cannot fail, cannot veto: it hands the
-/// commit to a queue and returns. A veto belongs in a `BlockStore`, which is
-/// the only thing that runs inside the commit.
+/// commit to a queue and returns. A reaction that must be part of the commit
+/// belongs in the repository, which is the only thing that runs inside it.
 struct Credits(mpsc::UnboundedSender<BlockCommit>);
 
 impl Listener for Credits {
@@ -35,52 +41,77 @@ impl Listener for Credits {
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
-    // 1. Both phases, in order: `config.toml` says what this scenario runs,
-    //    `connect` checks that each node serves what its section claims, and
-    //    the store opens only once every identity has held. What comes back
-    //    is one `Index` over three networks, one factory per asset tag, and
-    //    each chain's own polling cadence.
-    // Nothing here sends, so nothing registers background work; a scenario
-    //    that does — `transfer`, `all_chains` — drains this before it exits.
-    let registrar: Arc<dyn SubmissionRegistrar> = Arc::new(Submissions::default());
+    // 1. Local testing only: a `solana-test-validator --reset` is a new
+    //    cluster every run, so `config.toml` cannot state its genesis hash and
+    //    the node is asked for it. A deployment writes the hash it expects.
+    let sections: Value = Document::toml(CONFIG).parse()?;
+    let url = sections["solana"]["rpc"]["endpoints"][0]
+        .as_str()
+        .ok_or("[solana] states rpc.endpoints")?;
+    let genesis: String = json_rpc::Endpoint::new(url)
+        .connect(&BTreeMap::new())?
+        .request(json_rpc::Request::once("getGenesisHash", json!([])))
+        .await?
+        .map_err(json_rpc::CallError::from)?
+        .deserialize()?;
+    let document = Document::toml(CONFIG.replace("<genesis-hash-from-the-node>", &genesis));
+
+    // 2. The chains this application links, one line each. Each parses the
+    //    section registered under its name; asset tags are this file's own.
+    let mut registry = Registry::<String, Repository>::new();
+    registry.register::<chain_bitcoin::Config<String>>("bitcoin");
+    registry.register::<chain_ethereum::Config<String>>("ethereum");
+    registry.register::<chain_solana::Config<String>>("solana");
+    let chains = registry.chains(&document.parse()?)?;
+
+    // 3. Compose. Every node's identity is verified before the store is
+    //    opened, then each chain builds its index and factories over it.
+    let registrar: Arc<dyn SubmissionRegistrar> = Arc::new(Submissions::new());
     let Composition {
         index,
         history,
         wallets,
         schedules,
         ..
-    } = Scenario::read("indexing")
-        .await?
-        .compose(&registrar)
+    } = chains
+        .compose(
+            &BTreeMap::new(),
+            || async {
+                let file = std::path::absolute(".index-data/indexing.db")?;
+                tokio::task::spawn_blocking(move || -> Result<Database, AnyError> {
+                    std::fs::create_dir_all(".index-data")?;
+                    Ok(Database::open(file)?)
+                })
+                .await?
+            },
+            |store: &Database| Ok::<_, AnyError>(Repository::new(store.clone())),
+            &registrar,
+        )
         .await?;
 
-    // 2. The map holds factories only; it makes a wallet and hands it over.
-    //    The index is what observes it, from the block after the checkpoint
-    //    its watch was published at, and its row commits before the key is
-    //    kept (`docs/design/030 §8 (ex-029)` section 3.3).
-    let mut signers = Signers::default();
+    // 4. The index observes each wallet from the block after its network's
+    //    checkpoint. Watch first, keep the key second.
+    let mut signers: BTreeMap<&str, Arc<dyn Wallet>> = BTreeMap::new();
     for (asset, id) in WALLETS {
-        let wallet = wallets.create(&asset).await?;
-        index.watch(id, wallet.as_ref(), Start::Fresh).await?;
-        signers.keep(id, wallet);
+        let wallet = wallets.create(&asset.to_owned()).await?;
+        index.watch(id, wallet.as_ref(), Birthday::Fresh).await?;
+        signers.insert(id, wallet);
     }
 
-    // 3. Supply a reaction. The bundled SQLite store is already wired into each
-    //    chain's indexer; this is the hook that says what it just wrote.
+    // 5. Supply a reaction: the hook that says what each commit wrote.
     let (commits, mut committed) = mpsc::unbounded_channel();
     index.listen(Arc::new(Credits(commits)));
 
-    // 4. Run, each chain on the cadence its own section states. The
-    //    supervisor needs no selection argument: each unit reads its own watch
-    //    list on every pass, so a wallet watched while it runs is picked up
-    //    without restarting it.
+    // 6. Run, each chain on the cadence its own section states. Each unit
+    //    reads its own watch list on every pass, so a wallet watched while it
+    //    runs is picked up without a restart.
     let (stop, stopped) = watch::channel(false);
-    let (monitor, mut readiness) = Health::watching(index.networks());
+    let (monitor, mut readiness) = SyncReport::watching(index.networks());
     let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
-    readiness.ready().await?;
+    readiness.settled().await.ok_or("synchronization stopped")?;
 
-    // 5. What the composed index holds: one checkpoint per network, and the
-    //    addresses it observes there.
+    // 7. What the composed index holds: one checkpoint per network, the
+    //    addresses it observes there, and each wallet's history.
     for network in index.networks() {
         let checkpoint = index.checkpoint(network).await?;
         println!("{}/{}: {checkpoint:?}", network.chain, network.name);
@@ -88,12 +119,12 @@ async fn main() -> Result<(), AnyError> {
             println!("  watches {} from {:?}", watch.address.value, watch.start);
         }
     }
-    for (_, id) in WALLETS {
-        let page = page_of(history.as_ref(), signers.get(id)?.as_ref()).await?;
+    for (id, wallet) in &signers {
+        let page = history.history(wallet.as_ref(), Page::first(10)).await?;
         println!("{id}: {} transaction(s)", page.transactions.len());
     }
 
-    // 6. React, off the sync task.
+    // 8. React, off the sync task.
     stop.send(true)?;
     sync.await?;
     while let Ok(commit) = committed.try_recv() {
@@ -106,15 +137,4 @@ async fn main() -> Result<(), AnyError> {
         );
     }
     Ok(())
-}
-
-/// One page of a holder's history: the subject is the holder itself, and the
-/// page is the only other question. Amounts arrive atomic; the unit each
-/// asset's own chain declares is what scales one for display, and nothing
-/// here prints one.
-async fn page_of(
-    history: &dyn indexing::History,
-    holder: &dyn indexing::Holder,
-) -> Result<TransactionPage, AnyError> {
-    Ok(history.history(holder, Page::first(10)).await?)
 }

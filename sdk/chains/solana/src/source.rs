@@ -1,8 +1,8 @@
 //! [`indexing::BlockSource`] over the verified RPC client; [`RawBlock`] as the
-//! [`indexing::IndexedBlock`]. All node access goes through `native::rpc`.
+//! [`indexing::NativeBlock`]. All node access goes through `native::rpc`.
 
 use base::{BlockPosition, BlockRef, BoxFuture};
-use indexing::{BlockSource, ChainTip, IndexedBlock, SourceError};
+use indexing::{BlockSource, ChainTips, NativeBlock, SourceError};
 
 use crate::native::{block::RawBlock, rpc::Client};
 
@@ -22,13 +22,13 @@ impl<C> Source<C> {
     }
 }
 
-impl IndexedBlock for RawBlock {
+impl NativeBlock for RawBlock {
     fn block_ref(&self) -> BlockRef {
         self.reference().clone()
     }
 }
 
-impl<C: json_rpc::Client> ChainTip for Source<C> {
+impl<C: json_rpc::Client> ChainTips for Source<C> {
     fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
         Box::pin(async move { Ok(self.rpc.tip().await?) })
     }

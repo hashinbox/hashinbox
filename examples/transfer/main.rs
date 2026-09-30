@@ -4,15 +4,23 @@
 //! API. Needs all three local nodes (examples/README.md):
 //! `cargo run -p payment-examples --example transfer`
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use base::BlockPosition;
-use indexing::Supervisor;
-use indexing::{ObservedTransaction, Page, Start, Watching as _};
-use local::{AnyError, Asset, Health, Scenario, Signers, Submissions};
-use serde_json::json;
+use indexing::{
+    Birthday, Page, Subject, Supervisor, SyncReport, Watching as _,
+    sqlite::{Database, Repository},
+};
+use json_rpc::Client as _;
+use sdk_config::{Document, Registry};
+use serde_json::{Value, json};
 use tokio::sync::watch;
-use wallets::{Composition, SecretBytes, SubmissionRegistrar};
+use wallets::{Composition, SecretBytes, SubmissionRegistrar, Submissions, Wallet};
+
+type AnyError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The chains this scenario runs and the node of each.
+const CONFIG: &str = include_str!("config.toml");
 
 const INTERVAL: Duration = Duration::from_secs(1);
 /// Blocks mined to bitcoin's sender: a coinbase output matures after 100.
@@ -24,19 +32,34 @@ const ANVIL_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7
 
 /// Each chain's part: its asset tag, the sending wallet, the receiving wallet,
 /// and the amount sent in display units.
-const TRANSFERS: [(Asset, &str, &str, &str); 3] = [
-    (Asset::Btc, "btc-alice", "btc-bob", "0.5"),
-    (Asset::Eth, "eth-alice", "eth-bob", "0.01"),
-    (Asset::Sol, "sol-alice", "sol-bob", "0.1"),
+const TRANSFERS: [(&str, &str, &str, &str); 3] = [
+    ("btc", "btc-alice", "btc-bob", "0.5"),
+    ("eth", "eth-alice", "eth-bob", "0.01"),
+    ("sol", "sol-alice", "sol-bob", "0.1"),
 ];
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
-    // 1. Both phases, in order: `config.toml` says what this scenario runs,
-    //    `connect` checks that each node serves what its section claims, and
-    //    the store opens only once every identity has held.
-    let scenario = Scenario::read("transfer").await?;
-    let submissions = Arc::new(Submissions::default());
+    // 1. Local testing only: a `solana-test-validator --reset` is a new
+    //    cluster every run, so `config.toml` cannot state its genesis hash and
+    //    the node is asked for it. A deployment writes the hash it expects.
+    let sections: Value = Document::toml(CONFIG).parse()?;
+    let genesis = call(&sections, "solana", "getGenesisHash", json!([])).await?;
+    let genesis = genesis.as_str().ok_or("a genesis hash is text")?;
+    let document = Document::toml(CONFIG.replace("<genesis-hash-from-the-node>", genesis));
+
+    // 2. The chains this application links, one line each. Each parses the
+    //    section registered under its name; asset tags are this file's own.
+    let mut registry = Registry::<String, Repository>::new();
+    registry.register::<chain_bitcoin::Config<String>>("bitcoin");
+    registry.register::<chain_ethereum::Config<String>>("ethereum");
+    registry.register::<chain_solana::Config<String>>("solana");
+    let chains = registry.chains(&document.parse()?)?;
+
+    // 3. Compose. Every node's identity is verified before the store is
+    //    opened, then each chain builds its index and factories over it.
+    //    `submissions` owns the send work a chain finishes in the background.
+    let submissions = Arc::new(Submissions::new());
     let registrar: Arc<dyn SubmissionRegistrar> = submissions.clone();
     let Composition {
         index,
@@ -46,115 +69,130 @@ async fn main() -> Result<(), AnyError> {
         units,
         schedules,
         ..
-    } = scenario.compose(&registrar).await?;
-    // What each asset is, from the map, beside what an amount of it is, from
-    // the chain that declared it.
-    let mut declared = Vec::new();
-    for (asset, ..) in TRANSFERS {
-        let id = wallets.asset(&asset)?.id;
-        let unit = units.of(&id).ok_or("a declared unit")?.clone();
-        declared.push((id, unit));
-    }
+    } = chains
+        .compose(
+            &BTreeMap::new(),
+            || async {
+                let file = std::path::absolute(".index-data/transfer.db")?;
+                tokio::task::spawn_blocking(move || -> Result<Database, AnyError> {
+                    std::fs::create_dir_all(".index-data")?;
+                    Ok(Database::open(file)?)
+                })
+                .await?
+            },
+            |store: &Database| Ok::<_, AnyError>(Repository::new(store.clone())),
+            &registrar,
+        )
+        .await?;
 
-    // 2. A receiver per asset, then the senders. Ethereum's sender is Anvil's
+    // 4. A sender and a receiver per asset. Ethereum's sender is Anvil's
     //    pre-funded account, built from its key and watched from block zero —
-    //    an explicit birthday, which is what `Start::At` states.
-    let mut signers = Signers::default();
-    for (asset, _, receiver, _) in TRANSFERS {
-        let wallet = wallets.create(&asset).await?;
-        index.watch(receiver, wallet.as_ref(), Start::Fresh).await?;
-        signers.keep(receiver, wallet);
-    }
-    let secret = SecretBytes::from_hex(ANVIL_KEY)?;
-    let alice = wallets.from(&Asset::Eth, secret).await?;
-    index
-        .watch("eth-alice", alice.as_ref(), Start::At(BlockPosition(0)))
-        .await?;
-    signers.keep("eth-alice", alice);
-    for (asset, sender) in [(Asset::Btc, "btc-alice"), (Asset::Sol, "sol-alice")] {
-        let wallet = wallets.create(&asset).await?;
-        index.watch(sender, wallet.as_ref(), Start::Fresh).await?;
-        signers.keep(sender, wallet);
+    //    an explicit birthday, which is what `Birthday::At` states.
+    let mut signers: BTreeMap<&str, Arc<dyn Wallet>> = BTreeMap::new();
+    for (asset, sender, receiver, _) in TRANSFERS {
+        let asset = asset.to_owned();
+        for id in [sender, receiver] {
+            let (wallet, birthday) = if id == "eth-alice" {
+                let secret = SecretBytes::from_hex(ANVIL_KEY)?;
+                let funded = wallets.from(&asset, secret).await?;
+                (funded, Birthday::At(BlockPosition(0)))
+            } else {
+                (wallets.create(&asset).await?, Birthday::Fresh)
+            };
+            index.watch(id, wallet.as_ref(), birthday).await?;
+            signers.insert(id, wallet);
+        }
     }
 
-    // 3. Funding is a local-network operation and not part of the SDK, so it
-    //    goes straight to the node the document named: bitcoin mines past
-    //    coinbase maturity, solana asks for an airdrop.
-    let coinbase = signers.get("btc-alice")?.address().value.clone();
-    let _: Vec<String> = scenario
-        .node("bitcoin")?
-        .call("generatetoaddress", json!([MATURITY, &coinbase]))
-        .await?;
-    let airdropped = signers.get("sol-alice")?.address().value.clone();
-    let _: String = scenario
-        .node("solana")?
-        .call("requestAirdrop", json!([airdropped, AIRDROP]))
-        .await?;
+    // 5. Funding is a local-network operation and not part of the SDK, so it
+    //    goes straight to the node: bitcoin mines past coinbase maturity,
+    //    solana asks for an airdrop.
+    let coinbase = &signers["btc-alice"].address().value;
+    let mined = json!([MATURITY, coinbase]);
+    call(&sections, "bitcoin", "generatetoaddress", mined).await?;
+    let airdrop = json!([signers["sol-alice"].address().value, AIRDROP]);
+    call(&sections, "solana", "requestAirdrop", airdrop).await?;
 
-    // 4. One sync loop over the composed index serves every chain's wallets;
+    // 6. One sync loop over the composed index serves every chain's wallets;
     //    wait until every network has reached its node's tip.
     let (stop, stopped) = watch::channel(false);
-    let (monitor, mut readiness) = Health::watching(index.networks());
+    let (monitor, mut readiness) = SyncReport::watching(index.networks());
     let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
-    readiness.ready().await?;
+    readiness.settled().await.ok_or("synchronization stopped")?;
 
-    // 5. One send per chain: parse the receiver's address text in the
-    //    sender's own network, then send display units.
-    for ((asset, sender, receiver, amount), _) in TRANSFERS.into_iter().zip(&declared) {
+    // 7. One send per chain, once the index has seen the sender's funds:
+    //    parse the receiver's address text in the sender's own network, then
+    //    send display units. The map hands out an author only for an asset
+    //    this system sends.
+    for (asset, sender, receiver, amount) in TRANSFERS {
+        let asset = asset.to_owned();
         while balances
-            .balance(&**signers.get(sender)?)
+            .balance(signers[sender].as_ref())
             .await?
             .amount
             .is_zero()
         {
             tokio::time::sleep(INTERVAL).await;
         }
-        let text = signers.get(receiver)?.address().value.clone();
-        let to = wallets.parse(&asset, &text)?;
-        // Spending is the asset's capability: the map hands out an author
-        // only for an asset this system sends, and never for one it only
-        // receives.
-        let author = wallets.author(&asset, signers.get(sender)?)?;
+        let to = wallets.parse(&asset, &signers[receiver].address().value)?;
+        let author = wallets.author(&asset, &signers[sender])?;
         let id = author.send(to, amount.parse()?).await?;
         println!("{sender} sent {amount} to {receiver} in {id}");
     }
 
-    // 6. Only a confirmed transaction is history, so mine bitcoin's block;
+    // 8. Only a confirmed transaction is history, so mine bitcoin's block;
     //    Anvil and the validator confirm on their own.
-    let _: Vec<String> = scenario
-        .node("bitcoin")?
-        .call("generatetoaddress", json!([1, &coinbase]))
-        .await?;
-    for ((_, sender, receiver, _), (asset, unit)) in TRANSFERS.into_iter().zip(&declared) {
-        let mut page =
-            transactions(history.as_ref(), asset, signers.get(receiver)?.address()).await?;
-        while page.is_empty() {
+    let mined = json!([1, coinbase]);
+    call(&sections, "bitcoin", "generatetoaddress", mined).await?;
+    for (asset, sender, receiver, _) in TRANSFERS {
+        let asset = wallets.asset(&asset.to_owned())?.id;
+        let to = signers[receiver].address();
+        while transactions(history.as_ref(), &asset, to).await?.is_empty() {
             tokio::time::sleep(INTERVAL).await;
-            page = transactions(history.as_ref(), asset, signers.get(receiver)?.address()).await?;
         }
-        let settled = balances.balance(&**signers.get(sender)?).await?;
-        let balance = unit.display(&settled.amount)?;
+        let received = transactions(history.as_ref(), &asset, to).await?.len();
+        let settled = balances.balance(signers[sender].as_ref()).await?;
+        let unit = units.of(&asset).ok_or("a declared unit")?;
         println!(
-            "{sender} balance {balance}; {receiver} has {} transaction(s)",
-            page.len()
+            "{sender} balance {}; {receiver} has {received} transaction(s)",
+            unit.display(&settled.amount)?
         );
     }
-    // 7. Stop the loop, then drain the supervisor: a send whose chain finishes
-    //    it in the background must not be cut off by the process exiting.
+
+    // 9. Stop the loop, then wait for the send work still running: a send
+    //    its chain finishes in the background must not be cut off by the
+    //    process exiting.
     stop.send(true)?;
     sync.await?;
-    submissions.drain().await
+    Ok(submissions.drain().await?)
 }
 
-/// The confirmed half of one holding's history, exactly as the reader the
-/// composition handed back answers it: atomic amounts, which the asset's own
-/// unit scales when one is printed.
+/// One raw call to the node `config.toml` names for `chain`. Local-network
+/// setup only — the validator's genesis hash, mining, an airdrop — and never
+/// SDK API.
+async fn call(
+    sections: &Value,
+    chain: &str,
+    method: &str,
+    params: Value,
+) -> Result<Value, AnyError> {
+    let url = sections[chain]["rpc"]["endpoints"][0]
+        .as_str()
+        .ok_or("the section states rpc.endpoints")?;
+    let node = json_rpc::Endpoint::new(url).connect(&BTreeMap::new())?;
+    let result = node
+        .request(json_rpc::Request::once(method, params))
+        .await?;
+    Ok(result.map_err(json_rpc::CallError::from)?.deserialize()?)
+}
+
+/// The confirmed transactions of one address in one asset.
 async fn transactions(
-    history: &dyn indexing::History,
+    history: &dyn wallets::History,
     asset: &base::AssetId,
     address: &base::Address,
-) -> Result<Vec<ObservedTransaction>, AnyError> {
-    let subject = indexing::Subject {
+) -> Result<Vec<wallets::ObservedTransaction>, AnyError> {
+    let subject = Subject {
         address: address.clone(),
         asset: asset.clone(),
     };

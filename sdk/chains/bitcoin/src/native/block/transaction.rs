@@ -27,7 +27,9 @@ pub struct Input {
     pub outpoint: Outpoint,
     /// The consensus sequence number.
     pub sequence: u32,
-    /// The spent output's value and address; `None` only for a coinbase input.
+    /// The spent output's value and address. `None` for a coinbase input,
+    /// which spends nothing, and for every input of a transaction read
+    /// outside a block, whose previous outputs are unknown.
     pub previous: Option<Output>,
 }
 

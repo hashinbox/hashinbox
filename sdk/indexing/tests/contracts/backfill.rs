@@ -40,6 +40,44 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
         }
     }
 
+    /// A spendable set is refused until the address has been inspected up to
+    /// the line the page would be read at, and offered the moment it has.
+    ///
+    /// Blocks 1 to 3 are filled in under a line at 5. The store legitimately
+    /// holds the output block 3 created, the page would be stamped with block
+    /// 5, and the spend in block 5 has not been looked at for this address: the
+    /// row is unspent only as far as has been read. An [`indexing::OutputPage`]
+    /// carries no claim a caller could weigh, and its consumer spends what it is
+    /// given, so the honest answer is a refusal — the retryable `Conflict` every
+    /// caller of the port already restarts on.
+    ///
+    /// The store makes it, from the snapshot the rows come from. Nothing that
+    /// reads the page afterwards can, without reading the observations at
+    /// another instant than the rows.
+    pub async fn offers_no_output_until_the_range_is_read(&self) {
+        self.prepare().await;
+        self.filled(BlockPosition(1), BlockPosition(3)).await;
+
+        let error = self
+            .fixture
+            .repository
+            .list(self.fixture.request("late", 50))
+            .await
+            .expect_err("rows nothing can prove unspent must not be offered");
+        assert_eq!(error.kind, IndexErrorKind::Conflict);
+        assert!(
+            error.retryable,
+            "the refusal clears as the catch-up reaches the line"
+        );
+
+        self.filled(BlockPosition(4), BlockPosition(5)).await;
+        assert!(
+            self.outputs().await.is_empty(),
+            "read through the line, the set is offered — and block 5 spent the \
+             output block 3 created"
+        );
+    }
+
     /// An address registered after its history began ends up with that
     /// history: the rows appear below a checkpoint that does not move, and the
     /// observation's own claim reaches the line.
@@ -223,7 +261,7 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
             Some(checkpoint.clone()),
             Vec::new(),
             vec![Progress {
-                watch: "never-registered".to_owned(),
+                watch_id: "never-registered".to_owned(),
                 expected: None,
                 indexed_through: checkpoint,
             }],
@@ -260,9 +298,9 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
         let batch = IndexedBatch::new(
             self.fixture.network.clone(),
             Some(self.fixture.block(5)),
-            vec![self.facts(3), self.facts(4), self.disagreeing(5)],
+            vec![self.canonical(3), self.canonical(4), self.disagreeing(5)],
             vec![Progress {
-                watch: self.watch().id,
+                watch_id: self.watch().id,
                 expected: None,
                 indexed_through: self.fixture.block(4),
             }],

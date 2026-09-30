@@ -104,12 +104,12 @@ impl TransferBuilder {
         Ok(TransactionSnapshot::new(
             Self::SNAPSHOT_KIND,
             serde_json::json!({
-                "scope": {
+                "network": {
                     "chain": config.network.chain.as_str(),
-                    "network": config.network.name.as_str(),
+                    "name": config.network.name.as_str(),
                 },
                 "source": self.from().to_string(),
-                "destination": destination.to_string(),
+                "to": destination.to_string(),
                 "amount": amount.to_string(),
                 "asset": asset,
             }),
@@ -122,7 +122,8 @@ impl TransferBuilder {
     fn fee(signed: &SignedTransaction) -> Result<Decimal, TransactionError> {
         signed
             .inspect_eip1559_fees()
-            .map(|fees| fees.maximum_total_fee.atomic())
+            .and_then(|fees| fees.maximum_total_fee())
+            .map(|fee| fee.atomic())
             .map_err(|error| {
                 TransactionError::new(TransactionErrorKind::InvalidTransaction, error.message)
             })
@@ -141,7 +142,7 @@ impl TransferBuilder {
         let body: SnapshotBody = serde_json::from_value(snapshot.value().clone())
             .map_err(|error| invalid(format!("invalid Ethereum snapshot: {error}")))?;
         if body.network.chain != config.network.chain.as_str()
-            || body.network.network != config.network.name
+            || body.network.name != config.network.name
             || body.network.chain != crate::CHAIN_NAME.as_str()
             || config.chain_id == 0
             || body.source != self.from().to_string()
@@ -152,7 +153,7 @@ impl TransferBuilder {
             ));
         }
         let destination = body
-            .destination
+            .to
             .parse::<Address>()
             .map_err(|error| invalid(error.message))?;
         let amount = body.amount.parse::<Decimal>().map_err(invalid)?;
@@ -203,10 +204,10 @@ impl TransactionBuilder for TransferBuilder {
         Box::pin(async move {
             self.validate()?;
             let (destination, amount) = self.configured()?.clone();
-            let item = self.wallet.item(destination, &amount).map_err(|error| {
+            let request = self.wallet.request(destination, &amount).map_err(|error| {
                 TransactionError::new(TransactionErrorKind::InvalidAmount, error.message)
             })?;
-            let (signed, nonce) = self.wallet.outbox.sign(item).await?;
+            let (signed, nonce) = self.wallet.outbox.sign(request).await?;
             let fee = Self::fee(&signed)?;
             let claim = base::Claim::new([format!(
                 "{}/{nonce}",
@@ -226,13 +227,9 @@ impl TransactionBuilder for TransferBuilder {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SnapshotBody {
-    /// The persisted key is `scope`; the field is `network`, because that noun
-    /// was retired and snapshots written by earlier builds must keep
-    /// deserializing.
-    #[serde(rename = "scope")]
     network: NetworkBody,
     source: String,
-    destination: String,
+    to: String,
     amount: String,
     asset: Asset,
 }
@@ -241,7 +238,7 @@ struct SnapshotBody {
 #[serde(deny_unknown_fields)]
 struct NetworkBody {
     chain: String,
-    network: String,
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -317,9 +314,9 @@ mod tests {
         TransactionSnapshot::new(
             SNAPSHOT_KIND,
             serde_json::json!({
-                "scope": { "chain": "ethereum", "network": "sepolia" },
+                "network": { "chain": "ethereum", "name": "sepolia" },
                 "source": source.to_string(),
-                "destination": Address::from_bytes([0x22; 20]).to_string(),
+                "to": Address::from_bytes([0x22; 20]).to_string(),
                 "amount": "1.25",
                 "asset": { "kind": "native", "ticker": "ETH", "decimals": 18 },
             }),
@@ -357,7 +354,7 @@ mod tests {
             ),
         ] {
             let mut value = snapshot(&wallet).value().clone();
-            value["destination"] = serde_json::json!(destination);
+            value["to"] = serde_json::json!(destination);
             value["amount"] = serde_json::json!(amount);
             let error = decode(
                 &config(),
@@ -527,12 +524,12 @@ mod tests {
         assert!(decode(&config(), &wallet, &wrong_version).is_err());
 
         let mut encoded = serde_json::to_value(snapshot(&wallet)).expect("snapshot must serialize");
-        encoded["value"]["scope"]["chain"] = serde_json::json!("bitcoin");
+        encoded["value"]["network"]["chain"] = serde_json::json!("bitcoin");
         let wrong_chain = serde_json::from_value(encoded).expect("snapshot must deserialize");
         assert!(decode(&config(), &wallet, &wrong_chain).is_err());
 
         let mut encoded = serde_json::to_value(snapshot(&wallet)).expect("snapshot must serialize");
-        encoded["value"]["scope"]["network"] = serde_json::json!("mainnet");
+        encoded["value"]["network"]["name"] = serde_json::json!("mainnet");
         let wrong_network = serde_json::from_value(encoded).expect("snapshot must deserialize");
         assert!(decode(&config(), &wallet, &wrong_network).is_err());
         assert!(

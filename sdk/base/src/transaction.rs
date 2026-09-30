@@ -235,7 +235,7 @@ impl Snapshot {
 /// One word for one concept: the chains' `native::Transfer` and
 /// `wallets::Transfer` are the same request in native and in wallet terms, and
 /// the recipient is `to` in all three. `destination` survives only on the HTTP
-/// wire, where `apps/api` names it.
+/// wire, where `apps/server` names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Transfer {
     /// Canonical recipient address, in the source's network.

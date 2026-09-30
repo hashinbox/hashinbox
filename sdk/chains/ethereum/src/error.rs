@@ -18,7 +18,7 @@ impl From<sdk_config::Error> for native::Error {
     }
 }
 
-/// What the index reports while [`crate::Node::compose`] builds it. The
+/// What the index reports while [`crate::ChainHandle::compose`] builds it. The
 /// classification is already made; only the name of the class changes.
 impl From<IndexError> for native::Error {
     fn from(error: IndexError) -> Self {

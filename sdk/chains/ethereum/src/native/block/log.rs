@@ -24,7 +24,7 @@ pub struct Log {
 
 /// Log indexes already seen in one block: they must be unique and increasing.
 #[derive(Debug, Default)]
-pub(super) struct Order {
+pub(super) struct Indexes {
     seen: BTreeSet<u64>,
     previous: Option<u64>,
 }
@@ -33,7 +33,7 @@ impl Log {
     pub(super) fn parse_all(
         receipt: &Object,
         position: &Position<'_>,
-        order: &mut Order,
+        indexes: &mut Indexes,
     ) -> Result<Vec<Self>, Error> {
         receipt
             .get("logs")
@@ -42,7 +42,7 @@ impl Log {
             .iter()
             .map(|value| {
                 let log = Self::parse(value, position)?;
-                order.admit(log.index)?;
+                indexes.admit(log.index)?;
                 Ok(log)
             })
             .collect()
@@ -57,7 +57,7 @@ impl Log {
             || required_quantity_u64(object, "blockNumber", "log block number")?
                 != position.height.0
             || required_hash(object, "transactionHash", "log transaction hash")?
-                != *position.sent.id.as_bytes()
+                != *position.listed.id.as_bytes()
             || Some(required_quantity_u64(
                 object,
                 "transactionIndex",
@@ -128,7 +128,7 @@ impl Log {
     }
 }
 
-impl Order {
+impl Indexes {
     /// Accepts `index` only when it is new and above the previous one.
     fn admit(&mut self, index: u64) -> Result<(), Error> {
         if self.seen.contains(&index) {

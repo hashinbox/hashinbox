@@ -2,8 +2,8 @@
 //! rule governs all three: a store that offers a capability owes its whole
 //! contract, including the consistent read [`crate::IndexStore`] states.
 //!
-//! The read vocabulary each one names lives beside the trait that names it, not
-//! here — [`OutputRequest`] beside [`crate::IndexedOutput`]. [`BalanceQuery`]
+//! The read vocabulary each one names lives with the queries, not here —
+//! [`OutputRequest`] and [`Balance`] in the files beside this one. [`BalanceQuery`]
 //! and [`PurgedRows`] stay because the port that takes the one and the port that
 //! answers the other are the only things that name them.
 //!
@@ -15,8 +15,117 @@
 //! with the query it takes rather than here among the ports.
 
 use crate::{
-    Address, AssetId, Balance, BoxFuture, Holder, IndexError, Network, OutputPage, OutputRequest,
+    Address, AssetId, Balance, BlockPosition, BlockRef, BoxFuture, Completeness, Holder,
+    IndexError, IndexErrorKind, Network, OutputPage, OutputRequest, WatchProgress,
 };
+
+/// How far one address has been inspected, as one snapshot holds it: every
+/// observation of the address, and the confirmed line of the same read.
+///
+/// **What keeps a read honest about rows that are not there yet.** A store
+/// answers from the rows it holds, and a backfill exists precisely because some
+/// are missing: the range between an observation's recorded progress and the
+/// line has not been read for the address. Only the store can say so without a
+/// second read, because the observations and the rows are in one snapshot. So
+/// each shipped store loads this beside the rows it answers with and asks it
+/// what the answer may claim.
+///
+/// **Scoped to the address, not to the observation**, and deliberately. One
+/// inspection of an address serves every asset observed at it
+/// ([`crate::BlockInterpreter::inspect`] takes addresses and no asset), so the
+/// rows a token read folds are the rows its native sibling's catch-up is still
+/// inserting. The conservative answer is the true one.
+///
+/// Shared by the two shipped stores because it is a rule about
+/// [`WatchProgress`] rather than about either backend. A third-party store
+/// owes the same answers (`tests/contracts/`); it may ask this for them, or
+/// derive them its own way.
+pub struct Inspection<'a> {
+    observations: &'a [WatchProgress],
+    checkpoint: Option<&'a BlockRef>,
+}
+
+impl<'a> Inspection<'a> {
+    /// `observations` is every observation of one address, whatever its asset,
+    /// and `checkpoint` the line of the snapshot they were read in.
+    #[must_use]
+    pub const fn new(observations: &'a [WatchProgress], checkpoint: Option<&'a BlockRef>) -> Self {
+        Self {
+            observations,
+            checkpoint,
+        }
+    }
+
+    /// Whether any observation of the address is still reading its own past.
+    ///
+    /// [`WatchProgress::caught_up`] decides, which is the comparison a pass
+    /// selects by: a store and an index cannot disagree about what "still
+    /// catching up" means.
+    fn outstanding(&self) -> bool {
+        self.observations
+            .iter()
+            .any(|observed| !observed.caught_up(self.checkpoint))
+    }
+
+    /// What the history behind `of`'s rows may claim.
+    ///
+    /// [`Completeness::CompleteHistory`] needs all of three facts. `of` is
+    /// observed from the chain's first block, because the range below a
+    /// birthday is one no backfill will ever read. Progress has been recorded
+    /// for that observation, because a birthday says where inspection would
+    /// start and not that any of it happened. And nothing at the address is
+    /// behind the line, because rows that are still arriving prove nothing.
+    ///
+    /// Never [`Completeness::Overdrawn`]: that is the arithmetic's own proof,
+    /// and a caller that holds one keeps it over whatever this answers.
+    #[must_use]
+    pub fn completeness(&self, of: &dyn Holder) -> Completeness {
+        let whole = self
+            .observations
+            .iter()
+            .find(|observed| &observed.watch.asset == of.asset())
+            .is_some_and(|own| {
+                own.watch.start == BlockPosition(0) && own.indexed_through.is_some()
+            });
+        if whole && !self.outstanding() {
+            return Completeness::CompleteHistory;
+        }
+        Completeness::Incomplete
+    }
+
+    /// Refuses a spendable set while the rows it would be read from are still
+    /// arriving.
+    ///
+    /// **The one read that cannot be weakened instead.** A balance and a
+    /// history page carry [`Completeness`], so they answer honestly while an
+    /// inspection is outstanding and the caller decides what a partial answer
+    /// is worth. An [`OutputPage`] carries no such claim and could not use one:
+    /// its consumer is coin selection, which pages the set and spends the
+    /// union, so an output offered becomes a transaction input. An unspent row
+    /// at block 0 is only unspent *as far as has been read*, and until the
+    /// inspection reaches the checkpoint the page is read at, the blocks
+    /// between may hold the very spend that settles it. The rows exist, the
+    /// checkpoint is real, and the two together are still a lie, which leaves
+    /// refusing as the only honest answer.
+    ///
+    /// # Errors
+    ///
+    /// A retryable [`IndexErrorKind::Conflict`], the refusal every caller of
+    /// [`OutputStore`] already restarts on. It clears the moment the catch-up
+    /// reaches the line.
+    pub fn spendable(&self) -> Result<(), IndexError> {
+        if !self.outstanding() {
+            return Ok(());
+        }
+        Err(IndexError::new(
+            IndexErrorKind::Conflict,
+            "spendable outputs are not readable while this address's own history \
+             is still being inspected: an unspent row cannot be proven unspent \
+             below the checkpoint it was read at",
+            true,
+        ))
+    }
+}
 
 /// What a store folds one balance over: whose holding it is, and nothing else.
 ///
@@ -65,7 +174,12 @@ impl Holder for BalanceQuery {
 ///
 /// The returned [`Balance`] carries the store's own checkpoint as
 /// `observed_at` and nothing pending; the blocks above the confirmed line are
-/// the index's half, folded in by [`Balances`](crate::Balances).
+/// an index's ([`crate::Pending`]), and a consumer that wants them folds them
+/// in.
+///
+/// [`Balance::completeness`] is this store's own answer, from the snapshot the
+/// fold was read in: a holding whose address is still being inspected below
+/// `observed_at` is never [`Completeness::CompleteHistory`].
 pub trait BalanceStore: Send + Sync {
     /// Folds every stored movement of `query`'s holding into its balance.
     fn balance<'a>(&'a self, query: BalanceQuery) -> BoxFuture<'a, Result<Balance, IndexError>>;
@@ -82,6 +196,13 @@ impl<T: BalanceStore + ?Sized> BalanceStore for std::sync::Arc<T> {
 /// Current live outputs indexed for canonical addresses.
 pub trait OutputStore: Send + Sync {
     /// Lists one checkpoint-consistent page of spendable outputs.
+    ///
+    /// # Errors
+    ///
+    /// A retryable [`IndexErrorKind::Conflict`] while any observation of the
+    /// address is still being inspected below the checkpoint the page would be
+    /// read at, because a row cannot be proven unspent over blocks nothing has
+    /// read. The same kind when the checkpoint moved under a cursor.
     fn list<'a>(&'a self, request: OutputRequest) -> BoxFuture<'a, Result<OutputPage, IndexError>>;
 }
 

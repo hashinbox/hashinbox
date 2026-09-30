@@ -1,23 +1,24 @@
-//! Turns supervised network events into the process's diagnostics and the
-//! health snapshot the HTTP layer serves.
+//! Turns supervised network events into the process's diagnostics, on their
+//! way to the health snapshot the HTTP layer serves.
 
-use indexing::SyncHealth;
-use indexing::{IndexError, NetworkEvent, SyncMonitor};
-use tokio::sync::watch;
+use std::sync::Arc;
 
-/// The one place a network transition becomes operator-visible: one log line
-/// and one snapshot update, both non-blocking, as the monitor contract requires.
+use indexing::{IndexError, NetworkEvent, SyncMonitor, SyncReport};
+
+/// The one place a network transition becomes operator-visible: one log line,
+/// then the snapshot `indexing::SyncReport` keeps, both non-blocking, as the
+/// monitor contract requires.
 ///
 /// This is also the extension point for metrics. The workspace has no metrics
 /// client yet; when it gets one it is one more line here, and nothing in
 /// `indexing` changes.
 pub(crate) struct Health {
-    snapshot: watch::Sender<SyncHealth>,
+    report: Arc<SyncReport>,
 }
 
 impl Health {
-    pub(crate) const fn new(snapshot: watch::Sender<SyncHealth>) -> Self {
-        Self { snapshot }
+    pub(crate) const fn new(report: Arc<SyncReport>) -> Self {
+        Self { report }
     }
 
     fn reason(health: &indexing::NetworkHealth, failure: Option<&IndexError>) -> String {
@@ -34,7 +35,8 @@ impl Health {
     /// forward indexing, so a range a pruned node can never serve would
     /// otherwise be silent (`docs/design/024` section 7).
     fn owed(health: &indexing::NetworkHealth) -> String {
-        health.backfill.as_ref().map_or_else(String::new, |owed| {
+        let owed = health.status.backfill.as_ref();
+        owed.map_or_else(String::new, |owed| {
             format!(
                 " [backfill {}..={} for {} address(es){}]",
                 owed.resume.0,
@@ -51,101 +53,49 @@ impl SyncMonitor for Health {
         let health = &event.health;
         eprintln!(
             "sync {}/{}: {:?} -> {:?}{}{}",
-            health.network.chain,
-            health.network.name,
+            health.status.network.chain,
+            health.status.network.name,
             event.previous,
             health.state,
             Self::reason(health, health.failure.as_ref()),
             Self::owed(health),
         );
-        self.snapshot.send_modify(|snapshot| snapshot.apply(health));
+        self.report.network_changed(event);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use indexing::{
-        ChainName, IndexError, IndexErrorKind, Network, NetworkHealth, NetworkState, SyncHealth,
+        ChainName, IndexError, IndexErrorKind, Network, NetworkHealth, NetworkState, SyncReport,
     };
 
     use super::*;
 
-    fn network(chain: &str) -> Network {
-        Network {
-            chain: ChainName::new(chain),
-            name: "regtest".into(),
-        }
-    }
-
-    fn event(network: &Network, previous: NetworkState, state: NetworkState) -> NetworkEvent {
-        let failure =
-            matches!(state, NetworkState::Retrying | NetworkState::Quarantined).then(|| {
-                IndexError::new(
-                    IndexErrorKind::InvalidBlock,
-                    "block contains a duplicate transaction",
-                    state == NetworkState::Retrying,
-                )
-            });
-        NetworkEvent {
-            previous,
-            health: NetworkHealth {
-                state,
-                failure,
-                attempts: 1,
-                ..NetworkHealth::starting(network)
-            },
-        }
-    }
-
-    #[tokio::test]
-    async fn readiness_follows_every_network_and_survives_one_quarantine() {
-        let first = network("first");
-        let second = network("second");
-        let (snapshot, readiness) =
-            watch::channel(SyncHealth::starting(&[first.clone(), second.clone()]));
-        let health = Health::new(snapshot);
-        assert!(!readiness.borrow().ready());
-        assert!(!readiness.borrow().settled());
-
-        health.network_changed(&event(
-            &first,
-            NetworkState::CatchingUp,
-            NetworkState::Ready,
-        ));
-        assert!(
-            !readiness.borrow().ready(),
-            "one network is still catching up"
-        );
-
-        health.network_changed(&event(
-            &second,
-            NetworkState::CatchingUp,
-            NetworkState::Quarantined,
-        ));
-        assert!(readiness.borrow().settled(), "startup no longer waits");
-        assert!(
-            readiness.borrow().ready(),
-            "a quarantined network must not hold readiness at false forever"
-        );
-
-        health.network_changed(&event(
-            &first,
-            NetworkState::Ready,
-            NetworkState::Quarantined,
-        ));
-        assert!(!readiness.borrow().ready(), "nothing useful can be served");
-    }
-
     #[tokio::test]
     async fn a_failed_attempt_reaches_the_snapshot_with_its_reason() {
-        let only = network("only");
-        let (snapshot, readiness) =
-            watch::channel(SyncHealth::starting(std::slice::from_ref(&only)));
-        let health = Health::new(snapshot);
+        let only = Network {
+            chain: ChainName::new("only"),
+            name: "regtest".into(),
+        };
+        let (report, readiness) = SyncReport::watching(std::slice::from_ref(&only));
+        let health = Health::new(report);
 
-        health.network_changed(&event(&only, NetworkState::Ready, NetworkState::Retrying));
+        health.network_changed(&NetworkEvent {
+            previous: NetworkState::Ready,
+            health: NetworkHealth {
+                state: NetworkState::Retrying,
+                failure: Some(IndexError::new(
+                    IndexErrorKind::InvalidBlock,
+                    "block contains a duplicate transaction",
+                    true,
+                )),
+                attempts: 1,
+                ..NetworkHealth::starting(&only)
+            },
+        });
 
-        let reported = readiness.borrow().networks()[0].clone();
+        let reported = readiness.receiver().borrow().networks()[0].clone();
         assert_eq!(reported.state, NetworkState::Retrying);
         assert_eq!(reported.attempts, 1);
         assert_eq!(

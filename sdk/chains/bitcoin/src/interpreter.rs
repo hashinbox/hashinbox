@@ -113,7 +113,7 @@ impl Interpret for BlockInterpreter {
     /// them, so `NetworkFee` is already inside the movements: a balance fold
     /// that applied it again would charge it twice.
     fn settlement(&self) -> indexing::FeeSettlement {
-        indexing::FeeSettlement::Movements
+        indexing::FeeSettlement::Embedded
     }
 
     /// The evidence is parsed first, then the address filter is checked —
@@ -122,8 +122,10 @@ impl Interpret for BlockInterpreter {
     /// read is an `InvalidBlock` before anything is asked about the filter,
     /// and a filter of another network is a `NetworkMismatch` even for a block
     /// with nothing in it (`docs/DEFECT_PATTERNS.md` section 2.3). Bitcoin's
-    /// raw evidence names its own network, so that one comparison precedes
-    /// even the parse; the other two chains have nothing to compare.
+    /// parse reads addresses in the encoding of the network its evidence
+    /// names, so that one comparison precedes even the parse; on the other two
+    /// chains the network changes nothing about the parse, and the network the
+    /// block states is checked when its facts are validated.
     fn inspect(
         &self,
         block: &RawBlock,
@@ -156,11 +158,10 @@ impl Interpret for BlockInterpreter {
                 transactions.push(self.observation(transaction, order));
             }
         }
+        let reference = block.reference().clone();
         Ok(InterpretedBlock {
-            block: block.reference().clone(),
-            transactions,
             outputs: changes.into_outputs(),
-            credits: Vec::new(),
+            ..InterpretedBlock::new(parsed.network(), reference, transactions)?
         })
     }
 }
@@ -381,7 +382,7 @@ mod tests {
         let unrelated = address(2, AddressType::Taproot);
         let coinbase = native(vec![OutPoint::null()], vec![(10_000, script(&destination))]);
         let interpreted = inspect(&block(vec![(coinbase, Vec::new())]), &[&unrelated]).unwrap();
-        assert!(interpreted.transactions.is_empty());
+        assert!(interpreted.block.transactions().is_empty());
         assert!(interpreted.outputs.created.is_empty());
     }
 
@@ -409,14 +410,19 @@ mod tests {
         ]);
 
         let narrow = inspect(&raw, &[&selected]).unwrap();
-        assert_eq!(narrow.transactions.len(), 1, "one transaction is selected");
-        assert_eq!(narrow.transactions[0].transaction_order, 2);
+        assert_eq!(
+            narrow.block.transactions().len(),
+            1,
+            "one transaction is selected"
+        );
+        assert_eq!(narrow.block.transactions()[0].transaction_order, 2);
 
         // The wider selection reports all three, and the last keeps the very
         // ordinal it had when it was reported alone.
         let wide = inspect(&raw, &[&selected, &other]).unwrap();
         let orders: Vec<u64> = wide
-            .transactions
+            .block
+            .transactions()
             .iter()
             .map(|draft| draft.transaction_order)
             .collect();
@@ -434,8 +440,8 @@ mod tests {
         );
         let raw = block(vec![(funding, Vec::new()), (spending.clone(), vec![None])]);
         let interpreted = inspect(&raw, &[&source, &destination]).unwrap();
-        assert_eq!(interpreted.transactions.len(), 2);
-        let spend = &interpreted.transactions[1];
+        assert_eq!(interpreted.block.transactions().len(), 2);
+        let spend = &interpreted.block.transactions()[1];
         assert_eq!(spend.movements[0].kind(), MovementKind::Input);
         assert_eq!(spend.movements[1].kind(), MovementKind::Output);
         assert_eq!(
@@ -468,11 +474,15 @@ mod tests {
             ],
         )]);
         let interpreted = inspect(&raw, &[&selected]).unwrap();
-        assert_eq!(interpreted.transactions.len(), 1);
+        assert_eq!(interpreted.block.transactions().len(), 1);
         assert_eq!(interpreted.outputs.spent.len(), 1);
         assert_eq!(interpreted.outputs.tracked_spends.len(), 1);
         assert_eq!(
-            interpreted.transactions[0].fee.as_ref().unwrap().payer,
+            interpreted.block.transactions()[0]
+                .fee
+                .as_ref()
+                .unwrap()
+                .payer,
             None
         );
         assert!(interpreted.outputs.created.is_empty());
@@ -539,7 +549,7 @@ mod tests {
 
         let interpreted = inspect(&block(Vec::new()), &[&mine])
             .expect("a usable filter interprets an empty block");
-        assert!(interpreted.transactions.is_empty());
+        assert!(interpreted.block.transactions().is_empty());
         assert!(interpreted.outputs.created.is_empty());
     }
 

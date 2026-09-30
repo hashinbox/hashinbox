@@ -14,9 +14,9 @@ use std::{
 };
 
 use indexing::{
-    BackfillStatus, BlockHash, BlockHeight, BlockPosition, BlockRef, BoxFuture, ChainName,
-    Checkpoint, History, Holder, Index, IndexError, IndexErrorKind, Indexing, Network,
-    NetworkState, Start, SyncHealth, SyncPhase, SyncStatus, TransactionPage, Watch, Watching,
+    BackfillStatus, Birthday, BlockHash, BlockHeight, BlockPosition, BlockRef, BoxFuture,
+    ChainName, Checkpoint, Holder, Index, IndexError, IndexErrorKind, Indexing, Network,
+    NetworkState, SyncHealth, SyncPhase, SyncStatus, Watch, Watching,
 };
 use indexing::{NetworkEvent, Schedules, Supervisor, SyncControl, SyncMonitor};
 use tokio::sync::watch;
@@ -67,46 +67,12 @@ impl Checkpoint for Probe {
     }
 }
 
-impl History for Probe {
-    fn history<'a>(
-        &'a self,
-        _of: &'a dyn Holder,
-        _page: indexing::Page,
-    ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
-        Box::pin(async {
-            Ok(TransactionPage {
-                checkpoint: None,
-                transactions: Vec::new(),
-                pending: Vec::new(),
-                next: None,
-                completeness: indexing::Completeness::Incomplete,
-            })
-        })
-    }
-}
-
-impl indexing::Balances for Probe {
-    fn balance<'a>(
-        &'a self,
-        _of: &'a dyn Holder,
-    ) -> BoxFuture<'a, Result<indexing::Balance, IndexError>> {
-        Box::pin(async {
-            Ok(indexing::Balance {
-                amount: indexing::Decimal::zero(),
-                observed_at: None,
-                pending: indexing::PendingValue::none(),
-                completeness: indexing::Completeness::Incomplete,
-            })
-        })
-    }
-}
-
 impl Watching for Probe {
     fn watch<'a>(
         &'a self,
         _id: &'a str,
         _subject: &'a dyn Holder,
-        _start: Start,
+        _start: Birthday,
     ) -> BoxFuture<'a, Result<Watch, IndexError>> {
         Box::pin(async { unreachable!("supervision never watches") })
     }
@@ -124,7 +90,7 @@ impl Watching for Probe {
 }
 
 impl indexing::Backfilling for Probe {
-    fn cancel<'a>(
+    fn cancel_backfill<'a>(
         &'a self,
         _network: &'a Network,
     ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
@@ -163,7 +129,7 @@ impl Indexing for Probe {
                 pending_tip: None,
                 observed_tip: Some(block()),
                 phase,
-                unknown_spends: Vec::new(),
+                unmatched_spends: Vec::new(),
                 backfill,
             })
         })
@@ -179,7 +145,7 @@ struct Recorder {
 impl SyncMonitor for Recorder {
     fn network_changed(&self, event: &NetworkEvent) {
         self.events.lock().expect("events").push((
-            event.health.network.chain.to_string(),
+            event.health.status.network.chain.to_string(),
             event.previous,
             event.health.state,
         ));
@@ -279,7 +245,7 @@ impl Supervised {
             health
                 .networks()
                 .iter()
-                .any(|row| row.network == wanted && row.state == state)
+                .any(|row| row.status.network == wanted && row.state == state)
         });
         tokio::time::timeout(Duration::from_secs(5), reached)
             .await
@@ -295,8 +261,8 @@ impl Supervised {
             health
                 .networks()
                 .iter()
-                .find(|row| row.network == wanted)
-                .and_then(|row| row.backfill.as_ref()?.failure.clone())
+                .find(|row| row.status.network == wanted)
+                .and_then(|row| row.status.backfill.as_ref()?.failure.clone())
         };
         let reported = self.health.wait_for(|health| row(health).is_some());
         let health = tokio::time::timeout(Duration::from_secs(5), reported)
@@ -382,7 +348,7 @@ async fn a_non_retryable_failure_quarantines_only_its_network() {
     let reported = quarantined
         .networks()
         .iter()
-        .find(|row| row.network == network("failing"))
+        .find(|row| row.status.network == network("failing"))
         .expect("the failing network is reported")
         .clone();
     let failure = reported.failure.expect("a quarantined network reports why");
@@ -390,7 +356,7 @@ async fn a_non_retryable_failure_quarantines_only_its_network() {
     assert!(!failure.retryable);
     assert_eq!(reported.attempts, 1);
     assert!(
-        quarantined.settled() && quarantined.ready(),
+        quarantined.ever_settled() && quarantined.ready(),
         "one quarantined chain must not hold readiness at false forever"
     );
     supervised.shut_down().await;
@@ -482,6 +448,42 @@ async fn resume_clears_quarantine_and_runs_a_pass_at_once() {
             (NetworkState::CatchingUp, NetworkState::Ready),
         ],
         "a resume reports the way back, not just the arrival"
+    );
+    supervised.shut_down().await;
+}
+
+/// A failure changes what the network is doing and never what its last
+/// completed pass reported. The health holds that status whole, so the
+/// checkpoint an operator reads stays where indexing got to, and the phase
+/// beside it is that pass's answer rather than the network's state.
+#[tokio::test]
+async fn a_failed_pass_keeps_the_status_of_the_last_one_that_completed() {
+    let failing = Arc::new(Probe::new(
+        &network("failing"),
+        [Outcome::Ready],
+        Outcome::Fails(terminal()),
+    ));
+    let mut supervised = Supervised::new(vec![failing]);
+
+    supervised
+        .reaches("failing", NetworkState::Quarantined)
+        .await;
+
+    let row = supervised.health.borrow().networks()[0].clone();
+    assert_eq!(row.failure, Some(terminal()));
+    assert_eq!(row.attempts, 1);
+    assert_eq!(
+        row.status,
+        SyncStatus {
+            network: network("failing"),
+            checkpoint: Some(block()),
+            pending_tip: None,
+            observed_tip: Some(block()),
+            phase: SyncPhase::Ready,
+            unmatched_spends: Vec::new(),
+            backfill: None,
+        },
+        "the quarantine froze the last completed pass, it did not rewrite it"
     );
     supervised.shut_down().await;
 }
@@ -594,17 +596,18 @@ async fn a_backfill_that_can_never_be_served_does_not_hold_readiness_down() {
 
     let health = supervised.health.borrow().clone();
     assert!(
-        health.settled(),
+        health.ever_settled(),
         "startup binds its listener instead of waiting for a range that cannot close"
     );
     assert!(health.ready(), "and the readiness probe answers 204");
     let row = health
         .networks()
         .iter()
-        .find(|row| row.network == network("stalled"))
+        .find(|row| row.status.network == network("stalled"))
         .expect("the stalled network")
         .clone();
     let backfill = row
+        .status
         .backfill
         .expect("the stuck range stays visible to an operator");
     assert_eq!(backfill.resume, BlockPosition(0));
@@ -627,7 +630,7 @@ async fn a_network_that_has_not_reached_its_tip_is_still_not_ready() {
 
     let health = supervised.health.borrow().clone();
     assert!(!health.ready(), "an index behind its tip answers 503");
-    assert!(!health.settled(), "and the listener waits for it");
+    assert!(!health.ever_settled(), "and the listener waits for it");
     supervised.shut_down().await;
 }
 

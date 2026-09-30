@@ -20,12 +20,12 @@ use wallets::SendError;
 use super::{
     dispatch::Dispatch,
     recovery::Recovery,
-    reservation::{Admission, Grant, PreparedTransaction, Reservations},
+    reservation::{Admission, AdmissionOutcome, PreparedTransaction, Reservations},
 };
 use crate::native::{
     Address, Error, ErrorKind, SignedTransaction, TransactionId,
     rpc::{Accounts, Submitter},
-    transaction::{BuildContext, Builder, FeeLimits, Funds, Nonces, Preflight, Transfer},
+    transaction::{BoundTransfer, BuildContext, FeeLimits, Funds, Nonces, Preflight, Transfer},
 };
 
 /// The send pipeline of one factory and its siblings: the only place that
@@ -41,14 +41,14 @@ pub(crate) struct Outbox {
 
 /// One transfer, its sender, the fee limits it is built within, and the
 /// signer that controls the sender.
-pub(crate) struct Item {
+pub(crate) struct SendRequest {
     from: Address,
     transfer: Transfer,
     limits: FeeLimits,
     signer: Arc<dyn Signer>,
 }
 
-impl Item {
+impl SendRequest {
     /// `transfer` from `from`, signed by `signer`, within `limits`.
     pub(crate) fn new(
         signer: Arc<dyn Signer>,
@@ -99,7 +99,7 @@ impl Outbox {
     /// outcome is unknown, that item's local transaction ID.
     pub(crate) async fn send(
         &self,
-        items: Vec<Item>,
+        items: Vec<SendRequest>,
     ) -> Result<Vec<base::TransactionId>, SendError> {
         let admission = self.reserve(&items).await.map_err(unsubmitted)?;
         let batch = self.prepare(&items).await.map_err(unsubmitted)?;
@@ -128,7 +128,7 @@ impl Outbox {
     /// off the envelope.
     pub(crate) async fn sign(
         &self,
-        item: Item,
+        item: SendRequest,
     ) -> Result<(SignedTransaction, u64), TransactionError> {
         let items = [item];
         let _admission = self.reserve(&items).await.map_err(|(_, error)| error)?;
@@ -167,15 +167,15 @@ impl Outbox {
     }
 
     /// Reserve: every item's sender, in first-seen order.
-    async fn reserve(&self, items: &[Item]) -> Result<Admission, (usize, Error)> {
+    async fn reserve(&self, items: &[SendRequest]) -> Result<Admission, (usize, Error)> {
         self.admit(&senders(items)).await
     }
 
     async fn admit(&self, senders: &[(Address, usize)]) -> Result<Admission, (usize, Error)> {
         loop {
             let (id, index) = match self.reservations.admit(senders).await? {
-                Grant::Admitted(admission) => return Ok(admission),
-                Grant::Recover { id, index } => (id, index),
+                AdmissionOutcome::Admitted(admission) => return Ok(admission),
+                AdmissionOutcome::Recover { id, index } => (id, index),
             };
             self.submit(&id, None).await.map_err(|error| {
                 let message =
@@ -186,7 +186,10 @@ impl Outbox {
     }
 
     /// Prepare and sign: nothing leaves the process until every item passed.
-    async fn prepare(&self, items: &[Item]) -> Result<Vec<PreparedTransaction>, (usize, Error)> {
+    async fn prepare(
+        &self,
+        items: &[SendRequest],
+    ) -> Result<Vec<PreparedTransaction>, (usize, Error)> {
         let nonces = self.nonces(items).await?;
         let mut contexts = Vec::with_capacity(items.len());
         let mut funds = Funds::default();
@@ -208,7 +211,7 @@ impl Outbox {
 
     /// One nonce per item: each sender's range starts at the later of its
     /// pending nonce and its floor. Senders are read in first-seen order.
-    async fn nonces(&self, items: &[Item]) -> Result<Vec<u64>, (usize, Error)> {
+    async fn nonces(&self, items: &[SendRequest]) -> Result<Vec<u64>, (usize, Error)> {
         let mut ranges = BTreeMap::new();
         for (from, first) in senders(items) {
             let count = items.iter().filter(|item| item.from == from).count();
@@ -234,7 +237,7 @@ impl Outbox {
             .collect()
     }
 
-    async fn context(&self, item: &Item, nonce: u64) -> Result<BuildContext, Error> {
+    async fn context(&self, item: &SendRequest, nonce: u64) -> Result<BuildContext, Error> {
         let context = self
             .preflight
             .context(&item.from, &item.transfer, nonce, &item.limits)
@@ -249,13 +252,13 @@ impl Outbox {
     }
 
     async fn sign_each(
-        items: &[Item],
+        items: &[SendRequest],
         contexts: Vec<BuildContext>,
     ) -> Result<Vec<PreparedTransaction>, (usize, Error)> {
         let mut batch = Vec::with_capacity(items.len());
         for (index, (item, context)) in items.iter().zip(contexts).enumerate() {
             let nonce = context.nonce;
-            let transaction = Builder::new(item.transfer.clone(), context)
+            let transaction = BoundTransfer::new(item.transfer.clone(), context)
                 .sign(item.signer.as_ref())
                 .await
                 .map_err(|error| (index, error))?;
@@ -288,7 +291,7 @@ impl Outbox {
 }
 
 /// Each distinct sender of `items` with its first item, in first-seen order.
-fn senders(items: &[Item]) -> Vec<(Address, usize)> {
+fn senders(items: &[SendRequest]) -> Vec<(Address, usize)> {
     let mut senders: Vec<(Address, usize)> = Vec::new();
     for (index, item) in items.iter().enumerate() {
         if !senders.iter().any(|(from, _)| from == &item.from) {
@@ -322,8 +325,8 @@ mod tests {
         }
     }
 
-    fn unsigned(from: &Address, transfer: Transfer) -> Item {
-        Item::new(
+    fn unsigned(from: &Address, transfer: Transfer) -> SendRequest {
+        SendRequest::new(
             Arc::new(UnusedSigner),
             from.clone(),
             transfer,

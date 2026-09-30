@@ -145,20 +145,19 @@ fn addition(
     transaction: &str,
     outputs: OutputChanges,
 ) -> indexing::IndexedBatch {
-    let facts = CanonicalBlock::new(
+    let canonical = CanonicalBlock::new(
         network(),
         InterpretedBlock {
-            block,
-            transactions: vec![draft(transaction)],
             outputs,
-            credits: Vec::new(),
+            ..InterpretedBlock::new(&network(), block, vec![draft(transaction)])
+                .expect("unique transaction ids")
         },
     )
     .expect("valid block facts");
     indexing::IndexedBatch::new(
         network(),
         expected,
-        vec![facts],
+        vec![canonical],
         Vec::new(),
         indexing::FeeSettlement::Charged,
     )
@@ -212,13 +211,12 @@ fn duplicate_output_identity_is_rejected_before_repository_add() {
     let error = CanonicalBlock::new(
         network(),
         InterpretedBlock {
-            block: block(1, 1, 0),
-            transactions: vec![draft("duplicate")],
             outputs: OutputChanges {
                 created: vec![first, second],
                 ..OutputChanges::default()
             },
-            credits: Vec::new(),
+            ..InterpretedBlock::new(&network(), block(1, 1, 0), vec![draft("duplicate")])
+                .expect("unique transaction ids")
         },
     )
     .expect_err("duplicate output identity");
@@ -490,7 +488,10 @@ contract!(
     a_page_claims_a_whole_history_only_once_it_has_been_read,
     a_page_born_above_the_first_block_claims_no_whole_history,
     an_overdrawn_fold_does_not_reach_the_page_of_the_same_rows,
-    a_witnessed_total_never_reaches_the_page_of_the_same_rows,
+    a_whole_history_is_not_claimed_below_the_line_it_is_read_at,
+    a_sibling_still_catching_up_weakens_every_read_of_the_address,
+    only_what_the_address_owes_below_the_line_weakens_its_reads,
+    a_whole_history_is_not_claimed_before_the_first_commit,
 );
 
 contract!(
@@ -526,6 +527,7 @@ contract!(
     records_progress_for_its_own_network_only,
     refuses_a_batch_without_moving_the_balance_or_the_outputs,
     forgets_one_observations_progress_and_keeps_its_rows,
+    offers_no_output_until_the_range_is_read,
 );
 
 contract!(
@@ -558,6 +560,7 @@ contract!(
     a_backfilled_output_is_spent_by_the_next_block,
     a_recreated_output_is_still_an_error,
     a_replayed_creating_block_never_resurrects_a_spent_output,
+    an_output_page_names_a_successor_only_when_one_exists,
 );
 
 /// The offline rescan over one store two networks share

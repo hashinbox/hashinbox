@@ -19,7 +19,7 @@ mod witness;
 pub use accounts::{Accounts, View};
 pub use client::Client;
 pub use submitter::Submitter;
-pub use witness::{Attestation, Witness};
+pub use witness::{Attestation, Attester};
 
 pub(crate) use call::Remote;
 pub(crate) use wire::{parse_fixed_data, parse_quantity_u64};

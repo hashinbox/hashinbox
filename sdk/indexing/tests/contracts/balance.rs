@@ -5,7 +5,7 @@ use base::Decimal;
 use indexing::{
     Address, AssetId, Balance, BalanceQuery, BalanceStore, BlockCredit, CanonicalBlock,
     Completeness, FeeSettlement, IndexStore, InterpretedBlock, MovementId, Network, NetworkFee,
-    ObservationDraft, ObservationDraftStatus, OutputChanges, TransactionRef, ValueMovement,
+    ObservationDraft, ObservationDraftStatus, TransactionRef, ValueMovement,
 };
 
 use super::fixture::Fixture;
@@ -52,7 +52,7 @@ impl<'a, R: BalanceStore + IndexStore> BalanceContract<'a, R> {
         let settled = Network::new(network.chain.clone(), format!("{}-utxo", network.name));
         Self {
             fixture: Fixture::new(repository, network),
-            settled: Fixture::under(repository, settled, FeeSettlement::Movements),
+            settled: Fixture::under(repository, settled, FeeSettlement::Embedded),
         }
     }
 
@@ -236,15 +236,14 @@ impl<'a, R: BalanceStore + IndexStore> BalanceContract<'a, R> {
         };
         let (native, token) = (fixture.native(), fixture.token());
         let interpreted = InterpretedBlock {
-            block: fixture.block(9),
-            transactions: Vec::new(),
-            outputs: OutputChanges::default(),
             credits: vec![
                 credit("credit:1", &native, "a", 11),
                 credit("credit:2", &token, "a", 6),
                 credit("credit:3", &native, "v", 4),
                 credit("credit:4", &native, "d", 12),
             ],
+            ..InterpretedBlock::new(&fixture.network, fixture.block(9), Vec::new())
+                .expect("unique transaction ids")
         };
         CanonicalBlock::new(fixture.network.clone(), interpreted).expect("valid credit facts")
     }

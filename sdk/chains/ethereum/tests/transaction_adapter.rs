@@ -4,7 +4,7 @@
 use base::BoxFuture;
 use chain_ethereum::{
     Address, AssetKind, Error, FeeLimits, KeyPair, Wei,
-    native::transaction::{BuildContext, Builder, Preflight, Transfer},
+    native::transaction::{BoundTransfer, BuildContext, Preflight, Transfer},
 };
 use crypto::SecretBytes;
 
@@ -65,7 +65,7 @@ fn external_transaction_adapter_can_inspect_typed_transfers_and_sign() {
             futures_executor::block_on(InspectingAdapter.context(&from, &transfer, nonce, &limits))
                 .expect("typed transfer must be inspectable");
         assert_eq!(context.nonce, nonce);
-        let signed = futures_executor::block_on(Builder::new(transfer, context).sign(&key))
+        let signed = futures_executor::block_on(BoundTransfer::new(transfer, context).sign(&key))
             .expect("the local key signs its own transfer");
         let Ok(fees) = signed.inspect_eip1559_fees() else {
             panic!("the signed envelope must be EIP-1559");

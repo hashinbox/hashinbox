@@ -14,7 +14,7 @@ use crate::{BearerToken, Config, ConfigError};
 /// Liveness route: the process answers `204 No Content` while it runs.
 ///
 /// The paths of the two health routes are this crate's contract; the
-/// application owns the handlers (`apps/api/src/api/health.rs`), because
+/// application owns the handlers (`apps/server/src/api/health.rs`), because
 /// readiness is an application fact.
 pub const LIVENESS_PATH: &str = "/health/live";
 /// Readiness route: `204` when the application is ready, else `503`.

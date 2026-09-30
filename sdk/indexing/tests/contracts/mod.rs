@@ -24,24 +24,23 @@
 //! run them either, which is why SQLite's adapter modules keep only what is
 //! SQLite's own.
 
-mod anchors;
 mod backfill;
+mod backfill_fixture;
 mod balance;
-mod chunk;
+mod balance_totals;
+mod completeness_claims;
 mod fixture;
 mod history;
-mod provenance;
+mod idempotent_replay;
 mod purge;
-mod replays;
+mod reanchor;
 mod rollback;
-mod spends;
-mod totals;
+mod unmatched_spends;
 mod watch;
-mod witness;
 
 pub use backfill::BackfillContract;
 pub use balance::BalanceContract;
 pub use history::HistoryContract;
 pub use purge::PurgeContract;
-pub use spends::SpendContract;
+pub use unmatched_spends::SpendContract;
 pub use watch::WatchContract;

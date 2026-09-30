@@ -2,7 +2,6 @@
 
 use std::collections::BTreeSet;
 
-use alloy_primitives::U256;
 use alloy_rpc_types_eth::{Block as RpcBlock, BlockTransactions};
 use base::{BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef};
 use serde_json::Value;
@@ -11,7 +10,7 @@ use super::field::{
     Object, optional_address, required_address, required_hash, required_quantity,
     required_quantity_u64,
 };
-use crate::native::{Address, Error, TransactionId};
+use crate::native::{Address, Error, TransactionId, Wei};
 
 /// A block's identity and its transaction objects, without receipts.
 ///
@@ -20,17 +19,22 @@ use crate::native::{Address, Error, TransactionId};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Head {
     pub(crate) reference: BlockRef,
-    pub(super) transactions: Vec<Sent>,
+    pub(super) transactions: Vec<ListedTransaction>,
 }
 
-/// The fields of one transaction object that indexing consumes.
+/// One transaction as its block lists it, before its receipt: the fields of
+/// the transaction object that indexing consumes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Sent {
+pub struct ListedTransaction {
     pub(super) id: TransactionId,
-    pub(super) from: Address,
-    pub(super) to: Option<Address>,
-    pub(super) value: U256,
-    pub(super) index: u64,
+    /// The sender, who pays the fee.
+    pub from: Address,
+    /// `None` for contract creation.
+    pub to: Option<Address>,
+    /// Ether attached to the transaction.
+    pub value: Wei,
+    /// Position in the block.
+    pub index: u64,
 }
 
 impl Head {
@@ -65,7 +69,7 @@ impl Head {
             }),
             timestamp: Some(block.header.timestamp),
         };
-        let transactions = Sent::parse_all(block.transactions, height, hash, full)?;
+        let transactions = ListedTransaction::parse_all(block.transactions, height, hash, full)?;
         Ok(Self {
             reference,
             transactions,
@@ -74,7 +78,7 @@ impl Head {
 
     /// Transaction hashes in block order, for receipt lookups.
     pub(crate) fn ids(&self) -> impl Iterator<Item = &TransactionId> {
-        self.transactions.iter().map(|sent| &sent.id)
+        self.transactions.iter().map(|listed| &listed.id)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -82,7 +86,7 @@ impl Head {
     }
 }
 
-impl Sent {
+impl ListedTransaction {
     fn parse_all(
         transactions: BlockTransactions<Value>,
         height: BlockHeight,
@@ -127,7 +131,7 @@ impl Sent {
         let id = TransactionId::from_bytes(required_hash(object, "hash", "transaction hash")?);
         let from = required_address(object, "from", "transaction sender")?;
         let to = optional_address(object, "to", "transaction recipient")?;
-        let value = required_quantity(object, "value", "transaction value")?;
+        let value = Wei::from_u256(required_quantity(object, "value", "transaction value")?);
         let index = required_quantity_u64(object, "transactionIndex", "transaction index")?;
         let expected_index = u64::try_from(position)
             .map_err(|_| Error::invalid_block("Ethereum transaction position exceeds u64"))?;
@@ -160,7 +164,7 @@ impl Sent {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::B256;
+    use alloy_primitives::{B256, U256};
     use serde_json::json;
 
     use super::*;
@@ -183,7 +187,7 @@ mod tests {
             true,
         )
         .unwrap();
-        assert_eq!(parsed.transactions[0].value, U256::MAX);
+        assert_eq!(parsed.transactions[0].value, Wei::from_u256(U256::MAX));
         assert_eq!(parsed.reference.parent, None);
         for (transactions, message) in [
             (
@@ -226,7 +230,7 @@ mod tests {
             json!(42),
             json!(false),
         ] {
-            let error = Sent::parse(&value, 0, BlockHeight(10), [0xaa; 32])
+            let error = ListedTransaction::parse(&value, 0, BlockHeight(10), [0xaa; 32])
                 .expect_err("transaction requires an object");
             assert_eq!(error.message, "Ethereum transaction must be an object");
         }

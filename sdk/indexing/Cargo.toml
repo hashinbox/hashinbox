@@ -9,8 +9,9 @@ readme = "README.md"
 [features]
 # `sqlite` is the only store this crate ships, and the one a build gets without
 # asking (docs/design/030 §8 (ex-031) step 8). It stays a feature rather than becoming
-# unconditional because that is what lets `apps/api` depend on this crate with
-# `default-features = false` and name no async runtime at all.
+# unconditional because that is what lets `wallets`, `sdk/config` and the chain
+# crates depend on this crate with `default-features = false` and get no store
+# and no async runtime through it.
 default = ["sqlite", "supervisor"]
 # The embedded SQL store: `indexing::sqlite`, and rusqlite with it. SQLite is
 # synchronous, so every operation is one `spawn_blocking` on one connection of

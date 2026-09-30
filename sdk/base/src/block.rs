@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, fmt, slice, vec};
+use std::{collections::BTreeMap, fmt, ops, slice, vec};
+
+use crate::{Network, Networked};
 
 /// Number of produced blocks through one canonical block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -154,6 +156,16 @@ impl<T: Identified> Transactions<T> {
     }
 }
 
+/// The transaction at one place in block order, counted from zero over the
+/// transactions this collection holds.
+impl<T: Identified> ops::Index<usize> for Transactions<T> {
+    type Output = T;
+
+    fn index(&self, place: usize) -> &T {
+        &self.values[place]
+    }
+}
+
 impl<T: Identified> Default for Transactions<T> {
     fn default() -> Self {
         Self {
@@ -205,21 +217,38 @@ impl<T: Identified> IntoIterator for Transactions<T> {
     }
 }
 
-/// One parsed block: its identity and its transactions in block order.
+/// One block of one network: its identity and its transactions in block order.
+///
+/// The network is stated by whoever builds the block and is never derived
+/// from the reference or the transactions: a [`BlockRef`] is the same bytes
+/// on every network that shares a history, so nothing inside it can say which
+/// one was read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Block<T: Identified> {
+    network: Network,
     reference: BlockRef,
     transactions: Transactions<T>,
 }
 
 impl<T: Identified> Block<T> {
-    /// Pairs a block identity with its transactions.
+    /// Places a block identity and its transactions in `network`.
     #[must_use]
-    pub const fn new(reference: BlockRef, transactions: Transactions<T>) -> Self {
+    pub fn new(
+        network: &impl Networked,
+        reference: BlockRef,
+        transactions: Transactions<T>,
+    ) -> Self {
         Self {
+            network: network.canonical(),
             reference,
             transactions,
         }
+    }
+
+    /// The network the block was read from.
+    #[must_use]
+    pub const fn network(&self) -> &Network {
+        &self.network
     }
 
     /// The block's identity and parent link.
@@ -233,11 +262,19 @@ impl<T: Identified> Block<T> {
     pub const fn transactions(&self) -> &Transactions<T> {
         &self.transactions
     }
+
+    /// Takes the block apart, for a stage that rebuilds it over another
+    /// transaction type.
+    #[must_use]
+    pub fn into_parts(self) -> (Network, BlockRef, Transactions<T>) {
+        (self.network, self.reference, self.transactions)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ChainName;
 
     #[test]
     fn zero_coordinates_convert_and_advance() {
@@ -306,6 +343,8 @@ mod tests {
             Some("second")
         );
         assert_eq!(transactions.get(&7), None);
+        assert_eq!(transactions[0].label, "first");
+        assert_eq!(transactions[2].label, "third");
         let owned = transactions
             .into_iter()
             .map(|value| value.id)
@@ -325,19 +364,45 @@ mod tests {
         assert_eq!(duplicate, Err(1));
     }
 
-    #[test]
-    fn empty_block_exposes_reference_and_no_transactions() {
-        let reference = BlockRef {
+    fn reference() -> BlockRef {
+        BlockRef {
             position: BlockPosition(4),
             height: BlockHeight(3),
             hash: BlockHash(vec![4]),
             parent: None,
             timestamp: None,
-        };
-        let block = Block::<Fixture>::new(reference.clone(), Transactions::default());
+        }
+    }
 
-        assert_eq!(block.reference(), &reference);
+    fn network(name: &str) -> Network {
+        Network::new(ChainName::new("example"), name)
+    }
+
+    #[test]
+    fn empty_block_exposes_reference_and_no_transactions() {
+        let block = Block::<Fixture>::new(&network("main"), reference(), Transactions::default());
+
+        assert_eq!(block.reference(), &reference());
         assert!(block.transactions().is_empty());
         assert_eq!(block.clone(), block);
+    }
+
+    /// The network is part of what a block is: the same reference and the
+    /// same transactions read from two networks are two blocks.
+    #[test]
+    fn a_block_carries_the_network_it_was_built_with() {
+        let transactions =
+            || Transactions::new(vec![fixture(1, "a"), fixture(2, "b")]).expect("unique ids");
+        let main = Block::new(&network("main"), reference(), transactions());
+        let test = Block::new(&network("test"), reference(), transactions());
+
+        assert_eq!(main.network(), &network("main"));
+        assert_eq!(test.network(), &network("test"));
+        assert_ne!(main, test);
+
+        let (owner, identity, children) = main.into_parts();
+        assert_eq!(owner, network("main"));
+        assert_eq!(identity, reference());
+        assert_eq!(children, transactions());
     }
 }

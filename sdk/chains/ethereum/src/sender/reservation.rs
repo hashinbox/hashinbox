@@ -37,9 +37,9 @@ pub(crate) struct PreparedTransaction {
     pub(crate) transaction: SignedTransaction,
 }
 
-/// What [`Reservations::admit`] grants: the reservation itself, or the
-/// recovery that has to happen before one can be granted.
-pub(crate) enum Grant {
+/// What [`Reservations::admit`] answers: the reservation itself, or the
+/// recovery that has to happen before one can be made.
+pub(crate) enum AdmissionOutcome {
     /// Every sender is reserved until the admission drops.
     Admitted(Admission),
     /// Batch item `index`'s sender has the unknown outcome `id`; settle it
@@ -107,12 +107,12 @@ impl Reservations {
     pub(crate) async fn admit(
         &self,
         senders: &[(Address, usize)],
-    ) -> Result<Grant, (usize, Error)> {
+    ) -> Result<AdmissionOutcome, (usize, Error)> {
         loop {
             let mut notified = std::pin::pin!(self.changed.notified());
             notified.as_mut().enable();
             match self.try_admit(senders)? {
-                Some(grant) => return Ok(grant),
+                Some(outcome) => return Ok(outcome),
                 None => notified.await,
             }
         }
@@ -219,7 +219,10 @@ impl Reservations {
         state.held.remove(index)
     }
 
-    fn try_admit(&self, senders: &[(Address, usize)]) -> Result<Option<Grant>, (usize, Error)> {
+    fn try_admit(
+        &self,
+        senders: &[(Address, usize)],
+    ) -> Result<Option<AdmissionOutcome>, (usize, Error)> {
         let mut state = self.lock();
         for (from, index) in senders {
             let Some(account) = state.accounts.get(from) else {
@@ -235,7 +238,7 @@ impl Reservations {
             match pending.map(|(id, record)| (id, record.status)) {
                 Some((id, Status::Unknown)) => {
                     let (id, index) = (id.clone(), *index);
-                    return Ok(Some(Grant::Recover { id, index }));
+                    return Ok(Some(AdmissionOutcome::Recover { id, index }));
                 }
                 Some(_) => return Ok(None),
                 None => {}
@@ -254,7 +257,7 @@ impl Reservations {
             state.accounts.entry(from.clone()).or_default().active = Some(operation);
         }
         drop(state);
-        Ok(Some(Grant::Admitted(Admission {
+        Ok(Some(AdmissionOutcome::Admitted(Admission {
             reservations: self.clone(),
             operation,
         })))
@@ -515,7 +518,7 @@ mod tests {
         }];
         let reservations = Reservations::default();
         let senders = [(key.address().clone(), 0)];
-        let Ok(Grant::Admitted(admission)) = reservations.admit(&senders).await else {
+        let Ok(AdmissionOutcome::Admitted(admission)) = reservations.admit(&senders).await else {
             panic!("a free sender is admitted");
         };
         reservations.register(&admission, &batch).unwrap();
@@ -528,7 +531,7 @@ mod tests {
         assert!(!error.retryable);
         assert!(matches!(
             reservations.admit(&senders).await,
-            Ok(Grant::Admitted(_))
+            Ok(AdmissionOutcome::Admitted(_))
         ));
     }
 }

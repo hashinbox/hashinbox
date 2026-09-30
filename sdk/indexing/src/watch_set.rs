@@ -12,8 +12,8 @@
 //! ([`crate::BlockInterpreter::inspect`] takes addresses and no asset), not
 //! because they share a row.
 //!
-//! Inspection is still deduplicated by *address*, in [`Set::filters`] and in
-//! [`Set::behind`]: a pass fetches and interprets a block once per address
+//! Inspection is still deduplicated by *address*, in [`WatchRows::filters`] and in
+//! [`WatchRows::behind`]: a pass fetches and interprets a block once per address
 //! however many assets are observed at it.
 
 use std::collections::BTreeMap;
@@ -22,12 +22,12 @@ use crate::{Address, BlockPosition, BlockRef, Progress, WatchProgress};
 
 /// Everything one network's watch set holds, under one lock.
 #[derive(Default)]
-pub(super) struct Set {
+pub(crate) struct WatchRows {
     /// Every observation and its progress, by the observation's own identity.
-    pub(super) rows: BTreeMap<String, WatchProgress>,
+    pub(crate) rows: BTreeMap<String, WatchProgress>,
 }
 
-impl Set {
+impl WatchRows {
     /// The selection a pass inspects the blocks above the confirmed line for,
     /// in address order, **deduplicated**.
     ///
@@ -41,7 +41,7 @@ impl Set {
     /// of it still needs — its [`next_required`](WatchProgress::next_required),
     /// not its birthday, because a caught-up observation resumes after what was
     /// already inspected for it.
-    pub(super) fn filters(&self, checkpoint: Option<&BlockRef>) -> Vec<crate::AddressFilter> {
+    pub(crate) fn filters(&self, checkpoint: Option<&BlockRef>) -> Vec<crate::ForwardRange> {
         let mut earliest: BTreeMap<&Address, BlockPosition> = BTreeMap::new();
         for row in self.rows.values() {
             let Some(next) = row.next_required().filter(|_| row.caught_up(checkpoint)) else {
@@ -54,7 +54,7 @@ impl Set {
         }
         earliest
             .into_iter()
-            .map(|(address, start_position)| crate::AddressFilter {
+            .map(|(address, start_position)| crate::ForwardRange {
                 address: address.clone(),
                 start_position,
             })
@@ -67,13 +67,13 @@ impl Set {
     /// observation is in both and none is in neither: what one pass inspects at
     /// the front and what it fills in below the line are one partition of the
     /// set.
-    pub(super) fn behind(&self, checkpoint: Option<&BlockRef>) -> Vec<Backlog> {
+    pub(crate) fn behind(&self, checkpoint: Option<&BlockRef>) -> Vec<OwedRange> {
         self.rows
             .values()
             .filter(|row| !row.caught_up(checkpoint))
             .filter_map(|row| {
-                Some(Backlog {
-                    watch: row.watch.id.clone(),
+                Some(OwedRange {
+                    watch_id: row.watch.id.clone(),
                     address: row.watch.address.clone(),
                     expected: row.indexed_through.clone(),
                     resume: row.next_required()?,
@@ -92,14 +92,14 @@ impl Set {
     ///
     /// A claim carries the value its author believed the store held, which is
     /// what the store compares ([`Progress`]).
-    pub(super) fn forward(&self, line: Option<&BlockRef>, block: &BlockRef) -> Vec<Progress> {
+    pub(crate) fn forward(&self, line: Option<&BlockRef>, block: &BlockRef) -> Vec<Progress> {
         self.rows
             .values()
             .filter(|row| row.caught_up(line))
             .filter_map(|row| {
                 let next = row.next_required()?;
                 (next <= block.position).then(|| Progress {
-                    watch: row.watch.id.clone(),
+                    watch_id: row.watch.id.clone(),
                     expected: row.indexed_through.clone(),
                     indexed_through: block.clone(),
                 })
@@ -107,41 +107,11 @@ impl Set {
             .collect()
     }
 
-    /// Whether any observation of `address` is still reading its own past.
-    ///
-    /// Address-scoped rather than per observation, and deliberately: the stored
-    /// rows are shared by every asset at one address, so a balance read for a
-    /// token whose native sibling is still catching up is reading rows that are
-    /// still arriving. The conservative answer is the true one.
-    pub(super) fn backfilling(&self, address: &Address, checkpoint: Option<&BlockRef>) -> bool {
-        self.rows
-            .values()
-            .filter(|row| row.watch.address == *address)
-            .any(|row| !row.caught_up(checkpoint))
-    }
-
-    /// Whether any observation of `address` began at the chain's first block.
-    ///
-    /// The one half of a `Completeness::CompleteHistory` claim an index can
-    /// actually check. Address-scoped for the same reason
-    /// [`Self::backfilling`] is: one inspection of an address serves every asset
-    /// observed at it, so the rows a token read folds are the rows the address's
-    /// earliest observation put there.
-    ///
-    /// An address nothing observes answers `false`, which is the honest reading:
-    /// no observation means no evidence, not evidence of completeness.
-    pub(super) fn observed_from_the_first_block(&self, address: &Address) -> bool {
-        self.rows
-            .values()
-            .filter(|row| row.watch.address == *address)
-            .any(|row| row.watch.start == BlockPosition(0))
-    }
-
     /// Takes over what a committed batch proved: the claims are durable now, so
     /// the rows they name hold an answer a restart will find.
-    pub(super) fn advanced(&mut self, proved: &[Progress]) {
+    pub(crate) fn advanced(&mut self, proved: &[Progress]) {
         for claim in proved {
-            if let Some(row) = self.rows.get_mut(&claim.watch) {
+            if let Some(row) = self.rows.get_mut(&claim.watch_id) {
                 row.indexed_through = Some(claim.indexed_through.clone());
             }
         }
@@ -155,7 +125,7 @@ impl Set {
     /// store confirmed the write, so the store's value is this one or newer. A
     /// batch whose outcome was lost is exactly the "newer" case, and reloading is
     /// how the index finds out.
-    pub(super) fn restore(&mut self, stored: Vec<WatchProgress>) {
+    pub(crate) fn restore(&mut self, stored: Vec<WatchProgress>) {
         for row in stored {
             match self.rows.get_mut(&row.watch.id) {
                 Some(held) => held.indexed_through = row.indexed_through,
@@ -165,17 +135,17 @@ impl Set {
     }
 
     /// Every watch, in id order, as [`crate::Watching::watched`] returns them.
-    pub(super) fn watches(&self) -> Vec<crate::Watch> {
+    pub(crate) fn watches(&self) -> Vec<crate::Watch> {
         self.rows.values().map(|row| row.watch.clone()).collect()
     }
 
     /// The watch `id` names, whatever its address.
-    pub(super) fn identified(&self, id: &str) -> Option<crate::Watch> {
+    pub(crate) fn identified(&self, id: &str) -> Option<crate::Watch> {
         self.rows.get(id).map(|row| row.watch.clone())
     }
 
     /// The observation that already holds `(address, asset)`, if any.
-    pub(super) fn holder(&self, address: &Address, asset: &crate::AssetId) -> Option<crate::Watch> {
+    pub(crate) fn holder(&self, address: &Address, asset: &crate::AssetId) -> Option<crate::Watch> {
         self.rows
             .values()
             .map(|row| &row.watch)
@@ -193,7 +163,7 @@ impl Set {
     /// from an earlier birthday had to widen the shared range and a restart in
     /// between could read the narrower row back as settled
     /// (`docs/design/030 §8 (ex-032)`, the first defect).
-    pub(super) fn attach(&mut self, watch: crate::Watch) {
+    pub(crate) fn attach(&mut self, watch: crate::Watch) {
         drop(
             self.rows
                 .insert(watch.id.clone(), WatchProgress::unread(watch)),
@@ -205,20 +175,21 @@ impl Set {
     /// By identity, because that is all a row is keyed by and all a withdrawal
     /// ever knew: the same call settles a watch whose durable removal is
     /// confirmed and one whose removal is merely uncertain, where no `Watch`
-    /// value may be at hand ([`super::Reconciliation`]).
-    pub(super) fn detach(&mut self, id: &str) {
+    /// value may be at hand (`Reconciliation` in [`crate::watches`]).
+    pub(crate) fn detach(&mut self, id: &str) {
         drop(self.rows.remove(id));
     }
 }
 
-/// One observation's backlog: the address to inspect, and where to resume.
+/// The range one observation still owes: the address to inspect, and where to
+/// resume.
 ///
 /// The reduced form of a [`WatchProgress`] the filling half of a pass needs, and
 /// it carries `expected` because the claim it will write has to say what it
 /// believed the store held ([`Progress`]).
-pub(crate) struct Backlog {
+pub(crate) struct OwedRange {
     /// The observation's identity, which the claim is written against.
-    pub(crate) watch: String,
+    pub(crate) watch_id: String,
     /// The address to inspect for it.
     pub(crate) address: Address,
     /// The progress this observation believes the store holds.

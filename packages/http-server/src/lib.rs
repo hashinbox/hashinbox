@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn health_paths_are_the_documented_contract() {
-        // The application owns the handlers (payment-api serves and documents
+        // The application owns the handlers (payment-server serves and documents
         // both routes); this crate owns only the two paths, so a change here
         // is a change to the published HTTP contract.
         assert_eq!(LIVENESS_PATH, "/health/live");

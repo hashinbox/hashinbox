@@ -1,7 +1,7 @@
 //! What a *refused* batch leaves behind, over the fixture `backfill.rs` and
-//! `chunk.rs` already build.
+//! `backfill_fixture.rs` already build.
 //!
-//! Split by role for the reason `chunk.rs` states — one file per role rather
+//! Split by role for the reason `backfill_fixture.rs` states — one file per role rather
 //! than one per type, under the repository's 500-line cap. `backfill.rs` holds
 //! the guarantees a batch that lands owes; this holds the one a batch that is
 //! refused owes, and it is a separate guarantee because **a history page is not
@@ -36,8 +36,8 @@ impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillCont
     /// the claim — is exactly where the accepted batch left it.
     pub async fn refuses_a_batch_without_moving_the_balance_or_the_outputs(&self) {
         self.prepare().await;
-        self.filled(BlockPosition(1), BlockPosition(3)).await;
-        let live = self.outputs().await;
+        self.seed(1, 3).await;
+        let live = self.rows().await;
         assert_eq!(live.len(), 1, "block 3 created one output, unspent so far");
         assert_eq!(
             self.settled().await,
@@ -46,12 +46,12 @@ impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillCont
         );
 
         // Blocks 4 and 5 — the credit and the spend — under a claim that says
-        // the store holds no progress, which it has held since block 3 landed.
+        // the store holds progress through block 3, which it never recorded.
         let stale = self.batch(
             BlockPosition(4),
             BlockPosition(5),
             self.checkpoint().await,
-            None,
+            Some(self.fixture.block(3)),
         );
         let error = self
             .fixture
@@ -68,11 +68,11 @@ impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillCont
              where the accepted batch left it"
         );
         assert_eq!(
-            self.outputs().await,
+            self.rows().await,
             live,
             "nor did the spend block 5 carried, so the output is still live"
         );
-        assert_eq!(self.progress().await, Some(self.fixture.block(3)));
+        assert_eq!(self.progress().await, None, "nor the claim it made");
 
         self.filled(BlockPosition(4), BlockPosition(5)).await;
 

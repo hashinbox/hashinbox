@@ -1,5 +1,5 @@
 //! Sending: [`Transfer`] → [`Preflight`] ([`BuildContext`]) →
-//! [`Builder`] → [`UnsignedTransaction`] → sign →
+//! [`BoundTransfer`] → [`UnsignedTransaction`] → sign →
 //! [`SignedTransaction`] → [`crate::native::rpc::Submitter`].
 //!
 //! The protocol rules a batch needs are here too: consecutive [`Nonces`]
@@ -18,7 +18,7 @@ mod signed;
 mod transfer;
 mod unsigned;
 
-pub use builder::{BuildContext, Builder};
+pub use builder::{BoundTransfer, BuildContext};
 pub use fee::FeeLimits;
 pub use funds::{Funds, Requirement};
 pub use id::TransactionId;

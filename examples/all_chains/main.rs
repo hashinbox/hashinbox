@@ -1,32 +1,31 @@
-//! Every chain at once, in the shape of the `payment-server` composition root
-//! (`apps/server/src/chains.rs`): each section of `config.toml` is parsed and
-//! accepted by the chain registered for it, each connects and verifies its
-//! node, and one [`Composition`] turns the verified chains into one
-//! `indexing::Index`, one `wallets::Wallets<Asset>` and one polling cadence
-//! per network, over one index file. Then one submission supervisor, one sync
-//! loop, one watched address, and one send per chain.
+//! Every chain at once, in the shape of the `payment-server` composition
+//! root: one document, one registration line per chain, one composition over
+//! one index file, then one sync loop, one watched address and one send per
+//! chain.
 //!
-//! The two phases are the whole startup rule: **every identity check finishes
-//! before storage is opened**, which is why the chains are verified into a
-//! vector first and the store is opened after it.
-//!
-//! The two halves of "what comes back after a restart" have different owners
-//! (`docs/design/030 §8 (ex-029)` section 3.4). What is *observed* comes back from the
-//! index's own registry rows, at no cost to this file. What can *sign* comes
-//! back from the application's key material — here, fixed seeds; in a server,
-//! a key store. The server reaches this from its own document the same way;
-//! what it adds is an HTTP surface and shutdown supervision, not structure.
-//! Needs all three local nodes
-//! (examples/README.md): `cargo run -p payment-examples --example all_chains`
+//! What comes back after a restart has two owners. What is *observed* comes
+//! back from the index's own rows, at no cost to this file. What can *sign*
+//! comes back from the application's key material — here, fixed seeds; in a
+//! server, a key store. Needs all three local nodes (examples/README.md):
+//! `cargo run -p payment-examples --example all_chains`
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use base::BlockPosition;
-use indexing::{ObservedTransaction, Page, Start, Subject, Supervisor, Watching as _};
-use local::{AnyError, Asset, Health, Scenario, Signers, Submissions};
-use serde_json::json;
+use indexing::{
+    Birthday, Page, Subject, Supervisor, SyncReport, Watching as _,
+    sqlite::{Database, Repository},
+};
+use json_rpc::Client as _;
+use sdk_config::{Document, Registry};
+use serde_json::{Value, json};
 use tokio::sync::watch;
-use wallets::{Composition, SecretBytes, SubmissionRegistrar};
+use wallets::{Composition, SecretBytes, SubmissionRegistrar, Submissions, Wallet};
+
+type AnyError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The chains this scenario runs and the node of each.
+const CONFIG: &str = include_str!("config.toml");
 
 const INTERVAL: Duration = Duration::from_secs(1);
 /// Blocks mined to bitcoin's sender: a coinbase output matures after 100.
@@ -37,37 +36,54 @@ const AIRDROP: u64 = 1_000_000_000;
 const ANVIL_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 /// A well-known Ethereum address, observed without a key.
 const WATCHED: &str = "0x000000000000000000000000000000000000dead";
-const WATCHED_ID: &str = "eth-watched";
 
-/// Each chain's part: its asset tag, the sending wallet, the receiving wallet,
-/// and the amount sent in display units.
-const TRANSFERS: [(Asset, &str, &str, &str); 3] = [
-    (Asset::Btc, "btc-alice", "btc-bob", "0.5"),
-    (Asset::Eth, "eth-alice", "eth-bob", "0.01"),
-    (Asset::Sol, "sol-alice", "sol-bob", "0.1"),
+/// Each chain's part: its asset tag, the sending wallet and its seed, the
+/// receiving wallet and its seed, and the amount sent in display units.
+///
+/// The seeds are this scenario's stand-in for a key store, so a second run
+/// rebuilds the same wallets instead of minting new ones. The wallet without
+/// one is Anvil's pre-funded account, built from [`ANVIL_KEY`].
+const TRANSFERS: [(&str, Held, Held, &str); 3] = [
+    (
+        "btc",
+        ("btc-alice", Some(0x11)),
+        ("btc-bob", Some(0x12)),
+        "0.5",
+    ),
+    ("eth", ("eth-alice", None), ("eth-bob", Some(0x13)), "0.01"),
+    (
+        "sol",
+        ("sol-alice", Some(0x14)),
+        ("sol-bob", Some(0x15)),
+        "0.1",
+    ),
 ];
 
-/// This scenario's stand-in for a key store: one fixed seed per wallet id, so
-/// a second run rebuilds the same wallets instead of minting new ones. A
-/// server reads its keys from configuration instead; either way, the index
-/// never holds them.
-const SEEDS: [(&str, u8); 5] = [
-    ("btc-alice", 0x11),
-    ("btc-bob", 0x12),
-    ("eth-bob", 0x13),
-    ("sol-alice", 0x14),
-    ("sol-bob", 0x15),
-];
+/// A wallet id and the byte its 32-byte seed repeats.
+type Held = (&'static str, Option<u8>);
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
-    // 1. The document's sections, each accepted by the chain registered for
-    //    it, then both startup phases in the one order that is safe: every
-    //    node identity is verified, storage is opened only then, and each
-    //    chain composes itself over its own network's repository. This is
-    //    exactly what `apps/server` does with its own document.
-    let scenario = Scenario::read("all_chains").await?;
-    let submissions = Arc::new(Submissions::default());
+    // 1. Local testing only: a `solana-test-validator --reset` is a new
+    //    cluster every run, so `config.toml` cannot state its genesis hash and
+    //    the node is asked for it. A deployment writes the hash it expects.
+    let sections: Value = Document::toml(CONFIG).parse()?;
+    let genesis = call(&sections, "solana", "getGenesisHash", json!([])).await?;
+    let genesis = genesis.as_str().ok_or("a genesis hash is text")?;
+    let document = Document::toml(CONFIG.replace("<genesis-hash-from-the-node>", genesis));
+
+    // 2. The chains this application links, one line each. Each parses the
+    //    section registered under its name; asset tags are this file's own.
+    let mut registry = Registry::<String, Repository>::new();
+    registry.register::<chain_bitcoin::Config<String>>("bitcoin");
+    registry.register::<chain_ethereum::Config<String>>("ethereum");
+    registry.register::<chain_solana::Config<String>>("solana");
+    let chains = registry.chains(&document.parse()?)?;
+
+    // 3. Compose. Every node's identity is verified before the store is
+    //    opened, then each chain builds its index and factories over it.
+    //    `submissions` owns the send work a chain finishes in the background.
+    let submissions = Arc::new(Submissions::new());
     let registrar: Arc<dyn SubmissionRegistrar> = submissions.clone();
     let Composition {
         index,
@@ -77,141 +93,126 @@ async fn main() -> Result<(), AnyError> {
         units,
         schedules,
         ..
-    } = scenario.compose(&registrar).await?;
+    } = chains
+        .compose(
+            &BTreeMap::new(),
+            || async {
+                let file = std::path::absolute(".index-data/all_chains.db")?;
+                tokio::task::spawn_blocking(move || -> Result<Database, AnyError> {
+                    std::fs::create_dir_all(".index-data")?;
+                    Ok(Database::open(file)?)
+                })
+                .await?
+            },
+            |store: &Database| Ok::<_, AnyError>(Repository::new(store.clone())),
+            &registrar,
+        )
+        .await?;
 
-    // 2. What a previous run observed is already back: the index read its own
+    // 4. What a previous run observed is already back: the index read its own
     //    rows before its first pass, and this file did nothing for it.
     for network in index.networks() {
         let watched = index.watched(network).await?;
         println!("{}: {} address(es) restored", network.chain, watched.len());
     }
 
-    // 3. A sender and a receiver per chain, rebuilt from this scenario's own
-    //    key material. Ethereum's sender is Anvil's pre-funded account.
-    //    Re-watching an address under the same id and start is a no-op, so a
-    //    second run states the same thing and nothing changes.
-    let mut signers = Signers::default();
-    let alice = wallets
-        .from(&Asset::Eth, SecretBytes::from_hex(ANVIL_KEY)?)
-        .await?;
-    index
-        .watch("eth-alice", alice.as_ref(), Start::At(BlockPosition(0)))
-        .await?;
-    signers.keep("eth-alice", alice);
+    // 5. A sender and a receiver per chain, rebuilt from this scenario's own
+    //    key material. Watching an address again under the same id and
+    //    birthday changes nothing, so a second run states the same thing.
+    let mut signers: BTreeMap<&str, Arc<dyn Wallet>> = BTreeMap::new();
     for (asset, sender, receiver, _) in TRANSFERS {
-        for id in [sender, receiver] {
-            if signers.get(id).is_ok() {
-                continue;
-            }
-            let wallet = wallets.from(&asset, seed(id)?).await?;
-            index.watch(id, wallet.as_ref(), Start::Fresh).await?;
-            signers.keep(id, wallet);
+        let asset = asset.to_owned();
+        for (id, seed) in [sender, receiver] {
+            // The pre-funded account has a past, so it is watched from
+            // block zero: an explicit birthday is what `Birthday::At` states.
+            let (secret, birthday) = match seed {
+                Some(byte) => (SecretBytes::new(vec![byte; 32]), Birthday::Fresh),
+                None => (
+                    SecretBytes::from_hex(ANVIL_KEY)?,
+                    Birthday::At(BlockPosition(0)),
+                ),
+            };
+            let wallet = wallets.from(&asset, secret).await?;
+            index.watch(id, wallet.as_ref(), birthday).await?;
+            signers.insert(id, wallet);
         }
     }
 
-    // 4. One watched address: history only, no key, no balance, no sends.
-    let eth = wallets.asset(&Asset::Eth)?;
+    // 6. One watched address: history only, no key, no sends.
+    let ether = "eth".to_owned();
+    let watched = Subject {
+        address: wallets.parse(&ether, WATCHED)?,
+        asset: wallets.asset(&ether)?.id,
+    };
     index
-        .watch(
-            WATCHED_ID,
-            &Subject {
-                address: wallets.parse(&Asset::Eth, WATCHED)?,
-                asset: eth.id.clone(),
-            },
-            Start::Fresh,
-        )
+        .watch("eth-watched", &watched, Birthday::Fresh)
         .await?;
-    fund(&scenario, &signers).await?;
 
-    // 5. One sync loop over the composer serves every address, watched or not.
+    // 7. Funding is a local-network operation and not part of the SDK:
+    //    bitcoin mines past coinbase maturity, solana asks for an airdrop.
+    let mined = json!([MATURITY, signers["btc-alice"].address().value]);
+    call(&sections, "bitcoin", "generatetoaddress", mined).await?;
+    let airdrop = json!([signers["sol-alice"].address().value, AIRDROP]);
+    call(&sections, "solana", "requestAirdrop", airdrop).await?;
+
+    // 8. One sync loop over the composed index serves every address, watched
+    //    or held; wait until every network has reached its node's tip.
     let (stop, stopped) = watch::channel(false);
-    let (monitor, mut readiness) = Health::watching(index.networks());
+    let (monitor, mut readiness) = SyncReport::watching(index.networks());
     let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
-    readiness.ready().await?;
+    readiness.settled().await.ok_or("synchronization stopped")?;
 
-    // 6. One send per chain, from the wallet this file holds.
-    for (asset, sender, receiver, amount) in TRANSFERS {
+    // 9. One send per chain, from the wallet this file holds, once the index
+    //    has seen its funds. The map hands out an author only for an asset
+    //    this system sends.
+    for (asset, (sender, _), (receiver, _), amount) in TRANSFERS {
+        let asset = asset.to_owned();
         while balances
-            .balance(&**signers.get(sender)?)
+            .balance(signers[sender].as_ref())
             .await?
             .amount
             .is_zero()
         {
             tokio::time::sleep(INTERVAL).await;
         }
-        let text = signers.get(receiver)?.address().value.clone();
-        let to = wallets.parse(&asset, &text)?;
-        // Spending is the asset's capability: the map hands out an author
-        // only for an asset this system sends, and never for one it only
-        // receives.
-        let author = wallets.author(&asset, signers.get(sender)?)?;
+        let to = wallets.parse(&asset, &signers[receiver].address().value)?;
+        let author = wallets.author(&asset, &signers[sender])?;
         let id = author.send(to, amount.parse()?).await?;
         println!("{sender} sent {amount} to {receiver} in {id}");
     }
 
-    // 7. Stop the loop, then drain the supervisor: a send whose chain finishes
-    //    it in the background must not be cut off by the process exiting.
-    let watched = transactions(
-        history.as_ref(),
-        &eth.id,
-        &wallets.parse(&Asset::Eth, WATCHED)?,
-    )
-    .await?;
-    let unit = units.of(&eth.id).ok_or("ether's unit")?;
+    // 10. The watched address is served like any other.
+    let page = history.history(&watched, Page::first(10)).await?;
+    let unit = units.of(&watched.asset).ok_or("ether's unit")?;
     println!(
         "{WATCHED}: {} transaction(s), fees in {} digits",
-        watched.len(),
+        page.transactions.len(),
         unit.decimals
     );
+
+    // 11. Stop the loop, then wait for the send work still running: a send
+    //     its chain finishes in the background must not be cut off by the
+    //     process exiting.
     stop.send(true)?;
     sync.await?;
-    submissions.drain().await
+    Ok(submissions.drain().await?)
 }
 
-/// This scenario's key material for `id`: a fixed 32-byte seed.
-fn seed(id: &str) -> Result<SecretBytes, AnyError> {
-    let byte = SEEDS
-        .iter()
-        .find(|(known, _)| *known == id)
-        .map(|(_, byte)| *byte)
-        .ok_or_else(|| format!("no key material for {id}"))?;
-    Ok(SecretBytes::new(vec![byte; 32]))
-}
-
-/// The confirmed half of one holding's history, exactly as the reader the
-/// composition handed back answers it: atomic amounts, which the asset's own
-/// unit scales when one is printed.
-async fn transactions(
-    history: &dyn indexing::History,
-    asset: &base::AssetId,
-    address: &base::Address,
-) -> Result<Vec<ObservedTransaction>, AnyError> {
-    let subject = Subject {
-        address: address.clone(),
-        asset: asset.clone(),
-    };
-    Ok(history
-        .history(&subject, Page::first(10))
-        .await?
-        .transactions)
-}
-
-/// Funds the bitcoin and solana senders through the nodes the document named;
-/// the ethereum sender is Anvil's pre-funded account.
-///
-/// # Errors
-///
-/// The document configures no such section, or the node refuses the call.
-async fn fund(scenario: &Scenario, signers: &Signers) -> Result<(), AnyError> {
-    let coinbase = signers.get("btc-alice")?.address().value.clone();
-    let _: Vec<String> = scenario
-        .node("bitcoin")?
-        .call("generatetoaddress", json!([MATURITY, coinbase]))
+/// One raw call to the node `config.toml` names for `chain`. Local-network
+/// setup only — the validator's genesis hash, mining, an airdrop — and never
+/// SDK API.
+async fn call(
+    sections: &Value,
+    chain: &str,
+    method: &str,
+    params: Value,
+) -> Result<Value, AnyError> {
+    let url = sections[chain]["rpc"]["endpoints"][0]
+        .as_str()
+        .ok_or("the section states rpc.endpoints")?;
+    let node = json_rpc::Endpoint::new(url).connect(&BTreeMap::new())?;
+    let result = node
+        .request(json_rpc::Request::once(method, params))
         .await?;
-    let airdropped = signers.get("sol-alice")?.address().value.clone();
-    let _: String = scenario
-        .node("solana")?
-        .call("requestAirdrop", json!([airdropped, AIRDROP]))
-        .await?;
-    Ok(())
+    Ok(result.map_err(json_rpc::CallError::from)?.deserialize()?)
 }

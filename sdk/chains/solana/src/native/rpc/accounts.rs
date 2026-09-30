@@ -67,6 +67,9 @@ impl<C: json_rpc::Client> Accounts for Client<C> {
     }
 }
 
+/// An account as the node spells it: the owner as text and the data as a
+/// base64 tuple beside its claimed size. [`Account`] is built from it only
+/// once the owner parses and the data is canonical and of that size.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AccountWire {

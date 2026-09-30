@@ -108,7 +108,7 @@ where
     /// A new wallet of `asset`, returned and kept by nothing.
     ///
     /// The caller keeps it. To have it indexed, watch it:
-    /// `index.watch(&id, &*wallet, Start::Fresh)` — and, per
+    /// `index.watch(&id, &*wallet, Birthday::Fresh)` — and, per
     /// `docs/design/030 §8 (ex-029)` section 3.3, do that *before* filing the key, so a
     /// crash leaves a watch-only address rather than a key nothing observes.
     ///

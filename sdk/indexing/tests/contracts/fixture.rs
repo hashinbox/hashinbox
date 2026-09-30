@@ -18,8 +18,8 @@ use base::Decimal;
 use indexing::{
     Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, CanonicalBlock,
     ConfirmedHistory, FeeSettlement, HistoryQuery, IndexStore, IndexedBatch, IndexedOutput,
-    InterpretedBlock, MovementId, Network, ObservationDraft, ObservationDraftStatus, OutputChanges,
-    OutputId, OutputRequest, OutputStore, TransactionRef, ValueMovement,
+    InterpretedBlock, MovementId, Network, ObservationDraft, ObservationDraftStatus, OutputId,
+    OutputRequest, OutputStore, TransactionRef, ValueMovement,
 };
 
 /// One network's fixture over one repository.
@@ -131,8 +131,8 @@ impl<'a, R> Fixture<'a, R> {
     }
 
     /// Block `height`, carrying `draft` alone and no output or credit.
-    pub(super) fn facts(&self, height: u64, draft: ObservationDraft) -> CanonicalBlock {
-        self.block_facts(height, vec![draft])
+    pub(super) fn canonical(&self, height: u64, draft: ObservationDraft) -> CanonicalBlock {
+        self.canonical_block(height, vec![draft])
     }
 
     /// Block `height`, carrying `drafts` and no output or credit.
@@ -141,13 +141,13 @@ impl<'a, R> Fixture<'a, R> {
     /// order it is stored in: each draft names its own
     /// `transaction_order`, so a contract can hand them over shuffled and still
     /// say what the page must look like.
-    pub(super) fn block_facts(&self, height: u64, drafts: Vec<ObservationDraft>) -> CanonicalBlock {
-        let interpreted = InterpretedBlock {
-            block: self.block(height),
-            transactions: drafts,
-            outputs: OutputChanges::default(),
-            credits: Vec::new(),
-        };
+    pub(super) fn canonical_block(
+        &self,
+        height: u64,
+        drafts: Vec<ObservationDraft>,
+    ) -> CanonicalBlock {
+        let interpreted = InterpretedBlock::new(&self.network, self.block(height), drafts)
+            .expect("unique transaction ids");
         CanonicalBlock::new(self.network.clone(), interpreted).expect("valid fixture facts")
     }
 
@@ -157,7 +157,7 @@ impl<'a, R> Fixture<'a, R> {
         let heights = 1_u64..;
         heights
             .zip(drafts)
-            .map(|(height, draft)| self.facts(height, draft))
+            .map(|(height, draft)| self.canonical(height, draft))
             .collect()
     }
 
@@ -166,12 +166,12 @@ impl<'a, R> Fixture<'a, R> {
     pub(super) fn batch(
         &self,
         checkpoint: Option<BlockRef>,
-        facts: CanonicalBlock,
+        canonical: CanonicalBlock,
     ) -> IndexedBatch {
         IndexedBatch::new(
             self.network.clone(),
             checkpoint,
-            vec![facts],
+            vec![canonical],
             Vec::new(),
             self.settlement,
         )
@@ -183,10 +183,10 @@ impl<R: IndexStore> Fixture<'_, R> {
     /// Commits `blocks` in order, each authorised by the one before.
     pub(super) async fn commit(&self, blocks: Vec<CanonicalBlock>) {
         let mut checkpoint = None;
-        for facts in blocks {
-            let block = facts.block().clone();
+        for canonical in blocks {
+            let block = canonical.block().clone();
             self.repository
-                .commit(self.batch(checkpoint, facts))
+                .commit(self.batch(checkpoint, canonical))
                 .await
                 .expect("fixture block");
             checkpoint = Some(block);
@@ -221,19 +221,22 @@ impl<R: ConfirmedHistory> Fixture<'_, R> {
 }
 
 impl<R: OutputStore> Fixture<'_, R> {
+    /// The first page of up to `limit` of `address`'s live outputs, as a
+    /// request.
+    pub(super) fn request(&self, address: &str, limit: usize) -> OutputRequest {
+        OutputRequest {
+            network: self.network.clone(),
+            address: self.address(address),
+            after: None,
+            limit,
+        }
+    }
+
     /// Every live output of `address`.
     pub(super) async fn outputs(&self, address: &str, limit: usize) -> Vec<IndexedOutput> {
-        OutputStore::list(
-            self.repository,
-            OutputRequest {
-                network: self.network.clone(),
-                address: self.address(address),
-                after: None,
-                limit,
-            },
-        )
-        .await
-        .expect("live outputs")
-        .outputs
+        OutputStore::list(self.repository, self.request(address, limit))
+            .await
+            .expect("live outputs")
+            .outputs
     }
 }

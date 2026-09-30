@@ -12,13 +12,13 @@
 //! per chain, and a `build` that validates without launching anything.
 //!
 //! Its chains come from its own `config.toml` like every other scenario's, but
-//! it reads the sections itself (`local::Scenario::value`) instead of handing
-//! them to `sdk_config::Registry`, because the assembly a registry performs is
-//! exactly what this scenario is showing.
+//! it decodes each section into its chain's own `Config` itself instead of
+//! handing them to `sdk_config::Registry`, because the assembly a registry
+//! performs is exactly what this scenario is showing.
 //!
 //! What it demonstrates, in order: two required ports and no others
 //! (`sink.rs`), one index over one store assembled in the caller's own `main`, a
-//! birthday in the past (`Start::At`) beside a fresh one (`Start::Fresh`), a
+//! birthday in the past (`Birthday::At`) beside a fresh one (`Birthday::Fresh`), a
 //! caller-driven bounded `sync` with no supervisor and no runner, a restart that
 //! must restore the watch list and its progress from the store alone, and a
 //! query API this consumer chose for itself.
@@ -28,13 +28,21 @@
 
 mod sink;
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use indexing::{
-    AssetId, BlockPosition, Checkpoint, Index, Indexing, Network, Start, Subject, Watch, Watching,
+    AssetId, Birthday, BlockPosition, Checkpoint, Index, Indexing, Network, Subject, Watch,
+    Watching,
 };
-use local::{AnyError, Scenario};
+use json_rpc::Client as _;
+use sdk_config::Document;
+use serde_json::{Value, json};
 use sink::Sink;
+
+type AnyError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The chains this scenario runs and the node of each.
+const CONFIG: &str = include_str!("config.toml");
 
 /// How many bounded passes this scenario drives, per phase. `sync` returns when
 /// its policy's batch is spent, so a caller that wants more calls it again.
@@ -57,8 +65,23 @@ async fn main() -> Result<(), AnyError> {
     //    `sdk_config::Registry`, which is this scenario's whole point. No
     //    wallet map: two of the three factories need store capabilities this
     //    sink does not offer.
-    let scenario = Scenario::read("custom_store").await?;
-    let (index, units) = assemble(&scenario, &sink).await?;
+    //
+    //    Local testing only: a `solana-test-validator --reset` is a new
+    //    cluster every run, so `config.toml` cannot state its genesis hash and
+    //    the node is asked for it. A deployment writes the hash it expects.
+    let sections: Value = Document::toml(CONFIG).parse()?;
+    let url = sections["solana"]["rpc"]["endpoints"][0]
+        .as_str()
+        .ok_or("[solana] states rpc.endpoints")?;
+    let genesis: String = json_rpc::Endpoint::new(url)
+        .connect(&BTreeMap::new())?
+        .request(json_rpc::Request::once("getGenesisHash", json!([])))
+        .await?
+        .map_err(json_rpc::CallError::from)?
+        .deserialize()?;
+    let document = CONFIG.replace("<genesis-hash-from-the-node>", &genesis);
+    let sections: Value = Document::toml(document).parse()?;
+    let (index, units) = assemble(&sections, &sink).await?;
 
     // 3. Observe, from the block after each network's checkpoint.
     for unit in &units {
@@ -82,7 +105,7 @@ async fn main() -> Result<(), AnyError> {
 
     // 7. Drop the index and rebuild over the same store. This is the assertion
     //    that catches the most.
-    restart(&scenario, &sink, index, units).await
+    restart(&sections, &sink, index, units).await
 }
 
 /// One chain network as this scenario observes it: the network, and the two
@@ -92,7 +115,7 @@ async fn main() -> Result<(), AnyError> {
 /// every network now, and this is only what to ask it about.
 struct Observer {
     network: Network,
-    /// Observed from `Start::Fresh`, then from `Start::At` a block the network
+    /// Observed from `Birthday::Fresh`, then from `Birthday::At` a block the network
     /// has already passed.
     subjects: [Subject; 2],
 }
@@ -120,7 +143,7 @@ impl Observer {
 
     /// Observes the first address from the block after the current checkpoint.
     ///
-    /// `Start::Fresh` is an assertion of fact — this address has never been used
+    /// `Birthday::Fresh` is an assertion of fact — this address has never been used
     /// — so it is the honest one for an address this process just chose, and the
     /// wrong one for anything that may already have a history.
     ///
@@ -129,7 +152,7 @@ impl Observer {
     /// Whatever the store refuses, and a conflicting re-registration.
     async fn observe(&self, index: &Index<dyn Indexing>) -> Result<Watch, AnyError> {
         let [id, _] = self.ids();
-        let watch = index.watch(&id, &self.subjects[0], Start::Fresh).await?;
+        let watch = index.watch(&id, &self.subjects[0], Birthday::Fresh).await?;
         println!(
             "{id}: observing {} from {:?}",
             watch.address.value, watch.start
@@ -153,7 +176,7 @@ impl Observer {
                 BlockPosition(block.position.0.saturating_sub(BACKDATE))
             });
         let watch = index
-            .watch(&id, &self.subjects[1], Start::At(start))
+            .watch(&id, &self.subjects[1], Birthday::At(start))
             .await?;
         println!(
             "{id}: observing {} from {:?}",
@@ -250,11 +273,11 @@ impl Chain {
     /// # Errors
     ///
     /// The node serves another network.
-    async fn bitcoin(scenario: &Scenario) -> Result<Self, AnyError> {
-        let network: chain_bitcoin::Network = scenario.value("bitcoin", "network")?;
-        let rpc =
-            chain_bitcoin::RpcClient::connect(scenario.node("bitcoin")?.transport()?, &network)
-                .await?;
+    async fn bitcoin(sections: &Value) -> Result<Self, AnyError> {
+        let config: chain_bitcoin::Config<String> =
+            serde_json::from_value(sections["bitcoin"].clone())?;
+        let transport = config.rpc.transport(&BTreeMap::new())?;
+        let rpc = chain_bitcoin::RpcClient::connect(transport, &config.network).await?;
         Ok(Self(Box::new(|store| {
             chain_bitcoin::indexer(chain_bitcoin::IndexerParams::new(rpc, store))
                 .map(|index| Arc::new(index) as Arc<dyn Indexing>)
@@ -270,14 +293,12 @@ impl Chain {
     /// # Errors
     ///
     /// The node serves another chain id.
-    async fn ethereum(scenario: &Scenario) -> Result<Self, AnyError> {
-        let network = chain_ethereum::Network::new(
-            scenario.value("ethereum", "chain_id")?,
-            scenario.value::<String>("ethereum", "network")?,
-        );
-        let rpc =
-            chain_ethereum::RpcClient::connect(scenario.node("ethereum")?.transport()?, &network)
-                .await?;
+    async fn ethereum(sections: &Value) -> Result<Self, AnyError> {
+        let config: chain_ethereum::Config<String> =
+            serde_json::from_value(sections["ethereum"].clone())?;
+        let network = chain_ethereum::Network::new(config.chain_id, config.network.as_str());
+        let transport = config.rpc.transport(&BTreeMap::new())?;
+        let rpc = chain_ethereum::RpcClient::connect(transport, &network).await?;
         Ok(Self(Box::new(|store| {
             chain_ethereum::indexer(chain_ethereum::IndexerParams::new(rpc, store))
                 .map(|index| Arc::new(index) as Arc<dyn Indexing>)
@@ -285,8 +306,8 @@ impl Chain {
     }
 
     /// Solana: a test validator, checked against the genesis hash its section
-    /// states — which `local.rs` has already filled in from the node, because
-    /// a `--reset` cluster has no hash a checked-in file could name.
+    /// states — which `main` has already filled in from the node, because a
+    /// `--reset` cluster has no hash a checked-in file could name.
     ///
     /// `WalletFactory::new` here takes a history reader beside the index, so
     /// this chain's wallets need a store whose own `ConfirmedHistory` query a
@@ -295,15 +316,12 @@ impl Chain {
     /// # Errors
     ///
     /// The node serves another cluster.
-    async fn solana(scenario: &Scenario) -> Result<Self, AnyError> {
-        let network = chain_solana::Network::new(
-            scenario.value::<String>("solana", "network")?,
-            scenario
-                .value::<String>("solana", "genesis_hash")?
-                .parse()?,
-        );
-        let rpc = chain_solana::RpcClient::connect(scenario.node("solana")?.transport()?, &network)
-            .await?;
+    async fn solana(sections: &Value) -> Result<Self, AnyError> {
+        let config: chain_solana::Config<String> =
+            serde_json::from_value(sections["solana"].clone())?;
+        let network = chain_solana::Network::new(config.network.as_str(), config.genesis_hash);
+        let transport = config.rpc.transport(&BTreeMap::new())?;
+        let rpc = chain_solana::RpcClient::connect(transport, &network).await?;
         Ok(Self(Box::new(|store| {
             chain_solana::indexer(chain_solana::IndexerParams::new(rpc, store))
                 .map(|index| Arc::new(index) as Arc<dyn Indexing>)
@@ -322,7 +340,7 @@ impl Chain {
 /// `Index<dyn Indexing>` is the only shape there is: a composition routes no query
 /// at all. This store answers none either — no balance, no page, no spendable
 /// set — and nothing here asks an index for one, because each of those is the
-/// repository's own answer joined to an index's overlay. Routing watches,
+/// repository's own answer joined to an index's pending blocks. Routing watches,
 /// reporting checkpoints and driving `Index::sync` need none of that.
 ///
 /// # Errors
@@ -331,13 +349,13 @@ impl Chain {
 /// chain refuses about its own indexing policy, and two chains claiming one
 /// network.
 async fn assemble(
-    scenario: &Scenario,
+    sections: &Value,
     sink: &Arc<Sink>,
 ) -> Result<(Index<dyn Indexing>, Vec<Observer>), AnyError> {
     let (first, second, third) = (
-        Chain::bitcoin(scenario).await?,
-        Chain::ethereum(scenario).await?,
-        Chain::solana(scenario).await?,
+        Chain::bitcoin(sections).await?,
+        Chain::ethereum(sections).await?,
+        Chain::solana(sections).await?,
     );
     let index = Index::over(Arc::clone(sink))
         .chain(|store| first.compose(store))?
@@ -382,7 +400,7 @@ async fn drive(index: &Index<dyn Indexing>, passes: usize) -> Result<(), AnyErro
 /// Prints what the store holds, in the store's own vocabulary.
 ///
 /// Not a history page and not a balance: this consumer asked its own repository
-/// three questions it chose, and none of them is a shape `apps/api` serves.
+/// three questions it chose, and none of them is a shape `apps/server` serves.
 fn report(sink: &Sink, units: &[Observer]) {
     for unit in units {
         for (id, start) in sink.observed(&unit.network) {
@@ -415,7 +433,7 @@ fn report(sink: &Sink, units: &[Observer]) {
 ///
 /// Whatever reconnecting reports, and a restart that restored something else.
 async fn restart(
-    scenario: &Scenario,
+    sections: &Value,
     sink: &Arc<Sink>,
     index: Index<dyn Indexing>,
     units: Vec<Observer>,
@@ -426,7 +444,7 @@ async fn restart(
     }
     drop((index, units));
 
-    let (index, units) = assemble(scenario, sink).await?;
+    let (index, units) = assemble(sections, sink).await?;
     for (unit, before) in units.iter().zip(before) {
         let after = unit.restored(&index, sink).await?;
         assert_eq!(

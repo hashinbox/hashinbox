@@ -9,7 +9,7 @@ set -u
 CHECK_EXAMPLES=${CHECK_EXAMPLES:-1}
 
 w='(^|[^A-Za-z0-9_])'
-traits='IndexedBlock|BlockSource|BlockInterpreter|WalletFactory|AddressParser|FactoryProfile|Wallet|Author|Authorship|Sender|SingleSender|TransactionFactory|Addresser|Signer|TransactionBuilder|Broadcaster'
+traits='NativeBlock|BlockSource|BlockInterpreter|WalletFactory|AddressParser|FactoryProfile|Wallet|Author|Authorship|Sender|SingleSender|TransactionFactory|Addresser|Signer|TransactionBuilder|Broadcaster'
 status=0
 dirs=$(ls -d sdk/chains/*/src/native 2>/dev/null)
 if [ -n "$dirs" ]; then
@@ -92,7 +92,7 @@ banned="$banned|Provider|WalletProvider|Family|enroll|enroll_with_registry"
 banned="$banned|IndexScope|TestnetMap|TransactionEnvelope|MemoSource|UtxoSet|Holding"
 #    - the (chain, network) partition is a *network*, never a "scope": the
 #      health vocabulary is NetworkState/NetworkFailure/NetworkHealth/
-#      NetworkEvent, the handshake is NetworkAdmission, the error kind is
+#      NetworkEvent, the handshake is CommitGate, the error kind is
 #      IndexErrorKind::NetworkMismatch, and the callback is
 #      SyncMonitor::network_changed (docs/CHAIN_LAYOUT.md section 3).
 banned="$banned|ScopeState|ScopeFailure|ScopeHealth|ScopeEvent|ScopeAdmission"
@@ -176,9 +176,29 @@ fi
 
 # 8. Only the composition root names a chain crate (a retired design note (015)). The linter
 #    works on Cargo packages, so it cannot see inside apps/server.
-grep -rnE '\bchain_(bitcoin|ethereum|solana)\b|\bchain_[a-z]+::' apps/server/src \
-  | grep -vE '^apps/server/src/chains(\.rs|/)' && { echo "chain crate outside apps/server/src/chains"; status=1; }
-grep -rnE 'enum (Chain|WalletAsset)\b|WalletAsset::' apps/api/src && { echo "closed asset/chain enum in routes"; status=1; }
+#
+#    There is one application crate, and it is a binary: apps/server reads its
+#    configuration and serves the HTTP API, and exports nothing. The routes were
+#    a package of their own (apps/api) while a manifest kept them from naming a
+#    chain; they are apps/server/src/api now, so this check is what keeps them:
+#    - src/chains.rs is the one file of the application that names a chain
+#      crate;
+#    - nothing under src/api names a chain crate, the configuration reader
+#      (sdk_config), a storage backend (indexing::sqlite, indexing::memory,
+#      rusqlite), or the composition root's own chain and storage modules.
+#    Text is matched, comments included: a route has no reason to say either.
+app=apps/server/src
+[ -f "$app/chains.rs" ] || { echo "$app/chains.rs is missing"; status=1; }
+[ -d "$app/api" ] || { echo "$app/api is missing"; status=1; }
+[ -e apps/api ] && { echo "apps/api exists; the routes are $app/api"; status=1; }
+ls apps/*/src/lib.rs >/dev/null 2>&1 && { echo "an application exports a library"; status=1; }
+chain_crate="${w}chain_(bitcoin|ethereum|solana)([^A-Za-z0-9_]|\$)|${w}chain_[a-z]+::"
+grep -rnE "$chain_crate" "$app" \
+  | grep -vE "^$app/chains\.rs:" && { echo "chain crate outside $app/chains.rs"; status=1; }
+composed="chain_[a-z]+|sdk_config|rusqlite|indexing::(sqlite|memory)|crate::(chains|storage)"
+grep -rnE "${w}(${composed})([^A-Za-z0-9_]|\$)" "$app/api" \
+  && { echo "a route names a chain, the configuration reader or a storage backend"; status=1; }
+grep -rnE 'enum (Chain|WalletAsset)\b|WalletAsset::' "$app/api" && { echo "closed asset/chain enum in routes"; status=1; }
 
 # 10. The lenient address parse is store-free and there is exactly one of it
 #     (docs/CHAIN_LAYOUT.md section 3, Addresses). `wallets::AddressParser` is
@@ -202,9 +222,9 @@ done
 #    config.toml beside it that states its chains, one `[<chain>]` section per
 #    chain crate. The scenario list is the directories themselves, so a new
 #    scenario is covered the moment it exists; examples/tests/scenarios.rs
-#    additionally checks that no main.rs names a chain crate except
-#    custom_store's, which assembles its index by hand, and that
-#    examples/local.rs registers every chain under the name its sections use.
+#    additionally checks that each main.rs registers exactly the chains its
+#    config.toml configures, each under the name its section uses; custom_store
+#    registers none, because it assembles its index by hand.
 #    An unexpanded glob would make `basename` report a chain named "*" and pass
 #    silently, so a missing sdk/chains/ is a failure, not a skip.
 if [ "$CHECK_EXAMPLES" = 1 ]; then
@@ -228,18 +248,98 @@ fi
 
 # 11. A module directory holds more than one file.
 #    A folder containing exactly one `.rs` file is not a boundary: it says a
-#    sibling is coming that never came. Use `#[path = "<parent>_<child>.rs"]`
-#    beside the parent instead, which keeps `pub(super)` meaning the parent and
-#    drops the directory. Cargo owns `tests/`, `examples/` and `benches/`, whose
-#    one-file shape it mandates, so only `src/` is checked.
+#    sibling is coming that never came. Fold the file into the parent module's
+#    own file (`<parent>.rs`) and drop the directory; what was `pub(super)`
+#    becomes private there. Do not reach for a `#[path]` attribute: loading a
+#    file under another module's name is an include trick (AGENTS.md), and the
+#    ones the indexing engine had were removed for that reason. Cargo owns
+#    `tests/`, `examples/` and `benches/`, whose one-file shape it mandates, so
+#    only `src/` is checked.
 for dir in $(find sdk apps packages -type d -path '*/src/*' 2>/dev/null); do
   case "$dir" in *"/target/"*) continue ;; esac
   files=$(find "$dir" -mindepth 1 -maxdepth 1 -name '*.rs' | wc -l | tr -d ' ')
   subs=$(find "$dir" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
   if [ "$files" = "1" ] && [ "$subs" = "0" ]; then
-    echo "$dir holds one file and no subdirectory; flatten it beside its parent"
+    echo "$dir holds one file and no subdirectory; fold it into its parent module"
     status=1
   fi
 done
+
+# 12. Nothing imports a store (ARCHITECTURE.md, "Dependency direction").
+#     sdk/indexing/src/storage/ holds the ports and what every store shares, in
+#     the files directly in it; each directory under it is one store. A store
+#     may import the shared files and the engine. Nothing imports a store: not
+#     the engine (src/ and src/supervisor/), not a shared file directly in
+#     src/storage/, and not another store. `rusqlite` is the `sqlite` store's
+#     own crate and is held the same way.
+#
+#     It lives here because the linter has no rule for it: `rust/layers` reads
+#     Cargo dependency edges between packages, not `use` paths, and no other
+#     rule sees a module boundary inside one crate. The shape of the directory
+#     -- every folder a store, its root file inside it -- is a rule about
+#     paths, so that part is `layout` in linter.toml.
+#
+#     The stores are the directories themselves, so a new one is covered the
+#     moment it exists, and none at all is a failure rather than a pass. An
+#     import is a path into the module (`sqlite::`) or its name in a `use`.
+#     Declaring a module is not depending on it: `pub mod sqlite;` in
+#     storage.rs is neither, and one statement is exempt, matched whole and
+#     only in lib.rs -- `pub use storage::<store>;`, which is what makes
+#     `indexing::<store>` reachable for a caller. Comments and string literals
+#     are blanked first, so prose may name a store and
+#     `#[cfg(feature = "sqlite")]` is a gate, not an import. An item under
+#     `#[cfg(test)]` is blanked too -- that item, not the rest of the file --
+#     and tests/ is never read: contract suites exist to hold both stores.
+index=sdk/indexing/src
+stores=$(find "$index/storage" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+  | sed 's|.*/||' | sort | tr '\n' ' ')
+if [ -z "$stores" ]; then
+  echo "no store directory under $index/storage; cannot check what imports one"
+  status=1
+else
+  find "$index" -name '*.rs' -type f | sort | INDEX="$index" STORES="$stores" perl -e '
+    use strict; use warnings;
+    my $index = $ENV{INDEX};
+    my %owner = map { $_ => $_ } split " ", $ENV{STORES};
+    $owner{rusqlite} = "sqlite" if $owner{sqlite};
+    my $status = 0;
+    sub blank { my ($text) = @_; $text =~ s/[^\n]/ /g; $text }
+    while (my $file = <STDIN>) { chomp $file;
+      my $own = $file =~ m{^\Q$index\E/storage/([^/]+)/} ? $1 : "";
+      my $names = join "|", grep { $owner{$_} ne $own } sort keys %owner;
+      next unless length $names;
+      open my $handle, "<", $file or die "$file: $!"; local $/; my $source = <$handle>;
+      my $code = $source;
+      # One pass over comments, strings and characters, so none can open another.
+      $code =~ s{(//[^\n]*|/\*.*?\*/|r(#*)".*?"\2|"(?:[^"\\]|\\.)*"|\x27(?:\\.|[^\\\x27\n])\x27)}
+        {blank($1)}gse;
+      # A test-only item: through its first `;`, or to the end of the block it opens.
+      while ($code =~ /#\[cfg\((?:all\()?test\b[^\]]*\]/g) {
+        my ($from, $at, $depth) = ($-[0], $+[0], 0);
+        while ($at < length $code) {
+          my $char = substr $code, $at++, 1;
+          $depth++ if $char eq "{";
+          last if $char eq "}" && --$depth <= 0;
+          last if $char eq ";" && $depth == 0;
+        }
+        substr($code, $from, $at - $from) = blank(substr $code, $from, $at - $from);
+        pos($code) = $at;
+      }
+      $code =~ s{(\bpub\s+use\s+(?:(?:crate|self)::)?storage::(?:$names)\s*;)}{blank($1)}ge
+        if $file eq "$index/lib.rs";
+      my %found;
+      $found{$-[1]} = $1 while $code =~ /(?<![A-Za-z0-9_])($names)\s*::/g;
+      while ($code =~ /\buse\s([^;]*);/g) { my ($body, $from) = ($1, $-[1]);
+        $found{$from + $-[1]} = $1 while $body =~ /(?<![A-Za-z0-9_])($names)(?![A-Za-z0-9_])/g; }
+      my @lines = split /\n/, $source; my %reported;
+      for my $at (sort { $a <=> $b } keys %found) {
+        my $line = 1 + (substr($code, 0, $at) =~ tr/\n//);
+        next if $reported{$line}++;
+        print "$file:$line: $found{$at} is imported outside $index/storage/$owner{$found{$at}}:",
+          " $lines[$line - 1]\n";
+        $status = 1; } }
+    exit $status;
+  ' || status=1
+fi
 
 exit "$status"

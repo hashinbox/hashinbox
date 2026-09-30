@@ -17,7 +17,7 @@ use std::{
 use base::{BlockPosition, Decimal, Networked};
 use chain_solana::{IndexerParams, Network, RpcClient, WalletConfig, WalletFactory};
 use indexing::{
-    Checkpoint as _, IndexStore as _, Indexing as _, OutputRequest, OutputStore, Start,
+    Birthday, Checkpoint as _, IndexStore as _, Indexing as _, OutputRequest, OutputStore,
     WatchStore as _, Watching as _,
 };
 use sha2::{Digest, Sha256};
@@ -27,6 +27,9 @@ use wallets::{SecretBytes, Wallets};
 const RELEASE: &str = include_str!("fixtures/agave-v3.1.14.sha256");
 const VERSION: &str = "v3.1.14";
 const COMMIT: &str = "3134055b562e95902233be308453fffa1c4a8902";
+/// The key this test registers native SOL under. Any ordered key serves
+/// `wallets::Wallets`; the server's own tag type lives inside the binary.
+const SOL: &str = "sol";
 
 #[derive(Debug, PartialEq, Eq)]
 struct Artifact<'a> {
@@ -414,8 +417,12 @@ async fn native_sol_submission_indexing_and_central_storage() {
     );
     let tasks = Arc::new(Tasks::default());
     // The sender's absence proof: the repository's own confirmed pages joined to
-    // this index's overlay, which is the only value that holds both halves.
-    let history = Arc::new(service.history());
+    // the blocks this index holds above its line, by the pair that belongs
+    // together.
+    let history = Arc::new(wallets::PendingJoin::new(
+        repository.clone(),
+        service.clone(),
+    ));
     let factory = WalletFactory::new(
         WalletConfig::new(&native),
         &client,
@@ -424,31 +431,23 @@ async fn native_sol_submission_indexing_and_central_storage() {
     )
     .expect("native SOL factory")
     .with_registrar(tasks.clone());
-    let mut wallets = Wallets::<payment_api::AssetTag>::new();
-    wallets
-        .add(payment_api::AssetTag::from_static("sol"), factory)
-        .expect("native SOL registration");
-    let asset = wallets
-        .asset(&payment_api::AssetTag::from_static("sol"))
-        .expect("registered SOL asset")
-        .id;
+    let mut wallets = Wallets::<&str>::new();
+    wallets.add(SOL, factory).expect("native SOL registration");
+    let asset = wallets.asset(&SOL).expect("registered SOL asset").id;
     // What an amount of it is, from the chain that declares it — never from a
     // wallet.
     let unit = base::Unit::native(&chain_solana::SOL);
     let mut held = BTreeMap::new();
     for (id, seed) in [("source", 7_u8), ("destination", 9)] {
         let wallet = wallets
-            .from(
-                &payment_api::AssetTag::from_static("sol"),
-                SecretBytes::new(vec![seed; 32]),
-            )
+            .from(&SOL, SecretBytes::new(vec![seed; 32]))
             .await
             .expect("configured wallet");
         // The index owns observation, and its row commits before the key is
         // kept: a crash between them leaves a watch-only address, never a key
         // nothing observes (`docs/design/030 §8 (ex-029)` section 3.3).
         service
-            .watch(id, wallet.as_ref(), Start::At(BlockPosition(0)))
+            .watch(id, wallet.as_ref(), Birthday::At(BlockPosition(0)))
             .await
             .expect("watch");
         held.insert(id.to_owned(), wallet);
@@ -460,7 +459,7 @@ async fn native_sol_submission_indexing_and_central_storage() {
     airdrop(&validator.endpoint, &destination.value, 1_000).await;
     let amount = "0.00001".parse::<Decimal>().expect("exact SOL amount");
     let transaction = wallets
-        .author(&payment_api::AssetTag::from_static("sol"), &held["source"])
+        .author(&SOL, &held["source"])
         .expect("SOL is an asset this deployment sends")
         .send(destination.clone(), amount.clone())
         .await
@@ -536,7 +535,8 @@ async fn native_sol_submission_indexing_and_central_storage() {
         })
         .expect("restarted Solana indexer"),
     );
-    let restored_history = restarted_service.history();
+    let restored_history =
+        wallets::PendingJoin::new(restarted_repository.clone(), restarted_service.clone());
 
     // Nothing re-watches anything: the restarted index reads its own durable
     // rows and resumes with the addresses it had.
@@ -594,10 +594,10 @@ async fn native_sol_submission_indexing_and_central_storage() {
 /// index holds it: every amount atomic, which is the only unit `indexing` can
 /// produce.
 async fn transactions(
-    history: &dyn indexing::History,
+    history: &dyn wallets::History,
     asset: &base::AssetId,
     address: &base::Address,
-) -> Vec<indexing::ObservedTransaction> {
+) -> Vec<wallets::ObservedTransaction> {
     let subject = indexing::Subject {
         address: address.clone(),
         asset: asset.clone(),

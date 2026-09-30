@@ -11,8 +11,8 @@
 
 use indexing::{
     Address, AssetId, BlockHash, BlockHeight, BlockPosition, BlockRef, CanonicalBlock,
-    FeeSettlement, IndexErrorKind, IndexStore, IndexedBatch, InterpretedBlock, Network,
-    OutputChanges, Progress, Watch, WatchProgress, WatchStore,
+    FeeSettlement, IndexErrorKind, IndexStore, IndexedBatch, InterpretedBlock, Network, Progress,
+    Watch, WatchProgress, WatchStore,
 };
 
 /// The [`WatchStore`] contract, checked against one repository bound to
@@ -274,7 +274,7 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
             },
         ];
 
-        self.reanchor(vec![raised.clone()]).await;
+        self.cancel_backfill(vec![raised.clone()]).await;
         assert_eq!(
             self.stored().await,
             settled,
@@ -282,7 +282,7 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
              of the same address kept the one it earned",
         );
 
-        self.reanchor(vec![raised]).await;
+        self.cancel_backfill(vec![raised]).await;
         assert_eq!(
             self.stored().await,
             settled,
@@ -310,7 +310,7 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
         drop(self.record(std::slice::from_ref(&watch)).await);
         self.forget(&watch).await;
 
-        self.reanchor(vec![raised.clone()]).await;
+        self.cancel_backfill(vec![raised.clone()]).await;
 
         assert_eq!(
             self.stored().await,
@@ -334,7 +334,7 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
 
         let error = self
             .repository
-            .reanchor(vec![Watch {
+            .cancel_backfill(vec![Watch {
                 address: theirs.address.clone(),
                 ..mine.clone()
             }])
@@ -391,7 +391,7 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
         let progress = watches
             .iter()
             .map(|watch| Progress {
-                watch: watch.id.clone(),
+                watch_id: watch.id.clone(),
                 expected: None,
                 indexed_through: checkpoint.clone(),
             })
@@ -420,20 +420,16 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
             parent: None,
             timestamp: None,
         };
-        let facts = CanonicalBlock::new(
+        let canonical = CanonicalBlock::new(
             self.network.clone(),
-            InterpretedBlock {
-                block: block.clone(),
-                transactions: Vec::new(),
-                outputs: OutputChanges::default(),
-                credits: Vec::new(),
-            },
+            InterpretedBlock::new(&self.network, block.clone(), Vec::new())
+                .expect("unique transaction ids"),
         )
         .expect("valid fixture facts");
         let batch = IndexedBatch::new(
             self.network.clone(),
             None,
-            vec![facts],
+            vec![canonical],
             Vec::new(),
             FeeSettlement::Charged,
         )
@@ -452,9 +448,9 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
             .expect("a batch of observations");
     }
 
-    pub(super) async fn reanchor(&self, watches: Vec<Watch>) {
+    pub(super) async fn cancel_backfill(&self, watches: Vec<Watch>) {
         self.repository
-            .reanchor(watches)
+            .cancel_backfill(watches)
             .await
             .expect("a batch of re-anchored observations");
     }

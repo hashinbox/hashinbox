@@ -9,9 +9,10 @@ use crate::native::{Error, ErrorKind, Network, json::Object};
 /// Supported Bitcoin Core versions: 31.x.
 const CORE_VERSIONS: std::ops::Range<u64> = 310_000..320_000;
 
-/// A ready node's identity and tip.
+/// What [`Client::verify`] established about a ready node: its identity and
+/// its tip.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Status {
+pub struct Verification {
     /// Bitcoin Core's numeric version, e.g. `310000`.
     pub version: u64,
     /// The network the node serves.
@@ -28,7 +29,7 @@ impl<C: json_rpc::Client> Client<C> {
     /// # Errors
     ///
     /// As for [`Client::connect`].
-    pub async fn status(&self) -> Result<Status, Error> {
+    pub async fn verify(&self) -> Result<Verification, Error> {
         let info = self.request("getnetworkinfo", json!([])).await?;
         let info = Object::new(&info, "Bitcoin getnetworkinfo result", Error::invalid_reply)?;
         let version = info.u64("version", "Bitcoin Core version")?;
@@ -44,13 +45,13 @@ impl<C: json_rpc::Client> Client<C> {
             "Bitcoin getblockchaininfo result",
             Error::invalid_reply,
         )?;
-        let status = self.chain_status(&chain, version)?;
+        let verification = self.verify_chain(&chain, version)?;
         let index = self.request("getindexinfo", json!(["txindex"])).await?;
-        status.require_synced_index(&index)?;
-        Ok(status)
+        verification.require_synced_index(&index)?;
+        Ok(verification)
     }
 
-    fn chain_status(&self, chain: &Object<'_>, version: u64) -> Result<Status, Error> {
+    fn verify_chain(&self, chain: &Object<'_>, version: u64) -> Result<Verification, Error> {
         let name = chain.string("chain", "Bitcoin Core chain")?;
         let network = Network::from_core_chain(name).ok_or_else(|| {
             Error::new(
@@ -85,7 +86,7 @@ impl<C: json_rpc::Client> Client<C> {
             ));
         }
         let hash = chain.string("bestblockhash", "Bitcoin best block hash")?;
-        Ok(Status {
+        Ok(Verification {
             version,
             network,
             height: BlockHeight(blocks),
@@ -95,7 +96,7 @@ impl<C: json_rpc::Client> Client<C> {
     }
 }
 
-impl Status {
+impl Verification {
     fn require_synced_index(&self, info: &Value) -> Result<(), Error> {
         let info = Object::new(info, "Bitcoin getindexinfo result", Error::invalid_reply)?;
         let index = info
@@ -144,7 +145,7 @@ mod tests {
         })
     }
 
-    fn status(replies: Vec<Value>) -> Result<Status, Error> {
+    fn verify(replies: Vec<Value>) -> Result<Verification, Error> {
         let methods = [
             ("getnetworkinfo", json!([])),
             ("getblockchaininfo", json!([])),
@@ -156,7 +157,7 @@ mod tests {
                 .zip(replies)
                 .map(|((method, params), value)| Reply::ok(method, value).expecting(params)),
         );
-        let result = block_on(script.client().status());
+        let result = block_on(script.client().verify());
         script.exhausted();
         result
     }
@@ -185,7 +186,7 @@ mod tests {
                 false,
             ),
         ] {
-            let error = status(vec![info]).unwrap_err();
+            let error = verify(vec![info]).unwrap_err();
             assert_eq!(
                 (error.message.as_str(), error.retryable),
                 (message, retryable)
@@ -252,7 +253,7 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .extend(patch.as_object().unwrap().clone());
-            let error = status(vec![json!({"version": 310000}), chain]).unwrap_err();
+            let error = verify(vec![json!({"version": 310000}), chain]).unwrap_err();
             assert_eq!(
                 (error.message.as_str(), error.retryable),
                 (message, retryable)
@@ -289,7 +290,7 @@ mod tests {
                 true,
             ),
         ] {
-            let error = status(vec![json!({"version": 310000}), chain_info(), info]).unwrap_err();
+            let error = verify(vec![json!({"version": 310000}), chain_info(), info]).unwrap_err();
             assert_eq!(
                 (error.message.as_str(), error.retryable),
                 (message, retryable)
@@ -304,11 +305,11 @@ mod tests {
                 json!({"txindex": {"synced": true}}),
                 json!({"txindex": {"synced": true, "best_block_height": 10}}),
             ] {
-                let status =
-                    status(vec![json!({"version": version}), chain_info(), index]).unwrap();
+                let verification =
+                    verify(vec![json!({"version": version}), chain_info(), index]).unwrap();
                 assert_eq!(
-                    status,
-                    Status {
+                    verification,
+                    Verification {
                         version,
                         network: Network::Regtest,
                         height: BlockHeight(10),

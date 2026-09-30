@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use base::{Decimal, MovementKind};
+use base::{Decimal, Identified, MovementKind, TransactionId};
 
 use crate::{Address, AssetId, BlockRef, IndexError, IndexErrorKind, Network, TransactionRef};
 
@@ -241,6 +241,17 @@ pub struct CanonicalTransaction {
     pub fee: Option<NetworkFee>,
 }
 
+/// Identified inside its block by the chain's own identifier: the block
+/// states the network, so the identifier alone tells two of its transactions
+/// apart.
+impl Identified for CanonicalTransaction {
+    type Id = TransactionId;
+
+    fn id(&self) -> &TransactionId {
+        &self.transaction_id.id
+    }
+}
+
 impl CanonicalTransaction {
     /// The block that included the transaction.
     #[must_use]
@@ -270,50 +281,6 @@ impl CanonicalTransaction {
         }
         addresses
     }
-}
-
-/// A transaction's status as [`crate::History`] reports it.
-///
-/// `Confirmed` is a fact rather than a threshold: it means the durable store
-/// holds the transaction, which it only does for blocks at or below the
-/// chain's confirmed line, so it will not revert.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TransactionStatus {
-    /// In a canonical block above the confirmed line. It may still revert.
-    Pending {
-        /// The including block.
-        block: BlockRef,
-        /// Newest known height minus inclusion height, plus one.
-        confirmations: u64,
-    },
-    /// Committed at or below the confirmed line. It will not revert.
-    Confirmed {
-        /// The including block.
-        block: BlockRef,
-        /// Newest known height minus inclusion height, plus one.
-        confirmations: u64,
-    },
-    /// Included but failed.
-    Failed {
-        /// The including block.
-        block: BlockRef,
-        /// The chain's failure reason, when it reports one.
-        reason: Option<String>,
-    },
-}
-
-/// A history entry: a [`CanonicalTransaction`] with its read-time status.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ObservedTransaction {
-    /// The chain's transaction identifier, which names the network it was
-    /// indexed in.
-    pub transaction_id: TransactionRef,
-    /// Status with confirmation depth.
-    pub status: TransactionStatus,
-    /// The movements of the queried asset only.
-    pub movements: Vec<ValueMovement>,
-    /// The native fee, if any.
-    pub fee: Option<NetworkFee>,
 }
 
 /// A transaction as a [`crate::BlockInterpreter`] reports it, before
@@ -350,6 +317,17 @@ pub struct ObservationDraft {
     pub movements: Vec<ValueMovement>,
     /// The fee, when the chain charges one.
     pub fee: Option<NetworkFee>,
+}
+
+/// Identified inside its block exactly as the [`CanonicalTransaction`] it
+/// becomes, so a repeated identifier is refused when an interpreter's output
+/// is assembled and cannot reach validation.
+impl Identified for ObservationDraft {
+    type Id = TransactionId;
+
+    fn id(&self) -> &TransactionId {
+        &self.transaction_id.id
+    }
 }
 
 impl ObservationDraft {

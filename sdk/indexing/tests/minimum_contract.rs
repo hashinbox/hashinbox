@@ -21,10 +21,10 @@ use std::sync::{
 
 use futures_executor::block_on;
 use indexing::{
-    Address, AddressFilter, BlockHash, BlockHeight, BlockInterpreter, BlockParent, BlockPosition,
-    BlockRef, BlockSource, BoxFuture, ChainName, ChainTip, FeeSettlement, IndexError,
-    IndexErrorKind, IndexStore, IndexedBatch, IndexedBlock, Indexing, InterpretedBlock, Network,
-    OutputChanges, OutputKey, Service, SourceError, Start, Subject, SyncConfig, SyncPolicy, Watch,
+    Address, Birthday, BlockHash, BlockHeight, BlockInterpreter, BlockParent, BlockPosition,
+    BlockRef, BlockSource, BoxFuture, ChainName, ChainTips, FeeSettlement, ForwardRange,
+    IndexError, IndexErrorKind, IndexStore, IndexedBatch, Indexer, Indexing, InterpretedBlock,
+    NativeBlock, Network, OutputKey, SourceError, Subject, SyncConfig, SyncPolicy, Watch,
     WatchProgress, WatchStore, Watching,
 };
 
@@ -133,7 +133,7 @@ impl WatchStore for Sink {
 
     /// The minimum a sink owes for a cancelled backfill: the row stays, its
     /// birthday moves, and the claim it earned under the old one goes.
-    fn reanchor<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
+    fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
         Box::pin(async move {
             let mut held = self.watches.lock().expect("watches");
             let mut progress = self.progress.lock().expect("progress");
@@ -178,7 +178,7 @@ impl IndexStore for Sink {
             }
             let mut progress = self.progress.lock().expect("progress");
             for claim in batch.progress() {
-                let held = progress.iter().position(|(id, _)| id == &claim.watch);
+                let held = progress.iter().position(|(id, _)| id == &claim.watch_id);
                 let stored = held.map(|at| progress[at].1.clone());
                 if stored != claim.expected {
                     return Err(IndexError::new(
@@ -189,11 +189,11 @@ impl IndexStore for Sink {
                 }
                 match held {
                     Some(at) => progress[at].1 = claim.indexed_through.clone(),
-                    None => progress.push((claim.watch.clone(), claim.indexed_through.clone())),
+                    None => progress.push((claim.watch_id.clone(), claim.indexed_through.clone())),
                 }
             }
-            for facts in batch.blocks() {
-                let block = facts.block();
+            for canonical in batch.blocks() {
+                let block = canonical.block();
                 if batch
                     .expected_checkpoint()
                     .is_some_and(|line| block.position <= line.position)
@@ -251,13 +251,13 @@ impl Source {
 #[derive(Clone, Debug)]
 struct Native(BlockRef);
 
-impl IndexedBlock for Native {
+impl NativeBlock for Native {
     fn block_ref(&self) -> BlockRef {
         self.0.clone()
     }
 }
 
-impl ChainTip for Source {
+impl ChainTips for Source {
     fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
         Box::pin(async move { Ok(block(self.tip)) })
     }
@@ -306,12 +306,7 @@ impl BlockInterpreter for Interpreter {
         block: &Native,
         _addresses: &[Address],
     ) -> Result<InterpretedBlock, IndexError> {
-        Ok(InterpretedBlock {
-            block: block.0.clone(),
-            transactions: Vec::new(),
-            outputs: OutputChanges::default(),
-            credits: Vec::new(),
-        })
+        InterpretedBlock::new(&network(), block.0.clone(), Vec::new())
     }
 
     fn settlement(&self) -> FeeSettlement {
@@ -346,7 +341,7 @@ fn subject(address: &str) -> Subject {
 
 /// One index over `sink`, exactly as a third party assembles one: the chain's
 /// two halves, the store behind an `Arc`, and a policy.
-fn indexer(sink: &Arc<Sink>, tip: u64) -> Service<Source, Interpreter, Arc<Sink>> {
+fn indexer(sink: &Arc<Sink>, tip: u64) -> Indexer<Source, Interpreter, Arc<Sink>> {
     over(sink, Source::to(tip), network())
 }
 
@@ -356,8 +351,8 @@ fn over(
     sink: &Arc<Sink>,
     source: Source,
     network: Network,
-) -> Service<Source, Interpreter, Arc<Sink>> {
-    Service::new(
+) -> Indexer<Source, Interpreter, Arc<Sink>> {
+    Indexer::new(
         source,
         Interpreter,
         Arc::clone(sink),
@@ -374,7 +369,7 @@ fn a_store_with_no_read_methods_observes_commits_and_restarts() {
     let index = indexer(&sink, 3);
 
     // Observation, with a birthday, before anything is indexed.
-    let watch = block_on(index.watch("payer", &subject("payer"), Start::At(BlockPosition(0))))
+    let watch = block_on(index.watch("payer", &subject("payer"), Birthday::At(BlockPosition(0))))
         .expect("an observation the store accepted");
     assert_eq!(watch.start, BlockPosition(0));
     assert_eq!(
@@ -428,7 +423,7 @@ fn a_store_with_no_read_methods_observes_commits_and_restarts() {
 fn withdrawing_an_observation_reaches_the_store() {
     let (sink, _reported) = Sink::new();
     let index = indexer(&sink, 1);
-    block_on(index.watch("payer", &subject("payer"), Start::At(BlockPosition(0))))
+    block_on(index.watch("payer", &subject("payer"), Birthday::At(BlockPosition(0))))
         .expect("an observation");
 
     let withdrawn = block_on(index.unwatch("payer")).expect("a withdrawal");
@@ -490,7 +485,7 @@ fn a_restart_trusts_the_progress_the_store_recorded() {
 
     // An observation born below the checkpoint owes that range, and the next
     // pass reads it.
-    block_on(index.watch("payer", &subject("payer"), Start::At(BlockPosition(0))))
+    block_on(index.watch("payer", &subject("payer"), Birthday::At(BlockPosition(0))))
         .expect("an observation below the line");
     block_on(Indexing::sync(&index)).expect("the pass that fills the range in");
     let filled = first.served();
@@ -540,7 +535,7 @@ fn an_index_of_one_network_reads_only_that_network_out_of_a_shared_store() {
     let mine = indexer(&sink, 1);
     let theirs = over(&sink, Source::to(1), elsewhere.clone());
 
-    block_on(mine.watch("here", &subject("payer"), Start::At(BlockPosition(0))))
+    block_on(mine.watch("here", &subject("payer"), Birthday::At(BlockPosition(0))))
         .expect("an observation of this network");
     block_on(theirs.watch(
         "there",
@@ -548,7 +543,7 @@ fn an_index_of_one_network_reads_only_that_network_out_of_a_shared_store() {
             address: Address::new(elsewhere.clone(), "payer"),
             asset: indexing::AssetId::native(elsewhere.chain.clone()),
         },
-        Start::At(BlockPosition(0)),
+        Birthday::At(BlockPosition(0)),
     ))
     .expect("an observation of the other network");
 
@@ -591,7 +586,7 @@ fn an_index_of_one_network_reads_only_that_network_out_of_a_shared_store() {
 #[test]
 fn the_two_ports_are_the_whole_requirement() {
     fn requires_a_repository<R: indexing::Repository>(_store: &R) {}
-    fn requires_a_filter(filter: AddressFilter) -> BlockPosition {
+    fn requires_a_filter(filter: ForwardRange) -> BlockPosition {
         filter.start_position
     }
 
@@ -599,7 +594,7 @@ fn the_two_ports_are_the_whole_requirement() {
     requires_a_repository(&sink);
     requires_a_repository(sink.as_ref());
     assert_eq!(
-        requires_a_filter(AddressFilter {
+        requires_a_filter(ForwardRange {
             address: Address::new(network(), "payer"),
             start_position: BlockPosition(1),
         }),

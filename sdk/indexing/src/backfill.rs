@@ -1,15 +1,15 @@
 //! The half of one pass that reads *below* the confirmed line.
 //!
 //! Not a second loop, not a second owner and not a second store operation: the
-//! same [`Service`] that moved the checkpoint forward turns round, once, and
+//! same [`Indexer`] that moved the checkpoint forward turns round, once, and
 //! inspects the blocks an observation still owes from its own birthday, against
 //! the watch set it already holds. The affected observation is simply further
 //! behind (`docs/design/030 §8 (ex-032)`, "What a commit contains").
 //!
 //! **What this file owns is the scheduling and nothing else.** Every block is
-//! inspected by [`Service::inspect`], the one procedure the forward half also
+//! inspected by [`Indexer::inspect`], the one procedure the forward half also
 //! reaches ([`crate::scan`]), and the batch is committed by
-//! [`Service::apply`], the one commit lifecycle — so neither direction can be
+//! [`Indexer::commit_batch`], the one commit lifecycle — so neither direction can be
 //! given a validation or a step the other lacks. What is left here is where to
 //! read from, whom each block is read for, and what is still owed afterwards.
 //!
@@ -31,8 +31,8 @@ use std::collections::BTreeSet;
 
 use crate::{
     Address, BackfillStatus, BlockInterpreter, BlockRef, BlockSource, CanonicalBlock, IndexError,
-    IndexErrorKind, IndexedBatch, IndexedBlock, Network, Progress, Service, SyncPlan,
-    pass::Outcome, scan::Scan, watches::Backlog,
+    IndexErrorKind, IndexedBatch, Indexer, NativeBlock, Network, Progress, SyncPlan,
+    pass::CommitTally, scan::Scan, watches::OwedRange,
 };
 
 /// Stops asking for history a watch still owes.
@@ -52,7 +52,7 @@ pub trait Backfilling: Send + Sync {
     /// re-anchored, each carrying its new birthday.
     ///
     /// Each affected watch is left as the one it would have been had it been
-    /// created now from [`Start::Fresh`](crate::Start::Fresh): same id, same
+    /// created now from [`Birthday::Fresh`](crate::Birthday::Fresh): same id, same
     /// address, same asset, birthday at the checkpoint's successor, and **nothing
     /// inspected for it**. That is the one honest way to settle a range without
     /// claiming to have read it — a watch born above the line owes nothing below
@@ -69,7 +69,7 @@ pub trait Backfilling: Send + Sync {
     ///
     /// **A cancelled range can be resumed**, at the price of reading it again:
     /// [`Watching::unwatch`](crate::Watching::unwatch) the address and watch it
-    /// from a lower `Start::At`, or purge the progress with the offline rescan,
+    /// from a lower `Birthday::At`, or purge the progress with the offline rescan,
     /// which re-derives every range from its registered birthday. What cannot
     /// be resumed is the *claim* without the reading, which is the point.
     ///
@@ -85,13 +85,13 @@ pub trait Backfilling: Send + Sync {
     ///
     /// [`IndexErrorKind::NetworkMismatch`] for a network this index does not
     /// own, and the store's own errors.
-    fn cancel<'a>(
+    fn cancel_backfill<'a>(
         &'a self,
         network: &'a Network,
     ) -> crate::BoxFuture<'a, Result<Vec<crate::Watch>, IndexError>>;
 }
 
-impl<S, I, R> Service<S, I, R>
+impl<S, I, R> Indexer<S, I, R>
 where
     S: BlockSource<Block = I::Block>,
     I: BlockInterpreter,
@@ -111,7 +111,7 @@ where
     pub(super) async fn backfill(
         &self,
         plan: &SyncPlan,
-        committed: &mut Outcome,
+        committed: &mut CommitTally,
         budget: usize,
     ) -> Result<Option<BackfillStatus>, IndexError> {
         let Some(checkpoint) = committed.checkpoint.clone() else {
@@ -127,7 +127,7 @@ where
     async fn fill(
         &self,
         plan: &SyncPlan,
-        committed: &mut Outcome,
+        committed: &mut CommitTally,
         checkpoint: &BlockRef,
         budget: usize,
     ) -> Result<Option<BackfillStatus>, IndexError> {
@@ -157,7 +157,7 @@ where
         // commit together rather than one at a time, and none of them is being
         // held above it. The permit, the line the network is left at, the claims
         // the watch set takes over and the spends the store could not account for
-        // are `Service::apply`'s, exactly as they are at the front of the chain.
+        // are `Indexer::commit_batch`'s, exactly as they are at the front of the chain.
         let batch = IndexedBatch::new(
             self.config.network.clone(),
             Some(checkpoint.clone()),
@@ -165,7 +165,7 @@ where
             proved,
             self.interpreter.settlement(),
         )?;
-        self.apply(plan, committed, batch).await?;
+        self.commit_batch(plan, committed, batch).await?;
         self.owing(checkpoint, inspected, None)
     }
 
@@ -178,19 +178,20 @@ where
     /// coverage that does not exist, and nothing downstream would ever re-derive
     /// it (`docs/design/030 §8 (ex-032)` section 8, the named risk).
     fn reached(last: Option<&CanonicalBlock>) -> Result<BlockRef, IndexError> {
-        last.map(|facts| facts.block().clone()).ok_or_else(|| {
-            IndexError::new(
-                IndexErrorKind::Source,
-                "source served no block below the checkpoint",
-                true,
-            )
-        })
+        last.map(|canonical| canonical.block().clone())
+            .ok_or_else(|| {
+                IndexError::new(
+                    IndexErrorKind::Source,
+                    "source served no block below the checkpoint",
+                    true,
+                )
+            })
     }
 
     /// Inspects every block this read served, each for the addresses that still
     /// owe it, as **one contiguous reading**.
     ///
-    /// The procedure and every check are [`Service::inspect`]'s, so a historical
+    /// The procedure and every check are [`Indexer::inspect`]'s, so a historical
     /// block is held to exactly what a block arriving at the tip is held to. The
     /// [`Scan`] is what makes the sequence one reading rather than a bag of
     /// blocks: the durable claim this read proves says every block from where an
@@ -208,7 +209,7 @@ where
     fn interpret(
         &self,
         blocks: Vec<I::Block>,
-        owed: &[Backlog],
+        owed: &[OwedRange],
     ) -> Result<Vec<CanonicalBlock>, IndexError> {
         let mut scan = Scan::after(None);
         let mut filled = Vec::with_capacity(blocks.len());
@@ -233,7 +234,7 @@ where
     /// names a block the batch carries, which says nothing about where the
     /// observation resumed from.
     fn proved(
-        owed: &[Backlog],
+        owed: &[OwedRange],
         filled: &[CanonicalBlock],
         reached: &BlockRef,
     ) -> Result<Vec<Progress>, IndexError> {
@@ -250,7 +251,7 @@ where
                     .unwrap_or(reached);
                 Scan::after(entry.expected.clone()).follows(first)?;
                 Ok(Progress {
-                    watch: entry.watch.clone(),
+                    watch_id: entry.watch_id.clone(),
                     expected: entry.expected.clone(),
                     indexed_through: reached.clone(),
                 })
@@ -259,7 +260,7 @@ where
     }
 
     /// The addresses that still owe `position`, deduplicated.
-    fn owing_at(owed: &[Backlog], position: crate::BlockPosition) -> Vec<Address> {
+    fn owing_at(owed: &[OwedRange], position: crate::BlockPosition) -> Vec<Address> {
         let mut addresses = BTreeSet::new();
         for entry in owed {
             if entry.resume <= position {

@@ -1,7 +1,7 @@
 # The chains this scenario runs. `sdk_config::Document` reads this file,
 # `sdk_config::Sections` carries each named section without looking inside it,
-# and `sdk_config::Registry` (examples/local.rs) hands each one to the chain
-# that registered for it. Nothing in main.rs names a chain.
+# and the `sdk_config::Registry` in main.rs hands each one to the chain
+# registered under its name.
 #
 # Every key not stated here is the chain's own default: the asset tag, the
 # address type, Bitcoin's six-block confirmation depth, and each chain's
@@ -19,9 +19,8 @@ rpc.endpoints = ['http://127.0.0.1:8545']
 [solana]
 network = 'localnet'
 # `solana-test-validator --reset` mints a new cluster every run, so no
-# checked-in file can state its genesis hash. examples/local.rs asks this
-# section's own node for it and substitutes the answer before the document is
-# parsed. A deployment writes the hash it expects; a node serving another
+# checked-in file can state its genesis hash. main.rs asks this section's own
+# node for it and substitutes the answer before the document is parsed. A deployment writes the hash it expects; a node serving another
 # cluster is refused.
 genesis_hash = '<genesis-hash-from-the-node>'
 rpc.endpoints = ['http://127.0.0.1:8899']

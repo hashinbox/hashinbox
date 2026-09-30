@@ -97,12 +97,12 @@ impl TransferBuilder {
         Ok(TransactionSnapshot::new(
             Self::SNAPSHOT_KIND,
             serde_json::json!({
-                "scope": {
+                "network": {
                     "chain": network.chain.as_str(),
-                    "network": network.name.as_str(),
+                    "name": network.name.as_str(),
                 },
                 "source": self.from().to_string(),
-                "destination": destination.to_string(),
+                "to": destination.to_string(),
                 "amount": amount.to_string(),
                 "asset": {"kind": "native", "ticker": SOL.ticker, "decimals": SOL.decimals},
             }),
@@ -122,7 +122,7 @@ impl TransferBuilder {
             .map_err(|error| invalid(format!("invalid Solana snapshot: {error}")))?;
         let network = &self.wallet.config.network;
         if body.network.chain != CHAIN_NAME.as_str()
-            || body.network.network != network.name
+            || body.network.name != network.name
             || body.source != self.from().to_string()
             || !body.asset.is_sol()
         {
@@ -131,7 +131,7 @@ impl TransferBuilder {
             ));
         }
         let destination = body
-            .destination
+            .to
             .parse::<Address>()
             .map_err(|error| invalid(error.message))?;
         let amount = body.amount.parse::<Decimal>().map_err(invalid)?;
@@ -181,11 +181,11 @@ impl TransactionBuilder for TransferBuilder {
         Box::pin(async move {
             self.validate()?;
             let (destination, amount) = self.configured()?.clone();
-            let item = self
+            let request = self
                 .wallet
-                .item(destination, &amount)
+                .request(destination, &amount)
                 .map_err(|error| send_failure(SendError::item(0, Vec::new(), error)))?;
-            let (signed, fee) = self.wallet.outbox.sign(item).await?;
+            let (signed, fee) = self.wallet.outbox.sign(request).await?;
             let claim = base::Claim::new([signed
                 .from
                 .canonical(&self.wallet.config.network)
@@ -209,13 +209,9 @@ fn invalid(error: impl std::fmt::Display) -> TransactionError {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SnapshotBody {
-    /// The persisted key is `scope`; the field is `network`, because that noun
-    /// was retired and snapshots written by earlier builds must keep
-    /// deserializing.
-    #[serde(rename = "scope")]
     network: NetworkBody,
     source: String,
-    destination: String,
+    to: String,
     amount: String,
     asset: Asset,
 }
@@ -224,7 +220,7 @@ struct SnapshotBody {
 #[serde(deny_unknown_fields)]
 struct NetworkBody {
     chain: String,
-    network: String,
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -388,11 +384,11 @@ mod tests {
         let snapshot = builder.draft().unwrap().snapshot;
         let mut other = snapshot.value().clone();
         for (field, value) in [
-            ("/scope/network", serde_json::json!("mainnet-beta")),
-            ("/scope/chain", serde_json::json!("ethereum")),
+            ("/network/name", serde_json::json!("mainnet-beta")),
+            ("/network/chain", serde_json::json!("ethereum")),
             ("/source", serde_json::json!(key(9).address().to_string())),
             ("/asset/decimals", serde_json::json!(18)),
-            ("/destination", serde_json::json!("bad")),
+            ("/to", serde_json::json!("bad")),
             ("/amount", serde_json::json!("0")),
         ] {
             let original = other.pointer(field).unwrap().clone();

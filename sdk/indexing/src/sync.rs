@@ -45,8 +45,8 @@ pub enum SyncPhase {
 
 /// The outcome of one `sync` pass for one network.
 ///
-/// Shares five fields with [`crate::NetworkHealth`] by design rather than by
-/// accident; the reason the two are not one type is recorded there.
+/// [`crate::NetworkHealth`] holds the last one a network completed, beside the
+/// standing condition no single pass can report.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncStatus {
     /// The network this status describes.
@@ -68,7 +68,7 @@ pub struct SyncStatus {
     /// Empty on a pass that accounted for everything. A non-empty list is a
     /// per-address completeness fact, not a failure: the pass succeeded and the
     /// checkpoint moved.
-    pub unknown_spends: Vec<OutputKey>,
+    pub unmatched_spends: Vec<OutputKey>,
     /// The backfill still owed to addresses watched from below the checkpoint,
     /// or `None` when nothing is owed.
     ///

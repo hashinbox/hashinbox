@@ -65,7 +65,7 @@ impl<C: json_rpc::Client> Client<C> {
                 network: *network,
             }),
         };
-        client.status().await?;
+        client.verify().await?;
         Ok(client)
     }
 

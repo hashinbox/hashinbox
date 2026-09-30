@@ -20,12 +20,12 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 use base::Network;
 use base::{BoxFuture, Units};
-use indexing::{
-    Balance, Balances, History, Holder, Index, IndexError, IndexErrorKind, Indexing, Schedule,
-    Schedules,
-};
+use indexing::{Balance, Holder, Index, IndexError, IndexErrorKind, Indexing, Schedule, Schedules};
 
-use crate::{SubmissionRegistrar, WalletError, WalletErrorKind, WalletFactory, Wallets};
+use crate::{
+    Balances, History, SubmissionRegistrar, TransactionPage, WalletError, WalletErrorKind,
+    WalletFactory, Wallets,
+};
 
 /// One chain network's composed parts, as an application registers them.
 ///
@@ -34,28 +34,30 @@ use crate::{SubmissionRegistrar, WalletError, WalletErrorKind, WalletFactory, Wa
 /// network.
 pub struct ComposedChain<A> {
     /// The index of this one network, already mirroring its watch list to the
-    /// store it was composed over. One chain's `Node::compose` returns one
+    /// store it was composed over. One chain's `ChainHandle::compose` returns one
     /// network's indexer, which is what [`Indexing`] is: [`Composition`] is the
     /// only value here that holds more than one.
     pub index: Arc<dyn Indexing>,
     /// This network's history reader: the repository's own confirmed pages
     /// joined to the blocks `index` still holds above its confirmed line
-    /// (`indexing::ObservedHistory`).
+    /// ([`crate::PendingJoin`]).
     ///
     /// A field rather than a capability of `index`, because it is neither
-    /// half's alone — and a chain is the only place that holds both, so it is
-    /// the only place that can build one. [`Composition`] collects them into the
-    /// one handle a consumer serving several networks holds.
+    /// half's alone: the page is the repository's query and the pending blocks
+    /// are the index's, and a chain is the place that holds both, so it is the
+    /// place that pairs them. [`Composition`] collects them into the one handle
+    /// a consumer serving several networks holds.
     pub history: Arc<dyn History>,
     /// This network's balance fold: the repository's own total for a holding,
-    /// completed by the blocks `index` still holds above its confirmed line.
+    /// completed by the blocks `index` still holds above its confirmed line
+    /// ([`crate::PendingJoin`]).
     ///
     /// Stated beside `history` and for the same reason. A balance is a query
     /// over stored rows, and this chain is the one place that holds both the
-    /// rows' owner and the overlay that finishes them, so it is the one place
-    /// that can name what answers it. [`Composition`] collects them into the
-    /// one handle a consumer serving several networks holds — a consumer never
-    /// reaches a query through an [`Indexer`].
+    /// rows' owner and the index whose pending blocks finish them, so it is the
+    /// one place that can name what answers it. [`Composition`] collects them
+    /// into the one handle a consumer serving several networks holds — a
+    /// consumer never reaches a query through an index.
     pub balance: Arc<dyn Balances>,
     /// The asset tags and factories of this chain, all in one network.
     pub factories: Vec<(A, Box<dyn WalletFactory>)>,
@@ -254,8 +256,8 @@ where
 /// Every configured network's history reader, keyed by the network that owns it.
 ///
 /// The one place a history read is routed, and it is a consumer's own value: a
-/// page is the repository's query joined to one index's overlay, so there is one
-/// reader per network and nothing to ask an indexer for. A holding names its
+/// page is the repository's query joined to one index's pending blocks, so there
+/// is one reader per network and nothing to ask an indexer for. A holding names its
 /// network, so the route is the same lookup a balance takes — without making
 /// every child of a composition answer a page before any of them can.
 struct Histories(Vec<(Network, Arc<dyn History>)>);
@@ -265,7 +267,7 @@ impl History for Histories {
         &'a self,
         of: &'a dyn Holder,
         page: indexing::Page,
-    ) -> BoxFuture<'a, Result<indexing::TransactionPage, IndexError>> {
+    ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
         let network = &of.address().network;
         match self.0.iter().find(|(owner, _)| owner == network) {
             Some((_, reader)) => reader.history(of, page),
@@ -278,8 +280,8 @@ impl History for Histories {
 ///
 /// The one place a balance read is routed, and a consumer's own value for the
 /// same reason [`Histories`] is one: a total is the repository's row completed
-/// by one index's overlay, so there is one fold per network and nothing to ask
-/// an indexer for. A holding names its network, which is the whole of the route.
+/// by one index's pending blocks, so there is one fold per network and nothing
+/// to ask an indexer for. A holding names its network, which is the whole of the route.
 struct Folds(Vec<(Network, Arc<dyn Balances>)>);
 
 impl Balances for Folds {
@@ -312,8 +314,8 @@ mod tests {
 
     use base::{AssetId, ChainName, Unit};
     use indexing::{
-        Balance, Balances, BlockRef, Checkpoint, History, Holder, IndexError, Indexing, Listener,
-        Network, Page, Start, Subject, SyncStatus, TransactionPage, Watch, Watching, memory,
+        Balance, Birthday, BlockRef, Checkpoint, Holder, IndexError, Indexing, Listener, Network,
+        Page, Subject, SyncStatus, Watch, Watching, memory,
     };
 
     use super::*;
@@ -357,8 +359,8 @@ mod tests {
     }
 
     /// One network's history reader, answering a page that names which network
-    /// it came from: what `Histories` routes to, without a repository or an
-    /// overlay in sight.
+    /// it came from: what `Histories` routes to, without a repository or a
+    /// pending block in sight.
     struct FixtureHistory(Network);
 
     impl History for FixtureHistory {
@@ -412,7 +414,7 @@ mod tests {
             &'a self,
             _id: &'a str,
             _subject: &'a dyn Holder,
-            _start: Start,
+            _start: Birthday,
         ) -> BoxFuture<'a, Result<Watch, IndexError>> {
             unreachable!("a fixture index watches nothing")
         }
@@ -430,7 +432,7 @@ mod tests {
     }
 
     impl indexing::Backfilling for FixtureIndex {
-        fn cancel<'a>(
+        fn cancel_backfill<'a>(
             &'a self,
             _network: &'a Network,
         ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
@@ -438,7 +440,7 @@ mod tests {
         }
     }
 
-    /// One chain, in the position a chain crate's verified `Node` takes: it
+    /// One chain, in the position a chain crate's verified `ChainHandle` takes: it
     /// names its network before storage is open, and composes over the
     /// repository it is handed.
     struct FixtureChain {
@@ -598,7 +600,7 @@ mod tests {
     ///
     /// The capability a consumer declares is one `Arc<dyn History>`, and this is
     /// what satisfies it: each chain built a reader over *its* repository and
-    /// *its* overlay, and the route is the holding's own network. Nothing here
+    /// *its* pending blocks, and the route is the holding's own network. Nothing here
     /// reaches a page through an indexer — `Index` has no history to route — and
     /// a network no chain claimed is the same refusal every other read gives.
     #[tokio::test]
@@ -641,7 +643,7 @@ mod tests {
     /// Every chain's own balance fold behind one handle, asked by network.
     ///
     /// The same shape a page takes, and for the same reason: a total is stored
-    /// rows completed by one network's overlay, so the consumer holds one fold
+    /// rows completed by one network's pending blocks, so the consumer holds one fold
     /// per network and asks the owner of the holding. `FixtureIndex::balance`
     /// panics, which is what proves no read of this handle reached an indexer.
     #[tokio::test]

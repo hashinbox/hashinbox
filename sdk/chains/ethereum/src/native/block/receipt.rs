@@ -8,8 +8,8 @@ use super::{
         Object, optional_address, required_address, required_hash, required_quantity,
         required_quantity_u64,
     },
-    head::{Head, Sent},
-    log::Order,
+    head::{Head, ListedTransaction},
+    log::Indexes,
 };
 use crate::native::{Address, Error, Wei};
 
@@ -30,7 +30,7 @@ pub struct Receipt {
 
 /// Where one receipt must sit: its transaction and block.
 pub(super) struct Position<'a> {
-    pub(super) sent: &'a Sent,
+    pub(super) listed: &'a ListedTransaction,
     pub(super) index: usize,
     pub(super) height: BlockHeight,
     pub(super) block_hash: [u8; 32],
@@ -51,19 +51,19 @@ impl Receipt {
             .as_slice()
             .try_into()
             .map_err(|_| Error::invalid_block("Ethereum block hash is not 32 bytes"))?;
-        let mut order = Order::default();
+        let mut indexes = Indexes::default();
         receipts
             .iter()
             .zip(&head.transactions)
             .enumerate()
-            .map(|(index, (raw, sent))| {
+            .map(|(index, (raw, listed))| {
                 let position = Position {
-                    sent,
+                    listed,
                     index,
                     height: head.reference.height,
                     block_hash,
                 };
-                Self::parse(raw, &position, &mut order)
+                Self::parse(raw, &position, &mut indexes)
             })
             .collect()
     }
@@ -71,7 +71,7 @@ impl Receipt {
     pub(super) fn parse(
         raw: &[u8],
         position: &Position<'_>,
-        order: &mut Order,
+        indexes: &mut Indexes,
     ) -> Result<Self, Error> {
         let value: Value = serde_json::from_slice(raw)
             .map_err(|_| Error::invalid_block("Ethereum receipt result is not valid JSON"))?;
@@ -95,9 +95,9 @@ impl Receipt {
         let contract_address =
             optional_address(object, "contractAddress", "receipt contract address")?;
         position
-            .sent
+            .listed
             .validate_creation(succeeded, contract_address.as_ref())?;
-        let logs = Log::parse_all(object, position, order)?;
+        let logs = Log::parse_all(object, position, indexes)?;
         Ok(Self {
             succeeded,
             gas_used,
@@ -110,8 +110,9 @@ impl Receipt {
 
 impl Position<'_> {
     fn validate(&self, object: &Object) -> Result<(), Error> {
-        let sent = self.sent;
-        if required_hash(object, "transactionHash", "receipt transaction")? != *sent.id.as_bytes() {
+        let listed = self.listed;
+        if required_hash(object, "transactionHash", "receipt transaction")? != *listed.id.as_bytes()
+        {
             return Err(Error::invalid_block(
                 "Ethereum receipt transaction hash does not match block order",
             ));
@@ -119,7 +120,7 @@ impl Position<'_> {
         let index = required_quantity_u64(object, "transactionIndex", "receipt transaction index")?;
         let expected = u64::try_from(self.index)
             .map_err(|_| Error::invalid_block("Ethereum receipt position exceeds u64"))?;
-        if index != sent.index || index != expected {
+        if index != listed.index || index != expected {
             return Err(Error::invalid_block(
                 "Ethereum receipt transaction index does not match block order",
             ));
@@ -134,12 +135,12 @@ impl Position<'_> {
                 "Ethereum receipt block number does not match its block",
             ));
         }
-        if required_address(object, "from", "receipt sender")? != sent.from {
+        if required_address(object, "from", "receipt sender")? != listed.from {
             return Err(Error::invalid_block(
                 "Ethereum receipt sender does not match its transaction",
             ));
         }
-        if optional_address(object, "to", "receipt recipient")? != sent.to {
+        if optional_address(object, "to", "receipt recipient")? != listed.to {
             return Err(Error::invalid_block(
                 "Ethereum receipt recipient does not match its transaction",
             ));
@@ -148,7 +149,7 @@ impl Position<'_> {
     }
 }
 
-impl Sent {
+impl ListedTransaction {
     fn validate_creation(
         &self,
         succeeded: bool,

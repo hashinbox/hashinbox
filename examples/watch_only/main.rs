@@ -1,35 +1,64 @@
 //! Watch-only addresses: observe an address on every chain without holding a
 //! key for it. `index.watch` takes any `indexing::Holder` — a wallet, or a
-//! bare `Subject` of address and asset — the sync loop selects it like any
-//! wallet, and the index serves its history. There is nothing to read a
-//! balance with, because there is no key. Needs all three local nodes
-//! (examples/README.md): `cargo run -p payment-examples --example watch_only`
+//! bare `Subject` of address and asset — and the index serves its history and
+//! balance like any wallet's. Needs all three local nodes (examples/README.md):
+//! `cargo run -p payment-examples --example watch_only`
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use indexing::Supervisor;
-use indexing::{Page, Start, Subject, Watching as _};
-use local::{AnyError, Asset, Health, Scenario, Submissions};
+use indexing::{
+    Birthday, Page, Subject, Supervisor, SyncReport, Watching as _,
+    sqlite::{Database, Repository},
+};
+use json_rpc::Client as _;
+use sdk_config::{Document, Registry};
+use serde_json::{Value, json};
 use tokio::sync::watch;
-use wallets::{Composition, SecretBytes, SubmissionRegistrar};
+use wallets::{Composition, SecretBytes, SubmissionRegistrar, Submissions};
+
+type AnyError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The chains this scenario runs and the node of each.
+const CONFIG: &str = include_str!("config.toml");
 
 /// Each chain's asset tag, the id its observed address is filed under, and the
 /// seed the address is derived from. The wallet is dropped as soon as its text
 /// is read, so this process keeps only the address — exactly what it would
 /// have if the address belonged to someone else.
-const OBSERVED: [(Asset, &str, u8); 3] = [
-    (Asset::Btc, "btc-observed", 0x31),
-    (Asset::Eth, "eth-observed", 0x32),
-    (Asset::Sol, "sol-observed", 0x33),
+const OBSERVED: [(&str, &str, u8); 3] = [
+    ("btc", "btc-observed", 0x31),
+    ("eth", "eth-observed", 0x32),
+    ("sol", "sol-observed", 0x33),
 ];
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
-    // 1. Both phases, in order: `config.toml` says what this scenario runs,
-    //    and the store opens only once every node identity has held. `units`
-    //    is what each chain declared an amount of its asset to be; no wallet
-    //    carries it.
-    let registrar: Arc<dyn SubmissionRegistrar> = Arc::new(Submissions::default());
+    // 1. Local testing only: a `solana-test-validator --reset` is a new
+    //    cluster every run, so `config.toml` cannot state its genesis hash and
+    //    the node is asked for it. A deployment writes the hash it expects.
+    let sections: Value = Document::toml(CONFIG).parse()?;
+    let url = sections["solana"]["rpc"]["endpoints"][0]
+        .as_str()
+        .ok_or("[solana] states rpc.endpoints")?;
+    let genesis: String = json_rpc::Endpoint::new(url)
+        .connect(&BTreeMap::new())?
+        .request(json_rpc::Request::once("getGenesisHash", json!([])))
+        .await?
+        .map_err(json_rpc::CallError::from)?
+        .deserialize()?;
+    let document = Document::toml(CONFIG.replace("<genesis-hash-from-the-node>", &genesis));
+
+    // 2. The chains this application links, one line each. Each parses the
+    //    section registered under its name; asset tags are this file's own.
+    let mut registry = Registry::<String, Repository>::new();
+    registry.register::<chain_bitcoin::Config<String>>("bitcoin");
+    registry.register::<chain_ethereum::Config<String>>("ethereum");
+    registry.register::<chain_solana::Config<String>>("solana");
+    let chains = registry.chains(&document.parse()?)?;
+
+    // 3. Compose. Every node's identity is verified before the store is
+    //    opened, then each chain builds its index and factories over it.
+    let registrar: Arc<dyn SubmissionRegistrar> = Arc::new(Submissions::new());
     let Composition {
         index,
         history,
@@ -38,46 +67,50 @@ async fn main() -> Result<(), AnyError> {
         units,
         schedules,
         ..
-    } = Scenario::read("watch_only")
-        .await?
-        .compose(&registrar)
+    } = chains
+        .compose(
+            &BTreeMap::new(),
+            || async {
+                let file = std::path::absolute(".index-data/watch_only.db")?;
+                tokio::task::spawn_blocking(move || -> Result<Database, AnyError> {
+                    std::fs::create_dir_all(".index-data")?;
+                    Ok(Database::open(file)?)
+                })
+                .await?
+            },
+            |store: &Database| Ok::<_, AnyError>(Repository::new(store.clone())),
+            &registrar,
+        )
         .await?;
 
-    // 2. Observe one address per asset. `parse` turns user-supplied text into
-    //    the asset network's canonical address; `Subject` is that address and
-    //    the asset to read it in, which is all a watch needs — a wallet is
-    //    simply a `Holder` that can also sign.
+    // 4. Observe one address per asset. `parse` turns text into the asset
+    //    network's canonical address; a `Subject` is that address and the
+    //    asset to read it in, which is all a watch needs.
     let mut subjects = Vec::new();
     for (asset, id, seed) in OBSERVED {
-        let text = wallets
-            .from(&asset, SecretBytes::new(vec![seed; 32]))
-            .await?
-            .address()
-            .value
-            .clone();
+        let asset = asset.to_owned();
+        let secret = SecretBytes::new(vec![seed; 32]);
+        let text = wallets.from(&asset, secret).await?.address().value.clone();
         let subject = Subject {
             address: wallets.parse(&asset, &text)?,
             asset: wallets.asset(&asset)?.id,
         };
-        index.watch(id, &subject, Start::Fresh).await?;
+        index.watch(id, &subject, Birthday::Fresh).await?;
         println!("{id}: watching {}", subject.address.value);
         let unit = units.of(&subject.asset).ok_or("a declared unit")?.clone();
-        subjects.push((unit, subject));
+        subjects.push((id, unit, subject));
     }
 
-    // 3. The sync loop selects a watched address exactly like a wallet's; the
-    //    supervisor takes no selection, because each unit reads its own list,
-    //    and each chain keeps the cadence its own section stated.
+    // 5. One sync loop serves a watched address exactly like a wallet's. Wait
+    //    until every network has reached its node's tip.
     let (stop, stopped) = watch::channel(false);
-    let (monitor, mut readiness) = Health::watching(index.networks());
+    let (monitor, mut readiness) = SyncReport::watching(index.networks());
     let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
-    readiness.ready().await?;
+    readiness.settled().await.ok_or("synchronization stopped")?;
 
-    // 4. History and balance are both served for a watched address, each by the
-    //    handle that owns its network rather than through the index: they are
-    //    the repository's own answers completed by the blocks above its line,
-    //    and neither needs a key.
-    for ((_, id, _), (unit, subject)) in OBSERVED.into_iter().zip(&subjects) {
+    // 6. History and balance need no key: each is the repository's own
+    //    answer, completed by the blocks above its confirmed line.
+    for (id, unit, subject) in &subjects {
         let page = history.history(subject, Page::first(10)).await?;
         let balance = balances.balance(subject).await?;
         println!(

@@ -156,11 +156,12 @@ forbidden_words = ["common", "core", "helper", "helpers", "misc", "shared", "uti
 target = "**/*.md"
 min_cases = 0
 
-# Crate READMEs are the crate's rustdoc (`#![doc = include_str!("../README.md")]`) and follow
-# a retired design note (005) section 3: at least five H2 sections (why, concepts, API map, usage, related).
+# Crate READMEs are the crate's rustdoc (`#![doc = include_str!("../README.md")]`) and stay
+# short: two sentences on what the crate is for, then a usage section. A notes section is
+# optional and holds only what is hard to discover and costly to get wrong.
 [[rules."markdown/examples"]]
 target = "{apps,sdk,packages}/**/README.md"
-min_cases = 5
+min_cases = 1
 
 [[rules."rust/path-module-flattening"]]
 target = "**/*.rs"
@@ -220,16 +221,17 @@ target = ["packages/*", "sdk/chains/*", "sdk/{base,config,indexing,wallets}"]
 mode = "permissive"
 files.required = ["Cargo.toml", "README.md", "src/lib.rs"]
 
-# The routes package is a library; the composition root is the one binary.
-[[rules.layout]]
-target = "apps/api"
-mode = "permissive"
-files.required = ["Cargo.toml", "README.md", "src/lib.rs"]
-
+# One application crate: the binary that reads its configuration and serves the
+# HTTP API. The routes are its `api` module, not a library beside it.
 [[rules.layout]]
 target = "apps/server"
 mode = "permissive"
-files.required = ["Cargo.toml", "README.md", "src/main.rs", "src/chains.rs"]
+files.required = ["Cargo.toml", "README.md", "src/main.rs", "src/chains.rs", "src/api/mod.rs"]
+
+# An application is a distributable binary; it exports nothing.
+[[rules.layout]]
+target = "apps/*/src/lib.rs"
+allow = false
 
 # sdk/ holds chain-neutral capability crates plus the chains/ category; nothing else.
 [[rules.layout]]
@@ -303,19 +305,19 @@ directories.allowed = [
 # them. `custom_store` is the one scenario with a third file: the repository it
 # supplies is the subject of the scenario rather than its setup, and
 # examples/tests/custom_store.rs includes that same file so the store the
-# scenario runs is the store the test asserts against. `local.rs` is the
-# examples' non-chain setup and the one file under examples/ that names a chain
-# crate, to register it.
+# scenario runs is the store the test asserts against. Every scenario is
+# self-contained: there is no shared library under examples/, and each main.rs
+# registers the chains it links, because which chains an application links is
+# its own decision.
 # scripts/check-chains.sh check 4 requires a section per chain in every
-# scenario's config.toml, and examples/tests/scenarios.rs requires that no
-# main.rs but custom_store's names a chain crate.
+# scenario's config.toml, and examples/tests/scenarios.rs requires that each
+# main.rs registers exactly the chains its config.toml configures.
 [[rules.layout]]
 target = "examples"
 mode = "restrictive"
 files.required = [
     "Cargo.toml",
     "README.md",
-    "local.rs",
     "tests/scenarios.rs",
     "tests/custom_store.rs",
     "wallet/main.rs",
@@ -339,7 +341,7 @@ directories.allowed = [
 ]
 
 [[rules.layout]]
-target = ["apps/indexer", "apps/wallet", "sdk/deposits", "sdk/indexing/http"]
+target = ["apps/api", "apps/indexer", "apps/wallet", "sdk/deposits", "sdk/indexing/http"]
 allow = false
 
 # Empty source files/directories and one-file child modules do not define a domain.
@@ -348,6 +350,34 @@ target = "{apps,sdk,packages}/**/src/**"
 files.allow_empty = false
 directories.allow_empty = false
 directories.allow_single_file = false
+
+# sdk/indexing/src/storage (ARCHITECTURE.md, "Dependency direction"): a file
+# directly in it is shared by every store, and a directory directly in it is one
+# store. A folder that groups shared code is not a store and fails here until it
+# is flattened into files; a new store is named here and in the ban below.
+# Who may import a store is not a path rule, so scripts/check-chains.sh check 12
+# holds that.
+[[rules.layout]]
+target = "sdk/indexing/src/storage"
+mode = "restrictive"
+files.allowed = [
+    { target = "*.rs", description = "The ports, and what every store is asked and answers with." },
+]
+directories.allowed = [
+    { target = "sqlite", description = "One store: every port on one embedded SQL file." },
+    { target = "memory", description = "One store: every port on ordinary maps in this process." },
+]
+
+# A store's root module is inside its folder (`sqlite/mod.rs`), never beside it
+# (`sqlite.rs`): a file directly in storage/ is shared, and a store's root is not.
+[[rules.layout]]
+target = "sdk/indexing/src/storage/*"
+mode = "permissive"
+files.required = ["mod.rs"]
+
+[[rules.layout]]
+target = "sdk/indexing/src/storage/{sqlite,memory}.rs"
+allow = false
 
 [[rules."shared-affix"]]
 target = "**/src/**/*.rs"
@@ -396,14 +426,10 @@ name = "chains"
 target = "sdk/chains/*"
 dependencies = ["packages", "base", "indexing", "wallets", "config"]
 
-# Routes and wire models see the abstractions only; naming a chain crate here
-# is a finding, not a review comment (a retired design note (015) section 7).
-[[rules."rust/layers"]]
-name = "api"
-target = "apps/api"
-dependencies = ["packages", "base", "indexing", "wallets"]
-
-# The composition root may name every chain; only it may.
+# The composition root may name every chain; only it may. Its routes and wire
+# models (`apps/server/src/api`) see the abstractions only, which a layer cannot
+# say because layers are Cargo packages: scripts/check-chains.sh check 8 holds
+# that boundary inside the crate.
 [[rules."rust/layers"]]
 name = "server"
 target = "apps/server"
@@ -414,7 +440,6 @@ dependencies = [
     "wallets",
     "config",
     "chains",
-    "api",
 ]
 
 # Runnable SDK examples compose like an application; nothing depends on them.

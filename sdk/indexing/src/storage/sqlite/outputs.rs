@@ -27,8 +27,8 @@ use rusqlite::{Connection, Row, Transaction, params};
 
 use super::{Repository, Tables, conflict, failure, store};
 use crate::{
-    BlockHeight, BoxFuture, IndexError, IndexedOutput, OutputChanges, OutputCursor, OutputId,
-    OutputKey, OutputPage, OutputRequest, OutputStore,
+    BlockHeight, BoxFuture, IndexError, IndexedOutput, Inspection, OutputChanges, OutputCursor,
+    OutputId, OutputKey, OutputPage, OutputRequest, OutputStore, storage::Probe,
 };
 
 /// The creation columns every read selects, in the mapping's order. A row whose
@@ -61,6 +61,11 @@ impl Tables {
         request: &OutputRequest,
     ) -> Result<OutputPage, IndexError> {
         let (read, checkpoint) = self.snapshot(connection)?;
+        // Refused from this snapshot rather than by whoever reads the page: the
+        // observations and the rows are one transaction, so the gate and the
+        // rows it guards cannot be read at two different lines.
+        let observations = self.observing(&read, &request.address.value)?;
+        Inspection::new(&observations, checkpoint.as_ref()).spendable()?;
         let after = match &request.after {
             // The live set is not append-only -- a spend removes a row -- so a
             // cursor is still bound to the checkpoint it was issued at.
@@ -70,19 +75,15 @@ impl Tables {
             Some(cursor) => Self::resumed(&cursor.position)?,
             None => (String::new(), -1),
         };
-        let mut outputs = self.live(&read, &request.address.value, &after, request.limit + 1)?;
-        let has_more = outputs.len() > request.limit;
-        outputs.truncate(request.limit);
-        let next = outputs
-            .last()
-            .filter(|_| has_more)
-            .map(|output| OutputCursor {
-                checkpoint: checkpoint.clone(),
-                position: Self::position(&output.key()),
-                // Nothing here folds a pending block, so there is no overlay
-                // revision to name: the index that does sets it on the way out.
-                revision: None,
-            });
+        let probe = Probe::new(request.limit);
+        let live = self.live(&read, &request.address.value, &after, probe.rows())?;
+        let (outputs, next) = probe.page(live, |output| OutputCursor {
+            checkpoint: checkpoint.clone(),
+            position: Self::position(&output.key()),
+            // Nothing here folds a pending block, so there is no revision
+            // to name: whoever folds one sets it on the way out.
+            revision: None,
+        });
         Ok(OutputPage {
             checkpoint,
             outputs,
