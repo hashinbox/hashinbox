@@ -118,7 +118,7 @@ where
     /// movement or credit of another network ([`CanonicalBlock::new`]). A
     /// transaction identity given twice never reaches that validation: the
     /// interpreter's own output cannot be assembled with one
-    /// ([`crate::Facts::new`]). One validation point, reached from both
+    /// ([`crate::InterpretedBlock::new`]). One validation point, reached from both
     /// directions, so neither can be given a rule the other lacks.
     ///
     /// What is deliberately *not* here is the source's own canonicality. Only

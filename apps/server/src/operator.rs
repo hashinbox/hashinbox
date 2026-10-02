@@ -190,16 +190,18 @@ mod tests {
                 timestamp: Some(1_000),
             },
             vec![ObservationDraft {
-                transaction_id: TransactionRef::new(network.clone(), "credit"),
+                transaction: indexing::Transaction {
+                    transaction_id: TransactionRef::new(network.clone(), "credit"),
+                    movements: vec![ValueMovement::mint(
+                        MovementId("0".into()),
+                        AssetId::native(network.chain.clone()),
+                        Decimal::from(5_u64),
+                        Address::new(network.clone(), "owner"),
+                    )],
+                    fee: None,
+                },
                 transaction_order: 0,
                 status: ObservationDraftStatus::Included,
-                movements: vec![ValueMovement::mint(
-                    MovementId("0".into()),
-                    AssetId::native(network.chain.clone()),
-                    Decimal::from(5_u64),
-                    Address::new(network.clone(), "owner"),
-                )],
-                fee: None,
             }],
         )
         .expect("unique transaction ids");

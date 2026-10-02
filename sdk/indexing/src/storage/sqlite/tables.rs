@@ -58,7 +58,7 @@ impl Place {
         Ok(Self {
             height: Tables::stored(entry.block().height.0)?,
             order: Tables::stored(entry.transaction_order)?,
-            id: entry.transaction_id.id.as_str().to_owned(),
+            id: entry.transaction.transaction_id.id.as_str().to_owned(),
         })
     }
 }

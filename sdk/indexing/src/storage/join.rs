@@ -4,7 +4,7 @@
 //! Neither half can answer alone. A repository holds confirmed rows and answers
 //! at the checkpoint its answer carries; an index holds the blocks above that
 //! line and answers no query at all, only a sample of them
-//! ([`indexing::Pending`]). Composing the two is the consumer's job, and
+//! ([`crate::Pending`]). Composing the two is the consumer's job, and
 //! [`PendingJoin`] is that composition: [`crate::History`], [`crate::Balances`]
 //! and the spendable set, all three over one value so they cannot disagree
 //! about what is confirmed and what is on its way.
@@ -16,7 +16,7 @@
 //! 1. sample the pending blocks;
 //! 2. read the repository;
 //! 3. narrow the sample by **that answer**, which carries the checkpoint it
-//!    was read at ([`indexing::PendingSample::above`]).
+//!    was read at ([`crate::PendingSample::above`]).
 //!
 //! Reading the repository first loses a block committed in between: neither
 //! half holds it. Narrowing by a checkpoint fetched beside the answer counts it
@@ -32,20 +32,23 @@
 
 use std::sync::Arc;
 
-use indexing::Pending;
+use crate::{
+    Balance, Balances, BoxFuture, History, Holder, IndexError, IndexErrorKind, Network, Page,
+    Pending, TransactionPage,
+};
 
 /// One network's repository joined to the pending blocks of the index that
 /// fills it.
 ///
 /// It answers [`crate::History`] over a repository that pages its own history,
 /// [`crate::Balances`] over one that folds a balance, and
-/// [`indexing::OutputStore`] over one that lists live outputs — each of them the
+/// [`crate::OutputStore`] over one that lists live outputs — each of them the
 /// repository's answer with the same sample of pending blocks folded in.
 ///
 /// **Build one per network, from the pair that belongs together.** A chain's
 /// composition holds both the repository it handed its index and the index
 /// itself, so it is the place that can pair them; a consumer serving several
-/// networks holds one of these per network ([`crate::Composition`]).
+/// networks holds one of these per network, behind one [`Router`].
 ///
 /// The index is held as the one capability read here, never as the indexer:
 /// nothing in a read fetches, interprets or commits a block.
@@ -70,6 +73,74 @@ impl<R> PendingJoin<R> {
     }
 }
 
+/// One read per configured network, keyed by the network that owns it.
+///
+/// A [`PendingJoin`] answers for one network only, so a consumer serving
+/// several holds one per network and routes each holding to the one its
+/// address names. That route is this type, once for every read: it answers
+/// [`History`] over `Router<dyn History>` and [`Balances`] over
+/// `Router<dyn Balances>`, both by the same lookup.
+pub struct Router<T: ?Sized>(Vec<(Network, Arc<T>)>);
+
+impl<T: ?Sized> Router<T> {
+    /// Routes each holding to the read of its own network.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexErrorKind::Conflict`] when two reads claim one network.
+    pub fn new(reads: Vec<(Network, Arc<T>)>) -> Result<Self, IndexError> {
+        for (at, (network, _)) in reads.iter().enumerate() {
+            if reads[..at].iter().any(|(earlier, _)| earlier == network) {
+                return Err(IndexError::new(
+                    IndexErrorKind::Conflict,
+                    "two reads claim one network",
+                    false,
+                ));
+            }
+        }
+        Ok(Self(reads))
+    }
+
+    /// The read that owns `of`'s network, or the refusal every read of an
+    /// unconfigured network gives.
+    fn owner(&self, of: &dyn Holder) -> Result<&Arc<T>, IndexError> {
+        let network = &of.address().network;
+        self.0
+            .iter()
+            .find(|(owner, _)| owner == network)
+            .map(|(_, read)| read)
+            .ok_or_else(|| {
+                IndexError::new(
+                    IndexErrorKind::NetworkMismatch,
+                    "index network is not configured",
+                    false,
+                )
+            })
+    }
+}
+
+impl History for Router<dyn History> {
+    fn history<'a>(
+        &'a self,
+        of: &'a dyn Holder,
+        page: Page,
+    ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
+        match self.owner(of) {
+            Ok(read) => read.history(of, page),
+            Err(error) => Box::pin(async { Err(error) }),
+        }
+    }
+}
+
+impl Balances for Router<dyn Balances> {
+    fn balance<'a>(&'a self, of: &'a dyn Holder) -> BoxFuture<'a, Result<Balance, IndexError>> {
+        match self.owner(of) {
+            Ok(read) => read.balance(of),
+            Err(error) => Box::pin(async { Err(error) }),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::sync::{
@@ -77,8 +148,7 @@ pub(crate) mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    use base::{BlockRef, BoxFuture};
-    use indexing::{
+    use crate::{
         Address, AssetId, Balance, BalanceQuery, BalanceStore, BlockHash, BlockHeight,
         BlockPosition, CanonicalBlock, CanonicalPage, CanonicalStatus, CanonicalTransaction,
         ChainName, Completeness, ConfirmedHistory, Decimal, HistoryQuery, IndexError,
@@ -86,6 +156,7 @@ pub(crate) mod tests {
         ObservationDraftStatus, OutputChanges, OutputId, OutputPage, OutputRequest, OutputStore,
         Page, PendingValue, Subject, TransactionRef, ValueMovement,
     };
+    use base::{BlockRef, BoxFuture};
 
     use super::*;
     use crate::{Balances, History};
@@ -126,9 +197,9 @@ pub(crate) mod tests {
     }
 
     impl Pending for Held {
-        fn sampled(&self) -> Result<indexing::PendingSample, IndexError> {
+        fn sampled(&self) -> Result<crate::PendingSample, IndexError> {
             let held = self.0.lock().expect("the held blocks");
-            Ok(indexing::PendingSample::new(held.0.clone(), held.1))
+            Ok(crate::PendingSample::new(held.0.clone(), held.1))
         }
     }
 
@@ -159,13 +230,15 @@ pub(crate) mod tests {
 
     pub(crate) fn transaction(height: u64) -> CanonicalTransaction {
         CanonicalTransaction {
-            transaction_id: TransactionRef::new(network(), "tx"),
+            transaction: crate::Transaction {
+                transaction_id: TransactionRef::new(network(), "tx"),
+                movements: Vec::new(),
+                fee: None,
+            },
             transaction_order: 0,
             status: CanonicalStatus::Included {
                 block: block(height),
             },
-            movements: Vec::new(),
-            fee: None,
         }
     }
 
@@ -194,7 +267,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn query(after: Option<indexing::HistoryPosition>) -> HistoryQuery {
+    pub(crate) fn query(after: Option<crate::HistoryPosition>) -> HistoryQuery {
         HistoryQuery {
             address: address("owner"),
             asset: AssetId::native(network().chain),
@@ -208,17 +281,19 @@ pub(crate) mod tests {
     pub(crate) fn admitted(height: u64, amount: u64, to: &str) -> CanonicalBlock {
         let network = network();
         let draft = ObservationDraft {
-            transaction_id: TransactionRef::new(network.clone(), format!("tx-{height}")),
+            transaction: crate::Transaction {
+                transaction_id: TransactionRef::new(network.clone(), format!("tx-{height}")),
+                movements: vec![ValueMovement::transfer(
+                    MovementId("0".into()),
+                    AssetId::native(network.chain.clone()),
+                    Decimal::from(amount),
+                    address("payer"),
+                    address(to),
+                )],
+                fee: None,
+            },
             transaction_order: 0,
             status: ObservationDraftStatus::Included,
-            movements: vec![ValueMovement::transfer(
-                MovementId("0".into()),
-                AssetId::native(network.chain.clone()),
-                Decimal::from(amount),
-                address("payer"),
-                address(to),
-            )],
-            fee: None,
         };
         let interpreted =
             InterpretedBlock::new(&network, block(height), vec![draft]).expect("one transaction");
@@ -401,27 +476,28 @@ pub(crate) mod tests {
 
     /// Block four's transaction, as the store holds it once committed.
     fn committed() -> CanonicalTransaction {
-        CanonicalTransaction {
-            transaction_id: TransactionRef::new(network(), "tx-4"),
-            ..transaction(4)
-        }
+        let mut committed = transaction(4);
+        committed.transaction.transaction_id = TransactionRef::new(network(), "tx-4");
+        committed
     }
 
     /// Block four, as an index holds it: one credit, one spend, one change
     /// output.
     pub(crate) fn spending() -> CanonicalBlock {
         let draft = ObservationDraft {
-            transaction_id: TransactionRef::new(network(), "tx-4"),
+            transaction: crate::Transaction {
+                transaction_id: TransactionRef::new(network(), "tx-4"),
+                movements: vec![ValueMovement::transfer(
+                    MovementId("0".into()),
+                    AssetId::native(network().chain),
+                    Decimal::from(10_u64),
+                    address("payer"),
+                    address("owner"),
+                )],
+                fee: None,
+            },
             transaction_order: 0,
             status: ObservationDraftStatus::Included,
-            movements: vec![ValueMovement::transfer(
-                MovementId("0".into()),
-                AssetId::native(network().chain),
-                Decimal::from(10_u64),
-                address("payer"),
-                address("owner"),
-            )],
-            fee: None,
         };
         let interpreted = InterpretedBlock {
             outputs: OutputChanges {

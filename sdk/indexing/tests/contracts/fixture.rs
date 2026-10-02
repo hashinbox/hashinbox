@@ -96,16 +96,18 @@ impl<'a, R> Fixture<'a, R> {
     /// history to keep, to fill in, or to unwind.
     pub(super) fn paid(&self, owner: &str, height: BlockHeight) -> ObservationDraft {
         ObservationDraft {
-            transaction_id: self.transaction(&format!("block-{}", height.0)),
+            transaction: indexing::Transaction {
+                transaction_id: self.transaction(&format!("block-{}", height.0)),
+                movements: vec![ValueMovement::mint(
+                    MovementId(format!("mint-{}", height.0)),
+                    self.native(),
+                    Decimal::from(5_u64),
+                    self.address(owner),
+                )],
+                fee: None,
+            },
             transaction_order: 0,
             status: ObservationDraftStatus::Included,
-            movements: vec![ValueMovement::mint(
-                MovementId(format!("mint-{}", height.0)),
-                self.native(),
-                Decimal::from(5_u64),
-                self.address(owner),
-            )],
-            fee: None,
         }
     }
 
@@ -215,7 +217,7 @@ impl<R: ConfirmedHistory> Fixture<'_, R> {
         .expect("history page")
         .transactions
         .into_iter()
-        .map(|transaction| transaction.transaction_id.id.to_string())
+        .map(|transaction| transaction.transaction.transaction_id.id.to_string())
         .collect()
     }
 }

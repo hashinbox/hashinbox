@@ -74,6 +74,7 @@ struct Lease {
 #[derive(Clone)]
 pub struct Repository {
     database: Database,
+    logger: logging::Logger,
 }
 
 impl Clone for Database {
@@ -258,8 +259,18 @@ impl Drop for Lease {
 impl Repository {
     /// Speaks the domain over an open SQLite file. No I/O.
     #[must_use]
-    pub const fn new(storage: Database) -> Self {
-        Self { database: storage }
+    pub fn new(storage: Database) -> Self {
+        Self {
+            database: storage,
+            logger: logging::Logger::default(),
+        }
+    }
+
+    /// Emits newly committed incoming effects after the transaction completes.
+    #[must_use]
+    pub fn with_logger(mut self, logger: logging::Logger) -> Self {
+        self.logger = logger;
+        self
     }
 
     /// The statements of one network, ready to cross into the blocking hop.

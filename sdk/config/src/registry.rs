@@ -21,6 +21,11 @@ impl Sections {
         self.0.keys().map(String::as_str)
     }
 
+    /// Raw sections for application-owned persistence; may contain credentials.
+    pub fn into_values(self) -> BTreeMap<String, serde_json::Value> {
+        self.0
+    }
+
     /// Whether the document configured nothing at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -169,6 +174,8 @@ mod tests {
             self: Box<Self>,
             _secrets: &'a dyn json_rpc::Secrets,
             _statistics: &'a mut Vec<json_rpc::Statistics>,
+            _logger: logging::Logger,
+            _transport: Option<crate::Transport>,
         ) -> BoxFuture<'a, Result<Box<dyn wallets::Connection<&'static str, ()>>, Error>> {
             Box::pin(async { Err(Error::refused("a fixture chain contacts no node")) })
         }

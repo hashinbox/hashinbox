@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::{
     Payments,
     contract::{Block, Network},
@@ -6,7 +8,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-pub(super) fn routes() -> OpenApiRouter<Payments> {
+pub(super) fn routes() -> OpenApiRouter<super::Application> {
     OpenApiRouter::new().routes(routes!(read))
 }
 
@@ -14,6 +16,8 @@ pub(super) fn routes() -> OpenApiRouter<Payments> {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum IndexState {
+    /// Inspection paused after its current bounded pass completed.
+    Paused,
     /// Behind the node's tip and still applying blocks.
     CatchingUp,
     /// The checkpoint is at the tip the last pass observed.
@@ -28,6 +32,7 @@ pub(super) enum IndexState {
 impl From<indexing::NetworkState> for IndexState {
     fn from(value: indexing::NetworkState) -> Self {
         match value {
+            indexing::NetworkState::Paused => Self::Paused,
             indexing::NetworkState::CatchingUp => Self::CatchingUp,
             indexing::NetworkState::Ready => Self::Ready,
             indexing::NetworkState::Retrying => Self::Retrying,
@@ -189,11 +194,13 @@ struct Rpc {
 }
 
 impl Rpc {
-    fn new(network: &base::Network, endpoint: usize, statistics: &json_rpc::Statistics) -> Self {
+    /// A network holds one working node at a time, so its ordinal is always
+    /// the first; the field stays because the wire carries it.
+    fn new(network: &base::Network, statistics: &json_rpc::Statistics) -> Self {
         let snapshot = statistics.snapshot();
         Self {
             network: network.clone().into(),
-            endpoint,
+            endpoint: 0,
             attempts: snapshot.attempts,
             failures: snapshot.failures,
             consecutive_failures: snapshot.consecutive_failures,
@@ -215,7 +222,7 @@ impl Rpc {
     ),
     tag = "health"
 )]
-async fn read(State(payments): State<Payments>) -> (StatusCode, Json<Report>) {
+async fn read(State(payments): State<Arc<Payments>>) -> (StatusCode, Json<Report>) {
     let reporting = payments.health.has_changed().is_ok();
     let health = payments.health.borrow();
     let ready = reporting && health.ready();
@@ -234,12 +241,7 @@ async fn read(State(payments): State<Payments>) -> (StatusCode, Json<Report>) {
     let rpc = payments
         .rpc
         .iter()
-        .flat_map(|(network, endpoints)| {
-            endpoints
-                .iter()
-                .enumerate()
-                .map(move |(ordinal, statistics)| Rpc::new(network, ordinal, statistics))
-        })
+        .map(|(network, statistics)| Rpc::new(network, statistics))
         .collect();
     (
         if ready {

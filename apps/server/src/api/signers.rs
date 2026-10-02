@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 /// The wallets this process holds keys for, by the id it minted.
 ///
-/// Application custody stays outside `wallets` and indexing. The encrypted
+/// Application custody stays outside `wallets` and indexing. The durable
 /// registry restores these handles at boot; durable watches supply public identity.
 #[derive(Default)]
 pub(crate) struct Signers(
@@ -16,6 +16,20 @@ impl Signers {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn extend(&self, other: &Self) -> Result<(), wallets::WalletError> {
+        let other = other.0.read().map_err(|_| Self::poisoned())?;
+        let mut held = self.0.write().map_err(|_| Self::poisoned())?;
+        if other.keys().any(|id| held.contains_key(id)) {
+            return Err(Self::poisoned());
+        }
+        held.extend(
+            other
+                .iter()
+                .map(|(id, wallet)| (id.clone(), wallet.clone())),
+        );
+        Ok(())
     }
 
     /// Files `wallet` under `id`.

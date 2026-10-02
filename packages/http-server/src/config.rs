@@ -71,8 +71,9 @@ impl Config {
         }
     }
 
-    /// Rejects a non-loopback bind without upstream TLS, and a protected
-    /// router with no bearer token.
+    /// Rejects a non-loopback bind without upstream TLS, and a non-loopback
+    /// bind with no bearer token. A loopback listener may serve without a
+    /// token: only this machine can reach it.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !self.bind_addr.ip().is_loopback()
             && self.transport_security != TransportSecurity::TlsTerminatedUpstream
@@ -82,10 +83,10 @@ impl Config {
                 "a non-loopback listener requires upstream TLS termination",
             ));
         }
-        if self.bearer_token.is_none() {
+        if self.bearer_token.is_none() && !self.bind_addr.ip().is_loopback() {
             return Err(ConfigError::new(
                 ConfigErrorKind::MissingBearerToken,
-                "protected routes require a bearer token",
+                "a non-loopback listener requires a bearer token",
             ));
         }
         Ok(())
@@ -101,7 +102,7 @@ pub enum ConfigErrorKind {
     InvalidBearerToken,
     /// A non-loopback bind without [`TransportSecurity::TlsTerminatedUpstream`].
     InsecureNonLoopbackBind,
-    /// No bearer token was configured.
+    /// A non-loopback bind with no bearer token.
     MissingBearerToken,
 }
 

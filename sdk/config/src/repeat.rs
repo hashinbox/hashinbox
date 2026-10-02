@@ -47,10 +47,7 @@ impl Repetition {
 
     /// Wraps `inner` in this repetition, or hands it back untouched when the
     /// deployment asked for none.
-    pub(crate) fn wrap<C: json_rpc::Client + 'static>(
-        &self,
-        inner: C,
-    ) -> Arc<dyn json_rpc::Client> {
+    pub fn wrap<C: json_rpc::Client + 'static>(&self, inner: C) -> Arc<dyn json_rpc::Client> {
         match self {
             Self::Off => Arc::new(inner),
             Self::Policy(policy) => Arc::new(policy.wrap(inner)),

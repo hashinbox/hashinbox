@@ -23,7 +23,7 @@
 //! `transaction_id`. The disjointness that used to be structural — two
 //! collections a reader could not confuse — is now an identity argument, and it
 //! is exactly as tight: a `MovementId` is unique within its transaction
-//! (`ObservationDraft::validate_movements`) and a `BlockCredit`'s is unique
+//! (`Transaction::validate_movements`) and a `BlockCredit`'s is unique
 //! within its block (`BlockCredit::validate_all`), and the empty
 //! `transaction_id` separates the two namespaces, so no credit can ever collide
 //! with a movement.
@@ -54,7 +54,7 @@ pub(super) const WITHDRAWAL: i64 = 6;
 /// movement under that name would collide with its own transaction's fee and
 /// have the whole commit refused as corruption. A readable word like `"fee"` is
 /// exactly that collision waiting to happen. The empty string is not:
-/// `ObservationDraft::validate_movements` refuses a movement whose identity is
+/// `Transaction::validate_movements` refuses a movement whose identity is
 /// empty, so this value is unreachable from outside and the two namespaces are
 /// disjoint by construction rather than by convention.
 const FEE_ID: &str = "";
@@ -107,7 +107,7 @@ impl Tables {
         place: &Place,
     ) -> Result<(), IndexError> {
         let position = Self::stored(entry.block().position.0)?;
-        for (order, movement) in entry.movements.iter().enumerate() {
+        for (order, movement) in entry.transaction.movements.iter().enumerate() {
             let order = i64::try_from(order).unwrap_or(i64::MAX);
             let (from, to) = (endpoint(movement.from()), endpoint(movement.to()));
             let effect = Entry {
@@ -152,7 +152,7 @@ impl Tables {
         settlement: FeeSettlement,
         place: &Place,
     ) -> Result<(), IndexError> {
-        let charged = entry.fee.as_ref().filter(|fee| {
+        let charged = entry.transaction.fee.as_ref().filter(|fee| {
             settlement == FeeSettlement::Charged && fee.payer.as_ref() == Some(address)
         });
         let Some(fee) = charged else {

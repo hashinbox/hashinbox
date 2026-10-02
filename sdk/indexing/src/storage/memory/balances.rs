@@ -120,10 +120,10 @@ impl Repository {
             let mut fold = Fold::new(&query);
             fold.apply(transaction, settlement)?;
             *net += fold.net();
-            let changed = transaction.movements.iter().any(|movement| {
+            let changed = transaction.transaction.movements.iter().any(|movement| {
                 &movement.asset == asset
                     && (movement.from() == Some(address) || movement.to() == Some(address))
-            }) || transaction.fee.as_ref().is_some_and(|fee| {
+            }) || transaction.transaction.fee.as_ref().is_some_and(|fee| {
                 settlement == FeeSettlement::Charged
                     && &fee.asset == asset
                     && fee.payer.as_ref() == Some(address)

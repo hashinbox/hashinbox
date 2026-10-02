@@ -45,6 +45,7 @@ type Prepared = (Arc<dyn Authorship>, Vec<Transfer>);
 /// to the caller, and answers what each asset is. Who holds a wallet is the
 /// caller's question, what is observed is [`indexing::Watching`]'s, and where
 /// a key lives is the application's.
+#[derive(Clone)]
 pub struct Wallets<A: Ord> {
     factories: BTreeMap<A, Factory>,
 }
@@ -66,6 +67,25 @@ where
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Adds another collection's factories without rebuilding their shared send state.
+    ///
+    /// # Errors
+    /// Refuses overlapping tags without changing this collection.
+    pub fn extend(&mut self, other: &Self) -> Result<(), WalletError> {
+        if other
+            .factories
+            .keys()
+            .any(|tag| self.factories.contains_key(tag))
+        {
+            return Err(WalletError::new(
+                WalletErrorKind::Duplicate,
+                "duplicate wallet asset tag",
+            ));
+        }
+        self.factories.extend(other.factories.clone());
+        Ok(())
     }
 
     /// Registers the one factory of `asset` at the composition root; its

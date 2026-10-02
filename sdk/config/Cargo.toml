@@ -7,6 +7,7 @@ description = "Reads a deployment's configuration document and hands each named 
 readme = "README.md"
 
 [dependencies]
+logging = { path = "../../packages/logging" }
 base = { path = "../base" }
 indexing = { path = "../indexing", default-features = false }
 json-rpc = { path = "../../packages/json-rpc" }

@@ -44,7 +44,7 @@ const DEPTH: u64 = 2;
 /// Blocks one pass may read. Smaller than `HEIGHT`, so boundedness is visible.
 const BATCH: usize = 4;
 
-/// The address every even block credits, observed from `Birthday::Fresh`.
+/// The address every even block credits; each test chooses its observation start.
 const FRESH: &str = "address-fresh";
 
 /// The address every odd block credits, observed from a birthday in the past.
@@ -167,20 +167,22 @@ impl BlockInterpreter for Reader {
     ) -> Result<InterpretedBlock, IndexError> {
         let transactions = if addresses.contains(&block.to) {
             vec![ObservationDraft {
-                transaction_id: TransactionRef::new(
-                    network(),
-                    format!("tx-{}", block.reference.height.0),
-                ),
+                transaction: indexing::Transaction {
+                    transaction_id: TransactionRef::new(
+                        network(),
+                        format!("tx-{}", block.reference.height.0),
+                    ),
+                    movements: vec![ValueMovement::transfer(
+                        MovementId("transfer:0".to_owned()),
+                        AssetId::native(network().chain),
+                        Decimal::from(1_u64),
+                        address(SENDER),
+                        block.to.clone(),
+                    )],
+                    fee: None,
+                },
                 transaction_order: 0,
                 status: ObservationDraftStatus::Included,
-                movements: vec![ValueMovement::transfer(
-                    MovementId("transfer:0".to_owned()),
-                    AssetId::native(network().chain),
-                    Decimal::from(1_u64),
-                    address(SENDER),
-                    block.to.clone(),
-                )],
-                fee: None,
             }]
         } else {
             Vec::new()
@@ -263,9 +265,9 @@ async fn one_pass_commits_at_most_its_batch() {
     let store = Arc::new(Sink::new());
     let served = Arc::new(AtomicUsize::new(0));
     let unit = index(&store, &served);
-    unit.watch("fresh", &subject(FRESH), Birthday::Fresh)
+    unit.watch("fresh", &subject(FRESH), Birthday::At(BlockPosition(0)))
         .await
-        .expect("a fresh observation");
+        .expect("an observation from genesis");
 
     unit.sync().await.expect("one bounded pass");
 
@@ -275,6 +277,26 @@ async fn one_pass_commits_at_most_its_batch() {
         Some(batch - 1),
         "one pass must commit exactly the blocks its batch allows"
     );
+}
+
+/// Fresh is after the live tip, even when the durable line is lower. Existing
+/// blocks must not become historical credits for a future-only observation.
+#[tokio::test]
+async fn a_fresh_observation_starts_after_the_live_tip() {
+    let store = Arc::new(Sink::new());
+    let served = Arc::new(AtomicUsize::new(0));
+    let unit = index(&store, &served);
+    let watch = unit
+        .watch("fresh", &subject(FRESH), Birthday::Fresh)
+        .await
+        .expect("a fresh observation");
+    assert_eq!(watch.start, BlockPosition(HEIGHT));
+    assert_eq!(served.load(Ordering::Relaxed), 0);
+    assert_eq!(store.observed(&network()), [("fresh".into(), watch.start)]);
+
+    drive(&unit, 8).await;
+    assert_eq!(reached(&unit).await, Some(HEIGHT - 1 - DEPTH));
+    assert!(store.landings(&network()).is_empty());
 }
 
 /// Claims 1, 3 and 4 together, because they are one scenario: observe with a
@@ -290,9 +312,9 @@ async fn a_restart_over_the_same_store_restores_every_observation() {
     let store = Arc::new(Sink::new());
     let served = Arc::new(AtomicUsize::new(0));
     let unit = index(&store, &served);
-    unit.watch("fresh", &subject(FRESH), Birthday::Fresh)
+    unit.watch("fresh", &subject(FRESH), Birthday::At(BlockPosition(0)))
         .await
-        .expect("a fresh observation");
+        .expect("an observation from genesis");
     drive(&unit, 8).await;
     let confirmed = HEIGHT - 1 - DEPTH;
     assert_eq!(
@@ -398,9 +420,9 @@ async fn one_batch_presented_twice_is_folded_once() {
     let store = Arc::new(Sink::new());
     let served = Arc::new(AtomicUsize::new(0));
     let unit = index(&store, &served);
-    unit.watch("fresh", &subject(FRESH), Birthday::Fresh)
+    unit.watch("fresh", &subject(FRESH), Birthday::At(BlockPosition(0)))
         .await
-        .expect("a fresh observation");
+        .expect("an observation from genesis");
     drive(&unit, 8).await;
     let landed = store.landings(&network());
 
@@ -455,7 +477,7 @@ async fn a_second_identity_cannot_claim_an_observed_address() {
     assert_eq!(refusal.kind, IndexErrorKind::Conflict);
     assert_eq!(
         store.observed(&network()),
-        [("fresh".to_owned(), BlockPosition(0))],
+        [("fresh".to_owned(), BlockPosition(HEIGHT))],
         "a refused registration must leave the store exactly as it was"
     );
 }
@@ -474,9 +496,9 @@ async fn every_credit_a_block_makes_to_one_address_is_summed_once() {
     let store = Arc::new(Sink::new());
     let served = Arc::new(AtomicUsize::new(0));
     let unit = index(&store, &served);
-    unit.watch("fresh", &subject(FRESH), Birthday::Fresh)
+    unit.watch("fresh", &subject(FRESH), Birthday::At(BlockPosition(0)))
         .await
-        .expect("a fresh observation");
+        .expect("an observation from genesis");
     drive(&unit, 8).await;
     let before = store
         .landings(&network())

@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn listeners_require_upstream_tls_and_a_bearer_token() {
+    fn network_listeners_require_upstream_tls_and_a_bearer_token() {
         let address = "0.0.0.0:8080"
             .parse()
             .expect("test non-loopback socket address must parse");
@@ -249,13 +249,9 @@ mod tests {
             None,
             RequestLimits::default(),
         );
-        assert_eq!(
-            loopback_without_bearer
-                .validate()
-                .expect_err("loopback routes must not fail open")
-                .kind,
-            ConfigErrorKind::MissingBearerToken
-        );
+        loopback_without_bearer
+            .validate()
+            .expect("a loopback listener may serve without a token");
 
         ServerConfig::new(
             address,

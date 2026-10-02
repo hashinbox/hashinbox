@@ -66,6 +66,23 @@ impl Submissions {
         self.tasks().open = false;
     }
 
+    /// Whether background submissions have all finished successfully.
+    /// Callers block new submissions separately before replacing RPC or purging an index.
+    ///
+    /// # Errors
+    /// Reports a failed background task; maintenance must not discard ambiguous work.
+    pub fn idle(&self) -> Result<bool, crate::WalletError> {
+        let mut tasks = self.tasks();
+        tasks.reap();
+        if tasks.failure.is_some() {
+            return Err(crate::WalletError::new(
+                crate::WalletErrorKind::Unavailable,
+                "a background submission failed; recovery requires attention",
+            ));
+        }
+        Ok(tasks.running.is_empty())
+    }
+
     /// Closes registration and waits for every registered task.
     ///
     /// Every task is waited for even when one of them panicked, because the

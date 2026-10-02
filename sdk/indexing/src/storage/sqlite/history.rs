@@ -192,7 +192,7 @@ impl Tables {
         };
         let mut held = self.attached(read, address, asset, (lower, upper))?;
         for (place, entry) in &mut entries {
-            entry.movements = held.remove(&place.id).unwrap_or_default();
+            entry.transaction.movements = held.remove(&place.id).unwrap_or_default();
         }
         Ok(entries)
     }
@@ -220,14 +220,16 @@ impl Tables {
         Ok((
             place,
             CanonicalTransaction {
-                transaction_id: self.transaction(identity),
+                transaction: crate::Transaction {
+                    transaction_id: self.transaction(identity),
+                    movements: Vec::new(),
+                    fee: self.fee(row)?,
+                },
                 transaction_order: Self::restored(order)?,
                 status: match failed {
                     0 => CanonicalStatus::Included { block },
                     _ => CanonicalStatus::Failed { block, reason },
                 },
-                movements: Vec::new(),
-                fee: self.fee(row)?,
             },
         ))
     }
@@ -263,7 +265,7 @@ impl Tables {
         };
         let failed = i64::from(matches!(entry.status, CanonicalStatus::Failed { .. }));
         let place = Place::of(entry)?;
-        let fee = entry.fee.as_ref();
+        let fee = entry.transaction.fee.as_ref();
         let written = transaction
             .prepare_cached(
                 "INSERT OR IGNORE INTO transaction_fact
@@ -312,12 +314,10 @@ impl Tables {
         transaction: &Transaction<'_>,
         entry: &CanonicalTransaction,
     ) -> Result<Place, IndexError> {
-        let identity = entry.transaction_id.id.as_str();
+        let identity = entry.transaction.transaction_id.id.as_str();
         let held = self.fact(transaction, identity)?;
-        let presented = CanonicalTransaction {
-            movements: Vec::new(),
-            ..entry.clone()
-        };
+        let mut presented = entry.clone();
+        presented.transaction.movements.clear();
         match held {
             Some((place, stored)) if stored == presented => Ok(place),
             _ => Err(store(

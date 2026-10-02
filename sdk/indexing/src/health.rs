@@ -14,6 +14,8 @@ use crate::{IndexError, Network, SyncPhase, SyncStatus};
 /// remains the result of one pass; this is the network's standing condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetworkState {
+    /// The supervisor finished its active pass and is paused by its caller.
+    Paused,
     /// Behind the observed tip and still applying blocks.
     CatchingUp,
     /// The checkpoint is at the observed tip.

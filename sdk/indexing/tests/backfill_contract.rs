@@ -169,20 +169,22 @@ impl BlockInterpreter for Interpreter {
         let transactions = (0_u64..)
             .zip(addresses)
             .map(|(order, address)| ObservationDraft {
-                transaction_id: TransactionRef::new(
-                    network(),
-                    format!("{}-{}", address.value, reference.height.0),
-                ),
+                transaction: indexing::Transaction {
+                    transaction_id: TransactionRef::new(
+                        network(),
+                        format!("{}-{}", address.value, reference.height.0),
+                    ),
+                    movements: vec![ValueMovement::transfer(
+                        MovementId("0".into()),
+                        asset(),
+                        Decimal::from(10_u64),
+                        Address::new(network(), "treasury"),
+                        address.clone(),
+                    )],
+                    fee: None,
+                },
                 transaction_order: order,
                 status: ObservationDraftStatus::Included,
-                movements: vec![ValueMovement::transfer(
-                    MovementId("0".into()),
-                    asset(),
-                    Decimal::from(10_u64),
-                    Address::new(network(), "treasury"),
-                    address.clone(),
-                )],
-                fee: None,
             })
             .collect();
         InterpretedBlock::new(&network(), reference, transactions)
@@ -236,7 +238,7 @@ fn indexed(repository: &memory::Repository, address: &str) -> Vec<String> {
         .expect("history")
         .transactions
         .into_iter()
-        .map(|entry| entry.transaction_id.id.to_string())
+        .map(|entry| entry.transaction.transaction_id.id.to_string())
         .collect()
 }
 

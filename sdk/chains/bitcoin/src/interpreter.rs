@@ -71,15 +71,17 @@ impl BlockInterpreter {
     /// under every address selection.
     fn observation(&self, transaction: &Transaction, order: u64) -> ObservationDraft {
         ObservationDraft {
-            transaction_id: transaction.id().canonical(&self.network),
+            transaction: indexing::Transaction {
+                transaction_id: transaction.id().canonical(&self.network),
+                movements: transaction
+                    .movements()
+                    .into_iter()
+                    .map(|movement| self.movement(movement))
+                    .collect(),
+                fee: transaction.fee().map(|fee| self.fee(fee)),
+            },
             transaction_order: order,
             status: ObservationDraftStatus::Included,
-            movements: transaction
-                .movements()
-                .into_iter()
-                .map(|movement| self.movement(movement))
-                .collect(),
-            fee: transaction.fee().map(|fee| self.fee(fee)),
         }
     }
 
@@ -442,13 +444,13 @@ mod tests {
         let interpreted = inspect(&raw, &[&source, &destination]).unwrap();
         assert_eq!(interpreted.block.transactions().len(), 2);
         let spend = &interpreted.block.transactions()[1];
-        assert_eq!(spend.movements[0].kind(), MovementKind::Input);
-        assert_eq!(spend.movements[1].kind(), MovementKind::Output);
+        assert_eq!(spend.transaction.movements[0].kind(), MovementKind::Input);
+        assert_eq!(spend.transaction.movements[1].kind(), MovementKind::Output);
         assert_eq!(
-            spend.movements[0].id,
+            spend.transaction.movements[0].id,
             MovementId(format!("{}:vin:0", spending.compute_txid()))
         );
-        let fee = spend.fee.as_ref().unwrap();
+        let fee = spend.transaction.fee.as_ref().unwrap();
         assert_eq!(fee.amount, Decimal::from(1_000_u64));
         assert_eq!(fee.amount.scale(), 0);
         assert_eq!(fee.payer, Some(source.canonical(&network())));
@@ -479,6 +481,7 @@ mod tests {
         assert_eq!(interpreted.outputs.tracked_spends.len(), 1);
         assert_eq!(
             interpreted.block.transactions()[0]
+                .transaction
                 .fee
                 .as_ref()
                 .unwrap()

@@ -37,6 +37,8 @@ pub(crate) struct Unit<C: ?Sized> {
     control: SyncControl,
     health: NetworkHealth,
     attempts: u32,
+    logger: logging::Logger,
+    commands: watch::Receiver<u64>,
 }
 
 impl<C: Indexing + ?Sized + 'static> Unit<C> {
@@ -51,6 +53,12 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
             control: supervisor.control.clone(),
             health: NetworkHealth::starting(network),
             attempts: 0,
+            commands: supervisor.control.resumes(index),
+            logger: supervisor
+                .logger
+                .with("chain", network.chain.to_string())
+                .with("network", network.name.clone())
+                .with("component", "indexing"),
         }
     }
 
@@ -77,6 +85,21 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
             if *shutdown.borrow() {
                 return;
             }
+            if self.control.paused(self.index) {
+                if self.control.discarding(self.index) {
+                    self.health = NetworkHealth::starting(&self.health.status.network);
+                    self.attempts = 0;
+                }
+                self.report(NetworkState::Paused, None);
+                self.control.discarded(self.index);
+                self.control.acknowledge(self.index, true);
+                let wake = self.park(&mut shutdown).await;
+                if matches!(wake, Wake::Stop) {
+                    return;
+                }
+                continue;
+            }
+            self.control.acknowledge(self.index, false);
             if self.quarantined() {
                 match self.park(&mut shutdown).await {
                     Wake::Stop => return,
@@ -109,10 +132,14 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
         }
     }
 
-    async fn waited(&self, wait: Duration, shutdown: &mut watch::Receiver<bool>) -> Wake {
+    async fn waited(&mut self, wait: Duration, shutdown: &mut watch::Receiver<bool>) -> Wake {
+        if self.control.paused(self.index) {
+            return Wake::Again;
+        }
         tokio::select! {
             changed = shutdown.changed() => Self::woke(changed.is_err(), shutdown),
             () = tokio::time::sleep(wait) => Wake::Again,
+            _ = self.commands.changed() => Wake::Again,
         }
     }
 
@@ -120,14 +147,20 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
     /// until an operator resumes it or the process shuts down. It must not
     /// return, or the supervisor would see its task end before shutdown.
     async fn park(&mut self, shutdown: &mut watch::Receiver<bool>) -> Wake {
-        let mut resumes = self.control.resumes(self.index);
+        if self.health.state == NetworkState::Paused && !self.control.paused(self.index) {
+            self.report(NetworkState::CatchingUp, None);
+            return Wake::Again;
+        }
+        if self.quarantined() && self.control.paused(self.index) {
+            return Wake::Again;
+        }
         let woken = tokio::select! {
-            changed = resumes.changed() => {
+            changed = self.commands.changed() => {
                 if changed.is_err() { Wake::Stop } else { Wake::Again }
             }
             changed = shutdown.changed() => Self::woke(changed.is_err(), shutdown),
         };
-        if matches!(woken, Wake::Again) {
+        if matches!(woken, Wake::Again) && !self.control.paused(self.index) {
             self.attempts = 0;
             self.report(NetworkState::CatchingUp, None);
         }
@@ -171,6 +204,9 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
         } else {
             NetworkState::Quarantined
         };
+        if state == NetworkState::Quarantined {
+            self.commands.borrow_and_update();
+        }
         self.report(state, Some(&error));
         retrying.then_some(Self::jittered(self.schedule.retry(self.attempts)))
     }
@@ -262,6 +298,32 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
             now
         };
         let stalled = Self::stalled(&next.status).is_some();
+        if previous != next.state || next.attempts == 1 || next.attempts.is_power_of_two() {
+            let level = if next.state == NetworkState::Quarantined {
+                logging::Level::Error
+            } else if next.failure.is_some() || stalled {
+                logging::Level::Warn
+            } else {
+                logging::Level::Info
+            };
+            let failure = next
+                .failure
+                .as_ref()
+                .or_else(|| Self::stalled(&next.status));
+            let kind = failure
+                .map(|error| format!("{:?}", error.kind))
+                .unwrap_or_default();
+            self.logger.event(
+                level,
+                "indexing.state",
+                "Indexing state changed",
+                &[
+                    ("state", &format!("{:?}", next.state)),
+                    ("failure", &kind),
+                    ("attempts", &next.attempts.to_string()),
+                ],
+            );
+        }
         self.health.clone_from(&next);
         self.monitor.network_observed(&next);
         if previous != next.state

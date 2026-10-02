@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use jsonrpsee::{
     core::{
@@ -28,6 +28,7 @@ pub struct Http {
     client: HttpClient,
     header_names: Vec<String>,
     statistics: Statistics,
+    events: Arc<crate::events::Events>,
 }
 
 impl fmt::Debug for Http {
@@ -57,6 +58,7 @@ impl Http {
             client,
             header_names,
             statistics: Statistics::default(),
+            events: Arc::default(),
         })
     }
 
@@ -64,6 +66,13 @@ impl Http {
     #[must_use]
     pub fn statistics(&self) -> Statistics {
         self.statistics.clone()
+    }
+
+    /// Attaches an injected sink scoped to this node. Clones share failure grouping.
+    #[must_use]
+    pub fn with_logger(mut self, logger: logging::Logger) -> Self {
+        self.events = Arc::new(crate::events::Events::new(logger));
+        self
     }
 
     async fn execute(&self, request: Request) -> Result<CallResult, Error> {
@@ -79,7 +88,7 @@ impl Http {
             Err(RpcError::Call(error)) => Ok(Err(Failure::from(error))),
             Err(source) => Err(Error::from_rpc(source)),
         };
-        self.statistics.call(&result);
+        self.events.outcome(self.statistics.call(&result));
         result
     }
 
@@ -113,7 +122,7 @@ impl Http {
                     })
                     .collect()
             });
-        self.statistics.batch(&result);
+        self.events.outcome(self.statistics.batch(&result));
         result
     }
 }

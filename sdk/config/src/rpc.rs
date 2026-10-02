@@ -103,10 +103,27 @@ impl Rpc {
         &self,
         secrets: &dyn Secrets,
     ) -> Result<(Transport, Vec<json_rpc::Statistics>), Error> {
+        self.logged(secrets, &logging::Logger::default())
+    }
+
+    /// Builds each node with an explicitly injected, network-scoped logger.
+    /// Node IDs are endpoint ordinals within this immutable configuration.
+    ///
+    /// # Errors
+    /// The same configuration failures as [`Self::transport`].
+    pub fn logged(
+        &self,
+        secrets: &dyn Secrets,
+        logger: &logging::Logger,
+    ) -> Result<(Transport, Vec<json_rpc::Statistics>), Error> {
         let mut clients = Vec::with_capacity(self.endpoints.len());
         let mut statistics = Vec::with_capacity(self.endpoints.len());
-        for endpoint in &self.endpoints {
-            let client = endpoint.connect(secrets)?;
+        for (ordinal, endpoint) in self.endpoints.iter().enumerate() {
+            let client = endpoint.connect(secrets)?.with_logger(
+                logger
+                    .with("component", "rpc")
+                    .with("node_id", ordinal.to_string()),
+            );
             statistics.push(client.statistics());
             clients.push(client);
         }

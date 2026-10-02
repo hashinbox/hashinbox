@@ -69,6 +69,23 @@ where
     I: BlockInterpreter,
     R: Repository,
 {
+    pub(crate) async fn reload(&self) -> Result<(), IndexError> {
+        let _guard = self.enter()?;
+        if self.repository.checkpoint(self.network()).await?.is_some() {
+            return Err(IndexError::retryable_conflict(
+                "purge the repository before resetting indexing",
+            ));
+        }
+        self.pending.replace(pending::Blocks::default())?;
+        self.native.clear()?;
+        *self
+            .confirmed
+            .lock()
+            .map_err(|_| IndexError::retryable_conflict("index state poisoned"))? = None;
+        self.watches.mark_stale();
+        self.watches.load(&self.repository).await
+    }
+
     /// One bounded pass over this service's own state.
     ///
     /// A pass reads two lines from the source. Everything at or below the

@@ -61,10 +61,19 @@ impl<'a> Inspection<'a> {
     /// [`WatchProgress::caught_up`] decides, which is the comparison a pass
     /// selects by: a store and an index cannot disagree about what "still
     /// catching up" means.
+    ///
+    /// **An observed address at a network with no line has read nothing.** A
+    /// pass owes nothing below a line that does not exist, so `caught_up` says
+    /// yes there; a read cannot, because no block has been committed for the
+    /// network since it was created or purged ([`Purging`]). An empty answer
+    /// from that snapshot is the absence of reading, not of rows.
     fn outstanding(&self) -> bool {
+        let Some(line) = self.checkpoint else {
+            return !self.observations.is_empty();
+        };
         self.observations
             .iter()
-            .any(|observed| !observed.caught_up(self.checkpoint))
+            .any(|observed| !observed.caught_up(Some(line)))
     }
 
     /// What the history behind `of`'s rows may claim.
@@ -112,7 +121,8 @@ impl<'a> Inspection<'a> {
     ///
     /// A retryable [`IndexErrorKind::Conflict`], the refusal every caller of
     /// [`OutputStore`] already restarts on. It clears the moment the catch-up
-    /// reaches the line.
+    /// reaches the line, or, at a network with no line yet (never indexed, or
+    /// [`Purging`] emptied it), at the first commit.
     pub fn spendable(&self) -> Result<(), IndexError> {
         if !self.outstanding() {
             return Ok(());
@@ -201,8 +211,9 @@ pub trait OutputStore: Send + Sync {
     ///
     /// A retryable [`IndexErrorKind::Conflict`] while any observation of the
     /// address is still being inspected below the checkpoint the page would be
-    /// read at, because a row cannot be proven unspent over blocks nothing has
-    /// read. The same kind when the checkpoint moved under a cursor.
+    /// read at, or the address is observed and its network has no checkpoint,
+    /// because a row cannot be proven unspent over blocks nothing has read. The
+    /// same kind when the checkpoint moved under a cursor.
     fn list<'a>(&'a self, request: OutputRequest) -> BoxFuture<'a, Result<OutputPage, IndexError>>;
 }
 
@@ -213,19 +224,19 @@ impl<T: OutputStore + ?Sized> OutputStore for std::sync::Arc<T> {
     }
 }
 
-/// Taking one network's index back to nothing, offline.
+/// Taking one network's index back to nothing: offline, or online while that
+/// network is quiesced.
 ///
-/// Deliberately **not** part of [`crate::Repository`]: it is the offline
-/// rescan, not indexing, and a third-party sink that does not offer one still
-/// indexes correctly. The built-in store and the server's rescan tool are its
-/// only consumers.
+/// Deliberately **not** part of [`crate::Repository`]: it is the rescan, not
+/// indexing, and a third-party sink that does not offer one still indexes
+/// correctly.
 pub trait Purging: Send + Sync {
     /// Atomically removes every indexing-owned row of exactly one network —
     /// its checkpoint, history, movements, block credits, and live outputs —
     /// and reports how many of each it removed.
     ///
-    /// The offline rescan, and the only way
-    /// back from an [`crate::IndexErrorKind::ConfirmedReorg`].
+    /// The rescan, and the only way back from an
+    /// [`crate::IndexErrorKind::ConfirmedReorg`].
     ///
     /// **The observations survive and their progress does not.** What each
     /// watch observes is application state and is never touched, so the next
@@ -241,9 +252,27 @@ pub trait Purging: Send + Sync {
     /// untouched, which is what makes one shared store safe to purge one
     /// network of.
     ///
-    /// Callers must run it offline. Purging while HTTP serves history from
-    /// this network would hand clients an empty history that looks
-    /// authoritative.
+    /// **Offline, or online by the network's controller.** Online, the caller
+    /// owes the quiesced window: admissions for the network are blocked (the
+    /// application's), its unit is paused (`SyncControl::pause` has returned,
+    /// so no pass is mid-commit), and before resuming it the caller resets that
+    /// network's indexer ([`crate::Indexing::reset`]). The next pass then
+    /// re-derives every row from the registered birthdays.
+    ///
+    /// **Reads need no gate of the controller's: the purged rows answer for
+    /// themselves.** From this purge until the first commit after resume, the
+    /// network has no checkpoint and no observation has progress, and that is
+    /// what a read reports rather than an authoritative empty history: a
+    /// balance or history page is [`crate::Completeness::Incomplete`] with no
+    /// checkpoint, and an observed address's spendable set is refused with a
+    /// retryable [`crate::IndexErrorKind::Conflict`] ([`Inspection`]). Once
+    /// passes commit again, each read is as of the lower checkpoint the rescan
+    /// has reached, under the rule every catch-up reads by. A third-party store
+    /// offering this port owes the same answers.
+    ///
+    /// **Done once per window.** A second purge removes nothing, and a process
+    /// restarted between the purge and the resume needs none: it loads the
+    /// same observations without progress and scans from their birthdays.
     ///
     /// # Errors
     ///

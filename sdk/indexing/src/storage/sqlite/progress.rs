@@ -171,30 +171,29 @@ mod progress_test {
     /// block disagree with the stored one.
     fn canonical(height: u64, amount: u64) -> CanonicalBlock {
         let asset = AssetId::native(network().chain);
+        let draft = ObservationDraft {
+            transaction: crate::Transaction {
+                transaction_id: TransactionRef::new(network(), format!("block-{height}")),
+                movements: vec![ValueMovement::transfer(
+                    MovementId(format!("m-{height}")),
+                    asset.clone(),
+                    Decimal::from(amount),
+                    address("payer"),
+                    address("late"),
+                )],
+                fee: Some(NetworkFee {
+                    asset,
+                    amount: Decimal::from(1_u64),
+                    payer: Some(address("payer")),
+                }),
+            },
+            transaction_order: 0,
+            status: ObservationDraftStatus::Included,
+        };
         CanonicalBlock::new(
             network(),
-            InterpretedBlock::new(
-                &network(),
-                block(height),
-                vec![ObservationDraft {
-                    transaction_id: TransactionRef::new(network(), format!("block-{height}")),
-                    transaction_order: 0,
-                    status: ObservationDraftStatus::Included,
-                    movements: vec![ValueMovement::transfer(
-                        MovementId(format!("m-{height}")),
-                        asset.clone(),
-                        Decimal::from(amount),
-                        address("payer"),
-                        address("late"),
-                    )],
-                    fee: Some(NetworkFee {
-                        asset,
-                        amount: Decimal::from(1_u64),
-                        payer: Some(address("payer")),
-                    }),
-                }],
-            )
-            .expect("unique transaction ids"),
+            InterpretedBlock::new(&network(), block(height), vec![draft])
+                .expect("unique transaction ids"),
         )
         .expect("valid fixture facts")
     }

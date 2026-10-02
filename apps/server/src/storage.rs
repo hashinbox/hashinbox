@@ -146,18 +146,13 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn network_purge_preserves_encrypted_application_keys() {
+    async fn network_purge_preserves_application_keys() {
         use indexing::Purging as _;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("server.db");
         let config: Config = serde_json::from_value(serde_json::json!({"path": path})).unwrap();
         let store = config.open().await.unwrap();
-        let registry = crate::registry::Registry::open(
-            &path,
-            zeroize::Zeroizing::new("offline fixture passphrase".into()),
-        )
-        .await
-        .unwrap();
+        let registry = crate::registry::Registry::open(&path).await.unwrap();
         registry
             .keep(
                 "saved-key",
@@ -176,12 +171,7 @@ mod tests {
             .unwrap();
         assert_eq!(registry.ids().await, ["saved-key"]);
         drop(registry);
-        let reopened = crate::registry::Registry::open(
-            &path,
-            zeroize::Zeroizing::new("offline fixture passphrase".into()),
-        )
-        .await
-        .unwrap();
+        let reopened = crate::registry::Registry::open(&path).await.unwrap();
         assert_eq!(reopened.ids().await, ["saved-key"]);
     }
 }

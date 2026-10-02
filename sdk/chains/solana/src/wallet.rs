@@ -116,7 +116,7 @@ impl AddressParser for WalletConfig {
 /// checkpoint and its commit announcements. The sender's native history is the
 /// third thing it needs, and it is not the indexer's to give: a page is the
 /// repository's own query joined to that index's pending blocks, so this
-/// factory is handed the one narrow capability it reads — `wallets::History`,
+/// factory is handed the one narrow capability it reads — `indexing::History`,
 /// "page a holding's transactions from a position" — and names no store at all.
 pub struct WalletFactory {
     config: WalletConfig,
@@ -135,7 +135,7 @@ impl WalletFactory {
     /// because the sender pays every fee and is therefore on its own
     /// transaction whatever it moved. It is passed in rather than read off
     /// `indexer` because confirmed-plus-pending is neither the index's alone nor
-    /// the repository's — `wallets::PendingJoin` is what joins them, and the
+    /// the repository's — `indexing::PendingJoin` is what joins them, and the
     /// composition that owns both builds it.
     ///
     /// # Errors
@@ -146,7 +146,7 @@ impl WalletFactory {
         config: WalletConfig,
         rpc: &Client<C>,
         indexer: &Arc<Indexer<Source<C>, BlockInterpreter, R>>,
-        history: Arc<dyn wallets::History>,
+        history: Arc<dyn indexing::History>,
     ) -> Result<Self, Error>
     where
         C: json_rpc::Client + 'static,

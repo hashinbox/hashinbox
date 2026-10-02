@@ -1019,6 +1019,7 @@ dependencies = [
  "futures-util",
  "indexing",
  "json-rpc",
+ "logging",
  "sdk-config",
  "serde",
  "serde_json",
@@ -1041,6 +1042,7 @@ dependencies = [
  "futures-util",
  "indexing",
  "json-rpc",
+ "logging",
  "num-bigint",
  "sdk-config",
  "serde",
@@ -1063,6 +1065,7 @@ dependencies = [
  "hex",
  "indexing",
  "json-rpc",
+ "logging",
  "sdk-config",
  "serde",
  "serde_json",
@@ -2233,6 +2236,7 @@ dependencies = [
  "futures-channel",
  "futures-executor",
  "indexing",
+ "logging",
  "num-bigint",
  "rusqlite",
  "tempfile",
@@ -2417,6 +2421,7 @@ dependencies = [
  "http",
  "json-rpc",
  "jsonrpsee",
+ "logging",
  "serde",
  "serde_json",
  "tokio",
@@ -2596,6 +2601,13 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "logging"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
 
 [[package]]
 name = "lru-slab"
@@ -2813,8 +2825,8 @@ dependencies = [
  "http-server",
  "indexing",
  "json-rpc",
+ "logging",
  "reqwest",
- "ring",
  "rusqlite",
  "sdk-config",
  "serde",
@@ -2823,6 +2835,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower 0.5.2",
+ "url",
  "utoipa",
  "utoipa-axum",
  "uuid",
@@ -3555,6 +3568,7 @@ dependencies = [
  "base",
  "indexing",
  "json-rpc",
+ "logging",
  "serde",
  "serde_json",
  "tokio",

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use std::{error, fmt, str::FromStr};
 
 use axum::{Json, extract::State};
@@ -36,7 +38,7 @@ impl Asset {
     }
 }
 
-pub(super) fn routes() -> OpenApiRouter<Payments> {
+pub(super) fn routes() -> OpenApiRouter<super::Application> {
     OpenApiRouter::new().routes(routes!(list))
 }
 
@@ -106,7 +108,7 @@ impl AssetList {
     ),
     tag = "assets"
 )]
-async fn list(State(payments): State<Payments>) -> Json<AssetList> {
+async fn list(State(payments): State<Arc<Payments>>) -> Json<AssetList> {
     Json(AssetList::new(&payments.wallets, &payments.units))
 }
 

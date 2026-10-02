@@ -194,10 +194,10 @@ async fn call(
 
 /// The confirmed transactions of one address in one asset.
 async fn transactions(
-    history: &dyn wallets::History,
+    history: &dyn indexing::History,
     asset: &base::AssetId,
     address: &base::Address,
-) -> Result<Vec<wallets::ObservedTransaction>, AnyError> {
+) -> Result<Vec<indexing::ObservedTransaction>, AnyError> {
     let subject = Subject {
         address: address.clone(),
         asset: asset.clone(),

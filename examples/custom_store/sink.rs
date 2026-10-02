@@ -346,7 +346,7 @@ impl Sink {
     ) {
         let sent = transactions
             .iter()
-            .flat_map(|transaction| transaction.movements.iter())
+            .flat_map(|transaction| transaction.transaction.movements.iter())
             .filter_map(|movement| movement.to().map(|to| (to, &movement.amount)));
         let block = credits.iter().map(|credit| (&credit.to, &credit.amount));
         let mut totals: BTreeMap<(Network, String), Decimal> = BTreeMap::new();
@@ -421,7 +421,7 @@ impl Sink {
 // ---------------------------------------------------------------------------
 // THIS CONSUMER'S OWN QUERY API.
 //
-// Not `wallets::History` and not `wallets::Balances`: three plain questions in
+// Not `indexing::History` and not `indexing::Balances`: three plain questions in
 // the vocabulary of a deposit watcher. This is what "the queries are a consumer
 // capability" means once a consumer writes its own store — it implements no read
 // port it never wanted, it just asks.

@@ -29,6 +29,7 @@ supervisor = ["dep:tokio", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time
 memory = []
 
 [dependencies]
+logging = { path = "../../packages/logging" }
 base = { path = "../base" }
 futures-channel.workspace = true
 num-bigint.workspace = true

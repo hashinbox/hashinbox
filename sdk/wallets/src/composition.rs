@@ -18,14 +18,10 @@
 
 use std::{future::Future, sync::Arc, time::Duration};
 
-use base::Network;
 use base::{BoxFuture, Units};
-use indexing::{Balance, Holder, Index, IndexError, IndexErrorKind, Indexing, Schedule, Schedules};
+use indexing::{Balances, History, Index, Indexing, Router, Schedule, Schedules};
 
-use crate::{
-    Balances, History, SubmissionRegistrar, TransactionPage, WalletError, WalletErrorKind,
-    WalletFactory, Wallets,
-};
+use crate::{SubmissionRegistrar, WalletError, WalletErrorKind, WalletFactory, Wallets};
 
 /// One chain network's composed parts, as an application registers them.
 ///
@@ -40,7 +36,7 @@ pub struct ComposedChain<A> {
     pub index: Arc<dyn Indexing>,
     /// This network's history reader: the repository's own confirmed pages
     /// joined to the blocks `index` still holds above its confirmed line
-    /// ([`crate::PendingJoin`]).
+    /// ([`indexing::PendingJoin`]).
     ///
     /// A field rather than a capability of `index`, because it is neither
     /// half's alone: the page is the repository's query and the pending blocks
@@ -50,7 +46,7 @@ pub struct ComposedChain<A> {
     pub history: Arc<dyn History>,
     /// This network's balance fold: the repository's own total for a holding,
     /// completed by the blocks `index` still holds above its confirmed line
-    /// ([`crate::PendingJoin`]).
+    /// ([`indexing::PendingJoin`]).
     ///
     /// Stated beside `history` and for the same reason. A balance is a query
     /// over stored rows, and this chain is the one place that holds both the
@@ -107,13 +103,13 @@ pub struct Composition<A: Ord> {
     /// a history consumer declares, answered by the reader that owns the
     /// holding's network.
     ///
-    /// Routed here rather than by `indexing::Index`, because a page is a
+    /// Router here rather than by `indexing::Index`, because a page is a
     /// repository's own query and not something to reach through an indexer.
     pub history: Arc<dyn History>,
     /// Every configured network's balance fold, as one: the same narrow
     /// capability, answered by the fold that owns the holding's network.
     ///
-    /// Routed here for the same reason a page is: a balance is a query over a
+    /// Router here for the same reason a page is: a balance is a query over a
     /// repository's rows, and a consumer asks the owner of the network directly
     /// rather than through the composed index it happens to be driven by.
     pub balance: Arc<dyn Balances>,
@@ -183,11 +179,12 @@ where
             folds.push((index.network().clone(), balance));
             indexes.push(index);
         }
-        let index = Index::of(indexes).map_err(|error| E::from(WalletError::from(error)))?;
+        let failed = |error| E::from(WalletError::from(error));
+        let index = Index::of(indexes).map_err(failed)?;
         Ok(Self {
             index: Arc::new(index),
-            history: Arc::new(Histories(readers)),
-            balance: Arc::new(Folds(folds)),
+            history: Arc::new(Router::new(readers).map_err(failed)?),
+            balance: Arc::new(Router::new(folds).map_err(failed)?),
             wallets,
             units,
             schedules,
@@ -251,58 +248,6 @@ where
     }
 }
 
-/// Every configured network's history reader, keyed by the network that owns it.
-///
-/// The one place a history read is routed, and it is a consumer's own value: a
-/// page is the repository's query joined to one index's pending blocks, so there
-/// is one reader per network and nothing to ask an indexer for. A holding names its
-/// network, so the route is the same lookup a balance takes — without making
-/// every child of a composition answer a page before any of them can.
-struct Histories(Vec<(Network, Arc<dyn History>)>);
-
-impl History for Histories {
-    fn history<'a>(
-        &'a self,
-        of: &'a dyn Holder,
-        page: indexing::Page,
-    ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
-        let network = &of.address().network;
-        match self.0.iter().find(|(owner, _)| owner == network) {
-            Some((_, reader)) => reader.history(of, page),
-            None => Box::pin(async { Err(unconfigured()) }),
-        }
-    }
-}
-
-/// Every configured network's balance fold, keyed by the network that owns it.
-///
-/// The one place a balance read is routed, and a consumer's own value for the
-/// same reason [`Histories`] is one: a total is the repository's row completed
-/// by one index's pending blocks, so there is one fold per network and nothing
-/// to ask an indexer for. A holding names its network, which is the whole of the route.
-struct Folds(Vec<(Network, Arc<dyn Balances>)>);
-
-impl Balances for Folds {
-    fn balance<'a>(&'a self, of: &'a dyn Holder) -> BoxFuture<'a, Result<Balance, IndexError>> {
-        let network = &of.address().network;
-        match self.0.iter().find(|(owner, _)| owner == network) {
-            Some((_, fold)) => fold.balance(of),
-            None => Box::pin(async { Err(unconfigured()) }),
-        }
-    }
-}
-
-/// What a query about a network no configured chain claimed is refused with,
-/// stated once for both routers: the same refusal every other read of an
-/// unknown network already gave.
-fn unconfigured() -> IndexError {
-    IndexError::new(
-        IndexErrorKind::NetworkMismatch,
-        "index network is not configured",
-        false,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -312,8 +257,8 @@ mod tests {
 
     use base::{AssetId, ChainName, Unit};
     use indexing::{
-        Balance, Birthday, BlockRef, Checkpoint, Holder, IndexError, Indexing, Listener, Network,
-        Page, Subject, SyncStatus, Watch, Watching, memory,
+        Balance, Birthday, BlockRef, Checkpoint, Holder, IndexError, IndexErrorKind, Indexing,
+        Listener, Network, Page, Subject, SyncStatus, TransactionPage, Watch, Watching, memory,
     };
 
     use super::*;

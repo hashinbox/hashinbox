@@ -7,6 +7,7 @@ description = "Bitcoin support for the payment SDK: indexing source and interpre
 readme = "README.md"
 
 [dependencies]
+logging = { path = "../../../packages/logging" }
 base = { path = "../../base" }
 sdk-config = { path = "../../config" }
 crypto = { path = "../../../packages/crypto" }

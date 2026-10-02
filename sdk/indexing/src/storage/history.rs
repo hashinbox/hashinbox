@@ -9,11 +9,9 @@
 //!
 //! **Confirmed rows only.** [`ConfirmedHistory`] is a repository's own
 //! `history(query)` API over the rows it holds, at the checkpoint its answer
-//! carries. The pending-inclusive page a consumer serves is not declared here
-//! and nothing in this crate answers it: the blocks above the confirmed line
-//! are an index's own memory, which it exposes as a sample
-//! ([`crate::Pending`]), and joining the two is the consumer's composition
-//! (`wallets::PendingJoin`).
+//! carries. The pending-inclusive page is [`crate::History`], beside it in
+//! `observed.rs`: the blocks above the confirmed line are an index's own
+//! memory, exposed only as a sample ([`crate::Pending`]).
 
 use crate::{
     Address, AssetId, BlockHeight, BlockRef, BoxFuture, CanonicalStatus, CanonicalTransaction,
@@ -154,7 +152,7 @@ impl From<&CanonicalTransaction> for HistoryPosition {
         Self {
             height: transaction.block().height,
             transaction_order: transaction.transaction_order,
-            transaction: transaction.transaction_id.clone(),
+            transaction: transaction.transaction.transaction_id.clone(),
         }
     }
 }
@@ -240,6 +238,7 @@ impl HistoryQuery {
     #[must_use]
     pub fn select(&self, mut transaction: CanonicalTransaction) -> Option<CanonicalTransaction> {
         let moved = transaction
+            .transaction
             .movements
             .iter()
             .any(|movement| self.moves(movement));
@@ -247,6 +246,7 @@ impl HistoryQuery {
             return None;
         }
         transaction
+            .transaction
             .movements
             .retain(|movement| self.moves(movement));
         Some(transaction)
@@ -261,7 +261,7 @@ impl HistoryQuery {
     /// Whether the query address paid `transaction`'s fee and the fee alone
     /// puts it on the page: it failed, or the query asset is the fee asset.
     fn charges(&self, transaction: &CanonicalTransaction) -> bool {
-        let Some(fee) = &transaction.fee else {
+        let Some(fee) = &transaction.transaction.fee else {
             return false;
         };
         let failed = matches!(transaction.status, CanonicalStatus::Failed { .. });

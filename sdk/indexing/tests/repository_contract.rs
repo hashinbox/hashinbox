@@ -104,20 +104,22 @@ fn transaction(value: &str) -> TransactionRef {
 
 fn draft(id: &str) -> ObservationDraft {
     ObservationDraft {
-        transaction_id: transaction(id),
+        transaction: indexing::Transaction {
+            transaction_id: transaction(id),
+            movements: vec![ValueMovement::transfer(
+                MovementId(format!("movement-{id}")),
+                AssetId {
+                    chain: network().chain,
+                    asset: "native".into(),
+                },
+                Decimal::from(1_u64),
+                address("sender"),
+                address("receiver"),
+            )],
+            fee: None,
+        },
         transaction_order: 0,
         status: ObservationDraftStatus::Included,
-        movements: vec![ValueMovement::transfer(
-            MovementId(format!("movement-{id}")),
-            AssetId {
-                chain: network().chain,
-                asset: "native".into(),
-            },
-            Decimal::from(1_u64),
-            address("sender"),
-            address("receiver"),
-        )],
-        fee: None,
     }
 }
 
@@ -181,7 +183,7 @@ fn history(repository: &sqlite::Repository) -> Vec<String> {
     .expect("history")
     .transactions
     .into_iter()
-    .map(|transaction| transaction.transaction_id.id.to_string())
+    .map(|transaction| transaction.transaction.transaction_id.id.to_string())
     .collect()
 }
 
@@ -275,12 +277,18 @@ fn history_pages_survive_a_moving_checkpoint_and_output_pages_do_not() {
     let page = history_page(None).expect("first history page");
     assert_eq!(page.checkpoint, Some(second.clone()));
     assert_eq!(page.transactions.len(), 1);
-    assert_eq!(page.transactions[0].transaction_id, transaction("one"));
+    assert_eq!(
+        page.transactions[0].transaction.transaction_id,
+        transaction("one")
+    );
     let history_cursor = page.next.expect("history continuation");
     let page = history_page(Some(history_cursor.clone())).expect("final history page");
     assert_eq!(page.checkpoint, Some(second.clone()));
     assert_eq!(page.transactions.len(), 1);
-    assert_eq!(page.transactions[0].transaction_id, transaction("two"));
+    assert_eq!(
+        page.transactions[0].transaction.transaction_id,
+        transaction("two")
+    );
     assert_eq!(page.next, None);
 
     let page = output_page(None).expect("first output page");
@@ -303,9 +311,15 @@ fn history_pages_survive_a_moving_checkpoint_and_output_pages_do_not() {
     // have appended above the cursor: the page is the same one.
     let page = history_page(Some(history_cursor)).expect("an ascending cursor stays valid");
     assert_eq!(page.transactions.len(), 1);
-    assert_eq!(page.transactions[0].transaction_id, transaction("two"));
+    assert_eq!(
+        page.transactions[0].transaction.transaction_id,
+        transaction("two")
+    );
     let page = history_page(page.next).expect("the appended row is simply the next page");
-    assert_eq!(page.transactions[0].transaction_id, transaction("three"));
+    assert_eq!(
+        page.transactions[0].transaction.transaction_id,
+        transaction("three")
+    );
     assert_eq!(page.next, None);
     // The live-output set is not append-only — a spend removes a row — so its
     // cursor is still bound to the checkpoint it was issued at.
@@ -622,4 +636,111 @@ fn sqlite_restores_verified_opening_evidence_after_reopen() {
     let reopened = open(&path);
     let after = block_on(indexing::BalanceStore::balance(&reopened, query)).expect("reopened");
     assert_eq!(after, before);
+}
+
+#[test]
+fn receipt_logs_follow_atomic_commits_and_not_reinspection() {
+    use indexing::Watch;
+    use std::sync::Arc;
+    let directory = TempDir::new().unwrap();
+    for disk in [false, true] {
+        let logs = Arc::new(logging::Memory::default());
+        let logger = logging::Logger::new(logs.clone());
+        let store: Box<dyn indexing::Repository> = if disk {
+            Box::new(open(&directory.path().join("logged.db")).with_logger(logger))
+        } else {
+            Box::new(memory::Repository::new().with_logger(logger))
+        };
+        block_on(store.add(vec![Watch {
+            id: "receiver".into(),
+            address: address("receiver"),
+            asset: AssetId::native(network().chain),
+            start: BlockPosition(0),
+        }]))
+        .unwrap();
+        let first = block(1, 1, 0);
+        block_on(store.commit(addition(
+            first.clone(),
+            None,
+            "incoming",
+            OutputChanges::default(),
+        )))
+        .unwrap();
+        let events = logs.page(0, 100, &logging::Filter::default());
+        assert_eq!(events.entries.len(), 1);
+        assert_eq!(events.entries[0].fields["amount"], "1");
+        assert_eq!(events.entries[0].fields["block_time"], "1001");
+        block_on(store.commit(addition(
+            first.clone(),
+            Some(first.clone()),
+            "incoming",
+            OutputChanges::default(),
+        )))
+        .unwrap();
+        assert_eq!(
+            logs.page(0, 100, &logging::Filter::default()).entries.len(),
+            1
+        );
+        // Conflicting expected state is rejected and emits no receipt.
+        assert!(
+            block_on(store.commit(addition(
+                block(2, 2, 1),
+                None,
+                "rejected",
+                OutputChanges::default()
+            )))
+            .is_err()
+        );
+        assert_eq!(
+            logs.page(0, 100, &logging::Filter::default()).entries.len(),
+            1
+        );
+        let mut self_transfer = draft("self");
+        self_transfer.transaction.movements = vec![ValueMovement::transfer(
+            MovementId("self".into()),
+            AssetId::native(network().chain),
+            Decimal::from(4_u64),
+            address("receiver"),
+            address("receiver"),
+        )];
+        let mut change = draft("change");
+        change.transaction_order = 1;
+        change.transaction.movements.push(ValueMovement::transfer(
+            MovementId("spend".into()),
+            AssetId::native(network().chain),
+            Decimal::from(10_u64),
+            address("receiver"),
+            address("outside"),
+        ));
+        let second = block(2, 2, 1);
+        let mut interpreted =
+            InterpretedBlock::new(&network(), second.clone(), vec![self_transfer, change]).unwrap();
+        interpreted.credits.push(indexing::BlockCredit {
+            id: MovementId("withdrawal".into()),
+            asset: AssetId::native(network().chain),
+            amount: Decimal::from(3_u64),
+            to: address("receiver"),
+        });
+        let canonical = CanonicalBlock::new(network(), interpreted).unwrap();
+        for expected in [first, second] {
+            let batch = indexing::IndexedBatch::new(
+                network(),
+                Some(expected),
+                vec![canonical.clone()],
+                vec![],
+                indexing::FeeSettlement::Charged,
+            )
+            .unwrap();
+            block_on(store.commit(batch)).unwrap();
+        }
+        let events = logs.page(0, 100, &logging::Filter::default());
+        assert_eq!(
+            events.entries.len(),
+            2,
+            "no self-transfer, change, or repeated withdrawal event"
+        );
+        assert_eq!(events.entries[1].fields["credit_id"], "withdrawal");
+        assert_eq!(events.entries[1].fields["amount"], "3");
+        assert!(!events.entries[1].fields.contains_key("transaction_id"));
+    }
 }

@@ -368,10 +368,6 @@ async fn start_server(
     let child = Command::new(env!("CARGO_BIN_EXE_payment-server"))
         .arg(config_path)
         .env("SYSTEM_TEST_TOKEN", TOKEN)
-        .env(
-            "PAYMENT_WALLET_PASSPHRASE",
-            "offline-registry-fixture-passphrase",
-        )
         .envs(secrets.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())

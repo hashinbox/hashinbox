@@ -92,3 +92,24 @@ async fn once_only_never_increments_a_fallback_counter() {
     assert_eq!(handles[1].snapshot(), Snapshot::default());
     node::untouched(&listener);
 }
+
+#[tokio::test]
+async fn injected_logs_name_the_node_and_never_include_provider_prose_or_payloads() {
+    use std::sync::Arc;
+    let logs = Arc::new(logging::Memory::default());
+    let logger = logging::Logger::new(logs.clone()).with("node_id", "primary");
+    let endpoint = node::serve_once(|request| {
+        json!({"jsonrpc":"2.0", "id":request["id"],
+        "error":{"code":-32001,"message":"private credential", "data":"private payload"}})
+    });
+    let client = node::http(&endpoint).with_logger(logger);
+    let _ = client
+        .request(Request::once("private-method", json!(["private input"])))
+        .await
+        .unwrap();
+    let page = logs.page(0, 10, &logging::Filter::default());
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].fields["node_id"], "primary");
+    assert!(page.entries[0].fields["kind"].contains("-32001"));
+    assert!(!format!("{page:?}").contains("private"));
+}

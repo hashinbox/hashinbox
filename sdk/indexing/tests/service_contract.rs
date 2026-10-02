@@ -604,16 +604,21 @@ impl Interpreter {
             .entry(block.hash.0.clone())
             .or_default()
             .push(indexing::ObservationDraft {
-                transaction_id: TransactionRef::new(network.clone(), format!("credit-{height:?}")),
+                transaction: indexing::Transaction {
+                    transaction_id: TransactionRef::new(
+                        network.clone(),
+                        format!("credit-{height:?}"),
+                    ),
+                    movements: vec![indexing::ValueMovement::mint(
+                        indexing::MovementId("0".into()),
+                        indexing::AssetId::native(network.chain.clone()),
+                        base::Decimal::from(amount),
+                        owner.clone(),
+                    )],
+                    fee: None,
+                },
                 transaction_order: 0,
                 status: indexing::ObservationDraftStatus::Included,
-                movements: vec![indexing::ValueMovement::mint(
-                    indexing::MovementId("0".into()),
-                    indexing::AssetId::native(network.chain.clone()),
-                    base::Decimal::from(amount),
-                    owner.clone(),
-                )],
-                fee: None,
             });
     }
 
@@ -701,7 +706,7 @@ impl BlockInterpreter for Interpreter {
 /// For asserting what the index holds between passes, where nothing commits
 /// and `line` is whatever the scenario last saw. It is not how a read is
 /// composed: a read samples first, reads the store, and narrows by the
-/// checkpoint that answer came with (`wallets::PendingJoin`).
+/// checkpoint that answer came with (`indexing::PendingJoin`).
 fn held(index: &dyn Pending, line: Option<&BlockRef>) -> Vec<CanonicalBlock> {
     index
         .sampled()
@@ -727,7 +732,7 @@ fn credited(blocks: &[CanonicalBlock], owner: &Address) -> Vec<base::Decimal> {
     blocks
         .iter()
         .flat_map(CanonicalBlock::transactions)
-        .flat_map(|transaction| &transaction.movements)
+        .flat_map(|transaction| &transaction.transaction.movements)
         .filter(|movement| movement.to() == Some(owner))
         .map(|movement| movement.amount.clone())
         .collect()
@@ -1918,7 +1923,7 @@ fn a_transactionless_credit_is_pending_above_the_line_and_then_settles() {
 
 /// A UTXO chain spends its own change at depth one: the durable table holds
 /// confirmed outputs and the index holds the rest, as facts a consumer folds
-/// over the store's page (`wallets::PendingJoin`).
+/// over the store's page (`indexing::PendingJoin`).
 #[test]
 fn an_output_created_above_the_line_is_held_for_selection_at_depth_one() {
     let own_network = network("change-at-depth-one");
@@ -2797,11 +2802,13 @@ fn a_block_repeating_a_transaction_id_stops_the_pass_and_is_not_committed() {
     interpreter.reports_draft(
         &block(BlockHeight(4)),
         indexing::ObservationDraft {
-            transaction_id: TransactionRef::new(own_network.clone(), "between"),
+            transaction: indexing::Transaction {
+                transaction_id: TransactionRef::new(own_network.clone(), "between"),
+                movements: Vec::new(),
+                fee: None,
+            },
             transaction_order: 1,
             status: indexing::ObservationDraftStatus::Included,
-            movements: Vec::new(),
-            fee: None,
         },
     );
     // `credits` names a transaction after its block, so this is the repeat.
@@ -2830,4 +2837,46 @@ fn a_block_repeating_a_transaction_id_stops_the_pass_and_is_not_committed() {
     );
     let (stored, _) = repository.stored();
     assert!(!stored.contains_key(&BlockHeight(4)));
+}
+
+#[test]
+fn offline_reset_reloads_birthdays_and_discards_pending_and_native_cache() {
+    let network = network("reset");
+    let owner = address(&network, "owner");
+    let source = Source::new(5).confirming(1);
+    let repository = memory::Repository::new();
+    let index = Indexer::new(
+        source.clone(),
+        Interpreter::of(&network),
+        repository.clone(),
+        config(network.clone()),
+    );
+    let selection = vec![ForwardRange {
+        address: owner,
+        start_position: BlockPosition(1),
+    }];
+    let before = pass(&index, &selection).unwrap();
+    assert_eq!(before.checkpoint, Some(block(BlockHeight(4))));
+    assert_eq!(before.pending_tip, Some(block(BlockHeight(5))));
+    assert!(
+        block_on(index.reset()).is_err(),
+        "a live repository cannot be reset"
+    );
+    let watches = block_on(index.watched(&network)).unwrap();
+    block_on(repository.purge_network(&network)).unwrap();
+    block_on(index.reset()).unwrap();
+    assert!(held(&index, None).is_empty());
+    assert_eq!(block_on(index.watched(&network)).unwrap(), watches);
+    source.replace((0..=3).map(|height| block(BlockHeight(height))));
+    let after = block_on(index.sync()).unwrap();
+    assert_eq!(after.checkpoint, Some(block(BlockHeight(2))));
+    assert_eq!(after.pending_tip, Some(block(BlockHeight(3))));
+    assert!(
+        source
+            .requests()
+            .iter()
+            .filter(|h| **h == BlockHeight(2))
+            .count()
+            >= 2
+    );
 }

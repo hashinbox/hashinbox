@@ -8,14 +8,12 @@ serves the wallet HTTP API. It is a binary with no library.
 
 ```bash
 export PAYMENT_API_TOKEN='replace-me'
-export PAYMENT_WALLET_PASSPHRASE='a-long-unique-secret-kept-outside-the-database'
 cargo run --locked -p payment-server -- ./payments.toml
 ```
 
 ```toml
 # payments.toml (a `.toml` path is read as TOML, anything else as JSON)
 bind = '127.0.0.1:8080'
-wallet_passphrase_env = 'PAYMENT_WALLET_PASSPHRASE' # optional variable name; value required
 bearer_token_env = 'PAYMENT_API_TOKEN'   # the variable that holds the API token
 storage = { path = 'payment.db' }        # optional, this is the default
 
@@ -42,8 +40,23 @@ secret_env = 'BTC_TREASURY_KEY'
 start = 'fresh'
 ```
 
-Configure at least one chain. Each chain section is that chain crate's own
-`Config`; its keys are in the chain's README.
+Chains are optional: the UI starts with no nodes or unavailable nodes. File sections
+seed the `chains` table once; later changes use the Chains UI. Each section is the
+chain crate's own `Config`; its keys are in the chain's README.
+
+The Chains sidebar groups networks under each chain, with connection indicators.
+Each network has a bookmarkable view: RPC domain cards, indexing status, then
+combined indexing/RPC logs. Cards show URL origins; clicking a card prefills its
+configured RPC URL for editing. Environment references stay unresolved and
+authentication headers are not returned. URL edits preserve existing headers and bounds.
+The sidebar loads chain/network choices from `ui/src/chains.json` before API
+responses, then adds custom networks from the backend.
+Each network view has **+ Add RPC node**. Chain, network and native asset choices
+are predefined; users enter node details and RPC URLs, without JSON editing.
+Known network identity parameters are filled from the catalog; existing settings
+are preserved. Solana preset genesis hashes match the [upstream constants](https://github.com/solana-labs/solana/blob/master/sdk/src/genesis_config.rs).
+Custom Solana clusters need their own configured genesis hash and remain visible
+when configured; the catalog does not invent one for local validators.
 
 ```bash
 curl -H "Authorization: Bearer $PAYMENT_API_TOKEN" http://127.0.0.1:8080/v1/assets
@@ -58,19 +71,16 @@ or private keys. Single and batch transfers accept an exact decimal amount or
 
 ## Notes
 
-- Generated and imported keys persist encrypted in the same SQLite file. Keep
-  the passphrase: a missing or wrong one prevents startup; there is no plaintext
-  fallback or key-return endpoint. Back up the database and passphrase separately.
-- The application owns `wallet` and `wallet_schema`; index rescans leave them
-  untouched. Key insertion precedes watch publication. A key whose watch failed
-  stays private; it is not automatically registered during restart.
-- Encryption uses ring AES-256-GCM, random nonces, an authenticated ID/asset tag,
-  and a per-file 32-byte salt with PBKDF2-HMAC-SHA256 (600,000 iterations).
-  The passphrase and decrypted key buffers are zeroized. This is in-process
-  custody, not an HSM or remote custody service.
+- Generated and imported keys persist directly in SQLite; no encryption or passphrase.
+  Keys never appear in API responses, logs or Debug.
+- The application owns `wallet` and `wallet_schema`; index rescans preserve them.
+  Key insertion precedes watch publication. Interrupted creation leaves a private,
+  unpublished key; restart restores only keys with matching durable watches.
+- The plaintext registry uses schema 2. Older encrypted and unknown schemas are
+  refused without changing their rows; this build does not reinterpret ciphertext.
 
-- The configuration file holds no secret. The API token, wallet keys and RPC credentials are
-  names of environment variables, so the file can be committed and logged.
+- API tokens and imported wallet keys use environment references. RPC settings may contain
+  literal credentials and are stored directly in `chains`; never log the configuration.
 - The server speaks plain HTTP. A `bind` that is not loopback is refused unless
   `tls_terminated_upstream = true`, which states that a proxy in front of it
   terminates TLS.
@@ -78,16 +88,37 @@ or private keys. Single and batch transfers accept an exact decimal amount or
   `GET /healthz` reports each network and sanitized RPC counters from memory.
   It answers `200` only when every network is ready or quarantined and at least
   one is ready; otherwise it answers `503` with the same report shape.
-- After fixing a quarantine's cause, restart the process. Quarantine is process
-  state; there is no HTTP resume route or offline resume command.
-- A `confirmed_reorg` requires stopping the server and running
-  `payment-server ./payments.toml --rescan bitcoin/mainnet`. This deletes only
-  that network's indexing facts and preserves watches and application keys.
+- After fixing a quarantine's cause, request Resume in the Chains UI.
+- A confirmed reorg requires Reindex in the UI, or stopping the server and running
+  `payment-server ./payments.toml --rescan bitcoin/mainnet`. Recovery deletes only
+  that network's indexing facts and preserves watches, birthdays and keys.
 - To abandon unfinished historical catch-up, stop the server and run
   `payment-server ./payments.toml --cancel-backfill bitcoin/mainnet`. Existing
   indexed facts remain; unfinished watches begin after the saved checkpoint.
   Both offline commands validate the exact configured network and never start
   RPC, supervision, or a listener. Never run them alongside the live server.
-- Unpublished keys remain encrypted and hidden after interrupted creation.
+- Unpublished keys remain private after interrupted creation.
   No orphan-listing command is provided until a complete watch query can prove
   absence across every network, including networks disabled in configuration.
+
+## Events and controls
+
+The server injects one bounded `logging::Memory` sink into RPC nodes, indexing and
+its repository. `GET /v1/logs` filters by `chain`, `network`, `node_id`, `component`
+and an `after` cursor; records are notifications, not durable delivery. The Chains
+view shows actual status, node counters and filtered logs. `PUT /v1/indexing` accepts
+`{"network":{"chain":"bitcoin","name":"mainnet"},"action":"pause"}`, `resume`,
+or `reindex`. A 202 response means the request is saved; poll `GET /v1/chains` for
+applied state. Pause finishes the active bounded pass. Reindex drains network
+operations, purges confirmed facts, resets pending/cache state and scans again.
+Other networks continue; unsafe reads and sends stay blocked during rebuilding.
+
+`GET /v1/chains` omits RPC URLs and credentials. `PUT /v1/chains/{chain}` saves
+revision-checked settings; omit an existing node's endpoint to retain it. Nodes have
+stable IDs and priority order. Candidates are verified before activation; failed
+candidates retain the working connection. Switching drains complete operations and
+keeps the same wallet factories/senders. Networks can be added; existing network
+and asset parameters cannot be edited or deleted through this API.
+
+The database ownership, recovery phases and verification limits are documented in
+[runtime controls](../../docs/design/runtime-controls.md).

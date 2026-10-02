@@ -55,3 +55,10 @@ replies in order and asserts each method and its parameters. Enable it in
   change which host or path the request reaches.
 - The URL reaches the node as written, path and query included. Provider keys
   such as `/v3/<key>` or `?apikey=<key>` work without any extra setting.
+
+## Injected events
+
+Attach a scoped `logging::Logger` with `Http::with_logger`. The endpoint reports
+sanitized failures, repeated-failure counts (at most every 30 seconds), and recovery.
+Retries and failover preserve that node's context without duplicating its events.
+No URL, headers, request parameters or provider error prose reaches the sink.

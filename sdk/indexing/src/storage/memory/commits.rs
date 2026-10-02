@@ -49,7 +49,22 @@ impl IndexStore for Repository {
         &'a self,
         batch: IndexedBatch,
     ) -> BoxFuture<'a, Result<Vec<OutputKey>, IndexError>> {
-        Box::pin(async move { self.apply(|tables| self.write(&batch, tables)) })
+        Box::pin(async move {
+            let (unknown, receipts) = self.apply(|tables| {
+                let receipts = if self.logger.enabled(logging::Level::Info, "wallet.received") {
+                    crate::storage::receipts::Receipt::collect(&batch, |receipt| {
+                        Ok(tables.new_receipt(receipt))
+                    })?
+                } else {
+                    Vec::new()
+                };
+                Ok((self.write(&batch, tables)?, receipts))
+            })?;
+            for receipt in receipts {
+                receipt.emit(&self.logger);
+            }
+            Ok(unknown)
+        })
     }
 }
 
@@ -150,7 +165,7 @@ impl Repository {
         tables: &mut Tables,
     ) -> Result<(), IndexError> {
         for transaction in transactions {
-            for address in transaction.addresses() {
+            for address in transaction.transaction.addresses() {
                 self.fill_row(&address, transaction, tables)?;
             }
         }
@@ -164,7 +179,11 @@ impl Repository {
         transaction: &crate::CanonicalTransaction,
         tables: &mut Tables,
     ) -> Result<(), IndexError> {
-        let key = Self::history_key(&transaction.transaction_id.network, address, transaction);
+        let key = Self::history_key(
+            &transaction.transaction.transaction_id.network,
+            address,
+            transaction,
+        );
         match tables.history.get(&key) {
             Some(stored) if stored == transaction => Ok(()),
             Some(_) => Err(Self::corrupt(
@@ -255,5 +274,33 @@ impl Repository {
     /// retrying cannot repair it.
     pub(super) fn corrupt(message: &'static str) -> IndexError {
         IndexError::new(IndexErrorKind::Store, message, false)
+    }
+}
+
+impl Tables {
+    fn new_receipt(&self, receipt: &crate::storage::receipts::Receipt) -> bool {
+        let network = &receipt.subject.address.network;
+        let address = &receipt.subject.address.value;
+        if !self.watches.contains_key(&(
+            network.clone(),
+            receipt.subject.asset.clone(),
+            address.clone(),
+        )) {
+            return false;
+        }
+        if let Some(id) = &receipt.credit {
+            return !self.credits.contains_key(&(
+                network.clone(),
+                address.clone(),
+                receipt.block.height,
+                crate::MovementId(id.clone()),
+            ));
+        }
+        !self.history.keys().any(|(bound, owner, height, _, id)| {
+            bound == network
+                && owner == address
+                && height == &receipt.block.height
+                && receipt.transaction.as_deref() == Some(id.id.as_str())
+        })
     }
 }

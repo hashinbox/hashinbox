@@ -23,10 +23,10 @@ use base::{
     TransactionErrorKind, TransactionFuture, TransactionId, TransactionSnapshot,
 };
 use futures_executor::block_on;
+use indexing::Holder;
 use wallets::{
-    AddressParser, Author, Authorship, FactoryProfile, FutureResult, Generation, Holder,
-    SecretBytes, SendFuture, Sender, SingleSender, TransactionFactory, Transfer, Wallet,
-    WalletFactory, Wallets,
+    AddressParser, Author, Authorship, FactoryProfile, FutureResult, Generation, SecretBytes,
+    SendFuture, Sender, SingleSender, TransactionFactory, Transfer, Wallet, WalletFactory, Wallets,
 };
 
 /// The fee every prepared fixture transaction pays, in atomic units.

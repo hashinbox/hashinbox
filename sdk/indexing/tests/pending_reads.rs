@@ -12,14 +12,14 @@ use std::sync::Arc;
 use base::Decimal;
 use futures_executor::block_on;
 use indexing::{
-    Address, AssetId, Birthday, BlockHash, BlockHeight, BlockInterpreter, BlockParent,
+    Address, AssetId, Balances, Birthday, BlockHash, BlockHeight, BlockInterpreter, BlockParent,
     BlockPosition, BlockRef, BlockSource, BoxFuture, ChainName, ChainTips, Completeness,
-    FeeSettlement, IndexError, IndexErrorKind, IndexedOutput, Indexer, Indexing, InterpretedBlock,
-    MovementId, NativeBlock, Network, ObservationDraft, ObservationDraftStatus, OutputChanges,
-    OutputId, OutputPage, OutputRequest, OutputStore, SourceError, Subject, SyncConfig, SyncPolicy,
-    TransactionRef, ValueMovement, Watching, memory,
+    FeeSettlement, History, IndexError, IndexErrorKind, IndexedOutput, Indexer, Indexing,
+    InterpretedBlock, MovementId, NativeBlock, Network, ObservationDraft, ObservationDraftStatus,
+    OutputChanges, OutputId, OutputPage, OutputRequest, OutputStore, Page, PendingJoin,
+    SourceError, Subject, SyncConfig, SyncPolicy, TransactionRef, TransactionStatus, ValueMovement,
+    Watching, memory,
 };
-use wallets::{Balances, History, Page, PendingJoin, TransactionStatus};
 
 /// Block 2 funds the owner with one output, and block 6 spends it and returns
 /// the change.
@@ -137,17 +137,19 @@ impl Interpreter {
     /// One transfer of `amount` between the owner and somebody else.
     fn moved(height: u64, amount: u64, from: &str, to: &str) -> ObservationDraft {
         ObservationDraft {
-            transaction_id: transaction(height),
+            transaction: indexing::Transaction {
+                transaction_id: transaction(height),
+                movements: vec![ValueMovement::transfer(
+                    MovementId("0".into()),
+                    asset(),
+                    Decimal::from(amount),
+                    address(from),
+                    address(to),
+                )],
+                fee: None,
+            },
             transaction_order: 0,
             status: ObservationDraftStatus::Included,
-            movements: vec![ValueMovement::transfer(
-                MovementId("0".into()),
-                asset(),
-                Decimal::from(amount),
-                address(from),
-                address(to),
-            )],
-            fee: None,
         }
     }
 }

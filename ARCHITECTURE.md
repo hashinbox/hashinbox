@@ -13,8 +13,8 @@ Product acceptance lives in [SYSTEM_REQUIREMENTS.md](docs/SYSTEM_REQUIREMENTS.md
 | `http-server` | `packages/http-server` | Axum server hardening: bearer auth, transport security, limits; application-supplied health routes | packages | [README](packages/http-server/README.md) |
 | `sdk-config` | `sdk/config` | The configuration document and the registry that hands each named section to the chain that registered for it; `Rpc`, `Repetition`, `Cadence` as plain data; TOML behind feature `toml` (off by default). It names no chain crate | config | [README](sdk/config/README.md) |
 | `base` | `sdk/base` | Chain-neutral values and capabilities: address, network, asset, amount, block, sign, broadcast | base | [README](sdk/base/README.md) |
-| `indexing` | `sdk/indexing` | Append-only, chain-neutral sync into history, checkpoint, and outputs, with pending blocks in memory; optional SQLite/memory repositories and Tokio supervision | indexing | [README](sdk/indexing/README.md) |
-| `wallets` | `sdk/wallets` | Wallet factory contract and the `Wallets` registry: sends, batches, and consumer-side pending balance/history/output joins | wallets | [README](sdk/wallets/README.md) |
+| `indexing` | `sdk/indexing` | Append-only, chain-neutral sync into history, checkpoint, and outputs, with pending blocks in memory; pending-inclusive balance/history/output reads (`PendingJoin`); optional SQLite/memory repositories and Tokio supervision | indexing | [README](sdk/indexing/README.md) |
+| `wallets` | `sdk/wallets` | Wallet factory contract and the `Wallets` registry: wallet capabilities, sends and batches; no reads | wallets | [README](sdk/wallets/README.md) |
 | `chain-bitcoin` | `sdk/chains/bitcoin` | Bitcoin: RPC, blocks, UTXO wallets, send pipeline | chains | [README](sdk/chains/bitcoin/README.md) |
 | `chain-ethereum` | `sdk/chains/ethereum` | Ethereum: RPC, blocks, ETH and ERC-20 wallets, send pipeline | chains | [README](sdk/chains/ethereum/README.md) |
 | `chain-solana` | `sdk/chains/solana` | Solana: RPC, finalized blocks, SOL wallets, send pipeline | chains | [README](sdk/chains/solana/README.md) |
@@ -33,8 +33,9 @@ Product acceptance lives in [SYSTEM_REQUIREMENTS.md](docs/SYSTEM_REQUIREMENTS.md
   pipeline. `native/` knows no SDK indexing/wallet model. Adapters translate at
   that boundary; shared values do not become a universal transaction/RPC model.
 - Configuration owns documents, endpoint construction and chain registration.
-  Each chain interprets its own section. Every node identity is verified before
-  storage opens. Direct Rust construction remains available without a parser.
+  Each chain interprets its own section. The server opens storage and its control UI
+  before connecting; each candidate node is verified before activation. Direct Rust
+  construction remains available without a parser.
 - Wallet factories own construction and validation; `Wallets` collects factories,
   not wallet instances, IDs or secrets. The application owns custody and its
   signing map. Display units are keyed by exact `(Network, AssetId)`.
@@ -63,12 +64,17 @@ independently feature-gated, shipped implementations. Contract suites live in
 
 One caller-supplied repository serves all networks, including third-party
 implementations. Its required contract is `WatchStore + IndexStore`; balance,
-history, outputs and offline purge are optional consumer capabilities.
+history, outputs and network purge are optional consumer capabilities.
 
 `Indexer` owns one network's watches, pending `Blocks`, chain adapter and
 repository reference. `Index` routes across them. Native-block caching is
 separate from validated facts. The pass is a procedure over this state, not
 another state owner. Chain interpreters emit facts, never SQL or stored records.
+
+Block stages directly embed `base::Block<T>` alongside indexing output changes
+and credits. Transaction stages directly embed `indexing::Transaction` for identity,
+movements and fee, retaining their own status and inclusion order. Shared transaction
+facts stay in indexing; native chain transactions keep their protocol-specific models.
 
 ```mermaid
 sequenceDiagram
@@ -134,15 +140,18 @@ coverage atomically; it never repairs money or proves complete transaction histo
 Forward inspection preserves evidence; newly discovered older effects, re-anchoring,
 unwatch and purge invalidate it. Neither activity nor evidence adds a required port.
 
-Confirmed queries go directly to repositories. `wallets::PendingJoin` supplies
-pending-inclusive balance/history/output reads: sample pending blocks before the
-repository read, narrow them using that answer's checkpoint, and check revisions
-where needed. A commit must never omit or count a block twice. History preserves
+Confirmed queries go directly to repositories. `indexing::PendingJoin`, under
+`storage/`, supplies pending-inclusive balance/history/output reads: sample
+pending blocks before the repository read, narrow them using that answer's
+checkpoint, and check revisions where needed. A commit must never omit or count a block twice. History preserves
 all stable movements; paging during backfill must not promise a complete export.
 
-Offline network purge removes only that network's indexing facts and derived claims.
+Network purge removes only that network's indexing facts and derived claims, offline or
+online with that network paused and its admissions blocked; reads stay honest from the
+store's own snapshot (`Incomplete`, spendable outputs refused) until passes commit again.
 It preserves watch identities/birthdays, application custody tables and other networks.
-The next run rebuilds from those birthdays. Never run purge alongside a live writer.
+The next run, or the next pass after `Indexing::reset`, rebuilds from those birthdays.
+Never run purge alongside a live writer of that network.
 
 ## Sending and custody
 
@@ -168,12 +177,11 @@ an uncertain failure is not proof of a drop. Transport decorators must honor
 checks exact chain identity, Ethereum tracing/token support and Solana's executable
 Memo program before composition succeeds.
 
-The server owns encrypted signing material in application tables in the same SQLite
+The server owns plaintext signing material in application tables in the same SQLite
 file. Its schema version is independent of indexing migrations. Creation persists
 keys before watching; interrupted registration leaves an unpublished orphan. Boot
 restores signers only for matching durable watches. Routes return public identity,
-never keys. Environment passphrases and decrypted material use zeroizing storage;
-this does not claim HSM or remote-custody guarantees.
+never keys. Key buffers use zeroizing memory; no encryption or passphrase is required.
 
 Outbox state remains in-process. Durable keys do not make outgoing logical payments
 crash-safe: require one active writer per source and do not automatically retry an
@@ -193,6 +201,15 @@ Readiness is `all(Ready | Quarantined) && any(Ready)`. All-quarantined is unread
 without exiting. Historical coverage remains separately visible. Health reads
 memory rather than making RPC calls; transport counters are collected at connection
 construction, without adding an HTTP dependency to wallet/indexing contracts.
+
+The server publishes its composition as one immutable snapshot through a watch
+channel: the first before the listener binds (every network inactive), then one
+per activated or replaced connection. A request holds the snapshot it extracted,
+so a publication never reaches half a request; a wallet lookup that misses while
+a configured network is inactive answers 503, not 404. Requested run/pause and
+reindex state is a revision-checked edit of the `settings` row, owned by
+`Settings`. A node switch swaps only the transport inside the network's
+connection: factories, sender reservations and submissions stay with the network.
 
 After-commit listeners and health notifications cannot veto writes or promise reliable
 external delivery. Applications needing transactional reactions implement them inside

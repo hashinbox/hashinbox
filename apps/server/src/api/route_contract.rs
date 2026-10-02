@@ -20,6 +20,7 @@ use indexing::{
     Network, NetworkHealth, NetworkState, SyncHealth, TransactionRef, ValueMovement, Watch,
     Watching,
 };
+use indexing::{ObservedTransaction, TransactionPage, TransactionStatus};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 use tower::ServiceExt;
@@ -27,7 +28,6 @@ use wallets::{
     AddressParser, FactoryProfile, FutureResult, Generation, SecretBytes, SendFuture, Sender,
     Transfer, WalletFactory, Wallets,
 };
-use wallets::{ObservedTransaction, TransactionPage, TransactionStatus};
 
 use super::{AssetTag, Payments, Signers, router};
 
@@ -58,12 +58,12 @@ struct FixtureIndex {
 ///
 /// Three values, because that is the production shape: an `indexing::Index`
 /// routes watches and checkpoints, while a page and a balance each come from the
-/// handle that owns the holding's network — `wallets::PendingJoin` and one
+/// handle that owns the holding's network — `indexing::PendingJoin` and one
 /// network's fold there, one of these units here.
 struct Composed {
     index: Arc<indexing::Index>,
-    history: Arc<dyn wallets::History>,
-    balance: Arc<dyn wallets::Balances>,
+    history: Arc<dyn indexing::History>,
+    balance: Arc<dyn indexing::Balances>,
 }
 
 impl FixtureIndex {
@@ -88,8 +88,8 @@ impl FixtureIndex {
         let index = indexing::Index::of(units).expect("the fixture networks are disjoint");
         Composed {
             index: Arc::new(index),
-            history: routed.clone() as Arc<dyn wallets::History>,
-            balance: routed as Arc<dyn wallets::Balances>,
+            history: routed.clone() as Arc<dyn indexing::History>,
+            balance: routed as Arc<dyn indexing::Balances>,
         }
     }
 }
@@ -120,7 +120,7 @@ impl Readers {
     }
 }
 
-impl wallets::History for Readers {
+impl indexing::History for Readers {
     fn history<'a>(
         &'a self,
         of: &'a dyn Holder,
@@ -133,7 +133,7 @@ impl wallets::History for Readers {
     }
 }
 
-impl wallets::Balances for Readers {
+impl indexing::Balances for Readers {
     fn balance<'a>(
         &'a self,
         of: &'a dyn Holder,
@@ -261,7 +261,7 @@ impl Checkpoint for FixtureIndex {
     }
 }
 
-impl wallets::History for FixtureIndex {
+impl indexing::History for FixtureIndex {
     fn history<'a>(
         &'a self,
         of: &'a dyn Holder,
@@ -269,33 +269,38 @@ impl wallets::History for FixtureIndex {
     ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
         let network = of.address().network.clone();
         let observed = ObservedTransaction {
-            transaction_id: TransactionRef::new(network, "fixture-observed"),
+            transaction: indexing::Transaction {
+                transaction_id: TransactionRef::new(network, "fixture-observed"),
+                movements: vec![ValueMovement::output(
+                    MovementId("output-0".to_owned()),
+                    of.asset().clone(),
+                    150_000_000_u64.into(),
+                    Some(of.address().clone()),
+                )],
+                fee: None,
+            },
             status: TransactionStatus::Confirmed {
                 block: block(7),
                 confirmations: 2,
             },
-            movements: vec![ValueMovement::output(
-                MovementId("output-0".to_owned()),
-                of.asset().clone(),
-                150_000_000_u64.into(),
-                Some(of.address().clone()),
-            )],
-            fee: None,
+        };
+        let pending = indexing::Transaction {
+            transaction_id: TransactionRef::new(
+                observed.transaction.transaction_id.network.clone(),
+                "fixture-pending",
+            ),
+            ..observed.transaction.clone()
         };
         Box::pin(async move {
             Ok(TransactionPage {
                 checkpoint: Some(block(8)),
-                transactions: vec![observed.clone()],
+                transactions: vec![observed],
                 pending: vec![ObservedTransaction {
-                    transaction_id: TransactionRef::new(
-                        observed.transaction_id.network.clone(),
-                        "fixture-pending",
-                    ),
+                    transaction: pending,
                     status: TransactionStatus::Pending {
                         block: block(9),
                         confirmations: 1,
                     },
-                    ..observed
                 }],
                 next: None,
                 completeness: indexing::Completeness::Incomplete,
@@ -306,7 +311,7 @@ impl wallets::History for FixtureIndex {
 
 /// One network folds the balance for any holder, with or without a key behind
 /// it. Every amount is atomic, as `indexing` can only produce.
-impl wallets::Balances for FixtureIndex {
+impl indexing::Balances for FixtureIndex {
     fn balance<'a>(
         &'a self,
         _of: &'a dyn Holder,
@@ -527,8 +532,8 @@ impl wallets::TransactionFactory for FixtureWallet {
     }
 }
 
-struct Fixture {
-    payments: Payments,
+pub(super) struct Fixture {
+    pub(super) payments: Payments,
     registry: Arc<crate::registry::Registry>,
     app: Router,
     ready: watch::Sender<SyncHealth>,
@@ -589,7 +594,7 @@ fn reported(network: &Network, state: NetworkState) -> NetworkHealth {
     row
 }
 
-fn fixture(initially_ready: bool) -> Fixture {
+pub(super) fn fixture(initially_ready: bool) -> Fixture {
     fixture_with_usdc(initially_ready, true)
 }
 
@@ -647,6 +652,8 @@ fn fixture_with_generation_error(
         NetworkState::CatchingUp
     }));
     let registry = crate::registry::Registry::fixture();
+    let logs = Arc::new(logging::Memory::default());
+    let logger = logging::Logger::new(logs.clone());
     let payments = Payments {
         wallets: Arc::new(wallets),
         units: Arc::new(units()),
@@ -656,7 +663,12 @@ fn fixture_with_generation_error(
         history,
         balance,
         health: receiver,
-        rpc: vec![],
+        rpc: Default::default(),
+        inactive: Default::default(),
+        logs,
+        logger,
+        control: None,
+        access: Default::default(),
     };
     let token = http_server::BearerToken::new(TOKEN).expect("fixture bearer token");
     let config = http_server::Config::new(
@@ -867,6 +879,28 @@ async fn openapi_serves_the_merged_contract_without_authentication() {
         assert!(document["paths"][path]["get"].is_object(), "{path}");
     }
     assert!(document["components"]["schemas"]["Wallet"].is_object());
+    assert_no_transaction_calls(&fixture.calls);
+}
+
+/// While a configured network has no composition yet, a miss is not proof
+/// that the wallet does not exist: the answer is a retryable 503, never a 404.
+#[tokio::test]
+async fn a_lookup_while_a_network_starts_is_unavailable_not_missing() {
+    let fixture = fixture(true);
+    let starting = Payments {
+        inactive: [base::Network::new(base::ChainName::new("solana"), "devnet")].into(),
+        ..fixture.payments.clone()
+    };
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("bind"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        Some(http_server::BearerToken::new(TOKEN).expect("token")),
+        http_server::RequestLimits::default(),
+    );
+    let app = router(starting, &config).expect("router");
+    let response = request(&app, "GET", "/v1/wallets/missing-wallet", None, true).await;
+
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_no_transaction_calls(&fixture.calls);
 }
 
@@ -1982,7 +2016,7 @@ async fn durable_key_never_appears_in_wallet_responses() {
     .await;
     assert_eq!(created.status, StatusCode::CREATED);
     let id = json_body(&created)["id"].as_str().unwrap().to_owned();
-    assert_eq!(fixture.registry.ids().await, [id.clone()]);
+    assert_eq!(fixture.registry.ids().await, std::slice::from_ref(&id));
     let listed = request(&fixture.app, "GET", "/v1/wallets", None, true).await;
     let fetched = request(
         &fixture.app,
@@ -2106,10 +2140,7 @@ async fn health_reads_rpc_counters_after_the_endpoint_has_stopped() {
     node.abort();
     let _ = node.await;
     let mut fixture = fixture(true);
-    fixture
-        .payments
-        .rpc
-        .push((network(), vec![statistics.clone()]));
+    fixture.payments.rpc.insert(network(), statistics.clone());
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("bind"),
         http_server::TransportSecurity::PlaintextLoopback,
@@ -2157,4 +2188,53 @@ async fn malformed_batch_amount_precedes_wallet_lookup_and_signing() {
         );
     }
     assert_no_transaction_calls(&fixture.calls);
+}
+
+#[tokio::test]
+async fn logs_filter_chain_node_and_component_with_a_resume_cursor() {
+    let fixture = fixture_with_usdc(true, false);
+    let logger = fixture
+        .payments
+        .logger
+        .with("chain", "bitcoin")
+        .with("network", "regtest");
+    logger.with("component", "rpc").with("node_id", "0").event(
+        logging::Level::Warn,
+        "rpc.failed",
+        "RPC failed",
+        &[],
+    );
+    logger.with("component", "indexing").event(
+        logging::Level::Info,
+        "indexing.ready",
+        "Ready",
+        &[],
+    );
+    let response = request(
+        &fixture.app,
+        "GET",
+        "/v1/logs?chain=bitcoin&node_id=0",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK);
+    let body = json_body(&response);
+    assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(body["entries"][0]["event"], "rpc.failed");
+    let cursor = body["next"].as_u64().unwrap();
+    let response = request(
+        &fixture.app,
+        "GET",
+        &format!("/v1/logs?component=indexing&after={cursor}"),
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(
+        json_body(&response)["entries"][0]["event"],
+        "indexing.ready"
+    );
+    let response = request(&fixture.app, "GET", "/v1/logs?limit=1001", None, true).await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
 }

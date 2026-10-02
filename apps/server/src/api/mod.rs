@@ -1,10 +1,15 @@
 mod address;
+mod application;
+pub(crate) use application::Application;
 mod asset;
+mod chains;
 mod contract;
+mod control;
 mod cursor;
 mod error;
 mod health;
 mod history;
+mod logs;
 mod openapi;
 mod signers;
 mod transaction;
@@ -56,6 +61,9 @@ pub(crate) type Wallets = wallets::Wallets<AssetTag>;
         (name = "wallets", description = "Wallets and balances"),
         (name = "addresses", description = "Watch-only addresses"),
         (name = "transactions", description = "History, single transfers, and batches"),
+        (name = "logs", description = "Filtered process-local events"),
+        (name = "indexing", description = "Network inspection controls"),
+        (name = "chains", description = "Saved nodes and network runtime settings"),
         (name = "health", description = "Readiness, network state, and RPC statistics"),
         (name = "openapi", description = "This document")
     )
@@ -110,21 +118,51 @@ pub(crate) struct Payments {
     /// A narrow capability declared at this boundary rather than a capability of
     /// `index`: a page is the repository's own query joined to one network's
     /// blocks above its confirmed line, and neither half answers it alone. What
-    /// satisfies it is `wallets::PendingJoin`, one per network, collected by
-    /// `wallets::Composition`.
-    pub(crate) history: Arc<dyn wallets::History>,
+    /// satisfies it is `indexing::PendingJoin`, one per network, routed by
+    /// `indexing::Router`.
+    pub(crate) history: Arc<dyn indexing::History>,
     /// The one balance read these routes make, held for the same reason and in
     /// the same way as `history`: a total is the repository's own query
     /// completed by the blocks one index still holds above its line, so it is
     /// asked of the reader that owns the holding's network. One per network,
-    /// collected by `wallets::Composition` — never reached for through `index`,
+    /// routed by `indexing::Router` — never reached for through `index`,
     /// which can route one and is not what owns the answer.
-    pub(crate) balance: Arc<dyn wallets::Balances>,
+    pub(crate) balance: Arc<dyn indexing::Balances>,
     pub(crate) health: watch::Receiver<indexing::SyncHealth>,
-    pub(crate) rpc: Vec<(base::Network, Vec<json_rpc::Statistics>)>,
+    /// The statistics of each active network's working RPC node.
+    pub(crate) rpc: std::collections::BTreeMap<base::Network, json_rpc::Statistics>,
+    /// Configured networks with no composition yet: a lookup that misses
+    /// while any of these is starting cannot say the id does not exist.
+    pub(crate) inactive: std::collections::BTreeSet<base::Network>,
+    pub(crate) logs: Arc<logging::Memory>,
+    pub(crate) logger: logging::Logger,
+    pub(crate) control: Option<indexing::SyncControl>,
+    pub(crate) access: std::collections::BTreeMap<base::Network, Arc<crate::runtime::Access>>,
 }
 
 impl Payments {
+    pub(crate) fn admission(
+        &self,
+        network: &base::Network,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Error> {
+        self.access
+            .get(network)
+            .map(|access| {
+                access
+                    .enter()
+                    .map_err(|_| Error::indexed("network maintenance in progress"))
+            })
+            .transpose()
+    }
+
+    pub(crate) fn asset_admission(
+        &self,
+        asset: &AssetTag,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Error> {
+        let info = self.wallets.asset(asset).map_err(Error::by_asset)?;
+        self.admission(&info.network)
+    }
+
     /// What this process knows about one wallet id.
     ///
     /// Two owners answer it: the index says what is observed and from where,
@@ -146,6 +184,9 @@ impl Payments {
             if let Some(watch) = found {
                 return self.resolved(watch);
             }
+        }
+        if !self.inactive.is_empty() {
+            return Err(Error::indexed("a configured network is not active yet"));
         }
         Err(Error::unknown_wallet())
     }
@@ -191,7 +232,17 @@ impl Payments {
             .index
             .watch(&id, wallet.as_ref(), indexing::Birthday::Fresh)
             .await?;
-        self.signers.keep(id, wallet.clone())?;
+        self.signers.keep(id.clone(), wallet.clone())?;
+        self.logger
+            .with("chain", watch.address.network.chain.to_string())
+            .with("network", watch.address.network.name.clone())
+            .with("component", "wallet")
+            .event(
+                logging::Level::Info,
+                "wallet.created",
+                "Wallet created",
+                &[("wallet_id", &id)],
+            );
         let custody = Custody {
             watch,
             tag,
@@ -225,6 +276,16 @@ impl Payments {
             .index
             .watch(&id, &subject, indexing::Birthday::Fresh)
             .await?;
+        self.logger
+            .with("chain", watch.address.network.chain.to_string())
+            .with("network", watch.address.network.name.clone())
+            .with("component", "wallet")
+            .event(
+                logging::Level::Info,
+                "wallet.observed",
+                "Address registered",
+                &[("wallet_id", &id)],
+            );
         let custody = Custody {
             watch,
             tag,
@@ -371,8 +432,16 @@ pub(crate) fn openapi() -> utoipa::openapi::OpenApi {
 ///
 /// Returns the [`http_server::ConfigError`] of an invalid `config` (for
 /// example a non-loopback bind without TLS termination).
+#[cfg(test)]
 pub(crate) fn router(
     payments: Payments,
+    config: &http_server::Config,
+) -> Result<Router, http_server::ConfigError> {
+    live_router(Application::fixed(payments), config)
+}
+
+pub(crate) fn live_router(
+    application: Application,
     config: &http_server::Config,
 ) -> Result<Router, http_server::ConfigError> {
     let (protected, mut contract) = protected_routes().split_for_parts();
@@ -380,14 +449,18 @@ pub(crate) fn router(
     contract.merge(public_contract);
     let contract = Arc::new(contract);
 
-    let protected = http_server::protected_router(protected.with_state(payments.clone()), config)?;
+    let protected =
+        http_server::protected_router(protected.with_state(application.clone()), config)?;
     Ok(protected
-        .merge(public.with_state(payments))
+        .merge(public.with_state(application))
         .layer(Extension(contract)))
 }
 
-fn protected_routes() -> OpenApiRouter<Payments> {
+fn protected_routes() -> OpenApiRouter<Application> {
     OpenApiRouter::with_openapi(Contract::openapi())
+        .merge(chains::routes())
+        .merge(logs::routes())
+        .merge(control::routes())
         .merge(asset::routes())
         .merge(wallet::routes())
         .merge(address::routes())
@@ -395,7 +468,7 @@ fn protected_routes() -> OpenApiRouter<Payments> {
         .merge(transaction::routes())
 }
 
-fn public_routes() -> OpenApiRouter<Payments> {
+fn public_routes() -> OpenApiRouter<Application> {
     OpenApiRouter::new()
         .merge(health::routes())
         .merge(openapi::routes())
@@ -710,8 +783,6 @@ mod tests {
             Some(&serde_json::json!("#/components/schemas/TransferBatch")),
         );
     }
-
-    /// Arbitrary caller text is a query parameter, never a path segment.
 
     fn document() -> Value {
         serde_json::to_value(openapi()).expect("OpenAPI contract must serialize")

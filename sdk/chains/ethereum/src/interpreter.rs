@@ -44,7 +44,14 @@ impl BlockInterpreter {
             }
         };
         ObservationDraft {
-            transaction_id: transaction.id().canonical(&self.network),
+            transaction: indexing::Transaction {
+                transaction_id: transaction.id().canonical(&self.network),
+                movements: movements
+                    .into_iter()
+                    .filter_map(|movement| self.movement(movement))
+                    .collect(),
+                fee: transaction.fee().map(|fee| self.fee(fee)),
+            },
             // The node's own `transactionIndex`, checked against the block's
             // transaction list and against the receipt when the block was
             // parsed (`native/block/head.rs`, `native/block/receipt.rs`). Never
@@ -52,11 +59,6 @@ impl BlockInterpreter {
             // only, so counting them would number the selection.
             transaction_order: transaction.listed.index,
             status,
-            movements: movements
-                .into_iter()
-                .filter_map(|movement| self.movement(movement))
-                .collect(),
-            fee: transaction.fee().map(|fee| self.fee(fee)),
         }
     }
 
@@ -380,11 +382,9 @@ mod tests {
             ledger
                 .apply(
                     &indexing::CanonicalTransaction {
-                        transaction_id: draft.transaction_id.clone(),
+                        transaction: draft.transaction.clone(),
                         transaction_order: draft.transaction_order,
                         status,
-                        movements: draft.movements.clone(),
-                        fee: draft.fee.clone(),
                     },
                     settlement,
                 )
@@ -494,8 +494,8 @@ mod tests {
             .iter()
             .next()
             .expect("the value transfer");
-        assert_eq!(draft.movements.len(), 1);
-        assert_eq!(draft.movements[0].amount, Decimal::from(42_u64));
+        assert_eq!(draft.transaction.movements.len(), 1);
+        assert_eq!(draft.transaction.movements[0].amount, Decimal::from(42_u64));
 
         let credited = folded(&interpreted, beneficiary);
         assert_eq!(
@@ -558,6 +558,7 @@ mod tests {
         assert_eq!(selected.block.transactions()[0].transaction_order, 1);
         assert_eq!(
             selected.block.transactions()[0]
+                .transaction
                 .transaction_id
                 .id
                 .to_string(),
@@ -624,19 +625,30 @@ mod tests {
             .iter()
             .next()
             .expect("relevant tx must emit");
-        assert_eq!(draft.movements.len(), 1);
+        assert_eq!(draft.transaction.movements.len(), 1);
         assert_eq!(
-            draft.movements[0].id,
+            draft.transaction.movements[0].id,
             MovementId(format!("{TX_HASH}:value"))
         );
-        assert_eq!(draft.movements[0].amount, Decimal::from(42_u64));
+        assert_eq!(draft.transaction.movements[0].amount, Decimal::from(42_u64));
         assert_eq!(
-            draft.fee.as_ref().expect("fee must exist").amount,
+            draft
+                .transaction
+                .fee
+                .as_ref()
+                .expect("fee must exist")
+                .amount,
             Decimal::from(63_000_u64)
         );
-        assert_eq!(draft.movements[0].amount.scale(), 0);
+        assert_eq!(draft.transaction.movements[0].amount.scale(), 0);
         assert_eq!(
-            draft.fee.as_ref().expect("fee must exist").amount.scale(),
+            draft
+                .transaction
+                .fee
+                .as_ref()
+                .expect("fee must exist")
+                .amount
+                .scale(),
             0
         );
         assert_eq!(draft.status, ObservationDraftStatus::Included);
@@ -667,10 +679,11 @@ mod tests {
             .next()
             .expect("a contract-initiated credit must admit its transaction");
         assert_eq!(
-            draft.transaction_id,
+            draft.transaction.transaction_id,
             TransactionId::from_bytes(hash(TX_HASH)).canonical(&network())
         );
         let credit = draft
+            .transaction
             .movements
             .iter()
             .find(|movement| movement.to() == Some(&watcher))
@@ -685,6 +698,7 @@ mod tests {
         // attributed is cancelled rather than left to accumulate.
         let router = canonical_address(TO);
         let debit = draft
+            .transaction
             .movements
             .iter()
             .find(|movement| movement.from() == Some(&router))
@@ -694,13 +708,19 @@ mod tests {
         // Nothing unexplained is left on the sender: its gas is the fee only.
         assert!(
             !draft
+                .transaction
                 .movements
                 .iter()
                 .any(|movement| movement.from() == Some(&canonical_address(FROM))
                     && movement.id.0.contains(":residual:"))
         );
         assert_eq!(
-            draft.fee.as_ref().expect("fee must exist").amount,
+            draft
+                .transaction
+                .fee
+                .as_ref()
+                .expect("fee must exist")
+                .amount,
             Decimal::from(63_000_u64)
         );
     }
@@ -734,6 +754,7 @@ mod tests {
                 .expect("maximum U256 decimal literal must parse");
         assert_eq!(
             draft
+                .transaction
                 .movements
                 .iter()
                 .map(ValueMovement::kind)
@@ -745,7 +766,7 @@ mod tests {
                 MovementKind::Burn
             ]
         );
-        for movement in &draft.movements {
+        for movement in &draft.transaction.movements {
             assert_eq!(movement.amount, expected);
             assert_eq!(movement.amount.scale(), 0);
         }
@@ -764,12 +785,12 @@ mod tests {
         let interpreted =
             inspect(&priced, &[canonical_address(FROM)]).expect("a full-width fee must interpret");
         let draft = &interpreted.block.transactions()[0];
-        assert!(draft.movements.is_empty());
+        assert!(draft.transaction.movements.is_empty());
         let expected_fee =
             "37103788360346070921249247515601288832377161834387998120553730227145015296000"
                 .parse::<Decimal>()
                 .expect("full-width fee decimal literal must parse");
-        let fee = draft.fee.as_ref().expect("fee must exist");
+        let fee = draft.transaction.fee.as_ref().expect("fee must exist");
         assert_eq!(fee.amount, expected_fee);
         assert_eq!(fee.amount.scale(), 0);
     }
@@ -783,7 +804,7 @@ mod tests {
         let interpreted = inspect(&block, &[canonical_address(CONTRACT)])
             .expect("contract creation must interpret");
         assert_eq!(
-            interpreted.block.transactions()[0].movements[0].to(),
+            interpreted.block.transactions()[0].transaction.movements[0].to(),
             Some(&address(CONTRACT).canonical(&network()))
         );
     }
@@ -819,10 +840,14 @@ mod tests {
             draft.status,
             ObservationDraftStatus::Failed { .. }
         ));
-        assert!(draft.fee.is_some());
-        assert_eq!(draft.movements.len(), 1, "the settlement, and nothing else");
+        assert!(draft.transaction.fee.is_some());
         assert_eq!(
-            draft.movements[0].to(),
+            draft.transaction.movements.len(),
+            1,
+            "the settlement, and nothing else"
+        );
+        assert_eq!(
+            draft.transaction.movements[0].to(),
             Some(&canonical_address(BENEFICIARY))
         );
         assert_eq!(
@@ -921,7 +946,7 @@ mod tests {
             receipt(true, Some(TO), None, "0x1", logs),
         );
         let interpreted = inspect(&block, &[canonical_address(FROM)]).expect("logs must interpret");
-        let movements = &interpreted.block.transactions()[0].movements;
+        let movements = &interpreted.block.transactions()[0].transaction.movements;
         assert_eq!(movements.len(), 3);
         assert_eq!(movements[0].kind(), MovementKind::Transfer);
         assert_eq!(movements[1].kind(), MovementKind::Mint);
@@ -945,7 +970,12 @@ mod tests {
         );
         let interpreted = inspect(&block, &[canonical_address(FROM)])
             .expect("malformed token log must not poison the block");
-        assert!(interpreted.block.transactions()[0].movements.is_empty());
+        assert!(
+            interpreted.block.transactions()[0]
+                .transaction
+                .movements
+                .is_empty()
+        );
     }
 
     #[test]

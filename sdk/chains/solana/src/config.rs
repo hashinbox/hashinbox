@@ -171,18 +171,27 @@ impl<A: Ord> Config<A> {
     /// [`Self::validate`]'s refusals, and whatever the node reports when it
     /// serves another cluster or disagrees with a configured mint.
     pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<ChainHandle<A>, Error> {
-        self.connect_monitored(secrets, &mut Vec::new()).await
+        self.connect_monitored(secrets, &mut Vec::new(), logging::Logger::default(), None)
+            .await
     }
 
     async fn connect_monitored(
         self,
         secrets: &dyn json_rpc::Secrets,
         statistics: &mut Vec<json_rpc::Statistics>,
+        logger: logging::Logger,
+        transport: Option<Transport>,
     ) -> Result<ChainHandle<A>, Error> {
         self.validate()?;
         let network = self.cluster();
-        let (transport, endpoints) = self.rpc.monitored(secrets)?;
-        statistics.extend(endpoints);
+        let transport = match transport {
+            Some(transport) => transport,
+            None => {
+                let (transport, endpoints) = self.rpc.logged(secrets, &logger)?;
+                statistics.extend(endpoints);
+                transport
+            }
+        };
         let rpc = RpcClient::connect(transport, &network).await?;
         for token in &self.tokens {
             rpc.validate_token(&token.mint, token.decimals).await?;
@@ -298,8 +307,8 @@ impl<A> ChainHandle<A> {
         // rows are the store's, the pending blocks are the index's, and the
         // index answers no query itself — and handed to whoever reads a page:
         // the sender's absence proof, and `apps/server` through `ComposedChain`.
-        let reads = Arc::new(wallets::PendingJoin::new(repository, indexer.clone()));
-        let history: Arc<dyn wallets::History> = reads.clone();
+        let reads = Arc::new(indexing::PendingJoin::new(repository, indexer.clone()));
+        let history: Arc<dyn indexing::History> = reads.clone();
         let wallet = WalletConfig::new(&network);
         let sol = WalletFactory::new(wallet.clone(), &rpc, &indexer, history.clone())?
             .with_registrar(registrar.clone());
@@ -424,10 +433,12 @@ where
         self: Box<Self>,
         secrets: &'a dyn json_rpc::Secrets,
         statistics: &'a mut Vec<json_rpc::Statistics>,
+        logger: logging::Logger,
+        transport: Option<Transport>,
     ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, sdk_config::Error>> {
         Box::pin(async move {
             let node = (*self)
-                .connect_monitored(secrets, statistics)
+                .connect_monitored(secrets, statistics, logger, transport)
                 .await
                 .map_err(sdk_config::Error::refused)?;
             Ok(Box::new(node) as Box<dyn Connection<A, R>>)

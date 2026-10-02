@@ -337,15 +337,17 @@ impl<'a, R: BalanceStore + IndexStore> BalanceContract<'a, R> {
         fee: u64,
     ) -> ObservationDraft {
         ObservationDraft {
-            transaction_id: TransactionRef::new(fixture.network.clone(), id),
+            transaction: indexing::Transaction {
+                transaction_id: TransactionRef::new(fixture.network.clone(), id),
+                movements,
+                fee: Some(NetworkFee {
+                    asset: fixture.native(),
+                    amount: Decimal::from(fee),
+                    payer: Some(fixture.address(payer)),
+                }),
+            },
             transaction_order: 0,
             status: ObservationDraftStatus::Included,
-            movements,
-            fee: Some(NetworkFee {
-                asset: fixture.native(),
-                amount: Decimal::from(fee),
-                payer: Some(fixture.address(payer)),
-            }),
         }
     }
 

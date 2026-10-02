@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Json,
     extract::{Path, Query, State, rejection::QueryRejection},
@@ -14,7 +16,7 @@ use super::{
     error::{Error, ErrorBody},
 };
 
-pub(super) fn routes() -> OpenApiRouter<Payments> {
+pub(super) fn routes() -> OpenApiRouter<super::Application> {
     OpenApiRouter::new().routes(routes!(read))
 }
 
@@ -154,24 +156,24 @@ pub(super) enum Status {
     },
 }
 
-impl From<wallets::TransactionStatus> for Status {
-    fn from(value: wallets::TransactionStatus) -> Self {
+impl From<indexing::TransactionStatus> for Status {
+    fn from(value: indexing::TransactionStatus) -> Self {
         match value {
-            wallets::TransactionStatus::Pending {
+            indexing::TransactionStatus::Pending {
                 block,
                 confirmations,
             } => Self::Pending {
                 block: block.into(),
                 confirmations,
             },
-            wallets::TransactionStatus::Confirmed {
+            indexing::TransactionStatus::Confirmed {
                 block,
                 confirmations,
             } => Self::Confirmed {
                 block: block.into(),
                 confirmations,
             },
-            wallets::TransactionStatus::Failed { block, reason } => Self::Failed {
+            indexing::TransactionStatus::Failed { block, reason } => Self::Failed {
                 block: block.into(),
                 reason,
             },
@@ -197,11 +199,12 @@ pub(super) struct Transaction {
 
 impl Transaction {
     /// One indexed transaction in the display units of the assets it moved.
-    fn new(transaction: wallets::ObservedTransaction, units: &base::Units) -> Result<Self, Error> {
+    fn new(observed: indexing::ObservedTransaction, units: &base::Units) -> Result<Self, Error> {
+        let transaction = observed.transaction;
         Ok(Self {
             network: transaction.transaction_id.network.clone().into(),
             transaction_id: transaction.transaction_id.id.to_string(),
-            status: transaction.status.into(),
+            status: observed.status.into(),
             movements: transaction
                 .movements
                 .into_iter()
@@ -256,7 +259,7 @@ impl TransactionPage {
     /// query did not ask for, or moves an asset no configured chain declared a
     /// unit for; a 500 when its cursor cannot be encoded.
     pub(crate) fn new(
-        page: wallets::TransactionPage,
+        page: indexing::TransactionPage,
         network: &base::Network,
         asset: &base::AssetId,
         units: &base::Units,
@@ -264,7 +267,7 @@ impl TransactionPage {
         Self::owned_by(&page, network)?;
         Self::denominated(&page, asset, &base::AssetId::native(network.chain.clone()))?;
         let next_cursor = page.next.as_ref().map(HistoryCursor::encode).transpose()?;
-        let convert = |transactions: Vec<wallets::ObservedTransaction>| {
+        let convert = |transactions: Vec<indexing::ObservedTransaction>| {
             transactions
                 .into_iter()
                 .map(|transaction| Transaction::new(transaction, units))
@@ -282,7 +285,7 @@ impl TransactionPage {
     /// Rejects a page that left the queried network before any of it is
     /// converted: an identity of another network on this page would reach a
     /// caller as if it were theirs.
-    fn owned_by(page: &wallets::TransactionPage, network: &base::Network) -> Result<(), Error> {
+    fn owned_by(page: &indexing::TransactionPage, network: &base::Network) -> Result<(), Error> {
         let cursor = page
             .next
             .as_ref()
@@ -294,12 +297,16 @@ impl TransactionPage {
         }
         let transactions = page.transactions.iter().chain(&page.pending);
         for transaction in transactions {
-            if !transaction.transaction_id.belongs_to(network) {
+            if !transaction.transaction.transaction_id.belongs_to(network) {
                 return Err(Error::indexed(
                     "indexed transaction does not belong to the requested network",
                 ));
             }
-            let payer = transaction.fee.as_ref().and_then(|fee| fee.payer.as_ref());
+            let payer = transaction
+                .transaction
+                .fee
+                .as_ref()
+                .and_then(|fee| fee.payer.as_ref());
             if payer.is_some_and(|payer| !payer.belongs_to(network)) {
                 return Err(Error::indexed(
                     "indexed fee payer does not belong to the transaction network",
@@ -315,12 +322,13 @@ impl TransactionPage {
     /// currency on every supported chain — which is why `native` is taken from
     /// the queried network rather than from the page.
     fn denominated(
-        page: &wallets::TransactionPage,
+        page: &indexing::TransactionPage,
         asset: &base::AssetId,
         native: &base::AssetId,
     ) -> Result<(), Error> {
         for transaction in page.transactions.iter().chain(&page.pending) {
             if transaction
+                .transaction
                 .movements
                 .iter()
                 .any(|movement| &movement.asset != asset)
@@ -329,7 +337,7 @@ impl TransactionPage {
                     "indexed history contains an asset outside the query",
                 ));
             }
-            let fee = transaction.fee.as_ref();
+            let fee = transaction.transaction.fee.as_ref();
             if fee.is_some_and(|fee| &fee.asset != native) {
                 return Err(Error::indexed(
                     "indexed fee is not priced in the chain's own currency",
@@ -404,13 +412,14 @@ impl HistoryQuery {
     tag = "transactions"
 )]
 async fn read(
-    State(payments): State<Payments>,
+    State(payments): State<Arc<Payments>>,
     Path(path): Path<WalletPath>,
     query: Result<Query<HistoryQuery>, QueryRejection>,
 ) -> Result<Json<TransactionPage>, Error> {
     let Query(query) = query.map_err(Error::invalid_query)?;
     let page = query.try_into()?;
     let custody = payments.custody(&path.id).await?;
+    let _admission = payments.admission(&custody.watch.address.network)?;
     Ok(Json(payments.history(&custody, page).await?))
 }
 
@@ -483,37 +492,40 @@ mod tests {
             timestamp: Some(44),
         };
         let native = AssetId::native(network().chain);
-        let indexed = wallets::TransactionPage {
+        let transaction = indexing::Transaction {
+            transaction_id: TransactionRef {
+                network: network(),
+                id: "tx-1".to_owned().into(),
+            },
+            movements: vec![
+                indexing::ValueMovement::input(
+                    MovementId("input:0".to_owned()),
+                    native.clone(),
+                    Decimal::from(123_000_000_u64),
+                    Some(address("sender")),
+                ),
+                indexing::ValueMovement::output(
+                    MovementId("output:0".to_owned()),
+                    native.clone(),
+                    Decimal::from(122_000_000_u64),
+                    Some(address("recipient")),
+                ),
+            ],
+            fee: Some(indexing::NetworkFee {
+                asset: native.clone(),
+                amount: Decimal::from(1_000_000_u64),
+                payer: Some(address("sender")),
+            }),
+        };
+        let indexed = indexing::TransactionPage {
             checkpoint: Some(block.clone()),
             pending: Vec::new(),
-            transactions: vec![wallets::ObservedTransaction {
-                transaction_id: TransactionRef {
-                    network: network(),
-                    id: "tx-1".to_owned().into(),
-                },
-                status: wallets::TransactionStatus::Confirmed {
+            transactions: vec![indexing::ObservedTransaction {
+                transaction,
+                status: indexing::TransactionStatus::Confirmed {
                     block,
                     confirmations: 7,
                 },
-                movements: vec![
-                    indexing::ValueMovement::input(
-                        MovementId("input:0".to_owned()),
-                        native.clone(),
-                        Decimal::from(123_000_000_u64),
-                        Some(address("sender")),
-                    ),
-                    indexing::ValueMovement::output(
-                        MovementId("output:0".to_owned()),
-                        native.clone(),
-                        Decimal::from(122_000_000_u64),
-                        Some(address("recipient")),
-                    ),
-                ],
-                fee: Some(indexing::NetworkFee {
-                    asset: native.clone(),
-                    amount: Decimal::from(1_000_000_u64),
-                    payer: Some(address("sender")),
-                }),
             }],
             next: None,
             completeness: indexing::Completeness::Incomplete,
@@ -574,28 +586,28 @@ mod tests {
         );
         for (status, tail) in [
             (
-                wallets::TransactionStatus::Pending {
+                indexing::TransactionStatus::Pending {
                     block: block.clone(),
                     confirmations: 1,
                 },
                 r#""kind":"pending","confirmations":1"#,
             ),
             (
-                wallets::TransactionStatus::Confirmed {
+                indexing::TransactionStatus::Confirmed {
                     block: block.clone(),
                     confirmations: 7,
                 },
                 r#""kind":"confirmed","confirmations":7"#,
             ),
             (
-                wallets::TransactionStatus::Failed {
+                indexing::TransactionStatus::Failed {
                     block: block.clone(),
                     reason: Some("out of gas".to_owned()),
                 },
                 r#""kind":"failed","reason":"out of gas""#,
             ),
             (
-                wallets::TransactionStatus::Failed {
+                indexing::TransactionStatus::Failed {
                     block: block.clone(),
                     reason: None,
                 },
@@ -630,12 +642,25 @@ mod tests {
         };
         let native = AssetId::native(network().chain);
         let transaction = |network: &Network, asset: AssetId, fee: Option<AssetId>| {
-            wallets::ObservedTransaction {
-                transaction_id: TransactionRef {
-                    network: network.clone(),
-                    id: "tx-1".to_owned().into(),
+            indexing::ObservedTransaction {
+                transaction: indexing::Transaction {
+                    transaction_id: TransactionRef {
+                        network: network.clone(),
+                        id: "tx-1".to_owned().into(),
+                    },
+                    movements: vec![indexing::ValueMovement::mint(
+                        MovementId("mint".to_owned()),
+                        asset,
+                        Decimal::from(1_u64),
+                        address("recipient"),
+                    )],
+                    fee: fee.map(|asset| indexing::NetworkFee {
+                        asset,
+                        amount: Decimal::from(1_u64),
+                        payer: None,
+                    }),
                 },
-                status: wallets::TransactionStatus::Failed {
+                status: indexing::TransactionStatus::Failed {
                     block: BlockRef {
                         position: base::BlockPosition(1),
                         height: BlockHeight(1),
@@ -645,20 +670,9 @@ mod tests {
                     },
                     reason: None,
                 },
-                movements: vec![indexing::ValueMovement::mint(
-                    MovementId("mint".to_owned()),
-                    asset,
-                    Decimal::from(1_u64),
-                    address("recipient"),
-                )],
-                fee: fee.map(|asset| indexing::NetworkFee {
-                    asset,
-                    amount: Decimal::from(1_u64),
-                    payer: None,
-                }),
             }
         };
-        let page = |transactions| wallets::TransactionPage {
+        let page = |transactions| indexing::TransactionPage {
             checkpoint: None,
             transactions,
             pending: Vec::new(),
@@ -689,15 +703,29 @@ mod tests {
     /// by the identity each amount already carries.
     #[test]
     fn a_token_page_scales_each_amount_by_its_own_assets_unit() {
-        let indexed = wallets::TransactionPage {
+        let indexed = indexing::TransactionPage {
             checkpoint: None,
             pending: Vec::new(),
-            transactions: vec![wallets::ObservedTransaction {
-                transaction_id: TransactionRef {
-                    network: network(),
-                    id: "tx-1".to_owned().into(),
+            transactions: vec![indexing::ObservedTransaction {
+                transaction: indexing::Transaction {
+                    transaction_id: TransactionRef {
+                        network: network(),
+                        id: "tx-1".to_owned().into(),
+                    },
+                    movements: vec![indexing::ValueMovement::transfer(
+                        MovementId("transfer:0".to_owned()),
+                        token(),
+                        Decimal::from(1_500_000_u64),
+                        address("sender"),
+                        address("recipient"),
+                    )],
+                    fee: Some(indexing::NetworkFee {
+                        asset: AssetId::native(network().chain),
+                        amount: Decimal::from(1_000_000_u64),
+                        payer: Some(address("sender")),
+                    }),
                 },
-                status: wallets::TransactionStatus::Confirmed {
+                status: indexing::TransactionStatus::Confirmed {
                     block: BlockRef {
                         position: base::BlockPosition(1),
                         height: BlockHeight(1),
@@ -707,18 +735,6 @@ mod tests {
                     },
                     confirmations: 1,
                 },
-                movements: vec![indexing::ValueMovement::transfer(
-                    MovementId("transfer:0".to_owned()),
-                    token(),
-                    Decimal::from(1_500_000_u64),
-                    address("sender"),
-                    address("recipient"),
-                )],
-                fee: Some(indexing::NetworkFee {
-                    asset: AssetId::native(network().chain),
-                    amount: Decimal::from(1_000_000_u64),
-                    payer: Some(address("sender")),
-                }),
             }],
             next: None,
             completeness: indexing::Completeness::Incomplete,

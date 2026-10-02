@@ -127,16 +127,18 @@ impl BlockInterpreter for Interpreter {
                 format!("tx-{}-{}", reference.height.0, owner.value),
             );
             transactions.push(ObservationDraft {
-                transaction_id: id.clone(),
+                transaction: indexing::Transaction {
+                    transaction_id: id.clone(),
+                    movements: vec![ValueMovement::output(
+                        MovementId("output-0".into()),
+                        asset(),
+                        Decimal::from(5_u64),
+                        Some(owner.clone()),
+                    )],
+                    fee: None,
+                },
                 transaction_order: order,
                 status: ObservationDraftStatus::Included,
-                movements: vec![ValueMovement::output(
-                    MovementId("output-0".into()),
-                    asset(),
-                    Decimal::from(5_u64),
-                    Some(owner.clone()),
-                )],
-                fee: None,
             });
             created.push(IndexedOutput {
                 id: OutputId {
@@ -196,7 +198,7 @@ fn indexed(repository: &memory::Repository, owner: &Address) -> Vec<TransactionR
         .expect("history")
         .transactions
         .into_iter()
-        .map(|entry| entry.transaction_id)
+        .map(|entry| entry.transaction.transaction_id)
         .collect()
 }
 

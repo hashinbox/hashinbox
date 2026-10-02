@@ -9,17 +9,17 @@
 //! pending fold, and the refusal of a cursor folded over different pending
 //! blocks — is about which outputs exist right now.
 //!
-//! The order of the two reads is the one [`crate::pending`] states, and it
+//! The order of the two reads is the one [`super::join`] states, and it
 //! matters most here: reading the repository first loses a block committed in
 //! between, so the outputs it spent are offered as spendable again.
 
 use std::collections::BTreeSet;
 
-use base::BoxFuture;
-use indexing::{
+use crate::{
     Address, CanonicalBlock, IndexError, IndexErrorKind, IndexedOutput, OutputCursor, OutputKey,
     OutputPage, OutputRequest, OutputStore,
 };
+use base::BoxFuture;
 
 use crate::PendingJoin;
 
@@ -164,7 +164,7 @@ mod tests {
     use base::BlockRef;
 
     use super::*;
-    use crate::pending::tests::{
+    use crate::storage::join::tests::{
         Held, Landing, address, block, funding, interleaved, network, output, spending,
     };
 

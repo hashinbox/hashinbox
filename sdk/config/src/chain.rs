@@ -45,6 +45,8 @@ pub trait Chain<A, R>: Send + 'static {
         self: Box<Self>,
         secrets: &'a dyn Secrets,
         statistics: &'a mut Vec<Statistics>,
+        logger: logging::Logger,
+        transport: Option<crate::Transport>,
     ) -> BoxFuture<'a, Result<Box<dyn Connection<A, R>>, Error>>;
 }
 
@@ -57,6 +59,8 @@ pub trait Chain<A, R>: Send + 'static {
 pub struct Chains<A, R> {
     chains: Vec<(String, Box<dyn Chain<A, R>>)>,
     notices: Vec<String>,
+    logger: logging::Logger,
+    transport: Option<crate::Transport>,
 }
 
 impl<A: 'static, R: 'static> Chains<A, R> {
@@ -66,7 +70,32 @@ impl<A: 'static, R: 'static> Chains<A, R> {
         Self {
             chains: Vec::new(),
             notices: Vec::new(),
+            logger: logging::Logger::default(),
+            transport: None,
         }
+    }
+
+    /// Injects one event sink for every configured chain and its RPC nodes.
+    #[must_use]
+    pub fn with_logger(mut self, logger: logging::Logger) -> Self {
+        self.logger = logger;
+        self
+    }
+
+    /// Uses a caller-owned transport for one configured network.
+    /// Chain identity, token and protocol verification still run on this transport.
+    ///
+    /// # Errors
+    /// Refuses configurations containing more than one network.
+    pub fn with_transport(mut self, transport: crate::Transport) -> Result<Self, Error> {
+        if self.chains.len() != 1 {
+            return Err(Error::new(
+                ErrorKind::Section,
+                "transport injection requires one network",
+            ));
+        }
+        self.transport = Some(transport);
+        Ok(self)
     }
 
     /// Accepts `chain` under `name` and keeps whatever it asked to announce.
@@ -165,12 +194,15 @@ impl<A: 'static, R: 'static> Chains<A, R> {
         for (name, chain) in self.chains {
             let network = chain.network();
             let mut endpoints = Vec::new();
-            connections.push(
-                chain
-                    .connect(secrets, &mut endpoints)
-                    .await
-                    .map_err(|error| error.in_section(&name))?,
-            );
+            let logger = self
+                .logger
+                .with("chain", network.chain.to_string())
+                .with("network", network.name.clone());
+            let connection = chain
+                .connect(secrets, &mut endpoints, logger, self.transport.clone())
+                .await
+                .map_err(|error| error.in_section(&name))?;
+            connections.push(connection);
             statistics.push((network, endpoints));
         }
         Ok(connections)

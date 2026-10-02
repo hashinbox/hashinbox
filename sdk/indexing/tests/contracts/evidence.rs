@@ -167,17 +167,19 @@ impl<R: BalanceStore + IndexStore + WatchStore + EvidenceStore + Purging> Balanc
         );
         self.refuses(evidence).await;
         let self_transfer = ObservationDraft {
-            transaction_id: f.transaction("new-old-self"),
+            transaction: indexing::Transaction {
+                transaction_id: f.transaction("new-old-self"),
+                movements: vec![ValueMovement::transfer(
+                    MovementId("circle".into()),
+                    f.native(),
+                    Decimal::from(1_u64),
+                    f.address("a"),
+                    f.address("a"),
+                )],
+                fee: None,
+            },
             transaction_order: 9,
             status: ObservationDraftStatus::Included,
-            movements: vec![ValueMovement::transfer(
-                MovementId("circle".into()),
-                f.native(),
-                Decimal::from(1_u64),
-                f.address("a"),
-                f.address("a"),
-            )],
-            fee: None,
         };
         let older = f.canonical_block(7, vec![self_transfer]);
         f.repository
@@ -274,17 +276,19 @@ impl<R: BalanceStore + IndexStore + WatchStore + EvidenceStore + Purging> Balanc
         let f = &self.fixture;
         for (height, from, to) in [(9, "a", "b"), (10, "b", "a")] {
             let draft = ObservationDraft {
-                transaction_id: f.transaction(&format!("change-{height}")),
+                transaction: indexing::Transaction {
+                    transaction_id: f.transaction(&format!("change-{height}")),
+                    movements: vec![ValueMovement::transfer(
+                        MovementId("change".into()),
+                        f.native(),
+                        Decimal::from(20_u64),
+                        f.address(from),
+                        f.address(to),
+                    )],
+                    fee: None,
+                },
                 transaction_order: 0,
                 status: ObservationDraftStatus::Included,
-                movements: vec![ValueMovement::transfer(
-                    MovementId("change".into()),
-                    f.native(),
-                    Decimal::from(20_u64),
-                    f.address(from),
-                    f.address(to),
-                )],
-                fee: None,
             };
             let batch = IndexedBatch::new(
                 f.network.clone(),
@@ -314,10 +318,8 @@ impl<R: BalanceStore + IndexStore + WatchStore + EvidenceStore + Purging> Balanc
         let blocks = [(9, "a", "b"), (10, "b", "a")]
             .into_iter()
             .map(|(height, from, to)| {
-                let draft = ObservationDraft {
+                let transaction = indexing::Transaction {
                     transaction_id: f.transaction(&format!("change-{height}")),
-                    transaction_order: 0,
-                    status: ObservationDraftStatus::Included,
                     movements: vec![ValueMovement::transfer(
                         MovementId("change".into()),
                         f.native(),
@@ -326,6 +328,11 @@ impl<R: BalanceStore + IndexStore + WatchStore + EvidenceStore + Purging> Balanc
                         f.address(to),
                     )],
                     fee: None,
+                };
+                let draft = ObservationDraft {
+                    transaction,
+                    transaction_order: 0,
+                    status: ObservationDraftStatus::Included,
                 };
                 f.canonical_block(height, vec![draft])
             })
@@ -356,17 +363,19 @@ impl<R: BalanceStore + IndexStore + WatchStore + EvidenceStore + Purging> Balanc
         let drafts = [(1, "a", "b"), (0, "b", "a")]
             .into_iter()
             .map(|(order, from, to)| ObservationDraft {
-                transaction_id: f.transaction(&format!("within-{order}")),
+                transaction: indexing::Transaction {
+                    transaction_id: f.transaction(&format!("within-{order}")),
+                    movements: vec![ValueMovement::transfer(
+                        MovementId("change".into()),
+                        f.native(),
+                        Decimal::from(20_u64),
+                        f.address(from),
+                        f.address(to),
+                    )],
+                    fee: None,
+                },
                 transaction_order: order,
                 status: ObservationDraftStatus::Included,
-                movements: vec![ValueMovement::transfer(
-                    MovementId("change".into()),
-                    f.native(),
-                    Decimal::from(20_u64),
-                    f.address(from),
-                    f.address(to),
-                )],
-                fee: None,
             })
             .collect();
         let batch = IndexedBatch::new(

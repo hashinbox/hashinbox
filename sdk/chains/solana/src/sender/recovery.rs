@@ -8,11 +8,11 @@
 use std::{sync::Arc, time::Duration};
 
 use base::{BlockRef, BoxFuture};
+use indexing::History;
 use indexing::{
     AssetId, BlockCommit, Checkpoint, HistoryPosition, Listener, Network, Page, Subject,
 };
 use tokio::sync::watch;
-use wallets::History;
 
 use super::reservation::Reservations;
 use crate::native::{SignedTransaction, rpc::Submitter};
@@ -157,7 +157,7 @@ impl Recovery {
                 .transactions
                 .iter()
                 .chain(&page.pending)
-                .any(|observed| observed.transaction_id.id == id);
+                .any(|observed| observed.transaction.transaction_id.id == id);
             if seen {
                 return Scan::Present;
             }

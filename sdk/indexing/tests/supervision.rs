@@ -34,6 +34,7 @@ enum Outcome {
     Panics,
     /// Never completes, so a test can stop the script at a known point.
     Parks,
+    Wait(Arc<tokio::sync::Semaphore>),
 }
 
 /// One chain's indexer, scripted pass by pass.
@@ -119,6 +120,10 @@ impl Indexing for Probe {
             let (phase, backfill) = match outcome {
                 Outcome::Status(status) => return Ok(*status),
                 Outcome::Ready => (SyncPhase::Ready, None),
+                Outcome::Wait(gate) => {
+                    gate.acquire().await.unwrap().forget();
+                    (SyncPhase::Ready, None)
+                }
                 Outcome::CatchingUp => (SyncPhase::CatchingUp, None),
                 Outcome::BackfillFails => (SyncPhase::Ready, Some(refused())),
                 Outcome::Fails(error) => return Err(error),
@@ -839,4 +844,101 @@ async fn ready_snapshots_advance_without_extra_transition_notifications() {
         "only the initial Ready transition is an event"
     );
     supervised.shut_down().await;
+}
+
+#[tokio::test]
+async fn pause_acknowledges_idle_and_resume_restarts_only_that_network() {
+    let first = Arc::new(Probe::new(&network("first"), [], Outcome::Ready));
+    let second = Arc::new(Probe::new(&network("second"), [], Outcome::Ready));
+    let mut running = Supervised::new(vec![first.clone(), second.clone()]);
+    running.reaches("first", NetworkState::Ready).await;
+    running.control.pause(&network("first")).await.unwrap();
+    running.reaches("first", NetworkState::Paused).await;
+    let calls = first.calls();
+    let other = second.calls();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while second.calls() <= other {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(first.calls(), calls);
+    running.control.resume(&network("first")).unwrap();
+    running.reaches("first", NetworkState::Ready).await;
+    assert!(first.calls() > calls);
+    running.stop.send(true).unwrap();
+    running.task.await.unwrap();
+    assert!(running.control.pause(&network("first")).await.is_err());
+}
+
+#[tokio::test]
+async fn pause_waits_for_active_pass_without_cancelling_it() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let probe = Arc::new(Probe::new(
+        &network("first"),
+        [Outcome::Wait(gate.clone())],
+        Outcome::Ready,
+    ));
+    let running = Supervised::new(vec![probe.clone()]);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while probe.calls() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let network = network("first");
+    let pause = running.control.pause(&network);
+    tokio::pin!(pause);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(pause.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    gate.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(2), pause)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(gate.available_permits(), 0);
+    assert_eq!(probe.calls(), 1);
+    running.stop.send(true).unwrap();
+    running.task.await.unwrap();
+}
+
+#[tokio::test]
+async fn recovery_discards_reported_progress_before_resume() {
+    let network = network("recovered");
+    let probe = Arc::new(Probe::new(&network, [], Outcome::Ready));
+    let mut running = Supervised::new(vec![probe.clone()]);
+    running.reaches("recovered", NetworkState::Ready).await;
+    assert!(running.control.discard_progress(&network).await.is_err());
+    running.control.pause(&network).await.unwrap();
+    assert!(
+        running.health.borrow().networks()[0]
+            .status
+            .checkpoint
+            .is_some()
+    );
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        running.control.discard_progress(&network),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let calls = probe.calls();
+    {
+        let health = running.health.borrow();
+        let row = &health.networks()[0];
+        assert_eq!(row.state, NetworkState::Paused);
+        assert!(row.status.checkpoint.is_none());
+        assert!(row.status.pending_tip.is_none());
+        assert!(row.status.backfill.is_none());
+    }
+    assert_eq!(probe.calls(), calls);
+    running.control.resume(&network).unwrap();
+    running.reaches("recovered", NetworkState::Ready).await;
+    running.shut_down().await;
 }

@@ -8,10 +8,10 @@ use std::{
 };
 
 use base::{BlockHash, BlockHeight, BlockPosition, BlockRef, BoxFuture, Decimal, SecretBytes};
+use indexing::TransactionPage;
 use indexing::{
     AssetId, IndexError, IndexedOutput, OutputId, OutputPage, OutputRequest, OutputStore,
 };
-use wallets::TransactionPage;
 
 use super::{Outbox, SendRequest, UtxoReader};
 use crate::native::{
@@ -208,7 +208,7 @@ impl OutputStore for Node {
     }
 }
 
-impl wallets::History for Node {
+impl indexing::History for Node {
     fn history<'a>(
         &'a self,
         _of: &'a dyn indexing::Holder,

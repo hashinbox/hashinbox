@@ -45,9 +45,22 @@ impl IndexStore for Repository {
     ) -> BoxFuture<'a, Result<Vec<OutputKey>, IndexError>> {
         Box::pin(async move {
             let tables = self.tables(batch.network())?;
-            self.database
-                .transaction(move |transaction| tables.apply(transaction, &batch))
-                .await
+            let enabled = self.logger.enabled(logging::Level::Info, "wallet.received");
+            let write = move |transaction: &Transaction<'_>| {
+                let receipts = if enabled {
+                    crate::storage::receipts::Receipt::collect(&batch, |receipt| {
+                        tables.new_receipt(transaction, receipt)
+                    })?
+                } else {
+                    Vec::new()
+                };
+                Ok((tables.apply(transaction, &batch)?, receipts))
+            };
+            let (unknown, receipts) = self.database.transaction(write).await?;
+            for receipt in receipts {
+                receipt.emit(&self.logger);
+            }
+            Ok(unknown)
         })
     }
 }
@@ -69,6 +82,32 @@ impl Purging for Repository {
 }
 
 impl Tables {
+    fn new_receipt(
+        &self,
+        transaction: &Transaction<'_>,
+        receipt: &crate::storage::receipts::Receipt,
+    ) -> Result<bool, IndexError> {
+        transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM watch
+            WHERE chain=?1 AND network=?2 AND address=?3 AND asset=?4)
+            AND NOT EXISTS(SELECT 1 FROM balance_movement WHERE chain=?1 AND network=?2
+            AND address=?3 AND asset=?4 AND block_height=?5 AND transaction_id=?6
+            AND (?7 IS NULL OR movement_id=?7))",
+                rusqlite::params![
+                    self.chain(),
+                    self.name(),
+                    receipt.subject.address.value,
+                    receipt.subject.asset.asset,
+                    Self::stored(receipt.block.height.0)?,
+                    receipt.transaction.as_deref().unwrap_or(""),
+                    receipt.credit
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| super::failure(&error, "failed to identify newly indexed receipt"))
+    }
+
     /// Writes one batch's transactions, credits, output changes, balances and
     /// progress, and the line it leaves behind — or nothing at all.
     ///
@@ -149,7 +188,7 @@ impl Tables {
         settlement: FeeSettlement,
         place: &Place,
     ) -> Result<(), IndexError> {
-        for address in entry.addresses() {
+        for address in entry.transaction.addresses() {
             self.insert_membership(transaction, &address, place)?;
             self.insert_effects(transaction, &address, entry, settlement, place)?;
         }
@@ -289,16 +328,18 @@ mod blocks_test {
 
     fn draft(height: u64) -> ObservationDraft {
         ObservationDraft {
-            transaction_id: TransactionRef::new(network(), format!("block-{height}")),
+            transaction: crate::Transaction {
+                transaction_id: TransactionRef::new(network(), format!("block-{height}")),
+                movements: vec![ValueMovement::mint(
+                    MovementId(format!("mint-{height}")),
+                    AssetId::native(network().chain),
+                    Decimal::from(5_u64),
+                    address("owner"),
+                )],
+                fee: None,
+            },
             transaction_order: 0,
             status: ObservationDraftStatus::Included,
-            movements: vec![ValueMovement::mint(
-                MovementId(format!("mint-{height}")),
-                AssetId::native(network().chain),
-                Decimal::from(5_u64),
-                address("owner"),
-            )],
-            fee: None,
         }
     }
 
@@ -581,13 +622,15 @@ mod throughput_test {
     fn transactions(height: u64) -> Vec<ObservationDraft> {
         (0..TXS)
             .map(|index| ObservationDraft {
-                transaction_id: identity(height, index),
+                transaction: crate::Transaction {
+                    transaction_id: identity(height, index),
+                    movements: (0..MOVEMENTS)
+                        .map(|ordinal| movement(height, index, ordinal))
+                        .collect(),
+                    fee: None,
+                },
                 transaction_order: index as u64,
                 status: ObservationDraftStatus::Included,
-                movements: (0..MOVEMENTS)
-                    .map(|ordinal| movement(height, index, ordinal))
-                    .collect(),
-                fee: None,
             })
             .collect()
     }

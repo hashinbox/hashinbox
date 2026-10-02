@@ -41,7 +41,7 @@ impl<C, R> IndexerParams<C, R> {
 /// rather than a newtype that forwarded every capability to one: it implements
 /// `indexing::{Indexing, Checkpoint, Pending}` already. It answers no query:
 /// a history page is its store's, joined to the blocks this index holds above
-/// the line by `wallets::PendingJoin`. Store it as
+/// the line by `indexing::PendingJoin`. Store it as
 /// `Arc<dyn indexing::Indexing>` or combine several in an `indexing::Index`.
 ///
 /// A function rather than an inherent constructor, because this crate does

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Json,
     extract::{FromRequestParts, Path, State, rejection::JsonRejection},
@@ -12,7 +14,7 @@ use super::{
     error::{Error, ErrorBody},
 };
 
-pub(super) fn routes() -> OpenApiRouter<Payments> {
+pub(super) fn routes() -> OpenApiRouter<super::Application> {
     OpenApiRouter::new()
         .routes(routes!(send))
         .routes(routes!(send_batch))
@@ -106,13 +108,14 @@ struct TransferAccepted {
     tag = "transactions"
 )]
 async fn send(
-    State(payments): State<Payments>,
+    State(payments): State<Arc<Payments>>,
     Path(path): Path<WalletPath>,
     _query: SubmitQuery,
     request: Result<Json<Transfer>, JsonRejection>,
 ) -> Result<(StatusCode, Json<TransferAccepted>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let custody = payments.custody(&path.id).await?;
+    let _admission = payments.admission(&custody.watch.address.network)?;
     let (destination, amount) = request.resolve(&payments, &custody)?;
     // Sending is the asset's capability, not the wallet's: an asset this
     // deployment only receives has no author to hand out, and that one
@@ -224,12 +227,13 @@ struct BatchAccepted {
     tag = "transactions"
 )]
 async fn send_batch(
-    State(payments): State<Payments>,
+    State(payments): State<Arc<Payments>>,
     _query: SubmitQuery,
     request: Result<Json<TransferBatch>, JsonRejection>,
 ) -> Result<(StatusCode, Json<BatchAccepted>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let (tag, transfers) = request.resolve(&payments).await?;
+    let _admission = payments.asset_admission(&tag)?;
     let transaction_ids = payments
         .wallets
         .send_all(&tag, transfers)

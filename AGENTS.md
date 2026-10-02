@@ -34,9 +34,9 @@ separate indexer service, raw-block archive or multi-writer deployment.
 | `apps/server/src/api/` | Thin HTTP/OpenAPI adapters, wire models and process signing map; names no concrete chain, `sdk_config` or storage backend (`scripts/check-chains.sh` check 8) |
 | `sdk/base` | Small chain-neutral values and signing/broadcast contracts; no chains, RPC, indexing or wallets |
 | `sdk/chains/*` | Native protocol, RPC, addresses, signing, transaction construction/broadcast and indexing translation |
-| `sdk/wallets` | Factory collection, wallet capabilities and batch orchestration; no custody or durable watch ownership |
+| `sdk/wallets` | Factory collection, wallet capabilities and batch orchestration; no reads, custody or durable watch ownership |
 | `sdk/indexing` | Watches, block inspection, continuity, confirmation, pending blocks and atomic commit coordination |
-| `sdk/indexing/src/storage/` | Repository contracts/implementations and balance, history and output queries |
+| `sdk/indexing/src/storage/` | Repository contracts/implementations, balance, history and output queries, and their pending-inclusive reads (`PendingJoin`) |
 | `sdk/indexing/src/supervisor/` | Optional Tokio driver, retry, quarantine and network status |
 | `sdk/config` | Configuration parsing and chain registration without concrete chain dependencies |
 | `packages/*` | Reusable mechanics; never import SDK/application crates |

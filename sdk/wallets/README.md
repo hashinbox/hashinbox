@@ -3,12 +3,13 @@
 Create wallets, import keys and send payments on any chain without naming a
 chain crate. `Wallets` is a map from your own asset tags to the wallet factory
 each chain provides, and `Composition` assembles the configured chains into one
-index, one wallet map and the balance and history readers.
+index and one wallet map. Balance and history reads are `indexing`'s.
 
 ## Usage
 
 ```rust
-use wallets::{Holder, SecretBytes, Transfer, WalletFactory, Wallets};
+use indexing::Holder;
+use wallets::{SecretBytes, Transfer, WalletFactory, Wallets};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -35,34 +36,6 @@ async fn run(factory: impl WalletFactory + 'static, key: SecretBytes) -> Result<
 }
 ```
 
-Balances and history are read through `PendingJoin`, built once per network
-from the repository and the index that commits into it:
-
-```rust
-use std::sync::Arc;
-
-use indexing::{BalanceStore, ConfirmedHistory, Pending};
-use wallets::{Balances, History, Holder, Page, PendingJoin};
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-/// `index` is the index that commits into `repository`, for the same network.
-async fn read<R>(repository: R, index: Arc<dyn Pending>, of: &dyn Holder) -> Result<()>
-where
-    R: ConfirmedHistory + BalanceStore,
-{
-    let reads = PendingJoin::new(repository, index);
-
-    let balance = reads.balance(of).await?;
-    let page = reads.history(of, Page::first(25)).await?;
-
-    println!("{} settled, {} arriving", balance.amount, balance.pending.incoming);
-    println!("{} confirmed, {} pending", page.transactions.len(), page.pending.len());
-    println!("{:?}", balance.completeness);
-    Ok(())
-}
-```
-
 ## Notes
 
 - `Wallets` stores no wallet and no key. Register a new wallet's address with
@@ -74,17 +47,6 @@ where
   transfers twice.
 - An accepted send means submitted, not confirmed. Confirmation comes from
   indexing.
-- `History` and `Balances` are the two pending-inclusive reads, and
-  `PendingJoin` answers both, and the spendable set, for one network. It joins a
-  repository's own answer to the blocks that network's index still holds above
-  its confirmed line. The index answers no query: it hands out a sample of
-  those blocks (`indexing::Pending`). The join samples them **before** it reads
-  the repository and narrows the sample by the checkpoint the repository's
-  answer came with, so a block committed during the read is counted once.
-- How much of an address's history is indexed is the repository's claim
-  (`indexing::Completeness`), made from the rows it holds. `PendingJoin` passes
-  it on unchanged, and a repository's refusal to list outputs it cannot prove
-  unspent reaches the caller as the repository made it.
 
 Transfers accept `Amount::Exact(decimal)` or `Amount::All`. A sweep resolves
 inside the chain's existing send reservation; a batch may contain one sweep

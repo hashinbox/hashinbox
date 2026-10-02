@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
@@ -13,7 +15,7 @@ use super::{
     error::{Error, ErrorBody},
 };
 
-pub(super) fn routes() -> OpenApiRouter<Payments> {
+pub(super) fn routes() -> OpenApiRouter<super::Application> {
     OpenApiRouter::new().routes(routes!(watch))
 }
 
@@ -49,9 +51,10 @@ struct WatchAddress {
     tag = "addresses"
 )]
 async fn watch(
-    State(payments): State<Payments>,
+    State(payments): State<Arc<Payments>>,
     request: Result<Json<WatchAddress>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Wallet>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
+    let _admission = payments.asset_admission(&request.asset)?;
     payments.observed(request.asset, &request.address).await
 }

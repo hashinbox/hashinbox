@@ -3,7 +3,7 @@ name = "wallets"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Chain-neutral wallet contracts and the Wallets registry: factories, balances, history, and batch sends."
+description = "Chain-neutral wallet contracts and the Wallets registry: factories, wallet capabilities, and batch sends."
 readme = "README.md"
 
 [features]

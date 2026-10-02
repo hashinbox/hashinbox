@@ -120,25 +120,24 @@ impl<R: WatchStore + IndexStore + BalanceStore> WatchContract<'_, R> {
             }),
             timestamp: None,
         };
+        let draft = ObservationDraft {
+            transaction: indexing::Transaction {
+                transaction_id: TransactionRef::new(watch.address.network.clone(), "payment"),
+                movements: vec![ValueMovement::mint(
+                    MovementId("payment-mint".into()),
+                    watch.asset.clone(),
+                    Decimal::from(5_u64),
+                    watch.address.clone(),
+                )],
+                fee: None,
+            },
+            transaction_order: 0,
+            status: ObservationDraftStatus::Included,
+        };
         let canonical = CanonicalBlock::new(
             watch.address.network.clone(),
-            InterpretedBlock::new(
-                &watch.address.network,
-                block,
-                vec![ObservationDraft {
-                    transaction_id: TransactionRef::new(watch.address.network.clone(), "payment"),
-                    transaction_order: 0,
-                    status: ObservationDraftStatus::Included,
-                    movements: vec![ValueMovement::mint(
-                        MovementId("payment-mint".into()),
-                        watch.asset.clone(),
-                        Decimal::from(5_u64),
-                        watch.address.clone(),
-                    )],
-                    fee: None,
-                }],
-            )
-            .expect("unique transaction ids"),
+            InterpretedBlock::new(&watch.address.network, block, vec![draft])
+                .expect("unique transaction ids"),
         )
         .expect("valid fixture facts");
         let batch = IndexedBatch::new(

@@ -147,7 +147,7 @@ async fn the_server_serves_every_abstraction_and_restores_after_a_restart()
     );
     assert!(status["networks"][0]["checkpoint"]["height"].as_u64() > Some(0));
 
-    // Restart restores encrypted signing keys and independent watch-only rows.
+    // Restart restores persisted signing keys and independent watch-only rows.
     api.stop().await;
     let restarted = start_composed(&directory, &node).await?;
     let restored = get_json(&restarted.root, "/v1/wallets").await?;
@@ -349,6 +349,90 @@ async fn admitting_addresses_never_moves_readiness() -> Result<(), Box<dyn std::
     );
 
     api.stop().await;
+    node.stop().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runtime_nodes_and_reindex_preserve_wallets_and_saved_configuration()
+-> Result<(), Box<dyn std::error::Error>> {
+    let node = BitcoinNode::start().await;
+    let directory = TempDir::new()?;
+    let api = start_composed(&directory, &node).await?;
+    let wallet = create_wallet(&api.root, "btc").await?;
+    let address = wallet["address"].as_str().unwrap();
+    let funding = node.fund(vec![FundingOutput::new(address, 120_000)]);
+    node.mine();
+    wait_balance(&api.root, wallet_id(&wallet), "0.0012").await;
+
+    let saved = get_json(&api.root, "/v1/chains").await?;
+    assert_eq!(
+        saved[0]["networks"][0]["nodes"][0]["origin"],
+        url::Url::parse(&node.rpc_url)?
+            .origin()
+            .ascii_serialization()
+    );
+    assert!(saved[0]["networks"][0]["nodes"][0]["endpoint"].is_null());
+    assert!(!saved.to_string().contains("Basic test"));
+    let network = &saved[0]["networks"][0];
+    let response = reqwest::Client::new()
+        .put(format!("{}/v1/chains/bitcoin", api.root))
+        .bearer_auth(TOKEN)
+        .json(&json!({"revision": saved[0]["revision"], "networks": [{
+            "name": "regtest", "parameters": network["parameters"],
+            "nodes": [
+                {"id":"unavailable", "endpoint":"http://127.0.0.1:1"},
+                {"id": network["nodes"][0]["id"]}
+            ], "indexing": "running"
+        }]}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    let revision = response.json::<Value>().await?["revision"].clone();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let row = get_json(&api.root, "/v1/chains").await.unwrap();
+            if row[0]["networks"][0]["active_revision"] == revision {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    assert_eq!(
+        get_json(&api.root, "/v1/wallets").await?["wallets"][0]["id"],
+        wallet["id"]
+    );
+
+    let response = reqwest::Client::new()
+        .put(format!("{}/v1/indexing", api.root))
+        .bearer_auth(TOKEN)
+        .json(&json!({"network":{"chain":"bitcoin", "name":"regtest"}, "action":"reindex"}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let row = get_json(&api.root, "/v1/chains").await.unwrap();
+            if row[0]["networks"][0]["rebuild"].is_null() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    wait_balance(&api.root, wallet_id(&wallet), "0.0012").await;
+    wait_history(&api.root, wallet_id(&wallet), &funding).await;
+    api.stop().await;
+    let restarted = start_composed(&directory, &node).await?;
+    let saved = get_json(&restarted.root, "/v1/chains").await?;
+    assert_eq!(saved[0]["networks"][0]["nodes"][0]["id"], "unavailable");
+    assert_eq!(
+        get_json(&restarted.root, "/v1/wallets").await?["wallets"][0]["address"],
+        address
+    );
+    wait_balance(&restarted.root, wallet_id(&wallet), "0.0012").await;
+    restarted.stop().await;
     node.stop().await;
     Ok(())
 }

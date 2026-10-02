@@ -157,7 +157,7 @@ impl WalletFactory {
     /// Builds the send pipeline over `rpc` and coin selection over
     /// `spendable`, which is the store's live outputs joined to the blocks the
     /// chain's [`indexing::Indexer`] holds above its confirmed line
-    /// (`wallets::PendingJoin`), so a wallet can spend its own change at depth
+    /// (`indexing::PendingJoin`), so a wallet can spend its own change at depth
     /// one. No I/O.
     ///
     /// # Errors

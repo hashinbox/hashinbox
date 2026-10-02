@@ -38,3 +38,6 @@ logs/
 
 # Generated design-lint reports
 /lint/errors/
+
+# Frontend toolchain
+node_modules/

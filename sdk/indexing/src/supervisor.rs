@@ -35,6 +35,7 @@ pub struct Supervisor<C: ?Sized = dyn Indexing> {
     pub(crate) schedules: Schedules,
     pub(crate) monitor: Arc<dyn SyncMonitor>,
     pub(crate) control: SyncControl,
+    pub(crate) logger: logging::Logger,
 }
 
 impl<C: Indexing + ?Sized + 'static> Supervisor<C> {
@@ -50,7 +51,15 @@ impl<C: Indexing + ?Sized + 'static> Supervisor<C> {
             schedules,
             monitor,
             control,
+            logger: logging::Logger::default(),
         }
+    }
+
+    /// Records meaningful indexing transitions using a caller-owned sink.
+    #[must_use]
+    pub fn with_logger(mut self, logger: logging::Logger) -> Self {
+        self.logger = logger;
+        self
     }
 
     /// The handle that clears quarantines. Take it before [`Self::run`]
@@ -92,6 +101,7 @@ impl<C: Indexing + ?Sized + 'static> Supervisor<C> {
             );
             self.spawn(&mut tasks, &mut owners, index, &shutdown, Some(&failure));
         }
+        self.control.stop();
     }
 
     fn spawn(

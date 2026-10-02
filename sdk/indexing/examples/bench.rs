@@ -81,14 +81,16 @@ impl Profile {
                 })
                 .collect();
             transactions.push(ObservationDraft {
-                transaction_id: TransactionRef {
-                    network: network(),
-                    id: format!("{height:010}-{index:05}").into(),
+                transaction: indexing::Transaction {
+                    transaction_id: TransactionRef {
+                        network: network(),
+                        id: format!("{height:010}-{index:05}").into(),
+                    },
+                    movements,
+                    fee: None,
                 },
                 transaction_order: index as u64,
                 status: ObservationDraftStatus::Included,
-                movements,
-                fee: None,
             });
         }
         transactions
@@ -361,15 +363,15 @@ mod tests {
         let ids = ["0000000010-00000", "0000000010-00001", "0000000010-00002"];
         for (index, draft) in value.transactions.iter().enumerate() {
             assert_eq!(
-                draft.transaction_id,
+                draft.transaction.transaction_id,
                 TransactionRef {
                     network: network.clone(),
                     value: ids[index].into(),
                 }
             );
             assert_eq!(draft.status, ObservationDraftStatus::Included);
-            assert_eq!(draft.fee, None);
-            assert_eq!(draft.movements.len(), 2);
+            assert_eq!(draft.transaction.fee, None);
+            assert_eq!(draft.transaction.movements.len(), 2);
         }
         for (tx, ordinal, id, amount, from, to) in [
             (0, 0, "10-0-0", 1_000_u64, "addr-0000", "addr-0001"),
@@ -378,7 +380,7 @@ mod tests {
             (1, 1, "10-1-1", 1_001, "addr-0001", "addr-0000"),
         ] {
             assert_eq!(
-                value.transactions[tx].movements[ordinal],
+                value.transactions[tx].transaction.movements[ordinal],
                 ValueMovement::transfer(
                     MovementId(id.into()),
                     AssetId {

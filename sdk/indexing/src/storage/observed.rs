@@ -1,25 +1,21 @@
-//! One holding's history on both sides of the confirmed line: the capability a
+//! One holding's history on both sides of the confirmed line: the read a
 //! consumer declares, the page it answers with, and the join that answers it.
 //!
 //! A repository pages its own confirmed rows ([`ConfirmedHistory`]) and knows
 //! nothing above its checkpoint; an index holds the blocks above it and answers
-//! no query. [`History`] is the read that needs both, so it is declared here,
-//! with the consumer that composes them, and [`PendingJoin`] implements it in
-//! the order [`crate::pending`] states.
+//! no query. [`History`] is the read that needs both, and [`PendingJoin`]
+//! implements it in the order [`super::join`] states.
 //!
 //! What this file adds to a repository's page is read-time and nothing else: a
 //! status, a confirmation count, and the uncommitted transactions of the first
 //! page. The rows, their order, the cursor and the claim about the range behind
 //! them are the repository's and are passed on as they were answered.
 
-use base::{BlockRef, BoxFuture};
-use indexing::{
-    CanonicalBlock, CanonicalPage, CanonicalStatus, CanonicalTransaction, Completeness,
-    ConfirmedHistory, HistoryPosition, HistoryQuery, Holder, IndexError, IndexErrorKind,
-    NetworkFee, Page, TransactionRef, ValueMovement,
+use crate::{
+    BlockRef, BoxFuture, CanonicalBlock, CanonicalPage, CanonicalStatus, CanonicalTransaction,
+    Completeness, ConfirmedHistory, HistoryPosition, HistoryQuery, Holder, IndexError,
+    IndexErrorKind, Page, PendingJoin,
 };
-
-use crate::PendingJoin;
 
 /// A transaction's status as [`History`] reports it.
 ///
@@ -51,18 +47,14 @@ pub enum TransactionStatus {
     },
 }
 
-/// A history entry: a [`CanonicalTransaction`] with its read-time status.
+/// A history entry: an indexed [`crate::Transaction`] with its read-time status.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedTransaction {
-    /// The chain's transaction identifier, which names the network it was
-    /// indexed in.
-    pub transaction_id: TransactionRef,
+    /// The transaction's identity, native fee and selected movements.
+    /// Movements retain the repository query's asset projection.
+    pub transaction: crate::Transaction,
     /// Status with confirmation depth.
     pub status: TransactionStatus,
-    /// The movements of the queried asset only.
-    pub movements: Vec<ValueMovement>,
-    /// The native fee, if any.
-    pub fee: Option<NetworkFee>,
 }
 
 /// A [`History`] page: matching transactions with confirmation status.
@@ -83,7 +75,7 @@ pub struct TransactionPage {
     /// How much of the history behind this page the repository can prove it
     /// holds.
     ///
-    /// The same claim, in the same words, that [`indexing::Balance`] makes about
+    /// The same claim, in the same words, that [`crate::Balance`] makes about
     /// a fold, and for the same reason: a page is a read of the rows a
     /// backfill is still inserting *below* it, so `next` being `None` says
     /// nothing about the rows older than the first one here. Without it a
@@ -196,10 +188,8 @@ impl<R> PendingJoin<R> {
         committed: bool,
     ) -> Result<ObservedTransaction, IndexError> {
         Ok(ObservedTransaction {
-            transaction_id: transaction.transaction_id,
+            transaction: transaction.transaction,
             status: Self::observe_status(transaction.status, tip, committed)?,
-            movements: transaction.movements,
-            fee: transaction.fee,
         })
     }
 
@@ -254,10 +244,10 @@ impl<R> PendingJoin<R> {
 mod tests {
     use std::sync::Arc;
 
-    use indexing::{AssetId, BlockHeight, ChainName, Subject};
+    use crate::{AssetId, BlockHeight, ChainName, Subject, TransactionRef};
 
     use super::*;
-    use crate::pending::tests::{
+    use crate::storage::join::tests::{
         Held, Landing, Paged, address, admitted, block, interleaved, network, owner, page, query,
         transaction,
     };
@@ -287,6 +277,44 @@ mod tests {
             }
         );
         assert!(result.pending.is_empty());
+    }
+
+    #[test]
+    fn observation_preserves_projected_transaction_identity_movements_and_fee() {
+        let native = owner().asset;
+        let token = AssetId {
+            chain: native.chain.clone(),
+            asset: "token".into(),
+        };
+        let mut canonical = transaction(2);
+        canonical.transaction.movements = [native.clone(), token]
+            .into_iter()
+            .enumerate()
+            .map(|(index, asset)| {
+                crate::ValueMovement::mint(
+                    crate::MovementId(index.to_string()),
+                    asset,
+                    42_u64.into(),
+                    address("owner"),
+                )
+            })
+            .collect();
+        canonical.transaction.fee = Some(crate::NetworkFee {
+            asset: native.clone(),
+            amount: 3_u64.into(),
+            payer: Some(address("owner")),
+        });
+        let selected = query(None)
+            .select(canonical)
+            .expect("native movement matches");
+        assert_eq!(selected.transaction.movements.len(), 1);
+        assert_eq!(selected.transaction.movements[0].asset, native);
+        for committed in [false, true] {
+            let observed =
+                PendingJoin::<Paged>::observed(selected.clone(), Some(&block(3)), committed)
+                    .expect("read-time status");
+            assert_eq!(observed.transaction, selected.transaction);
+        }
     }
 
     #[test]
@@ -328,7 +356,7 @@ mod tests {
 
     #[test]
     fn later_pages_carry_no_pending_rows_so_the_ascending_cursor_stays_stable() {
-        let after = indexing::HistoryPosition {
+        let after = crate::HistoryPosition {
             height: BlockHeight(2),
             transaction_order: 0,
             transaction: TransactionRef::new(network(), "tx"),
@@ -414,7 +442,7 @@ mod tests {
                 .transactions
                 .iter()
                 .chain(&page.pending)
-                .filter(|entry| entry.transaction_id.id.to_string() == "tx-4")
+                .filter(|entry| entry.transaction.transaction_id.id.to_string() == "tx-4")
                 .count();
             assert_eq!(
                 reported, 1,

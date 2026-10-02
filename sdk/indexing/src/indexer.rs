@@ -61,6 +61,7 @@ pub trait Checkpoint: Send + Sync {
 ///
 /// Implemented by [`crate::Indexer`], which is what each chain's own
 /// constructor returns.
+// linter:disable rust/trait-method-count -- Recovery resets the same owner after a purge.
 pub trait Indexing: Backfilling + Checkpoint + Watching {
     /// The one `(chain, network)` network this indexer synchronizes and answers
     /// for.
@@ -69,6 +70,23 @@ pub trait Indexing: Backfilling + Checkpoint + Watching {
     /// Notifies `listener` after each block this indexer commits. A list, not
     /// a slot; a composer forwards to every unit.
     fn listen(&self, listener: Arc<dyn Listener>);
+
+    /// Reloads this index after its network was purged ([`crate::Purging`]),
+    /// offline or quiesced online: pending blocks and caches are discarded and
+    /// the observations reload without progress, so the next pass scans from
+    /// their birthdays. The caller keeps this network's driver paused and its
+    /// admissions blocked until this completes. Refused while the network still
+    /// has a checkpoint; repeating it on a purged network is harmless.
+    /// Existing wallet/send state remains alive. Unsupported implementations refuse.
+    fn reset<'a>(&'a self) -> BoxFuture<'a, Result<(), IndexError>> {
+        Box::pin(async {
+            Err(IndexError::new(
+                crate::IndexErrorKind::InvalidRequest,
+                "index does not support recovery",
+                false,
+            ))
+        })
+    }
 
     /// Advances this indexer's network, against its own watch list.
     ///
@@ -170,6 +188,10 @@ where
 
     fn listen(&self, listener: Arc<dyn Listener>) {
         Self::listen(self, listener);
+    }
+
+    fn reset<'a>(&'a self) -> BoxFuture<'a, Result<(), IndexError>> {
+        Box::pin(self.reload())
     }
 
     fn sync<'a>(&'a self) -> BoxFuture<'a, Result<SyncStatus, IndexError>> {

@@ -130,7 +130,7 @@ pub trait FactoryProfile {
     fn network(&self) -> &Network;
 
     /// The identity of the asset its wallets hold — the same value every one
-    /// of them answers [`crate::Holder::asset`] with, which selects their
+    /// of them answers [`indexing::Holder::asset`] with, which selects their
     /// history and balance.
     ///
     /// Identity only: how much an amount of it is, and what to call it, is
@@ -248,7 +248,7 @@ mod tests {
     use base::{SignFuture, SignRequest, Signer};
 
     use super::*;
-    use crate::Holder;
+    use indexing::Holder;
 
     /// A wallet made with configuration `config` over the handle `outbox`.
     struct Probe {

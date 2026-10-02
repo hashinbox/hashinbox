@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
@@ -13,7 +15,7 @@ use super::{
     error::{Error, ErrorBody},
 };
 
-pub(super) fn routes() -> OpenApiRouter<Payments> {
+pub(super) fn routes() -> OpenApiRouter<super::Application> {
     OpenApiRouter::new()
         .routes(routes!(create, list))
         .routes(routes!(read))
@@ -34,7 +36,7 @@ struct CreateWallet {
     path = "/v1/wallets",
     operation_id = "create_wallet",
     summary = "Generate a wallet for one configured asset",
-    description = "Generates a wallet, encrypts its key in the application registry, then \
+    description = "Generates a wallet, stores its key in the application registry, then \
         watches it from creation. Keys never leave the server. Retrying creates another wallet.",
     request_body = CreateWallet,
     security(("bearerAuth" = [])),
@@ -51,10 +53,11 @@ struct CreateWallet {
     tag = "wallets"
 )]
 async fn create(
-    State(payments): State<Payments>,
+    State(payments): State<Arc<Payments>>,
     request: Result<Json<CreateWallet>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Wallet>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
+    let _admission = payments.asset_admission(&request.asset)?;
     let material = payments
         .wallets
         .secret(&request.asset)
@@ -93,7 +96,7 @@ struct WalletList {
     ),
     tag = "wallets"
 )]
-async fn list(State(payments): State<Payments>) -> Result<Json<WalletList>, Error> {
+async fn list(State(payments): State<Arc<Payments>>) -> Result<Json<WalletList>, Error> {
     let wallets = payments
         .custodies()
         .await?
@@ -120,7 +123,7 @@ async fn list(State(payments): State<Payments>) -> Result<Json<WalletList>, Erro
     tag = "wallets"
 )]
 async fn read(
-    State(payments): State<Payments>,
+    State(payments): State<Arc<Payments>>,
     Path(path): Path<WalletPath>,
 ) -> Result<Json<Wallet>, Error> {
     Ok(Json(payments.custody(&path.id).await?.into()))
@@ -207,10 +210,11 @@ impl Balance {
     tag = "wallets"
 )]
 async fn balance(
-    State(payments): State<Payments>,
+    State(payments): State<Arc<Payments>>,
     Path(path): Path<WalletPath>,
 ) -> Result<Json<Balance>, Error> {
     let custody = payments.custody(&path.id).await?;
+    let _admission = payments.admission(&custody.watch.address.network)?;
     Ok(Json(payments.balance(&custody).await?))
 }
 

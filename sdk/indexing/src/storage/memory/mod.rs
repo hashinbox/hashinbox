@@ -125,6 +125,7 @@ struct Tables {
 #[derive(Clone, Default)]
 pub struct Repository {
     tables: Arc<Mutex<Tables>>,
+    logger: logging::Logger,
 }
 
 /// Where one transaction sits in one address's history:
@@ -142,6 +143,13 @@ impl Repository {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Emits newly committed incoming effects after releasing the store lock.
+    #[must_use]
+    pub fn with_logger(mut self, logger: logging::Logger) -> Self {
+        self.logger = logger;
+        self
     }
 
     /// Reads under the lock. A poisoned lock is a terminal store failure.
@@ -180,7 +188,7 @@ impl Repository {
             address.value.clone(),
             transaction.block().height,
             transaction.transaction_order,
-            transaction.transaction_id.clone(),
+            transaction.transaction.transaction_id.clone(),
         )
     }
 

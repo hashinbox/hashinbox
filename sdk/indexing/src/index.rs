@@ -53,9 +53,8 @@ impl<R: Clone, C: Indexing + ?Sized> Assembly<R, C> {
     ///
     /// `chain` is the chain crate's own constructor — its RPC client, its
     /// interpreter, its policy — handed the store and nothing else. It is
-    /// synchronous and does no I/O: every chain in this workspace verifies its
-    /// node *before* a store is opened, so by the
-    /// time a store exists there is nothing left to await.
+    /// synchronous and does no I/O: callers verify chain connections before
+    /// assembling their indexing components.
     ///
     /// # Errors
     ///
@@ -85,7 +84,6 @@ impl<R: Clone, C: Indexing + ?Sized> Assembly<R, C> {
     ///
     /// # Errors
     ///
-    /// [`IndexErrorKind::InvalidRequest`] when no chain was added, and
     /// [`IndexErrorKind::Conflict`] when two chains claim one network.
     pub fn build(self) -> Result<Index<C>, IndexError> {
         Index::of(self.chains)
@@ -117,7 +115,8 @@ impl<C: Indexing + ?Sized> Index<C> {
         }
     }
 
-    /// Combines indexers whose networks are disjoint.
+    /// Combines indexers whose networks are disjoint. An empty collection is valid
+    /// while a caller awaits configuration; it does not establish readiness.
     ///
     /// The primitive [`Assembly::build`] ends at, and what a caller that composed
     /// its chains some other way — asynchronously, or through
@@ -125,16 +124,8 @@ impl<C: Indexing + ?Sized> Index<C> {
     ///
     /// # Errors
     ///
-    /// [`IndexErrorKind::InvalidRequest`] for no indexers and
     /// [`IndexErrorKind::Conflict`] when two indexers claim one network.
     pub fn of(indexers: Vec<Arc<C>>) -> Result<Self, IndexError> {
-        if indexers.is_empty() {
-            return Err(IndexError::new(
-                IndexErrorKind::InvalidRequest,
-                "at least one indexer is required",
-                false,
-            ));
-        }
         let mut unique = BTreeSet::new();
         let mut networks = Vec::with_capacity(indexers.len());
         for indexer in &indexers {
@@ -238,6 +229,12 @@ impl<C: Indexing + ?Sized> Index<C> {
 impl<C: Indexing + ?Sized> SyncUnit<C> {
     /// The one network this unit owns.
     #[must_use]
+    /// Shared owner, for caller-coordinated offline recovery and composition.
+    pub fn indexer(&self) -> Arc<C> {
+        self.indexer.clone()
+    }
+
+    /// The exact network owned by this unit.
     pub fn network(&self) -> &Network {
         self.indexer.network()
     }

@@ -61,7 +61,7 @@ impl CanonicalTransaction {
     fn activity(&self, query: &ActivityQuery, settlement: FeeSettlement) -> Vec<Activity> {
         let position = ActivityPosition::transaction(self);
         let mut effects = Vec::new();
-        for (order, movement) in self.movements.iter().enumerate() {
+        for (order, movement) in self.transaction.movements.iter().enumerate() {
             if movement.asset != query.asset {
                 continue;
             }
@@ -86,7 +86,7 @@ impl CanonicalTransaction {
                 });
             }
         }
-        if let Some(fee) = self.fee.as_ref().filter(|fee| {
+        if let Some(fee) = self.transaction.fee.as_ref().filter(|fee| {
             settlement == FeeSettlement::Charged
                 && fee.asset == query.asset
                 && fee.payer.as_ref() == Some(&query.address)
@@ -135,7 +135,7 @@ impl ActivityPosition {
             height: transaction.block().height,
             transaction: Some(ActivityTransaction {
                 order: transaction.transaction_order,
-                id: transaction.transaction_id.clone(),
+                id: transaction.transaction.transaction_id.clone(),
             }),
             movement_order: 0,
             movement: None,

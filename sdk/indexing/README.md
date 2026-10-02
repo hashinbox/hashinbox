@@ -54,12 +54,69 @@ feature, on by default, adds `Supervisor`, which runs `sync` for you with retry
 and per-network quarantine. Balance, history and output queries belong to the
 repository, not to the index.
 
+## Reads
+
+`History` and `Balances` are the pending-inclusive reads. `PendingJoin` answers
+both, and the spendable outputs, for one network: the repository's own answer
+joined to the blocks that network's index still holds above its confirmed line.
+`Router` holds one read per network and routes each holding by its address.
+
+```rust
+use std::sync::Arc;
+
+use indexing::{
+    BalanceStore, Balances, ConfirmedHistory, History, Holder, Page, Pending, PendingJoin,
+};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// `index` is the index that commits into `repository`, for the same network.
+async fn read<R>(repository: R, index: Arc<dyn Pending>, of: &dyn Holder) -> Result<()>
+where
+    R: ConfirmedHistory + BalanceStore,
+{
+    let reads = PendingJoin::new(repository, index);
+
+    let balance = reads.balance(of).await?;
+    let page = reads.history(of, Page::first(25)).await?;
+
+    println!("{} settled, {} arriving", balance.amount, balance.pending.incoming);
+    println!("{} confirmed, {} pending", page.transactions.len(), page.pending.len());
+    for observed in &page.transactions {
+        println!("{}: {:?}", observed.transaction.transaction_id.id, observed.status);
+    }
+    Ok(())
+}
+```
+
+- The index answers no query; it hands out a sample of its pending blocks
+  (`Pending`). The join samples them **before** it reads the repository and
+  narrows the sample by the checkpoint the repository's answer came with, so a
+  block committed during the read is counted once.
+- The settled fold nets a self-transfer to nothing; the pending fold reports
+  it as both arriving and leaving. The questions differ: what the total is,
+  and what is moving. Do not unify them.
+- How much of an address's history is indexed is the repository's claim
+  (`Completeness`). The join passes it on unchanged, and a repository's refusal
+  to list outputs it cannot prove unspent reaches the caller as made.
+- `ObservedTransaction` embeds the indexed `Transaction` with its read-time
+  status, keeping the query's movement projection.
+
 ## Notes
 
+- `InterpretedBlock` and `CanonicalBlock` directly contain `base::Block<T>`
+  plus output changes and credits. Canonical construction validates and seals
+  those fields. `ObservationDraft` and `CanonicalTransaction` directly contain
+  `Transaction` (identity, movements and fee); each stage keeps its own status
+  and native transaction order. `ObservedTransaction` embeds that same value
+  with its read-time status and the queried asset's movements.
 - A reorg below the confirmed line stops that network with
   `IndexErrorKind::ConfirmedReorg` and is never repaired automatically, because
   stored blocks are treated as final. Recover with `Purging::purge_network`
-  while nothing else is running; it keeps the watches and other networks.
+  while nothing else is running, or online with that network quiesced (see
+  `SyncControl`: pause, purge, `Indexing::reset`, resume); it keeps the watches
+  and other networks. Inside the window the store reports `Incomplete` and
+  refuses spendable outputs rather than answering an empty history.
 - Hand the same repository to every chain. Each operation names its network, so
   one store isolates them; a store per network or per asset is not supported.
 - A `Listener` is called after the commit, at most once, and cannot refuse it. A
@@ -96,3 +153,12 @@ repository, not to the index.
   additions, re-anchoring, unwatch, rescan and a negative block-end total invalidate it.
 - The SQLite repository needs a Tokio runtime, because each operation runs on
   `spawn_blocking`.
+
+## Injected events
+
+`Supervisor::with_logger` records state transitions; SQLite and memory repositories'
+`with_logger` records newly committed positive net effects on watched assets. Replays,
+rollback, self-transfers and Bitcoin change do not produce new receipt notifications.
+Historical receipts retain their original block time. Delivery is best effort after
+commit; transactional application reactions still belong in a custom repository.
+`SyncControl::pause` waits for the active pass; `resume` restarts a paused network.

@@ -41,36 +41,34 @@ impl json_rpc::Secrets for Environment {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
     pub(crate) bind: SocketAddr,
-    bearer_token_env: String,
-    #[serde(default = "Config::passphrase_env")]
-    wallet_passphrase_env: String,
+    /// The variable holding the API token; absent means no authorization,
+    /// which only a loopback `bind` accepts.
+    #[serde(default)]
+    bearer_token_env: Option<String>,
     #[serde(default)]
     tls_terminated_upstream: bool,
     #[serde(default)]
     pub(crate) storage: storage::Config,
     /// One section per chain, still raw: `crate::chains::registry` decides
     /// which chain parses which, and this module never looks inside one.
-    chains: Sections,
+    #[serde(default)]
+    pub(crate) chains: Sections,
     #[serde(default)]
     pub(crate) wallets: Vec<ConfiguredWallet>,
+    /// How the browser page presents itself; every key is optional.
+    #[serde(default)]
+    pub(crate) ui: Ui,
+}
+
+/// The `[ui]` section: what the page shows that is the deployment's choice.
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Ui {
+    /// The name in the top bar; the page has its own default.
+    pub(crate) brand: Option<String>,
 }
 
 impl Config {
-    fn passphrase_env() -> String {
-        "PAYMENT_WALLET_PASSPHRASE".to_owned()
-    }
-
-    pub(crate) fn passphrase(&self) -> Result<zeroize::Zeroizing<String>, AnyError> {
-        let value = zeroize::Zeroizing::new(
-            env::var(&self.wallet_passphrase_env)
-                .map_err(|_| "wallet passphrase environment variable is unavailable")?,
-        );
-        if value.is_empty() {
-            return Err("wallet passphrase must not be empty".into());
-        }
-        Ok(value)
-    }
-
     pub(crate) async fn read(path: impl AsRef<Path>) -> Result<Self, AnyError> {
         let config: Self = Document::read(path).await?.parse()?;
         config.validate()?;
@@ -86,18 +84,16 @@ impl Config {
     /// its own chain refuses — every message naming the section at fault.
     pub(crate) fn chains(&self) -> Result<Chains<AssetTag, Repository>, AnyError> {
         let chains = chains::registry().chains(&self.chains)?;
-        if chains.is_empty() {
-            return Err("at least one chain must be configured".into());
-        }
         Ok(chains)
     }
 
     fn validate(&self) -> Result<(), AnyError> {
-        if self.bearer_token_env.trim().is_empty() {
+        if self
+            .bearer_token_env
+            .as_deref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
             return Err("bearer-token environment name must not be empty".into());
-        }
-        if self.wallet_passphrase_env.trim().is_empty() {
-            return Err("wallet passphrase environment name must not be empty".into());
         }
         self.storage.validate()?;
         self.chains()?;
@@ -113,8 +109,27 @@ impl Config {
         Ok(())
     }
 
+    /// Where the browser page sends its API calls, from `PAYMENT_UI_API_BASE`.
+    /// Unset or empty means the page's own origin, which is right whenever
+    /// this server serves the page; set it when a proxy or another origin
+    /// fronts the API.
+    pub(crate) fn api_base() -> Result<String, AnyError> {
+        let base = env::var("PAYMENT_UI_API_BASE").unwrap_or_default();
+        let base = base.trim().trim_end_matches('/');
+        let absolute = base.starts_with("https://") || base.starts_with("http://");
+        if !(base.is_empty() || absolute || base.starts_with('/')) {
+            return Err(
+                "PAYMENT_UI_API_BASE must be an http(s) URL or a path starting with /".into(),
+            );
+        }
+        Ok(base.to_owned())
+    }
+
     pub(crate) fn server(&self) -> Result<http_server::Config, AnyError> {
-        let token = http_server::BearerToken::new(env::var(&self.bearer_token_env)?)?;
+        let token = match &self.bearer_token_env {
+            Some(name) => Some(http_server::BearerToken::new(env::var(name)?)?),
+            None => None,
+        };
         let security = if self.tls_terminated_upstream {
             http_server::TransportSecurity::TlsTerminatedUpstream
         } else {
@@ -123,7 +138,7 @@ impl Config {
         let config = http_server::Config::new(
             self.bind,
             security,
-            Some(token),
+            token,
             http_server::RequestLimits::default(),
         );
         config.validate()?;
@@ -133,6 +148,7 @@ impl Config {
 
 /// Explicit observation start for an environment-imported wallet.
 /// Zero means genesis; `fresh` starts after the current checkpoint.
+#[derive(Clone, Copy)]
 enum Start {
     Fresh,
     At(u64),
@@ -171,7 +187,7 @@ impl<'de> Deserialize<'de> for Start {
 ///
 /// `start` is a native block position or `"fresh"`; `0` means genesis.
 /// HTTP creation and watching always choose fresh observation.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ConfiguredWallet {
     id: String,
@@ -181,7 +197,11 @@ pub(crate) struct ConfiguredWallet {
 }
 
 impl ConfiguredWallet {
-    /// Builds the wallet, durably encrypts its key, publishes its watch, then
+    pub(crate) fn asset(&self) -> &AssetTag {
+        &self.asset
+    }
+
+    /// Builds the wallet, durably stores its key, publishes its watch, then
     /// installs the process's signing handle. Interrupted publication leaves
     /// the saved key private until the configured import is retried.
     ///
@@ -309,14 +329,8 @@ mod tests {
     }
 
     #[test]
-    fn at_least_one_chain_is_required_and_an_unknown_one_names_itself() {
-        assert_eq!(
-            parse(value(json!({}), json!([])))
-                .err()
-                .expect("no chain")
-                .to_string(),
-            "at least one chain must be configured"
-        );
+    fn empty_chains_allow_ui_setup_and_unknown_chains_are_rejected() {
+        parse(value(json!({}), json!([]))).expect("UI starts without configured nodes");
         let error = parse(value(json!({"dogecoin": {}}), json!([])))
             .err()
             .expect("no chain is registered for it")

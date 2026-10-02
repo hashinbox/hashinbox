@@ -4,10 +4,9 @@ use axum::{Extension, Json};
 use utoipa::openapi::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::Payments;
 use super::error::{Error, ErrorBody};
 
-pub(super) fn routes() -> OpenApiRouter<Payments> {
+pub(super) fn routes() -> OpenApiRouter<super::Application> {
     OpenApiRouter::new().routes(routes!(read))
 }
 

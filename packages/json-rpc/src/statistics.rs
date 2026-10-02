@@ -56,16 +56,17 @@ impl Statistics {
         Self::increment(&self.0.attempts);
     }
 
-    pub(crate) fn call(&self, result: &Result<CallResult, Error>) {
+    pub(crate) fn call(&self, result: &Result<CallResult, Error>) -> Option<String> {
         let failure = match result {
             Err(error) => Some(Self::transport(error.kind)),
             Ok(Err(failure)) => Some(REMOTE | u64::from(failure.code as u32)),
             Ok(Ok(_)) => None,
         };
         self.finish(failure);
+        failure.and_then(Self::message)
     }
 
-    pub(crate) fn batch(&self, result: &Result<Vec<CallResult>, Error>) {
+    pub(crate) fn batch(&self, result: &Result<Vec<CallResult>, Error>) -> Option<String> {
         let failure = match result {
             Err(error) => Some(Self::transport(error.kind)),
             Ok(results) => results
@@ -74,6 +75,7 @@ impl Statistics {
                 .map(|failure| REMOTE | u64::from(failure.code as u32)),
         };
         self.finish(failure);
+        failure.and_then(Self::message)
     }
 
     fn finish(&self, failure: Option<u64>) {

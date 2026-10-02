@@ -4,8 +4,8 @@ use base::Decimal;
 
 use indexing::{
     BlockCredit, BlockHeight, BlockPosition, CanonicalBlock, ConfirmedHistory, FeeSettlement,
-    IndexedBatch, IndexedOutput, InterpretedBlock, MovementId, Network, OutputChanges, OutputStore,
-    Progress, PurgedRows, Purging, Repository, Watch, WatchProgress,
+    IndexErrorKind, IndexedBatch, IndexedOutput, InterpretedBlock, MovementId, Network,
+    OutputChanges, OutputStore, Progress, PurgedRows, Purging, Repository, Watch, WatchProgress,
 };
 
 use super::fixture::Fixture;
@@ -85,7 +85,14 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
              earliest registered start position",
         );
         assert!(Self::history(&self.purged).await.is_empty());
-        assert!(Self::outputs(&self.purged).await.is_empty());
+        let refused = OutputStore::list(self.purged.repository, self.purged.request("owner", 100))
+            .await
+            .expect_err(
+                "an observed address of a network with no line has had nothing read, \
+                 so its spendable set is refused rather than served empty",
+            );
+        assert_eq!(refused.kind, IndexErrorKind::Conflict);
+        assert!(refused.retryable, "it clears at the next commit");
         assert_eq!(
             self.observations(&self.purged.network).await,
             [WatchProgress::unread(Self::watch(&self.purged))],

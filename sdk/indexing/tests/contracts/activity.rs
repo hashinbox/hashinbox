@@ -33,17 +33,19 @@ impl<R: BalanceStore + IndexStore + ActivityRead> BalanceContract<'_, R> {
             .await
             .expect("replay");
         let draft = |id: &str, order| ObservationDraft {
-            transaction_id: f.transaction(id),
+            transaction: indexing::Transaction {
+                transaction_id: f.transaction(id),
+                movements: vec![ValueMovement::transfer(
+                    MovementId("native".into()),
+                    f.native(),
+                    Decimal::from(1_u64),
+                    f.address("b"),
+                    f.address("a"),
+                )],
+                fee: None,
+            },
             transaction_order: order,
             status: ObservationDraftStatus::Included,
-            movements: vec![ValueMovement::transfer(
-                MovementId("native".into()),
-                f.native(),
-                Decimal::from(1_u64),
-                f.address("b"),
-                f.address("a"),
-            )],
-            fee: None,
         };
         let canonical = f.canonical_block(10, vec![draft("a-last", 8), draft("z-first", 2)]);
         f.repository

@@ -80,15 +80,9 @@ impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillCont
     /// The block at `height` as it is *not* stored: same transaction, no fee, so
     /// one `(address, height, transaction)` would have two contents.
     pub(super) fn disagreeing(&self, height: u64) -> CanonicalBlock {
-        self.canonical_of(
-            height,
-            vec![ObservationDraft {
-                fee: None,
-                ..self.draft(height)
-            }],
-            OutputChanges::default(),
-            Vec::new(),
-        )
+        let mut draft = self.draft(height);
+        draft.transaction.fee = None;
+        self.canonical_of(height, vec![draft], OutputChanges::default(), Vec::new())
     }
 
     /// The fixture's five blocks, committed with nothing watched.
@@ -188,21 +182,23 @@ impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillCont
 
     pub(super) fn draft(&self, height: u64) -> ObservationDraft {
         ObservationDraft {
-            transaction_id: self.fixture.transaction(&format!("block-{height}")),
+            transaction: indexing::Transaction {
+                transaction_id: self.fixture.transaction(&format!("block-{height}")),
+                movements: vec![ValueMovement::transfer(
+                    MovementId(format!("m-{height}")),
+                    self.asset(),
+                    Decimal::from(10_u64),
+                    self.fixture.address("payer"),
+                    self.fixture.address("late"),
+                )],
+                fee: Some(indexing::NetworkFee {
+                    asset: self.asset(),
+                    amount: Decimal::from(1_u64),
+                    payer: Some(self.fixture.address("payer")),
+                }),
+            },
             transaction_order: 0,
             status: ObservationDraftStatus::Included,
-            movements: vec![ValueMovement::transfer(
-                MovementId(format!("m-{height}")),
-                self.asset(),
-                Decimal::from(10_u64),
-                self.fixture.address("payer"),
-                self.fixture.address("late"),
-            )],
-            fee: Some(indexing::NetworkFee {
-                asset: self.asset(),
-                amount: Decimal::from(1_u64),
-                payer: Some(self.fixture.address("payer")),
-            }),
         }
     }
 

@@ -56,6 +56,11 @@ impl<B> Default for NativeBlocks<B> {
 }
 
 impl<B> NativeBlocks<B> {
+    pub(crate) fn clear(&self) -> Result<(), IndexError> {
+        self.entries()?.clear();
+        Ok(())
+    }
+
     fn entries(&self) -> Result<MutexGuard<'_, VecDeque<CachedBlock<B>>>, IndexError> {
         self.blocks.lock().map_err(|_| {
             IndexError::new(

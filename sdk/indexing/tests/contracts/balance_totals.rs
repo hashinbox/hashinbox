@@ -321,21 +321,26 @@ impl<R: BalanceStore + IndexStore + WatchStore> BalanceContract<'_, R> {
             &fixture.network,
             fixture.block(9),
             vec![ObservationDraft {
-                transaction_id: TransactionRef::new(fixture.network.clone(), "named-like-a-fee"),
+                transaction: indexing::Transaction {
+                    transaction_id: TransactionRef::new(
+                        fixture.network.clone(),
+                        "named-like-a-fee",
+                    ),
+                    movements: vec![ValueMovement::transfer(
+                        MovementId("fee".into()),
+                        native.clone(),
+                        Decimal::from(3_u64),
+                        fixture.address("a"),
+                        fixture.address("b"),
+                    )],
+                    fee: Some(NetworkFee {
+                        asset: native,
+                        amount: Decimal::from(1_u64),
+                        payer: Some(fixture.address("a")),
+                    }),
+                },
                 transaction_order: 0,
                 status: ObservationDraftStatus::Included,
-                movements: vec![ValueMovement::transfer(
-                    MovementId("fee".into()),
-                    native.clone(),
-                    Decimal::from(3_u64),
-                    fixture.address("a"),
-                    fixture.address("b"),
-                )],
-                fee: Some(NetworkFee {
-                    asset: native,
-                    amount: Decimal::from(1_u64),
-                    payer: Some(fixture.address("a")),
-                }),
             }],
         )
         .expect("unique transaction ids");

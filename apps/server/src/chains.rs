@@ -29,3 +29,14 @@ pub(crate) fn registry() -> Registry<AssetTag, Repository> {
     registry.register::<chain_solana::Config<AssetTag>>("solana");
     registry
 }
+
+/// Resolve the shipped default asset tags once when importing file configuration.
+pub(crate) fn explicit_asset(chain: &str, section: &mut serde_json::Value) {
+    let defaults = [("bitcoin", "btc"), ("ethereum", "eth"), ("solana", "sol")];
+    let Some((_, tag)) = defaults.into_iter().find(|(name, _)| *name == chain) else {
+        return;
+    };
+    if let Some(object) = section.as_object_mut() {
+        object.entry("asset").or_insert(serde_json::json!(tag));
+    }
+}

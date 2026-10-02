@@ -13,6 +13,7 @@ members = [
     "packages/crypto",
     "packages/json-rpc",
     "packages/http-server",
+    "packages/logging",
 ]
 exclude = ["old", "reference"]
 resolver = "3"

@@ -58,13 +58,14 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
         let token = self.page("a", &self.fixture.token(), None, 2).await;
         let mixed = &token.transactions[1];
         assert_eq!(
-            mixed.movements,
+            mixed.transaction.movements,
             [self.transfer("m6-t", &self.fixture.token(), "a", "b")]
         );
-        assert_eq!(mixed.fee, Some(self.fee("a")));
+        assert_eq!(mixed.transaction.fee, Some(self.fee("a")));
         let native = self.page("b", &self.fixture.native(), None, 10).await;
         assert!(native.transactions.iter().all(|transaction| {
             transaction
+                .transaction
                 .movements
                 .iter()
                 .all(|movement| movement.asset == self.fixture.native())
@@ -81,8 +82,8 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
         let routed = native
             .transactions
             .iter()
-            .find(|transaction| transaction.transaction_id.id.as_str() == "e7");
-        let movements = routed.map(|transaction| transaction.movements.clone());
+            .find(|transaction| transaction.transaction.transaction_id.id.as_str() == "e7");
+        let movements = routed.map(|transaction| transaction.transaction.movements.clone());
         assert_eq!(
             movements,
             Some(vec![self.transfer(
@@ -103,9 +104,9 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
             let failed = page
                 .transactions
                 .iter()
-                .find(|transaction| transaction.transaction_id.id.as_str() == "f8");
+                .find(|transaction| transaction.transaction.transaction_id.id.as_str() == "f8");
             assert_eq!(
-                failed.map(|transaction| transaction.movements.len()),
+                failed.map(|transaction| transaction.transaction.movements.len()),
                 Some(0)
             );
             let other = self.page("b", &asset, None, 10).await;
@@ -121,8 +122,11 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
         let paid = native
             .transactions
             .iter()
-            .find(|transaction| transaction.transaction_id.id.as_str() == "p9");
-        assert_eq!(paid.map(|transaction| transaction.movements.len()), Some(0));
+            .find(|transaction| transaction.transaction.transaction_id.id.as_str() == "p9");
+        assert_eq!(
+            paid.map(|transaction| transaction.transaction.movements.len()),
+            Some(0)
+        );
         let token = self.page("a", &self.fixture.token(), None, 10).await;
         assert!(!Self::ids(&token).contains(&"p9".to_owned()));
     }
@@ -205,7 +209,7 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
             .collect();
         let ids: Vec<String> = block
             .iter()
-            .map(|transaction| transaction.transaction_id.id.to_string())
+            .map(|transaction| transaction.transaction.transaction_id.id.to_string())
             .collect();
         assert_eq!(ids, ["z", "y", "x"], "a page is in native block order");
         let orders: Vec<u64> = block
@@ -275,7 +279,7 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
         let filled: Vec<String> = widened
             .iter()
             .filter(|transaction| transaction.block().height.0 == top + 1)
-            .map(|transaction| transaction.transaction_id.id.to_string())
+            .map(|transaction| transaction.transaction.transaction_id.id.to_string())
             .collect();
         assert_eq!(
             filled,
@@ -304,7 +308,7 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
     fn place_of(id: &str, transactions: &[CanonicalTransaction]) -> usize {
         transactions
             .iter()
-            .position(|transaction| transaction.transaction_id.id.as_str() == id)
+            .position(|transaction| transaction.transaction.transaction_id.id.as_str() == id)
             .unwrap_or_else(|| panic!("{id} must be in the walked history"))
     }
 
@@ -408,7 +412,7 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
             .chain(self.drafts())
             .iter()
             .flat_map(|canonical| canonical.transactions().iter().cloned().collect::<Vec<_>>())
-            .filter(|transaction| transaction.addresses().contains(&query.address))
+            .filter(|transaction| transaction.transaction.addresses().contains(&query.address))
             .filter_map(|transaction| query.select(transaction))
             .collect()
     }
@@ -450,7 +454,7 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
 
     fn ids(page: &CanonicalPage) -> Vec<String> {
         let ids = page.transactions.iter();
-        ids.map(|transaction| transaction.transaction_id.id.to_string())
+        ids.map(|transaction| transaction.transaction.transaction_id.id.to_string())
             .collect()
     }
 
@@ -490,11 +494,13 @@ impl<'a, R: IndexStore + ConfirmedHistory> HistoryContract<'a, R> {
 
     fn draft(&self, id: &str, movements: Vec<ValueMovement>, payer: &str) -> ObservationDraft {
         ObservationDraft {
-            transaction_id: TransactionRef::new(self.fixture.network.clone(), id),
+            transaction: indexing::Transaction {
+                transaction_id: TransactionRef::new(self.fixture.network.clone(), id),
+                movements,
+                fee: Some(self.fee(payer)),
+            },
             transaction_order: 0,
             status: ObservationDraftStatus::Included,
-            movements,
-            fee: Some(self.fee(payer)),
         }
     }
 

@@ -137,7 +137,7 @@ fn every_operation_has_a_unique_id_a_summary_and_described_responses() {
             );
         }
     }
-    assert_eq!(ids.len(), 11, "every route method has one operation");
+    assert_eq!(ids.len(), 15, "every route method has one operation");
 }
 
 /// The closed state enum publishes one shape per wire discriminator.
@@ -304,10 +304,7 @@ fn required_properties_match_what_serde_emits() {
     }
 }
 
-/// Every add path states a birthday, in one shared vocabulary, and a caller
-/// that omits it is refused by the parser rather than given a default.
-
-/// Both reads that can be short report it, in the same three words.
+/// Both reads that can be short report it with the same vocabulary.
 #[test]
 fn the_balance_and_the_history_page_state_completeness_the_same_way() {
     let document = document();

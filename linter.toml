@@ -5,7 +5,7 @@
 
 [files]
 # Excluded research and non-source output; all first-party workspace crates remain checked.
-exclude = ["**/.git", "**/target", "**/vendor", "**/generated", "old", "reference"]
+exclude = ["**/.git", "**/target", "**/vendor", "**/generated", "**/node_modules", "old", "reference"]
 
 [[rules.layout]]
 target = "."
@@ -79,9 +79,16 @@ max_words = 2
 reject_numbered_fragments = true
 
 [[rules.filename]]
-target = "**/src/**"
+target = ["apps/*/src/**", "packages/*/src/**", "sdk/**/src/**"]
 kind = "directory"
 case = "snake_case"
+max_words = 1
+
+# The browser app's folders are single words too, but a leading underscore is
+# allowed: `_components` sorts above the pages in every file tree.
+[[rules.filename]]
+target = "apps/server/ui/src/**"
+kind = "directory"
 max_words = 1
 
 [[rules."forbidden-words"]]
@@ -227,6 +234,38 @@ files.required = ["Cargo.toml", "README.md", "src/lib.rs"]
 target = "apps/server"
 mode = "permissive"
 files.required = ["Cargo.toml", "README.md", "src/main.rs", "src/chains.rs", "src/api/mod.rs"]
+
+# The server's browser app (React, built by Vite, embedded by src/ui.rs).
+# Generic components carry no domain and sit in src/_components; a page is one
+# file in src/pages, and becomes a folder only when it has components of its
+# own, holding page.tsx beside them. The client in src/api is generated from
+# docs/openapi.json. dist/ is the committed build the binary embeds.
+[[rules.layout]]
+target = "apps/server/ui/src"
+mode = "restrictive"
+files.required = ["main.tsx", "root.tsx", "layout.tsx", "theme.ts", "api/client.ts", "api/schema.d.ts"]
+files.allowed = [
+    { target = "*.ts", description = "Browser-side vocabulary shared by pages: exact amounts, the theme." },
+    { target = "chains.json", description = "Predefined chain, network and native asset choices rendered before API responses." },
+]
+directories.allowed = [
+    { target = "_components", description = "Generic components with no domain knowledge." },
+    { target = "pages", description = "One file per page, or a folder for a page with its own components." },
+]
+
+[[rules.layout]]
+target = "apps/server/ui/src/pages/*"
+mode = "restrictive"
+files.required = ["page.tsx"]
+directories.allowed = [
+    { target = "_components", description = "Components only this page uses." },
+]
+
+[[rules.filename]]
+target = "apps/server/ui/src/**/*.tsx"
+kind = "file"
+case = "snake_case"
+max_words = 1
 
 # An application is a distributable binary; it exports nothing.
 [[rules.layout]]

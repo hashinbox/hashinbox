@@ -33,10 +33,15 @@ mod balance;
 mod commit;
 mod evidence;
 mod history;
+mod join;
 #[cfg(feature = "memory")]
 pub mod memory;
+mod observed;
 mod outputs;
 mod reads;
+#[cfg(any(feature = "sqlite", feature = "memory"))]
+mod receipts;
+mod spendable;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 mod watch;
@@ -45,12 +50,14 @@ pub use activity::{
     Activity, ActivityKind, ActivityPage, ActivityPosition, ActivityQuery, ActivityTransaction,
     Direction,
 };
-pub use balance::{Balance, Completeness, Fold, MovementEffect, PendingValue};
+pub use balance::{Balance, Balances, Completeness, Fold, MovementEffect, PendingValue};
 pub use commit::{IndexStore, IndexedBatch, Progress};
 pub use evidence::BalanceEvidence;
 #[cfg(any(feature = "sqlite", feature = "memory"))]
 pub(crate) use history::Probe;
 pub use history::{CanonicalPage, ConfirmedHistory, HistoryPosition, HistoryQuery, Page};
+pub use join::{PendingJoin, Router};
+pub use observed::{History, ObservedTransaction, TransactionPage, TransactionStatus};
 pub use outputs::{OutputCursor, OutputPage, OutputRequest};
 pub use reads::{BalanceQuery, BalanceStore, Inspection, OutputStore, PurgedRows, Purging};
 pub use watch::{WatchProgress, WatchStore};

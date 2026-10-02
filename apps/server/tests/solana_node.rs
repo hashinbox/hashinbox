@@ -216,8 +216,14 @@ impl Ports {
     fn reserve() -> Result<Self, io::Error> {
         let seed = 20_000 + (std::process::id() % 1_000) as u16 * 32;
         for offset in 0..1_000_u16 {
-            let base = seed.saturating_add(offset.saturating_mul(32));
-            let candidates = (base..base.saturating_add(25)).collect::<Vec<_>>();
+            let Some(base) = seed.checked_add(offset * 32) else {
+                break;
+            };
+            let Some(end) = base.checked_add(30) else {
+                break;
+            };
+            // Agave 3.1.14 requires max - min >= 25 for dynamic ports.
+            let candidates = (base..end).collect::<Vec<_>>();
             let reservations = candidates
                 .iter()
                 .map(|port| TcpListener::bind(("127.0.0.1", *port)))
@@ -228,7 +234,7 @@ impl Ports {
                     rpc: base,
                     faucet: base + 2,
                     gossip: base + 3,
-                    dynamic: (base + 4, base + 24),
+                    dynamic: (base + 4, base + 29),
                 });
             }
         }
@@ -241,7 +247,7 @@ impl Ports {
 
 struct Validator {
     child: Child,
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     endpoint: String,
 }
 
@@ -263,15 +269,31 @@ impl Validator {
             .arg(ports.faucet.to_string())
             .args(["--gossip-port"])
             .arg(ports.gossip.to_string())
-            .args(["--dynamic-port-range", &dynamic, "--reset", "--quiet"])
+            .args(["--dynamic-port-range", &dynamic, "--reset", "--log"])
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log));
         drop(ports);
         Ok(Self {
             child: command.spawn()?,
-            _directory: directory,
+            directory,
             endpoint,
         })
+    }
+
+    fn log(&self) -> String {
+        let path = self.directory.path().join("validator.log");
+        match fs::read_to_string(&path) {
+            Ok(log) => log
+                .lines()
+                .rev()
+                .take(80)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(error) => format!("could not read {}: {error}", path.display()),
+        }
     }
 }
 
@@ -330,7 +352,8 @@ async fn call(endpoint: &str, method: &str, params: serde_json::Value) -> serde_
 
 /// Waits for the owned validator, then connects to it as the cluster whose
 /// genesis hash it reports.
-async fn ready(endpoint: &str) -> (Network, RpcClient<json_rpc::Http>) {
+async fn ready(validator: &mut Validator) -> (Network, RpcClient<json_rpc::Http>) {
+    let endpoint = &validator.endpoint;
     // One node, no decorator: the chain's own client already states
     // `Request::once` for every call.
     let node = json_rpc::Endpoint::new(endpoint).with_bounds(json_rpc::Bounds {
@@ -339,6 +362,12 @@ async fn ready(endpoint: &str) -> (Network, RpcClient<json_rpc::Http>) {
         ..json_rpc::Bounds::default()
     });
     for _ in 0..300 {
+        if let Some(status) = validator.child.try_wait().expect("validator status") {
+            panic!(
+                "owned validator exited with {status}; log:\n{}",
+                validator.log()
+            );
+        }
         let healthy = reqwest::Client::new()
             .post(endpoint)
             .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"getHealth","params":[]}))
@@ -363,7 +392,10 @@ async fn ready(endpoint: &str) -> (Network, RpcClient<json_rpc::Http>) {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    panic!("owned validator did not become ready")
+    panic!(
+        "owned validator did not become ready; log:\n{}",
+        validator.log()
+    )
 }
 
 async fn airdrop(endpoint: &str, address: &str, lamports: u64) {
@@ -380,11 +412,31 @@ async fn airdrop(endpoint: &str, address: &str, lamports: u64) {
         .expect("owned validator airdrop response");
     assert!(response.status().is_success());
     let body: serde_json::Value = response.json().await.expect("airdrop JSON");
-    assert!(
-        body.get("result")
-            .and_then(serde_json::Value::as_str)
-            .is_some()
-    );
+    let signature = body["result"].as_str().expect("airdrop signature");
+    finalized(endpoint, signature).await;
+}
+
+async fn finalized(endpoint: &str, signature: &str) {
+    for _ in 0..300 {
+        let statuses = call(
+            endpoint,
+            "getSignatureStatuses",
+            serde_json::json!([[signature], {"searchTransactionHistory": true}]),
+        )
+        .await;
+        let status = &statuses["value"][0];
+        if !status.is_null() {
+            assert!(
+                status["err"].is_null(),
+                "transaction {signature} failed: {status}"
+            );
+            if status["confirmationStatus"] == "finalized" {
+                return;
+            }
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    panic!("transaction {signature} did not finalize")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -401,8 +453,8 @@ async fn native_sol_submission_indexing_and_central_storage() {
         .expect("validator version");
     assert!(String::from_utf8_lossy(&version.stdout).contains("3.1.14"));
 
-    let validator = Validator::start(&binary).expect("owned validator");
-    let (native, client) = ready(&validator.endpoint).await;
+    let mut validator = Validator::start(&binary).expect("owned validator");
+    let (native, client) = ready(&mut validator).await;
     let network = native.canonical();
 
     let index = tempfile::tempdir().expect("isolated index directory");
@@ -419,7 +471,7 @@ async fn native_sol_submission_indexing_and_central_storage() {
     // The sender's absence proof: the repository's own confirmed pages joined to
     // the blocks this index holds above its line, by the pair that belongs
     // together.
-    let history = Arc::new(wallets::PendingJoin::new(
+    let history = Arc::new(indexing::PendingJoin::new(
         repository.clone(),
         service.clone(),
     ));
@@ -455,15 +507,24 @@ async fn native_sol_submission_indexing_and_central_storage() {
     let destination = held["destination"].address().clone();
 
     airdrop(&validator.endpoint, &source.value, 2_000_000).await;
-    airdrop(&validator.endpoint, &destination.value, 1_000).await;
+    let rent = call(
+        &validator.endpoint,
+        "getMinimumBalanceForRentExemption",
+        serde_json::json!([0]),
+    )
+    .await
+    .as_u64()
+    .expect("System account rent minimum");
+    airdrop(&validator.endpoint, &destination.value, rent).await;
     let amount = "0.00001".parse::<Decimal>().expect("exact SOL amount");
     let transaction = wallets
         .author(&SOL, &held["source"])
         .expect("SOL is an asset this deployment sends")
-        .send(destination.clone(), amount.clone())
+        .send(destination.clone(), amount.clone().into())
         .await
         .expect("native SOL submission");
     tasks.drain().await;
+    finalized(&validator.endpoint, &transaction.to_string()).await;
 
     let mut observed = None;
     for _ in 0..100 {
@@ -471,21 +532,31 @@ async fn native_sol_submission_indexing_and_central_storage() {
         observed = transactions(&*history, &asset, &source)
             .await
             .into_iter()
-            .find(|entry| entry.transaction_id.id == transaction);
+            .find(|entry| entry.transaction.transaction_id.id == transaction);
         if observed.is_some() {
             break;
         }
         sleep(Duration::from_millis(100)).await;
     }
+    if observed.is_none() {
+        let status = call(
+            &validator.endpoint,
+            "getSignatureStatuses",
+            serde_json::json!([[transaction], {"searchTransactionHistory": true}]),
+        )
+        .await;
+        let checkpoint = service.checkpoint(&network).await.expect("checkpoint");
+        panic!("submitted transaction not canonical: status={status}, checkpoint={checkpoint:?}");
+    }
     let observed = observed.expect("submitted transaction became canonical");
-    assert_eq!(observed.movements.len(), 1);
+    assert_eq!(observed.transaction.movements.len(), 1);
     assert_eq!(
-        unit.display(&observed.movements[0].amount)
+        unit.display(&observed.transaction.movements[0].amount)
             .expect("exact SOL movement"),
         amount
     );
     assert_eq!(
-        unit.display(&observed.fee.expect("exact network fee").amount)
+        unit.display(&observed.transaction.fee.expect("exact network fee").amount)
             .expect("exact SOL fee"),
         "0.000005".parse::<Decimal>().expect("exact SOL fee")
     );
@@ -535,7 +606,7 @@ async fn native_sol_submission_indexing_and_central_storage() {
         .expect("restarted Solana indexer"),
     );
     let restored_history =
-        wallets::PendingJoin::new(restarted_repository.clone(), restarted_service.clone());
+        indexing::PendingJoin::new(restarted_repository.clone(), restarted_service.clone());
 
     // Nothing re-watches anything: the restarted index reads its own durable
     // rows and resumes with the addresses it had.
@@ -559,7 +630,7 @@ async fn native_sol_submission_indexing_and_central_storage() {
         restored = transactions(&restored_history, &asset, &source)
             .await
             .iter()
-            .any(|entry| entry.transaction_id.id == transaction);
+            .any(|entry| entry.transaction.transaction_id.id == transaction);
         if restored {
             break;
         }
@@ -593,10 +664,10 @@ async fn native_sol_submission_indexing_and_central_storage() {
 /// index holds it: every amount atomic, which is the only unit `indexing` can
 /// produce.
 async fn transactions(
-    history: &dyn wallets::History,
+    history: &dyn indexing::History,
     asset: &base::AssetId,
     address: &base::Address,
-) -> Vec<wallets::ObservedTransaction> {
+) -> Vec<indexing::ObservedTransaction> {
     let subject = indexing::Subject {
         address: address.clone(),
         asset: asset.clone(),

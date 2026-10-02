@@ -200,6 +200,320 @@
         ]
       }
     },
+    "/v1/chains": {
+      "get": {
+        "tags": [
+          "chains"
+        ],
+        "summary": "Read chain settings and runtime progress",
+        "description": "Returns saved settings, active revisions and reindex progress. Configured RPC URLs are returned for operator editing; environment references are not resolved and authentication headers are omitted.",
+        "operationId": "list_chain_settings",
+        "responses": {
+          "200": {
+            "description": "Saved chains",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ChainSettings"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Runtime controls unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/chains/{chain}": {
+      "put": {
+        "tags": [
+          "chains"
+        ],
+        "summary": "Save chain nodes and requested indexing state",
+        "description": "Persists desired settings before asynchronous verification. Failed candidates keep the active connection. Existing network identities and asset parameters cannot be replaced; networks can be added and nodes edited or reordered.",
+        "operationId": "save_chain_settings",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Registered chain name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChainUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Desired settings saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid settings or conflicting revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Runtime controls unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/indexing": {
+      "put": {
+        "tags": [
+          "indexing"
+        ],
+        "summary": "Pause, resume or reindex one network",
+        "description": "Persists requested indexing state. Reindex pauses operations, purges indexed facts, preserves wallet keys and birthdays, then scans again. Poll chain settings for progress.",
+        "operationId": "control_indexing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Command"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Indexing request persisted"
+          },
+          "204": {
+            "description": "Indexing control applied"
+          },
+          "400": {
+            "description": "Invalid command",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Network not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Supervisor stopped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Control unavailable or still pausing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/logs": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "Read filtered retained logs",
+        "description": "Returns bounded in-memory events matching every supplied filter. Use the returned cursor for polling; a changed session requires restarting the cursor.",
+        "operationId": "read_logs",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "component",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 0,
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Retained events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Events"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/transactions": {
       "post": {
         "tags": [
@@ -338,7 +652,7 @@
           "wallets"
         ],
         "summary": "Generate a wallet for one configured asset",
-        "description": "Generates a wallet, encrypts its key in the application registry, then watches it from creation. Keys never leave the server. Retrying creates another wallet.",
+        "description": "Generates a wallet, stores its key in the application registry, then watches it from creation. Keys never leave the server. Retrying creates another wallet.",
         "operationId": "create_wallet",
         "requestBody": {
           "content": {
@@ -753,6 +1067,14 @@
   },
   "components": {
     "schemas": {
+      "Action": {
+        "type": "string",
+        "enum": [
+          "pause",
+          "resume",
+          "reindex"
+        ]
+      },
       "Address": {
         "type": "object",
         "description": "A canonical address within its network.",
@@ -997,6 +1319,70 @@
         },
         "additionalProperties": false
       },
+      "ChainSettings": {
+        "type": "object",
+        "required": [
+          "id",
+          "revision",
+          "networks"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "networks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetworkSettings"
+            }
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ChainUpdate": {
+        "type": "object",
+        "required": [
+          "networks"
+        ],
+        "properties": {
+          "networks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetworkUpdate"
+            }
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Null when creating a chain; otherwise the last read revision.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "Command": {
+        "type": "object",
+        "required": [
+          "network",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/Action"
+          },
+          "network": {
+            "$ref": "#/components/schemas/Network"
+          }
+        },
+        "additionalProperties": false
+      },
       "Completeness": {
         "type": "string",
         "description": "How much of the history behind an answer the index can prove it holds.\n\nIt is a property of the read, not of the wallet, and the balance and the\nhistory page share the vocabulary; opening evidence applies only to balances.",
@@ -1048,6 +1434,81 @@
               "type": "string"
             },
             "description": "Definitely acknowledged transaction IDs before an ordered batch failed.\nPresent only when that accepted prefix is non-empty."
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "description": "One retained event, with public context and no raw request or provider payload.",
+        "required": [
+          "sequence",
+          "timestamp",
+          "level",
+          "event",
+          "message",
+          "fields",
+          "truncated"
+        ],
+        "properties": {
+          "event": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "level": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "sequence": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Events": {
+        "type": "object",
+        "description": "Polling result. A gap means some records were lost; logs are not an audit ledger.",
+        "required": [
+          "session",
+          "entries",
+          "next",
+          "gap"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "gap": {
+            "type": "boolean"
+          },
+          "next": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "session": {
+            "type": "string"
           }
         }
       },
@@ -1122,6 +1583,7 @@
         "type": "string",
         "description": "What one indexed network's synchronization is doing.",
         "enum": [
+          "paused",
           "catching_up",
           "ready",
           "retrying",
@@ -1299,6 +1761,174 @@
           }
         }
       },
+      "NetworkSettings": {
+        "type": "object",
+        "required": [
+          "name",
+          "parameters",
+          "nodes",
+          "indexing",
+          "history_pending"
+        ],
+        "properties": {
+          "active_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "checkpoint": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "history_pending": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "history_resume": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "indexing": {
+            "$ref": "#/components/schemas/Requested"
+          },
+          "name": {
+            "type": "string"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeStatus"
+            }
+          },
+          "parameters": {
+            "description": "Chain-owned configuration, excluding RPC addresses and credentials."
+          },
+          "pending_block": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "rebuild": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReindexStatus"
+              }
+            ]
+          }
+        }
+      },
+      "NetworkUpdate": {
+        "type": "object",
+        "required": [
+          "name",
+          "parameters",
+          "nodes"
+        ],
+        "properties": {
+          "indexing": {
+            "$ref": "#/components/schemas/Requested"
+          },
+          "name": {
+            "type": "string"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeUpdate"
+            }
+          },
+          "parameters": {
+            "description": "Chain configuration with an explicit asset tag. Existing parameters are immutable."
+          }
+        },
+        "additionalProperties": false
+      },
+      "NodeStatus": {
+        "type": "object",
+        "required": [
+          "id",
+          "active",
+          "attempts",
+          "failures"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "attempts": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "failures": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_failure": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "URL origin for the node card."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Configured URL for operator editing; environment references remain unresolved."
+          }
+        }
+      },
+      "NodeUpdate": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "endpoint": {
+            "description": "URL string or endpoint object (url, headers, bounds). Omit to retain existing credentials."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable identifier; changing URL or order preserves this ID."
+          }
+        },
+        "additionalProperties": false
+      },
       "ParentBlock": {
         "type": "object",
         "description": "The parent of a [`Block`].",
@@ -1319,6 +1949,37 @@
           }
         },
         "additionalProperties": false
+      },
+      "Phase": {
+        "type": "string",
+        "enum": [
+          "requested",
+          "purging",
+          "scanning"
+        ]
+      },
+      "ReindexStatus": {
+        "type": "object",
+        "required": [
+          "id",
+          "phase"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/Phase"
+          },
+          "target": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          }
+        }
       },
       "Report": {
         "type": "object",
@@ -1348,6 +2009,13 @@
             "description": "One set of counters per configured RPC endpoint."
           }
         }
+      },
+      "Requested": {
+        "type": "string",
+        "enum": [
+          "running",
+          "paused"
+        ]
       },
       "Rpc": {
         "type": "object",
@@ -1393,6 +2061,19 @@
           "network": {
             "$ref": "#/components/schemas/Network",
             "description": "Chain and network this client serves."
+          }
+        }
+      },
+      "SavedRevision": {
+        "type": "object",
+        "required": [
+          "revision"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -1721,6 +2402,18 @@
     {
       "name": "transactions",
       "description": "History, single transfers, and batches"
+    },
+    {
+      "name": "logs",
+      "description": "Filtered process-local events"
+    },
+    {
+      "name": "indexing",
+      "description": "Network inspection controls"
+    },
+    {
+      "name": "chains",
+      "description": "Saved nodes and network runtime settings"
     },
     {
       "name": "health",

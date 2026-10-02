@@ -175,18 +175,27 @@ impl<A: Ord> Config<A> {
     /// serves another chain ID, cannot trace a block, or disagrees with a
     /// configured token.
     pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<ChainHandle<A>, Error> {
-        self.connect_monitored(secrets, &mut Vec::new()).await
+        self.connect_monitored(secrets, &mut Vec::new(), logging::Logger::default(), None)
+            .await
     }
 
     async fn connect_monitored(
         self,
         secrets: &dyn json_rpc::Secrets,
         statistics: &mut Vec<json_rpc::Statistics>,
+        logger: logging::Logger,
+        transport: Option<Transport>,
     ) -> Result<ChainHandle<A>, Error> {
         self.validate()?;
         let network = Network::new(self.chain_id, self.network.as_str());
-        let (transport, endpoints) = self.rpc.monitored(secrets)?;
-        statistics.extend(endpoints);
+        let transport = match transport {
+            Some(transport) => transport,
+            None => {
+                let (transport, endpoints) = self.rpc.logged(secrets, &logger)?;
+                statistics.extend(endpoints);
+                transport
+            }
+        };
         let rpc = RpcClient::connect(transport, &network).await?;
         rpc.validate_tracing().await?;
         for token in &self.tokens {
@@ -294,7 +303,7 @@ impl<A> ChainHandle<A> {
         // is the place holding both halves of one network's answer: the rows
         // are the store's, the pending blocks are the index's, and the index
         // answers no query itself.
-        let reads = Arc::new(wallets::PendingJoin::new(repository, indexer.clone()));
+        let reads = Arc::new(indexing::PendingJoin::new(repository, indexer.clone()));
         Ok(ComposedChain {
             index: indexer,
             history: reads.clone(),
@@ -420,10 +429,12 @@ where
         self: Box<Self>,
         secrets: &'a dyn json_rpc::Secrets,
         statistics: &'a mut Vec<json_rpc::Statistics>,
+        logger: logging::Logger,
+        transport: Option<Transport>,
     ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, sdk_config::Error>> {
         Box::pin(async move {
             let node = (*self)
-                .connect_monitored(secrets, statistics)
+                .connect_monitored(secrets, statistics, logger, transport)
                 .await
                 .map_err(sdk_config::Error::refused)?;
             Ok(Box::new(node) as Box<dyn Connection<A, R>>)

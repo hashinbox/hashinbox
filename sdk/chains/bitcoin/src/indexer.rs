@@ -78,7 +78,7 @@ impl<C, R> IndexerParams<C, R> {
 /// rather than a newtype that forwarded every capability to one. Store it as
 /// `Arc<dyn indexing::Indexing>` or combine several in an `indexing::Index`.
 /// Unlike an account chain it also materializes UTXOs. Reading them is the
-/// repository's (`indexing::OutputStore`), and `wallets::PendingJoin` folds this
+/// repository's (`indexing::OutputStore`), and `indexing::PendingJoin` folds this
 /// index's pending blocks into that page so a wallet can spend its own change at
 /// depth one; `crate::WalletFactory` spends the result as its
 /// `Arc<dyn indexing::OutputStore>`. Not an impl on the index, because the rows

@@ -37,11 +37,11 @@ pub use base::{
 };
 
 // What a chain implements, and the vocabulary it produces.
-pub use block::{BlockCredit, CanonicalBlock, Facts, InterpretedBlock};
+pub use block::{BlockCredit, CanonicalBlock, InterpretedBlock};
 pub use network::{require_chain, select_addresses};
 pub use observation::{
     CanonicalStatus, CanonicalTransaction, MovementId, NetworkFee, ObservationDraft,
-    ObservationDraftStatus, ValueMovement,
+    ObservationDraftStatus, Transaction, ValueMovement,
 };
 pub use output::{IndexedOutput, OutputChanges, OutputId, OutputKey};
 pub use source::{BlockInterpreter, BlockSource, ChainTips, FeeSettlement, NativeBlock};
@@ -63,6 +63,11 @@ pub use pending::{Checkpointed, Pending, PendingSample};
 pub use storage::{
     Balance, CanonicalPage, Completeness, ConfirmedHistory, Fold, HistoryPosition, HistoryQuery,
     MovementEffect, OutputCursor, OutputPage, OutputRequest, Page, PendingValue,
+};
+// The pending-inclusive reads: a repository's answers joined to the blocks its
+// index holds above the confirmed line.
+pub use storage::{
+    Balances, History, ObservedTransaction, PendingJoin, Router, TransactionPage, TransactionStatus,
 };
 pub use sync::{BackfillStatus, SyncPhase, SyncStatus};
 pub use watch::{Birthday, ForwardRange, Watch, Watching};

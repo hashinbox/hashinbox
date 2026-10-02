@@ -4,7 +4,7 @@
 //! No query is routed, and none can be: a balance, a history page and a
 //! spendable set are a repository's reads, and the capabilities a consumer
 //! declares for their pending-inclusive forms live with the consumer
-//! (`wallets::History`, `wallets::Balances`), where this crate cannot name
+//! (`indexing::History`, `indexing::Balances`), where this crate cannot name
 //! them.
 
 use std::sync::{Arc, Mutex};
@@ -362,14 +362,11 @@ fn an_assembly_hands_one_store_to_every_chain_and_launches_nothing() {
 }
 
 #[test]
-fn rejects_an_empty_index() {
-    let result = Index::<dyn Indexing>::of(Vec::new());
-    let error = match result {
-        Ok(_) => panic!("an index of nothing must not report readiness"),
-        Err(error) => error,
-    };
-
-    assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
+fn an_empty_index_allows_configuration_but_does_not_report_readiness() {
+    let index = Index::<dyn Indexing>::of(Vec::new()).expect("empty collection");
+    assert!(index.units().is_empty());
+    assert!(index.networks().is_empty());
+    assert!(!indexing::SyncHealth::starting(index.networks()).ready());
 }
 
 #[test]

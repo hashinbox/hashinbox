@@ -170,17 +170,26 @@ impl<A: Ord> Config<A> {
     /// [`Self::validate`]'s refusals, and whatever `RpcClient::connect`
     /// reports when the node serves another network.
     pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<ChainHandle<A>, Error> {
-        self.connect_monitored(secrets, &mut Vec::new()).await
+        self.connect_monitored(secrets, &mut Vec::new(), logging::Logger::default(), None)
+            .await
     }
 
     async fn connect_monitored(
         self,
         secrets: &dyn json_rpc::Secrets,
         statistics: &mut Vec<json_rpc::Statistics>,
+        logger: logging::Logger,
+        transport: Option<Transport>,
     ) -> Result<ChainHandle<A>, Error> {
         self.validate()?;
-        let (transport, endpoints) = self.rpc.monitored(secrets)?;
-        statistics.extend(endpoints);
+        let transport = match transport {
+            Some(transport) => transport,
+            None => {
+                let (transport, endpoints) = self.rpc.logged(secrets, &logger)?;
+                statistics.extend(endpoints);
+                transport
+            }
+        };
         let rpc = RpcClient::connect(transport, &self.network).await?;
         Ok(ChainHandle { config: self, rpc })
     }
@@ -305,7 +314,7 @@ impl<A> ChainHandle<A> {
         // index holds above its confirmed line. Paired here because this is
         // the place that holds both: the rows are the store's, the pending
         // blocks are the index's, and the index answers no query itself.
-        let reads = Arc::new(wallets::PendingJoin::new(repository, indexer.clone()));
+        let reads = Arc::new(indexing::PendingJoin::new(repository, indexer.clone()));
         // The unspent rows with the pending blocks folded in, so change is
         // spendable at depth one. The store itself refuses them while the
         // address's own history is still being read.
@@ -364,10 +373,12 @@ where
         self: Box<Self>,
         secrets: &'a dyn json_rpc::Secrets,
         statistics: &'a mut Vec<json_rpc::Statistics>,
+        logger: logging::Logger,
+        transport: Option<Transport>,
     ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, sdk_config::Error>> {
         Box::pin(async move {
             let node = (*self)
-                .connect_monitored(secrets, statistics)
+                .connect_monitored(secrets, statistics, logger, transport)
                 .await
                 .map_err(sdk_config::Error::refused)?;
             Ok(Box::new(node) as Box<dyn Connection<A, R>>)

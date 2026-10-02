@@ -7,7 +7,7 @@ from the server. Historical plans do not override these requirements.
 ## Product
 
 One `payment-server` process composes Bitcoin, Ethereum and Solana, an embedded
-index, one SQLite file and an encrypted application wallet registry. It must:
+index, one SQLite file and an application wallet registry. It must:
 
 - Create wallets, persist their keys, and return canonical public addresses.
 - Observe public addresses without keys; index from explicit resolved birthdays.
@@ -29,7 +29,7 @@ No business ledger, payment state machine, automatic collection/sweep job, gas
 sponsorship, durable outgoing-operation/idempotency store, hardware wallet,
 HSM/KMS/remote custody, raw-block archive, separate indexer service, HA or
 multi-writer deployment. Chain-owned reservations are necessary send coordination,
-not a business reservation service. Encryption does not claim production custody.
+not a business reservation service.
 
 Pre-release internal APIs may change directly; no compatibility aliases or invented
 versioned DTOs. SQLite migrations are ordered, transactional and versioned; reject
@@ -123,10 +123,9 @@ External chain, JSON-RPC and HTTP standards remain compatibility contracts.
 
 ## Wallet custody
 
-The server owns encrypted application tables in the same SQLite file, with a schema
-version independent of indexing. Require an environment-sourced passphrase; no
-implicit plaintext mode. Use authenticated encryption, random salt/nonces, and
-zeroizing key/plaintext memory. Fail closed on wrong passphrase or modified rows.
+The server stores wallet keys directly in its application tables in the same SQLite
+file, with a schema version independent of indexing. No encryption or passphrase.
+Keep key material out of responses, logs and Debug; use zeroizing memory buffers.
 
 Creation is registry-first, observation-second, publication-last. A crash before
 observation leaves a private unserved key; no read may publish it as a usable wallet.
@@ -277,18 +276,19 @@ Submission:
 
 ## Composition, health and lifecycle
 
-1. Validate closed configuration, credentials and server security.
-2. Construct long-lived clients; verify all network identities and required native
-   capabilities before opening storage. No per-request dependency construction.
-3. Open the SQLite file off the async executor, validate its identity and migrate.
-4. Compose all network indexers over one repository, plus factories and query handles.
-   Duplicate networks/assets fail without launching background tasks.
-5. Unlock application keys, restore signers and observations, and register configured
-   wallets before the first pass. Keep the SDK independent of custody policy.
-6. Start indexing and supervised submissions. Bind HTTP once every network has settled
-   at least once, Ready or Quarantined. Incomplete historical catch-up does not gate it.
-7. Supervise serving, cancellation, task failures and joins. One indexer's failure must
-   not terminate healthy networks.
+1. Validate configuration and server security; allow no chains or unavailable nodes.
+2. Open the one SQLite file off the executor; migrate indexing, wallet and server
+   settings under their respective owners. Seed the `chains` table only on creation.
+3. Bind the control UI/API before node verification; report readiness independently.
+4. Verify each candidate's network identity and native capabilities before activation.
+   Compose one indexer per network over one repository; reject duplicate asset tags.
+5. Restore application keys and observations before that network's first pass.
+   Keep key custody outside the SDK; store keys and RPC settings without encryption.
+6. Persist requested run/pause and revision-checked node settings. Keep the working
+   connection if replacement verification fails. Drain operations before switching,
+   preserving existing factories, sender reservations and ambiguous submissions.
+7. Supervise serving, cancellation and joins. Each network advances independently;
+   one failure must not terminate healthy networks. No per-request construction.
 
 Retry transient failures with bounded jittered backoff; quarantine terminal errors and
 panics without automatic retry. Readiness is `all(Ready | Quarantined) && any(Ready)`;
@@ -301,13 +301,16 @@ failures, consecutive failures and sanitized last failure. Do not publish URLs,
 credentials, request content or remote error prose. Refresh state snapshots as passes
 advance; notification callbacks keep their transition/failure cadence.
 
-The SDK can resume a live quarantine. For the server, fixing its cause and restarting
-is the operator resume workflow: a new CLI process cannot control an old process's
-RAM. This supersedes the proposed `--resume`; do not add an administration transport
-solely to preserve that name. Confirmed reorgs require offline `--rescan`; durable
-backfill cancellation is an offline operator operation, not a product HTTP route.
-Recovery must preserve keys, registrations and other networks and run no listener or
-supervisor. Invalid targets fail before mutation.
+The SDK and server can resume a live quarantine. UI reindex persists its request,
+quiesces network admissions/passes, purges through repository recovery, resets the
+indexer's memory and resumes scanning. Persist the purging phase before mutation;
+on restart repeat purging safely, or resume scanning without purging again. Preserve
+wallet keys, registrations, birthdays and other networks. Block unsafe reads/sends
+until the fixed recovery target is inspected for every applicable watch. An unknown
+target requires a completed catch-up before recovery can be declared complete.
+
+Offline `--rescan` and `--cancel-backfill` remain available while the server is stopped;
+they never start RPC or a listener. Invalid targets fail before mutation.
 
 Submission registration succeeds only once tasks are tracked. Shutdown marks unready,
 stops HTTP admission, closes registration and drains handlers/submissions while
@@ -325,8 +328,8 @@ Blocking database work runs off async executors with bounded admission.
   coordinates, pending/confirmed forks, paging, network isolation and offline purge.
 - Test the real router's validation/auth/errors, fixed/all single/batch requests,
   watch-only/empty refusals, secret exclusion, memory-only health and RPC failure stats.
-- Restart a created wallet over the same encrypted file and prove it can still sign
-  and spend; prove wrong-password/corruption refusal and interrupted registration privacy.
+- Restart a created wallet over the same SQLite file and prove it can still sign
+  and spend; prove unsupported-schema/corruption refusal and interrupted registration privacy.
 - Execute all six examples and server create/receive/read/restart/send against owned
   local Bitcoin, Anvil and checksum-pinned Solana validators. A compile is not runtime
   proof; preserve logs and report precisely which behavior ran.
