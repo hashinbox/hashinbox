@@ -11,22 +11,14 @@ restarts and reorgs.
 use std::sync::Arc;
 
 use indexing::{
-    Address, AssetId, Birthday, BlockPosition, Index, IndexError, Indexing, Repository, Subject,
-    Watching,
+    Address, AssetId, Birthday, BlockPosition, Index, IndexError, Indexing, Subject, Watching,
 };
 
-/// `chain` is a chain crate's constructor, such as `chain_bitcoin::indexer`.
-async fn run<R, E>(
-    repository: R,
-    chain: impl FnOnce(R) -> Result<Arc<dyn Indexing>, E>,
-    deposit: Address,
-) -> Result<(), IndexError>
-where
-    R: Repository + Clone,
-    E: std::fmt::Display,
-{
-    // One repository serves every network. Add one `.chain(..)` per chain.
-    let index: Index = Index::over(repository).chain(chain)?.build()?;
+/// `chain` is a chain crate's indexer, such as `chain_bitcoin::indexer`'s,
+/// built over the one repository every network shares.
+async fn run(chain: Arc<dyn Indexing>, deposit: Address) -> Result<(), IndexError> {
+    // One indexer per network, all over one repository.
+    let index: Index = Index::of(vec![chain])?;
 
     // A watch is an id, an address, an asset and the first block to inspect.
     let asset = AssetId::native(deposit.network.chain.clone());
@@ -34,7 +26,8 @@ where
     index.watch("deposits", &subject, Birthday::At(BlockPosition(0))).await?;
 
     // One bounded pass per network. Call it in your own loop.
-    for status in index.sync().await? {
+    for unit in index.units() {
+        let status = unit.sync().await?;
         println!("{:?}: {:?} at {:?}", status.network, status.phase, status.checkpoint);
     }
     Ok(())
@@ -48,11 +41,72 @@ A repository implements two ports, and nothing else is required:
 | `WatchStore` | `add`, `all`, `forget`, `cancel_backfill` | the watches and how far each was inspected |
 | `IndexStore` | `checkpoint`, `commit` | the confirmed line and the one atomic write a pass makes |
 
+Both shipped repositories also implement the optional `WalletRegistry`
+(`register`, `wallet`, `wallets`) on the same `wallet` table: an application files a
+wallet's label and key beside its watch and reads every wallet back. A `Watch`
+carries no key, and scanning never reads label or key. `register` files an unknown
+address archived and unobserved; `index.watch` on its id then observes it.
+`forget` (the durable half of `unwatch`) archives a row: its progress and total go,
+its birthday, label, key and indexed facts stay, and the address stays reserved for
+that id, so registering it again restores the original wallet, to be watched from
+its original birthday. A purge resets progress and keeps every wallet.
+
+```rust
+use indexing::{Birthday, Indexing, Registration, WalletRegistry};
+
+async fn create(
+    store: &dyn WalletRegistry,
+    index: &dyn Indexing,
+    registration: Registration,
+) -> Result<(), indexing::IndexError> {
+    // Filed first, archived and unobserved: the key is durable before anything
+    // is scanned. An archived address answers its original wallet instead.
+    let wallet = store.register(registration).await?;
+    let birthday = wallet.birthday().map_or(Birthday::Fresh, Birthday::At);
+    index.watch(wallet.id(), &wallet, birthday).await?;
+    Ok(())
+}
+```
+
 Two repositories ship with the crate: `sqlite::Repository` (feature `sqlite`, on
 by default) and `memory::Repository` (feature `memory`). The `supervisor`
 feature, on by default, adds `Supervisor`, which runs `sync` for you with retry
 and per-network quarantine. Balance, history and output queries belong to the
-repository, not to the index.
+repository, not to the index. The `testing` feature, off by default and for
+dev-dependencies only, adds `testing::Chain`: one scripted chain double that is
+a `BlockSource`, `ChainTips` and `BlockInterpreter` at once.
+
+## SQLite
+
+`sqlite::Database::open` is async, on `sqlx` and Tokio. It takes an absolute
+path. An empty file is given the indexing schema and stamped with this store's
+identity; a file with that exact identity opens as it is. There are no
+migrations: any other file is refused, and the message says to delete it.
+
+An application that keeps its own tables in the same file passes its schema
+to `open_with`. The text is applied beside indexing's when the file is created
+and is part of the identity, so changing it also needs a fresh file. Read and
+write those tables through `Database::pool`. Indexing's tables belong to the
+repository.
+
+```rust
+use indexing::sqlite::{Database, Repository};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// The application's own table, created with indexing's in a new file.
+const NOTES: &str = "CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT NOT NULL);";
+
+async fn open(path: &std::path::Path) -> Result<Repository> {
+    let database = Database::open_with(path, NOTES).await?;
+    sqlx::query("INSERT INTO notes (id, body) VALUES (?1, ?2) ON CONFLICT (id) DO NOTHING")
+        .bind("first")
+        .bind("opened")
+        .execute(database.pool())
+        .await?;
+    Ok(Repository::new(database))
+}
+```
 
 ## Reads
 
@@ -83,7 +137,7 @@ where
     println!("{} settled, {} arriving", balance.amount, balance.pending.incoming);
     println!("{} confirmed, {} pending", page.transactions.len(), page.pending.len());
     for observed in &page.transactions {
-        println!("{}: {:?}", observed.transaction.transaction_id.id, observed.status);
+        println!("{}: {:?}", observed.transaction.id.id, observed.status);
     }
     Ok(())
 }
@@ -104,17 +158,20 @@ where
 
 ## Notes
 
-- `InterpretedBlock` and `CanonicalBlock` directly contain `base::Block<T>`
-  plus output changes and credits. Canonical construction validates and seals
-  those fields. `ObservationDraft` and `CanonicalTransaction` directly contain
-  `Transaction` (identity, movements and fee); each stage keeps its own status
-  and native transaction order. `ObservedTransaction` embeds that same value
-  with its read-time status and the queried asset's movements.
+- `BlockWithOutputs` is `base::Block<Transaction>` plus output changes and
+  credits. An interpreter returns it; `BlockWithOutputs::validate` checks it
+  (each `Transaction::validate`, unique identifiers and native orders, valid
+  credits, every transaction naming the inspected block) before it is held as
+  pending or committed. `Transaction` carries identity, movements, fee, native
+  order and `Status` (included or failed, with its block). `ObservedTransaction`
+  embeds that same value with its read-time status and the queried asset's
+  movements.
 - A reorg below the confirmed line stops that network with
   `IndexErrorKind::ConfirmedReorg` and is never repaired automatically, because
   stored blocks are treated as final. Recover with `Purging::purge_network`
-  while nothing else is running, or online with that network quiesced (see
-  `SyncControl`: pause, purge, `Indexing::reset`, resume); it keeps the watches
+  while nothing else is running, or online with that network quiesced:
+  block its admissions, then `SyncControl::rescan(indexer, store)` pauses,
+  purges, resets the indexer, discards reported progress and resumes; it keeps the watches
   and other networks. Inside the window the store reports `Incomplete` and
   refuses spendable outputs rather than answering an empty history.
 - Hand the same repository to every chain. Each operation names its network, so
@@ -137,28 +194,16 @@ where
   The index never sees a query's answer, so it cannot correct one.
 - Shipped repositories keep exact signed totals for watched holdings, updated
   atomically from newly inserted facts. Registration seeds retained history;
-  replay adds nothing, and unresolved deficits remain `Overdrawn`. Unwatched
-  holdings are computed from retained facts. SQLite migrates existing totals
-  transactionally before opening. Concrete repositories also offer `activity`:
-  exact credit/debit pages including self-transfer sides, charged fees and
-  transactionless withdrawals, with native ordering and snapshot coverage.
-  Concrete repositories offer `verify_balance`
-  for an explicit independent comparison; verification never repairs rows.
-- To retain an external balance attestation, capture one `BalanceEvidence` from
-  the query and its settled answer, verify that same capture, then call the
-  concrete repository's `record_evidence` only on agreement. It compares the
-  checkpoint, signed total and caught-up watch progress atomically; no money is
-  changed. `Balance.opening` reports the saved anchor while contiguous inspection
-  still supports it, independently of complete-history coverage. Historical
-  additions, re-anchoring, unwatch, rescan and a negative block-end total invalidate it.
-- The SQLite repository needs a Tokio runtime, because each operation runs on
-  `spawn_blocking`.
+  replay adds nothing, and unresolved deficits remain `Overdrawn`. Unwatched and
+  archived holdings are computed from retained facts.
+- The SQLite repository needs a Tokio runtime with its timer. Each pooled
+  connection does its SQLite work on a worker thread of its own, never on the
+  async executor.
 
 ## Injected events
 
-`Supervisor::with_logger` records state transitions; SQLite and memory repositories'
-`with_logger` records newly committed positive net effects on watched assets. Replays,
-rollback, self-transfers and Bitcoin change do not produce new receipt notifications.
-Historical receipts retain their original block time. Delivery is best effort after
-commit; transactional application reactions still belong in a custom repository.
+`Supervisor::with_logger` records state transitions. Transactional application
+reactions belong in a custom repository.
 `SyncControl::pause` waits for the active pass; `resume` restarts a paused network.
+`SyncControl::rescan` fails as `RescanError::NotStarted` (nothing purged, network
+resumed) or `RescanError::Interrupted` (purged, network left paused; rescan again).

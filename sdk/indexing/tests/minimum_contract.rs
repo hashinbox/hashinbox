@@ -14,17 +14,15 @@
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
     mpsc::{Receiver, Sender, channel},
 };
 
 use futures_executor::block_on;
 use indexing::{
-    Address, Birthday, BlockHash, BlockHeight, BlockInterpreter, BlockParent, BlockPosition,
-    BlockRef, BlockSource, BoxFuture, ChainName, ChainTips, FeeSettlement, ForwardRange,
-    IndexError, IndexErrorKind, IndexStore, IndexedBatch, Indexer, Indexing, InterpretedBlock,
-    NativeBlock, Network, OutputKey, SourceError, Subject, SyncConfig, SyncPolicy, Watch,
-    WatchProgress, WatchStore, Watching,
+    Address, Birthday, BlockPosition, BlockRef, BoxFuture, ChainName, ForwardRange, IndexError,
+    IndexErrorKind, IndexStore, IndexedBatch, Indexer, Indexing, Network, OutputKey, Subject,
+    SyncConfig, SyncPolicy, Watch, WatchProgress, WatchStore, Watching,
+    testing::{Chain, block},
 };
 
 /// A third party's index sink: the two required ports over two maps, plus a
@@ -192,7 +190,7 @@ impl IndexStore for Sink {
                 }
             }
             for canonical in batch.blocks() {
-                let block = canonical.block();
+                let block = canonical.block.reference();
                 if batch
                     .expected_checkpoint()
                     .is_some_and(|line| block.position <= line.position)
@@ -215,120 +213,8 @@ impl IndexStore for Sink {
     }
 }
 
-/// A chain of `tip + 1` dense blocks, counting every block it serves.
-///
-/// The count is the only way to see the difference between an index that trusted
-/// the progress its store handed back and one that re-read the range anyway:
-/// nothing the store answers afterwards distinguishes them.
-struct Source {
-    tip: u64,
-    served: Arc<AtomicUsize>,
-}
-
-impl Source {
-    fn to(tip: u64) -> Self {
-        Self {
-            tip,
-            served: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    /// The same chain, sharing one count with `self`.
-    fn again(&self, tip: u64) -> Self {
-        Self {
-            tip,
-            served: Arc::clone(&self.served),
-        }
-    }
-
-    fn served(&self) -> usize {
-        self.served.load(Ordering::Acquire)
-    }
-}
-
-/// The native block of this fixture chain: a reference and nothing else.
-#[derive(Clone, Debug)]
-struct Native(BlockRef);
-
-impl NativeBlock for Native {
-    fn block_ref(&self) -> BlockRef {
-        self.0.clone()
-    }
-}
-
-impl ChainTips for Source {
-    fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
-        Box::pin(async move { Ok(block(self.tip)) })
-    }
-
-    fn confirmed_tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
-        Box::pin(async move { Ok(block(self.tip)) })
-    }
-}
-
-impl BlockSource for Source {
-    type Block = Native;
-
-    fn blocks<'a>(
-        &'a self,
-        start: BlockPosition,
-        end: BlockPosition,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<Native>, SourceError>> {
-        Box::pin(async move {
-            let blocks: Vec<_> = (start.0..=end.0.min(self.tip))
-                .take(limit)
-                .map(|height| Native(block(height)))
-                .collect();
-            self.served.fetch_add(blocks.len(), Ordering::AcqRel);
-            Ok(blocks)
-        })
-    }
-
-    fn canonical_at<'a>(
-        &'a self,
-        position: BlockPosition,
-    ) -> BoxFuture<'a, Result<Option<BlockRef>, SourceError>> {
-        Box::pin(async move { Ok((position.0 <= self.tip).then(|| block(position.0))) })
-    }
-}
-
-/// Reports nothing at all: what is being proven is the storage contract, and an
-/// empty block still has to commit and still has to advance the watch.
-struct Interpreter;
-
-impl BlockInterpreter for Interpreter {
-    type Block = Native;
-
-    fn inspect(
-        &self,
-        block: &Native,
-        _addresses: &[Address],
-    ) -> Result<InterpretedBlock, IndexError> {
-        InterpretedBlock::new(&network(), block.0.clone(), Vec::new())
-    }
-
-    fn settlement(&self) -> FeeSettlement {
-        FeeSettlement::Charged
-    }
-}
-
 fn network() -> Network {
     Network::new(ChainName::new("minimal"), "net")
-}
-
-fn block(height: u64) -> BlockRef {
-    let hash = |height: u64| BlockHash(height.to_be_bytes().to_vec());
-    BlockRef {
-        position: BlockPosition(height),
-        height: BlockHeight(height),
-        hash: hash(height),
-        parent: height.checked_sub(1).map(|parent| BlockParent {
-            position: BlockPosition(parent),
-            hash: hash(parent),
-        }),
-        timestamp: None,
-    }
 }
 
 fn subject(address: &str) -> Subject {
@@ -339,23 +225,21 @@ fn subject(address: &str) -> Subject {
 }
 
 /// One index over `sink`, exactly as a third party assembles one: the chain's
-/// two halves, the store behind an `Arc`, and a policy.
-fn indexer(sink: &Arc<Sink>, tip: u64) -> Indexer<Source, Interpreter, Arc<Sink>> {
-    over(sink, Source::to(tip), network())
+/// two halves, the store behind an `Arc`, and a policy. The chain reports
+/// nothing at all: what is being proven is the storage contract, and an empty
+/// block still has to commit and still has to advance the watch.
+fn indexer(sink: &Arc<Sink>, tip: u64) -> Indexer<Chain, Chain, Arc<Sink>> {
+    over(sink, &Chain::dense(network(), tip))
 }
 
-/// The same, over a named source and network, so a scenario can keep the source
-/// to read its counters or bind a second network to one sink.
-fn over(
-    sink: &Arc<Sink>,
-    source: Source,
-    network: Network,
-) -> Indexer<Source, Interpreter, Arc<Sink>> {
+/// The same, over a named chain of any network, so a scenario can keep the
+/// chain to count the blocks it served or bind a second network to one sink.
+fn over(sink: &Arc<Sink>, chain: &Chain) -> Indexer<Chain, Chain, Arc<Sink>> {
     Indexer::new(
-        source,
-        Interpreter,
+        chain.clone(),
+        chain.clone(),
         Arc::clone(sink),
-        SyncConfig::new(&network, SyncPolicy::new(100)).expect("sync policy"),
+        SyncConfig::new(chain.network(), SyncPolicy::new(100)).expect("sync policy"),
     )
 }
 
@@ -477,17 +361,17 @@ fn a_restart_trusts_the_progress_the_store_recorded() {
     let (sink, _reported) = Sink::new();
     // Three blocks with nothing observed: a checkpoint, and a range nothing was
     // inspected for.
-    let first = Source::to(3);
-    let index = over(&sink, first.again(3), network());
+    let chain = Chain::dense(network(), 3);
+    let index = over(&sink, &chain);
     block_on(Indexing::sync(&index)).expect("the forward pass");
-    let forward = first.served();
+    let forward = chain.fetched().len();
 
     // An observation born below the checkpoint owes that range, and the next
     // pass reads it.
     block_on(index.watch("payer", &subject("payer"), Birthday::At(BlockPosition(0))))
         .expect("an observation below the line");
     block_on(Indexing::sync(&index)).expect("the pass that fills the range in");
-    let filled = first.served();
+    let filled = chain.fetched().len();
     assert!(
         filled > forward,
         "the pass read the range below the checkpoint: {forward} then {filled}",
@@ -503,11 +387,12 @@ fn a_restart_trusts_the_progress_the_store_recorded() {
     // The restart has the same store and the same chain. It must read only what
     // is new.
     drop(index);
-    let restarted = over(&sink, first.again(5), network());
+    chain.extend_to(5);
+    let restarted = over(&sink, &chain);
     block_on(Indexing::sync(&restarted)).expect("the pass after the restart");
 
     assert_eq!(
-        first.served() - filled,
+        chain.fetched().len() - filled,
         2,
         "only blocks 4 and 5 were new; a restart that re-derived its own \
          progress would have read 0 to 3 again, and nothing the store answers \
@@ -532,7 +417,7 @@ fn an_index_of_one_network_reads_only_that_network_out_of_a_shared_store() {
     let elsewhere = Network::new(ChainName::new("minimal"), "other");
     let (sink, _reported) = Sink::new();
     let mine = indexer(&sink, 1);
-    let theirs = over(&sink, Source::to(1), elsewhere.clone());
+    let theirs = over(&sink, &Chain::dense(elsewhere.clone(), 1));
 
     block_on(mine.watch("here", &subject("payer"), Birthday::At(BlockPosition(0))))
         .expect("an observation of this network");
@@ -554,7 +439,7 @@ fn an_index_of_one_network_reads_only_that_network_out_of_a_shared_store() {
     drop(mine);
     drop(theirs);
     let mine = indexer(&sink, 1);
-    let theirs = over(&sink, Source::to(1), elsewhere.clone());
+    let theirs = over(&sink, &Chain::dense(elsewhere.clone(), 1));
 
     assert_eq!(
         block_on(mine.watched(&network()))

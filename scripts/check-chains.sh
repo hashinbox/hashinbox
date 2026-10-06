@@ -11,6 +11,32 @@ CHECK_EXAMPLES=${CHECK_EXAMPLES:-1}
 w='(^|[^A-Za-z0-9_])'
 traits='NativeBlock|BlockSource|BlockInterpreter|WalletFactory|AddressParser|FactoryProfile|Wallet|Author|Authorship|Sender|SingleSender|TransactionFactory|Addresser|Signer|TransactionBuilder|Broadcaster'
 status=0
+# Shared by checks 8 and 12: what of a Rust file is production code. `code`
+# blanks comments, strings and characters in one pass, so none can open
+# another; `production` then blanks every `#[cfg(test)]` item -- through its
+# first `;`, or to the end of the block it opens -- and a whole file whose
+# inner attributes open with `#![cfg(test)]`, and nothing else.
+production_perl='
+sub blank { my ($text) = @_; $text =~ s/[^\n]/ /g; $text }
+sub code { my ($text) = @_;
+  $text =~ s{(//[^\n]*|/\*.*?\*/|r(#*)".*?"\2|"(?:[^"\\]|\\.)*"|\x27(?:\\.|[^\\\x27\n])\x27)}
+    {blank($1)}gse;
+  $text }
+sub production { my ($text, $code) = @_;
+  return blank($text) if $code =~ /\A\s*(?:#!\[[^\]]*\]\s*)*#!\[cfg\((?:all\()?test\b/;
+  while ($code =~ /#\[cfg\((?:all\()?test\b[^\]]*\]/g) {
+    my ($from, $at, $depth) = ($-[0], $+[0], 0);
+    while ($at < length $code) {
+      my $char = substr $code, $at++, 1;
+      $depth++ if $char eq "{";
+      last if $char eq "}" && --$depth <= 0;
+      last if $char eq ";" && $depth == 0;
+    }
+    substr($text, $from, $at - $from) = blank(substr $text, $from, $at - $from);
+    pos($code) = $at;
+  }
+  $text }
+'
 dirs=$(ls -d sdk/chains/*/src/native 2>/dev/null)
 if [ -n "$dirs" ]; then
   # 1. SDK contract crates in any form: indexing::x, wallets::{..}, `extern crate wallets;`.
@@ -178,10 +204,21 @@ fi
 #    chain; they are apps/server/src/api now, so this check is what keeps them:
 #    - src/chains.rs is the one file of the application that names a chain
 #      crate;
-#    - nothing under src/api names a chain crate, the configuration reader
-#      (sdk_config), a storage backend (indexing::sqlite, indexing::memory,
-#      rusqlite), or the composition root's own chain and storage modules.
+#    - nothing under src/api (the endpoints and what several of them share),
+#      src/asset.rs (the asset tags they select by) or src/state.rs (the state
+#      they run on) names a chain crate, the configuration reader
+#      (sdk_config), a storage backend (indexing::sqlite, indexing::memory),
+#      or the composition root's own chain and storage modules; and nothing
+#      under src/api names the SQL driver (sqlx) -- the state holds the one
+#      pool, and the models are what read and write through it.
 #    Text is matched, comments included: a route has no reason to say either.
+#    Test-only items -- and test-only files, `#![cfg(test)]` -- are blanked
+#    first, as in check 12, so a route's tests may run on the memory store
+#    while the route itself still may not name one.
+#    - nothing under src/models (the entities, their wire form and their SQL)
+#      names the HTTP framework (axum), the routes (crate::api), the
+#      configuration reader, or a chain. A model's wire form is its own, so
+#      serde and utoipa derives are allowed there.
 app=apps/server/src
 [ -f "$app/chains.rs" ] || { echo "$app/chains.rs is missing"; status=1; }
 [ -d "$app/api" ] || { echo "$app/api is missing"; status=1; }
@@ -190,10 +227,27 @@ ls apps/*/src/lib.rs >/dev/null 2>&1 && { echo "an application exports a library
 chain_crate="${w}chain_(bitcoin|ethereum|solana)([^A-Za-z0-9_]|\$)|${w}chain_[a-z]+::"
 grep -rnE "$chain_crate" "$app" \
   | grep -vE "^$app/chains\.rs:" && { echo "chain crate outside $app/chains.rs"; status=1; }
-composed="chain_[a-z]+|sdk_config|rusqlite|indexing::(sqlite|memory)|crate::(chains|storage)"
-grep -rnE "${w}(${composed})([^A-Za-z0-9_]|\$)" "$app/api" \
+composed="chain_[a-z]+|sdk_config|indexing::(sqlite|memory)|crate::(chains|storage)"
+# Every production line of the given files that names one of PATTERN.
+named() { pattern=$1; shift
+  find "$@" -name '*.rs' -type f | sort | PATTERN="$pattern" perl -e "$production_perl"'
+    my $status = 1;
+    while (my $file = <STDIN>) { chomp $file;
+      open my $handle, "<", $file or die "$file: $!"; local $/; my $source = <$handle>;
+      my @lines = split /\n/, production($source, code($source));
+      for my $at (0 .. $#lines) {
+        next unless $lines[$at] =~ /(^|[^A-Za-z0-9_])($ENV{PATTERN})([^A-Za-z0-9_]|$)/;
+        print "$file:", $at + 1, ":$lines[$at]\n"; $status = 0; } }
+    exit $status;'
+}
+named "$composed" "$app/api" "$app/asset.rs" "$app/state.rs" \
   && { echo "a route names a chain, the configuration reader or a storage backend"; status=1; }
-grep -rnE 'enum (Chain|WalletAsset)\b|WalletAsset::' "$app/api" && { echo "closed asset/chain enum in routes"; status=1; }
+named "sqlx" "$app/api" \
+  && { echo "a route names the SQL driver; read and write through a model"; status=1; }
+named "axum|chain_[a-z]+|sdk_config|crate::(api|chains)" "$app/models" \
+  && { echo "a model names the HTTP framework, the routes, the configuration reader or a chain"; status=1; }
+grep -rnE 'enum (Chain|WalletAsset)\b|WalletAsset::' "$app/api" \
+  "$app/asset.rs" "$app/state.rs" && { echo "closed asset/chain enum in routes"; status=1; }
 
 # 10. The lenient address parse is store-free and has one implementation.
 #     `wallets::AddressParser` is
@@ -265,8 +319,10 @@ done
 #     the files directly in it; each directory under it is one store. A store
 #     may import the shared files and the engine. Nothing imports a store: not
 #     the engine (src/ and src/supervisor/), not a shared file directly in
-#     src/storage/, and not another store. `rusqlite` is the `sqlite` store's
-#     own crate and is held the same way.
+#     src/storage/, and not another store. `sqlx` is the `sqlite` store's
+#     own driver and is held the same way: it may appear in
+#     src/storage/sqlite/ and nowhere else in the crate, while `sqlx::sqlite::`
+#     there names the driver's module, not the store.
 #
 #     It lives here because the linter has no rule for it: `rust/layers` reads
 #     Cargo dependency edges between packages, not `use` paths, and no other
@@ -292,38 +348,23 @@ if [ -z "$stores" ]; then
   echo "no store directory under $index/storage; cannot check what imports one"
   status=1
 else
-  find "$index" -name '*.rs' -type f | sort | INDEX="$index" STORES="$stores" perl -e '
+  find "$index" -name '*.rs' -type f | sort | INDEX="$index" STORES="$stores" perl -e "$production_perl"'
     use strict; use warnings;
     my $index = $ENV{INDEX};
     my %owner = map { $_ => $_ } split " ", $ENV{STORES};
-    $owner{rusqlite} = "sqlite" if $owner{sqlite};
+    $owner{sqlx} = "sqlite" if $owner{sqlite};
     my $status = 0;
-    sub blank { my ($text) = @_; $text =~ s/[^\n]/ /g; $text }
     while (my $file = <STDIN>) { chomp $file;
       my $own = $file =~ m{^\Q$index\E/storage/([^/]+)/} ? $1 : "";
       my $names = join "|", grep { $owner{$_} ne $own } sort keys %owner;
       next unless length $names;
       open my $handle, "<", $file or die "$file: $!"; local $/; my $source = <$handle>;
-      my $code = $source;
-      # One pass over comments, strings and characters, so none can open another.
-      $code =~ s{(//[^\n]*|/\*.*?\*/|r(#*)".*?"\2|"(?:[^"\\]|\\.)*"|\x27(?:\\.|[^\\\x27\n])\x27)}
-        {blank($1)}gse;
-      # A test-only item: through its first `;`, or to the end of the block it opens.
-      while ($code =~ /#\[cfg\((?:all\()?test\b[^\]]*\]/g) {
-        my ($from, $at, $depth) = ($-[0], $+[0], 0);
-        while ($at < length $code) {
-          my $char = substr $code, $at++, 1;
-          $depth++ if $char eq "{";
-          last if $char eq "}" && --$depth <= 0;
-          last if $char eq ";" && $depth == 0;
-        }
-        substr($code, $from, $at - $from) = blank(substr $code, $from, $at - $from);
-        pos($code) = $at;
-      }
+      my $code = code($source);
+      $code = production($code, $code);
       $code =~ s{(\bpub\s+use\s+(?:(?:crate|self)::)?storage::(?:$names)\s*;)}{blank($1)}ge
         if $file eq "$index/lib.rs";
       my %found;
-      $found{$-[1]} = $1 while $code =~ /(?<![A-Za-z0-9_])($names)\s*::/g;
+      $found{$-[1]} = $1 while $code =~ /(?<![A-Za-z0-9_])(?<!sqlx::)($names)\s*::/g;
       while ($code =~ /\buse\s([^;]*);/g) { my ($body, $from) = ($1, $-[1]);
         $found{$from + $-[1]} = $1 while $body =~ /(?<![A-Za-z0-9_])($names)(?![A-Za-z0-9_])/g; }
       my @lines = split /\n/, $source; my %reported;
@@ -336,5 +377,29 @@ else
     exit $status;
   ' || status=1
 fi
+
+# 14. `wallets` and `indexing` know nothing of each other, both directions.
+#     Wallets names no `indexing` at all -- code, comments or manifest -- and
+#     indexing names no `wallets` crate: no `wallets::` path, `use wallets` or
+#     manifest entry. (`wallets` is also indexing's noun for its wallet rows,
+#     so that direction matches the crate's paths, not the word.) Composition
+#     of both lives in `sdk/config`.
+grep -rnw 'indexing' sdk/wallets/src sdk/wallets/tests sdk/wallets/Cargo.toml \
+  && { echo "sdk/wallets names indexing; wallets depends on base only"; status=1; }
+grep -rnE '(^|[^A-Za-z0-9_:])wallets::|\buse[[:space:]]+wallets\b' \
+  sdk/indexing/src sdk/indexing/tests \
+  && { echo "sdk/indexing names the wallets crate"; status=1; }
+grep -nE '^[[:space:]]*wallets[[:space:]]*=' sdk/indexing/Cargo.toml \
+  && { echo "sdk/indexing depends on wallets"; status=1; }
+
+# 13. One SQLite in the build. sqlx and rusqlite each link the C library
+#     through `libsqlite3-sys`, whose `links = "sqlite3"` lets one build hold
+#     a single version of it, so the driver is sqlx alone: the lockfile names
+#     no rusqlite and exactly one libsqlite3-sys.
+grep -q '^name = "rusqlite"$' Cargo.lock \
+  && { echo "Cargo.lock names rusqlite; the SQLite driver is sqlx"; status=1; }
+sqlite_sys=$(grep -c '^name = "libsqlite3-sys"$' Cargo.lock)
+[ "$sqlite_sys" = "1" ] \
+  || { echo "Cargo.lock names libsqlite3-sys $sqlite_sys times; one SQLite links"; status=1; }
 
 exit "$status"

@@ -15,6 +15,7 @@ import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState } from 'react';
 import { call, client, type Balance, type Transaction, type Wallet as Account } from '@/api/client';
 import { Coin } from '@/_components/coin';
+import { Confirm } from '@/_components/confirm';
 import { Copy } from '@/_components/copy';
 import type { Shell } from '@/layout';
 import { atomic, decimalsOf, effect, format, shorten, unitOf } from '@/money';
@@ -26,10 +27,6 @@ const PAGE = 100;
 const CLAIMS: Record<Balance['completeness'], { text: string; color: string }> = {
   complete_history: {
     text: 'Every movement since the address was first used is here.',
-    color: 'text.secondary',
-  },
-  verified_opening_balance: {
-    text: 'The total was checked against the node.',
     color: 'text.secondary',
   },
   incomplete: {
@@ -50,7 +47,20 @@ const STATUS: Record<Transaction['status']['kind'], string> = {
 
 const figures = { fontFamily: mono, fontWeight: 300, fontVariantNumeric: 'tabular-nums' } as const;
 
-export function Wallet({ shell, wallet }: { shell: Shell; wallet: Account }) {
+/** When the wallet was archived, as local date text. */
+function day(seconds: number): string {
+  return new Date(seconds * 1000).toLocaleDateString();
+}
+
+export function Wallet({
+  shell,
+  wallet,
+  onRetired,
+}: {
+  shell: Shell;
+  wallet: Account;
+  onRetired: (wallet: Account) => void;
+}) {
   const decimals = decimalsOf(wallet, shell.listings);
   const unit = unitOf(wallet, shell.listings);
   const [balance, setBalance] = useState<Balance | null>(null);
@@ -60,6 +70,18 @@ export function Wallet({ shell, wallet }: { shell: Shell; wallet: Account }) {
   const [line, setLine] = useState<number | null>(null);
   // Not wired yet: the API has no route to stop or restart a watch.
   const [watching, setWatching] = useState(true);
+  const [archiving, setArchiving] = useState(false);
+  const live = wallet.archived_at == null;
+
+  const archive = () => {
+    setArchiving(false);
+    call(client.DELETE('/v1/wallets/{id}', { params: { path: { id: wallet.id } } }))
+      .then((archived) => {
+        shell.notify('Wallet archived. Its address is no longer watched.');
+        onRetired(archived);
+      })
+      .catch(shell.fail);
+  };
 
   const refresh = useCallback(() => {
     const id = { path: { id: wallet.id } };
@@ -108,26 +130,39 @@ export function Wallet({ shell, wallet }: { shell: Shell; wallet: Account }) {
       >
         <Box sx={{ minWidth: 0 }}>
           <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center' }}>
-            <Coin symbol={wallet.asset} size={26} />
+            <Coin symbol={wallet.asset ?? wallet.asset_id} size={26} />
             <Typography variant="overline" component="p" sx={{ flexGrow: 1 }}>
-              {wallet.asset} · {wallet.network.chain}/{wallet.network.name}
+              {wallet.asset ?? wallet.asset_id} · {wallet.network.chain}/{wallet.network.name}
               {wallet.watch_only && ' · watch only'}
+              {wallet.archived_at != null && ` · archived ${day(wallet.archived_at)}`}
             </Typography>
-            <Tooltip title="Stops inspecting new blocks for this address; its history is kept. Not wired to the server yet.">
-              <FormControlLabel
-                control={
-                  <Switch
-                    size="small"
-                    checked={watching}
-                    onChange={(e) => setWatching(e.target.checked)}
-                  />
-                }
-                label={watching ? 'Watching' : 'Paused'}
-                slotProps={{ typography: { sx: { fontSize: 12, color: 'text.secondary' } } }}
-                sx={{ mr: 0 }}
-              />
-            </Tooltip>
+            {live && (
+              <Button size="small" color="error" onClick={() => setArchiving(true)}>
+                Archive
+              </Button>
+            )}
+            {live && (
+              <Tooltip title="Stops inspecting new blocks for this address; its history is kept. Not wired to the server yet.">
+                <FormControlLabel
+                  control={
+                    <Switch
+                      size="small"
+                      checked={watching}
+                      onChange={(e) => setWatching(e.target.checked)}
+                    />
+                  }
+                  label={watching ? 'Watching' : 'Paused'}
+                  slotProps={{ typography: { sx: { fontSize: 12, color: 'text.secondary' } } }}
+                  sx={{ mr: 0 }}
+                />
+              </Tooltip>
+            )}
           </Stack>
+          {wallet.label != null && (
+            <Typography variant="h2" component="h2" sx={{ mt: 0.75, overflowWrap: 'anywhere' }}>
+              {wallet.label}
+            </Typography>
+          )}
           <Typography sx={{ fontFamily: mono, fontSize: 17, overflowWrap: 'anywhere', my: 0.5 }}>
             {wallet.address}
           </Typography>
@@ -191,7 +226,7 @@ export function Wallet({ shell, wallet }: { shell: Shell; wallet: Account }) {
         </Box>
       </Box>
 
-      {!wallet.watch_only && (
+      {!wallet.watch_only && live && (
         <Send shell={shell} wallet={wallet} onSent={() => window.setTimeout(refresh, 2500)} />
       )}
 
@@ -248,6 +283,17 @@ export function Wallet({ shell, wallet }: { shell: Shell; wallet: Account }) {
           Older
         </Button>
       )}
+      <Confirm
+        open={archiving}
+        title="Archive wallet"
+        phrase={wallet.label ?? wallet.address}
+        action="Archive"
+        onClose={() => setArchiving(false)}
+        onConfirm={archive}
+      >
+        Stops watching this address and refuses sends from it. Its indexed history and balance stay
+        readable. There is no unarchive.
+      </Confirm>
     </Box>
   );
 }

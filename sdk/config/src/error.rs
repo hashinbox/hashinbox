@@ -16,6 +16,9 @@ pub enum ErrorKind {
     /// One named section is not a section any registered chain understands,
     /// or the chain that owns it refused it.
     Section,
+    /// A candidate node list built and parsed, and its node did not prove the
+    /// network its section configures ([`crate::ChainNodes::verify`]).
+    Unverified,
 }
 
 /// A configuration value the deployment cannot run on.
@@ -92,6 +95,15 @@ impl From<wallets::WalletError> for Error {
     /// A chain refused to compose itself over the storage it was handed. The
     /// section is attached by whatever was iterating chains at the time.
     fn from(error: wallets::WalletError) -> Self {
+        Self::new(ErrorKind::Section, error.message)
+    }
+}
+
+impl From<indexing::IndexError> for Error {
+    /// A chain's index or the composition over every chain refused: two
+    /// chains claiming one network, or a store that failed while a chain was
+    /// composed over it. The index's own wording is kept verbatim.
+    fn from(error: indexing::IndexError) -> Self {
         Self::new(ErrorKind::Section, error.message)
     }
 }

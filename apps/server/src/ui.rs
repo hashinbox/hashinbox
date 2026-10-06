@@ -163,12 +163,9 @@ mod tests {
     #[test]
     fn the_bundle_names_only_routes_the_api_serves() {
         let served = [
-            "/healthz",
-            "/v1/addresses",
+            "/health",
             "/v1/assets",
-            "/v1/chains",
-            "/v1/indexing",
-            "/v1/logs",
+            "/v1/networks",
             "/v1/transactions",
             "/v1/wallets",
         ];
@@ -177,7 +174,7 @@ mod tests {
         let named: Vec<&str> = SCRIPT
             .match_indices("\"/")
             .filter_map(|(at, _)| SCRIPT[at + 1..].split('"').next())
-            .filter(|path| path.starts_with("/v1/") || *path == "/healthz")
+            .filter(|path| path.starts_with("/v1/") || *path == "/health")
             .collect();
         for path in &named {
             assert!(

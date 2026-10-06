@@ -14,8 +14,8 @@
 //! memory, exposed only as a sample ([`crate::Pending`]).
 
 use crate::{
-    Address, AssetId, BlockHeight, BlockRef, BoxFuture, CanonicalStatus, CanonicalTransaction,
-    Checkpointed, Completeness, Holder, IndexError, IndexErrorKind, TransactionRef, ValueMovement,
+    Address, AssetId, BlockHeight, BlockRef, BoxFuture, Checkpointed, Completeness, Holder,
+    IndexError, IndexErrorKind, Status, Transaction, TransactionRef, ValueMovement,
     holder::require_holding,
 };
 
@@ -132,7 +132,7 @@ impl Page {
 ///
 /// **All three components are functions of the block**, which is what keeps
 /// that true when more of an already-stored block is written later:
-/// [`CanonicalTransaction::transaction_order`] is the transaction's native
+/// [`Transaction::order`] is the transaction's native
 /// place in its block rather than a rank over whatever selection reached the
 /// block first, so one transaction resolves to one position under every
 /// selection and no later watch can renumber rows beneath a held cursor.
@@ -147,12 +147,12 @@ pub struct HistoryPosition {
 }
 
 /// A transaction's own place is where a page that ends on it resumes.
-impl From<&CanonicalTransaction> for HistoryPosition {
-    fn from(transaction: &CanonicalTransaction) -> Self {
+impl From<&Transaction> for HistoryPosition {
+    fn from(transaction: &Transaction) -> Self {
         Self {
             height: transaction.block().height,
-            transaction_order: transaction.transaction_order,
-            transaction: transaction.transaction.transaction_id.clone(),
+            transaction_order: transaction.order,
+            transaction: transaction.id.clone(),
         }
     }
 }
@@ -205,20 +205,20 @@ impl Holder for HistoryQuery {
     fn asset(&self) -> &AssetId {
         &self.asset
     }
+}
 
+impl HistoryQuery {
     /// The holding, and the page this request adds to it.
     ///
     /// # Errors
     ///
     /// [`IndexErrorKind::InvalidRequest`] for a blank address, an asset of
     /// another chain, or a `limit` outside `1..=1000`.
-    fn validate(&self) -> Result<(), IndexError> {
+    pub fn validate(&self) -> Result<(), IndexError> {
         require_holding(&self.address, &self.asset)?;
         require_limit(self.limit)
     }
-}
 
-impl HistoryQuery {
     /// The store query for one page of `of`'s history.
     ///
     /// The two halves come from their own owners: the subject's address and
@@ -236,9 +236,8 @@ impl HistoryQuery {
     /// `transaction` as this query returns it: `None` when it does not match,
     /// otherwise with only its movements of the query asset.
     #[must_use]
-    pub fn select(&self, mut transaction: CanonicalTransaction) -> Option<CanonicalTransaction> {
+    pub fn select(&self, mut transaction: Transaction) -> Option<Transaction> {
         let moved = transaction
-            .transaction
             .movements
             .iter()
             .any(|movement| self.moves(movement));
@@ -246,7 +245,6 @@ impl HistoryQuery {
             return None;
         }
         transaction
-            .transaction
             .movements
             .retain(|movement| self.moves(movement));
         Some(transaction)
@@ -260,11 +258,11 @@ impl HistoryQuery {
 
     /// Whether the query address paid `transaction`'s fee and the fee alone
     /// puts it on the page: it failed, or the query asset is the fee asset.
-    fn charges(&self, transaction: &CanonicalTransaction) -> bool {
-        let Some(fee) = &transaction.transaction.fee else {
+    fn charges(&self, transaction: &Transaction) -> bool {
+        let Some(fee) = &transaction.fee else {
             return false;
         };
-        let failed = matches!(transaction.status, CanonicalStatus::Failed { .. });
+        let failed = matches!(transaction.status, Status::Failed { .. });
         fee.payer.as_ref() == Some(&self.address) && (failed || fee.asset == self.asset)
     }
 }
@@ -272,12 +270,12 @@ impl HistoryQuery {
 /// A [`ConfirmedHistory`] page: canonical transactions without read-time
 /// status.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CanonicalPage {
+pub struct ConfirmedHistoryPage {
     /// The checkpoint the page was read at.
     pub checkpoint: Option<BlockRef>,
     /// Matching transactions, ascending by
     /// `(height, transaction order, transaction id)` — native block order.
-    pub transactions: Vec<CanonicalTransaction>,
+    pub transactions: Vec<Transaction>,
     /// Where the next page resumes, or `None` when nothing else matches.
     pub next: Option<HistoryPosition>,
     /// How much of the history this page is a window onto the store can prove
@@ -303,7 +301,7 @@ pub struct CanonicalPage {
 
 /// The page and its checkpoint are one snapshot, so the page is what a
 /// pending sample is narrowed by.
-impl Checkpointed for CanonicalPage {
+impl Checkpointed for ConfirmedHistoryPage {
     fn checkpoint(&self) -> Option<&BlockRef> {
         self.checkpoint.as_ref()
     }
@@ -326,7 +324,7 @@ pub trait ConfirmedHistory: Send + Sync {
     fn history<'a>(
         &'a self,
         query: HistoryQuery,
-    ) -> BoxFuture<'a, Result<CanonicalPage, IndexError>>;
+    ) -> BoxFuture<'a, Result<ConfirmedHistoryPage, IndexError>>;
 }
 
 /// So a repository that is neither cheap to clone nor clonable at all is held
@@ -336,7 +334,7 @@ impl<T: ConfirmedHistory + ?Sized> ConfirmedHistory for std::sync::Arc<T> {
     fn history<'a>(
         &'a self,
         query: HistoryQuery,
-    ) -> BoxFuture<'a, Result<CanonicalPage, IndexError>> {
+    ) -> BoxFuture<'a, Result<ConfirmedHistoryPage, IndexError>> {
         (**self).history(query)
     }
 }

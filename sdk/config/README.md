@@ -38,9 +38,25 @@ The document for that registry has one section per registered name:
 }
 ```
 
+A chain's `Config` implements `Chain`: `network` names its network from the
+section alone, `accept` validates local settings, `verify` checks a node's identity
+over a transport, and `connect` builds the transport, verifies it and returns what
+composes the chain.
+
 `Chains::compose` then verifies every node, opens storage and returns a
-`wallets::Composition`. No document is required: `Chains::add` accepts a chain
-`Config` built in code.
+`Composition`; the first failed verification ends it.
+
+`Composition` folds every verified chain's `ComposedChain` into what a process
+holds: one `indexing::Index`, one history and one balance handle routed by
+network, one `wallets::Wallets` map, every declared unit and each network's
+`Schedule`. `Connection` is a verified chain with its type erased.
+`Composition::verify_then_build` finishes every identity check before storage
+opens, so a deployment naming the wrong node writes nothing.
+`Chains::compose_available` instead skips a chain whose node fails verification and
+returns a `Startup`: the composition of the rest, each verified network's endpoint
+counters, every configured network as a `ChainNodes`, and the skipped sections'
+errors. No document is required: `Chains::add` accepts a chain `Config` built in
+code.
 
 ## Notes
 
@@ -52,3 +68,12 @@ The document for that registry has one section per registered name:
 - A `${NAME}` reference is resolved when the transport is built, not when the
   document is parsed. A missing environment variable therefore fails at
   `Rpc::transport` or `Chains::connect`, after validation has passed.
+- An application that keeps a network's nodes elsewhere (stored) reads each
+  parsed section's endpoint documents, as written, with `Chains::endpoints` and
+  hands its own back with `Chains::with_endpoints`; the section's `rpc.repeat`
+  and chain keys stay as written. A chain parsed from a document is composed over
+  a `json_rpc::Swap` (`ChainNodes::transport`). `ChainNodes::verify` runs the
+  chain's own `verify` over candidate endpoints and returns the transport and
+  counters to install with `Swap::replace`; nothing is parsed again.
+- `Chains::with_transport_for` composes one network over a caller-owned transport
+  instead; the caller then owns its endpoint counters.

@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     BlockCommit, BlockHeight, BlockInterpreter, BlockPosition, BlockRef, BlockSource,
-    CanonicalBlock, IndexError, IndexErrorKind, IndexStore, IndexedBatch, Indexer, NativeBlock,
-    OutputChanges, OutputKey, Repository, SyncPhase, SyncPlan, SyncStatus, pending,
+    BlockWithOutputs, IndexError, IndexErrorKind, IndexStore, IndexedBatch, Indexer, NativeBlock,
+    OutputKey, Repository, SyncPhase, SyncPlan, SyncStatus, pending,
 };
 
 /// What one pass has committed so far: the line it left behind, and the
@@ -333,7 +333,7 @@ where
         plan: &mut SyncPlan,
     ) -> Result<(), IndexError> {
         while let Some(canonical) = self.pending.confirmed(window.confirmed.position)? {
-            let block = canonical.block().clone();
+            let block = canonical.block.reference().clone();
             // A commit whose outcome was lost leaves the store's own line at or
             // above this block: it is written, its claims are recorded, and
             // there is nothing left to do but stop holding it. Presenting it
@@ -367,17 +367,11 @@ where
     /// direction is [`Self::commit_batch`]'s.
     async fn commit_held_block(
         &self,
-        canonical: CanonicalBlock,
+        canonical: BlockWithOutputs,
         committed: &mut CommitTally,
         plan: &mut SyncPlan,
     ) -> Result<(), IndexError> {
-        let block = canonical.block().clone();
-        // Storage consumes the facts, so keep the ones a listener needs — but
-        // only when one is actually registered.
-        let changed = self.listeners.listening().then(|| {
-            let transactions = canonical.transactions().iter().cloned().collect();
-            (transactions, canonical.outputs().clone())
-        });
+        let block = canonical.block.reference().clone();
         let proved = self
             .watches
             .forward(committed.checkpoint.as_ref(), &block)?;
@@ -388,11 +382,11 @@ where
             proved,
             self.interpreter.settlement(),
         )?;
-        let unknown = self.commit_batch(plan, committed, batch).await?;
+        self.commit_batch(plan, committed, batch).await?;
         self.pending.committed(&block)?;
         plan.advance(block.clone());
         committed.checkpoint = Some(block.clone());
-        self.announce(block, changed, unknown);
+        self.announce(block);
         Ok(())
     }
 
@@ -452,21 +446,10 @@ where
     /// Synchronous on purpose: no list is copied per block, and a hook that
     /// cannot await cannot slow the pass by awaiting. The list is shared for the loop rather than
     /// locked across it, so a callback may register another listener.
-    fn announce(
-        &self,
-        block: BlockRef,
-        changed: Option<(Vec<crate::CanonicalTransaction>, OutputChanges)>,
-        unmatched_spends: Vec<OutputKey>,
-    ) {
-        let Some((transactions, outputs)) = changed else {
-            return;
-        };
+    fn announce(&self, block: BlockRef) {
         self.listeners.announce(&BlockCommit {
             network: self.config.network.clone(),
             block,
-            transactions,
-            outputs,
-            unmatched_spends,
         });
     }
 }

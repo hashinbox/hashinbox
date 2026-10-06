@@ -4,17 +4,18 @@
 //! code or deserialized from any `serde` format — [`Config::connect`]s to a
 //! node and verifies its identity, and the verified [`ChainHandle`] then
 //! [`ChainHandle::compose`]s over an opened repository into a
-//! [`wallets::ComposedChain`]. No storage is opened on the first step, which is
+//! [`sdk_config::ComposedChain`]. No storage is opened on the first step, which is
 //! what lets an application check every chain's identity before it opens
-//! anything. [`wallets::Composition`] is what
+//! anything. [`sdk_config::Composition`] is what
 //! holds this chain beside the others.
 
 use std::{str::FromStr, sync::Arc};
 
 use base::{Networked as _, Unit, Units};
 use indexing::Checkpoint as _;
+use sdk_config::{ComposedChain, Connection};
 use serde::Deserialize;
-use wallets::{ComposedChain, Connection, SubmissionRegistrar};
+use wallets::SubmissionRegistrar;
 
 /// What a store must answer for **this** chain to compose over it.
 ///
@@ -70,7 +71,7 @@ use crate::{
 ///
 /// `A` is the asset tag the application keys its wallet factories by; the
 /// chain never interprets it.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(
     deny_unknown_fields,
     bound = "A: serde::de::DeserializeOwned + FromStr + Ord"
@@ -190,8 +191,14 @@ impl<A: Ord> Config<A> {
                 transport
             }
         };
-        let rpc = RpcClient::connect(transport, &self.network).await?;
+        let rpc = self.verified(transport).await?;
         Ok(ChainHandle { config: self, rpc })
+    }
+
+    /// The node identity checks [`Self::connect`] runs over `transport`: the
+    /// node serves this configuration's network.
+    async fn verified(&self, transport: Transport) -> Result<RpcClient<Transport>, Error> {
+        RpcClient::connect(transport, &self.network).await
     }
 
     const fn default_confirmation_depth() -> u64 {
@@ -331,15 +338,20 @@ impl<A> ChainHandle<A> {
 }
 
 /// [`ChainHandle::compose`] with this chain's type erased, so one vector holds every
-/// configured chain and [`wallets::Composition`] folds them without naming any
+/// configured chain and [`sdk_config::Composition`] folds them without naming any
 /// of them. An application writes none of this.
 impl<A: Send + 'static, R: Store> Connection<A, R> for ChainHandle<A> {
     fn compose<'a>(
         self: Box<Self>,
         repository: R,
         registrar: &'a Arc<dyn SubmissionRegistrar>,
-    ) -> base::BoxFuture<'a, Result<ComposedChain<A>, wallets::WalletError>> {
-        Box::pin(async move { Ok((*self).compose(repository, registrar).await?) })
+    ) -> base::BoxFuture<'a, Result<ComposedChain<A>, sdk_config::Error>> {
+        Box::pin(async move {
+            (*self)
+                .compose(repository, registrar)
+                .await
+                .map_err(sdk_config::Error::refused)
+        })
     }
 }
 
@@ -352,7 +364,7 @@ impl<A: Send + 'static, R: Store> Connection<A, R> for ChainHandle<A> {
 /// of them involves a file.
 impl<A, R> sdk_config::Chain<A, R> for Config<A>
 where
-    A: Ord + Send + Sync + 'static,
+    A: Clone + Ord + Send + Sync + 'static,
     R: Store,
 {
     fn network(&self) -> base::Network {
@@ -369,15 +381,28 @@ where
         )))
     }
 
+    fn verify<'a>(
+        &'a self,
+        transport: &'a Transport,
+    ) -> base::BoxFuture<'a, Result<(), sdk_config::Error>> {
+        Box::pin(async move {
+            self.verified(transport.clone())
+                .await
+                .map(drop)
+                .map_err(sdk_config::Error::refused)
+        })
+    }
+
     fn connect<'a>(
-        self: Box<Self>,
+        &'a self,
         secrets: &'a dyn json_rpc::Secrets,
         statistics: &'a mut Vec<json_rpc::Statistics>,
         logger: logging::Logger,
         transport: Option<Transport>,
     ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, sdk_config::Error>> {
         Box::pin(async move {
-            let node = (*self)
+            let node = self
+                .clone()
                 .connect_monitored(secrets, statistics, logger, transport)
                 .await
                 .map_err(sdk_config::Error::refused)?;
@@ -390,9 +415,11 @@ where
 mod tests {
     use std::collections::BTreeMap;
 
+    use futures_executor::block_on;
     use serde_json::json;
 
     use super::*;
+    use crate::native::rpc::script::{Reply, Script, Scripted};
 
     fn parse(value: serde_json::Value) -> Result<Config<String>, Error> {
         serde_json::from_value(value)
@@ -598,5 +625,63 @@ mod tests {
         }))
         .expect("an explicit tag");
         assert_eq!(config.asset, "btc-regtest");
+    }
+
+    /// [`sdk_config::Chain::verify`] over a scripted node: the identity check
+    /// `connect` runs, and the one a replacement node list must pass.
+    fn verify(config: &Config<String>, script: &Script) -> Result<(), sdk_config::Error> {
+        let transport: Transport = Arc::new(script.clone());
+        let chain: &dyn sdk_config::Chain<String, indexing::memory::Repository> = config;
+        block_on(chain.verify(&transport))
+    }
+
+    fn regtest() -> Config<String> {
+        let rpc = Rpc::endpoint("http://127.0.0.1:18443");
+        Config::new(Network::Regtest, rpc, "btc".to_owned())
+    }
+
+    fn node_info() -> Reply {
+        Reply::ok("getnetworkinfo", json!({"version": 310_000})).expecting(json!([]))
+    }
+
+    fn chain_info(chain: &str) -> Reply {
+        let info = json!({
+            "chain": chain, "pruned": false, "initialblockdownload": false,
+            "blocks": 10, "headers": 10, "bestblockhash": "02".repeat(32),
+        });
+        Reply::ok("getblockchaininfo", info).expecting(json!([]))
+    }
+
+    #[test]
+    fn verify_accepts_a_node_serving_the_configured_network() {
+        let script = Script::node([
+            node_info(),
+            chain_info("regtest"),
+            Reply::ok(
+                "getindexinfo",
+                json!({"txindex": {"synced": true, "best_block_height": 10}}),
+            )
+            .expecting(json!(["txindex"])),
+        ]);
+
+        verify(&regtest(), &script).expect("a regtest node serves a regtest section");
+
+        script.exhausted();
+    }
+
+    /// A mainnet node behind a regtest section is refused on its chain name,
+    /// before the transaction index is consulted.
+    #[test]
+    fn verify_refuses_a_node_serving_another_network() {
+        let script = Script::node([node_info(), chain_info("main")]);
+
+        let error = verify(&regtest(), &script).expect_err("another network");
+
+        assert_eq!(error.kind, sdk_config::ErrorKind::Section);
+        assert_eq!(
+            error.message,
+            "Bitcoin RPC network does not match configuration"
+        );
+        script.exhausted();
     }
 }

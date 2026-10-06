@@ -11,8 +11,8 @@ the rest of the SDK.
 use std::{collections::BTreeMap, sync::Arc};
 
 use chain_bitcoin::{AddressType, Config, Error, Network, Store};
-use sdk_config::Rpc;
-use wallets::{ComposedChain, SubmissionRegistrar};
+use sdk_config::{ComposedChain, Rpc};
+use wallets::SubmissionRegistrar;
 
 /// `repository` is the one store every network is indexed into.
 async fn bitcoin<R: Store>(

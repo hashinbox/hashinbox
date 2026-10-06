@@ -5,9 +5,9 @@ use base::Decimal;
 
 use indexing::{
     AssetId, BalanceQuery, BalanceStore, BlockCredit, BlockHeight, BlockPosition, BlockRef,
-    CanonicalBlock, ConfirmedHistory, FeeSettlement, IndexedBatch, IndexedOutput, InterpretedBlock,
-    MovementId, ObservationDraft, ObservationDraftStatus, OutputChanges, OutputId, OutputKey,
-    OutputStore, Progress, Repository, ValueMovement, Watch,
+    BlockWithOutputs, ConfirmedHistory, FeeSettlement, IndexedBatch, IndexedOutput, MovementId,
+    OutputChanges, OutputId, OutputKey, OutputStore, Progress, Repository, Status, Transaction,
+    ValueMovement, Watch,
 };
 
 use super::backfill::BackfillContract;
@@ -79,9 +79,9 @@ impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillCont
 
     /// The block at `height` as it is *not* stored: same transaction, no fee, so
     /// one `(address, height, transaction)` would have two contents.
-    pub(super) fn disagreeing(&self, height: u64) -> CanonicalBlock {
+    pub(super) fn disagreeing(&self, height: u64) -> BlockWithOutputs {
         let mut draft = self.draft(height);
-        draft.transaction.fee = None;
+        draft.fee = None;
         self.canonical_of(height, vec![draft], OutputChanges::default(), Vec::new())
     }
 
@@ -116,7 +116,7 @@ impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillCont
 
     /// One block as the interpreter reports it for the pending address, already
     /// validated.
-    pub(super) fn canonical(&self, height: u64) -> CanonicalBlock {
+    pub(super) fn canonical(&self, height: u64) -> BlockWithOutputs {
         let created = (height == 3).then(|| self.output()).into_iter().collect();
         let spent = if height == 5 {
             vec![self.output().key()]
@@ -147,24 +147,20 @@ impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillCont
     pub(super) fn canonical_of(
         &self,
         height: u64,
-        transactions: Vec<ObservationDraft>,
+        transactions: Vec<Transaction>,
         outputs: OutputChanges,
         credits: Vec<BlockCredit>,
-    ) -> CanonicalBlock {
-        CanonicalBlock::new(
-            self.fixture.network.clone(),
-            InterpretedBlock {
-                outputs,
-                credits,
-                ..InterpretedBlock::new(
-                    &self.fixture.network,
-                    self.fixture.block(height),
-                    transactions,
-                )
-                .expect("unique transaction ids")
-            },
-        )
-        .expect("valid fixture facts")
+    ) -> BlockWithOutputs {
+        BlockWithOutputs {
+            outputs,
+            credits,
+            ..BlockWithOutputs::new(
+                &self.fixture.network,
+                self.fixture.block(height),
+                transactions,
+            )
+            .expect("unique transaction ids")
+        }
     }
 
     /// The settled balance of `late`, under an account chain's fee rule.
@@ -180,25 +176,25 @@ impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillCont
             .amount
     }
 
-    pub(super) fn draft(&self, height: u64) -> ObservationDraft {
-        ObservationDraft {
-            transaction: indexing::Transaction {
-                transaction_id: self.fixture.transaction(&format!("block-{height}")),
-                movements: vec![ValueMovement::transfer(
-                    MovementId(format!("m-{height}")),
-                    self.asset(),
-                    Decimal::from(10_u64),
-                    self.fixture.address("payer"),
-                    self.fixture.address("late"),
-                )],
-                fee: Some(indexing::NetworkFee {
-                    asset: self.asset(),
-                    amount: Decimal::from(1_u64),
-                    payer: Some(self.fixture.address("payer")),
-                }),
+    pub(super) fn draft(&self, height: u64) -> Transaction {
+        Transaction {
+            id: self.fixture.transaction(&format!("block-{height}")),
+            movements: vec![ValueMovement::transfer(
+                MovementId(format!("m-{height}")),
+                self.asset(),
+                Decimal::from(10_u64),
+                self.fixture.address("payer"),
+                self.fixture.address("late"),
+            )],
+            fee: Some(indexing::NetworkFee {
+                asset: self.asset(),
+                amount: Decimal::from(1_u64),
+                payer: Some(self.fixture.address("payer")),
+            }),
+            order: 0,
+            status: Status::Included {
+                block: self.fixture.block(height),
             },
-            transaction_order: 0,
-            status: ObservationDraftStatus::Included,
         }
     }
 

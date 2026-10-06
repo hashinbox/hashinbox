@@ -23,6 +23,11 @@ json-rpc = { path = "../packages/json-rpc" }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 
+[dev-dependencies]
+# The scripted chain `tests/custom_store.rs` asserts the scenario's claims
+# over (`indexing::testing`); no scenario uses it.
+indexing = { path = "../sdk/indexing", features = ["testing"] }
+
 [[example]]
 name = "wallet"
 path = "wallet/main.rs"

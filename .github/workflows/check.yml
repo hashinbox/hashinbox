@@ -76,6 +76,25 @@ jobs:
             fi
           done
           exit "$status"
+      # The same invariant for the SQL driver: sqlx is the `sqlite` store's
+      # (`indexing --features sqlite`) and the binary's. The vocabulary crates,
+      # the chains and indexing without that store link none of it.
+      - name: No SDK crate links sqlx
+        run: |
+          status=0
+          for crate in base wallets sdk-config chain-bitcoin chain-ethereum chain-solana; do
+            if cargo tree --locked -q -p "$crate" -e normal --prefix none \
+                 | grep -q '^sqlx '; then
+              echo "$crate links sqlx"
+              status=1
+            fi
+          done
+          if cargo tree --locked -q -p indexing --no-default-features --features memory \
+               -e normal --prefix none | grep -q '^sqlx '; then
+            echo "indexing without the sqlite store links sqlx"
+            status=1
+          fi
+          exit "$status"
       - name: Test
         run: cargo test --locked --workspace --no-fail-fast
       - name: Submission supervision

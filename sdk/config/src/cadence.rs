@@ -20,7 +20,7 @@ use crate::{Error, ErrorKind};
 /// described a rollback journal that no longer exists.
 ///
 /// Both fields are the type their consumer takes. [`Self::poll`] is the
-/// `Duration` `wallets::ComposedChain::poll` holds, and [`Self::policy`] is
+/// `Duration` [`crate::ComposedChain::poll`] holds, and [`Self::policy`] is
 /// the [`SyncPolicy`] `indexing` validates — neither is re-inflated from a
 /// bare integer at the chain end, which is what this type used to force
 /// because a `packages/*` crate could not name an `sdk/*` type.

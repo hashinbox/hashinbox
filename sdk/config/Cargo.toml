@@ -18,7 +18,12 @@ toml = { version = "=0.9.12", optional = true }
 wallets = { path = "../wallets" }
 
 [dev-dependencies]
+# The in-memory store (`indexing::memory`), which stands in for an opened
+# database while a composition is assembled.
+indexing = { path = "../indexing", default-features = false, features = ["memory"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
+# The scripted wallet factory a composition test registers.
+wallets = { path = "../wallets", features = ["testing"] }
 
 [features]
 default = []

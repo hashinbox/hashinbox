@@ -3,9 +3,9 @@
 use base::Decimal;
 
 use indexing::{
-    Address, AssetId, Balance, BalanceQuery, BalanceStore, BlockCredit, CanonicalBlock,
-    Completeness, FeeSettlement, IndexStore, InterpretedBlock, MovementId, Network, NetworkFee,
-    ObservationDraft, ObservationDraftStatus, TransactionRef, ValueMovement,
+    Address, AssetId, Balance, BalanceQuery, BalanceStore, BlockCredit, BlockWithOutputs,
+    Completeness, FeeSettlement, IndexStore, MovementId, Network, NetworkFee, Status, Transaction,
+    TransactionRef, ValueMovement,
 };
 
 use super::fixture::Fixture;
@@ -226,7 +226,7 @@ impl<'a, R: BalanceStore + IndexStore> BalanceContract<'a, R> {
 
     /// The ninth block: no transaction at all, four credits the chain made
     /// on its own, and the checkpoint that carries them.
-    pub(super) fn credited(fixture: &Fixture<'_, R>) -> CanonicalBlock {
+    pub(super) fn credited(fixture: &Fixture<'_, R>) -> BlockWithOutputs {
         let credit = |id: &str, asset: &AssetId, to: &str, amount: u64| BlockCredit {
             id: MovementId(id.into()),
             asset: asset.clone(),
@@ -234,20 +234,19 @@ impl<'a, R: BalanceStore + IndexStore> BalanceContract<'a, R> {
             to: fixture.address(to),
         };
         let (native, token) = (fixture.native(), fixture.token());
-        let interpreted = InterpretedBlock {
+        BlockWithOutputs {
             credits: vec![
                 credit("credit:1", &native, "a", 11),
                 credit("credit:2", &token, "a", 6),
                 credit("credit:3", &native, "v", 4),
                 credit("credit:4", &native, "d", 12),
             ],
-            ..InterpretedBlock::new(&fixture.network, fixture.block(9), Vec::new())
+            ..BlockWithOutputs::new(&fixture.network, fixture.block(9), Vec::new())
                 .expect("unique transaction ids")
-        };
-        CanonicalBlock::new(fixture.network.clone(), interpreted).expect("valid credit facts")
+        }
     }
 
-    fn drafts(fixture: &Fixture<'_, R>) -> Vec<ObservationDraft> {
+    fn drafts(fixture: &Fixture<'_, R>) -> Vec<Transaction> {
         let (native, token) = (fixture.native(), fixture.token());
         vec![
             Self::draft(
@@ -281,8 +280,9 @@ impl<'a, R: BalanceStore + IndexStore> BalanceContract<'a, R> {
                 7,
             ),
             Self::draft(fixture, "utxo", Self::utxo(fixture, &native), "a", 5),
-            ObservationDraft {
-                status: ObservationDraftStatus::Failed {
+            Transaction {
+                status: Status::Failed {
+                    block: fixture.block(1),
                     reason: Some("reverted".into()),
                 },
                 ..Self::draft(fixture, "failed", Vec::new(), "a", 7)
@@ -335,19 +335,20 @@ impl<'a, R: BalanceStore + IndexStore> BalanceContract<'a, R> {
         movements: Vec<ValueMovement>,
         payer: &str,
         fee: u64,
-    ) -> ObservationDraft {
-        ObservationDraft {
-            transaction: indexing::Transaction {
-                transaction_id: TransactionRef::new(fixture.network.clone(), id),
-                movements,
-                fee: Some(NetworkFee {
-                    asset: fixture.native(),
-                    amount: Decimal::from(fee),
-                    payer: Some(fixture.address(payer)),
-                }),
+    ) -> Transaction {
+        Transaction {
+            id: TransactionRef::new(fixture.network.clone(), id),
+            movements,
+            fee: Some(NetworkFee {
+                asset: fixture.native(),
+                amount: Decimal::from(fee),
+                payer: Some(fixture.address(payer)),
+            }),
+            order: 0,
+            // Placed in its block by the fixture.
+            status: Status::Included {
+                block: fixture.block(1),
             },
-            transaction_order: 0,
-            status: ObservationDraftStatus::Included,
         }
     }
 

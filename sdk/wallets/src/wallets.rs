@@ -1,11 +1,12 @@
 use std::{collections::BTreeMap, sync::Arc};
 
+use base::{Address, Network};
 use base::{AssetId, Decimal};
-use indexing::{Address, Network};
 
 use crate::{
-    Author, Authorship, FutureResult, SecretBytes, SendError, SendFuture, Transfer, Wallet,
-    WalletError, WalletErrorKind, WalletFactory,
+    Admission, Author, Authorship, FutureResult, Limit, Policy, Queue, SecretBytes, SendError,
+    SendFuture, Stats, Suspension, Transfer, Wallet, WalletError, WalletErrorKind, WalletFactory,
+    pause::Gate,
 };
 
 /// What one registered asset key is: its network and the identity of the
@@ -34,6 +35,9 @@ struct Factory {
     /// Absent for an asset this system receives and reports and never spends;
     /// that absence is the whole refusal.
     authorship: Option<Arc<dyn Authorship>>,
+    /// The queue `authorship` sends through, once [`Wallets::queue`] put one
+    /// in front of it.
+    queue: Option<Arc<Queue<Arc<dyn Authorship>>>>,
 }
 
 /// One asset's authorship with the transfers it accepted.
@@ -43,17 +47,20 @@ type Prepared = (Arc<dyn Authorship>, Vec<Transfer>);
 ///
 /// It unifies factories and stores nothing else: it makes wallets, hands them
 /// to the caller, and answers what each asset is. Who holds a wallet is the
-/// caller's question, what is observed is [`indexing::Watching`]'s, and where
+/// caller's question, what is observed is the index's, and where
 /// a key lives is the application's.
 #[derive(Clone)]
 pub struct Wallets<A: Ord> {
     factories: BTreeMap<A, Factory>,
+    /// One pause per network an asset is registered on ([`Self::pause`]).
+    gates: BTreeMap<Network, Arc<Gate>>,
 }
 
 impl<A: Ord> Default for Wallets<A> {
     fn default() -> Self {
         Self {
             factories: BTreeMap::new(),
+            gates: BTreeMap::new(),
         }
     }
 }
@@ -85,6 +92,11 @@ where
             ));
         }
         self.factories.extend(other.factories.clone());
+        for (network, gate) in &other.gates {
+            self.gates
+                .entry(network.clone())
+                .or_insert_with(|| gate.clone());
+        }
         Ok(())
     }
 
@@ -99,7 +111,7 @@ where
     /// the only place the refusal exists — a chain writes none.
     ///
     /// There is no registry argument: the index owns the durable list of what
-    /// it observes ([`indexing::Watching`]).
+    /// it observes.
     ///
     /// # Errors
     ///
@@ -115,14 +127,108 @@ where
                 "a wallet factory is already registered for this asset",
             ));
         }
+        self.gates.entry(factory.network().clone()).or_default();
         let registered = Factory {
             network: factory.network().clone(),
             asset: factory.asset(),
             authorship: factory.authorship(),
+            queue: None,
             maker: Arc::new(factory),
         };
         self.factories.insert(asset, registered);
         Ok(())
+    }
+
+    /// Puts a send queue ([`Queue`]) in front of every spendable asset, so
+    /// both its batches and its wallets' own sends wait their turn.
+    ///
+    /// Assets of one network share one in-flight [`Limit`] of
+    /// `policy.in_flight`: they reach the same node, and the bound is about
+    /// that node. Every send through the queue is admitted by its network's
+    /// pause ([`Self::pause`]). An asset already queued keeps its queue.
+    pub fn queue(&mut self, policy: &Policy) {
+        let mut limits: BTreeMap<Network, Arc<Limit>> = BTreeMap::new();
+        for factory in self.factories.values_mut() {
+            let Some(inner) = factory.authorship.clone() else {
+                continue;
+            };
+            if factory.queue.is_some() {
+                continue;
+            }
+            let limit = limits
+                .entry(factory.network.clone())
+                .or_insert_with(|| Arc::new(Limit::new(policy.in_flight)))
+                .clone();
+            let gate = self.gates.get(&factory.network).cloned();
+            let queue = Arc::new(Queue::gated(inner, policy.clone(), limit, gate));
+            factory.authorship = Some(queue.clone());
+            factory.queue = Some(queue);
+        }
+    }
+
+    /// What every asset's queue is doing now, by asset; empty until
+    /// [`Self::queue`].
+    #[must_use]
+    pub fn queues(&self) -> Vec<(A, Stats)>
+    where
+        A: Clone,
+    {
+        self.factories
+            .iter()
+            .filter_map(|(tag, factory)| Some((tag.clone(), factory.queue.as_ref()?.stats())))
+            .collect()
+    }
+
+    /// Refuses every later send of every queued asset; sends already admitted
+    /// are still dispatched and answered.
+    pub fn close(&self) {
+        for queue in self
+            .factories
+            .values()
+            .filter_map(|factory| factory.queue.as_ref())
+        {
+            queue.close();
+        }
+    }
+
+    /// Pauses `network`: every later queued send of its assets ([`Self::queue`])
+    /// and every [`Self::admit`] is refused with [`WalletErrorKind::Paused`]
+    /// until the returned value is dropped. [`Suspension::drained`] waits for the
+    /// sends and admissions already running.
+    ///
+    /// The application's half of a quiesced window on one network, such as an
+    /// online rescan by the index. A network no asset is
+    /// registered on has nothing to pause.
+    pub fn pause(&self, network: &Network) -> Suspension {
+        self.gates
+            .get(network)
+            .map_or_else(Suspension::nothing, Gate::pause)
+    }
+
+    /// Whether `network` is paused ([`Self::pause`]).
+    #[must_use]
+    pub fn paused(&self, network: &Network) -> bool {
+        self.gates.get(network).is_some_and(|gate| gate.paused())
+    }
+
+    /// Admits one piece of work on `asset`'s network that is not a send — an
+    /// application registering a watch of it, say — counted until the
+    /// [`Admission`] is dropped, so a [`Self::pause`] waits for it. Sends are
+    /// admitted by their queue and need none.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unsupported`] for an unregistered asset;
+    /// [`WalletErrorKind::Paused`] while its network is paused.
+    pub fn admit(&self, asset: &A) -> Result<Admission, WalletError> {
+        let network = self.factory(asset)?.network;
+        let gate = self.gates.get(&network).ok_or_else(|| {
+            WalletError::new(
+                WalletErrorKind::Unsupported,
+                "wallet asset is not registered",
+            )
+        })?;
+        gate.admit()
     }
 
     /// A new wallet of `asset`, returned and kept by nothing.
@@ -340,211 +446,43 @@ where
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use std::sync::Mutex;
-
-    use base::{
-        Address, Broadcaster, ChainName, SignFuture, SignRequest, Signer, TransactionBuilder,
-        TransactionError, TransactionId, TransactionSnapshot,
-    };
+mod tests {
+    use base::AssetId;
+    use base::{Address, ChainName, TransactionId};
     use futures_executor::block_on;
-    use indexing::{AssetId, Holder};
 
     use super::*;
     use crate::{
-        AddressParser, FactoryProfile, Generation, SecretBytes, SendError, SendFuture, Sender,
-        SingleSender, TransactionFactory, Transfer,
+        SecretBytes, SendError, Transfer,
+        testing::{Factory, Outbox, Submission},
     };
 
-    /// Makes [`FixtureWallet`]s in its network and parses any non-empty text.
-    /// A factory only accepts wallets of its own network, which is what
-    /// `Origin` proves for a real chain.
-    pub(crate) struct FixtureFactory {
-        network: Network,
-        sender: Arc<RecordingSender>,
-        generation: Option<WalletErrorKind>,
-        /// Whether its asset is one the system spends at all.
-        spends: bool,
-    }
-
-    impl FixtureFactory {
-        /// A factory of the example chain's `network`.
-        pub(crate) fn new(network: &str) -> Self {
-            Self::of(fixture_network(network))
-        }
-
-        /// A factory of any network, for a fixture that needs several chains.
-        pub(crate) fn of(network: Network) -> Self {
-            Self {
-                network,
-                sender: Arc::new(RecordingSender::default()),
-                generation: None,
-                spends: true,
-            }
-        }
-
-        /// A factory of an asset the system receives and reports and never
-        /// spends, as a chain declares one by returning no authorship.
-        fn receiving(network: &str) -> Self {
-            Self {
-                spends: false,
-                ..Self::new(network)
-            }
-        }
-    }
-
-    impl WalletFactory for FixtureFactory {
-        fn validate(&self, wallet: &dyn Wallet) -> Result<(), WalletError> {
-            if wallet.address().belongs_to(&self.network) {
-                return Ok(());
-            }
-            Err(WalletError::new(
-                WalletErrorKind::Unsupported,
-                "incompatible fixture wallet",
-            ))
-        }
-
-        fn create<'a>(&'a self, secret: SecretBytes) -> FutureResult<'a, Arc<dyn Wallet>> {
-            let value = format!("fixture-{:02x}", secret.as_bytes().first().unwrap_or(&0));
-            let wallet = FixtureWallet {
-                address: Address::new(self.network.clone(), value),
-                asset: AssetId::native(self.network.chain.clone()),
-            };
-            Box::pin(async move { Ok(Arc::new(wallet) as Arc<dyn Wallet>) })
-        }
-
-        fn generate(&self) -> FutureResult<'_, Generation> {
-            if let Some(kind) = self.generation {
-                return Box::pin(async move {
-                    Err(WalletError::new(kind, "fixture generation failed"))
-                });
-            }
-            Generation::of(self, Ok(SecretBytes::new([7; 32])))
-        }
-    }
-
-    impl AddressParser for FixtureFactory {
-        fn parse_address(&self, text: &str) -> Result<Address, WalletError> {
-            if text.is_empty() {
-                return Err(WalletError::new(
-                    WalletErrorKind::InvalidAddress,
-                    "invalid fixture address",
-                ));
-            }
-            Ok(Address::new(self.network.clone(), text.to_lowercase()))
-        }
-    }
-
-    impl FactoryProfile for FixtureFactory {
-        fn network(&self) -> &Network {
-            &self.network
-        }
-
-        fn asset(&self) -> AssetId {
-            AssetId::native(self.network.chain.clone())
-        }
-
-        fn authorship(&self) -> Option<Arc<dyn Authorship>> {
-            self.spends
-                .then(|| self.sender.clone() as Arc<dyn Authorship>)
-        }
-    }
-
-    /// Records every batch it is handed, so a test can check what reached it.
-    #[derive(Default)]
-    struct RecordingSender(Mutex<Vec<Vec<(String, String)>>>);
-
-    impl RecordingSender {
-        fn batches(&self) -> Vec<Vec<(String, String)>> {
-            self.0.lock().expect("recorded batches").clone()
-        }
-    }
-
-    impl Sender for RecordingSender {
-        fn send<'a>(&'a self, transfers: Vec<Transfer>) -> SendFuture<'a> {
-            let recorded = transfers
-                .iter()
-                .map(|transfer| (transfer.to.value.clone(), transfer.amount.to_string()))
-                .collect();
-            self.0.lock().expect("recorded batches").push(recorded);
-            Box::pin(async move { Ok(vec![TransactionId::new("batch")]) })
-        }
-    }
-
-    impl Authorship for RecordingSender {
-        fn author(&self, wallet: &Arc<dyn Wallet>) -> Result<Arc<dyn Author>, WalletError> {
-            let wallet = (wallet.as_ref() as &dyn std::any::Any)
-                .downcast_ref::<FixtureWallet>()
-                .ok_or_else(|| {
-                    WalletError::new(WalletErrorKind::Unsupported, "not a fixture wallet")
-                })?;
-            Ok(Arc::new(FixtureWallet {
-                address: wallet.address.clone(),
-                asset: wallet.asset.clone(),
-            }))
-        }
-    }
-
-    /// A wallet with a fixed address and no chain.
-    struct FixtureWallet {
-        address: Address,
-        asset: AssetId,
-    }
-
-    impl Holder for FixtureWallet {
-        fn address(&self) -> &Address {
-            &self.address
-        }
-
-        fn asset(&self) -> &AssetId {
-            &self.asset
-        }
-    }
-
-    impl Signer for FixtureWallet {
-        fn sign<'a>(&'a self, _request: SignRequest) -> SignFuture<'a> {
-            Box::pin(async { unreachable!("fixture wallets do not sign") })
-        }
-    }
-
-    impl SingleSender for FixtureWallet {
-        fn send<'a>(
-            &'a self,
-            _destination: Address,
-            _amount: crate::Amount,
-        ) -> FutureResult<'a, TransactionId> {
-            Box::pin(async { Ok(TransactionId::new("single")) })
-        }
-    }
-
-    impl TransactionFactory for FixtureWallet {
-        fn transaction(&self) -> Box<dyn TransactionBuilder> {
-            unreachable!("fixture wallets build nothing")
-        }
-
-        fn resume(
-            &self,
-            _snapshot: &TransactionSnapshot,
-        ) -> Result<Box<dyn TransactionBuilder>, TransactionError> {
-            unreachable!("fixture wallets restore nothing")
-        }
-
-        fn broadcaster(&self) -> &dyn Broadcaster {
-            unreachable!("fixture wallets broadcast nothing")
-        }
-    }
-
-    fn fixture_network(name: &str) -> Network {
+    fn network(name: &str) -> Network {
         Network::new(ChainName::new("example"), name)
     }
 
-    /// A map with `coin` registered on `mainnet`, and that factory's sender.
-    fn map() -> (Wallets<&'static str>, Arc<RecordingSender>) {
-        let factory = FixtureFactory::new("mainnet");
-        let sender = factory.sender.clone();
+    /// A map with `coin` registered on `mainnet`, and that factory's outbox.
+    fn map() -> (Wallets<&'static str>, Outbox) {
+        let factory = Factory::new(network("mainnet"));
+        let outbox = factory.outbox();
         let mut wallets = Wallets::new();
         wallets.add("coin", factory).expect("first registration");
-        (wallets, sender)
+        (wallets, outbox)
+    }
+
+    /// The destinations and amounts of every batch that reached `outbox`.
+    fn batches(outbox: &Outbox) -> Vec<Vec<(String, String)>> {
+        outbox
+            .submissions()
+            .into_iter()
+            .map(|submission| match submission {
+                Submission::Batch(sent) => sent
+                    .into_iter()
+                    .map(|(to, amount)| (to.value, amount.to_string()))
+                    .collect(),
+                Submission::Single(..) => panic!("a batch test sends no single transfer"),
+            })
+            .collect()
     }
 
     #[test]
@@ -552,7 +490,7 @@ pub(crate) mod tests {
         let (mut wallets, _) = map();
 
         let error = wallets
-            .add("coin", FixtureFactory::new("mainnet"))
+            .add("coin", Factory::new(network("mainnet")))
             .expect_err("one factory per asset");
 
         assert_eq!(error.kind, WalletErrorKind::Duplicate);
@@ -568,8 +506,8 @@ pub(crate) mod tests {
         let created = block_on(wallets.create(&"coin")).expect("create");
         let imported = block_on(wallets.from(&"coin", SecretBytes::new([0x2a; 32]))).expect("from");
 
-        assert_eq!(created.address().value, "fixture-07");
-        assert_eq!(imported.address().value, "fixture-2a");
+        assert_eq!(created.address().value, "addr-07");
+        assert_eq!(imported.address().value, "addr-2a");
         assert_eq!(*created.asset(), AssetId::native(ChainName::new("example")));
         // Two creations of one asset are two wallets; nothing is deduplicated
         // or remembered here.
@@ -587,7 +525,7 @@ pub(crate) mod tests {
                 .err()
                 .map(|e| e.kind),
             block_on(wallets.secret(&"missing")).err().map(|e| e.kind),
-            wallets.parse(&"missing", "a").err().map(|e| e.kind),
+            wallets.parse(&"missing", "addr-a").err().map(|e| e.kind),
             wallets.asset(&"missing").err().map(|e| e.kind),
             wallets
                 .author(
@@ -607,7 +545,7 @@ pub(crate) mod tests {
     fn acceptance_is_proved_by_the_factory() {
         let (mut wallets, _) = map();
         wallets
-            .add("other", FixtureFactory::new("testnet"))
+            .add("other", Factory::new(network("testnet")))
             .expect("second network");
         let coin = block_on(wallets.create(&"coin")).expect("create");
 
@@ -626,7 +564,7 @@ pub(crate) mod tests {
         let info = wallets.asset(&"coin").expect("registered asset");
 
         assert_eq!(info.tag, "coin");
-        assert_eq!(info.network, fixture_network("mainnet"));
+        assert_eq!(info.network, network("mainnet"));
         assert_eq!(info.id, AssetId::native(ChainName::new("example")));
         assert_eq!(wallets.assets(), vec![info]);
     }
@@ -637,12 +575,9 @@ pub(crate) mod tests {
     fn parsing_canonicalizes_text_in_the_assets_own_network() {
         let (wallets, _) = map();
 
-        let parsed = wallets.parse(&"coin", "FIXTURE-Address").expect("parse");
+        let parsed = wallets.parse(&"coin", "ADDR-Mixed").expect("parse");
 
-        assert_eq!(
-            parsed,
-            Address::new(fixture_network("mainnet"), "fixture-address")
-        );
+        assert_eq!(parsed, Address::new(network("mainnet"), "addr-mixed"));
         assert_eq!(
             wallets.parse(&"coin", "").expect_err("blank text").kind,
             WalletErrorKind::InvalidAddress
@@ -658,13 +593,15 @@ pub(crate) mod tests {
     fn an_asset_that_declares_no_authorship_has_no_author_and_no_sender() {
         let mut wallets = Wallets::new();
         wallets
-            .add("coin", FixtureFactory::new("mainnet"))
+            .add("coin", Factory::new(network("mainnet")))
             .expect("an asset the system spends");
         wallets
-            .add("token", FixtureFactory::receiving("mainnet"))
+            .add("token", Factory::new(network("mainnet")).receiving())
             .expect("an asset the system only receives");
         let held = block_on(wallets.create(&"token")).expect("create");
-        let to = wallets.parse(&"token", "destination").expect("destination");
+        let to = wallets
+            .parse(&"token", "addr-destination")
+            .expect("destination");
 
         let Err(refused) = wallets.author(&"token", &held) else {
             panic!("a received asset must have no authoring capability")
@@ -707,10 +644,10 @@ pub(crate) mod tests {
 
     #[test]
     fn a_batch_reaches_its_assets_sender_in_authored_order() {
-        let (wallets, sender) = map();
+        let (wallets, outbox) = map();
         let wallet = block_on(wallets.create(&"coin")).expect("create");
-        let first = wallets.parse(&"coin", "first").expect("destination");
-        let second = wallets.parse(&"coin", "second").expect("destination");
+        let first = wallets.parse(&"coin", "addr-first").expect("destination");
+        let second = wallets.parse(&"coin", "addr-second").expect("destination");
 
         let ids = block_on(wallets.send_all(
             &"coin",
@@ -723,19 +660,19 @@ pub(crate) mod tests {
 
         assert_eq!(ids, [TransactionId::new("batch")]);
         assert_eq!(
-            sender.batches(),
+            batches(&outbox),
             [vec![
-                ("first".to_owned(), "1.25".to_owned()),
-                ("second".to_owned(), "0.5".to_owned()),
+                ("addr-first".to_owned(), "1.25".to_owned()),
+                ("addr-second".to_owned(), "0.5".to_owned()),
             ]]
         );
     }
 
     #[test]
     fn sweep_is_last_for_its_source_and_stays_unresolved_for_the_sender() {
-        let (wallets, sender) = map();
+        let (wallets, outbox) = map();
         let wallet = block_on(wallets.create(&"coin")).unwrap();
-        let to = wallets.parse(&"coin", "destination").unwrap();
+        let to = wallets.parse(&"coin", "addr-destination").unwrap();
         for tail in ["all", "1"] {
             let batch = vec![
                 transfer(&wallet, to.clone(), "all"),
@@ -744,28 +681,32 @@ pub(crate) mod tests {
             let failure = block_on(wallets.send_all(&"coin", batch)).unwrap_err();
             assert_eq!(failure.failed_index, Some(1));
             assert_eq!(failure.source.kind, WalletErrorKind::InvalidBatch);
-            assert!(sender.batches().is_empty());
+            assert!(batches(&outbox).is_empty());
         }
         let batch = vec![
             transfer(&wallet, to.clone(), "1"),
             transfer(&wallet, to, "all"),
         ];
         block_on(wallets.send_all(&"coin", batch)).unwrap();
-        assert_eq!(sender.batches()[0][1].1, "all");
+        assert_eq!(batches(&outbox)[0][1].1, "all");
     }
 
     /// Every item is checked before anything is sent, and the first failure
     /// names its authored index.
     #[test]
     fn a_batch_is_checked_completely_before_its_sender_is_reached() {
-        let (mut wallets, sender) = map();
+        let (mut wallets, outbox) = map();
         wallets
-            .add("other", FixtureFactory::new("testnet"))
+            .add("other", Factory::new(network("testnet")))
             .expect("second network");
         let wallet = block_on(wallets.create(&"coin")).expect("create");
         let foreign = block_on(wallets.create(&"other")).expect("create elsewhere");
-        let to = wallets.parse(&"coin", "destination").expect("destination");
-        let elsewhere = wallets.parse(&"other", "destination").expect("destination");
+        let to = wallets
+            .parse(&"coin", "addr-destination")
+            .expect("destination");
+        let elsewhere = wallets
+            .parse(&"other", "addr-destination")
+            .expect("destination");
         let good = || transfer(&wallet, to.clone(), "1");
 
         for (transfers, index, kind) in [
@@ -790,14 +731,16 @@ pub(crate) mod tests {
             assert_eq!(error.source.kind, kind);
             assert!(error.accepted.is_empty());
         }
-        assert!(sender.batches().is_empty(), "nothing reached the sender");
+        assert!(batches(&outbox).is_empty(), "nothing reached the sender");
     }
 
     #[test]
     fn a_batch_holds_one_to_fifty_transfers_of_a_registered_asset() {
-        let (wallets, sender) = map();
+        let (wallets, outbox) = map();
         let wallet = block_on(wallets.create(&"coin")).expect("create");
-        let to = wallets.parse(&"coin", "destination").expect("destination");
+        let to = wallets
+            .parse(&"coin", "addr-destination")
+            .expect("destination");
         let many = |count| {
             (0..count)
                 .map(|_| transfer(&wallet, to.clone(), "1"))
@@ -816,7 +759,7 @@ pub(crate) mod tests {
         for count in [1, MAX_TRANSFERS] {
             block_on(wallets.send_all(&"coin", many(count))).expect("accepted bounds");
         }
-        assert_eq!(sender.batches().len(), 2);
+        assert_eq!(batches(&outbox).len(), 2);
         assert_eq!(
             SendError::check_count(MAX_TRANSFERS + 1)
                 .expect_err("the shared bound")
@@ -824,5 +767,121 @@ pub(crate) mod tests {
                 .kind,
             WalletErrorKind::InvalidBatch
         );
+    }
+
+    /// After `queue`, both send paths of the asset go through its queue: a
+    /// batch and a wallet's own send are counted by it, and `close` refuses
+    /// the next one.
+    #[test]
+    fn queued_assets_send_through_their_queue_and_close_together() {
+        let (mut wallets, outbox) = map();
+        assert!(wallets.queues().is_empty(), "nothing is queued until asked");
+        wallets.queue(&crate::Policy::default());
+        let wallet = block_on(wallets.from(&"coin", SecretBytes::new([1; 32]))).expect("a wallet");
+        let to = Address::new(network("mainnet"), "addr-02");
+
+        let batch = Transfer {
+            wallet: wallet.clone(),
+            to: to.clone(),
+            amount: crate::Amount::All,
+        };
+        block_on(wallets.send_all(&"coin", vec![batch])).expect("the batch");
+        let author = wallets.author(&"coin", &wallet).expect("an author");
+        block_on(author.send(to.clone(), crate::Amount::All)).expect("the single send");
+
+        assert_eq!(outbox.submissions().len(), 2);
+        assert_eq!(wallets.queues()[0].1.completed, 2);
+
+        wallets.close();
+        let refused = block_on(author.send(to, crate::Amount::All)).expect_err("closed");
+        assert_eq!(refused.kind, WalletErrorKind::Unavailable);
+        assert_eq!(outbox.submissions().len(), 2, "nothing reached the double");
+    }
+
+    /// A paused network refuses its queued sends and its admissions, waits
+    /// for the send it already admitted, leaves every other network alone,
+    /// and admits again once the pause is dropped.
+    #[tokio::test]
+    async fn a_paused_network_drains_refuses_and_reopens() {
+        let (mut wallets, outbox) = map();
+        wallets
+            .add("other", Factory::new(network("testnet")))
+            .expect("a second network");
+        wallets.queue(&crate::Policy::default());
+        let wallet = wallets
+            .from(&"coin", SecretBytes::new([1; 32]))
+            .await
+            .expect("a wallet");
+        let author = wallets.author(&"coin", &wallet).expect("an author");
+        let to = Address::new(network("mainnet"), "addr-02");
+
+        outbox.hold();
+        let running = tokio::spawn({
+            let author = author.clone();
+            let to = to.clone();
+            async move { author.send(to, crate::Amount::All).await }
+        });
+        while outbox.submissions().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        let paused = wallets.pause(&network("mainnet"));
+        assert!(wallets.paused(&network("mainnet")));
+        assert!(!wallets.paused(&network("testnet")));
+        let refused = author
+            .send(to.clone(), crate::Amount::All)
+            .await
+            .expect_err("paused");
+        assert_eq!(refused.kind, WalletErrorKind::Paused);
+        let batch = vec![transfer(&wallet, to.clone(), "1")];
+        let batched = wallets.send_all(&"coin", batch).await.expect_err("paused");
+        assert_eq!(batched.source.kind, WalletErrorKind::Paused);
+        assert_eq!(
+            wallets.admit(&"coin").err().map(|e| e.kind),
+            Some(WalletErrorKind::Paused)
+        );
+        drop(wallets.admit(&"other").expect("another network admits"));
+        assert_eq!(
+            wallets.admit(&"missing").err().map(|e| e.kind),
+            Some(WalletErrorKind::Unsupported)
+        );
+
+        {
+            let drained = paused.drained();
+            tokio::pin!(drained);
+            assert!(
+                poll_once(drained.as_mut()).await.is_none(),
+                "the admitted send is still with the node"
+            );
+            outbox.release();
+            running
+                .await
+                .expect("joined")
+                .expect("the admitted send is answered");
+            drained.await;
+        }
+        assert_eq!(
+            outbox.submissions().len(),
+            1,
+            "nothing refused reached the node"
+        );
+
+        drop(paused);
+        author
+            .send(to, crate::Amount::All)
+            .await
+            .expect("sends again");
+        wallets.pause(&network("unregistered")).drained().await;
+    }
+
+    /// One poll of `future`, without waiting.
+    async fn poll_once<F: std::future::Future + Unpin>(future: F) -> Option<F::Output> {
+        let mut future = future;
+        std::future::poll_fn(|context| {
+            std::task::Poll::Ready(match std::pin::Pin::new(&mut future).poll(context) {
+                std::task::Poll::Ready(output) => Some(output),
+                std::task::Poll::Pending => None,
+            })
+        })
+        .await
     }
 }

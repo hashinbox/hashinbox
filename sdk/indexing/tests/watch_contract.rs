@@ -11,27 +11,12 @@ use std::{
 
 use futures_executor::block_on;
 use indexing::{
-    Address, AssetId, Birthday, BlockCommit, BlockHash, BlockHeight, BlockInterpreter, BlockParent,
-    BlockPosition, BlockRef, BlockSource, BoxFuture, ChainName, ChainTips, ConfirmedHistory,
-    Decimal, Holder, IndexError, IndexErrorKind, IndexedOutput, Indexer, Indexing,
-    InterpretedBlock, Listener, MovementId, NativeBlock, Network, ObservationDraft,
-    ObservationDraftStatus, OutputChanges, OutputId, OutputKey, Subject, SyncConfig, SyncPolicy,
-    TransactionRef, ValueMovement, Watching, memory,
+    Address, AssetId, Birthday, BlockCommit, BlockHeight, BlockParent, BlockPosition, BlockRef,
+    ChainName, ConfirmedHistory, Decimal, Holder, IndexErrorKind, IndexedOutput, Indexer, Indexing,
+    Listener, MovementId, Network, OutputChanges, OutputId, OutputKey, Status, Subject, SyncConfig,
+    SyncPolicy, Transaction, TransactionRef, ValueMovement, Watching, memory,
+    testing::{Chain, Fault, Request, block},
 };
-
-/// Every block this source serves, one per position, each crediting the
-/// address it was told to credit.
-#[derive(Clone)]
-struct Source(u64);
-
-#[derive(Clone, Debug)]
-struct Block(BlockRef);
-
-impl NativeBlock for Block {
-    fn block_ref(&self) -> BlockRef {
-        self.0.clone()
-    }
-}
 
 fn network() -> Network {
     Network::new(ChainName::new("watched"), "testnet")
@@ -52,135 +37,94 @@ fn subject(value: &str) -> Subject {
     }
 }
 
-fn block(height: u64) -> BlockRef {
-    BlockRef {
-        position: BlockPosition(height),
-        height: BlockHeight(height),
-        hash: BlockHash(height.to_be_bytes().to_vec()),
-        parent: height.checked_sub(1).map(|parent| BlockParent {
-            position: BlockPosition(parent),
-            hash: BlockHash(parent.to_be_bytes().to_vec()),
-        }),
-        timestamp: None,
-    }
-}
+/// Every address a scenario here watches.
+const WATCHED: [&str; 5] = ["owner", "wallet", "observed", "new", "later"];
 
-impl ChainTips for Source {
-    fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, indexing::SourceError>> {
-        Box::pin(async move { Ok(block(self.0)) })
-    }
-
-    fn confirmed_tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, indexing::SourceError>> {
-        Box::pin(async move { Ok(block(self.0)) })
-    }
-}
-
-impl BlockSource for Source {
-    type Block = Block;
-
-    fn blocks<'a>(
-        &'a self,
-        start: BlockPosition,
-        end: BlockPosition,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<Self::Block>, indexing::SourceError>> {
-        let blocks = (start.0..=end.0.min(self.0))
-            .take(limit)
-            .map(|height| Block(block(height)))
-            .collect();
-        Box::pin(async move { Ok(blocks) })
-    }
-
-    fn canonical_at<'a>(
-        &'a self,
-        position: BlockPosition,
-    ) -> BoxFuture<'a, Result<Option<BlockRef>, indexing::SourceError>> {
-        let found = (position.0 <= self.0).then(|| block(position.0));
-        Box::pin(async move { Ok(found) })
-    }
-}
-
-/// Credits every selected address in every block, and creates one output for
-/// each, so a commit carries transactions *and* output changes. Block 2 also
-/// spends an output nothing indexed, so it carries an unknown spend.
-#[derive(Clone, Default)]
-struct Interpreter;
-
-impl BlockInterpreter for Interpreter {
-    type Block = Block;
-
-    fn settlement(&self) -> indexing::FeeSettlement {
-        indexing::FeeSettlement::Charged
-    }
-
-    fn inspect(
-        &self,
-        source: &Self::Block,
-        addresses: &[Address],
-    ) -> Result<InterpretedBlock, IndexError> {
-        let reference = source.block_ref();
-        let mut transactions = Vec::new();
-        let mut created = Vec::new();
-        for (order, owner) in (0_u64..).zip(addresses) {
-            let id = TransactionRef::new(
-                network(),
-                format!("tx-{}-{}", reference.height.0, owner.value),
-            );
-            transactions.push(ObservationDraft {
-                transaction: indexing::Transaction {
-                    transaction_id: id.clone(),
-                    movements: vec![ValueMovement::output(
-                        MovementId("output-0".into()),
-                        asset(),
-                        Decimal::from(5_u64),
-                        Some(owner.clone()),
-                    )],
-                    fee: None,
-                },
-                transaction_order: order,
-                status: ObservationDraftStatus::Included,
-            });
-            created.push(IndexedOutput {
-                id: OutputId {
-                    transaction: id,
-                    index: 0,
-                },
-                address: owner.clone(),
-                asset: asset(),
-                amount: Decimal::from(5_u64),
-                evidence: Vec::new(),
-                created_at: reference.height,
-                coinbase: false,
-            });
+/// Pays each of [`WATCHED`] 5 in every block a scenario here reads, as one
+/// transaction and one output, so a commit carries transactions *and* output
+/// changes. Block 2 also spends, for `owner`, an output nothing indexed, so it
+/// carries an unknown spend.
+fn script(chain: &Chain) {
+    for reference in (0..=5).map(block).chain([pruned(100), pruned(103)]) {
+        for (order, owner) in (0_u64..).zip(WATCHED) {
+            pay(chain, &reference, order, &address(owner));
         }
-        let spent = match (reference.height.0, addresses.first()) {
-            (2, Some(owner)) => vec![OutputKey {
-                address: owner.clone(),
-                output: OutputId {
-                    transaction: TransactionRef::new(network(), "never-indexed"),
-                    index: 0,
-                },
-            }],
-            _ => Vec::new(),
-        };
-        Ok(InterpretedBlock {
-            outputs: OutputChanges {
-                created,
-                spent,
-                tracked_spends: Vec::new(),
-            },
-            ..InterpretedBlock::new(&network(), reference, transactions)?
-        })
     }
+    let unknown = OutputKey {
+        address: address("owner"),
+        output: OutputId {
+            transaction: TransactionRef::new(network(), "never-indexed"),
+            index: 0,
+        },
+    };
+    chain.change_outputs(
+        &block(2),
+        OutputChanges {
+            spent: vec![unknown],
+            ..OutputChanges::default()
+        },
+    );
+}
+
+/// One transaction of block `reference` paying `owner` 5 at `order`, and the
+/// output it creates.
+fn pay(chain: &Chain, reference: &BlockRef, order: u64, owner: &Address) {
+    let height = reference.height;
+    let id = TransactionRef::new(network(), format!("tx-{}-{}", height.0, owner.value));
+    let movement = ValueMovement::output(
+        MovementId("output-0".into()),
+        asset(),
+        Decimal::from(5_u64),
+        Some(owner.clone()),
+    );
+    chain.include(
+        reference,
+        Transaction {
+            id: id.clone(),
+            movements: vec![movement],
+            fee: None,
+            order,
+            status: Status::Included {
+                block: reference.clone(),
+            },
+        },
+    );
+    let output = IndexedOutput {
+        id: OutputId {
+            transaction: id,
+            index: 0,
+        },
+        address: owner.clone(),
+        asset: asset(),
+        amount: Decimal::from(5_u64),
+        evidence: Vec::new(),
+        created_at: height,
+        coinbase: false,
+    };
+    chain.change_outputs(
+        reference,
+        OutputChanges {
+            created: vec![output],
+            ..OutputChanges::default()
+        },
+    );
+}
+
+/// The dense chain through `tip`, scripted.
+fn chain(tip: u64) -> Chain {
+    let chain = Chain::dense(network(), tip);
+    script(&chain);
+    chain
 }
 
 fn service(
     memory: &memory::Repository,
     tip: u64,
-) -> Arc<Indexer<Source, Interpreter, memory::Repository>> {
+) -> Arc<Indexer<Chain, Chain, memory::Repository>> {
+    let chain = chain(tip);
     Arc::new(Indexer::new(
-        Source(tip),
-        Interpreter,
+        chain.clone(),
+        chain,
         memory.clone(),
         SyncConfig::new(&network(), SyncPolicy::new(100)).expect("sync config"),
     ))
@@ -198,7 +142,7 @@ fn indexed(repository: &memory::Repository, owner: &Address) -> Vec<TransactionR
         .expect("history")
         .transactions
         .into_iter()
-        .map(|entry| entry.transaction.transaction_id)
+        .map(|entry| entry.id)
         .collect()
 }
 
@@ -418,11 +362,10 @@ impl Listener for Seen {
     }
 }
 
-/// A listener is a list, not a slot, and each entry is told what the commit
-/// actually produced: the block, its transactions, its output changes, and
-/// the required spends the store could not match.
+/// A listener is a list, not a slot, and each entry is told which block of
+/// which network committed.
 #[test]
-fn every_listener_is_told_what_each_commit_changed() {
+fn every_listener_is_told_each_committed_block() {
     let memory = memory::Repository::new();
     let index = service(&memory, 2);
     let owner = subject("owner");
@@ -445,19 +388,6 @@ fn every_listener_is_told_what_each_commit_changed() {
             "one call per committed block, oldest first, for every listener"
         );
         assert!(commits.iter().all(|commit| commit.network == network()));
-        assert_eq!(commits[1].transactions.len(), 1, "what it indexed");
-        assert_eq!(commits[1].outputs.created.len(), 1, "what became spendable");
-        assert!(commits[1].unmatched_spends.is_empty());
-        assert_eq!(
-            commits[2]
-                .unmatched_spends
-                .iter()
-                .map(|key| key.output.transaction.id.as_str())
-                .collect::<Vec<_>>(),
-            ["never-indexed"],
-            "a required spend nothing indexed is a completeness fact the \
-             listener is told about, not a failure"
-        );
     }
 
     // Nothing is announced twice: a replayed tip is `AlreadyApplied`.
@@ -524,7 +454,7 @@ fn a_listener_that_registers_another_listener_does_not_deadlock() {
     /// Registers `late` from inside `committed`, once, which is the re-entrant
     /// call a list held across the dispatch cannot take.
     struct Reentrant {
-        index: Weak<Indexer<Source, Interpreter, memory::Repository>>,
+        index: Weak<Indexer<Chain, Chain, memory::Repository>>,
         late: Arc<Seen>,
         registered: AtomicBool,
     }
@@ -583,98 +513,39 @@ fn a_listener_that_registers_another_listener_does_not_deadlock() {
     );
 }
 
-/// Only recent sparse slots exist; asking for the genesis range is terminal.
-#[derive(Clone)]
-struct Pruned {
-    tip: Arc<std::sync::atomic::AtomicU64>,
-    offline: Arc<AtomicBool>,
-    pause: Option<Arc<(AtomicBool, std::sync::Barrier, std::sync::Barrier)>>,
-}
-
-impl Pruned {
-    fn reference(position: u64) -> BlockRef {
-        let mut reference = block(position);
-        reference.height = BlockHeight(if position == 100 { 10 } else { 11 });
-        reference.parent = Some(BlockParent {
-            position: BlockPosition(if position == 100 { 97 } else { 100 }),
-            hash: BlockHash(
-                (if position == 100 { 97_u64 } else { 100 })
-                    .to_be_bytes()
-                    .to_vec(),
-            ),
-        });
-        reference
+/// Slot `position` of a node that holds only recent sparse slots: 100 at
+/// height 10 above a pruned 97, and 103 at height 11 above 100.
+fn pruned(position: u64) -> BlockRef {
+    let parent = if position == 100 { 97 } else { 100 };
+    BlockRef {
+        height: BlockHeight(if position == 100 { 10 } else { 11 }),
+        parent: Some(BlockParent {
+            position: BlockPosition(parent),
+            hash: block(parent).hash,
+        }),
+        ..block(position)
     }
 }
 
-impl ChainTips for Pruned {
-    fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, indexing::SourceError>> {
-        Box::pin(async move {
-            assert!(!self.offline.load(Ordering::SeqCst), "unexpected RPC");
-            let position = self.tip.load(Ordering::SeqCst);
-            if let Some(pause) = &self.pause
-                && pause.0.swap(false, Ordering::SeqCst)
-            {
-                pause.1.wait();
-                pause.2.wait();
-            }
-            Ok(Self::reference(position))
-        })
-    }
-
-    fn confirmed_tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, indexing::SourceError>> {
-        self.tip()
-    }
-}
-
-impl BlockSource for Pruned {
-    type Block = Block;
-
-    fn blocks<'a>(
-        &'a self,
-        start: BlockPosition,
-        end: BlockPosition,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<Block>, indexing::SourceError>> {
-        Box::pin(async move {
-            if start.0 < 100 {
-                return Err(indexing::SourceError::new(
-                    "required position was pruned",
-                    false,
-                ));
-            }
-            Ok([100, 103]
-                .into_iter()
-                .filter(|position| start.0 <= *position && *position <= end.0)
-                .take(limit)
-                .map(|position| Block(Self::reference(position)))
-                .collect())
-        })
-    }
-
-    fn canonical_at<'a>(
-        &'a self,
-        position: BlockPosition,
-    ) -> BoxFuture<'a, Result<Option<BlockRef>, indexing::SourceError>> {
-        Box::pin(async move {
-            assert!(!self.offline.load(Ordering::SeqCst), "unexpected RPC");
-            Ok(matches!(position.0, 100 | 103).then(|| Self::reference(position.0)))
-        })
-    }
+/// A node at slot 100 on which asking for the genesis range is terminal.
+fn pruned_chain() -> Chain {
+    let chain = Chain::new(network(), [pruned(100)]);
+    chain.fail(Fault::Pruned {
+        below: BlockPosition(100),
+        retryable: false,
+    });
+    script(&chain);
+    chain
 }
 
 #[test]
 fn fresh_before_first_sync_uses_the_verified_tip_without_requiring_pruned_history() {
     use indexing::Checkpoint;
     let memory = memory::Repository::new();
-    let source = Pruned {
-        tip: Arc::new(std::sync::atomic::AtomicU64::new(100)),
-        offline: Arc::new(AtomicBool::new(false)),
-        pause: None,
-    };
+    let source = pruned_chain();
     let index = Indexer::new(
         source.clone(),
-        Interpreter,
+        source.clone(),
         memory.clone(),
         SyncConfig::new(&network(), SyncPolicy::new(100)).expect("config"),
     );
@@ -686,20 +557,21 @@ fn fresh_before_first_sync_uses_the_verified_tip_without_requiring_pruned_histor
         None,
         "the source tip must not masquerade as a persisted CAS checkpoint"
     );
-    source.offline.store(true, Ordering::SeqCst);
+    let offline = source.requests();
     assert_eq!(
         block_on(index.watch("new", &owner, Birthday::Fresh)).expect("repeat"),
         watched
     );
-    source.offline.store(false, Ordering::SeqCst);
+    assert_eq!(source.requests(), offline, "unexpected RPC");
     block_on(index.sync()).expect("anchor without pruned history");
-    source.tip.store(103, Ordering::SeqCst);
+    source.replace([pruned(100), pruned(103)]);
     block_on(index.sync()).expect("sparse successor");
     assert_eq!(indexed(&memory, &owner.address).len(), 1);
-    source.offline.store(true, Ordering::SeqCst);
+    let offline = source.requests();
     let later = block_on(index.watch("later", &subject("later"), Birthday::Fresh))
         .expect("persisted checkpoint needs no RPC");
     assert_eq!(later.start, BlockPosition(104));
+    assert_eq!(source.requests(), offline, "unexpected RPC");
 }
 
 #[test]
@@ -709,14 +581,21 @@ fn a_commit_during_fresh_tip_lookup_overrides_the_fallback_birthday() {
         std::sync::Barrier::new(2),
         std::sync::Barrier::new(2),
     ));
-    let source = Pruned {
-        tip: Arc::new(std::sync::atomic::AtomicU64::new(100)),
-        offline: Arc::new(AtomicBool::new(false)),
-        pause: Some(pause.clone()),
-    };
+    let source = pruned_chain();
+    source.on_request({
+        let pause = pause.clone();
+        move |request| {
+            if matches!(request, Request::Tip | Request::ConfirmedTip)
+                && pause.0.swap(false, Ordering::SeqCst)
+            {
+                pause.1.wait();
+                pause.2.wait();
+            }
+        }
+    });
     let index = Arc::new(Indexer::new(
         source.clone(),
-        Interpreter,
+        source.clone(),
         memory::Repository::new(),
         SyncConfig::new(&network(), SyncPolicy::new(100)).expect("config"),
     ));
@@ -725,7 +604,7 @@ fn a_commit_during_fresh_tip_lookup_overrides_the_fallback_birthday() {
         block_on(registering.watch("new", &subject("new"), Birthday::Fresh))
     });
     pause.1.wait();
-    source.tip.store(103, Ordering::SeqCst);
+    source.replace([pruned(100), pruned(103)]);
     block_on(index.sync()).expect("commit while the RPC is in flight");
     pause.2.wait();
     let watch = thread.join().expect("thread").expect("watch");
@@ -734,4 +613,64 @@ fn a_commit_during_fresh_tip_lookup_overrides_the_fallback_birthday() {
         BlockPosition(104),
         "the gate's committed line wins"
     );
+}
+
+/// The create flow over a registry: a wallet filed unobserved is not scanned
+/// until the index watches its id, which observes the archived row rather than
+/// refusing it; unwatching archives it again, and re-filing the address under
+/// another id restores the original wallet, watched from its own birthday.
+#[test]
+fn a_filed_wallet_is_observed_by_watching_it_and_restored_at_its_birthday() {
+    use indexing::{Registration, WalletRegistry as _};
+
+    let memory = memory::Repository::new();
+    let index = service(&memory, 3);
+    block_on(index.sync()).expect("a checkpoint");
+    let filing = |id: &str| Registration {
+        id: id.to_owned(),
+        address: address("new"),
+        asset: asset(),
+        label: Some("fresh".to_owned()),
+        secret: Some(key()),
+    };
+    let filed = block_on(memory.register(filing("wallet"))).expect("filed");
+    assert!(filed.archived_at().is_some());
+    assert!(
+        block_on(index.watched(&network()))
+            .expect("rows")
+            .is_empty(),
+        "a filed wallet is not scanned"
+    );
+
+    let watched = block_on(index.watch("wallet", &filed, Birthday::Fresh)).expect("observed");
+    assert_eq!(
+        watched.start,
+        BlockPosition(4),
+        "fresh: after the checkpoint"
+    );
+    let stored = block_on(memory.wallet("wallet"))
+        .expect("a read")
+        .expect("kept");
+    assert_eq!(stored.watch(), Some(watched.clone()), "the row is observed");
+    block_on(index.sync()).expect("a pass");
+
+    block_on(index.unwatch("wallet")).expect("archived");
+    let restored = block_on(memory.register(filing("another"))).expect("restored");
+    assert_eq!(restored.id(), "wallet", "the original wallet comes back");
+    let birthday = restored.birthday().expect("its birthday is kept");
+    let error = block_on(index.watch("another", &restored, Birthday::At(birthday)))
+        .expect_err("the pair is reserved for its own id");
+    assert_eq!(error.kind, IndexErrorKind::Conflict);
+    let again =
+        block_on(index.watch(restored.id(), &restored, Birthday::At(birthday))).expect("restored");
+    assert_eq!(again, watched, "same id, holding and birthday");
+    assert_eq!(
+        block_on(index.watched(&network())).expect("rows"),
+        [watched]
+    );
+}
+
+/// A key no test reads back.
+fn key() -> crypto::SecretBytes {
+    crypto::SecretBytes::new([3; 32])
 }

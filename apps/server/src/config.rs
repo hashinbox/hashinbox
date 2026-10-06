@@ -1,5 +1,5 @@
 //! The server's configuration document: HTTP binding, storage, the chain
-//! sections and wallets imported at startup. Secrets come from named
+//! sections. Secrets come from named
 //! environment variables, never from the file.
 //!
 //! `sdk_config::Document::read` is the reader — TOML for a `.toml` path, JSON
@@ -7,13 +7,13 @@
 //! which this module never looks inside. `crate::chains` says which chain owns
 //! which name; the chain itself says what its section means.
 
-use std::{collections::BTreeSet, env, error::Error, net::SocketAddr, path::Path};
+use std::{env, error::Error, net::SocketAddr, path::Path};
 
 use sdk_config::{Chains, Document, Sections};
-use serde::{Deserialize, Deserializer, de};
+use serde::Deserialize;
 
 use crate::{
-    api::{AssetTag, Signers, Wallets},
+    asset::AssetTag,
     chains,
     storage::{self, Repository},
 };
@@ -53,8 +53,6 @@ pub(crate) struct Config {
     /// which chain parses which, and this module never looks inside one.
     #[serde(default)]
     pub(crate) chains: Sections,
-    #[serde(default)]
-    pub(crate) wallets: Vec<ConfiguredWallet>,
     /// How the browser page presents itself; every key is optional.
     #[serde(default)]
     pub(crate) ui: Ui,
@@ -97,15 +95,6 @@ impl Config {
         }
         self.storage.validate()?;
         self.chains()?;
-        let mut ids = BTreeSet::new();
-        for wallet in &self.wallets {
-            if wallet.id.trim().is_empty() || wallet.secret_env.trim().is_empty() {
-                return Err("wallet ID and secret environment name must not be empty".into());
-            }
-            if !ids.insert(&wallet.id) {
-                return Err("configured wallet IDs must be unique".into());
-            }
-        }
         Ok(())
     }
 
@@ -146,109 +135,6 @@ impl Config {
     }
 }
 
-/// Explicit observation start for an environment-imported wallet.
-/// Zero means genesis; `fresh` starts after the current checkpoint.
-#[derive(Clone, Copy)]
-enum Start {
-    Fresh,
-    At(u64),
-}
-
-impl From<Start> for indexing::Birthday {
-    fn from(value: Start) -> Self {
-        match value {
-            Start::Fresh => Self::Fresh,
-            Start::At(position) => Self::At(base::BlockPosition(position)),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Start {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Stated {
-            Position(u64),
-            Sentinel(String),
-        }
-        match Stated::deserialize(deserializer)? {
-            Stated::Position(position) => Ok(Self::At(position)),
-            Stated::Sentinel(text) if text == "fresh" => Ok(Self::Fresh),
-            Stated::Sentinel(text) => Err(de::Error::invalid_value(
-                de::Unexpected::Str(&text),
-                &"\"fresh\" or a non-negative block position",
-            )),
-        }
-    }
-}
-
-/// A wallet imported at every startup from a secret held in the
-/// environment, indexed from its explicit birthday.
-///
-/// `start` is a native block position or `"fresh"`; `0` means genesis.
-/// HTTP creation and watching always choose fresh observation.
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ConfiguredWallet {
-    id: String,
-    asset: AssetTag,
-    secret_env: String,
-    start: Start,
-}
-
-impl ConfiguredWallet {
-    pub(crate) fn asset(&self) -> &AssetTag {
-        &self.asset
-    }
-
-    /// Builds the wallet, durably stores its key, publishes its watch, then
-    /// installs the process's signing handle. Interrupted publication leaves
-    /// the saved key private until the configured import is retried.
-    ///
-    /// The index is asked for one capability, `indexing::Watching`, because
-    /// registering an observation is the whole of what an import does with it.
-    ///
-    /// The one key text every supported chain accepts is 64 hexadecimal
-    /// characters, so the decode is chain-neutral and the asset's factory
-    /// checks the length and the curve.
-    pub(crate) async fn import(
-        self,
-        wallets: &Wallets,
-        index: &dyn indexing::Watching,
-        signers: &Signers,
-        registry: &std::sync::Arc<crate::registry::Registry>,
-    ) -> Result<(), AnyError> {
-        let text = zeroize::Zeroizing::new(
-            env::var(&self.secret_env)
-                .map_err(|_| "configured wallet secret environment variable is unavailable")?,
-        );
-        let secret = wallets::SecretBytes::from_hex(&text)
-            .map_err(|_| "configured wallet secret is not hexadecimal key material")?;
-        let retained = wallets::SecretBytes::new(secret.as_bytes());
-        let wallet = wallets
-            .from(&self.asset, secret)
-            .await
-            .map_err(Self::disabled)?;
-        registry.keep(&self.id, &self.asset, retained).await?;
-        if signers.get(&self.id).is_some() {
-            return Ok(());
-        }
-        index
-            .watch(&self.id, wallet.as_ref(), self.start.into())
-            .await?;
-        signers.keep(self.id, wallet)?;
-        Ok(())
-    }
-
-    /// An unregistered tag is a configuration error, not a wallet error.
-    fn disabled(error: wallets::WalletError) -> AnyError {
-        if error.kind == wallets::WalletErrorKind::Unsupported {
-            return "configured wallet references a disabled asset".into();
-        }
-        error.into()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -283,12 +169,11 @@ mod tests {
         })
     }
 
-    fn value(chains: Value, wallets: Value) -> Value {
+    fn value(chains: Value) -> Value {
         json!({
             "bind": "127.0.0.1:3000",
             "bearer_token_env": "API_TOKEN",
-            "chains": chains,
-            "wallets": wallets
+            "chains": chains
         })
     }
 
@@ -300,11 +185,11 @@ mod tests {
 
     #[test]
     fn storage_defaults_to_one_file_and_names_no_backend() {
-        parse(value(solana(), json!([]))).expect("default storage");
-        let mut explicit = value(solana(), json!([]));
+        parse(value(solana())).expect("default storage");
+        let mut explicit = value(solana());
         explicit["storage"] = json!({"path": "/tmp/payment.db"});
         parse(explicit).expect("explicit storage path");
-        let mut external = value(solana(), json!([]));
+        let mut external = value(solana());
         external["storage"] = json!({"postgres": {
             "url_env": "PAYMENT_DATABASE_URL", "schema": "payment", "max_connections": 8
         }});
@@ -318,20 +203,20 @@ mod tests {
     /// `"chains"` and the old spelling is rejected outright.
     #[test]
     fn the_chain_section_is_named_chains() {
-        let mut legacy = value(solana(), json!([]));
+        let mut legacy = value(solana());
         legacy["indexes"] = legacy["chains"].take();
         legacy
             .as_object_mut()
             .expect("configuration object")
             .remove("chains");
         assert!(parse(legacy).is_err(), "`indexes` is replaced by `chains`");
-        parse(value(solana(), json!([]))).expect("`chains` is the configured section");
+        parse(value(solana())).expect("`chains` is the configured section");
     }
 
     #[test]
     fn empty_chains_allow_ui_setup_and_unknown_chains_are_rejected() {
-        parse(value(json!({}), json!([]))).expect("UI starts without configured nodes");
-        let error = parse(value(json!({"dogecoin": {}}), json!([])))
+        parse(value(json!({}))).expect("UI starts without configured nodes");
+        let error = parse(value(json!({"dogecoin": {}})))
             .err()
             .expect("no chain is registered for it")
             .to_string();
@@ -363,7 +248,7 @@ mod tests {
         let config = Config::read(&path).await.expect("a TOML deployment");
         assert_eq!(
             config.chains().expect("one chain").networks(),
-            parse(value(solana(), json!([])))
+            parse(value(solana()))
                 .expect("the same chain in JSON")
                 .chains()
                 .expect("one chain")
@@ -372,64 +257,13 @@ mod tests {
     }
 
     #[test]
-    fn wallet_validation_preserves_field_and_duplicate_precedence() {
-        let valid = json!({
-            "id": "treasury",
-            "asset": "eth",
-            "secret_env": "UNREAD_SECRET_ENVIRONMENT",
-            "start": 1
-        });
-        let missing_secret = json!({
-            "id": "other",
-            "asset": "usdc",
-            "secret_env": " ",
-            "start": 1
-        });
-        for (wallets, expected) in [
-            (
-                json!([valid.clone(), missing_secret]),
-                "wallet ID and secret environment name must not be empty",
-            ),
-            (
-                json!([valid.clone(), valid.clone()]),
-                "configured wallet IDs must be unique",
-            ),
-        ] {
-            let error = parse(value(ethereum(), wallets))
-                .err()
-                .expect("first wallet violation must win");
-            assert_eq!(error.to_string(), expected);
-        }
-        parse(value(ethereum(), json!([valid]))).expect("an open asset tag");
-    }
-
-    #[test]
-    fn rejects_malformed_tags_and_height_only_birthdays() {
-        for wallet in [
-            json!({"id": "t", "asset": "ETH", "secret_env": "S", "start": 1}),
-            json!({"id": "t", "asset": "eth", "secret_env": "S", "start_height": 1}),
-            json!({"id": "t", "asset": "eth", "secret_env": "S", "start_position": 1}),
-            json!({"id": "t", "asset": "eth", "secret_env": "S", "start": "tip"}),
-            json!({"id": "t", "asset": "eth", "secret_env": "S"}),
-        ] {
-            assert!(parse(value(ethereum(), json!([wallet]))).is_err());
-        }
-    }
-
-    /// The gap this closes: a bare integer could name genesis and could not
-    /// name "this key has never been used", so a configured wallet with no
-    /// past had to claim one.
-    #[test]
-    fn a_configured_wallet_can_state_a_position_or_that_it_is_fresh() {
-        for start in [json!(0), json!(842_000), json!("fresh")] {
-            let wallet = json!({
-                "id": "treasury",
-                "asset": "eth",
-                "secret_env": "UNREAD_SECRET_ENVIRONMENT",
-                "start": start,
-            });
-            parse(value(ethereum(), json!([wallet]))).expect("a stated birthday");
-        }
+    fn rejects_removed_wallet_configuration() {
+        let mut config = value(solana());
+        config["wallets"] = json!([]);
+        let error = parse(config)
+            .err()
+            .expect("wallet configuration is removed");
+        assert!(error.to_string().contains("unknown field `wallets`"));
     }
 
     #[test]
@@ -452,7 +286,7 @@ mod tests {
             ("cadence", "reorg_retention"),
         ] {
             for extra in [json!(1), Value::Null, json!(""), json!([]), json!({})] {
-                let mut config = value(solana(), json!([]));
+                let mut config = value(solana());
                 let object = match pointer {
                     "chains" => &mut config["chains"],
                     "solana" => &mut config["chains"]["solana"],
@@ -471,21 +305,21 @@ mod tests {
         }
         let mut chains = ethereum();
         chains["ethereum"]["database"] = json!("per-chain.db");
-        assert!(parse(value(chains, json!([]))).is_err());
+        assert!(parse(value(chains)).is_err());
     }
 
-    /// Solana takes the one plural RPC shape and constrains it to one node.
+    /// Solana takes the one plural RPC shape: one node or several, never
+    /// none and never another shape.
     #[test]
-    fn rejects_a_solana_section_without_exactly_one_endpoint() {
-        for endpoints in [
-            Value::Null,
-            json!("http://127.0.0.1:8899"),
-            json!([]),
-            json!(["http://127.0.0.1:8899", "http://127.0.0.1:8900"]),
-        ] {
-            let mut config = value(solana(), json!([]));
+    fn solana_uses_the_one_rpc_shape_with_one_or_more_endpoints() {
+        for endpoints in [Value::Null, json!("http://127.0.0.1:8899"), json!([])] {
+            let mut config = value(solana());
             config["chains"]["solana"]["rpc"]["endpoints"] = endpoints;
             assert!(parse(config).is_err());
         }
+        let mut config = value(solana());
+        config["chains"]["solana"]["rpc"]["endpoints"] =
+            json!(["http://127.0.0.1:8899", "http://127.0.0.1:8900"]);
+        parse(config).expect("several Solana nodes");
     }
 }

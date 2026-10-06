@@ -22,9 +22,8 @@ use base::Decimal;
 
 use indexing::{
     BalanceQuery, BalanceStore, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef,
-    CanonicalBlock, FeeSettlement, IndexErrorKind, IndexStore, IndexedBatch, InterpretedBlock,
-    MovementId, ObservationDraft, ObservationDraftStatus, TransactionRef, ValueMovement, Watch,
-    WatchProgress, WatchStore,
+    BlockWithOutputs, FeeSettlement, IndexErrorKind, IndexStore, IndexedBatch, MovementId, Status,
+    Transaction, TransactionRef, ValueMovement, Watch, WatchProgress, WatchStore,
 };
 
 use super::watch::WatchContract;
@@ -57,6 +56,10 @@ impl<R: WatchStore + IndexStore> WatchContract<'_, R> {
             .expect_err("a birthday below the stored one");
 
         assert_eq!(error.kind, IndexErrorKind::Conflict);
+        assert!(
+            !error.retryable,
+            "the stored birthday is the caller's own, so a retry is refused again",
+        );
         assert_eq!(
             self.stored().await,
             held,
@@ -120,26 +123,22 @@ impl<R: WatchStore + IndexStore + BalanceStore> WatchContract<'_, R> {
             }),
             timestamp: None,
         };
-        let draft = ObservationDraft {
-            transaction: indexing::Transaction {
-                transaction_id: TransactionRef::new(watch.address.network.clone(), "payment"),
-                movements: vec![ValueMovement::mint(
-                    MovementId("payment-mint".into()),
-                    watch.asset.clone(),
-                    Decimal::from(5_u64),
-                    watch.address.clone(),
-                )],
-                fee: None,
+        let draft = Transaction {
+            id: TransactionRef::new(watch.address.network.clone(), "payment"),
+            movements: vec![ValueMovement::mint(
+                MovementId("payment-mint".into()),
+                watch.asset.clone(),
+                Decimal::from(5_u64),
+                watch.address.clone(),
+            )],
+            fee: None,
+            order: 0,
+            status: Status::Included {
+                block: block.clone(),
             },
-            transaction_order: 0,
-            status: ObservationDraftStatus::Included,
         };
-        let canonical = CanonicalBlock::new(
-            watch.address.network.clone(),
-            InterpretedBlock::new(&watch.address.network, block, vec![draft])
-                .expect("unique transaction ids"),
-        )
-        .expect("valid fixture facts");
+        let canonical = BlockWithOutputs::new(&watch.address.network, block, vec![draft])
+            .expect("unique transaction ids");
         let batch = IndexedBatch::new(
             watch.address.network.clone(),
             Some(anchor.clone()),

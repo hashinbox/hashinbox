@@ -4,12 +4,12 @@
 //! questions of it.
 //!
 //! It is deliberately the one scenario that does **not** go through
-//! `sdk_config::Chains::compose` and `wallets::Composition`. That path also
+//! `sdk_config::Chains::compose` and `sdk_config::Composition`. That path also
 //! builds wallet factories and asset units, and two of the three factories need
 //! store capabilities this sink does not offer. What it uses instead is the
-//! SDK's own assembly flow — `indexing::Index::new(store).chain(…).build()?` —
-//! which is the whole of what composing an index requires: one store, one line
-//! per chain, and a `build` that validates without launching anything.
+//! SDK's own composition — `indexing::Index::of(indexers)` over one store —
+//! which is the whole of what composing an index requires: one store, one
+//! indexer per chain, validated without launching anything.
 //!
 //! Its chains come from its own `config.toml` like every other scenario's, but
 //! it decodes each section into its chain's own `Config` itself instead of
@@ -332,15 +332,15 @@ impl Chain {
 ///
 /// **Two phases, and they never merge.** Every node's identity is verified first,
 /// before the store is handed to anything: a deployment that names the wrong node
-/// fails without having written a byte. Then one `Index::over(store)`, one
-/// `.chain(…)` per chain, and a `build` that refuses a duplicate network without
+/// fails without having written a byte. Then one indexer per chain over the
+/// store, and an `Index::of` that refuses a duplicate network without
 /// launching a task.
 ///
 /// `Index<dyn Indexing>` is the only shape there is: a composition routes no query
 /// at all. This store answers none either — no balance, no page, no spendable
 /// set — and nothing here asks an index for one, because each of those is the
 /// repository's own answer joined to an index's pending blocks. Routing watches,
-/// reporting checkpoints and driving `Index::sync` need none of that.
+/// reporting checkpoints and driving units need none of that.
 ///
 /// # Errors
 ///
@@ -356,11 +356,11 @@ async fn assemble(
         Chain::ethereum(sections).await?,
         Chain::solana(sections).await?,
     );
-    let index = Index::over(Arc::clone(sink))
-        .chain(|store| first.compose(store))?
-        .chain(|store| second.compose(store))?
-        .chain(|store| third.compose(store))?
-        .build()?;
+    let index = Index::of(vec![
+        first.compose(Arc::clone(sink))?,
+        second.compose(Arc::clone(sink))?,
+        third.compose(Arc::clone(sink))?,
+    ])?;
     let units = index
         .networks()
         .iter()
@@ -373,19 +373,20 @@ async fn assemble(
 
 /// Drives the whole index `passes` times.
 ///
-/// This is the whole of the scheduling an embedder needs. `Index::sync` is
+/// This is the whole of the scheduling an embedder needs. `SyncUnit::sync` is
 /// bounded by contract — one pass reads at most what each network's `SyncPolicy`
 /// allows and returns — so nothing here has to cancel, retry or wait, and no
-/// supervisor is involved. Every chain is asked on every pass, and one chain's
-/// refusal does not cost the others theirs; this loop stops at the worst of them,
-/// which is the simplest policy and a deliberate choice rather than a default.
+/// supervisor is involved. Each unit is asked in turn; this loop stops at the
+/// first failure, which is the simplest policy and a deliberate choice rather
+/// than a default.
 ///
 /// # Errors
 ///
-/// The worst failure any network reported.
+/// The first failure any network reported.
 async fn drive(index: &Index<dyn Indexing>, passes: usize) -> Result<(), AnyError> {
     for pass in 1..=passes {
-        for status in index.sync().await? {
+        for unit in index.units() {
+            let status = unit.sync().await?;
             let at = status.checkpoint.map(|block| block.position.0);
             println!(
                 "pass {pass} {}/{}: {:?}, checkpoint {at:?}",

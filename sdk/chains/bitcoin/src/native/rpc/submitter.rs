@@ -16,7 +16,8 @@ const NOT_FOUND: i64 = -5;
 
 /// Transaction submission: the chain's only external effect.
 pub trait Submitter: Send + Sync {
-    /// Submits one exact signed envelope with one visible attempt and
+    /// Submits one exact signed envelope with one visible attempt at every
+    /// node the transport reaches (`json_rpc::Client::broadcast`) and
     /// verifies the returned txid.
     ///
     /// A definitive rejection is [`ErrorKind::Rejected`] (or
@@ -42,7 +43,7 @@ impl<C: json_rpc::Client> Submitter for Client<C> {
     ) -> BoxFuture<'a, Result<TransactionId, Error>> {
         Box::pin(async move {
             let params = json!([transaction.hex(), max_fee_rate.core_maximum()?]);
-            let raw = match self.call_once("sendrawtransaction", params).await {
+            let raw = match self.broadcast_once("sendrawtransaction", params).await {
                 Ok(raw) => raw,
                 Err(CallError::Remote(failure)) => {
                     return Err(Error::new(
@@ -168,6 +169,47 @@ mod tests {
         ] {
             let unknown = broadcast(reply, rate()).unwrap_err();
             assert_eq!(unknown.kind, ErrorKind::RpcUnavailable);
+        }
+    }
+
+    /// The injected tip probe of a test cluster.
+    fn tip(client: &Script) -> BoxFuture<'_, Result<u64, CallError>> {
+        Box::pin(async move {
+            let probe = json_rpc::Request::new("getblockcount", json!([]));
+            let raw = json_rpc::Client::request(client, probe).await??;
+            Ok(raw.deserialize()?)
+        })
+    }
+
+    #[test]
+    fn submission_reaches_every_node_of_a_cluster_once() {
+        let id = signed().id;
+        let height = || Reply::ok("getblockcount", json!(1));
+        let timeout = json_rpc::Error {
+            kind: json_rpc::ErrorKind::Timeout,
+            message: "timed out".to_owned(),
+        };
+        let nodes = [
+            Script::node(vec![
+                height(),
+                Reply::result("sendrawtransaction", Err(timeout)),
+            ]),
+            Script::node(vec![
+                height(),
+                Reply::ok("sendrawtransaction", json!(id.to_string())),
+            ]),
+        ];
+        let cluster = block_on(json_rpc::Cluster::new(
+            nodes.to_vec(),
+            tip,
+            json_rpc::Policy::default(),
+        ))
+        .unwrap();
+        let client = Client::unverified(cluster, crate::native::Network::Regtest);
+        assert_eq!(block_on(client.broadcast(signed(), rate())), Ok(id));
+        for node in &nodes {
+            node.exhausted();
+            assert_eq!(node.methods(), ["getblockcount", "sendrawtransaction"]);
         }
     }
 

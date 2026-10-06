@@ -1,12 +1,14 @@
 #![doc = include_str!("../README.md")]
 
 mod client;
+mod cluster;
 mod endpoint;
 mod error;
 mod failover;
 mod http;
 mod retry;
 mod statistics;
+mod swap;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod value;
@@ -14,12 +16,14 @@ mod value;
 use serde_json::Value;
 
 pub use client::{Batch, BoxFuture, Client, Repetition, Request};
+pub use cluster::{Cluster, Limit, Policy};
 pub use endpoint::{Bounds, Endpoint, Secrets};
 pub use error::{CallError, Error, ErrorKind};
 pub use failover::Failover;
 pub use http::Http;
 pub use retry::{Backoff, Retry, Trigger};
 pub use statistics::{Snapshot, Statistics};
+pub use swap::Swap;
 pub use value::{CallResult, Failure, RawJson};
 
 /// One request of a [`Batch`].

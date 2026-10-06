@@ -1,9 +1,9 @@
 //! The required-spend contract.
 
 use indexing::{
-    AssetId, BlockHeight, BlockRef, CanonicalBlock, ConfirmedHistory, FeeSettlement,
-    IndexErrorKind, IndexStore, IndexedBatch, IndexedOutput, InterpretedBlock, Network,
-    OutputChanges, OutputCursor, OutputId, OutputKey, OutputPage, OutputRequest, OutputStore,
+    AssetId, BlockHeight, BlockRef, BlockWithOutputs, ConfirmedHistory, FeeSettlement,
+    IndexErrorKind, IndexStore, IndexedBatch, IndexedOutput, Network, OutputChanges, OutputCursor,
+    OutputId, OutputKey, OutputPage, OutputRequest, OutputStore,
 };
 
 use super::fixture::Fixture;
@@ -292,16 +292,15 @@ impl<'a, R: IndexStore + OutputStore + ConfirmedHistory> SpendContract<'a, R> {
     async fn fill(&self, checkpoint: &BlockRef, output: &IndexedOutput) {
         let block = self.fixture.block(output.created_at.0);
         let transactions = vec![self.fixture.paid("owner", block.height)];
-        let interpreted = InterpretedBlock {
+        let interpreted = BlockWithOutputs {
             outputs: OutputChanges {
                 created: vec![output.clone()],
                 ..OutputChanges::default()
             },
-            ..InterpretedBlock::new(&self.fixture.network, block, transactions)
+            ..BlockWithOutputs::new(&self.fixture.network, block, transactions)
                 .expect("unique transaction ids")
         };
-        let canonical = CanonicalBlock::new(self.fixture.network.clone(), interpreted)
-            .expect("valid fixture facts");
+        let canonical = interpreted;
         let batch = IndexedBatch::new(
             self.fixture.network.clone(),
             Some(checkpoint.clone()),
@@ -371,17 +370,16 @@ impl<'a, R: IndexStore + OutputStore + ConfirmedHistory> SpendContract<'a, R> {
         outputs: OutputChanges,
     ) -> Result<Vec<OutputKey>, indexing::IndexError> {
         let height = block.height;
-        let interpreted = InterpretedBlock {
+        let interpreted = BlockWithOutputs {
             outputs,
-            ..InterpretedBlock::new(
+            ..BlockWithOutputs::new(
                 &self.fixture.network,
                 block,
                 vec![self.fixture.paid("owner", height)],
             )
             .expect("unique transaction ids")
         };
-        let canonical = CanonicalBlock::new(self.fixture.network.clone(), interpreted)
-            .expect("valid fixture facts");
+        let canonical = interpreted;
         let batch = IndexedBatch::new(
             self.fixture.network.clone(),
             checkpoint,

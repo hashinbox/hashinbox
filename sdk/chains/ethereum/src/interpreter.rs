@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use base::{MovementKind, Networked};
 use indexing::{
-    BlockCredit, BlockInterpreter as Interpret, IndexError, InterpretedBlock, MovementId, Network,
-    NetworkFee, ObservationDraft, ObservationDraftStatus, ValueMovement,
+    BlockCredit, BlockInterpreter as Interpret, BlockRef, BlockWithOutputs, IndexError, MovementId,
+    Network, NetworkFee, Status, ValueMovement,
 };
 
 use crate::native::{
@@ -35,29 +35,35 @@ impl BlockInterpreter {
         &self.network
     }
 
-    fn observation(&self, transaction: &Transaction, movements: Vec<Movement>) -> ObservationDraft {
+    /// One transaction of `block` as the index keeps it.
+    fn observation(
+        &self,
+        transaction: &Transaction,
+        movements: Vec<Movement>,
+        block: &BlockRef,
+    ) -> indexing::Transaction {
+        let block = block.clone();
         let status = if transaction.succeeded() {
-            ObservationDraftStatus::Included
+            Status::Included { block }
         } else {
-            ObservationDraftStatus::Failed {
+            Status::Failed {
+                block,
                 reason: Some("ethereum receipt status is zero".to_owned()),
             }
         };
-        ObservationDraft {
-            transaction: indexing::Transaction {
-                transaction_id: transaction.id().canonical(&self.network),
-                movements: movements
-                    .into_iter()
-                    .filter_map(|movement| self.movement(movement))
-                    .collect(),
-                fee: transaction.fee().map(|fee| self.fee(fee)),
-            },
+        indexing::Transaction {
+            id: transaction.id().canonical(&self.network),
+            movements: movements
+                .into_iter()
+                .filter_map(|movement| self.movement(movement))
+                .collect(),
+            fee: transaction.fee().map(|fee| self.fee(fee)),
             // The node's own `transactionIndex`, checked against the block's
             // transaction list and against the receipt when the block was
             // parsed (`native/block/head.rs`, `native/block/receipt.rs`). Never
             // this loop's counter: `inspect` reports the selected transactions
             // only, so counting them would number the selection.
-            transaction_order: transaction.listed.index,
+            order: transaction.listed.index,
             status,
         }
     }
@@ -130,9 +136,10 @@ impl Interpret for BlockInterpreter {
         &self,
         block: &RawBlock,
         addresses: &[base::Address],
-    ) -> Result<InterpretedBlock, IndexError> {
+    ) -> Result<BlockWithOutputs, IndexError> {
         let parsed = block.parse()?;
         let selected: BTreeSet<Address> = indexing::select_addresses(&self.network, addresses)?;
+        let reference = block.reference().clone();
         let mut transactions = Vec::new();
         for transaction in parsed.transactions() {
             let movements = transaction.movements();
@@ -143,7 +150,7 @@ impl Interpret for BlockInterpreter {
                 .into_iter()
                 .any(|address| selected.contains(address))
             {
-                transactions.push(self.observation(transaction, movements));
+                transactions.push(self.observation(transaction, movements, &reference));
             }
         }
         let credits = block
@@ -152,10 +159,9 @@ impl Interpret for BlockInterpreter {
             .filter(|withdrawal| selected.contains(&withdrawal.address))
             .map(|withdrawal| self.credit(withdrawal))
             .collect();
-        let reference = block.reference().clone();
-        Ok(InterpretedBlock {
+        Ok(BlockWithOutputs {
             credits,
-            ..InterpretedBlock::new(parsed.network(), reference, transactions)?
+            ..BlockWithOutputs::new(parsed.network(), reference, transactions)?
         })
     }
 }
@@ -353,14 +359,14 @@ mod tests {
     fn inspect(
         block: &RawBlock,
         addresses: &[base::Address],
-    ) -> Result<InterpretedBlock, IndexError> {
+    ) -> Result<BlockWithOutputs, IndexError> {
         BlockInterpreter::new(&network())?.inspect(block, addresses)
     }
 
     /// The settled balance of `of` in ether, folded from `interpreted`
     /// exactly as a store folds the rows it wrote from it, under this chain's
     /// own fee rule — both collections, because a store writes both.
-    fn folded(interpreted: &InterpretedBlock, of: base::Address) -> indexing::Balance {
+    fn folded(interpreted: &BlockWithOutputs, of: base::Address) -> indexing::Balance {
         let subject = indexing::Subject {
             address: of,
             asset: AssetKind::Native.id(),
@@ -370,24 +376,8 @@ mod tests {
             .settlement();
         let mut ledger = indexing::Fold::new(&subject);
         for draft in interpreted.block.transactions() {
-            let status = match &draft.status {
-                ObservationDraftStatus::Included => indexing::CanonicalStatus::Included {
-                    block: interpreted.block.reference().clone(),
-                },
-                ObservationDraftStatus::Failed { reason } => indexing::CanonicalStatus::Failed {
-                    block: interpreted.block.reference().clone(),
-                    reason: reason.clone(),
-                },
-            };
             ledger
-                .apply(
-                    &indexing::CanonicalTransaction {
-                        transaction: draft.transaction.clone(),
-                        transaction_order: draft.transaction_order,
-                        status,
-                    },
-                    settlement,
-                )
+                .apply(draft, settlement)
                 .expect("interpreted amounts are storable");
         }
         for credit in &interpreted.credits {
@@ -442,7 +432,7 @@ mod tests {
     }
 
     /// The block body credits a watched
-    /// address two ether with no transaction, `InterpretedBlock::credits`
+    /// address two ether with no transaction, `BlockWithOutputs::credits`
     /// carries it, and the fold reports it — beside the 42 wei the block's one
     /// transaction moved to the same address, each counted exactly once.
     ///
@@ -494,8 +484,8 @@ mod tests {
             .iter()
             .next()
             .expect("the value transfer");
-        assert_eq!(draft.transaction.movements.len(), 1);
-        assert_eq!(draft.transaction.movements[0].amount, Decimal::from(42_u64));
+        assert_eq!(draft.movements.len(), 1);
+        assert_eq!(draft.movements[0].amount, Decimal::from(42_u64));
 
         let credited = folded(&interpreted, beneficiary);
         assert_eq!(
@@ -536,7 +526,7 @@ mod tests {
         );
     }
 
-    /// A draft's `transaction_order` is its place in the **block**, not its
+    /// A transaction's `order` is its place in the **block**, not its
     /// place in what `inspect` reported.
     ///
     /// The block holds two transactions and only the second touches a selected
@@ -545,7 +535,7 @@ mod tests {
     /// has already checked against block order and against the receipt, so the
     /// same transaction carries the same ordinal under every selection — which
     /// is what keeps a history cursor stable
-    /// (`indexing::ObservationDraft::transaction_order`).
+    /// (`indexing::Transaction::order`).
     #[test]
     fn a_draft_carries_its_place_in_the_block_not_in_the_selection() {
         let block = two_transaction_block();
@@ -555,13 +545,9 @@ mod tests {
             1,
             "one transaction is selected"
         );
-        assert_eq!(selected.block.transactions()[0].transaction_order, 1);
+        assert_eq!(selected.block.transactions()[0].order, 1);
         assert_eq!(
-            selected.block.transactions()[0]
-                .transaction
-                .transaction_id
-                .id
-                .to_string(),
+            selected.block.transactions()[0].id.id.to_string(),
             SECOND_TX_HASH
         );
 
@@ -576,7 +562,7 @@ mod tests {
             .block
             .transactions()
             .iter()
-            .map(|draft| draft.transaction_order)
+            .map(|draft| draft.order)
             .collect();
         assert_eq!(orders, [0, 1]);
     }
@@ -625,33 +611,22 @@ mod tests {
             .iter()
             .next()
             .expect("relevant tx must emit");
-        assert_eq!(draft.transaction.movements.len(), 1);
+        assert_eq!(draft.movements.len(), 1);
         assert_eq!(
-            draft.transaction.movements[0].id,
+            draft.movements[0].id,
             MovementId(format!("{TX_HASH}:value"))
         );
-        assert_eq!(draft.transaction.movements[0].amount, Decimal::from(42_u64));
+        assert_eq!(draft.movements[0].amount, Decimal::from(42_u64));
         assert_eq!(
-            draft
-                .transaction
-                .fee
-                .as_ref()
-                .expect("fee must exist")
-                .amount,
+            draft.fee.as_ref().expect("fee must exist").amount,
             Decimal::from(63_000_u64)
         );
-        assert_eq!(draft.transaction.movements[0].amount.scale(), 0);
+        assert_eq!(draft.movements[0].amount.scale(), 0);
         assert_eq!(
-            draft
-                .transaction
-                .fee
-                .as_ref()
-                .expect("fee must exist")
-                .amount
-                .scale(),
+            draft.fee.as_ref().expect("fee must exist").amount.scale(),
             0
         );
-        assert_eq!(draft.status, ObservationDraftStatus::Included);
+        assert!(matches!(draft.status, Status::Included { .. }));
     }
 
     /// A wallet paid through a
@@ -679,11 +654,10 @@ mod tests {
             .next()
             .expect("a contract-initiated credit must admit its transaction");
         assert_eq!(
-            draft.transaction.transaction_id,
+            draft.id,
             TransactionId::from_bytes(hash(TX_HASH)).canonical(&network())
         );
         let credit = draft
-            .transaction
             .movements
             .iter()
             .find(|movement| movement.to() == Some(&watcher))
@@ -698,7 +672,6 @@ mod tests {
         // attributed is cancelled rather than left to accumulate.
         let router = canonical_address(TO);
         let debit = draft
-            .transaction
             .movements
             .iter()
             .find(|movement| movement.from() == Some(&router))
@@ -708,19 +681,13 @@ mod tests {
         // Nothing unexplained is left on the sender: its gas is the fee only.
         assert!(
             !draft
-                .transaction
                 .movements
                 .iter()
                 .any(|movement| movement.from() == Some(&canonical_address(FROM))
                     && movement.id.0.contains(":residual:"))
         );
         assert_eq!(
-            draft
-                .transaction
-                .fee
-                .as_ref()
-                .expect("fee must exist")
-                .amount,
+            draft.fee.as_ref().expect("fee must exist").amount,
             Decimal::from(63_000_u64)
         );
     }
@@ -754,7 +721,6 @@ mod tests {
                 .expect("maximum U256 decimal literal must parse");
         assert_eq!(
             draft
-                .transaction
                 .movements
                 .iter()
                 .map(ValueMovement::kind)
@@ -766,7 +732,7 @@ mod tests {
                 MovementKind::Burn
             ]
         );
-        for movement in &draft.transaction.movements {
+        for movement in &draft.movements {
             assert_eq!(movement.amount, expected);
             assert_eq!(movement.amount.scale(), 0);
         }
@@ -785,12 +751,12 @@ mod tests {
         let interpreted =
             inspect(&priced, &[canonical_address(FROM)]).expect("a full-width fee must interpret");
         let draft = &interpreted.block.transactions()[0];
-        assert!(draft.transaction.movements.is_empty());
+        assert!(draft.movements.is_empty());
         let expected_fee =
             "37103788360346070921249247515601288832377161834387998120553730227145015296000"
                 .parse::<Decimal>()
                 .expect("full-width fee decimal literal must parse");
-        let fee = draft.transaction.fee.as_ref().expect("fee must exist");
+        let fee = draft.fee.as_ref().expect("fee must exist");
         assert_eq!(fee.amount, expected_fee);
         assert_eq!(fee.amount.scale(), 0);
     }
@@ -804,7 +770,7 @@ mod tests {
         let interpreted = inspect(&block, &[canonical_address(CONTRACT)])
             .expect("contract creation must interpret");
         assert_eq!(
-            interpreted.block.transactions()[0].transaction.movements[0].to(),
+            interpreted.block.transactions()[0].movements[0].to(),
             Some(&address(CONTRACT).canonical(&network()))
         );
     }
@@ -836,18 +802,11 @@ mod tests {
         )
         .expect("failure must interpret");
         let draft = &interpreted.block.transactions()[0];
-        assert!(matches!(
-            draft.status,
-            ObservationDraftStatus::Failed { .. }
-        ));
-        assert!(draft.transaction.fee.is_some());
+        assert!(matches!(draft.status, Status::Failed { .. }));
+        assert!(draft.fee.is_some());
+        assert_eq!(draft.movements.len(), 1, "the settlement, and nothing else");
         assert_eq!(
-            draft.transaction.movements.len(),
-            1,
-            "the settlement, and nothing else"
-        );
-        assert_eq!(
-            draft.transaction.movements[0].to(),
+            draft.movements[0].to(),
             Some(&canonical_address(BENEFICIARY))
         );
         assert_eq!(
@@ -946,7 +905,7 @@ mod tests {
             receipt(true, Some(TO), None, "0x1", logs),
         );
         let interpreted = inspect(&block, &[canonical_address(FROM)]).expect("logs must interpret");
-        let movements = &interpreted.block.transactions()[0].transaction.movements;
+        let movements = &interpreted.block.transactions()[0].movements;
         assert_eq!(movements.len(), 3);
         assert_eq!(movements[0].kind(), MovementKind::Transfer);
         assert_eq!(movements[1].kind(), MovementKind::Mint);
@@ -970,12 +929,7 @@ mod tests {
         );
         let interpreted = inspect(&block, &[canonical_address(FROM)])
             .expect("malformed token log must not poison the block");
-        assert!(
-            interpreted.block.transactions()[0]
-                .transaction
-                .movements
-                .is_empty()
-        );
+        assert!(interpreted.block.transactions()[0].movements.is_empty());
     }
 
     #[test]

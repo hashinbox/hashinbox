@@ -6,16 +6,18 @@ use serde_json::Value;
 
 use crate::native::{Error, ErrorKind, Network};
 
-/// A verified Solana JSON-RPC connection to one endpoint. Cheap to clone:
-/// clones share it.
+/// A verified Solana JSON-RPC connection over the transport `C`, which may
+/// reach one node or several. Cheap to clone: clones share it.
 ///
 /// [`Client::connect`] is the only public constructor, and it checks the
 /// genesis hash and the executable Memo-v3 program first, so holding a
-/// `Client` proves which cluster it serves. Every call is one attempt against
-/// one endpoint (`json_rpc::Request::once`): Solana reads carry context floors
-/// and submissions must not be repeated transparently, so no transport
-/// decorator may repeat them whatever the deployment configures. Timeouts and
-/// size limits belong to the transport `C`.
+/// `Client` proves which cluster it serves. No call is ever repeated
+/// (`json_rpc::Request::once`), whatever the deployment configures: a read
+/// is one attempt at the node the transport routes it to, because Solana
+/// reads carry context floors that a second node may not have reached, and a
+/// submission is one [`json_rpc::Client::broadcast`] that reaches every node
+/// the transport holds, each exactly once. Timeouts and size limits belong to
+/// the transport `C`.
 pub struct Client<C> {
     inner: Arc<State<C>>,
 }
@@ -72,23 +74,44 @@ impl<C: json_rpc::Client> Client<C> {
         Ok(client)
     }
 
-    /// One attempt of `method`, decoded as `T`. Remote failures show only
-    /// their code, never node text.
+    /// One attempt of `method` at one node, decoded as `T`. Remote failures
+    /// show only their code, never node text.
     pub(crate) async fn request<T>(&self, method: &str, params: Value) -> Result<T, Error>
     where
         T: DeserializeOwned,
     {
-        let raw = self
+        let outcome = self
             .inner
             .transport
             .request(Request::once(method, params))
-            .await?
-            .map_err(|failure| {
-                Error::rpc(
-                    format!("Solana RPC {method} failed with code {}", failure.code),
-                    true,
-                )
-            })?;
+            .await;
+        Self::decode(method, outcome)
+    }
+
+    /// One signed envelope submitted to every node the transport reaches,
+    /// each exactly once; the first acceptance answers, decoded as `T`.
+    pub(crate) async fn broadcast_once<T>(&self, method: &str, params: Value) -> Result<T, Error>
+    where
+        T: DeserializeOwned,
+    {
+        let outcome = self
+            .inner
+            .transport
+            .broadcast(Request::once(method, params))
+            .await;
+        Self::decode(method, outcome)
+    }
+
+    fn decode<T: DeserializeOwned>(
+        method: &str,
+        outcome: Result<json_rpc::CallResult, json_rpc::Error>,
+    ) -> Result<T, Error> {
+        let raw = outcome?.map_err(|failure| {
+            Error::rpc(
+                format!("Solana RPC {method} failed with code {}", failure.code),
+                true,
+            )
+        })?;
         raw.deserialize::<T>().map_err(|_| Error::malformed(method))
     }
 }

@@ -4,17 +4,18 @@
 //! code or deserialized from any `serde` format — [`Config::connect`]s to a
 //! node and verifies its identity, and the verified [`ChainHandle`] then
 //! [`ChainHandle::compose`]s over an opened repository into a
-//! [`wallets::ComposedChain`]. No storage is opened on the first step, which is
+//! [`sdk_config::ComposedChain`]. No storage is opened on the first step, which is
 //! what lets an application check every chain's identity before it opens
-//! anything. [`wallets::Composition`] is what
+//! anything. [`sdk_config::Composition`] is what
 //! holds this chain beside the others.
 
 use std::{collections::BTreeSet, str::FromStr, sync::Arc};
 
 use base::{Networked as _, Unit, Units};
 use indexing::Checkpoint as _;
+use sdk_config::{ComposedChain, Connection};
 use serde::{Deserialize, de};
-use wallets::{ComposedChain, Connection, SubmissionRegistrar};
+use wallets::SubmissionRegistrar;
 
 /// What a store must answer for **this** chain to compose over it.
 ///
@@ -66,7 +67,7 @@ use crate::{
 ///
 /// `A` is the asset tag the application keys its wallet factories by; the
 /// chain never interprets it.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(
     deny_unknown_fields,
     bound = "A: serde::de::DeserializeOwned + FromStr + Ord"
@@ -187,7 +188,6 @@ impl<A: Ord> Config<A> {
         transport: Option<Transport>,
     ) -> Result<ChainHandle<A>, Error> {
         self.validate()?;
-        let network = Network::new(self.chain_id, self.network.as_str());
         let transport = match transport {
             Some(transport) => transport,
             None => {
@@ -196,12 +196,21 @@ impl<A: Ord> Config<A> {
                 transport
             }
         };
+        let rpc = self.verified(transport).await?;
+        Ok(ChainHandle { config: self, rpc })
+    }
+
+    /// The node identity checks [`Self::connect`] runs over `transport`: the
+    /// node serves this chain id, traces calls, and every allowlisted token
+    /// is a contract with the configured decimals.
+    async fn verified(&self, transport: Transport) -> Result<RpcClient<Transport>, Error> {
+        let network = Network::new(self.chain_id, self.network.as_str());
         let rpc = RpcClient::connect(transport, &network).await?;
         rpc.validate_tracing().await?;
         for token in &self.tokens {
             rpc.validate_token(&token.contract, token.decimals).await?;
         }
-        Ok(ChainHandle { config: self, rpc })
+        Ok(rpc)
     }
 }
 
@@ -316,21 +325,26 @@ impl<A> ChainHandle<A> {
 }
 
 /// [`ChainHandle::compose`] with this chain's type erased, so one vector holds every
-/// configured chain and [`wallets::Composition`] folds them without naming any
+/// configured chain and [`sdk_config::Composition`] folds them without naming any
 /// of them. An application writes none of this.
 impl<A: Send + 'static, R: Store> Connection<A, R> for ChainHandle<A> {
     fn compose<'a>(
         self: Box<Self>,
         repository: R,
         registrar: &'a Arc<dyn SubmissionRegistrar>,
-    ) -> base::BoxFuture<'a, Result<ComposedChain<A>, wallets::WalletError>> {
-        Box::pin(async move { Ok((*self).compose(repository, registrar).await?) })
+    ) -> base::BoxFuture<'a, Result<ComposedChain<A>, sdk_config::Error>> {
+        Box::pin(async move {
+            (*self)
+                .compose(repository, registrar)
+                .await
+                .map_err(sdk_config::Error::refused)
+        })
     }
 }
 
 /// One allowlisted ERC-20 token: its contract, the asset tag its wallets use,
 /// and the decimals the contract is checked against when this chain connects.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields, bound = "A: serde::de::DeserializeOwned")]
 pub struct Token<A> {
     /// The contract address, in canonical lowercase when it is written as
@@ -413,7 +427,7 @@ pub type Limits = FeeLimits<u128>;
 /// of them involves a file.
 impl<A, R> sdk_config::Chain<A, R> for Config<A>
 where
-    A: Ord + Send + Sync + 'static,
+    A: Clone + Ord + Send + Sync + 'static,
     R: Store,
 {
     fn network(&self) -> base::Network {
@@ -425,15 +439,28 @@ where
         Ok(None)
     }
 
+    fn verify<'a>(
+        &'a self,
+        transport: &'a Transport,
+    ) -> base::BoxFuture<'a, Result<(), sdk_config::Error>> {
+        Box::pin(async move {
+            self.verified(transport.clone())
+                .await
+                .map(drop)
+                .map_err(sdk_config::Error::refused)
+        })
+    }
+
     fn connect<'a>(
-        self: Box<Self>,
+        &'a self,
         secrets: &'a dyn json_rpc::Secrets,
         statistics: &'a mut Vec<json_rpc::Statistics>,
         logger: logging::Logger,
         transport: Option<Transport>,
     ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, sdk_config::Error>> {
         Box::pin(async move {
-            let node = (*self)
+            let node = self
+                .clone()
                 .connect_monitored(secrets, statistics, logger, transport)
                 .await
                 .map_err(sdk_config::Error::refused)?;
@@ -448,12 +475,17 @@ mod tests {
 
     use std::time::Duration;
 
+    use futures_executor::block_on;
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::native::Wei;
+    use crate::native::{
+        Wei,
+        rpc::script::{Reply, Script, Scripted},
+    };
 
     const CONTRACT: &str = "0x1111111111111111111111111111111111111111";
+    const BLOCK_HASH: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OTHER_CONTRACT: &str = "0x2222222222222222222222222222222222222222";
 
     fn section(token: Option<&str>) -> Value {
@@ -802,5 +834,72 @@ mod tests {
         let mut native_only = section(None);
         native_only["rpc"]["endpoints"] = json!(["http://127.0.0.1:8545", "http://127.0.0.1:9545"]);
         parse(native_only).expect("native Ethereum keeps ordered RPC failover");
+    }
+
+    /// [`sdk_config::Chain::verify`] over a scripted node: the identity check
+    /// `connect` runs, and the one a replacement node list must pass.
+    fn verify(config: &Config<String>, script: &Script) -> Result<(), sdk_config::Error> {
+        let transport: Transport = Arc::new(script.clone());
+        let chain: &dyn sdk_config::Chain<String, indexing::memory::Repository> = config;
+        block_on(chain.verify(&transport))
+    }
+
+    /// The node's latest block, empty: the trace probe still traces it.
+    fn latest() -> Value {
+        json!({
+            "hash": BLOCK_HASH,
+            "parentHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "sha3Uncles": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "miner": "0x0000000000000000000000000000000000000000",
+            "stateRoot": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "transactionsRoot":
+                "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "receiptsRoot": "0xabababababababababababababababababababababababababababababababab",
+            "logsBloom": format!("0x{}", "00".repeat(256)),
+            "difficulty": "0x0",
+            "number": "0xa",
+            "gasLimit": "0x1c9c380",
+            "gasUsed": "0x0",
+            "timestamp": "0x64",
+            "extraData": "0x",
+            "mixHash": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "nonce": "0x0000000000000000",
+            "uncles": [],
+            "transactions": []
+        })
+    }
+
+    #[test]
+    fn verify_accepts_a_node_serving_the_configured_network() {
+        let script = Script::node([
+            Reply::ok("eth_chainId", json!("0x1")).expecting(json!([])),
+            Reply::ok("eth_getBlockByNumber", latest()).expecting(json!(["latest", true])),
+            Reply::ok("debug_traceBlockByHash", json!([])).expecting(json!([
+                BLOCK_HASH,
+                {"tracer": "prestateTracer", "tracerConfig": {"diffMode": true}}
+            ])),
+        ]);
+        let config = parse(section(None)).expect("a chain-1 section");
+
+        verify(&config, &script).expect("a chain-1 node serves a chain-1 section");
+
+        script.exhausted();
+    }
+
+    /// An Anvil node behind a mainnet section is refused on its chain ID,
+    /// before the trace probe.
+    #[test]
+    fn verify_refuses_a_node_serving_another_network() {
+        let script = Script::node([Reply::ok("eth_chainId", json!("0x7a69"))]);
+        let config = parse(section(None)).expect("a chain-1 section");
+
+        let error = verify(&config, &script).expect_err("another chain");
+
+        assert_eq!(error.kind, sdk_config::ErrorKind::Section);
+        assert_eq!(
+            error.message,
+            "Ethereum RPC chain ID 31337 does not match configured chain ID 1"
+        );
+        script.exhausted();
     }
 }

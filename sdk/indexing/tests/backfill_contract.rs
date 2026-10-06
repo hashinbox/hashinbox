@@ -1,55 +1,16 @@
 //! Late observations backfill their own history without delaying forward sync.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
 use base::Decimal;
 use futures_executor::block_on;
 use indexing::{
-    Address, AssetId, Balance, BalanceQuery, BalanceStore, Birthday, BlockHash, BlockHeight,
-    BlockInterpreter, BlockParent, BlockPosition, BlockRef, BlockSource, BoxFuture, ChainName,
-    Completeness, ConfirmedHistory, FeeSettlement, HistoryQuery, IndexError, IndexErrorKind,
-    Indexer, InterpretedBlock, MovementId, NativeBlock, Network, ObservationDraft,
-    ObservationDraftStatus, Page, Subject, SyncConfig, SyncPhase, SyncPolicy, SyncStatus,
+    Address, AssetId, Balance, BalanceQuery, BalanceStore, Birthday, BlockHeight, BlockPosition,
+    ChainName, Completeness, ConfirmedHistory, HistoryQuery, IndexErrorKind, Indexer, MovementId,
+    Network, Page, Status, Subject, SyncConfig, SyncPhase, SyncPolicy, SyncStatus, Transaction,
     TransactionRef, ValueMovement, Watching, memory,
+    testing::{Chain, Fault, block},
 };
-
-/// Every block above `pruned` exists, and the source counts what a pass asked
-/// it for.
-#[derive(Clone, Default)]
-struct Source {
-    tip: u64,
-    /// The oldest block this node still holds. A request below it is refused
-    /// the way a pruned node refuses one, and never stops refusing.
-    pruned: u64,
-    /// One produced block this node leaves out of every range it serves, while
-    /// answering for every other one — the shape a claim must never be built
-    /// over, because the block it omits is one nothing will ever inspect again.
-    skipped: Option<u64>,
-    fetched: Arc<AtomicUsize>,
-}
-
-impl Source {
-    /// The same node, having produced up to `tip`, counting into the same
-    /// total so a test can measure one restart against another.
-    fn at(&self, tip: u64) -> Self {
-        Self {
-            tip,
-            ..self.clone()
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct Block(BlockRef);
-
-impl NativeBlock for Block {
-    fn block_ref(&self) -> BlockRef {
-        self.0.clone()
-    }
-}
 
 fn network() -> Network {
     Network::new(ChainName::new("backfilled"), "testnet")
@@ -66,148 +27,15 @@ fn subject(value: &str) -> Subject {
     }
 }
 
-fn block(height: u64) -> BlockRef {
-    BlockRef {
-        position: BlockPosition(height),
-        height: BlockHeight(height),
-        hash: BlockHash(height.to_be_bytes().to_vec()),
-        parent: height.checked_sub(1).map(|parent| BlockParent {
-            position: BlockPosition(parent),
-            hash: BlockHash(parent.to_be_bytes().to_vec()),
-        }),
-        timestamp: None,
-    }
-}
+/// Every address a scenario here watches.
+const WATCHED: [&str; 6] = ["late", "fresh", "early", "x", "y", "z"];
 
-impl indexing::ChainTips for Source {
-    fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, indexing::SourceError>> {
-        Box::pin(async move { Ok(block(self.tip)) })
-    }
+type Index<R> = Indexer<Chain, Chain, R>;
 
-    fn confirmed_tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, indexing::SourceError>> {
-        Box::pin(async move { Ok(block(self.tip)) })
-    }
-}
-
-impl BlockSource for Source {
-    type Block = Block;
-
-    fn blocks<'a>(
-        &'a self,
-        start: BlockPosition,
-        end: BlockPosition,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<Self::Block>, indexing::SourceError>> {
-        if start.0 < self.pruned {
-            return Box::pin(async move {
-                Err(indexing::SourceError {
-                    message: "block is not available on this node".into(),
-                    retryable: true,
-                })
-            });
-        }
-        let blocks: Vec<_> = (start.0..=end.0.min(self.tip))
-            .filter(|height| Some(*height) != self.skipped)
-            .take(limit)
-            .map(|height| Block(block(height)))
-            .collect();
-        self.fetched.fetch_add(blocks.len(), Ordering::Relaxed);
-        Box::pin(async move { Ok(blocks) })
-    }
-
-    fn canonical_at<'a>(
-        &'a self,
-        position: BlockPosition,
-    ) -> BoxFuture<'a, Result<Option<BlockRef>, indexing::SourceError>> {
-        let found = (position.0 <= self.tip).then(|| block(position.0));
-        Box::pin(async move { Ok(found) })
-    }
-}
-
-/// Credits every selected address in every block, and nothing otherwise: a
-/// block indexed with an empty selection produces no row at all, which is what
-/// leaves the gap this test closes.
-///
-/// It also records what it was asked, block by block, because the selection *is*
-/// the subject of one scenario here: which observations a given block was
-/// inspected for is invisible from the store afterwards.
-#[derive(Clone, Default)]
-struct Interpreter {
-    inspected: Arc<std::sync::Mutex<Vec<Inspection>>>,
-}
-
-/// One block, and the addresses it was inspected for.
-type Inspection = (u64, Vec<String>);
-
-impl Interpreter {
-    /// Every `(block, addresses)` pair this interpreter was handed, in order.
-    fn calls(&self) -> Vec<Inspection> {
-        self.inspected.lock().expect("inspections").clone()
-    }
-}
-
-impl BlockInterpreter for Interpreter {
-    type Block = Block;
-
-    fn settlement(&self) -> FeeSettlement {
-        FeeSettlement::Charged
-    }
-
-    fn inspect(
-        &self,
-        block: &Self::Block,
-        addresses: &[Address],
-    ) -> Result<InterpretedBlock, IndexError> {
-        let reference = block.block_ref();
-        self.inspected.lock().expect("inspections").push((
-            reference.height.0,
-            addresses.iter().map(|at| at.value.clone()).collect(),
-        ));
-        // Every address gets its own transaction in the same block, so the
-        // ordinal is the address's place in the block's whole list rather than
-        // in the selection — which is what the interpreters supply.
-        let transactions = (0_u64..)
-            .zip(addresses)
-            .map(|(order, address)| ObservationDraft {
-                transaction: indexing::Transaction {
-                    transaction_id: TransactionRef::new(
-                        network(),
-                        format!("{}-{}", address.value, reference.height.0),
-                    ),
-                    movements: vec![ValueMovement::transfer(
-                        MovementId("0".into()),
-                        asset(),
-                        Decimal::from(10_u64),
-                        Address::new(network(), "treasury"),
-                        address.clone(),
-                    )],
-                    fee: None,
-                },
-                transaction_order: order,
-                status: ObservationDraftStatus::Included,
-            })
-            .collect();
-        InterpretedBlock::new(&network(), reference, transactions)
-    }
-}
-
-type Index<R> = Indexer<Source, Interpreter, R>;
-
-fn service<R: Clone>(repository: R, source: Source, policy: SyncPolicy) -> Arc<Index<R>> {
-    watching(repository, source, policy, Interpreter::default())
-}
-
-/// The same, over an interpreter the caller keeps, so a scenario can read which
-/// observations each block was inspected for.
-fn watching<R: Clone>(
-    repository: R,
-    source: Source,
-    policy: SyncPolicy,
-    interpreter: Interpreter,
-) -> Arc<Index<R>> {
+fn service<R: Clone>(repository: R, source: Chain, policy: SyncPolicy) -> Arc<Index<R>> {
     Arc::new(Indexer::new(
+        source.clone(),
         source,
-        interpreter,
         repository,
         SyncConfig::new(&network(), policy).expect("sync config"),
     ))
@@ -215,10 +43,21 @@ fn watching<R: Clone>(
 
 fn memory_service(
     memory: &memory::Repository,
-    source: Source,
+    source: Chain,
     policy: SyncPolicy,
 ) -> Arc<Index<memory::Repository>> {
     service(memory.clone(), source, policy)
+}
+
+/// The chain of [`source`] through 10, failing with `fault`: a node that has
+/// pruned what it was asked for, or that leaves one produced block out of
+/// every range it serves while answering for every other one — the shape a
+/// claim must never be built over, because the block it omits is one nothing
+/// will ever inspect again.
+fn failing(fault: Fault) -> Chain {
+    let chain = source(10);
+    chain.fail(fault);
+    chain
 }
 
 /// One pass, returning the status of the only network.
@@ -238,24 +77,51 @@ fn indexed(repository: &memory::Repository, address: &str) -> Vec<String> {
         .expect("history")
         .transactions
         .into_iter()
-        .map(|entry| entry.transaction.transaction_id.id.to_string())
+        .map(|entry| entry.id.id.to_string())
         .collect()
 }
 
 /// Ten blocks indexed with nothing watched, so the store holds a checkpoint
 /// and no history at all.
-fn caught_up(memory: &memory::Repository, source: Source) -> Arc<Index<memory::Repository>> {
+fn caught_up(memory: &memory::Repository, source: Chain) -> Arc<Index<memory::Repository>> {
     let index = memory_service(memory, source, SyncPolicy::new(100));
     assert_eq!(pass(&index).phase, SyncPhase::Ready);
     index
 }
 
-fn source(tip: u64) -> Source {
-    Source {
-        tip,
-        pruned: 0,
-        skipped: None,
-        fetched: Arc::new(AtomicUsize::new(0)),
+/// A dense chain through `tip` on which every block credits each of
+/// [`WATCHED`] 10 from the treasury, one transaction per address. A block
+/// inspected with an empty selection produces no row at all, which is what
+/// leaves the gap this test closes.
+fn source(tip: u64) -> Chain {
+    let chain = Chain::dense(network(), tip);
+    for height in 0..=30 {
+        for (order, address) in (0_u64..).zip(WATCHED) {
+            chain.include(&block(height), credit(height, order, address));
+        }
+    }
+    chain
+}
+
+/// The treasury's transfer of 10 to `address` in block `height`, at `order`
+/// in that block: every address gets its own transaction in the same block,
+/// so the ordinal is the address's place in the block's whole list.
+fn credit(height: u64, order: u64, address: &str) -> Transaction {
+    let address = Address::new(network(), address);
+    Transaction {
+        id: TransactionRef::new(network(), format!("{}-{height}", address.value)),
+        movements: vec![ValueMovement::transfer(
+            MovementId("0".into()),
+            asset(),
+            Decimal::from(10_u64),
+            Address::new(network(), "treasury"),
+            address,
+        )],
+        fee: None,
+        order,
+        status: Status::Included {
+            block: block(height),
+        },
     }
 }
 
@@ -290,14 +156,14 @@ fn a_fresh_watch_owes_nothing_and_reads_no_historical_block() {
     let memory = memory::Repository::new();
     let source = source(10);
     let index = caught_up(&memory, source.clone());
-    let read = source.fetched.load(Ordering::Relaxed);
+    let read = source.fetched().len();
 
     block_on(index.watch("fresh-1", &subject("fresh"), Birthday::Fresh)).expect("watch");
     let status = pass(&index);
 
     assert!(status.backfill.is_none(), "a fresh watch owes nothing");
     assert_eq!(
-        source.fetched.load(Ordering::Relaxed),
+        source.fetched().len(),
         read,
         "and so costs no block fetch at all"
     );
@@ -490,11 +356,11 @@ fn one_pass_reads_no_more_blocks_than_its_batch_size() {
         .expect("watch");
 
     let bounded = memory_service(&memory, source.clone(), SyncPolicy::new(3));
-    let read = source.fetched.load(Ordering::Relaxed);
+    let read = source.fetched().len();
     let status = pass(&bounded);
 
     assert_eq!(
-        source.fetched.load(Ordering::Relaxed) - read,
+        source.fetched().len() - read,
         3,
         "the backfill reads the batch size and stops"
     );
@@ -534,13 +400,13 @@ fn an_interrupted_backfill_reaches_the_same_end_state() {
     drop(first);
 
     let resumed = memory_service(&memory, source.clone(), SyncPolicy::new(100));
-    let read = source.fetched.load(Ordering::Relaxed);
+    let read = source.fetched().len();
     assert!(
         pass(&resumed).backfill.is_none(),
         "the rest of the range closes in one pass"
     );
     assert_eq!(
-        source.fetched.load(Ordering::Relaxed) - read,
+        source.fetched().len() - read,
         8,
         "the resumed pass reads blocks 3 to 10 and never rereads 0 to 2"
     );
@@ -566,12 +432,12 @@ fn a_settled_backfill_is_not_swept_again_after_a_restart() {
     drop(index);
 
     let restarted = memory_service(&memory, source.clone(), SyncPolicy::new(100));
-    let read = source.fetched.load(Ordering::Relaxed);
+    let read = source.fetched().len();
     let status = pass(&restarted);
 
     assert!(status.backfill.is_none(), "nothing is owed after a restart");
     assert_eq!(
-        source.fetched.load(Ordering::Relaxed),
+        source.fetched().len(),
         read,
         "and no block is fetched to find that out"
     );
@@ -624,14 +490,14 @@ fn a_lower_birthday_registered_before_a_restart_is_not_lost_to_recorded_progress
     drop(index);
 
     let restarted = memory_service(&memory, source.clone(), SyncPolicy::new(100));
-    let read = source.fetched.load(Ordering::Relaxed);
+    let read = source.fetched().len();
 
     assert!(
         pass(&restarted).backfill.is_none(),
         "one pass closes the widened range"
     );
     assert!(
-        source.fetched.load(Ordering::Relaxed) > read,
+        source.fetched().len() > read,
         "and it read blocks to do it, rather than settling a range it never saw"
     );
     assert_eq!(
@@ -668,34 +534,29 @@ fn one_pass_serves_three_observations_from_their_own_positions() {
     block_on(index.watch("y", &subject("y"), Birthday::At(BlockPosition(22)))).expect("y");
     drop(index);
 
-    let interpreter = Interpreter::default();
-    let one = watching(
-        memory.clone(),
-        source.clone(),
-        SyncPolicy::new(100),
-        interpreter.clone(),
-    );
-    let read = source.fetched.load(Ordering::Relaxed);
+    let one = service(memory.clone(), source.clone(), SyncPolicy::new(100));
+    let read = source.fetched().len();
+    let inspected = source.inspections().len();
     assert!(
         pass(&one).backfill.is_none(),
         "one pass closes what x and y owe between them"
     );
 
     assert_eq!(
-        source.fetched.load(Ordering::Relaxed) - read,
+        source.fetched().len() - read,
         9,
         "blocks 22 through 30, fetched once for the two observations that need \
          them rather than once each"
     );
     assert_eq!(
-        interpreter.calls(),
+        source.inspections()[inspected..],
         (22..=30)
             .map(|height| (
-                height,
+                BlockHeight(height),
                 if height <= 25 {
-                    vec!["y".to_owned()]
+                    vec![subject("y").address]
                 } else {
-                    vec!["x".to_owned(), "y".to_owned()]
+                    vec![subject("x").address, subject("y").address]
                 }
             ))
             .collect::<Vec<_>>(),
@@ -759,12 +620,13 @@ fn a_fresh_watch_owes_nothing_so_a_restart_never_sweeps_it() {
     // the watched address for every block it passes, which is the whole of
     // what that watch asked for, so those ten blocks are the only ones any
     // phase of this pass has a reason to read.
-    let moved = source.at(20);
+    source.extend_to(20);
+    let moved = source;
     let ahead = memory_service(&memory, moved.clone(), SyncPolicy::new(100));
-    let read = moved.fetched.load(Ordering::Relaxed);
+    let read = moved.fetched().len();
     assert_eq!(pass(&ahead).phase, SyncPhase::Ready);
     assert_eq!(
-        moved.fetched.load(Ordering::Relaxed) - read,
+        moved.fetched().len() - read,
         10,
         "blocks 11 through 20, read once by the forward phase and not swept again"
     );
@@ -772,12 +634,12 @@ fn a_fresh_watch_owes_nothing_so_a_restart_never_sweeps_it() {
     drop(ahead);
 
     let restarted = memory_service(&memory, moved.clone(), SyncPolicy::new(100));
-    let read = moved.fetched.load(Ordering::Relaxed);
+    let read = moved.fetched().len();
     let status = pass(&restarted);
 
     assert!(status.backfill.is_none(), "nothing is owed after a restart");
     assert_eq!(
-        moved.fetched.load(Ordering::Relaxed),
+        moved.fetched().len(),
         read,
         "and no block is re-read to find that out"
     );
@@ -804,10 +666,7 @@ fn a_historical_range_missing_a_produced_block_settles_nothing() {
     // The same node, having lost one block in the middle of the range.
     let gapped = memory_service(
         &memory,
-        Source {
-            skipped: Some(5),
-            ..source(10)
-        },
+        failing(Fault::Omitted(BlockPosition(5))),
         SyncPolicy::new(100),
     );
     let status = pass(&gapped);
@@ -856,10 +715,7 @@ fn a_resumed_historical_read_must_follow_what_the_observation_recorded() {
 
     let gapped = memory_service(
         &memory,
-        Source {
-            skipped: Some(3),
-            ..source(10)
-        },
+        failing(Fault::Omitted(BlockPosition(3))),
         SyncPolicy::new(100),
     );
     let status = pass(&gapped);
@@ -892,10 +748,10 @@ fn a_resumed_historical_read_must_follow_what_the_observation_recorded() {
 #[test]
 fn a_backfill_the_source_cannot_serve_reports_its_failure() {
     let memory = memory::Repository::new();
-    let pruned = Source {
-        pruned: 5,
-        ..source(10)
-    };
+    let pruned = failing(Fault::Pruned {
+        below: BlockPosition(5),
+        retryable: true,
+    });
     let index = caught_up(&memory, pruned.clone());
     block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(0))))
         .expect("watch");
@@ -930,10 +786,10 @@ fn a_backfill_the_source_cannot_serve_reports_its_failure() {
 #[test]
 fn a_backfill_the_source_cannot_serve_still_answers_for_the_tip() {
     let memory = memory::Repository::new();
-    let pruned = Source {
-        pruned: 5,
-        ..source(10)
-    };
+    let pruned = failing(Fault::Pruned {
+        below: BlockPosition(5),
+        retryable: true,
+    });
     let index = caught_up(&memory, pruned);
     block_on(index.watch("late-1", &subject("late"), Birthday::At(BlockPosition(0))))
         .expect("watch");
@@ -985,7 +841,8 @@ fn a_network_behind_its_tip_is_still_catching_up() {
     let memory = memory::Repository::new();
     let source = source(10);
     caught_up(&memory, source.clone());
-    let behind = memory_service(&memory, source.at(20), SyncPolicy::new(3));
+    source.extend_to(20);
+    let behind = memory_service(&memory, source, SyncPolicy::new(3));
 
     let status = pass(&behind);
 

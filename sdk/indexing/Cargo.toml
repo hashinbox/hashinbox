@@ -7,17 +7,17 @@ description = "Reorg-safe, chain-neutral block synchronization into canonical hi
 readme = "README.md"
 
 [features]
-# `sqlite` is the only store this crate ships, and the one a build gets without
+# `sqlite` is the file store this crate ships, and the one a build gets without
 # asking. It stays a feature rather than becoming
-# unconditional because that is what lets `wallets`, `sdk/config` and the chain
+# unconditional because that is what lets `sdk/config` and the chain
 # crates depend on this crate with `default-features = false` and get no store
 # and no async runtime through it.
 default = ["sqlite", "supervisor"]
-# The embedded SQL store: `indexing::sqlite`, and rusqlite with it. SQLite is
-# synchronous, so every operation is one `spawn_blocking` on one connection of
-# a bounded pool. The C library is bundled: one amalgamation compile, no
-# operator prerequisite. Off, the crate is the traits and the vocabulary.
-sqlite = ["dep:rusqlite", "dep:tokio", "tokio/rt"]
+# The embedded SQL store: `indexing::sqlite`, on `sqlx` (bundled SQLite, its
+# pool, and one worker thread per connection). It brings Tokio with it: sqlx
+# runs on the Tokio runtime, so a build with this store has one whether or not
+# it takes `supervisor`. Off, the crate is the traits and the vocabulary.
+sqlite = ["dep:sqlx"]
 # The driver: `indexing::Supervisor` and its tasks. Off, the crate carries no
 # async runtime.
 supervisor = ["dep:tokio", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time"]
@@ -27,13 +27,18 @@ supervisor = ["dep:tokio", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time
 # embedding that wants nothing on disk, and any test that would otherwise open
 # one. Independent of `sqlite`: a build may take either, both, or neither.
 memory = []
+# The scripted chain double (`indexing::testing`). Off, the crate carries no
+# test scaffolding; it belongs in a `[dev-dependencies]` entry only.
+testing = []
 
 [dependencies]
 logging = { path = "../../packages/logging" }
 base = { path = "../base" }
+# `SecretBytes`: the zeroizing key a wallet row may hold (`WalletRegistry`).
+crypto = { path = "../../packages/crypto" }
 futures-channel.workspace = true
 num-bigint.workspace = true
-rusqlite ={ version = "=0.40.2", default-features = false, features = ["bundled", "cache"], optional = true }
+sqlx = { workspace = true, optional = true }
 tokio = { version = "=1.49.0", default-features = false, optional = true }
 
 [dev-dependencies]
@@ -41,14 +46,10 @@ tokio = { version = "=1.49.0", default-features = false, optional = true }
 # own features on for its own integration tests, and the reason `rust/layers`
 # names `indexing` in its own dependency list. Cargo permits a dev-dependency
 # cycle for exactly this case.
-indexing = { path = ".", features = ["memory"] }
+indexing = { path = ".", features = ["memory", "testing"] }
 futures-executor.workspace = true
 tempfile = "=3.27.0"
 tokio = { version = "=1.49.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
-
-[[example]]
-name = "bench"
-path = "examples/bench.rs"
 
 [lints]
 workspace = true

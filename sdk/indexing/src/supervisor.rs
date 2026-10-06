@@ -4,6 +4,7 @@
 mod control;
 mod monitor;
 mod readiness;
+mod rescan;
 mod unit;
 
 use std::{collections::HashMap, sync::Arc};
@@ -16,8 +17,9 @@ use tokio::{
 use crate::{Index, IndexError, IndexErrorKind, Indexing, Schedule, Schedules};
 
 pub use control::SyncControl;
-pub use monitor::{NetworkEvent, SyncMonitor};
+pub use monitor::SyncMonitor;
 pub use readiness::{Readiness, SyncReport};
+pub use rescan::RescanError;
 use unit::Unit;
 
 /// Drives every unit of one composed index, each on its own task.

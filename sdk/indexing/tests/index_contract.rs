@@ -232,10 +232,10 @@ fn one_chain_and_composer_share_the_read_contract() {
     exercise_reads(&index, &composed_network, 7);
     assert_eq!(index.networks(), std::slice::from_ref(&composed_network));
     assert_eq!(
-        block_on(index.sync())
-            .expect("one unit, one status")
-            .into_iter()
-            .map(|status| status.network)
+        index
+            .units()
+            .iter()
+            .map(|unit| block_on(unit.sync()).expect("one unit, one status").network)
             .collect::<Vec<_>>(),
         [composed_network]
     );
@@ -262,103 +262,6 @@ fn routes_each_networked_operation_to_its_indexer() {
 
     assert_eq!(first.calls(), vec![Call::Checkpoint(first_network)]);
     assert_eq!(second.calls(), vec![Call::Watch(Box::new(watched))]);
-}
-
-/// Why an assembly refused, or a panic naming what was expected. `Index` is not
-/// `Debug`, so `expect_err` cannot be used on it.
-fn refusal<C: ?Sized>(built: Result<Index<C>, IndexError>, expected: &str) -> IndexError {
-    match built {
-        Ok(_) => panic!("{expected}"),
-        Err(error) => error,
-    }
-}
-
-/// One shared repository composes three independently driven network indexers.
-#[test]
-fn an_assembly_hands_one_store_to_every_chain_and_launches_nothing() {
-    /// The one thing a chain needs of a store here: that it arrived.
-    #[derive(Clone)]
-    struct Store(Arc<Mutex<Vec<String>>>);
-
-    /// One chain's constructor, which records that the store reached it.
-    fn chain(name: &'static str) -> impl FnOnce(Store) -> Result<Arc<dyn Indexing>, IndexError> {
-        move |store: Store| {
-            store.0.lock().expect("handed to").push(name.to_owned());
-            Ok(Arc::new(Probe::new(network(name), 1)) as Arc<dyn Indexing>)
-        }
-    }
-
-    /// The flow as a caller writes it: one `?` per chain, and no builder that
-    /// remembers a failure to report later.
-    fn three(store: Store) -> Result<Index<dyn Indexing>, IndexError> {
-        Index::over(store)
-            .chain(chain("bitcoin"))?
-            .chain(chain("ethereum"))?
-            .chain(chain("solana"))?
-            .build()
-    }
-
-    fn duplicated(store: Store) -> Result<Index<dyn Indexing>, IndexError> {
-        Index::over(store)
-            .chain(chain("bitcoin"))?
-            .chain(chain("bitcoin"))?
-            .build()
-    }
-
-    fn refusing(store: Store) -> Result<Index<dyn Indexing>, IndexError> {
-        Index::over(store)
-            .chain(|_| Err("the node serves another chain id"))?
-            .chain(chain("bitcoin"))?
-            .build()
-    }
-
-    let store = Store(Arc::new(Mutex::new(Vec::new())));
-    let index = match three(store.clone()) {
-        Ok(index) => index,
-        Err(error) => panic!("three disjoint chains over one store: {error}"),
-    };
-
-    assert_eq!(
-        *store.0.lock().expect("handed to"),
-        ["bitcoin", "ethereum", "solana"],
-        "every chain was handed the one store, in the order it was added",
-    );
-    assert_eq!(
-        index.networks(),
-        [network("bitcoin"), network("ethereum"), network("solana")],
-        "and the index answers for all three",
-    );
-    assert_eq!(
-        index
-            .units()
-            .iter()
-            .map(|unit| unit.network().clone())
-            .collect::<Vec<_>>(),
-        index.networks(),
-        "each chain is still its own independently drivable unit, of one network",
-    );
-
-    // Two chains claiming one network is refused at `build`, not at the first
-    // pass; a chain that refuses to compose is refused at that chain.
-    let duplicate = refusal(duplicated(store.clone()), "two chains, one network");
-    assert_eq!(duplicate.kind, IndexErrorKind::Conflict);
-
-    let handed = store.0.lock().expect("handed to").len();
-    let refused = refusal(
-        refusing(store.clone()),
-        "a chain that could not be composed",
-    );
-    assert_eq!(refused.kind, IndexErrorKind::InvalidRequest);
-    assert!(
-        refused.message.contains("the node serves another chain id"),
-        "carrying the chain's own reason: {}",
-        refused.message
-    );
-    assert_eq!(
-        store.0.lock().expect("handed to").len(),
-        handed,
-        "and nothing after the refusal was constructed at all",
-    );
 }
 
 #[test]
@@ -432,7 +335,11 @@ fn routes_each_watch_and_combines_statuses_from_every_indexer() {
     ] {
         block_on(index.watch(id, &subject(owner), Birthday::At(start))).expect("watch");
     }
-    let statuses = block_on(index.sync()).expect("composed sync");
+    let statuses: Vec<_> = index
+        .units()
+        .iter()
+        .map(|unit| block_on(unit.sync()).expect("unit sync"))
+        .collect();
 
     assert_eq!(
         statuses
@@ -466,114 +373,6 @@ fn routes_each_watch_and_combines_statuses_from_every_indexer() {
         ]
     );
     assert_eq!(idle.calls(), vec![Call::Sync]);
-}
-
-/// An embedded collection still drives healthy chains after another chain fails.
-#[test]
-fn a_failing_unit_does_not_stop_the_units_after_it() {
-    /// A unit whose pass always fails, and counts how often it was asked.
-    struct Refusing {
-        network: Network,
-        calls: Mutex<Vec<Call>>,
-        retryable: bool,
-    }
-
-    impl Indexing for Refusing {
-        fn network(&self) -> &Network {
-            &self.network
-        }
-
-        fn listen(&self, _listener: Arc<dyn indexing::Listener>) {}
-
-        fn sync<'a>(&'a self) -> BoxFuture<'a, Result<SyncStatus, IndexError>> {
-            self.calls.lock().expect("calls").push(Call::Sync);
-            let retryable = self.retryable;
-            Box::pin(async move {
-                Err(IndexError::new(
-                    indexing::IndexErrorKind::Source,
-                    "this node is refusing",
-                    retryable,
-                ))
-            })
-        }
-    }
-
-    impl Checkpoint for Refusing {
-        fn checkpoint<'a>(
-            &'a self,
-            _network: &'a Network,
-        ) -> BoxFuture<'a, Result<Option<BlockRef>, IndexError>> {
-            Box::pin(async { Ok(None) })
-        }
-    }
-
-    impl Watching for Refusing {
-        fn watch<'a>(
-            &'a self,
-            _id: &'a str,
-            _subject: &'a dyn Holder,
-            _start: Birthday,
-        ) -> BoxFuture<'a, Result<Watch, IndexError>> {
-            unreachable!("this scenario never watches")
-        }
-
-        fn unwatch<'a>(&'a self, _id: &'a str) -> BoxFuture<'a, Result<Option<Watch>, IndexError>> {
-            Box::pin(async { Ok(None) })
-        }
-
-        fn watched<'a>(
-            &'a self,
-            _network: &'a Network,
-        ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-    }
-
-    impl indexing::Backfilling for Refusing {
-        fn cancel_backfill<'a>(
-            &'a self,
-            _network: &'a Network,
-        ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-    }
-
-    let refusing = |chain: &str, retryable: bool| {
-        Arc::new(Refusing {
-            network: network(chain),
-            calls: Mutex::new(Vec::new()),
-            retryable,
-        })
-    };
-    // Retryable first, terminal second, so the answer cannot be "the first
-    // failure" by accident.
-    let first = refusing("first-chain", true);
-    let second = refusing("second-chain", false);
-    let last = Arc::new(Probe::new(network("last-chain"), 9));
-    let index = Index::of(vec![
-        first.clone() as Arc<dyn Indexing>,
-        second.clone() as Arc<dyn Indexing>,
-        last.clone() as Arc<dyn Indexing>,
-    ])
-    .expect("disjoint networks compose");
-
-    let error = block_on(index.sync()).expect_err("two units refused");
-
-    assert!(
-        !error.retryable,
-        "the terminal failure is the one a driver is told about: {}",
-        error.message
-    );
-    assert_eq!(
-        first.calls.lock().expect("calls").len(),
-        1,
-        "the first unit was asked"
-    );
-    assert_eq!(
-        last.calls(),
-        vec![Call::Sync],
-        "and so was the unit after both failures, which used to be skipped"
-    );
 }
 
 #[test]
@@ -663,7 +462,7 @@ fn rejects_a_child_whose_status_is_not_about_its_own_network() {
         }) as Arc<dyn Indexing>])
         .expect("one network composes");
 
-        let error = block_on(index.sync()).expect_err("inconsistent status report");
+        let error = block_on(index.units()[0].sync()).expect_err("inconsistent status report");
         assert_eq!(
             error,
             IndexError::new(
@@ -679,10 +478,5 @@ fn rejects_a_child_whose_status_is_not_about_its_own_network() {
         status: Mutex::new(Some(ready)),
     }) as Arc<dyn Indexing>])
     .expect("one network composes");
-    assert_eq!(
-        block_on(index.sync())
-            .expect("a complete report passes")
-            .len(),
-        1
-    );
+    block_on(index.units()[0].sync()).expect("a complete report passes");
 }

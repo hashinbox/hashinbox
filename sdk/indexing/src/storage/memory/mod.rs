@@ -23,8 +23,8 @@
 //! the reference for it.
 //!
 //! The tables, the checkpoint read, history, outputs and the balance fold are
-//! here; the one commit is in `commits.rs` and the watch list in
-//! `observations.rs`.
+//! here; the one commit is in `commits.rs`, the watch list in
+//! `observations.rs` and the application's wallet registry in `wallets.rs`.
 //!
 //! Two collections reach the balance fold, not one. The history rows carry
 //! every change a transaction made, and `credits` carries the changes no
@@ -47,11 +47,10 @@
 //! Atomicity is expressed the only way a map-backed store can: a commit mutates
 //! a copy and installs it, so a rejected change leaves every row as it was.
 
-mod activity;
 mod balances;
 mod commits;
-mod evidence;
 mod observations;
+mod wallets;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -60,10 +59,10 @@ use std::{
 
 use crate::{
     Address, AssetId, Balance, BalanceQuery, BalanceStore, BlockCredit, BlockHeight, BlockRef,
-    BoxFuture, CanonicalPage, CanonicalTransaction, Completeness, ConfirmedHistory, FeeSettlement,
-    Fold, HistoryQuery, Holder, IndexError, IndexErrorKind, IndexedOutput, Inspection, MovementId,
+    BoxFuture, Completeness, ConfirmedHistory, ConfirmedHistoryPage, FeeSettlement, Fold,
+    HistoryQuery, Holder, IndexError, IndexErrorKind, IndexedOutput, Inspection, MovementId,
     Network, OutputCursor, OutputId, OutputKey, OutputPage, OutputRequest, OutputStore,
-    TransactionRef, Watch, storage::Probe,
+    Transaction, TransactionRef, Watch, storage::Probe,
 };
 
 /// Every stored row, keyed by the domain values themselves.
@@ -97,13 +96,15 @@ struct Tables {
     /// eventually does claim it inspects this very spend again. One entry per
     /// unwatched outpoint spent in every block would grow with the chain.
     spent: BTreeSet<(Network, String, OutputId)>,
-    /// Which network holds each watch identity. Identities are unique across
-    /// the whole store, exactly as SQLite's unique index on `id` spans the whole
-    /// file.
+    /// Which network holds each wallet identity, observed or archived.
+    /// Identities are unique across the whole store, exactly as SQLite's
+    /// unique index on `id` spans the whole file.
     identities: BTreeMap<String, Network>,
-    watches: BTreeMap<(Network, AssetId, String), Watch>,
+    /// Every wallet, observed or archived, by the holding it names.
+    wallets: BTreeMap<(Network, AssetId, String), WalletRow>,
+    /// The persisted total of every *observed* holding; an archived one has
+    /// none, and its reads fold the rows.
     balances: BTreeMap<(Network, AssetId, String), num_bigint::BigInt>,
-    openings: BTreeMap<(Network, AssetId, String), crate::BalanceEvidence>,
     /// How far each observation has been inspected, by its own identity. One row
     /// per observation, not per address: a claim belongs to the watch that earned
     /// it under its own birthday.
@@ -116,6 +117,37 @@ struct Tables {
     settlements: BTreeMap<Network, FeeSettlement>,
 }
 
+/// One wallet as SQLite's `wallet` row holds it, less the holding that keys it.
+///
+/// The key is shared rather than copied when a change stages the tables, and
+/// is zeroized when the last copy goes.
+#[derive(Clone)]
+struct WalletRow {
+    id: String,
+    /// `None` only for a wallet nothing ever observed.
+    birthday: Option<crate::BlockPosition>,
+    label: Option<String>,
+    secret: Option<Arc<crypto::SecretBytes>>,
+    /// `None` while observed.
+    archived_at: Option<u64>,
+}
+
+impl WalletRow {
+    /// The observation this row is, keyed by `(network, asset, address)`, or
+    /// `None` while archived.
+    fn watch(&self, (network, asset, address): &(Network, AssetId, String)) -> Option<Watch> {
+        if self.archived_at.is_some() {
+            return None;
+        }
+        Some(Watch {
+            id: self.id.clone(),
+            address: Address::new(network.clone(), address.clone()),
+            asset: asset.clone(),
+            start: self.birthday?,
+        })
+    }
+}
+
 /// Every store port, on maps held for as long as the process runs.
 ///
 /// The analogue of one open database file, and clonable the way a handle to one
@@ -125,7 +157,6 @@ struct Tables {
 #[derive(Clone, Default)]
 pub struct Repository {
     tables: Arc<Mutex<Tables>>,
-    logger: logging::Logger,
 }
 
 /// Where one transaction sits in one address's history:
@@ -136,20 +167,13 @@ pub struct Repository {
 type HistoryPlace = (Network, String, BlockHeight, u64, TransactionRef);
 
 /// Every address's history rows, in page order.
-type HistoryRows = BTreeMap<HistoryPlace, CanonicalTransaction>;
+type HistoryRows = BTreeMap<HistoryPlace, Transaction>;
 
 impl Repository {
     /// An empty store.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Emits newly committed incoming effects after releasing the store lock.
-    #[must_use]
-    pub fn with_logger(mut self, logger: logging::Logger) -> Self {
-        self.logger = logger;
-        self
     }
 
     /// Reads under the lock. A poisoned lock is a terminal store failure.
@@ -181,14 +205,14 @@ impl Repository {
     fn history_key(
         network: &Network,
         address: &Address,
-        transaction: &CanonicalTransaction,
+        transaction: &Transaction,
     ) -> HistoryPlace {
         (
             network.clone(),
             address.value.clone(),
             transaction.block().height,
-            transaction.transaction_order,
-            transaction.transaction.transaction_id.clone(),
+            transaction.order,
+            transaction.id.clone(),
         )
     }
 
@@ -205,7 +229,7 @@ impl ConfirmedHistory for Repository {
     fn history<'a>(
         &'a self,
         query: HistoryQuery,
-    ) -> BoxFuture<'a, Result<CanonicalPage, IndexError>> {
+    ) -> BoxFuture<'a, Result<ConfirmedHistoryPage, IndexError>> {
         Box::pin(async move {
             query.validate()?;
             self.read(|tables| Ok(Self::history_page(&query, tables)))
@@ -215,13 +239,13 @@ impl ConfirmedHistory for Repository {
 
 impl Repository {
     /// One page of `query`, selected out of the rows the address owns.
-    fn history_page(query: &HistoryQuery, tables: &Tables) -> CanonicalPage {
+    fn history_page(query: &HistoryQuery, tables: &Tables) -> ConfirmedHistoryPage {
         let checkpoint = tables.checkpoints.get(&query.address.network).cloned();
         let completeness = Self::provenance(query, tables, checkpoint.as_ref());
         let probe = Probe::new(query.limit);
         let read = Self::address_history(query, tables, probe.rows());
         let (transactions, next) = probe.page(read, |last| last.into());
-        CanonicalPage {
+        ConfirmedHistoryPage {
             checkpoint,
             transactions,
             next,
@@ -230,11 +254,7 @@ impl Repository {
     }
 
     /// Up to `rows` matching transactions after the position, in order.
-    fn address_history(
-        query: &HistoryQuery,
-        tables: &Tables,
-        rows: usize,
-    ) -> Vec<CanonicalTransaction> {
+    fn address_history(query: &HistoryQuery, tables: &Tables, rows: usize) -> Vec<Transaction> {
         let after = query.after.as_ref().map(|after| {
             (
                 after.height,
@@ -362,7 +382,6 @@ impl Repository {
         // away.
         if balance.completeness != Completeness::Overdrawn {
             balance.completeness = Self::provenance(query, tables, balance.observed_at.as_ref());
-            balance.opening = Self::opening(query, tables, balance.observed_at.as_ref());
         }
         Ok(balance)
     }

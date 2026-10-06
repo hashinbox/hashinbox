@@ -16,7 +16,7 @@ use wallets::{
 use crate::TransferBuilder;
 use crate::native::{
     Address, AssetKind, ETH, Error, ErrorKind, KeyPair, Network, Wei,
-    rpc::{Accounts, Attestation, Attester, Client},
+    rpc::{Accounts, Client},
     transaction::{FeeLimits, Transfer},
 };
 use crate::sender::{FactorySender, Outbox, SendRequest};
@@ -117,8 +117,7 @@ impl AddressParser for WalletConfig {
 ///
 /// It reads no index: the index answers both balance and history from the
 /// movements it stores. The node reads this factory holds are the ones a send
-/// needs (nonce, affordability) plus [`WalletFactory::witness`], which vouches
-/// for a folded balance without replacing it.
+/// needs (nonce, affordability).
 pub struct WalletFactory {
     config: WalletConfig,
     accounts: Arc<dyn Accounts>,
@@ -201,70 +200,12 @@ impl WalletFactory {
         }))
     }
 
-    /// A witness over this factory's node for this factory's asset: the one
-    /// independent evidence this SDK has about a folded balance.
-    #[must_use]
-    pub fn witness(&self) -> BalanceWitness {
-        BalanceWitness {
-            accounts: self.accounts.clone(),
-            asset: self.config.asset.clone(),
-            network: self.config.network.clone(),
-        }
-    }
-
     fn origin(&self) -> Origin<Fingerprint> {
         Origin::new(Fingerprint {
             config: self.config.clone(),
             accounts: Dependency::of(&self.accounts),
             outbox: Dependency::of(&self.outbox),
         })
-    }
-}
-
-/// Checks one immutable atomic balance capture against canonically pinned state.
-///
-/// Ether uses `eth_getBalance` and tokens use `balanceOf`, both at the capture's
-/// block hash with `requireCanonical`. An agreement proves the total at that
-/// block, not that the address's complete history was indexed.
-///
-/// The caller captures [`indexing::BalanceEvidence`] once, passes it here, and
-/// may record that same value in its repository after [`Attestation::Agreed`].
-/// The repository compares the captured holding, checkpoint and amount with its
-/// current rows before retaining it. This witness neither writes storage nor
-/// replaces an indexed amount; disagreement and unavailability are reported.
-///
-/// Bitcoin has no address-state oracle, and Solana cannot pin an account read
-/// to a past slot, so neither chain supplies this capability.
-pub struct BalanceWitness {
-    accounts: Arc<dyn Accounts>,
-    asset: AssetKind,
-    network: base::Network,
-}
-
-impl BalanceWitness {
-    /// Whether an independent read agrees with this exact captured holding,
-    /// atomic amount and block. Record the same capture only after agreement.
-    ///
-    /// A wrong holding, malformed address or refused canonical pin is
-    /// [`Attestation::Unavailable`]; it never fails or changes a balance read.
-    pub async fn attest(&self, evidence: &indexing::BalanceEvidence) -> Attestation {
-        let unavailable = |reason: &str| Attestation::Unavailable {
-            reason: reason.to_owned(),
-        };
-        if evidence.address().network != self.network || evidence.asset() != &self.asset.id() {
-            return unavailable("this witness holds another Ethereum network or asset");
-        }
-        let address = match Address::try_from(evidence.address()) {
-            Ok(address) => address,
-            Err(error) => {
-                return Attestation::Unavailable {
-                    reason: error.message,
-                };
-            }
-        };
-        Attester::new(self.accounts.as_ref())
-            .attest(address, &self.asset, evidence.at(), evidence.amount())
-            .await
     }
 }
 
@@ -589,144 +530,6 @@ mod tests {
             public_key_format: PublicKeyFormat::Raw,
             key_tweak: None,
         }
-    }
-
-    /// An `Accounts` that reports one balance for every pinned read, or
-    /// refuses the pin.
-    struct Reporting(Option<Wei>);
-
-    impl Accounts for Reporting {
-        fn balance<'a>(
-            &'a self,
-            _address: Address,
-            _asset: &'a AssetKind,
-            at: View,
-        ) -> BoxFuture<'a, Result<Wei, Error>> {
-            assert_eq!(
-                at,
-                View::Block(settled()),
-                "a witness must use the captured canonical block"
-            );
-            Box::pin(async move {
-                self.0
-                    .clone()
-                    .ok_or_else(|| Error::rpc("Ethereum node has reorganised that block out", true))
-            })
-        }
-
-        fn nonce<'a>(&'a self, _address: Address) -> BoxFuture<'a, Result<u64, Error>> {
-            Box::pin(async { unreachable!("a witness reads no nonce") })
-        }
-    }
-
-    fn witness(reports: Option<u128>) -> BalanceWitness {
-        let inactive = Arc::new(InactiveDependencies);
-        let outbox = Outbox::new(
-            11_155_111,
-            inactive.clone(),
-            inactive.clone(),
-            inactive.clone(),
-        );
-        WalletFactory::assemble(
-            config(AssetKind::Native, ETH.decimals),
-            Arc::new(Reporting(reports.map(Wei::from_u128))),
-            Arc::new(outbox),
-        )
-        .witness()
-    }
-
-    fn settled() -> BlockRef {
-        BlockRef {
-            position: base::BlockPosition(9),
-            height: base::BlockHeight(9),
-            hash: base::BlockHash(vec![0xaa; 32]),
-            parent: None,
-            timestamp: None,
-        }
-    }
-
-    fn subject(asset: AssetKind) -> indexing::Subject {
-        indexing::Subject {
-            address: key()
-                .address()
-                .canonical(config(asset.clone(), 18).network()),
-            asset: asset.id(),
-        }
-    }
-
-    fn balance(amount: u64) -> indexing::Balance {
-        indexing::Balance {
-            amount: Decimal::from(amount),
-            observed_at: Some(settled()),
-            pending: indexing::PendingValue::none(),
-            completeness: indexing::Completeness::Incomplete,
-            opening: None,
-        }
-    }
-
-    fn evidence(asset: AssetKind, amount: u64) -> indexing::BalanceEvidence {
-        indexing::BalanceEvidence::capture(
-            &indexing::BalanceQuery::new(&subject(asset)),
-            &balance(amount),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn an_agreeing_witness_uses_the_immutable_capture_even_after_the_reader_advances() {
-        let query = indexing::BalanceQuery::new(&subject(AssetKind::Native));
-        let mut answer = balance(42);
-        let captured = indexing::BalanceEvidence::capture(&query, &answer).unwrap();
-        answer.amount = Decimal::from(43_u64);
-        answer.observed_at.as_mut().unwrap().position = base::BlockPosition(10);
-        let attestation = block_on(witness(Some(42)).attest(&captured));
-        assert_eq!(attestation, Attestation::Agreed);
-        assert_eq!(captured.at(), &settled());
-        assert_eq!(captured.amount(), &Decimal::from(42_u64));
-        assert_eq!(answer.amount, Decimal::from(43_u64));
-    }
-
-    #[test]
-    fn a_seeded_disagreement_is_reported_without_mutating_the_capture() {
-        let captured = evidence(AssetKind::Native, 42);
-        let attestation = block_on(witness(Some(43)).attest(&captured));
-        assert_eq!(
-            attestation,
-            Attestation::Disagreed {
-                folded: Decimal::from(42_u64),
-                witness: Decimal::from(43_u64),
-            }
-        );
-        assert_eq!(captured.amount(), &Decimal::from(42_u64));
-    }
-
-    #[test]
-    fn a_balance_without_a_checkpoint_cannot_be_captured_for_a_witness() {
-        let mut answer = balance(0);
-        answer.observed_at = None;
-        let captured = indexing::BalanceEvidence::capture(
-            &indexing::BalanceQuery::new(&subject(AssetKind::Native)),
-            &answer,
-        );
-        assert_eq!(
-            captured.unwrap_err().kind,
-            indexing::IndexErrorKind::InvalidRequest
-        );
-    }
-
-    #[test]
-    fn a_refused_pin_or_another_holding_proves_nothing_rather_than_failing_the_read() {
-        let captured = evidence(AssetKind::Native, 42);
-        let refused = block_on(witness(None).attest(&captured));
-        assert!(matches!(refused, Attestation::Unavailable { .. }));
-        let token = AssetKind::Erc20(Address::from_bytes([0x0b; 20]));
-        let foreign = block_on(witness(Some(42)).attest(&evidence(token, 42)));
-        assert_eq!(
-            foreign,
-            Attestation::Unavailable {
-                reason: "this witness holds another Ethereum network or asset".to_owned(),
-            }
-        );
     }
 
     #[test]

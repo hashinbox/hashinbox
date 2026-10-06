@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use crate::{BlockPosition, BlockRef, CanonicalBlock, IndexError, IndexErrorKind};
+use crate::{BlockPosition, BlockRef, BlockWithOutputs, IndexError, IndexErrorKind};
 
 /// One pending block: validated against its predecessor, ready to commit, and
 /// not committed. It becomes a commit once the confirmed line reaches it, and
@@ -14,7 +14,7 @@ struct Candidate {
     /// The validated block this will commit, with no precondition of its own:
     /// which checkpoint authorises the write is settled where the write
     /// happens, not here (`crate::IndexedBatch`).
-    canonical: CanonicalBlock,
+    canonical: BlockWithOutputs,
     /// The address selection the block was interpreted against.
     selection: u64,
 }
@@ -51,7 +51,7 @@ pub trait Pending: Send + Sync {
 /// later page is folded over the same blocks or refused.
 pub struct PendingSample {
     /// The blocks, oldest first, in commit order.
-    blocks: Vec<CanonicalBlock>,
+    blocks: Vec<BlockWithOutputs>,
     /// Which revision of the held list these blocks are.
     revision: u64,
 }
@@ -65,7 +65,7 @@ impl PendingSample {
     /// blocks are in commit order, and the revision differs whenever the list
     /// does.
     #[must_use]
-    pub const fn new(blocks: Vec<CanonicalBlock>, revision: u64) -> Self {
+    pub const fn new(blocks: Vec<BlockWithOutputs>, revision: u64) -> Self {
         Self { blocks, revision }
     }
 
@@ -125,13 +125,13 @@ impl PendingSample {
     /// }
     /// ```
     #[must_use]
-    pub fn above<A: Checkpointed + ?Sized>(self, answer: &A) -> Vec<CanonicalBlock> {
+    pub fn above<A: Checkpointed + ?Sized>(self, answer: &A) -> Vec<BlockWithOutputs> {
         let Some(line) = answer.checkpoint() else {
             return self.blocks;
         };
         self.blocks
             .into_iter()
-            .filter(|canonical| canonical.block().position > line.position)
+            .filter(|canonical| canonical.block.reference().position > line.position)
             .collect()
     }
 }
@@ -144,7 +144,7 @@ impl PendingSample {
 /// answer; this is how a consumer hands the two over together, so the line
 /// cannot be separated from the rows it belongs to.
 ///
-/// Implemented by the answers a repository gives: [`crate::CanonicalPage`],
+/// Implemented by the answers a repository gives: [`crate::ConfirmedHistoryPage`],
 /// [`crate::Balance`] and [`crate::OutputPage`]. A repository with an answer
 /// type of its own implements it for that type, and owes what those three do:
 /// the checkpoint is the one the rows came from, not one read before or after.
@@ -167,7 +167,7 @@ pub trait Checkpointed {
 /// reorg shallower than the line is [`Blocks::unwind`] — no store I/O
 /// and no backend code at all.
 ///
-/// One payload, one bound: the interpreted facts ([`CanonicalBlock`]), which
+/// One payload, one bound: the interpreted facts ([`BlockWithOutputs`]), which
 /// cover every block above the line unconditionally and are proportional to the
 /// watched addresses those blocks touch, usually nothing. The native blocks
 /// those facts were read from are not here — they are megabytes, they are the
@@ -219,13 +219,13 @@ impl Blocks {
         Ok(self
             .entries()?
             .last()
-            .map(|entry| entry.canonical.block().clone()))
+            .map(|entry| entry.canonical.block.reference().clone()))
     }
 
     /// Holds `canonical` above the line, as interpreted at `selection`.
     pub(crate) fn admit(
         &self,
-        canonical: CanonicalBlock,
+        canonical: BlockWithOutputs,
         selection: u64,
     ) -> Result<(), IndexError> {
         let mut entries = self.entries()?;
@@ -241,12 +241,12 @@ impl Blocks {
     pub(crate) fn confirmed(
         &self,
         line: BlockPosition,
-    ) -> Result<Option<CanonicalBlock>, IndexError> {
+    ) -> Result<Option<BlockWithOutputs>, IndexError> {
         Ok(self
             .entries()?
             .first()
             .map(|entry| entry.canonical.clone())
-            .filter(|canonical| canonical.block().position <= line))
+            .filter(|canonical| canonical.block.reference().position <= line))
     }
 
     /// Drops the oldest held block once storage has it.
@@ -254,7 +254,7 @@ impl Blocks {
         let mut entries = self.entries()?;
         if entries
             .first()
-            .is_some_and(|entry| entry.canonical.block() == block)
+            .is_some_and(|entry| entry.canonical.block.reference() == block)
         {
             entries.remove(0);
             self.changed();
@@ -272,7 +272,7 @@ impl Blocks {
     pub(crate) fn unwind(&self, position: BlockPosition) -> Result<(), IndexError> {
         let mut entries = self.entries()?;
         let before = entries.len();
-        entries.retain(|entry| entry.canonical.block().position < position);
+        entries.retain(|entry| entry.canonical.block.reference().position < position);
         if entries.len() != before {
             self.changed();
         }
@@ -284,7 +284,7 @@ impl Blocks {
         let mut blocks = self
             .entries()?
             .iter()
-            .map(|entry| entry.canonical.block().clone())
+            .map(|entry| entry.canonical.block.reference().clone())
             .collect::<Vec<_>>();
         blocks.reverse();
         Ok(blocks)
@@ -312,7 +312,7 @@ impl Blocks {
         Ok(self
             .entries()?
             .iter()
-            .map(|entry| entry.canonical.block().clone())
+            .map(|entry| entry.canonical.block.reference().clone())
             .collect())
     }
 
@@ -364,10 +364,10 @@ mod tests {
     use base::ChainName;
 
     use super::*;
-    use crate::{BlockHash, BlockHeight, InterpretedBlock, Network};
+    use crate::{BlockHash, BlockHeight, BlockWithOutputs, Network};
 
-    fn held(position: u64) -> CanonicalBlock {
-        let interpreted = InterpretedBlock::new(
+    fn held(position: u64) -> BlockWithOutputs {
+        BlockWithOutputs::new(
             &Network::new(ChainName::new("test"), "mainnet"),
             BlockRef {
                 position: BlockPosition(position),
@@ -378,13 +378,14 @@ mod tests {
             },
             Vec::new(),
         )
-        .expect("unique transaction ids");
-        CanonicalBlock::new(Network::new(ChainName::new("test"), "mainnet"), interpreted)
-            .expect("a valid block")
+        .expect("unique transaction ids")
     }
 
-    fn positions(blocks: &[CanonicalBlock]) -> Vec<u64> {
-        blocks.iter().map(|held| held.block().position.0).collect()
+    fn positions(blocks: &[BlockWithOutputs]) -> Vec<u64> {
+        blocks
+            .iter()
+            .map(|held| held.block.reference().position.0)
+            .collect()
     }
 
     /// A store's answer, reduced to the line it was read at.
@@ -406,7 +407,7 @@ mod tests {
         for position in [4, 7, 9] {
             pending.admit(held(position), 0).expect("a held block");
         }
-        let line = |position| held(position).block().clone();
+        let line = |position| held(position).block.reference().clone();
         let above = |checkpoint: Option<&BlockRef>| {
             let answer = ReadAt(checkpoint.cloned());
             positions(&pending.sampled().expect("a sample").above(&answer))
@@ -440,7 +441,7 @@ mod tests {
         pending.admit(held(2), 0).expect("a second held block");
         changed("holding a second block");
         pending
-            .committed(held(1).block())
+            .committed(held(1).block.reference())
             .expect("the oldest block commits");
         changed("a commit");
         pending.unwind(BlockPosition(2)).expect("a reorg");

@@ -11,6 +11,10 @@
 //! Bitcoin's change selection, the rescan tool — and they are three traits so
 //! that needing none of them is a legal store rather than a stubbed one.
 //!
+//! [`wallet::WalletRegistry`] is one more, on the same table as the watch list:
+//! the application files a wallet's label and key beside its observation and
+//! reads every wallet back, archived ones included. Scanning never reads it.
+//!
 //! Querying history is not among them: it is the repository's own
 //! [`crate::ConfirmedHistory`] API, declared with the query it takes, so a sink
 //! carries no pagination model to be a sink.
@@ -21,17 +25,15 @@
 //!
 //! Everything above this module is the vocabulary a chain produces; everything
 //! below it is a store, or what every store is asked and answers with: [`Balance`],
-//! [`CanonicalPage`] and the output requests, in the files beside this one.
+//! [`ConfirmedHistoryPage`] and the output requests, in the files beside this one.
 //! Two stores are shipped and
 //! either, both or neither may be built: [`sqlite`] on one embedded SQL file,
 //! and [`memory`] on ordinary maps and no file at all. One store serves every
 //! configured network: each operation names the network it is about, and rows
 //! of one network are invisible to reads of another.
 
-mod activity;
 mod balance;
 mod commit;
-mod evidence;
 mod history;
 mod join;
 #[cfg(feature = "memory")]
@@ -40,26 +42,22 @@ mod observed;
 mod outputs;
 mod reads;
 #[cfg(any(feature = "sqlite", feature = "memory"))]
-mod receipts;
 mod spendable;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+mod wallet;
 mod watch;
 
-pub use activity::{
-    Activity, ActivityKind, ActivityPage, ActivityPosition, ActivityQuery, ActivityTransaction,
-    Direction,
-};
 pub use balance::{Balance, Balances, Completeness, Fold, MovementEffect, PendingValue};
 pub use commit::{IndexStore, IndexedBatch, Progress};
-pub use evidence::BalanceEvidence;
 #[cfg(any(feature = "sqlite", feature = "memory"))]
 pub(crate) use history::Probe;
-pub use history::{CanonicalPage, ConfirmedHistory, HistoryPosition, HistoryQuery, Page};
+pub use history::{ConfirmedHistory, ConfirmedHistoryPage, HistoryPosition, HistoryQuery, Page};
 pub use join::{PendingJoin, Router};
 pub use observed::{History, ObservedTransaction, TransactionPage, TransactionStatus};
 pub use outputs::{OutputCursor, OutputPage, OutputRequest};
 pub use reads::{BalanceQuery, BalanceStore, Inspection, OutputStore, PurgedRows, Purging};
+pub use wallet::{Registration, Wallet, WalletRegistry};
 pub use watch::{WatchProgress, WatchStore};
 
 /// The whole of what an index requires of a store.

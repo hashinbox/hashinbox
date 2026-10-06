@@ -1,7 +1,6 @@
 //! The vocabulary of what was observed on chain: `ValueMovement` and its
-//! `MovementId`, the `NetworkFee` of a transaction, `CanonicalTransaction`
-//! with its `CanonicalStatus`, and the `ObservationDraft` an interpreter
-//! fills before the index accepts it. Values only; nothing here stores.
+//! `MovementId`, the `NetworkFee` of a transaction, and the `Transaction`
+//! with its `Status`. Values only; nothing here stores.
 
 use std::collections::BTreeSet;
 
@@ -199,10 +198,11 @@ impl NetworkFee {
     }
 }
 
-/// Canonical state stored for a transaction. Confirmation is deliberately absent:
-/// it is derived from the inclusion block and the current checkpoint when read.
+/// Whether a transaction succeeded, with the block that included it.
+/// Confirmation is deliberately absent: it is derived from the inclusion block
+/// and the current checkpoint when read.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CanonicalStatus {
+pub enum Status {
     /// Executed successfully in `block`.
     Included {
         /// The including block.
@@ -218,57 +218,57 @@ pub enum CanonicalStatus {
     },
 }
 
-/// Stable identity and value effects shared by every transaction stage.
+/// One transaction as an interpreter reports it and storage keeps it.
+///
+/// One struct for every step: [`Self::validate`] is a check on it, not a
+/// conversion into another type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Transaction {
     /// The chain's identifier and the network it belongs to.
-    pub transaction_id: TransactionRef,
+    pub id: TransactionRef,
     /// Every stable value movement, native and token.
     pub movements: Vec<ValueMovement>,
     /// The fee, when the chain charges one.
     pub fee: Option<NetworkFee>,
-}
-
-/// A transaction as storage keeps it: validated, bound to a network and a block.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CanonicalTransaction {
-    /// Shared transaction identity and value effects.
-    pub transaction: Transaction,
-    /// The transaction's native place in its block, carried through from
-    /// [`ObservationDraft::transaction_order`] unchanged.
+    /// The transaction's native place in its block: how many transactions the
+    /// chain executed before it, counting **every** one of them.
     ///
-    /// Storage keeps it and pages by it, and it is the middle component of a
-    /// [`HistoryPosition`](crate::HistoryPosition). Nothing between the
-    /// interpreter and the store can recompute it: a store is handed the
-    /// transactions that touched a selected address and never the block's whole
-    /// list.
-    pub transaction_order: u64,
+    /// **The whole block's list, never the reported subset.** An interpreter is
+    /// handed the block entire and reports only the transactions that touched a
+    /// selected address, so this is the one fact about block order that cannot
+    /// be recovered further down: a store sees the selection and never the list.
+    /// Taking the position in the complete list gives one transaction the same
+    /// ordinal under every selection, which keeps a history page ordered by a
+    /// function of the block alone and a held cursor stable. It is the middle
+    /// component of a [`HistoryPosition`](crate::HistoryPosition).
+    ///
+    /// Ethereum reads it from `transactionIndex`; Bitcoin and Solana take the
+    /// position in the complete `tx` / `transactions` array.
+    pub order: u64,
     /// Inclusion or failure, with the block.
-    pub status: CanonicalStatus,
+    pub status: Status,
 }
 
 /// Identified inside its block by the chain's own identifier: the block
 /// states the network, so the identifier alone tells two of its transactions
 /// apart.
-impl Identified for CanonicalTransaction {
+impl Identified for Transaction {
     type Id = TransactionId;
 
     fn id(&self) -> &TransactionId {
-        &self.transaction.transaction_id.id
-    }
-}
-
-impl CanonicalTransaction {
-    /// The block that included the transaction.
-    #[must_use]
-    pub fn block(&self) -> &BlockRef {
-        match &self.status {
-            CanonicalStatus::Included { block } | CanonicalStatus::Failed { block, .. } => block,
-        }
+        &self.id.id
     }
 }
 
 impl Transaction {
+    /// The block that included the transaction.
+    #[must_use]
+    pub fn block(&self) -> &BlockRef {
+        match &self.status {
+            Status::Included { block } | Status::Failed { block, .. } => block,
+        }
+    }
+
     /// Every address the transaction touches: movement endpoints and the fee
     /// payer. Storage copies the transaction under each of them.
     #[must_use]
@@ -289,85 +289,32 @@ impl Transaction {
         }
         addresses
     }
-}
 
-/// A transaction as a [`crate::BlockInterpreter`] reports it, before
-/// validation binds it to its block.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ObservationDraft {
-    /// Shared transaction identity and value effects.
-    pub transaction: Transaction,
-    /// The transaction's native place in its block: how many transactions the
-    /// chain executed before it, counting **every** one of them.
+    /// Checks the transaction as `network`'s fact: identity first, then that a
+    /// failed transaction moved nothing, then movements, then the fee.
     ///
-    /// **The whole block's list, never the reported subset.** An interpreter is
-    /// handed the block entire and reports only the transactions that touched a
-    /// selected address, so this is the one fact about block order that cannot
-    /// be recovered further down: a store sees the selection and never the list.
-    /// Taking the position in the complete list gives one transaction the same
-    /// ordinal under every selection, which is what keeps a history page ordered
-    /// by a function of the block alone and a held cursor stable. A rank over the reported subset —
-    /// `enumerate()` over the filtered vector — would instead depend on which
-    /// watch reached the block first, and a later, wider watch would renumber
-    /// rows underneath a cursor a caller is already holding.
+    /// # Errors
     ///
-    /// Ethereum reads it from `transactionIndex`, which it already checks
-    /// against block order and against the receipt; Bitcoin and Solana take the
-    /// position in the complete `tx` / `transactions` array, whose length each
-    /// chain verifies before interpreting it.
-    pub transaction_order: u64,
-    /// Whether it succeeded.
-    pub status: ObservationDraftStatus,
-}
-
-/// Identified inside its block exactly as the [`CanonicalTransaction`] it
-/// becomes, so a repeated identifier is refused when an interpreter's output
-/// is assembled and cannot reach validation.
-impl Identified for ObservationDraft {
-    type Id = TransactionId;
-
-    fn id(&self) -> &TransactionId {
-        &self.transaction.transaction_id.id
-    }
-}
-
-impl ObservationDraft {
-    pub(crate) fn canonical(
-        self,
-        network: &Network,
-        block: &BlockRef,
-    ) -> Result<CanonicalTransaction, IndexError> {
-        self.transaction.validate_identity(network)?;
-        if matches!(self.status, ObservationDraftStatus::Failed { .. })
-            && !self.transaction.movements.is_empty()
-        {
+    /// [`IndexErrorKind::NetworkMismatch`] for a transaction of another
+    /// network, and [`IndexErrorKind::InvalidBlock`] for invalid content.
+    pub fn validate(&self, network: &Network) -> Result<(), IndexError> {
+        self.validate_identity(network)?;
+        if matches!(self.status, Status::Failed { .. }) && !self.movements.is_empty() {
             return Err(IndexError::new(
                 IndexErrorKind::InvalidBlock,
                 "failed transaction contains movements",
                 false,
             ));
         }
-        self.transaction.validate_effects(network)?;
-        let status = match self.status {
-            ObservationDraftStatus::Included => CanonicalStatus::Included {
-                block: block.clone(),
-            },
-            ObservationDraftStatus::Failed { reason } => CanonicalStatus::Failed {
-                block: block.clone(),
-                reason,
-            },
-        };
-        Ok(CanonicalTransaction {
-            transaction: self.transaction,
-            transaction_order: self.transaction_order,
-            status,
-        })
+        self.validate_movements(network)?;
+        if let Some(fee) = &self.fee {
+            fee.validate(network)?;
+        }
+        Ok(())
     }
-}
 
-impl Transaction {
     fn validate_identity(&self, network: &Network) -> Result<(), IndexError> {
-        if !self.transaction_id.belongs_to(network) {
+        if !self.id.belongs_to(network) {
             return Err(IndexError::new(
                 IndexErrorKind::NetworkMismatch,
                 "transaction belongs to another network",
@@ -379,20 +326,12 @@ impl Transaction {
         // what a store relies on to reserve the empty string for a row *no*
         // transaction names, so the two namespaces cannot be made to collide by
         // an interpreter.
-        if self.transaction_id.id.as_str().is_empty() {
+        if self.id.id.as_str().is_empty() {
             return Err(IndexError::new(
                 IndexErrorKind::InvalidBlock,
                 "transaction has no identifier",
                 false,
             ));
-        }
-        Ok(())
-    }
-
-    fn validate_effects(&self, network: &Network) -> Result<(), IndexError> {
-        self.validate_movements(network)?;
-        if let Some(fee) = &self.fee {
-            fee.validate(network)?;
         }
         Ok(())
     }
@@ -422,24 +361,12 @@ impl Transaction {
     }
 }
 
-/// Whether an interpreted transaction succeeded; the block is added later.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ObservationDraftStatus {
-    /// Executed successfully.
-    Included,
-    /// Included but failed.
-    Failed {
-        /// The chain's failure reason, when it reports one.
-        reason: Option<String>,
-    },
-}
-
 #[cfg(test)]
 mod tests {
     use base::{BlockHash, BlockHeight, BlockPosition, ChainName};
 
     use super::*;
-    use crate::{HistoryQuery, Holder};
+    use crate::HistoryQuery;
 
     fn network() -> Network {
         Network::new(ChainName::new("test"), "mainnet")
@@ -549,25 +476,23 @@ mod tests {
         }
     }
 
-    fn draft(fee: AssetId) -> ObservationDraft {
-        ObservationDraft {
-            transaction: crate::Transaction {
-                transaction_id: TransactionRef::new(network(), "tx"),
-                movements: vec![ValueMovement::transfer(
-                    MovementId("token".into()),
-                    token(),
-                    Decimal::from(3_u64),
-                    address("b"),
-                    address("c"),
-                )],
-                fee: Some(NetworkFee {
-                    asset: fee,
-                    amount: Decimal::from(1_u64),
-                    payer: Some(address("a")),
-                }),
-            },
-            transaction_order: 0,
-            status: ObservationDraftStatus::Included,
+    fn draft(fee: AssetId) -> Transaction {
+        Transaction {
+            id: TransactionRef::new(network(), "tx"),
+            movements: vec![ValueMovement::transfer(
+                MovementId("token".into()),
+                token(),
+                Decimal::from(3_u64),
+                address("b"),
+                address("c"),
+            )],
+            fee: Some(NetworkFee {
+                asset: fee,
+                amount: Decimal::from(1_u64),
+                payer: Some(address("a")),
+            }),
+            order: 0,
+            status: Status::Included { block: block() },
         }
     }
 
@@ -581,87 +506,58 @@ mod tests {
     }
 
     #[test]
-    fn canonicalization_preserves_shared_facts_and_native_order() {
-        let mut observed = draft(AssetId::native(network().chain));
-        observed.transaction_order = 7;
-        let facts = observed.transaction.clone();
+    fn a_transaction_touches_its_endpoints_and_fee_payer() {
+        let observed = draft(AssetId::native(network().chain));
         assert_eq!(
-            facts.addresses(),
+            observed.addresses(),
             BTreeSet::from([address("a"), address("b"), address("c")])
         );
-        let canonical = observed.canonical(&network(), &block()).unwrap();
-        assert_eq!(canonical.transaction, facts);
-        assert_eq!(canonical.transaction_order, 7);
-        assert_eq!(
-            canonical.status,
-            CanonicalStatus::Included { block: block() }
-        );
+        assert!(observed.validate(&network()).is_ok());
+        assert_eq!(observed.block(), &block());
     }
 
     #[test]
-    fn failed_stage_validation_keeps_identity_then_movements_then_fee_precedence() {
+    fn failed_validation_keeps_identity_then_movements_then_fee_precedence() {
         let mut observed = draft(token());
-        observed.status = ObservationDraftStatus::Failed {
+        observed.status = Status::Failed {
+            block: block(),
             reason: Some("reverted".into()),
         };
-        observed.transaction.transaction_id = TransactionRef::new(network(), "");
+        observed.id = TransactionRef::new(network(), "");
         assert_eq!(
-            observed
-                .clone()
-                .canonical(&network(), &block())
-                .unwrap_err()
-                .message,
+            observed.validate(&network()).unwrap_err().message,
             "transaction has no identifier"
         );
-        observed.transaction.transaction_id = TransactionRef::new(network(), "failed");
+        observed.id = TransactionRef::new(network(), "failed");
         assert_eq!(
-            observed
-                .clone()
-                .canonical(&network(), &block())
-                .unwrap_err()
-                .message,
+            observed.validate(&network()).unwrap_err().message,
             "failed transaction contains movements"
         );
-        observed.transaction.movements.clear();
+        observed.movements.clear();
         assert_eq!(
-            observed
-                .clone()
-                .canonical(&network(), &block())
-                .unwrap_err()
-                .message,
+            observed.validate(&network()).unwrap_err().message,
             "transaction contains an invalid network fee"
         );
-        observed.transaction.fee.as_mut().unwrap().asset = AssetId::native(network().chain);
-        let facts = observed.transaction.clone();
-        let canonical = observed.canonical(&network(), &block()).unwrap();
-        assert_eq!(canonical.transaction, facts);
-        assert_eq!(
-            canonical.status,
-            CanonicalStatus::Failed {
-                block: block(),
-                reason: Some("reverted".into()),
-            }
-        );
+        observed.fee.as_mut().unwrap().asset = AssetId::native(network().chain);
+        assert!(observed.validate(&network()).is_ok());
     }
 
     #[test]
     fn a_network_fee_must_be_paid_in_the_native_asset() {
-        let error = draft(token()).canonical(&network(), &block()).unwrap_err();
+        let error = draft(token()).validate(&network()).unwrap_err();
         assert_eq!(error.kind, IndexErrorKind::InvalidBlock);
         assert_eq!(error.message, "transaction contains an invalid network fee");
         let native = AssetId::native(network().chain);
-        assert!(draft(native).canonical(&network(), &block()).is_ok());
+        assert!(draft(native).validate(&network()).is_ok());
     }
 
     #[test]
     fn a_paid_fee_selects_the_fee_asset_only_and_strips_other_movements() {
         let native = AssetId::native(network().chain);
-        let paid = draft(native.clone())
-            .canonical(&network(), &block())
-            .unwrap();
+        let paid = draft(native.clone());
         let selected = query(native).select(paid.clone()).expect("fee asset");
-        assert!(selected.transaction.movements.is_empty());
-        assert_eq!(selected.transaction.fee, paid.transaction.fee);
+        assert!(selected.movements.is_empty());
+        assert_eq!(selected.fee, paid.fee);
         assert_eq!(query(token()).select(paid), None);
     }
 

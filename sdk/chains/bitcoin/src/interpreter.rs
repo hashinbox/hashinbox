@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use base::{MovementKind, Networked};
 use indexing::{
-    BlockInterpreter as Interpret, IndexError, IndexErrorKind, IndexedOutput, InterpretedBlock,
-    MovementId, Network, NetworkFee, ObservationDraft, ObservationDraftStatus, OutputChanges,
-    OutputKey, ValueMovement,
+    BlockInterpreter as Interpret, BlockRef, BlockWithOutputs, IndexError, IndexErrorKind,
+    IndexedOutput, MovementId, Network, NetworkFee, OutputChanges, OutputKey, Status,
+    ValueMovement,
 };
 
 use crate::native::{
@@ -68,20 +68,26 @@ impl BlockInterpreter {
     /// `order` is the transaction's place in the block's **whole** `tx` array,
     /// which is why [`Interpret::inspect`] counts the loop rather than the
     /// transactions it keeps: the same transaction must carry the same ordinal
-    /// under every address selection.
-    fn observation(&self, transaction: &Transaction, order: u64) -> ObservationDraft {
-        ObservationDraft {
-            transaction: indexing::Transaction {
-                transaction_id: transaction.id().canonical(&self.network),
-                movements: transaction
-                    .movements()
-                    .into_iter()
-                    .map(|movement| self.movement(movement))
-                    .collect(),
-                fee: transaction.fee().map(|fee| self.fee(fee)),
+    /// under every address selection. `block` is the block being inspected,
+    /// which included it.
+    fn observation(
+        &self,
+        transaction: &Transaction,
+        order: u64,
+        block: &BlockRef,
+    ) -> indexing::Transaction {
+        indexing::Transaction {
+            id: transaction.id().canonical(&self.network),
+            movements: transaction
+                .movements()
+                .into_iter()
+                .map(|movement| self.movement(movement))
+                .collect(),
+            fee: transaction.fee().map(|fee| self.fee(fee)),
+            order,
+            status: Status::Included {
+                block: block.clone(),
             },
-            transaction_order: order,
-            status: ObservationDraftStatus::Included,
         }
     }
 
@@ -132,7 +138,7 @@ impl Interpret for BlockInterpreter {
         &self,
         block: &RawBlock,
         addresses: &[base::Address],
-    ) -> Result<InterpretedBlock, IndexError> {
+    ) -> Result<BlockWithOutputs, IndexError> {
         if block.network().canonical() != self.network {
             return Err(IndexError::new(
                 IndexErrorKind::NetworkMismatch,
@@ -150,6 +156,7 @@ impl Interpret for BlockInterpreter {
             spent: BTreeMap::new(),
             tracked: BTreeMap::new(),
         };
+        let reference = block.reference().clone();
         let mut transactions = Vec::new();
         // Enumerated over the complete, block-ordered list; the filter is inside
         // the loop, so `order` is the transaction's native place whatever the
@@ -157,13 +164,12 @@ impl Interpret for BlockInterpreter {
         // `nTx` before it is parsed at all.
         for (order, transaction) in (0_u64..).zip(parsed.transactions()) {
             if changes.apply(transaction)? {
-                transactions.push(self.observation(transaction, order));
+                transactions.push(self.observation(transaction, order, &reference));
             }
         }
-        let reference = block.reference().clone();
-        Ok(InterpretedBlock {
+        Ok(BlockWithOutputs {
             outputs: changes.into_outputs(),
-            ..InterpretedBlock::new(parsed.network(), reference, transactions)?
+            ..BlockWithOutputs::new(parsed.network(), reference, transactions)?
         })
     }
 }
@@ -350,7 +356,7 @@ mod tests {
         bytes.to_vec()
     }
 
-    fn inspect(block: &RawBlock, selected: &[&Address]) -> Result<InterpretedBlock, IndexError> {
+    fn inspect(block: &RawBlock, selected: &[&Address]) -> Result<BlockWithOutputs, IndexError> {
         let addresses: Vec<_> = selected
             .iter()
             .map(|address| address.canonical(&network()))
@@ -388,7 +394,7 @@ mod tests {
         assert!(interpreted.outputs.created.is_empty());
     }
 
-    /// A draft's `transaction_order` is its place in the **block**, not its
+    /// A transaction's `order` is its place in the **block**, not its
     /// place in what `inspect` reported.
     ///
     /// The block holds three transactions and only the last touches a selected
@@ -397,7 +403,7 @@ mod tests {
     /// parse has already checked against the block's own `nTx` — so the same
     /// transaction carries the same ordinal under every selection, which is what
     /// keeps a history cursor stable
-    /// (`indexing::ObservationDraft::transaction_order`).
+    /// (`indexing::Transaction::order`).
     #[test]
     fn a_draft_carries_its_place_in_the_block_not_in_the_selection() {
         let selected = address(1, AddressType::SegwitV0);
@@ -417,7 +423,7 @@ mod tests {
             1,
             "one transaction is selected"
         );
-        assert_eq!(narrow.block.transactions()[0].transaction_order, 2);
+        assert_eq!(narrow.block.transactions()[0].order, 2);
 
         // The wider selection reports all three, and the last keeps the very
         // ordinal it had when it was reported alone.
@@ -426,7 +432,7 @@ mod tests {
             .block
             .transactions()
             .iter()
-            .map(|draft| draft.transaction_order)
+            .map(|draft| draft.order)
             .collect();
         assert_eq!(orders, [0, 1, 2]);
     }
@@ -444,13 +450,13 @@ mod tests {
         let interpreted = inspect(&raw, &[&source, &destination]).unwrap();
         assert_eq!(interpreted.block.transactions().len(), 2);
         let spend = &interpreted.block.transactions()[1];
-        assert_eq!(spend.transaction.movements[0].kind(), MovementKind::Input);
-        assert_eq!(spend.transaction.movements[1].kind(), MovementKind::Output);
+        assert_eq!(spend.movements[0].kind(), MovementKind::Input);
+        assert_eq!(spend.movements[1].kind(), MovementKind::Output);
         assert_eq!(
-            spend.transaction.movements[0].id,
+            spend.movements[0].id,
             MovementId(format!("{}:vin:0", spending.compute_txid()))
         );
-        let fee = spend.transaction.fee.as_ref().unwrap();
+        let fee = spend.fee.as_ref().unwrap();
         assert_eq!(fee.amount, Decimal::from(1_000_u64));
         assert_eq!(fee.amount.scale(), 0);
         assert_eq!(fee.payer, Some(source.canonical(&network())));
@@ -481,7 +487,6 @@ mod tests {
         assert_eq!(interpreted.outputs.tracked_spends.len(), 1);
         assert_eq!(
             interpreted.block.transactions()[0]
-                .transaction
                 .fee
                 .as_ref()
                 .unwrap()

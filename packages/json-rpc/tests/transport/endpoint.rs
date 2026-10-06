@@ -279,6 +279,7 @@ async fn every_header_reaches_the_node_with_its_value_resolved() {
     let (address, observed) = node::serve_headers();
     Endpoint::new(address)
         .with_header("x-tenant", "acme")
+        .with_header("x-api-key", "offline-provider-key")
         .with_header("authorization", "Basic ${BTC_RPC_BASIC}")
         .connect(&secrets([("BTC_RPC_BASIC", "dXNlcjpwYXNz+w==")]))
         .expect("the named variable is set")
@@ -289,6 +290,7 @@ async fn every_header_reaches_the_node_with_its_value_resolved() {
     let headers = observed.recv().expect("the server must report its headers");
     for expected in [
         ("x-tenant", "acme"),
+        ("x-api-key", "offline-provider-key"),
         ("authorization", "Basic dXNlcjpwYXNz+w=="),
     ] {
         assert!(

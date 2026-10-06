@@ -34,6 +34,21 @@ pub enum WalletErrorKind {
     /// The entry is a watched address without a key: it has history, but no
     /// balance read or send.
     WatchOnly,
+    /// The asset's network is paused ([`crate::Wallets::pause`]), for example
+    /// while it is rescanned: nothing new starts on it until it resumes.
+    Paused,
+}
+
+impl WalletErrorKind {
+    /// Whether a failure of this kind is transient: the node or the source was
+    /// busy or unreachable, or the network paused, and nothing about the
+    /// request was wrong. Trying
+    /// again is only safe when the failure also accepted nothing and is not
+    /// ambiguous; this says nothing about either.
+    #[must_use]
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::Unavailable | Self::SourceBusy | Self::Paused)
+    }
 }
 
 /// A wallet operation failure.
@@ -94,22 +109,6 @@ impl From<base::TransactionError> for WalletError {
             message,
             ambiguous_transaction_id,
         }
-    }
-}
-
-impl From<indexing::IndexError> for WalletError {
-    fn from(error: indexing::IndexError) -> Self {
-        let kind = match error.kind {
-            indexing::IndexErrorKind::Conflict => WalletErrorKind::Conflict,
-            indexing::IndexErrorKind::NetworkMismatch
-            | indexing::IndexErrorKind::InvalidRequest => WalletErrorKind::Unsupported,
-            indexing::IndexErrorKind::Source
-            | indexing::IndexErrorKind::Store
-            | indexing::IndexErrorKind::InvalidBlock
-            | indexing::IndexErrorKind::Disconnected
-            | indexing::IndexErrorKind::ConfirmedReorg => WalletErrorKind::Unavailable,
-        };
-        Self::new(kind, error.message)
     }
 }
 

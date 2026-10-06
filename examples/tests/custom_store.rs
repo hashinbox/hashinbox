@@ -3,9 +3,9 @@
 //! The store under test is the scenario's own file, included here rather than
 //! copied, so a regression in it fails this test: `examples/custom_store/sink.rs`
 //! implements exactly two ports and the assertions below are what a third party
-//! gets for them. The chain is synthetic, because none of this is about a chain
-//! — a vector of blocks, an interpreter that credits one address per block, and
-//! a confirmed line a few blocks below the tip.
+//! gets for them. The chain is `indexing`'s scripted one, because none of this
+//! is about a chain — blocks that each credit one address, and a confirmed line
+//! a few blocks below the tip.
 //!
 //! Four claims, in the order they matter:
 //!
@@ -19,17 +19,14 @@
 #[path = "../custom_store/sink.rs"]
 mod sink;
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
 use indexing::{
-    Address, AssetId, Birthday, BlockHash, BlockHeight, BlockInterpreter, BlockParent,
-    BlockPosition, BlockRef, BlockSource, BoxFuture, ChainName, ChainTips, Checkpoint as _,
-    Decimal, FeeSettlement, IndexError, IndexErrorKind, IndexStore as _, Indexer, Indexing as _,
-    InterpretedBlock, MovementId, NativeBlock, Network, ObservationDraft, ObservationDraftStatus,
-    SourceError, Subject, SyncConfig, SyncPolicy, TransactionRef, ValueMovement, Watching as _,
+    Address, AssetId, Birthday, BlockInterpreter as _, BlockPosition, BlockSource as _,
+    BlockWithOutputs, ChainName, Checkpoint as _, Decimal, FeeSettlement, IndexErrorKind,
+    IndexStore as _, Indexer, Indexing as _, MovementId, Network, Status, Subject, SyncConfig,
+    SyncPolicy, Transaction, TransactionRef, ValueMovement, Watching as _,
+    testing::{Chain, block},
 };
 use sink::Sink;
 
@@ -58,155 +55,38 @@ fn network() -> Network {
     Network::new(ChainName::new("probe"), "one")
 }
 
-/// One block of the test chain: its reference, and the address it credits.
-#[derive(Clone)]
-struct Block {
-    reference: BlockRef,
-    to: Address,
-}
-
-impl NativeBlock for Block {
-    fn block_ref(&self) -> BlockRef {
-        self.reference.clone()
-    }
-}
-
-/// The test chain: [`HEIGHT`] blocks, each crediting one address, and a
-/// confirmed line [`DEPTH`] below its tip.
+/// The test chain: [`HEIGHT`] blocks and a confirmed line [`DEPTH`] below its
+/// tip. Even positions credit [`FRESH`] and odd ones credit [`PAST`], one unit
+/// from [`SENDER`] in one transaction, so each address's history is
+/// interleaved with the other's rather than contiguous; a block holds nothing
+/// for an address its credit does not reach.
 ///
 /// It counts the blocks it serves, which is how the restart test tells resuming
 /// from a restored watch list apart from starting the same work again: a store
 /// that lost a checkpoint or a progress row makes the index read blocks it has
 /// already read, and nothing in the store's own answers says so.
-struct Feed {
-    blocks: Vec<Block>,
-    served: Arc<AtomicUsize>,
-}
-
-impl Feed {
-    /// Every block this chain has produced. Even positions credit [`FRESH`],
-    /// odd ones credit [`PAST`], so each address's history is interleaved with
-    /// the other's rather than contiguous.
-    fn new(served: &Arc<AtomicUsize>) -> Self {
-        let blocks = (0..HEIGHT)
-            .map(|position| Block {
-                reference: reference(position),
-                to: address(if position % 2 == 0 { FRESH } else { PAST }),
-            })
-            .collect();
-        Self {
-            blocks,
-            served: Arc::clone(served),
-        }
-    }
-
-    /// The highest block this chain calls irreversible.
-    fn confirmed(&self) -> BlockRef {
-        reference(HEIGHT.saturating_sub(1).saturating_sub(DEPTH))
-    }
-}
-
-impl ChainTips for Feed {
-    fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
-        Box::pin(async { Ok(reference(HEIGHT.saturating_sub(1))) })
-    }
-
-    fn confirmed_tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
-        Box::pin(async { Ok(self.confirmed()) })
-    }
-}
-
-impl BlockSource for Feed {
-    type Block = Block;
-
-    fn blocks<'a>(
-        &'a self,
-        start: BlockPosition,
-        end: BlockPosition,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<Self::Block>, SourceError>> {
-        Box::pin(async move {
-            let blocks: Vec<_> = self
-                .blocks
-                .iter()
-                .filter(|block| (start..=end).contains(&block.reference.position))
-                .take(limit)
-                .cloned()
-                .collect();
-            self.served.fetch_add(blocks.len(), Ordering::Relaxed);
-            Ok(blocks)
-        })
-    }
-
-    fn canonical_at<'a>(
-        &'a self,
-        position: BlockPosition,
-    ) -> BoxFuture<'a, Result<Option<BlockRef>, SourceError>> {
-        Box::pin(async move {
-            Ok(self
-                .blocks
-                .iter()
-                .find(|block| block.reference.position == position)
-                .map(NativeBlock::block_ref))
-        })
-    }
-}
-
-/// Reads one test block for the addresses it is given: one transaction moving
-/// one unit to the block's credited address, and nothing at all when that
-/// address is not selected.
-struct Reader;
-
-impl BlockInterpreter for Reader {
-    type Block = Block;
-
-    fn inspect(
-        &self,
-        block: &Self::Block,
-        addresses: &[Address],
-    ) -> Result<InterpretedBlock, IndexError> {
-        let transactions = if addresses.contains(&block.to) {
-            vec![ObservationDraft {
-                transaction: indexing::Transaction {
-                    transaction_id: TransactionRef::new(
-                        network(),
-                        format!("tx-{}", block.reference.height.0),
-                    ),
-                    movements: vec![ValueMovement::transfer(
-                        MovementId("transfer:0".to_owned()),
-                        AssetId::native(network().chain),
-                        Decimal::from(1_u64),
-                        address(SENDER),
-                        block.to.clone(),
-                    )],
-                    fee: None,
-                },
-                transaction_order: 0,
-                status: ObservationDraftStatus::Included,
-            }]
-        } else {
-            Vec::new()
+fn chain() -> Chain {
+    let chain = Chain::dense(network(), HEIGHT - 1).confirming(DEPTH);
+    for position in 0..HEIGHT {
+        let to = address(if position % 2 == 0 { FRESH } else { PAST });
+        let draft = Transaction {
+            id: TransactionRef::new(network(), format!("tx-{position}")),
+            movements: vec![ValueMovement::transfer(
+                MovementId("transfer:0".to_owned()),
+                AssetId::native(network().chain),
+                Decimal::from(1_u64),
+                address(SENDER),
+                to,
+            )],
+            fee: None,
+            order: 0,
+            status: Status::Included {
+                block: block(position),
+            },
         };
-        InterpretedBlock::new(&network(), block.block_ref(), transactions)
+        chain.include(&block(position), draft);
     }
-
-    fn settlement(&self) -> FeeSettlement {
-        FeeSettlement::Charged
-    }
-}
-
-/// One block's reference on the test chain, linked to the one below it.
-fn reference(position: u64) -> BlockRef {
-    BlockRef {
-        position: BlockPosition(position),
-        height: BlockHeight(position),
-        hash: BlockHash(vec![u8::try_from(position).unwrap_or(u8::MAX)]),
-        parent: position.checked_sub(1).map(|below| BlockParent {
-            position: BlockPosition(below),
-            hash: BlockHash(vec![u8::try_from(below).unwrap_or(u8::MAX)]),
-        }),
-        timestamp: None,
-    }
+    chain
 }
 
 /// One address of the test network.
@@ -225,17 +105,17 @@ fn subject(text: &str) -> Subject {
 /// One index over `store`, exactly as the scenario builds one over a chain: the
 /// store is handed over as `Arc`, because it is not `Clone` and does not need to
 /// be.
-fn index(store: &Arc<Sink>, served: &Arc<AtomicUsize>) -> Indexer<Feed, Reader, Arc<Sink>> {
+fn index(store: &Arc<Sink>, chain: &Chain) -> Indexer<Chain, Chain, Arc<Sink>> {
     Indexer::new(
-        Feed::new(served),
-        Reader,
+        chain.clone(),
+        chain.clone(),
         Arc::clone(store),
         SyncConfig::new(&network(), SyncPolicy::new(BATCH)).expect("a valid policy"),
     )
 }
 
 /// The checkpoint position the index reached, or `None` before its first commit.
-async fn reached(index: &Indexer<Feed, Reader, Arc<Sink>>) -> Option<u64> {
+async fn reached(index: &Indexer<Chain, Chain, Arc<Sink>>) -> Option<u64> {
     index
         .checkpoint(&network())
         .await
@@ -244,7 +124,7 @@ async fn reached(index: &Indexer<Feed, Reader, Arc<Sink>>) -> Option<u64> {
 }
 
 /// Drives `index` until nothing more changes, at most `passes` times.
-async fn drive(index: &Indexer<Feed, Reader, Arc<Sink>>, passes: usize) {
+async fn drive(index: &Indexer<Chain, Chain, Arc<Sink>>, passes: usize) {
     let mut previous = None;
     for _ in 0..passes {
         index.sync().await.expect("a pass over the test chain");
@@ -263,8 +143,8 @@ async fn drive(index: &Indexer<Feed, Reader, Arc<Sink>>, passes: usize) {
 #[tokio::test]
 async fn one_pass_commits_at_most_its_batch() {
     let store = Arc::new(Sink::new());
-    let served = Arc::new(AtomicUsize::new(0));
-    let unit = index(&store, &served);
+    let chain = chain();
+    let unit = index(&store, &chain);
     unit.watch("fresh", &subject(FRESH), Birthday::At(BlockPosition(0)))
         .await
         .expect("an observation from genesis");
@@ -284,14 +164,14 @@ async fn one_pass_commits_at_most_its_batch() {
 #[tokio::test]
 async fn a_fresh_observation_starts_after_the_live_tip() {
     let store = Arc::new(Sink::new());
-    let served = Arc::new(AtomicUsize::new(0));
-    let unit = index(&store, &served);
+    let chain = chain();
+    let unit = index(&store, &chain);
     let watch = unit
         .watch("fresh", &subject(FRESH), Birthday::Fresh)
         .await
         .expect("a fresh observation");
     assert_eq!(watch.start, BlockPosition(HEIGHT));
-    assert_eq!(served.load(Ordering::Relaxed), 0);
+    assert_eq!(chain.fetched().len(), 0);
     assert_eq!(store.observed(&network()), [("fresh".into(), watch.start)]);
 
     drive(&unit, 8).await;
@@ -310,8 +190,8 @@ async fn a_fresh_observation_starts_after_the_live_tip() {
 #[tokio::test]
 async fn a_restart_over_the_same_store_restores_every_observation() {
     let store = Arc::new(Sink::new());
-    let served = Arc::new(AtomicUsize::new(0));
-    let unit = index(&store, &served);
+    let chain = chain();
+    let unit = index(&store, &chain);
     unit.watch("fresh", &subject(FRESH), Birthday::At(BlockPosition(0)))
         .await
         .expect("an observation from genesis");
@@ -361,9 +241,9 @@ async fn a_restart_over_the_same_store_restores_every_observation() {
 
     // Claim 3. Everything above is dropped; the store is not.
     let observed = unit.watched(&network()).await.expect("the watch list");
-    let read = served.load(Ordering::Relaxed);
+    let read = chain.fetched().len();
     drop(unit);
-    let restarted = index(&store, &served);
+    let restarted = index(&store, &chain);
     assert_eq!(
         restarted.watched(&network()).await.expect("the watch list"),
         observed,
@@ -388,7 +268,7 @@ async fn a_restart_over_the_same_store_restores_every_observation() {
     drive(&restarted, 8).await;
     let pending = usize::try_from(DEPTH).expect("a representable depth");
     assert_eq!(
-        served.load(Ordering::Relaxed),
+        chain.fetched().len(),
         read + pending,
         "a restart must resume: nothing below the confirmed line may be read twice"
     );
@@ -418,8 +298,8 @@ async fn a_restart_over_the_same_store_restores_every_observation() {
 #[tokio::test]
 async fn one_batch_presented_twice_is_folded_once() {
     let store = Arc::new(Sink::new());
-    let served = Arc::new(AtomicUsize::new(0));
-    let unit = index(&store, &served);
+    let chain = chain();
+    let unit = index(&store, &chain);
     unit.watch("fresh", &subject(FRESH), Birthday::At(BlockPosition(0)))
         .await
         .expect("an observation from genesis");
@@ -431,10 +311,14 @@ async fn one_batch_presented_twice_is_folded_once() {
         .await
         .expect("a checkpoint")
         .expect("a committed block");
-    let block = Reader
-        .inspect(&Feed::new(&served).blocks[0], &[address(FRESH)])
+    let genesis = chain
+        .blocks(BlockPosition(0), BlockPosition(0), 1)
+        .await
+        .expect("the genesis block");
+    let block = chain
+        .inspect(&genesis[0], &[address(FRESH)])
         .expect("one interpreted block");
-    let canonical = indexing::CanonicalBlock::new(network(), block).expect("valid facts");
+    let canonical = block;
     let batch = || {
         indexing::IndexedBatch::new(
             network(),
@@ -463,8 +347,8 @@ async fn one_batch_presented_twice_is_folded_once() {
 #[tokio::test]
 async fn a_second_identity_cannot_claim_an_observed_address() {
     let store = Arc::new(Sink::new());
-    let served = Arc::new(AtomicUsize::new(0));
-    let unit = index(&store, &served);
+    let chain = chain();
+    let unit = index(&store, &chain);
     unit.watch("fresh", &subject(FRESH), Birthday::Fresh)
         .await
         .expect("a fresh observation");
@@ -494,8 +378,8 @@ async fn a_second_identity_cannot_claim_an_observed_address() {
 #[tokio::test]
 async fn every_credit_a_block_makes_to_one_address_is_summed_once() {
     let store = Arc::new(Sink::new());
-    let served = Arc::new(AtomicUsize::new(0));
-    let unit = index(&store, &served);
+    let chain = chain();
+    let unit = index(&store, &chain);
     unit.watch("fresh", &subject(FRESH), Birthday::At(BlockPosition(0)))
         .await
         .expect("an observation from genesis");
@@ -518,15 +402,11 @@ async fn every_credit_a_block_makes_to_one_address_is_summed_once() {
         amount: Decimal::from(amount),
         to: address(FRESH),
     };
-    let canonical = indexing::CanonicalBlock::new(
-        network(),
-        InterpretedBlock {
-            credits: vec![credited("credit:0", 3), credited("credit:1", 5)],
-            ..InterpretedBlock::new(&network(), checkpoint.clone(), Vec::new())
-                .expect("unique transaction ids")
-        },
-    )
-    .expect("two distinct credits in one block");
+    let canonical = indexing::BlockWithOutputs {
+        credits: vec![credited("credit:0", 3), credited("credit:1", 5)],
+        ..BlockWithOutputs::new(&network(), checkpoint.clone(), Vec::new())
+            .expect("unique transaction ids")
+    };
     let batch = || {
         indexing::IndexedBatch::new(
             network(),

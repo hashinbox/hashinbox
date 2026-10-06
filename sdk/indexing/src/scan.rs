@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use crate::{
-    Address, BlockInterpreter, BlockPosition, BlockRef, BlockSource, CanonicalBlock, IndexError,
+    Address, BlockInterpreter, BlockPosition, BlockRef, BlockSource, BlockWithOutputs, IndexError,
     Indexer, NativeBlock, SyncPlan, block::extends, pending,
 };
 
@@ -115,10 +115,10 @@ where
     /// follows the reading so far, the interpreter did not change which block it
     /// read, and what it produced is something this network can hold — no
     /// overlapping output change, no two transactions at one native place, no
-    /// movement or credit of another network ([`CanonicalBlock::new`]). A
+    /// movement or credit of another network ([`BlockWithOutputs::new`]). A
     /// transaction identity given twice never reaches that validation: the
     /// interpreter's own output cannot be assembled with one
-    /// ([`crate::InterpretedBlock::new`]). One validation point, reached from both
+    /// ([`crate::BlockWithOutputs::new`]). One validation point, reached from both
     /// directions, so neither can be given a rule the other lacks.
     ///
     /// What is deliberately *not* here is the source's own canonicality. Only
@@ -132,12 +132,13 @@ where
         scan: &mut Scan,
         block: &I::Block,
         addresses: &[Address],
-    ) -> Result<CanonicalBlock, IndexError> {
+    ) -> Result<BlockWithOutputs, IndexError> {
         let reference = block.block_ref();
         scan.follows(&reference)?;
         let interpreted = self.interpreter.inspect(block, addresses)?;
         interpreted.validate_reference(&reference)?;
-        CanonicalBlock::new(self.config.network.clone(), interpreted)
+        interpreted.validate(&self.config.network)?;
+        Ok(interpreted)
     }
 
     /// Inspects one block and holds it above the confirmed line, in `pending`.

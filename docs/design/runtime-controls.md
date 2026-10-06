@@ -1,6 +1,7 @@
 # Runtime controls and logging
 
-Accepted target, not a claim that every item is implemented.
+Status: **retired by `042`.** The runtime controls and the settings table were
+deleted; composition is static. Kept as history.
 
 ## Ownership
 

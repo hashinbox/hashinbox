@@ -24,7 +24,7 @@ required-features = ["solana-node"]
 solana-node = []
 
 [dependencies]
-logging = { path = "../../packages/logging" }
+clap.workspace = true
 axum = "0.8"
 base = { path = "../../sdk/base" }
 base64 = "=0.22.1"
@@ -35,10 +35,12 @@ hex.workspace = true
 http-server = { path = "../../packages/http-server" }
 indexing = { path = "../../sdk/indexing" }
 json-rpc = { path = "../../packages/json-rpc" }
-rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled", "cache"] }
 sdk-config = { path = "../../sdk/config", features = ["toml"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+# The one file's pool (`indexing::sqlite::Database::pool`): the models' own
+# table, `rpc_endpoints`, is read and written through it.
+sqlx.workspace = true
 tokio = { workspace = true, features = ["fs", "net", "process", "rt", "signal", "sync", "time"] }
 utoipa = { version = "=5.5.0", features = ["axum_extras"] }
 utoipa-axum = "=0.2.0"
@@ -54,10 +56,16 @@ alloy-primitives.workspace = true
 bitcoin.workspace = true
 futures-executor.workspace = true
 http-body-util = "=0.1.4"
+# A test chain implements `sdk_config::Chain`, whose `connect` names the logger.
+logging = { path = "../../packages/logging" }
+# The route tests run on the in-memory store, the scripted chain double and
+# the scripted wallet double; none is ever linked into the binary.
+indexing = { path = "../../sdk/indexing", features = ["memory", "testing"] }
 reqwest.workspace = true
 sha2.workspace = true
 tempfile = "=3.27.0"
 tower = { version = "=0.5.2", features = ["util"] }
+wallets = { path = "../../sdk/wallets", features = ["submissions", "testing"] }
 
 [lints]
 workspace = true

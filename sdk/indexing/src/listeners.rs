@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::{BlockRef, CanonicalTransaction, Network, OutputChanges, OutputKey};
+use crate::{BlockRef, Network};
 
 /// What one committed block changed, delivered after it was durably stored.
 ///
@@ -20,15 +20,6 @@ pub struct BlockCommit {
     pub network: Network,
     /// The committed block; now the network's checkpoint.
     pub block: BlockRef,
-    /// Transactions in this block that touched a watched address. Empty when
-    /// the block was indexed and matched nothing.
-    pub transactions: Vec<CanonicalTransaction>,
-    /// What became spendable and what was spent, for the same addresses.
-    pub outputs: OutputChanges,
-    /// Required spends committed without a matching indexed output: one
-    /// address's history is provably short
-    /// ([`IndexStore::commit`](crate::IndexStore::commit)).
-    pub unmatched_spends: Vec<OutputKey>,
 }
 
 /// Notified after each block an index commits.
@@ -76,12 +67,6 @@ impl Listeners {
             extended.push(listener);
             *listeners = extended.into();
         }
-    }
-
-    /// Whether anything is listening, so a pass copies a commit's facts only
-    /// when something will read them.
-    pub(crate) fn listening(&self) -> bool {
-        self.0.read().is_ok_and(|listeners| !listeners.is_empty())
     }
 
     /// Tells every listener about one committed block, oldest first, after the

@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use crate::{CallResult, Error, ErrorKind};
+use crate::{CallResult, Error, ErrorKind, Limit};
 
 const REMOTE: u64 = 1 << 32;
 const HTTP: u64 = 1 << 16;
@@ -76,6 +76,20 @@ impl Statistics {
         };
         self.finish(failure);
         failure.and_then(Self::message)
+    }
+
+    /// Whether the latest completion failed with one of `limits`.
+    pub(crate) fn limited(&self, limits: &[Limit]) -> bool {
+        if self.0.consecutive_failures.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        let code = self.0.last_failure.load(Ordering::Relaxed);
+        limits.iter().any(|limit| {
+            code == match *limit {
+                Limit::Http(status) => HTTP | u64::from(status),
+                Limit::Remote(remote) => REMOTE | u64::from(remote as u32),
+            }
+        })
     }
 
     fn finish(&self, failure: Option<u64>) {

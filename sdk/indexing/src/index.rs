@@ -11,11 +11,10 @@ use crate::{
 
 /// One index over any number of independently implemented chains.
 ///
-/// Reads and watches go to the unit that owns the requested network; [`Index::sync`]
-/// advances each unit in order against that unit's own watch list. A single
-/// chain is composed the same way as three: `Index::of(vec![indexer])`. A caller
-/// that wants one chain's failure not to stop the others drives [`Index::units`]
-/// instead.
+/// Reads and watches go to the unit that owns the requested network; each of
+/// [`Index::units`] is driven alone, so one chain's failure does not stop the
+/// others. A single chain is composed the same way as three:
+/// `Index::of(vec![indexer])`.
 ///
 /// **This is the only many-network value in the crate.** Every child is one
 /// network ([`Indexing::network`]), so composing is what turns N networks into
@@ -25,69 +24,15 @@ use crate::{
 ///
 /// `C` is what the children answer, and it defaults to [`Indexing`] — the whole
 /// of what one network's index is. **No query routes through here.** Watches,
-/// checkpoints and `sync` do, because each of them is a statement about a
+/// checkpoints and watches do, because each of them is a statement about a
 /// network and this is what knows which unit owns one; a balance and a page are
 /// the repository's own answers, so a consumer serving several networks holds
 /// one reader per network and asks the one that owns the subject
-/// (`wallets::Composition`). A composition that routed a balance would have had
+/// (`sdk_config::Composition`). A composition that routed a balance would have had
 /// to demand the capability of every child before it could offer it for any.
 pub struct Index<C: ?Sized = dyn Indexing> {
     units: Vec<SyncUnit<C>>,
     networks: Vec<Network>,
-}
-
-/// One store and the chains being assembled over it.
-///
-/// Built by [`Index::over`], finished by [`Assembly::build`]. Each
-/// [`Assembly::chain`] answers `Result`, so the fluent form is
-/// `Index::over(store).chain(…)?.chain(…)?.build()?` and a refusal is the
-/// chain's own typed error at the chain that refused — no deferred failure state
-/// and no chains constructed after one.
-pub struct Assembly<R, C: ?Sized = dyn Indexing> {
-    repository: R,
-    chains: Vec<Arc<C>>,
-}
-
-impl<R: Clone, C: Indexing + ?Sized> Assembly<R, C> {
-    /// Adds one chain, built over this index's store.
-    ///
-    /// `chain` is the chain crate's own constructor — its RPC client, its
-    /// interpreter, its policy — handed the store and nothing else. It is
-    /// synchronous and does no I/O: callers verify chain connections before
-    /// assembling their indexing components.
-    ///
-    /// # Errors
-    ///
-    /// [`IndexErrorKind::InvalidRequest`] carrying the chain's own message: at
-    /// this point every failure is "this configuration cannot be assembled".
-    pub fn chain<E: std::fmt::Display>(
-        mut self,
-        chain: impl FnOnce(R) -> Result<Arc<C>, E>,
-    ) -> Result<Self, IndexError> {
-        let indexer = chain(self.repository.clone()).map_err(|error| {
-            IndexError::new(
-                IndexErrorKind::InvalidRequest,
-                format!("a chain could not be composed: {error}"),
-                false,
-            )
-        })?;
-        self.chains.push(indexer);
-        Ok(self)
-    }
-
-    /// The assembled index, or the first thing wrong with it.
-    ///
-    /// **Nothing is launched.** What this checks is that the chains' networks are
-    /// disjoint; no task is spawned, no block is fetched and no store is
-    /// written. Driving is the caller's, through [`Index::sync`] or the optional
-    /// `crate::Supervisor`.
-    ///
-    /// # Errors
-    ///
-    /// [`IndexErrorKind::Conflict`] when two chains claim one network.
-    pub fn build(self) -> Result<Index<C>, IndexError> {
-        Index::of(self.chains)
-    }
 }
 
 /// One child indexer and the network it owns: the unit of failure isolation.
@@ -101,26 +46,8 @@ pub struct SyncUnit<C: ?Sized = dyn Indexing> {
 }
 
 impl<C: Indexing + ?Sized> Index<C> {
-    /// Begins assembling an index over one store.
-    ///
-    /// The store is handed to each chain by [`Assembly::chain`] rather than by the
-    /// caller, which is the whole of what this adds: one repository, every
-    /// network, cloned once per chain. Nothing is validated and nothing is
-    /// launched until [`Assembly::build`].
-    #[must_use]
-    pub fn over<R: Clone>(repository: R) -> Assembly<R, C> {
-        Assembly {
-            repository,
-            chains: Vec::new(),
-        }
-    }
-
     /// Combines indexers whose networks are disjoint. An empty collection is valid
     /// while a caller awaits configuration; it does not establish readiness.
-    ///
-    /// The primitive [`Assembly::build`] ends at, and what a caller that composed
-    /// its chains some other way — asynchronously, or through
-    /// `wallets::Composition` — uses directly.
     ///
     /// # Errors
     ///
@@ -163,51 +90,6 @@ impl<C: Indexing + ?Sized> Index<C> {
     pub fn listen(&self, listener: Arc<dyn Listener>) {
         for unit in &self.units {
             unit.indexer.listen(listener.clone());
-        }
-    }
-
-    /// Advances every network once, retaining failure isolation for embedded callers.
-    /// A failed unit does not prevent later units from receiving their pass.
-    ///
-    /// # Errors
-    /// The worst failure reported: terminal outranks retryable, earliest wins ties.
-    pub fn sync<'a>(&'a self) -> BoxFuture<'a, Result<Vec<SyncStatus>, IndexError>> {
-        Box::pin(async move {
-            let mut reported = Vec::with_capacity(self.units.len());
-            for unit in &self.units {
-                reported.push(unit.sync().await);
-            }
-            Self::outcome(reported)
-        })
-    }
-
-    /// What a pass over every unit answers.
-    ///
-    /// A terminal failure outranks a retryable one, and the earliest of equal
-    /// rank wins: a caller deciding whether to try again needs to hear about the
-    /// network that will not recover by itself, not whichever one happens to be
-    /// first. The error is passed through verbatim — kind, message and
-    /// `retryable` — because that is what a driver and the supervisor's
-    /// quarantine rule both read.
-    ///
-    /// The statuses of the units that *did* pass are not returned beside a
-    /// failure, because one `Result` cannot carry both; what this guarantees is
-    /// that their work happened. A caller that needs each network's outcome
-    /// separately drives [`Index::units`], which is what the supervisor does.
-    fn outcome(
-        reported: Vec<Result<SyncStatus, IndexError>>,
-    ) -> Result<Vec<SyncStatus>, IndexError> {
-        let mut statuses = Vec::new();
-        let mut failures = Vec::new();
-        for outcome in reported {
-            match outcome {
-                Ok(passed) => statuses.push(passed),
-                Err(failure) => failures.push(failure),
-            }
-        }
-        match failures.into_iter().min_by_key(|failure| failure.retryable) {
-            Some(failure) => Err(failure),
-            None => Ok(statuses),
         }
     }
 

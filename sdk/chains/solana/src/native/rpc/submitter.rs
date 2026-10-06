@@ -10,11 +10,12 @@ use crate::native::{Error, SignedTransaction, TransactionId};
 
 /// Transaction submission and the reads that settle its outcome.
 pub trait Submitter: Send + Sync {
-    /// Submits the exact signed bytes once, with node preflight and no node
-    /// rebroadcast, and checks the node returns the local signature.
+    /// Submits the exact signed bytes to every node the transport reaches,
+    /// each exactly once, with node preflight and no node rebroadcast, and
+    /// checks the answering node returns the local signature.
     ///
     /// Every failure is [`crate::native::ErrorKind::RpcUnavailable`]: the
-    /// bytes may have reached the node, so the outcome is unknown and only
+    /// bytes may have reached a node, so the outcome is unknown and only
     /// `transaction.id` identifies it.
     fn broadcast<'a>(
         &'a self,
@@ -64,7 +65,7 @@ impl<C: json_rpc::Client> Submitter for Client<C> {
         Box::pin(async move {
             let unknown = || Error::rpc("Solana submission outcome is unknown", true);
             let returned = self
-                .request::<String>(
+                .broadcast_once::<String>(
                     "sendTransaction",
                     json!([STANDARD.encode(transaction.envelope.as_bytes()), {
                         "encoding":"base64",
@@ -170,6 +171,7 @@ impl StatusWire {
 
 #[cfg(test)]
 mod tests {
+    use json_rpc::testing::Reply;
     use solana_signature::Signature;
 
     use super::*;
@@ -230,6 +232,47 @@ mod tests {
                 Error::rpc("Solana submission outcome is unknown", true)
             );
             rpc.exhausted();
+        }
+    }
+
+    /// The injected tip probe of a test cluster.
+    fn tip(node: &Script) -> json_rpc::BoxFuture<'_, Result<u64, json_rpc::CallError>> {
+        Box::pin(async move {
+            let probe = json_rpc::Request::new("getSlot", json!([]));
+            let raw = json_rpc::Client::request(node, probe).await??;
+            Ok(raw.deserialize()?)
+        })
+    }
+
+    /// The submission is broadcast: every node receives the exact bytes once,
+    /// never as repeatable work, and the first acceptance answers even when
+    /// another node's outcome is unknown.
+    #[tokio::test]
+    async fn submission_reaches_every_node_of_a_cluster_once() {
+        let transaction = signed(7, vec![8, 9]);
+        let timeout = json_rpc::Error {
+            kind: json_rpc::ErrorKind::Timeout,
+            message: "timed out".to_owned(),
+        };
+        let [lost, accepted] = [
+            Reply::result("sendTransaction", Err(timeout)),
+            Reply::ok("sendTransaction", json!(transaction.id.to_string())),
+        ]
+        .map(|reply| {
+            Script::new([Reply::ok("getSlot", json!(1)), reply]).once_only("sendTransaction")
+        });
+        let nodes = [lost, accepted];
+        let cluster = json_rpc::Cluster::new(nodes.to_vec(), tip, json_rpc::Policy::default())
+            .await
+            .unwrap();
+        let client = Client::unverified(cluster, Script::network());
+        client
+            .broadcast(&transaction, 11)
+            .await
+            .expect("one node accepted");
+        for node in &nodes {
+            node.exhausted();
+            assert_eq!(node.methods(), ["getSlot", "sendTransaction"]);
         }
     }
 

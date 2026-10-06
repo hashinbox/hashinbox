@@ -458,8 +458,9 @@ async fn native_sol_submission_indexing_and_central_storage() {
     let network = native.canonical();
 
     let index = tempfile::tempdir().expect("isolated index directory");
-    let file =
-        indexing::sqlite::Database::open(index.path().join("solana.db")).expect("index file");
+    let file = indexing::sqlite::Database::open(index.path().join("solana.db"))
+        .await
+        .expect("index file");
     let repository = indexing::sqlite::Repository::new(file.clone());
     let service = Arc::new(
         chain_solana::indexer(IndexerParams {
@@ -532,7 +533,7 @@ async fn native_sol_submission_indexing_and_central_storage() {
         observed = transactions(&*history, &asset, &source)
             .await
             .into_iter()
-            .find(|entry| entry.transaction.transaction_id.id == transaction);
+            .find(|entry| entry.transaction.id.id == transaction);
         if observed.is_some() {
             break;
         }
@@ -630,7 +631,7 @@ async fn native_sol_submission_indexing_and_central_storage() {
         restored = transactions(&restored_history, &asset, &source)
             .await
             .iter()
-            .any(|entry| entry.transaction.transaction_id.id == transaction);
+            .any(|entry| entry.transaction.id.id == transaction);
         if restored {
             break;
         }

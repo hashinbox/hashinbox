@@ -20,14 +20,7 @@ async fn start_composed(
     node: &BitcoinNode,
 ) -> Result<RunningApi, Box<dyn std::error::Error>> {
     let storage = json!({"path": directory.path().join("payment.db")});
-    start_server(
-        storage,
-        json!({"bitcoin": bitcoin_index(node)}),
-        json!([]),
-        &[],
-        None,
-    )
-    .await
+    start_server(storage, json!({"bitcoin": bitcoin_index(node)}), &[], None).await
 }
 
 async fn get_json(root: &str, path: &str) -> Result<Value, Box<dyn std::error::Error>> {
@@ -86,7 +79,7 @@ async fn the_server_serves_every_abstraction_and_restores_after_a_restart()
     let watched_text = bitcoin_destination(5);
     let (status, watched) = post_json(
         &api.root,
-        "/v1/addresses",
+        "/v1/wallets",
         json!({"asset": "btc", "address": watched_text}),
     )
     .await?;
@@ -136,7 +129,7 @@ async fn the_server_serves_every_abstraction_and_restores_after_a_restart()
         "the watched address's own funding, folded from the index"
     );
 
-    let status = get_json(&api.root, "/healthz").await?;
+    let status = get_json(&api.root, "/health").await?;
     assert_eq!(
         status["ready"], true,
         "forward indexing reached the tip, so the process serves: {status}"
@@ -285,9 +278,9 @@ async fn every_framework_rejection_answers_json_over_the_wire()
 /// (`indexing::CommitGate`), which refuses whichever supervised pass was
 /// mid-plan with a retryable `Conflict`. That is internal and self-healing —
 /// no block, node, store or checkpoint changed, and the next pass reconciles —
-/// so `/healthz` has to stay 200 across every admission. It did not: the
-/// supervisor published `Retrying` for the lost race, roughly one `POST
-/// /v1/addresses` in three landed inside a pass, and the process answered 503
+/// so `/health` has to stay 200 across every admission. It did not: the
+/// supervisor published `Retrying` for the lost race, roughly one watching `POST
+/// /v1/wallets` in three landed inside a pass, and the process answered 503
 /// until the next one. Sampled once, that is a readiness flake in
 /// `the_server_serves_every_abstraction_and_restores_after_a_restart`; run for
 /// real it is a process that depools itself whenever a client registers
@@ -304,7 +297,7 @@ async fn admitting_addresses_never_moves_readiness() -> Result<(), Box<dyn std::
     // the admissions below.
     let stop = Arc::new(AtomicBool::new(false));
     let probe = tokio::spawn({
-        let url = format!("{}/healthz", api.root);
+        let url = format!("{}/health", api.root);
         let stop = Arc::clone(&stop);
         async move {
             let client = reqwest::Client::new();
@@ -324,7 +317,7 @@ async fn admitting_addresses_never_moves_readiness() -> Result<(), Box<dyn std::
     for byte in 20..60_u8 {
         let (status, body) = post_json(
             &api.root,
-            "/v1/addresses",
+            "/v1/wallets",
             json!({
                 "asset": "btc",
                 "address": bitcoin_destination(byte)
@@ -338,9 +331,9 @@ async fn admitting_addresses_never_moves_readiness() -> Result<(), Box<dyn std::
     let dips = probe.await?;
     assert!(
         dips.is_empty(),
-        "admitting an address must never answer 503 on /healthz: {dips:?}"
+        "admitting an address must never answer 503 on /health: {dips:?}"
     );
-    let status = get_json(&api.root, "/healthz").await?;
+    let status = get_json(&api.root, "/health").await?;
     assert_eq!(status["ready"], true, "{status}");
     assert_eq!(status["networks"][0]["state"], "ready", "{status}");
     assert!(
@@ -353,86 +346,47 @@ async fn admitting_addresses_never_moves_readiness() -> Result<(), Box<dyn std::
     Ok(())
 }
 
+/// Composition is static and per section: a chain whose node cannot be
+/// verified is skipped at startup, and every other chain composes and serves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn runtime_nodes_and_reindex_preserve_wallets_and_saved_configuration()
+async fn an_unverifiable_chain_is_skipped_and_the_others_serve()
 -> Result<(), Box<dyn std::error::Error>> {
     let node = BitcoinNode::start().await;
     let directory = TempDir::new()?;
-    let api = start_composed(&directory, &node).await?;
-    let wallet = create_wallet(&api.root, "btc").await?;
-    let address = wallet["address"].as_str().unwrap();
-    let funding = node.fund(vec![FundingOutput::new(address, 120_000)]);
-    node.mine();
-    wait_balance(&api.root, wallet_id(&wallet), "0.0012").await;
-
-    let saved = get_json(&api.root, "/v1/chains").await?;
-    assert_eq!(
-        saved[0]["networks"][0]["nodes"][0]["origin"],
-        url::Url::parse(&node.rpc_url)?
-            .origin()
-            .ascii_serialization()
-    );
-    assert!(saved[0]["networks"][0]["nodes"][0]["endpoint"].is_null());
-    assert!(!saved.to_string().contains("Basic test"));
-    let network = &saved[0]["networks"][0];
-    let response = reqwest::Client::new()
-        .put(format!("{}/v1/chains/bitcoin", api.root))
-        .bearer_auth(TOKEN)
-        .json(&json!({"revision": saved[0]["revision"], "networks": [{
-            "name": "regtest", "parameters": network["parameters"],
-            "nodes": [
-                {"id":"unavailable", "endpoint":"http://127.0.0.1:1"},
-                {"id": network["nodes"][0]["id"]}
-            ], "indexing": "running"
-        }]}))
-        .send()
-        .await?;
-    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
-    let revision = response.json::<Value>().await?["revision"].clone();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            let row = get_json(&api.root, "/v1/chains").await.unwrap();
-            if row[0]["networks"][0]["active_revision"] == revision {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    let unreachable = json!({
+        "network": "mainnet",
+        "chain_id": 1,
+        "rpc": {
+            "endpoints": [{"url": "http://127.0.0.1:9", "bounds": {"timeout_ms": 500}}],
+            "repeat": "off"
         }
-    })
+    });
+    let api = start_server(
+        json!({"path": directory.path().join("payment.db")}),
+        json!({"bitcoin": bitcoin_index(&node), "ethereum": unreachable}),
+        &[],
+        None,
+    )
     .await?;
-    assert_eq!(
-        get_json(&api.root, "/v1/wallets").await?["wallets"][0]["id"],
-        wallet["id"]
-    );
 
-    let response = reqwest::Client::new()
-        .put(format!("{}/v1/indexing", api.root))
-        .bearer_auth(TOKEN)
-        .json(&json!({"network":{"chain":"bitcoin", "name":"regtest"}, "action":"reindex"}))
-        .send()
-        .await?;
-    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            let row = get_json(&api.root, "/v1/chains").await.unwrap();
-            if row[0]["networks"][0]["rebuild"].is_null() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await?;
-    wait_balance(&api.root, wallet_id(&wallet), "0.0012").await;
-    wait_history(&api.root, wallet_id(&wallet), &funding).await;
-    api.stop().await;
-    let restarted = start_composed(&directory, &node).await?;
-    let saved = get_json(&restarted.root, "/v1/chains").await?;
-    assert_eq!(saved[0]["networks"][0]["nodes"][0]["id"], "unavailable");
+    let assets = get_json(&api.root, "/v1/assets").await?;
+    let tags = assets["assets"]
+        .as_array()
+        .expect("asset list")
+        .iter()
+        .map(|asset| asset["asset"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(tags, [json!("btc")], "only the verified chain is composed");
+    let status = get_json(&api.root, "/health").await?;
+    assert_eq!(status["ready"], true);
     assert_eq!(
-        get_json(&restarted.root, "/v1/wallets").await?["wallets"][0]["address"],
-        address
+        status["networks"]
+            .as_array()
+            .expect("networks")
+            .iter()
+            .map(|n| n["network"]["chain"].clone())
+            .collect::<Vec<_>>(),
+        [json!("bitcoin")]
     );
-    wait_balance(&restarted.root, wallet_id(&wallet), "0.0012").await;
-    restarted.stop().await;
-    node.stop().await;
     Ok(())
 }

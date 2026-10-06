@@ -21,16 +21,17 @@ import {
 } from '@/api/client';
 import { Networks, type Line } from '@/_components/networks';
 import { Toast, type Message } from '@/_components/toast';
-import { Chains } from '@/pages/chains';
+import { Docs } from '@/pages/docs/page';
+import { Networks as Configured } from '@/pages/networks';
 import { Wallets } from '@/pages/wallets/page';
 import { settings } from '@/settings';
 import { display } from '@/theme';
 
-type View = 'wallets' | 'chains';
+type View = 'wallets' | 'networks' | 'docs';
 /** Whether the server wants a token: not asked yet, no, or yes. */
 type Door = 'unknown' | 'open' | 'locked';
 const TOKEN_KEY = 'tally.token';
-const VIEWS: View[] = ['wallets', 'chains'];
+const VIEWS: View[] = ['wallets', 'networks', 'docs'];
 
 /** The tab named in the address, so a reload or a shared link lands on it. */
 function linked(): View {
@@ -61,6 +62,7 @@ export function Layout() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
+  const [archived, setArchived] = useState(false);
   const [lines, setLines] = useState<Line[]>([]);
   const [ready, setReady] = useState<boolean | null>(null);
   const [toast, setToast] = useState<Message | null>(null);
@@ -98,7 +100,7 @@ export function Layout() {
   useEffect(() => {
     setToken(token);
     let live = true;
-    call(client.GET('/v1/chains'))
+    call(client.GET('/v1/assets'))
       .then(() => {
         if (!live) return;
         setDoor('open');
@@ -113,11 +115,14 @@ export function Layout() {
     };
   }, [token, fail]);
 
-  // Wallet availability must not prevent configuring nodes or recovering indexing.
+  // The wallets and the assets they can be made in.
   useEffect(() => {
     if (door !== 'open') return;
     let live = true;
-    Promise.all([call(client.GET('/v1/assets')), call(client.GET('/v1/wallets'))])
+    Promise.all([
+      call(client.GET('/v1/assets')),
+      call(client.GET('/v1/wallets', { params: { query: { archived } } })),
+    ])
       .then(([assets, list]) => {
         if (!live) return;
         setListings(assets.assets);
@@ -130,7 +135,7 @@ export function Layout() {
     return () => {
       live = false;
     };
-  }, [door, token, view, fail]);
+  }, [door, token, view, archived, fail]);
 
   useEffect(() => {
     const navigate = () => setView(linked());
@@ -198,6 +203,16 @@ export function Layout() {
     setView('wallets');
   };
 
+  // The list leaves archived wallets out unless it was asked to show them.
+  const retired = (wallet: Wallet) => {
+    setWallets((list) =>
+      archived
+        ? list.map((w) => (w.id === wallet.id ? wallet : w))
+        : list.filter((w) => w.id !== wallet.id),
+    );
+    if (!archived) setSelected(null);
+  };
+
   useEffect(() => {
     if (linked() !== view) window.history.replaceState(null, '', `#${view}`);
   }, [view]);
@@ -217,10 +232,15 @@ export function Layout() {
           >
             {settings.brand}
           </Link>
-          {open && (
-            <Tabs value={view} onChange={(_, next: View) => setView(next)} aria-label="Views">
-              <Tab value="wallets" label="Wallets" />
-              <Tab value="chains" label="Chains" />
+          {door !== 'unknown' && (
+            <Tabs
+              value={open || view === 'docs' ? view : false}
+              onChange={(_, next: View) => setView(next)}
+              aria-label="Views"
+            >
+              {open && <Tab value="wallets" label="Wallets" />}
+              {open && <Tab value="networks" label="Networks" />}
+              <Tab value="docs" label="Docs" />
             </Tabs>
           )}
           <Box sx={{ flexGrow: 1 }} />
@@ -242,12 +262,21 @@ export function Layout() {
               selected={selected}
               onSelect={setSelected}
               onAdded={added}
+              archived={archived}
+              onArchived={setArchived}
+              onRetired={retired}
             />
           )}
-          {view === 'chains' && <Chains shell={shell} />}
+          {view === 'networks' && <Configured shell={shell} />}
+          {view === 'docs' && <Docs shell={shell} secured={token !== null} />}
         </Box>
       )}
-      {door === 'locked' && (
+      {door === 'locked' && view === 'docs' && (
+        <Box component="main">
+          <Docs shell={shell} secured />
+        </Box>
+      )}
+      {door === 'locked' && view !== 'docs' && (
         <Box component="main" sx={{ px: 3, py: 10, maxWidth: 560, mx: 'auto' }}>
           <Typography variant="overline" component="p">
             Authorization required

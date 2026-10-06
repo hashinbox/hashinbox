@@ -11,10 +11,10 @@ use indexing::{
     sqlite::{Database, Repository},
 };
 use json_rpc::Client as _;
-use sdk_config::{Document, Registry};
+use sdk_config::{Composition, Document, Registry};
 use serde_json::{Value, json};
 use tokio::sync::watch;
-use wallets::{Composition, SubmissionRegistrar, Submissions, Wallet};
+use wallets::{SubmissionRegistrar, Submissions, Wallet};
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -69,11 +69,8 @@ async fn main() -> Result<(), AnyError> {
             &BTreeMap::new(),
             || async {
                 let file = std::path::absolute(".index-data/transfer.db")?;
-                tokio::task::spawn_blocking(move || -> Result<Database, AnyError> {
-                    std::fs::create_dir_all(".index-data")?;
-                    Ok(Database::open(file)?)
-                })
-                .await?
+                tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
+                Ok::<_, AnyError>(Database::open(file).await?)
             },
             |store: &Database| Ok::<_, AnyError>(Repository::new(store.clone())),
             &registrar,

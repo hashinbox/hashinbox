@@ -79,7 +79,8 @@ impl Trigger {
 /// node before moving on.
 ///
 /// [`Repetition::Forbidden`] work reaches the inner client exactly once,
-/// whatever the policy says.
+/// whatever the policy says. A broadcast stays a broadcast: each attempt is one
+/// [`Client::broadcast`] of the inner client.
 #[derive(Clone, Debug)]
 pub struct Retry<C> {
     inner: C,
@@ -121,15 +122,21 @@ impl<C: Client> Retry<C> {
         self
     }
 
-    async fn repeat_request(&self, request: Request) -> Result<CallResult, Error> {
+    /// One attempt is one `send` to the inner client: [`Client::request`], or
+    /// [`Client::broadcast`] so a broadcast stays one at every attempt.
+    async fn repeat_request<'a>(
+        &'a self,
+        request: Request,
+        send: impl Fn(&'a C, Request) -> BoxFuture<'a, Result<CallResult, Error>>,
+    ) -> Result<CallResult, Error> {
         if request.repetition() == Repetition::Forbidden {
-            return self.inner.request(request).await;
+            return send(&self.inner, request).await;
         }
         // `attempts` is nonzero, so the loop always produces an outcome and the
         // last one is the answer: there is no "no attempt was made" case.
         let mut attempt = 1;
         loop {
-            let outcome = self.inner.request(request.clone()).await;
+            let outcome = send(&self.inner, request.clone()).await;
             if !self.repeats(&outcome) || attempt == self.attempts.get() {
                 return outcome;
             }
@@ -168,11 +175,17 @@ impl<C: Client> Retry<C> {
 
 impl<C: Client> Client for Retry<C> {
     fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
-        Box::pin(self.repeat_request(request))
+        Box::pin(self.repeat_request(request, C::request))
     }
 
     fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
         Box::pin(self.repeat_batch(batch))
+    }
+
+    /// Repeats whole broadcasts under the same policy; [`Repetition::Forbidden`]
+    /// work is broadcast once.
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+        Box::pin(self.repeat_request(request, C::broadcast))
     }
 }
 

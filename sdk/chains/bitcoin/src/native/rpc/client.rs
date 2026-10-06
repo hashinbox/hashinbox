@@ -85,6 +85,17 @@ impl<C: json_rpc::Client> Client<C> {
         Ok(self.inner.transport.request(request).await??)
     }
 
+    /// One signed envelope submitted to every node the transport reaches,
+    /// each exactly once; the first acceptance answers.
+    pub(crate) async fn broadcast_once(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<RawJson, CallError> {
+        let request = Request::once(method, params);
+        Ok(self.inner.transport.broadcast(request).await??)
+    }
+
     /// One read call as JSON.
     pub(crate) async fn request(&self, method: &str, params: Value) -> Result<Value, Error> {
         let raw = self.call(method, params).await.map_err(Error::from_call)?;

@@ -3,9 +3,9 @@
 use base::Decimal;
 
 use indexing::{
-    BlockCredit, BlockHeight, BlockPosition, CanonicalBlock, ConfirmedHistory, FeeSettlement,
-    IndexErrorKind, IndexedBatch, IndexedOutput, InterpretedBlock, MovementId, Network,
-    OutputChanges, OutputStore, Progress, PurgedRows, Purging, Repository, Watch, WatchProgress,
+    BlockCredit, BlockHeight, BlockPosition, BlockWithOutputs, ConfirmedHistory, FeeSettlement,
+    IndexErrorKind, IndexedBatch, IndexedOutput, MovementId, Network, OutputChanges, OutputStore,
+    Progress, PurgedRows, Purging, Repository, Watch, WatchProgress,
 };
 
 use super::fixture::Fixture;
@@ -147,7 +147,7 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
         for height in 1..=2_u64 {
             let block = fixture.block(height);
             let created = fixture.output("owner", &format!("block-{height}"), BlockHeight(height));
-            let interpreted = InterpretedBlock {
+            let interpreted = BlockWithOutputs {
                 outputs: OutputChanges {
                     created: vec![created],
                     ..OutputChanges::default()
@@ -158,7 +158,7 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
                     amount: Decimal::from(height),
                     to: fixture.address("owner"),
                 }],
-                ..InterpretedBlock::new(
+                ..BlockWithOutputs::new(
                     network,
                     block,
                     vec![fixture.paid("owner", BlockHeight(height))],
@@ -166,8 +166,7 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
                 .expect("unique transaction ids")
             };
             let checkpoint = (height > 1).then(|| fixture.block(1));
-            let canonical =
-                CanonicalBlock::new(network.clone(), interpreted).expect("valid fixture facts");
+            let canonical = interpreted;
             // Each block also advances the observation, so the purge has a claim
             // to reset as well as rows to remove. There is no separate progress
             // write to make: a claim rides on the block that proved it.

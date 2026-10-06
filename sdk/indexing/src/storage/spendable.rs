@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    Address, CanonicalBlock, IndexError, IndexErrorKind, IndexedOutput, OutputCursor, OutputKey,
+    Address, BlockWithOutputs, IndexError, IndexErrorKind, IndexedOutput, OutputCursor, OutputKey,
     OutputPage, OutputRequest, OutputStore,
 };
 use base::BoxFuture;
@@ -137,10 +137,10 @@ struct LiveChanges {
 
 impl LiveChanges {
     /// The net effect of `blocks` on `address`'s live outputs.
-    fn fold(address: &Address, blocks: &[CanonicalBlock]) -> Self {
+    fn fold(address: &Address, blocks: &[BlockWithOutputs]) -> Self {
         let mut created = Vec::new();
         let mut spent = BTreeSet::new();
-        for changes in blocks.iter().map(CanonicalBlock::outputs) {
+        for changes in blocks.iter().map(|facts| &facts.outputs) {
             for key in changes.spent.iter().chain(&changes.tracked_spends) {
                 spent.insert(key.clone());
             }

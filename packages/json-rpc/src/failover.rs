@@ -8,7 +8,9 @@ use crate::{Batch, BoxFuture, CallResult, Client, Error, ErrorKind, Repetition, 
 /// after a retryable transport failure; a received error object or a terminal
 /// transport failure stops at that client. [`Repetition::Forbidden`] work
 /// reaches the first client and no other, so a later node can never hide that
-/// an earlier one accepted the envelope.
+/// an earlier one accepted the envelope. [`Client::broadcast`] walks the same
+/// way, broadcasting at each visited client; use [`crate::Cluster`] to reach
+/// every node.
 ///
 /// `Debug` shows the client count and nothing else.
 ///
@@ -50,16 +52,22 @@ impl<C: Client> Failover<C> {
         })
     }
 
-    async fn walk_request(&self, request: Request) -> Result<CallResult, Error> {
+    /// Walks the clients with `send`: [`Client::request`], or
+    /// [`Client::broadcast`] so each visited client broadcasts.
+    async fn walk_request<'a>(
+        &'a self,
+        request: Request,
+        send: impl Fn(&'a C, Request) -> BoxFuture<'a, Result<CallResult, Error>>,
+    ) -> Result<CallResult, Error> {
         if request.repetition() == Repetition::Forbidden {
-            return self.first.request(request).await;
+            return send(&self.first, request).await;
         }
-        let mut last = match self.first.request(request.clone()).await {
+        let mut last = match send(&self.first, request.clone()).await {
             Err(error) if error.is_retryable() => error,
             outcome => return outcome,
         };
         for client in &self.rest {
-            match client.request(request.clone()).await {
+            match send(client, request.clone()).await {
                 Err(error) if error.is_retryable() => last = error,
                 outcome => return outcome,
             }
@@ -87,10 +95,17 @@ impl<C: Client> Failover<C> {
 
 impl<C: Client> Client for Failover<C> {
     fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
-        Box::pin(self.walk_request(request))
+        Box::pin(self.walk_request(request, C::request))
     }
 
     fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
         Box::pin(self.walk_batch(batch))
+    }
+
+    /// The same ordered walk, broadcasting at each visited client: failover
+    /// stays an ordered alternative, never a fan-out of its own, so
+    /// [`Repetition::Forbidden`] work is broadcast by the first client only.
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+        Box::pin(self.walk_request(request, C::broadcast))
     }
 }

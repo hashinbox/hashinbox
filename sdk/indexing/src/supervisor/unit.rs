@@ -8,7 +8,7 @@ use crate::{
 };
 use tokio::sync::watch;
 
-use super::{NetworkEvent, Schedule, Supervisor, SyncControl, SyncMonitor};
+use super::{Schedule, Supervisor, SyncControl, SyncMonitor};
 
 /// Why a unit's pass or wait ended.
 enum Wake {
@@ -326,16 +326,6 @@ impl<C: Indexing + ?Sized + 'static> Unit<C> {
         }
         self.health.clone_from(&next);
         self.monitor.network_observed(&next);
-        if previous != next.state
-            || next.state == NetworkState::Retrying
-            || next.failure.is_some()
-            || stalled
-        {
-            self.monitor.network_changed(&NetworkEvent {
-                previous,
-                health: next,
-            });
-        }
     }
 
     fn now() -> u64 {

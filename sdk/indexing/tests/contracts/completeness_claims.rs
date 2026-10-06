@@ -298,12 +298,12 @@ impl<R: ConfirmedHistory + BalanceStore + IndexStore + WatchStore> HistoryContra
             .fixture
             .chain(self.drafts())
             .into_iter()
-            .find(|canonical| canonical.block().position == BlockPosition(height))
+            .find(|canonical| canonical.block.reference().position == BlockPosition(height))
             .expect("a block of the fixture chain");
         let claim = Progress {
             watch_id: id.to_owned(),
             expected: expected.map(|height| self.fixture.block(height)),
-            indexed_through: named.block().clone(),
+            indexed_through: named.block.reference().clone(),
         };
         self.fixture
             .repository

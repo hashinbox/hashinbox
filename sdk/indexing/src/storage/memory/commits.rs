@@ -49,22 +49,7 @@ impl IndexStore for Repository {
         &'a self,
         batch: IndexedBatch,
     ) -> BoxFuture<'a, Result<Vec<OutputKey>, IndexError>> {
-        Box::pin(async move {
-            let (unknown, receipts) = self.apply(|tables| {
-                let receipts = if self.logger.enabled(logging::Level::Info, "wallet.received") {
-                    crate::storage::receipts::Receipt::collect(&batch, |receipt| {
-                        Ok(tables.new_receipt(receipt))
-                    })?
-                } else {
-                    Vec::new()
-                };
-                Ok((self.write(&batch, tables)?, receipts))
-            })?;
-            for receipt in receipts {
-                receipt.emit(&self.logger);
-            }
-            Ok(unknown)
-        })
+        Box::pin(async move { self.apply(|tables| self.write(&batch, tables)) })
     }
 }
 
@@ -121,10 +106,14 @@ impl Repository {
         // recorded spend rather than nothing at all, so replaying the block that
         // created it cannot offer it again.
         for canonical in batch.blocks() {
-            self.fill_history(canonical.transactions(), tables)?;
-            self.fill_credits(network, canonical.credits(), canonical.block(), tables)?;
-            unknown.extend(self.fill_outputs(network, canonical.outputs(), tables)?);
-            tables.clear_deficits(network);
+            self.fill_history(canonical.block.transactions(), tables)?;
+            self.fill_credits(
+                network,
+                &canonical.credits,
+                canonical.block.reference(),
+                tables,
+            )?;
+            unknown.extend(self.fill_outputs(network, &canonical.outputs, tables)?);
         }
         for claim in batch.progress() {
             Self::advance(network, claim, tables)?;
@@ -142,7 +131,9 @@ impl Repository {
     /// is redoing, so what is refused is a claim whose author was reading a
     /// different value — never one that went down.
     fn advance(network: &Network, claim: &Progress, tables: &mut Tables) -> Result<(), IndexError> {
-        if tables.identities.get(&claim.watch_id) != Some(network) {
+        let observed = Self::located(tables, &claim.watch_id)
+            .is_some_and(|(wallet_key, row)| wallet_key.0 == *network && row.archived_at.is_none());
+        if !observed {
             return Err(conflict(
                 "indexed progress names an observation this store does not hold",
             ));
@@ -161,11 +152,11 @@ impl Repository {
     /// duplicate.
     fn fill_history(
         &self,
-        transactions: &crate::Transactions<crate::CanonicalTransaction>,
+        transactions: &crate::Transactions<crate::Transaction>,
         tables: &mut Tables,
     ) -> Result<(), IndexError> {
         for transaction in transactions {
-            for address in transaction.transaction.addresses() {
+            for address in transaction.addresses() {
                 self.fill_row(&address, transaction, tables)?;
             }
         }
@@ -176,14 +167,10 @@ impl Repository {
     fn fill_row(
         &self,
         address: &Address,
-        transaction: &crate::CanonicalTransaction,
+        transaction: &crate::Transaction,
         tables: &mut Tables,
     ) -> Result<(), IndexError> {
-        let key = Self::history_key(
-            &transaction.transaction.transaction_id.network,
-            address,
-            transaction,
-        );
+        let key = Self::history_key(&transaction.id.network, address, transaction);
         match tables.history.get(&key) {
             Some(stored) if stored == transaction => Ok(()),
             Some(_) => Err(Self::corrupt(
@@ -216,7 +203,7 @@ impl Repository {
                     ));
                 }
                 None => {
-                    Self::accrue_credit(tables, credit, block)?;
+                    Self::accrue_credit(tables, credit)?;
                     drop(tables.credits.insert(key, (block.position, credit.clone())));
                 }
             }
@@ -274,33 +261,5 @@ impl Repository {
     /// retrying cannot repair it.
     pub(super) fn corrupt(message: &'static str) -> IndexError {
         IndexError::new(IndexErrorKind::Store, message, false)
-    }
-}
-
-impl Tables {
-    fn new_receipt(&self, receipt: &crate::storage::receipts::Receipt) -> bool {
-        let network = &receipt.subject.address.network;
-        let address = &receipt.subject.address.value;
-        if !self.watches.contains_key(&(
-            network.clone(),
-            receipt.subject.asset.clone(),
-            address.clone(),
-        )) {
-            return false;
-        }
-        if let Some(id) = &receipt.credit {
-            return !self.credits.contains_key(&(
-                network.clone(),
-                address.clone(),
-                receipt.block.height,
-                crate::MovementId(id.clone()),
-            ));
-        }
-        !self.history.keys().any(|(bound, owner, height, _, id)| {
-            bound == network
-                && owner == address
-                && height == &receipt.block.height
-                && receipt.transaction.as_deref() == Some(id.id.as_str())
-        })
     }
 }

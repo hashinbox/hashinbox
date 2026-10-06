@@ -1,44 +1,38 @@
-mod address;
-mod application;
-pub(crate) use application::Application;
-mod asset;
-mod chains;
-mod contract;
-mod control;
-mod cursor;
-mod error;
+//! The HTTP endpoints, one module per resource, assembled into the router and
+//! the OpenAPI document, and the error every endpoint answers with. A shape
+//! several endpoints share is a model (`crate::models`); each endpoint's own
+//! request and response bodies live in its resource file.
+
+mod assets;
+mod balance;
 mod health;
-mod history;
-mod logs;
+pub(crate) mod networks;
 mod openapi;
-mod signers;
-mod transaction;
-mod wallet;
-
 #[cfg(test)]
-mod openapi_contract;
-#[cfg(test)]
-mod route_contract;
-
-pub(crate) use asset::AssetTag;
-pub(crate) use signers::Signers;
-
-use error::Error;
+pub(crate) use openapi::emits_required;
+mod transactions;
+mod wallets;
 
 use std::sync::Arc;
 
 use axum::{Extension, Router};
-use indexing::Watching as _;
-use tokio::sync::watch;
+
 use utoipa::{
     Modify, OpenApi,
     openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
 };
 use utoipa_axum::router::OpenApiRouter;
 
-/// The wallet factories the routes serve, keyed by configured asset tags. The
-/// composition root owns this type; the HTTP layer only borrows it.
-pub(crate) type Wallets = wallets::Wallets<AssetTag>;
+use axum::{
+    Json,
+    extract::rejection::{JsonRejection, QueryRejection},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+use crate::state::AppState;
 
 /// The document root: title, version, description, servers, and the one
 /// `bearerAuth` security scheme the protected operations declare. Title and
@@ -59,11 +53,8 @@ pub(crate) type Wallets = wallets::Wallets<AssetTag>;
     tags(
         (name = "assets", description = "Configured assets"),
         (name = "wallets", description = "Wallets and balances"),
-        (name = "addresses", description = "Watch-only addresses"),
         (name = "transactions", description = "History, single transfers, and batches"),
-        (name = "logs", description = "Filtered process-local events"),
-        (name = "indexing", description = "Network inspection controls"),
-        (name = "chains", description = "Saved nodes and network runtime settings"),
+        (name = "networks", description = "Configured networks, their RPC nodes, and rescans"),
         (name = "health", description = "Readiness, network state, and RPC statistics"),
         (name = "openapi", description = "This document")
     )
@@ -98,317 +89,6 @@ impl Modify for BearerAuth {
     }
 }
 
-/// Shared handler state: the wallet factories, the wallets this process holds
-/// keys for, the index that observes them, the two query readers beside it, and
-/// every network's indexing health. Every value is an abstraction; no route
-/// names a chain, none of them names the supervisor that produces the health,
-/// and none of them names a repository.
-///
-/// Cheap to clone; every route receives a clone.
-#[derive(Clone)]
-pub(crate) struct Payments {
-    pub(crate) wallets: Arc<Wallets>,
-    pub(crate) units: Arc<base::Units>,
-    pub(crate) signers: Arc<Signers>,
-    pub(crate) registry: Arc<crate::registry::Registry>,
-    pub(crate) index: Arc<indexing::Index>,
-    /// The one history read these routes make, for whichever network the wallet
-    /// belongs to.
-    ///
-    /// A narrow capability declared at this boundary rather than a capability of
-    /// `index`: a page is the repository's own query joined to one network's
-    /// blocks above its confirmed line, and neither half answers it alone. What
-    /// satisfies it is `indexing::PendingJoin`, one per network, routed by
-    /// `indexing::Router`.
-    pub(crate) history: Arc<dyn indexing::History>,
-    /// The one balance read these routes make, held for the same reason and in
-    /// the same way as `history`: a total is the repository's own query
-    /// completed by the blocks one index still holds above its line, so it is
-    /// asked of the reader that owns the holding's network. One per network,
-    /// routed by `indexing::Router` — never reached for through `index`,
-    /// which can route one and is not what owns the answer.
-    pub(crate) balance: Arc<dyn indexing::Balances>,
-    pub(crate) health: watch::Receiver<indexing::SyncHealth>,
-    /// The statistics of each active network's working RPC node.
-    pub(crate) rpc: std::collections::BTreeMap<base::Network, json_rpc::Statistics>,
-    /// Configured networks with no composition yet: a lookup that misses
-    /// while any of these is starting cannot say the id does not exist.
-    pub(crate) inactive: std::collections::BTreeSet<base::Network>,
-    pub(crate) logs: Arc<logging::Memory>,
-    pub(crate) logger: logging::Logger,
-    pub(crate) control: Option<indexing::SyncControl>,
-    pub(crate) access: std::collections::BTreeMap<base::Network, Arc<crate::runtime::Access>>,
-}
-
-impl Payments {
-    pub(crate) fn admission(
-        &self,
-        network: &base::Network,
-    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Error> {
-        self.access
-            .get(network)
-            .map(|access| {
-                access
-                    .enter()
-                    .map_err(|_| Error::indexed("network maintenance in progress"))
-            })
-            .transpose()
-    }
-
-    pub(crate) fn asset_admission(
-        &self,
-        asset: &AssetTag,
-    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Error> {
-        let info = self.wallets.asset(asset).map_err(Error::by_asset)?;
-        self.admission(&info.network)
-    }
-
-    /// What this process knows about one wallet id.
-    ///
-    /// Two owners answer it: the index says what is observed and from where,
-    /// and [`Signers`] says whether this process can sign for it. The application
-    /// joins those facts; indexing owns no signing material.
-    ///
-    /// # Errors
-    ///
-    /// [`error::Error`]'s 404 when no network watches `id`, and the index's
-    /// own error.
-    pub(crate) async fn custody(&self, id: &str) -> Result<Custody, Error> {
-        for network in self.index.networks() {
-            let found = self
-                .index
-                .watched(network)
-                .await?
-                .into_iter()
-                .find(|watch| watch.id == id);
-            if let Some(watch) = found {
-                return self.resolved(watch);
-            }
-        }
-        if !self.inactive.is_empty() {
-            return Err(Error::indexed("a configured network is not active yet"));
-        }
-        Err(Error::unknown_wallet())
-    }
-
-    /// Every watched id this process knows, in id order across networks.
-    pub(crate) async fn custodies(&self) -> Result<Vec<Custody>, Error> {
-        let mut held = Vec::new();
-        for network in self.index.networks() {
-            for watch in self.index.watched(network).await? {
-                held.push(self.resolved(watch)?);
-            }
-        }
-        held.sort_by(|left, right| left.watch.id.cmp(&right.watch.id));
-        Ok(held)
-    }
-
-    /// The configured tag of a watched row's asset. One tag is one asset in
-    /// one network, so the pair recovers it.
-    fn resolved(&self, watch: indexing::Watch) -> Result<Custody, Error> {
-        let tag = self
-            .wallets
-            .assets()
-            .into_iter()
-            .find(|info| info.network == watch.address.network && info.id == watch.asset)
-            .map(|info| info.tag)
-            .ok_or_else(Error::unknown_wallet)?;
-        let wallet = self.signers.get(&watch.id);
-        Ok(Custody { watch, tag, wallet })
-    }
-
-    /// Persists a generated/imported key, publishes its watch, then installs
-    /// the signing handle. A rejected or cancelled watch leaves a private key
-    /// row but no wallet route; a committed watch is recoverable at boot.
-    pub(crate) async fn registered(
-        &self,
-        wallet: Arc<dyn wallets::Wallet>,
-        tag: AssetTag,
-        material: wallets::SecretBytes,
-    ) -> Result<(axum::http::StatusCode, axum::Json<contract::Wallet>), Error> {
-        let id = uuid::Uuid::now_v7().to_string();
-        self.registry.keep(&id, &tag, material).await?;
-        let watch = self
-            .index
-            .watch(&id, wallet.as_ref(), indexing::Birthday::Fresh)
-            .await?;
-        self.signers.keep(id.clone(), wallet.clone())?;
-        self.logger
-            .with("chain", watch.address.network.chain.to_string())
-            .with("network", watch.address.network.name.clone())
-            .with("component", "wallet")
-            .event(
-                logging::Level::Info,
-                "wallet.created",
-                "Wallet created",
-                &[("wallet_id", &id)],
-            );
-        let custody = Custody {
-            watch,
-            tag,
-            wallet: Some(wallet),
-        };
-        Ok((axum::http::StatusCode::CREATED, axum::Json(custody.into())))
-    }
-
-    /// Observes `text`'s address in `tag`'s network, with no key behind it.
-    ///
-    /// The asset's own factory parses the text, so the address is canonical
-    /// and of that asset's network before the index is asked to watch it.
-    ///
-    /// # Errors
-    ///
-    /// A 404 for an unconfigured tag, a 400 for address text the asset's
-    /// chain refuses, and the index's error.
-    pub(crate) async fn observed(
-        &self,
-        tag: AssetTag,
-        text: &str,
-    ) -> Result<(axum::http::StatusCode, axum::Json<contract::Wallet>), Error> {
-        let info = self.wallets.asset(&tag).map_err(Error::by_asset)?;
-        let address = self.wallets.parse(&tag, text).map_err(Error::by_asset)?;
-        let subject = indexing::Subject {
-            address,
-            asset: info.id,
-        };
-        let id = uuid::Uuid::now_v7().to_string();
-        let watch = self
-            .index
-            .watch(&id, &subject, indexing::Birthday::Fresh)
-            .await?;
-        self.logger
-            .with("chain", watch.address.network.chain.to_string())
-            .with("network", watch.address.network.name.clone())
-            .with("component", "wallet")
-            .event(
-                logging::Level::Info,
-                "wallet.observed",
-                "Address registered",
-                &[("wallet_id", &id)],
-            );
-        let custody = Custody {
-            watch,
-            tag,
-            wallet: None,
-        };
-        Ok((axum::http::StatusCode::CREATED, axum::Json(custody.into())))
-    }
-
-    /// The canonical destination of `text` in the custody's own asset network.
-    ///
-    /// # Errors
-    ///
-    /// A 400 for text the asset's chain refuses.
-    pub(crate) fn destination(
-        &self,
-        custody: &Custody,
-        text: &str,
-    ) -> Result<base::Address, Error> {
-        self.wallets
-            .parse(&custody.tag, text)
-            .map_err(Error::by_asset)
-    }
-
-    /// One batch item: its asset tag and the transfer its wallet will send.
-    ///
-    /// # Errors
-    ///
-    /// A 404 for an unknown id, a 422 for a watch-only one, a 400 for a
-    /// malformed amount or destination.
-    pub(crate) async fn transfer(
-        &self,
-        item: &transaction::BatchedTransfer,
-    ) -> Result<(AssetTag, wallets::Transfer), Error> {
-        let amount = transaction::Transfer::amount(&item.amount)?;
-        let custody = self.custody(&item.wallet_id).await?;
-        let wallet = custody.signing()?.clone();
-        let to = self.destination(&custody, &item.destination)?;
-        Ok((custody.tag, wallets::Transfer { wallet, to, amount }))
-    }
-
-    /// One `page` of a custody's history, in display units.
-    ///
-    /// The reader answers the page for the custody itself — it is a
-    /// [`indexing::Holder`] — in exact atomic units; the unit each asset's own
-    /// chain declared turns them into display units, looked up by the identity
-    /// every movement and every fee already carries. That is the whole of the
-    /// projection and the only place it happens.
-    ///
-    /// The subject names its network, so the reader that owns that network is
-    /// the one that answers; nothing here holds a repository or knows one
-    /// exists.
-    ///
-    /// # Errors
-    ///
-    /// The index's error, and a 503 when the page breaks the query contract.
-    pub(crate) async fn history(
-        &self,
-        custody: &Custody,
-        page: indexing::Page,
-    ) -> Result<history::TransactionPage, Error> {
-        let network = custody.watch.address.network.clone();
-        let page = self.history.history(custody, page).await?;
-        history::TransactionPage::new(page, &network, &custody.watch.asset, &self.units)
-    }
-
-    /// One custody's confirmed indexed total and pending movements, in display units.
-    ///
-    /// One owner answers both halves, so they cannot disagree about what is
-    /// confirmed, and no key is involved: a watched address reads its balance
-    /// exactly as a wallet does. The amounts arrive in atomic units and are
-    /// scaled here, by the unit the asset's own chain declared.
-    ///
-    /// The custody names its network, so the balance reader that owns it answers — the
-    /// same route the page takes. Nothing here holds a repository, knows one
-    /// exists, or reaches an answer through an indexer.
-    ///
-    /// # Errors
-    ///
-    /// The balance reader's own error, and a 503 when a stored amount cannot be scaled.
-    pub(crate) async fn balance(&self, custody: &Custody) -> Result<wallet::Balance, Error> {
-        let unit = self
-            .units
-            .of(&custody.watch.address.network, &custody.watch.asset)
-            .ok_or_else(Error::undeclared)?;
-        let balance = self.balance.balance(custody).await?;
-        wallet::Balance::new(balance, unit)
-    }
-}
-
-/// One wallet id as this process knows it: what the index observes, which
-/// configured asset that is, and the key this process holds for it, if any.
-///
-/// Custody is exactly the question the two halves answer together, and
-/// `watch_only` on the wire is its one boolean.
-pub(crate) struct Custody {
-    pub(crate) watch: indexing::Watch,
-    pub(crate) tag: AssetTag,
-    pub(crate) wallet: Option<Arc<dyn wallets::Wallet>>,
-}
-
-/// A custody is one address in one asset, which is exactly what the index
-/// reads by, so it is the subject of its own history and balance.
-impl indexing::Holder for Custody {
-    fn address(&self) -> &base::Address {
-        &self.watch.address
-    }
-
-    fn asset(&self) -> &indexing::AssetId {
-        &self.watch.asset
-    }
-}
-
-impl Custody {
-    /// The wallet that signs for this id.
-    ///
-    /// # Errors
-    ///
-    /// A 422 `WatchOnly` when this process holds no key for it.
-    pub(crate) fn signing(&self) -> Result<&Arc<dyn wallets::Wallet>, Error> {
-        self.wallet.as_ref().ok_or_else(Error::watch_only)
-    }
-}
-
 /// The complete OpenAPI 3 document, without binding a listener.
 ///
 /// `payment-server --openapi` prints exactly this, and `docs/openapi.json`
@@ -423,7 +103,7 @@ pub(crate) fn openapi() -> utoipa::openapi::OpenApi {
 
 /// The complete API router.
 ///
-/// Wallet and transaction routes are protected by `config`'s bearer
+/// Wallet, transaction and network routes are protected by `config`'s bearer
 /// authentication and body limit ([`http_server::protected_router`]); health
 /// routes and `GET /openapi.json` are public. The OpenAPI contract is built
 /// from the same handlers.
@@ -432,43 +112,32 @@ pub(crate) fn openapi() -> utoipa::openapi::OpenApi {
 ///
 /// Returns the [`http_server::ConfigError`] of an invalid `config` (for
 /// example a non-loopback bind without TLS termination).
-#[cfg(test)]
 pub(crate) fn router(
-    payments: Payments,
+    state: AppState,
     config: &http_server::Config,
 ) -> Result<Router, http_server::ConfigError> {
-    live_router(Application::fixed(payments), config)
-}
-
-pub(crate) fn live_router(
-    application: Application,
-    config: &http_server::Config,
-) -> Result<Router, http_server::ConfigError> {
+    let state = Arc::new(state);
     let (protected, mut contract) = protected_routes().split_for_parts();
     let (public, public_contract) = public_routes().split_for_parts();
     contract.merge(public_contract);
     let contract = Arc::new(contract);
 
-    let protected =
-        http_server::protected_router(protected.with_state(application.clone()), config)?;
+    let protected = http_server::protected_router(protected.with_state(state.clone()), config)?;
     Ok(protected
-        .merge(public.with_state(application))
+        .merge(public.with_state(state))
         .layer(Extension(contract)))
 }
 
-fn protected_routes() -> OpenApiRouter<Application> {
+fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::with_openapi(Contract::openapi())
-        .merge(chains::routes())
-        .merge(logs::routes())
-        .merge(control::routes())
-        .merge(asset::routes())
-        .merge(wallet::routes())
-        .merge(address::routes())
-        .merge(history::routes())
-        .merge(transaction::routes())
+        .merge(assets::routes())
+        .merge(wallets::routes())
+        .merge(balance::routes())
+        .merge(transactions::routes())
+        .merge(networks::routes())
 }
 
-fn public_routes() -> OpenApiRouter<Application> {
+fn public_routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
         .merge(health::routes())
         .merge(openapi::routes())
@@ -476,7 +145,10 @@ fn public_routes() -> OpenApiRouter<Application> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value;
+    use axum::http::StatusCode;
+    use serde_json::{Value, json};
+
+    use super::harness::{App, Reply};
 
     use super::*;
 
@@ -485,17 +157,20 @@ mod tests {
         let document = document();
 
         for (path, method) in [
-            ("/healthz", "get"),
+            ("/health", "get"),
             ("/openapi.json", "get"),
             ("/v1/assets", "get"),
             ("/v1/wallets", "post"),
             ("/v1/wallets", "get"),
-            ("/v1/addresses", "post"),
             ("/v1/wallets/{id}", "get"),
+            ("/v1/wallets/{id}", "delete"),
             ("/v1/wallets/{id}/balance", "get"),
             ("/v1/wallets/{id}/transactions", "get"),
             ("/v1/wallets/{id}/transactions", "post"),
             ("/v1/transactions", "post"),
+            ("/v1/networks", "get"),
+            ("/v1/networks/{chain}/{network}/rpc", "put"),
+            ("/v1/networks/{chain}/{network}/rescans", "post"),
         ] {
             assert_pointer(&document, &format!("/paths/{}/{method}", escape(path)));
         }
@@ -518,6 +193,7 @@ mod tests {
             "Network",
             "NetworkCheckpoint",
             "ParentBlock",
+            "Queue",
             "Status",
             "Report",
             "Transaction",
@@ -527,7 +203,12 @@ mod tests {
             "TransferBatch",
             "Wallet",
             "WalletList",
-            "WatchAddress",
+            "NetworkList",
+            "ConfiguredNetwork",
+            "RpcNode",
+            "RpcNodes",
+            "RpcEndpoint",
+            "ServiceState",
         ] {
             assert_pointer(&document, &format!("/components/schemas/{schema}"));
         }
@@ -544,6 +225,7 @@ mod tests {
             "NetworkSync",
             "ScopedId",
             "Proof",
+            "WatchAddress",
         ] {
             assert!(
                 document
@@ -586,7 +268,6 @@ mod tests {
             "Transfer",
             "BatchedTransfer",
             "TransferBatch",
-            "WatchAddress",
         ] {
             assert_eq!(
                 document.pointer(&format!(
@@ -639,15 +320,13 @@ mod tests {
                 .pointer("/components/schemas/WalletAsset")
                 .is_none()
         );
-        for schema in ["CreateWallet", "WatchAddress"] {
-            let asset = &document["components"]["schemas"][schema]["properties"]["asset"];
-            assert_eq!(asset["type"], "string", "{schema}.asset is an open tag");
-            assert_eq!(asset["pattern"], "^[a-z0-9][a-z0-9-]{0,31}$");
-            assert!(
-                asset.get("enum").is_none(),
-                "{schema}.asset lists no assets"
-            );
-        }
+        let asset = &document["components"]["schemas"]["CreateWallet"]["properties"]["asset"];
+        assert_eq!(asset["type"], "string", "CreateWallet.asset is an open tag");
+        assert_eq!(asset["pattern"], "^[a-z0-9][a-z0-9-]{0,31}$");
+        assert!(
+            asset.get("enum").is_none(),
+            "CreateWallet.asset lists no assets"
+        );
         for chain in ["bitcoin", "ethereum", "solana", "btc", "usdc"] {
             assert!(
                 !text
@@ -714,7 +393,7 @@ mod tests {
         );
         assert_eq!(
             document.pointer(&format!("{transfers}/maxItems")),
-            Some(&serde_json::json!(wallets::MAX_TRANSFERS)),
+            Some(&serde_json::json!(::wallets::MAX_TRANSFERS)),
         );
         assert_eq!(
             document.pointer(&format!("{transfers}/items/$ref")),
@@ -843,5 +522,545 @@ mod tests {
                 "OpenAPI schema {schema} does not require {property}"
             );
         }
+    }
+
+    /// Every rejection is the documented JSON error contract, including the ones
+    /// Axum and the authentication layer produce before a handler runs. A
+    /// `text/plain` rejection would break every generated client.
+    #[tokio::test]
+    async fn every_rejection_answers_the_json_error_contract() {
+        let app = App::ready().await;
+        let id = app.wallet_id().await;
+        let history = format!("/v1/wallets/{id}/transactions");
+
+        // 1. An unknown query field on the history route.
+        let unknown_field = app
+            .call(
+                "GET",
+                &format!("{history}?commitment=finalized"),
+                None,
+                true,
+            )
+            .await;
+        assert_json_error(&unknown_field, StatusCode::BAD_REQUEST);
+
+        // 2. A limit that is not a number at all.
+        let bad_limit = app
+            .call("GET", &format!("{history}?limit=all"), None, true)
+            .await;
+        assert_json_error(&bad_limit, StatusCode::BAD_REQUEST);
+        // A numeric limit outside the documented range keeps its own message.
+        let out_of_range = app
+            .call("GET", &format!("{history}?limit=0"), None, true)
+            .await;
+        assert_eq!(
+            out_of_range.json(),
+            json!({"message": "history limit must be between 1 and 1000"})
+        );
+
+        // 3. An asset tag that is not a tag, in the path.
+        let bad_tag = app
+            .call(
+                "POST",
+                "/v1/wallets",
+                Some(json!({"asset": "NOT-A-TAG"})),
+                true,
+            )
+            .await;
+        assert_json_error(&bad_tag, StatusCode::BAD_REQUEST);
+
+        // 4. A missing and a wrong bearer token.
+        for authorized in [false, true] {
+            let response = app
+                .raw(
+                    "GET",
+                    "/v1/wallets",
+                    None,
+                    false,
+                    if authorized {
+                        &[("authorization", "Bearer wrong-secret")]
+                    } else {
+                        &[]
+                    },
+                )
+                .await;
+            assert_json_error(&response, StatusCode::UNAUTHORIZED);
+        }
+
+        // 5. A body sent without the JSON content type.
+        let wrong_content_type = app
+            .raw(
+                "POST",
+                "/v1/wallets",
+                Some(r#"{"asset":"btc"}"#),
+                true,
+                &[("content-type", "text/plain")],
+            )
+            .await;
+        assert_json_error(&wrong_content_type, StatusCode::BAD_REQUEST);
+    }
+
+    /// Every error body is `application/json` and carries a non-empty `message`.
+    fn assert_json_error(response: &Reply, status: StatusCode) {
+        assert_eq!(response.status, status);
+        assert_eq!(
+            response
+                .content_type
+                .as_deref()
+                .map(|value| value.split(';').next().unwrap_or_default().trim())
+                .unwrap_or_default(),
+            "application/json",
+            "a {status} rejection must answer JSON, not {:?}",
+            response.content_type
+        );
+        let body = response.json();
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "a {status} rejection must carry a message: {body}"
+        );
+        assert!(
+            body.as_object().is_some_and(|body| {
+                body.keys().all(|key| {
+                    [
+                        "message",
+                        "transaction_ids",
+                        "failed_index",
+                        "ambiguous_transaction_id",
+                    ]
+                    .contains(&key.as_str())
+                })
+            }),
+            "a {status} rejection must use the ErrorBody schema: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_routes_are_refused() {
+        let app = App::ready().await;
+        for (method, path) in [
+            ("GET", "/v1/status"),
+            ("POST", "/v1/status/resume"),
+            ("POST", "/v1/status/backfill/cancel"),
+            ("POST", "/v1/wallets/import"),
+            ("GET", "/v1/assets/btc/address?text=addr-a"),
+            ("GET", "/healthz"),
+            ("POST", "/v1/addresses"),
+        ] {
+            assert_eq!(
+                app.call(method, path, None, true).await.status,
+                if path == "/v1/wallets/import" {
+                    StatusCode::METHOD_NOT_ALLOWED
+                } else {
+                    StatusCode::NOT_FOUND
+                },
+                "{path}"
+            );
+        }
+    }
+}
+
+mod harness;
+
+/// The body of every error response: `message` is always present, the
+/// submission fields only when they are truthfully known.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
+pub(crate) struct ErrorBody {
+    /// What went wrong.
+    pub(crate) message: String,
+    /// Definitely acknowledged transaction IDs before an ordered batch failed.
+    /// Present only when that accepted prefix is non-empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(required = false)]
+    pub(crate) transaction_ids: Vec<String>,
+    /// Zero-based original request index. Present only when one public batch
+    /// occurrence truthfully failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub(crate) failed_index: Option<usize>,
+    /// Canonical ID derived from the exact locally signed envelope. Present only
+    /// when its submission outcome remains unknown; its presence produces 503.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub(crate) ambiguous_transaction_id: Option<String>,
+}
+
+/// One HTTP status the API answers with; every handler failure picks one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Failure {
+    BadRequest,
+    NotFound,
+    Conflict,
+    Unprocessable,
+    Internal,
+    Unavailable,
+}
+
+impl Failure {
+    const fn status(self) -> StatusCode {
+        match self {
+            Self::BadRequest => StatusCode::BAD_REQUEST,
+            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::Conflict => StatusCode::CONFLICT,
+            Self::Unprocessable => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Error {
+    failure: Failure,
+    message: String,
+    transaction_ids: Vec<String>,
+    failed_index: Option<usize>,
+    ambiguous_transaction_id: Option<String>,
+}
+
+impl Error {
+    pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(Failure::BadRequest, message)
+    }
+
+    /// An index page that breaks the read contract: a 503.
+    pub(crate) fn indexed(message: impl Into<String>) -> Self {
+        Self::new(Failure::Unavailable, message)
+    }
+
+    /// An indexed amount that is not a non-negative whole number of atomic
+    /// units, which no chain reports.
+    pub(crate) fn unscalable(error: base::DecimalError) -> Self {
+        Self::indexed(format!(
+            "indexed amount is not a non-negative integer: {error}"
+        ))
+    }
+
+    /// An indexed asset whose unit no configured chain declared. Composition
+    /// refuses to start a process whose factories leave one undeclared, so
+    /// this is an index reporting an asset nothing was configured for.
+    pub(crate) fn undeclared() -> Self {
+        Self::indexed("indexed asset has no unit declared by any configured chain")
+    }
+
+    pub(crate) fn invalid_json(_error: JsonRejection) -> Self {
+        Self::invalid_request("request body must match the documented JSON schema")
+    }
+
+    /// An unparsable query string: the contract answers JSON, never Axum's
+    /// plain-text rejection.
+    pub(crate) fn invalid_query(_error: QueryRejection) -> Self {
+        Self::invalid_request("query parameters must match the documented schema")
+    }
+
+    pub(crate) fn invalid_batch(failed_index: usize, message: impl Into<String>) -> Self {
+        Self {
+            failed_index: Some(failed_index),
+            ..Self::invalid_request(message)
+        }
+    }
+
+    pub(crate) fn invalid_response(message: impl Into<String>) -> Self {
+        Self::new(Failure::Internal, message)
+    }
+
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
+        Self::new(Failure::NotFound, message)
+    }
+
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
+        Self::new(Failure::Conflict, message)
+    }
+
+    /// A network a rescan cannot touch: nothing of it was composed.
+    pub(crate) fn not_in_service() -> Self {
+        Self::conflict("network is not in service")
+    }
+
+    pub(crate) fn unprocessable(message: impl Into<String>) -> Self {
+        Self::new(Failure::Unprocessable, message)
+    }
+
+    /// A wallet error of an operation selected by asset tag: an unregistered
+    /// tag (`Unsupported`) is `404 wallet asset is not configured`.
+    pub(crate) fn by_asset(error: ::wallets::WalletError) -> Self {
+        if error.kind == ::wallets::WalletErrorKind::Unsupported {
+            return Self::not_found("wallet asset is not configured");
+        }
+        error.into()
+    }
+
+    /// The network is being rescanned: no watch is registered and no send
+    /// starts on it until indexing resumes.
+    pub(crate) fn rescanning() -> Self {
+        Self::conflict("the network is being rescanned; retry once it is indexing again")
+    }
+
+    /// The same failure, attributed to one authored batch occurrence.
+    #[must_use]
+    pub(crate) fn at(self, failed_index: usize) -> Self {
+        Self {
+            failed_index: Some(failed_index),
+            ..self
+        }
+    }
+
+    fn new(failure: Failure, message: impl Into<String>) -> Self {
+        Self {
+            failure,
+            message: message.into(),
+            transaction_ids: Vec::new(),
+            failed_index: None,
+            ambiguous_transaction_id: None,
+        }
+    }
+}
+
+impl From<::wallets::WalletError> for Error {
+    fn from(error: ::wallets::WalletError) -> Self {
+        let ::wallets::WalletError {
+            kind,
+            message,
+            ambiguous_transaction_id,
+        } = error;
+        let failure = match kind {
+            ::wallets::WalletErrorKind::Unsupported
+            | ::wallets::WalletErrorKind::InvalidSecret
+            | ::wallets::WalletErrorKind::InvalidAddress
+            | ::wallets::WalletErrorKind::InvalidAmount
+            | ::wallets::WalletErrorKind::InvalidBatch
+            | ::wallets::WalletErrorKind::AddressMismatch => Failure::BadRequest,
+            ::wallets::WalletErrorKind::Duplicate | ::wallets::WalletErrorKind::Conflict => {
+                Failure::Conflict
+            }
+            ::wallets::WalletErrorKind::NotFound => Failure::NotFound,
+            ::wallets::WalletErrorKind::Transaction | ::wallets::WalletErrorKind::WatchOnly => {
+                Failure::Unprocessable
+            }
+            ::wallets::WalletErrorKind::Unavailable
+            | ::wallets::WalletErrorKind::SourceBusy
+            | ::wallets::WalletErrorKind::Generation => Failure::Unavailable,
+            // This server pauses a network only to rescan it.
+            ::wallets::WalletErrorKind::Paused => return Self::rescanning(),
+        };
+        let mut response = Self::new(failure, message);
+        response.ambiguous_transaction_id = ambiguous_transaction_id.map(|id| id.to_string());
+        response
+    }
+}
+
+/// The index's own failures, with the same status mapping the wallet errors
+/// they used to travel through had.
+impl From<indexing::IndexError> for Error {
+    fn from(error: indexing::IndexError) -> Self {
+        let failure = match error.kind {
+            indexing::IndexErrorKind::InvalidRequest => Failure::BadRequest,
+            indexing::IndexErrorKind::NetworkMismatch => Failure::NotFound,
+            indexing::IndexErrorKind::Conflict => Failure::Conflict,
+            _ => Failure::Unavailable,
+        };
+        Self::new(failure, error.message)
+    }
+}
+
+impl From<::wallets::SendError> for Error {
+    fn from(error: ::wallets::SendError) -> Self {
+        let mut response = Self::from(error.source);
+        response.transaction_ids = error
+            .accepted
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        response.failed_index = error.failed_index;
+        response.ambiguous_transaction_id = error.ambiguous_transaction_id.map(|id| id.to_string());
+        response
+    }
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        let status = if self.ambiguous_transaction_id.is_some() {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            self.failure.status()
+        };
+        (
+            status,
+            Json(ErrorBody {
+                message: self.message,
+                transaction_ids: self.transaction_ids,
+                failed_index: self.failed_index,
+                ambiguous_transaction_id: self.ambiguous_transaction_id,
+            }),
+        )
+            .into_response()
+    }
+}
+
+#[cfg(test)]
+mod errors {
+    use axum::{http::StatusCode, response::IntoResponse};
+    use base::TransactionId;
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+    use wallets::{SendError, WalletError, WalletErrorKind};
+
+    use super::Error;
+
+    fn ambiguous_error(message: &str, id: &str) -> WalletError {
+        WalletError {
+            kind: WalletErrorKind::Transaction,
+            message: message.to_owned(),
+            ambiguous_transaction_id: Some(TransactionId::new(id)),
+        }
+    }
+
+    async fn projection(error: Error) -> (StatusCode, Value) {
+        let response = error.into_response();
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("error response body")
+            .to_bytes();
+        let body = serde_json::from_slice(&bytes).expect("error response JSON");
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn ambiguous_failures_preserve_reconciliation_metadata() {
+        let (status, body) =
+            projection(ambiguous_error("single ambiguous", "single-local").into()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body,
+            json!({
+                "message": "single ambiguous",
+                "ambiguous_transaction_id": "single-local"
+            })
+        );
+
+        let item = SendError::item(
+            1,
+            vec![TransactionId::new("accepted-0")],
+            ambiguous_error("item ambiguous", "item-local"),
+        );
+        let (status, body) = projection(item.into()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body,
+            json!({
+                "message": "item ambiguous",
+                "transaction_ids": ["accepted-0"],
+                "failed_index": 1,
+                "ambiguous_transaction_id": "item-local"
+            })
+        );
+
+        let grouped = SendError::grouped(
+            vec![TransactionId::new("accepted-group")],
+            ambiguous_error("grouped ambiguous", "grouped-local"),
+        );
+        let (status, body) = projection(grouped.into()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body,
+            json!({
+                "message": "grouped ambiguous",
+                "transaction_ids": ["accepted-group"],
+                "ambiguous_transaction_id": "grouped-local"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn definite_operation_failures_omit_submission_metadata() {
+        for (error, status, body) in [
+            (
+                WalletError::new(WalletErrorKind::Transaction, "definite single").into(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                json!({"message": "definite single"}),
+            ),
+            (
+                SendError::definite(WalletErrorKind::InvalidBatch, "collection failure").into(),
+                StatusCode::BAD_REQUEST,
+                json!({"message": "collection failure"}),
+            ),
+            (
+                SendError::definite(WalletErrorKind::Unavailable, "operation failure").into(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"message": "operation failure"}),
+            ),
+            (
+                SendError::definite(WalletErrorKind::SourceBusy, "single source is busy").into(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"message": "single source is busy"}),
+            ),
+        ] {
+            assert_eq!(projection(error).await, (status, body));
+        }
+    }
+
+    #[tokio::test]
+    async fn definite_batch_failures_preserve_only_known_submission_metadata() {
+        for (error, status, body) in [
+            (
+                SendError::item(
+                    3,
+                    Vec::new(),
+                    WalletError::new(WalletErrorKind::SourceBusy, "source is busy"),
+                )
+                .into(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"message": "source is busy", "failed_index": 3}),
+            ),
+            (
+                SendError::item(
+                    2,
+                    Vec::new(),
+                    WalletError::new(WalletErrorKind::Transaction, "item failure"),
+                )
+                .into(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                json!({"message": "item failure", "failed_index": 2}),
+            ),
+            (
+                SendError::grouped(
+                    vec![TransactionId::new("accepted-definite")],
+                    WalletError::new(WalletErrorKind::Transaction, "grouped failure"),
+                )
+                .into(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                json!({
+                    "message": "grouped failure",
+                    "transaction_ids": ["accepted-definite"]
+                }),
+            ),
+        ] {
+            assert_eq!(projection(error).await, (status, body));
+        }
+    }
+
+    #[test]
+    fn every_failure_maps_to_its_own_status() {
+        use super::Failure;
+
+        let statuses = [
+            Failure::BadRequest,
+            Failure::NotFound,
+            Failure::Conflict,
+            Failure::Unprocessable,
+            Failure::Internal,
+            Failure::Unavailable,
+        ]
+        .map(Failure::status);
+        let mut unique = statuses.to_vec();
+        unique.sort_unstable_by_key(StatusCode::as_u16);
+        unique.dedup();
+        assert_eq!(unique.len(), statuses.len(), "one variant per status");
+        assert_eq!(statuses[0], StatusCode::BAD_REQUEST);
+        assert_eq!(statuses[4], StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

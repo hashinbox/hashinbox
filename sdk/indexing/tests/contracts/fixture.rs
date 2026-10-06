@@ -16,10 +16,10 @@
 use base::Decimal;
 
 use indexing::{
-    Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, CanonicalBlock,
-    ConfirmedHistory, FeeSettlement, HistoryQuery, IndexStore, IndexedBatch, IndexedOutput,
-    InterpretedBlock, MovementId, Network, ObservationDraft, ObservationDraftStatus, OutputId,
-    OutputRequest, OutputStore, TransactionRef, ValueMovement,
+    Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef,
+    BlockWithOutputs, ConfirmedHistory, FeeSettlement, HistoryQuery, IndexStore, IndexedBatch,
+    IndexedOutput, MovementId, Network, OutputId, OutputRequest, OutputStore, Status, Transaction,
+    TransactionRef, ValueMovement,
 };
 
 /// One network's fixture over one repository.
@@ -94,20 +94,20 @@ impl<'a, R> Fixture<'a, R> {
 
     /// One transaction paying `owner` 5 at `height`, so a fixture block has
     /// history to keep, to fill in, or to unwind.
-    pub(super) fn paid(&self, owner: &str, height: BlockHeight) -> ObservationDraft {
-        ObservationDraft {
-            transaction: indexing::Transaction {
-                transaction_id: self.transaction(&format!("block-{}", height.0)),
-                movements: vec![ValueMovement::mint(
-                    MovementId(format!("mint-{}", height.0)),
-                    self.native(),
-                    Decimal::from(5_u64),
-                    self.address(owner),
-                )],
-                fee: None,
+    pub(super) fn paid(&self, owner: &str, height: BlockHeight) -> Transaction {
+        Transaction {
+            id: self.transaction(&format!("block-{}", height.0)),
+            movements: vec![ValueMovement::mint(
+                MovementId(format!("mint-{}", height.0)),
+                self.native(),
+                Decimal::from(5_u64),
+                self.address(owner),
+            )],
+            fee: None,
+            order: 0,
+            status: Status::Included {
+                block: self.block(height.0),
             },
-            transaction_order: 0,
-            status: ObservationDraftStatus::Included,
         }
     }
 
@@ -133,7 +133,7 @@ impl<'a, R> Fixture<'a, R> {
     }
 
     /// Block `height`, carrying `draft` alone and no output or credit.
-    pub(super) fn canonical(&self, height: u64, draft: ObservationDraft) -> CanonicalBlock {
+    pub(super) fn canonical(&self, height: u64, draft: Transaction) -> BlockWithOutputs {
         self.canonical_block(height, vec![draft])
     }
 
@@ -146,16 +146,19 @@ impl<'a, R> Fixture<'a, R> {
     pub(super) fn canonical_block(
         &self,
         height: u64,
-        drafts: Vec<ObservationDraft>,
-    ) -> CanonicalBlock {
-        let interpreted = InterpretedBlock::new(&self.network, self.block(height), drafts)
-            .expect("unique transaction ids");
-        CanonicalBlock::new(self.network.clone(), interpreted).expect("valid fixture facts")
+        drafts: Vec<Transaction>,
+    ) -> BlockWithOutputs {
+        let block = self.block(height);
+        let drafts = drafts
+            .into_iter()
+            .map(|draft| placed(draft, &block))
+            .collect();
+        BlockWithOutputs::new(&self.network, block, drafts).expect("unique transaction ids")
     }
 
     /// One block's facts per draft, heights 1 upward, each connecting to the
     /// one before, so [`Self::commit`] can write the chain in order.
-    pub(super) fn chain(&self, drafts: Vec<ObservationDraft>) -> Vec<CanonicalBlock> {
+    pub(super) fn chain(&self, drafts: Vec<Transaction>) -> Vec<BlockWithOutputs> {
         let heights = 1_u64..;
         heights
             .zip(drafts)
@@ -168,7 +171,7 @@ impl<'a, R> Fixture<'a, R> {
     pub(super) fn batch(
         &self,
         checkpoint: Option<BlockRef>,
-        canonical: CanonicalBlock,
+        canonical: BlockWithOutputs,
     ) -> IndexedBatch {
         IndexedBatch::new(
             self.network.clone(),
@@ -183,10 +186,10 @@ impl<'a, R> Fixture<'a, R> {
 
 impl<R: IndexStore> Fixture<'_, R> {
     /// Commits `blocks` in order, each authorised by the one before.
-    pub(super) async fn commit(&self, blocks: Vec<CanonicalBlock>) {
+    pub(super) async fn commit(&self, blocks: Vec<BlockWithOutputs>) {
         let mut checkpoint = None;
         for canonical in blocks {
-            let block = canonical.block().clone();
+            let block = canonical.block.reference().clone();
             self.repository
                 .commit(self.batch(checkpoint, canonical))
                 .await
@@ -217,7 +220,7 @@ impl<R: ConfirmedHistory> Fixture<'_, R> {
         .expect("history page")
         .transactions
         .into_iter()
-        .map(|transaction| transaction.transaction.transaction_id.id.to_string())
+        .map(|transaction| transaction.id.id.to_string())
         .collect()
     }
 }
@@ -241,4 +244,16 @@ impl<R: OutputStore> Fixture<'_, R> {
             .expect("live outputs")
             .outputs
     }
+}
+
+/// `transaction` as the block it is placed in reports it: included in, or
+/// failed in, `block`. Contract drafts are written before their block is
+/// chosen, so the fixture places them, as an interpreter would.
+pub(super) fn placed(mut transaction: Transaction, block: &BlockRef) -> Transaction {
+    match &mut transaction.status {
+        Status::Included { block: held } | Status::Failed { block: held, .. } => {
+            *held = block.clone();
+        }
+    }
+    transaction
 }

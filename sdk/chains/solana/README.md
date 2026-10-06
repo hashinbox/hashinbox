@@ -11,8 +11,8 @@ without the rest of the SDK.
 use std::{collections::BTreeMap, sync::Arc};
 
 use chain_solana::{Config, Network, Store};
-use sdk_config::Rpc;
-use wallets::{ComposedChain, SubmissionRegistrar};
+use sdk_config::{ComposedChain, Rpc};
+use wallets::SubmissionRegistrar;
 
 /// `repository` is the one store every network is indexed into.
 async fn solana<R: Store>(
@@ -49,9 +49,13 @@ tokens = [{ mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', asset = 'usdc
 
 ## Notes
 
-- Configure exactly one RPC endpoint. Every request is sent once and never
-  retried or failed over, because a repeated submission can send the same
-  payment twice. Set the endpoint's timeout with that in mind.
+- Configure one or more RPC endpoints. No request is ever retried or repeated
+  by the transport, whatever `repeat` says. A read reaches one node and
+  carries the previous read's slot as its floor, so a node behind it fails the
+  send before anything is submitted. A submission is broadcast to every
+  configured node, each exactly once; the first acceptance answers, and a
+  failure on every node where one node did not answer stays an unknown
+  outcome. Set each endpoint's timeout with that in mind.
 - The genesis hash is configured and verified, never discovered. `connect`
   refuses a node that reports another hash, so a wrong URL cannot index a
   different cluster into the same store.

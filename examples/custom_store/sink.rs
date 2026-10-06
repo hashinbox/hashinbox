@@ -30,9 +30,9 @@ use std::{
 };
 
 use indexing::{
-    Address, AssetId, BlockCredit, BlockPosition, BlockRef, BoxFuture, CanonicalTransaction,
-    Decimal, Holder, IndexError, IndexErrorKind, IndexStore, IndexedBatch, Network, OutputChanges,
-    OutputId, OutputKey, Progress, Transactions, Watch, WatchProgress, WatchStore,
+    Address, AssetId, BlockCredit, BlockPosition, BlockRef, BoxFuture, Decimal, IndexError,
+    IndexErrorKind, IndexStore, IndexedBatch, Network, OutputChanges, OutputId, OutputKey,
+    Progress, Transaction, Transactions, Watch, WatchProgress, WatchStore,
 };
 
 /// One store, serving every network it is handed to; not `Clone`, because the
@@ -192,7 +192,7 @@ impl Sink {
     ///
     /// One network is the only rule a store owns here: the staged copy is
     /// installed once, so two networks would be one write over rows of both. A
-    /// row's own address and asset are [`Holder::validate`]'s to answer for.
+    /// row's own address and asset are [`Watch::validate`]'s to answer for.
     fn one_network(watches: &[Watch]) -> Result<(), IndexError> {
         let Some(first) = watches.first() else {
             return Ok(());
@@ -303,9 +303,9 @@ impl Sink {
         }
         let mut unknown = Vec::new();
         for block in batch.blocks() {
-            let at = block.block().position;
-            Self::land(rows, at, block.transactions(), block.credits());
-            unknown.extend(Self::settle(rows, network, block.outputs()));
+            let at = block.block.reference().position;
+            Self::land(rows, at, block.block.transactions(), &block.credits);
+            unknown.extend(Self::settle(rows, network, &block.outputs));
         }
         if let Some(line) = batch.checkpoint() {
             rows.checkpoints.insert(network.clone(), line.clone());
@@ -341,12 +341,12 @@ impl Sink {
     fn land(
         rows: &mut Rows,
         position: BlockPosition,
-        transactions: &Transactions<CanonicalTransaction>,
+        transactions: &Transactions<Transaction>,
         credits: &[BlockCredit],
     ) {
         let sent = transactions
             .iter()
-            .flat_map(|transaction| transaction.transaction.movements.iter())
+            .flat_map(|transaction| transaction.movements.iter())
             .filter_map(|movement| movement.to().map(|to| (to, &movement.amount)));
         let block = credits.iter().map(|credit| (&credit.to, &credit.amount));
         let mut totals: BTreeMap<(Network, String), Decimal> = BTreeMap::new();

@@ -12,7 +12,7 @@
     }
   ],
   "paths": {
-    "/healthz": {
+    "/health": {
       "get": {
         "tags": [
           "health"
@@ -76,93 +76,6 @@
         }
       }
     },
-    "/v1/addresses": {
-      "post": {
-        "tags": [
-          "addresses"
-        ],
-        "summary": "Observe an address without its key",
-        "description": "Observes an address from registration without its key. The entry is watch-only; sending from it answers 422.",
-        "operationId": "watch_address",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/WatchAddress"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Address registered for indexing",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Wallet"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body, asset tag, or address text",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Asset is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The address is already registered",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Address registration is unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
     "/v1/assets": {
       "get": {
         "tags": [
@@ -200,40 +113,27 @@
         ]
       }
     },
-    "/v1/chains": {
+    "/v1/networks": {
       "get": {
         "tags": [
-          "chains"
+          "networks"
         ],
-        "summary": "Read chain settings and runtime progress",
-        "description": "Returns saved settings, active revisions and reindex progress. Configured RPC URLs are returned for operator editing; environment references are not resolved and authentication headers are omitted.",
-        "operationId": "list_chain_settings",
+        "summary": "List every configured network and its RPC nodes",
+        "description": "Every network the configuration names, its state, and the nodes it uses now. Nodes come from the database once a network has stored them; the configuration file only seeds that list on the first start. Only each node's origin is returned.",
+        "operationId": "list_networks",
         "responses": {
           "200": {
-            "description": "Saved chains",
+            "description": "Networks in configuration order",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/ChainSettings"
-                  }
+                  "$ref": "#/components/schemas/NetworkList"
                 }
               }
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Runtime controls unavailable",
+            "description": "Missing or invalid bearer token",
             "content": {
               "application/json": {
                 "schema": {
@@ -250,19 +150,115 @@
         ]
       }
     },
-    "/v1/chains/{chain}": {
-      "put": {
+    "/v1/networks/{chain}/{network}/rescans": {
+      "post": {
         "tags": [
-          "chains"
+          "networks"
         ],
-        "summary": "Save chain nodes and requested indexing state",
-        "description": "Persists desired settings before asynchronous verification. Failed candidates keep the active connection. Existing network identities and asset parameters cannot be replaced; networks can be added and nodes edited or reordered.",
-        "operationId": "save_chain_settings",
+        "summary": "Purge a network's indexed facts and index it again",
+        "description": "One action: refuses new wallets and sends on the network and waits for those running, pauses its indexing, deletes its indexed history, balances, outputs and checkpoint, and resumes indexing from every watch's birthday. Answers once indexing has resumed; the network then reports `catching_up` until it reaches the tip. Watches, wallet keys and every other network are untouched. A failure after the deletion leaves the network paused; rescanning again finishes it.",
+        "operationId": "rescan_network",
         "parameters": [
           {
             "name": "chain",
             "in": "path",
-            "description": "Registered chain name",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Purged; indexing has resumed from the birthdays",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfiguredNetwork"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A rescan or node change of this network is in progress, or the network is not in service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The rescan failed; the message says whether the network is paused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/networks/{chain}/{network}/rpc": {
+      "put": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "Replace a network's RPC nodes",
+        "description": "Verifies the nodes with the chain's own startup check over the new list, stores them, then sends every later call to them; calls already sent finish on the node they reached. A node that fails the check leaves the current nodes in use and stores nothing. The stored list is used on every later start, whatever the configuration file says. Credentials are stored as sent; prefer `${NAME}` references. A network that is unavailable stores the verified nodes and uses them from the next start.",
+        "operationId": "replace_network_rpc",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
             "required": true,
             "schema": {
               "type": "string"
@@ -273,25 +269,25 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ChainUpdate"
+                "$ref": "#/components/schemas/RpcNodes"
               }
             }
           },
           "required": true
         },
         "responses": {
-          "202": {
-            "description": "Desired settings saved",
+          "200": {
+            "description": "Nodes verified, stored and in use",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SavedRevision"
+                  "$ref": "#/components/schemas/ConfiguredNetwork"
                 }
               }
             }
           },
           "400": {
-            "description": "Invalid settings or conflicting revision",
+            "description": "Malformed node list, a node the chain refuses, or an unset `${NAME}`",
             "content": {
               "application/json": {
                 "schema": {
@@ -301,70 +297,7 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Runtime controls unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/v1/indexing": {
-      "put": {
-        "tags": [
-          "indexing"
-        ],
-        "summary": "Pause, resume or reindex one network",
-        "description": "Persists requested indexing state. Reindex pauses operations, purges indexed facts, preserves wallet keys and birthdays, then scans again. Poll chain settings for progress.",
-        "operationId": "control_indexing",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/Command"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "Indexing request persisted"
-          },
-          "204": {
-            "description": "Indexing control applied"
-          },
-          "400": {
-            "description": "Invalid command",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
+            "description": "Missing or invalid bearer token",
             "content": {
               "application/json": {
                 "schema": {
@@ -374,7 +307,7 @@
             }
           },
           "404": {
-            "description": "Network not configured",
+            "description": "Network is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -383,8 +316,8 @@
               }
             }
           },
-          "409": {
-            "description": "Supervisor stopped",
+          "422": {
+            "description": "The node was unreachable or serves another network; the message says which, and the current nodes stay in use",
             "content": {
               "application/json": {
                 "schema": {
@@ -394,110 +327,7 @@
             }
           },
           "503": {
-            "description": "Control unavailable or still pausing",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/v1/logs": {
-      "get": {
-        "tags": [
-          "logs"
-        ],
-        "summary": "Read filtered retained logs",
-        "description": "Returns bounded in-memory events matching every supplied filter. Use the returned cursor for polling; a changed session requires restarting the cursor.",
-        "operationId": "read_logs",
-        "parameters": [
-          {
-            "name": "chain",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "network",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "node_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "component",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "after",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64",
-              "default": 0,
-              "minimum": 0
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 100,
-              "maximum": 1000,
-              "minimum": 1
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Retained events",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Events"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid query",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
+            "description": "Another change to this network is in progress, or the nodes could not be stored",
             "content": {
               "application/json": {
                 "schema": {
@@ -573,6 +403,16 @@
               }
             }
           },
+          "409": {
+            "description": "The batch asset's network is being rescanned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Definite batch failure; transaction_ids is present only for a definitely acknowledged prefix and failed_index only for a truthful item-scoped failure",
             "content": {
@@ -606,9 +446,21 @@
         "tags": [
           "wallets"
         ],
-        "summary": "List every wallet and watched address",
-        "description": "Every registered wallet and watched address in wallet ID order.",
+        "summary": "List the wallets",
+        "description": "Every active wallet and watched address in wallet ID order; with `archived=true`, the archived ones too.",
         "operationId": "list_wallets",
+        "parameters": [
+          {
+            "name": "archived",
+            "in": "query",
+            "description": "Include archived wallets; they are left out by default.",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Wallets in ID order",
@@ -616,6 +468,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/WalletList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -651,8 +513,8 @@
         "tags": [
           "wallets"
         ],
-        "summary": "Generate a wallet for one configured asset",
-        "description": "Generates a wallet, stores its key in the application registry, then watches it from creation. Keys never leave the server. Retrying creates another wallet.",
+        "summary": "Generate a wallet, or watch an address, for one configured asset",
+        "description": "Without `address`, generates a wallet, stores it with its key, then watches it from creation. Keys never leave the server. Retrying creates another wallet. With `address`, stores and observes that address from registration without its key: the wallet is watch-only, and sending from it answers 422. `label` names either. `start` is `\"fresh\"` (the default) or the native position observation begins at; a position older than the network's backfill policy allows answers 400. An archived wallet's address is refused: archiving is final.",
         "operationId": "create_wallet",
         "requestBody": {
           "content": {
@@ -666,7 +528,7 @@
         },
         "responses": {
           "201": {
-            "description": "Wallet generated and registered for indexing",
+            "description": "Wallet generated or address watched, and registered for indexing",
             "content": {
               "application/json": {
                 "schema": {
@@ -676,7 +538,7 @@
             }
           },
           "400": {
-            "description": "Malformed body or asset tag",
+            "description": "Malformed body, asset tag, label, address text, or a start the backfill policy refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -706,7 +568,7 @@
             }
           },
           "409": {
-            "description": "Wallet ID or address is already registered",
+            "description": "The address is already an active or archived wallet, an unobserved row of it holds another key, or the asset's network is being rescanned",
             "content": {
               "application/json": {
                 "schema": {
@@ -739,7 +601,7 @@
           "wallets"
         ],
         "summary": "Read one wallet's public metadata",
-        "description": "The wallet's asset, network, canonical address, and watch-only flag; never its key.",
+        "description": "The wallet's asset, network, canonical address, watch-only flag, label and archive time, archived or not; never its key.",
         "operationId": "read_wallet",
         "parameters": [
           {
@@ -775,6 +637,82 @@
           },
           "404": {
             "description": "Wallet is unknown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "wallets"
+        ],
+        "summary": "Archive a wallet",
+        "description": "Marks the wallet archived and stops observing its address. Its history and balance stay readable from what was indexed; sending from it answers 409. Archiving again answers the same wallet. Archiving is final: its address cannot be created again.",
+        "operationId": "archive_wallet",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The wallet ID a create or watch call returned.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archived wallet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Wallet"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Wallet is unknown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The wallet's network is being rescanned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The wallet could not be archived or unwatched",
             "content": {
               "application/json": {
                 "schema": {
@@ -1036,6 +974,16 @@
               }
             }
           },
+          "409": {
+            "description": "The wallet's network is being rescanned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Deterministic rejection, or a watch-only wallet",
             "content": {
@@ -1067,14 +1015,6 @@
   },
   "components": {
     "schemas": {
-      "Action": {
-        "type": "string",
-        "enum": [
-          "pause",
-          "resume",
-          "reindex"
-        ]
-      },
       "Address": {
         "type": "object",
         "description": "A canonical address within its network.",
@@ -1257,7 +1197,7 @@
       },
       "BatchedTransfer": {
         "type": "object",
-        "description": "One ordered item of a [`TransferBatch`].",
+        "description": "One ordered item of a `TransferBatch`.",
         "required": [
           "wallet_id",
           "destination",
@@ -1319,91 +1259,95 @@
         },
         "additionalProperties": false
       },
-      "ChainSettings": {
-        "type": "object",
-        "required": [
-          "id",
-          "revision",
-          "networks"
-        ],
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "networks": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NetworkSettings"
-            }
-          },
-          "revision": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          }
-        }
-      },
-      "ChainUpdate": {
-        "type": "object",
-        "required": [
-          "networks"
-        ],
-        "properties": {
-          "networks": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NetworkUpdate"
-            }
-          },
-          "revision": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Null when creating a chain; otherwise the last read revision.",
-            "minimum": 0
-          }
-        },
-        "additionalProperties": false
-      },
-      "Command": {
-        "type": "object",
-        "required": [
-          "network",
-          "action"
-        ],
-        "properties": {
-          "action": {
-            "$ref": "#/components/schemas/Action"
-          },
-          "network": {
-            "$ref": "#/components/schemas/Network"
-          }
-        },
-        "additionalProperties": false
-      },
       "Completeness": {
         "type": "string",
-        "description": "How much of the history behind an answer the index can prove it holds.\n\nIt is a property of the read, not of the wallet, and the balance and the\nhistory page share the vocabulary; opening evidence applies only to balances.",
+        "description": "How much of the history behind an answer the index can prove it holds.\n\nIt is a property of the read, not of the wallet, and the balance and the\nhistory page share the vocabulary.",
         "enum": [
           "complete_history",
-          "verified_opening_balance",
           "incomplete",
           "overdrawn"
         ]
       },
+      "ConfiguredNetwork": {
+        "type": "object",
+        "description": "One configured network, its state, and its nodes.",
+        "required": [
+          "network",
+          "state",
+          "nodes"
+        ],
+        "properties": {
+          "network": {
+            "$ref": "#/components/schemas/Network"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RpcNode"
+            },
+            "description": "Nodes in failover order; ordinal `i` is `rpc[i]` of `GET /health`."
+          },
+          "state": {
+            "$ref": "#/components/schemas/ServiceState"
+          }
+        }
+      },
       "CreateWallet": {
         "type": "object",
-        "description": "`POST /v1/wallets` body: generate a wallet for one configured asset.",
+        "description": "`POST /v1/wallets` body: generate a wallet for one configured asset, or\nwatch an existing address of it without its key.",
         "required": [
           "asset"
         ],
         "properties": {
+          "address": {
+            "type": "string",
+            "description": "Address text in any form the asset's chain accepts. Present: watch this\naddress without its key. Absent: generate a new wallet."
+          },
           "asset": {
             "type": "string",
-            "description": "The configured asset tag the new wallet holds (`GET /v1/assets`).",
+            "description": "The configured asset tag the wallet holds (`GET /v1/assets`).",
             "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+          },
+          "label": {
+            "type": "string",
+            "description": "The operator's name for the wallet, 1 to 64 characters.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "start": {
+            "$ref": "#/components/schemas/Start",
+            "description": "Where observation begins: `\"fresh\"` for an address never used before,\nor the native position to inspect from. Absent means `\"fresh\"`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "DetailedEndpoint": {
+        "type": "object",
+        "description": "A node with its own headers and bounds.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "bounds": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Per-call limits: `timeout_ms`, `max_request_bytes`,\n`max_response_bytes`; each defaults when absent."
+          },
+          "headers": {
+            "type": "object",
+            "description": "Headers every call carries.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "url": {
+            "type": "string",
+            "description": "`http` or `https` URL naming a host, without a fragment."
           }
         },
         "additionalProperties": false
@@ -1437,81 +1381,6 @@
           }
         }
       },
-      "Event": {
-        "type": "object",
-        "description": "One retained event, with public context and no raw request or provider payload.",
-        "required": [
-          "sequence",
-          "timestamp",
-          "level",
-          "event",
-          "message",
-          "fields",
-          "truncated"
-        ],
-        "properties": {
-          "event": {
-            "type": "string"
-          },
-          "fields": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "level": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "sequence": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "timestamp": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "truncated": {
-            "type": "boolean"
-          }
-        }
-      },
-      "Events": {
-        "type": "object",
-        "description": "Polling result. A gap means some records were lost; logs are not an audit ledger.",
-        "required": [
-          "session",
-          "entries",
-          "next",
-          "gap"
-        ],
-        "properties": {
-          "entries": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Event"
-            }
-          },
-          "gap": {
-            "type": "boolean"
-          },
-          "next": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "session": {
-            "type": "string"
-          }
-        }
-      },
       "Fee": {
         "type": "object",
         "description": "A transaction fee, always in the chain's native asset.",
@@ -1541,6 +1410,13 @@
             ]
           }
         }
+      },
+      "Fresh": {
+        "type": "string",
+        "description": "The `\"fresh\"` literal of a `Start`.",
+        "enum": [
+          "fresh"
+        ]
       },
       "IndexFailure": {
         "type": "object",
@@ -1761,173 +1637,21 @@
           }
         }
       },
-      "NetworkSettings": {
+      "NetworkList": {
         "type": "object",
+        "description": "`GET /v1/networks`: every configured network.",
         "required": [
-          "name",
-          "parameters",
-          "nodes",
-          "indexing",
-          "history_pending"
+          "networks"
         ],
         "properties": {
-          "active_revision": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
-          "checkpoint": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "history_pending": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "history_resume": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
-          "indexing": {
-            "$ref": "#/components/schemas/Requested"
-          },
-          "name": {
-            "type": "string"
-          },
-          "nodes": {
+          "networks": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/NodeStatus"
-            }
-          },
-          "parameters": {
-            "description": "Chain-owned configuration, excluding RPC addresses and credentials."
-          },
-          "pending_block": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
-          "rebuild": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ReindexStatus"
-              }
-            ]
+              "$ref": "#/components/schemas/ConfiguredNetwork"
+            },
+            "description": "Networks in configuration order."
           }
         }
-      },
-      "NetworkUpdate": {
-        "type": "object",
-        "required": [
-          "name",
-          "parameters",
-          "nodes"
-        ],
-        "properties": {
-          "indexing": {
-            "$ref": "#/components/schemas/Requested"
-          },
-          "name": {
-            "type": "string"
-          },
-          "nodes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NodeUpdate"
-            }
-          },
-          "parameters": {
-            "description": "Chain configuration with an explicit asset tag. Existing parameters are immutable."
-          }
-        },
-        "additionalProperties": false
-      },
-      "NodeStatus": {
-        "type": "object",
-        "required": [
-          "id",
-          "active",
-          "attempts",
-          "failures"
-        ],
-        "properties": {
-          "active": {
-            "type": "boolean"
-          },
-          "attempts": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "failures": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "id": {
-            "type": "string"
-          },
-          "last_failure": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "origin": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "URL origin for the node card."
-          },
-          "url": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Configured URL for operator editing; environment references remain unresolved."
-          }
-        }
-      },
-      "NodeUpdate": {
-        "type": "object",
-        "required": [
-          "id"
-        ],
-        "properties": {
-          "endpoint": {
-            "description": "URL string or endpoint object (url, headers, bounds). Omit to retain existing credentials."
-          },
-          "id": {
-            "type": "string",
-            "description": "Stable identifier; changing URL or order preserves this ID."
-          }
-        },
-        "additionalProperties": false
       },
       "ParentBlock": {
         "type": "object",
@@ -1950,33 +1674,34 @@
         },
         "additionalProperties": false
       },
-      "Phase": {
-        "type": "string",
-        "enum": [
-          "requested",
-          "purging",
-          "scanning"
-        ]
-      },
-      "ReindexStatus": {
+      "Queue": {
         "type": "object",
+        "description": "One asset's in-memory send queue, read without touching its dispatch.",
         "required": [
-          "id",
-          "phase"
+          "asset",
+          "depth",
+          "in_flight",
+          "completed"
         ],
         "properties": {
-          "id": {
-            "type": "string"
+          "asset": {
+            "type": "string",
+            "description": "The configured asset tag whose sends wait in this queue."
           },
-          "phase": {
-            "$ref": "#/components/schemas/Phase"
-          },
-          "target": {
-            "type": [
-              "integer",
-              "null"
-            ],
+          "completed": {
+            "type": "integer",
             "format": "int64",
+            "description": "Sends answered since the process started, success or failure.",
+            "minimum": 0
+          },
+          "depth": {
+            "type": "integer",
+            "description": "Sends admitted and not yet answered.",
+            "minimum": 0
+          },
+          "in_flight": {
+            "type": "integer",
+            "description": "Sends with the node right now.",
             "minimum": 0
           }
         }
@@ -1987,7 +1712,8 @@
         "required": [
           "ready",
           "networks",
-          "rpc"
+          "rpc",
+          "queues"
         ],
         "properties": {
           "networks": {
@@ -1996,6 +1722,13 @@
               "$ref": "#/components/schemas/NetworkCheckpoint"
             },
             "description": "Latest notification for each network; no repository or node calls."
+          },
+          "queues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Queue"
+            },
+            "description": "One send queue per asset that sends, in asset tag order."
           },
           "ready": {
             "type": "boolean",
@@ -2009,13 +1742,6 @@
             "description": "One set of counters per configured RPC endpoint."
           }
         }
-      },
-      "Requested": {
-        "type": "string",
-        "enum": [
-          "running",
-          "paused"
-        ]
       },
       "Rpc": {
         "type": "object",
@@ -2042,7 +1768,7 @@
           },
           "endpoint": {
             "type": "integer",
-            "description": "Zero-based endpoint ordinal in that network's configuration.",
+            "description": "Zero-based ordinal of the node in the network's current list\n(`GET /v1/networks`).",
             "minimum": 0
           },
           "failures": {
@@ -2064,18 +1790,78 @@
           }
         }
       },
-      "SavedRevision": {
+      "RpcEndpoint": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "The node's URL, with default bounds and no added header."
+          },
+          {
+            "$ref": "#/components/schemas/DetailedEndpoint",
+            "description": "The node's URL, headers and bounds."
+          }
+        ],
+        "description": "One RPC node, written as the configuration file's `rpc.endpoints` writes\nit. `${NAME}` anywhere in the URL or a header value stands for the\nserver's environment variable `NAME`."
+      },
+      "RpcNode": {
         "type": "object",
+        "description": "One RPC node as it may be shown.",
         "required": [
-          "revision"
+          "origin"
         ],
         "properties": {
-          "revision": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
+          "origin": {
+            "type": "string",
+            "description": "Scheme, host and port of the node's URL. User information, path,\nquery and headers are never returned: any of them may hold a\ncredential."
           }
         }
+      },
+      "RpcNodes": {
+        "type": "object",
+        "description": "`PUT /v1/networks/{chain}/{network}/rpc` body.",
+        "required": [
+          "endpoints"
+        ],
+        "properties": {
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RpcEndpoint"
+            },
+            "description": "One to 16 nodes, in failover order.",
+            "maxItems": 16,
+            "minItems": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "ServiceState": {
+        "type": "string",
+        "description": "What a configured network is doing.",
+        "enum": [
+          "unavailable",
+          "rescanning",
+          "paused",
+          "catching_up",
+          "ready",
+          "retrying",
+          "quarantined"
+        ]
+      },
+      "Start": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Fresh",
+            "description": "The address has never been used: observe from the next block."
+          },
+          {
+            "type": "integer",
+            "format": "int64",
+            "description": "Observe from this native position.",
+            "minimum": 0
+          }
+        ],
+        "description": "A wallet's birthday on the wire: `\"fresh\"` or a native position."
       },
       "Status": {
         "oneOf": [
@@ -2309,27 +2095,53 @@
       },
       "Wallet": {
         "type": "object",
-        "description": "Public wallet fields returned by wallet creation, import, watch, lookup,\nand listing.",
+        "description": "One wallet: its public identity and its lifecycle. Its wire form is what\nevery wallet route returns; it never holds the key.",
         "required": [
           "id",
           "asset",
+          "asset_id",
           "network",
           "address",
-          "watch_only"
+          "watch_only",
+          "label",
+          "archived_at"
         ],
         "properties": {
           "address": {
             "type": "string",
             "description": "Canonical address text."
           },
+          "archived_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix seconds when the wallet was archived; null while it is active.\nAlways present.",
+            "minimum": 0
+          },
           "asset": {
-            "type": "string",
-            "description": "The configured asset tag this wallet holds and sends.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The configured asset tag this wallet holds and sends; null when no\nconfigured asset holds it any more. Always present.",
             "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+          },
+          "asset_id": {
+            "type": "string",
+            "description": "The asset's identity within its chain: `native`, or a token\nidentifier."
           },
           "id": {
             "type": "string",
-            "description": "Wallet ID (a UUIDv7 for wallets and addresses the API registered)."
+            "description": "Wallet ID, a UUIDv7 the API minted."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The operator's label; null when none was given. Always present."
           },
           "network": {
             "$ref": "#/components/schemas/Network",
@@ -2337,13 +2149,13 @@
           },
           "watch_only": {
             "type": "boolean",
-            "description": "Observed without a key: history only, no balance or sends."
+            "description": "Observed without a key: history and balance only, no sends."
           }
         }
       },
       "WalletList": {
         "type": "object",
-        "description": "`GET /v1/wallets`: every wallet and watched address.",
+        "description": "`GET /v1/wallets`: the wallets.",
         "required": [
           "wallets"
         ],
@@ -2356,26 +2168,6 @@
             "description": "Wallets in ID order."
           }
         }
-      },
-      "WatchAddress": {
-        "type": "object",
-        "description": "`POST /v1/addresses` body: observe an address without its key.",
-        "required": [
-          "asset",
-          "address"
-        ],
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "Address text in any form the asset's chain accepts."
-          },
-          "asset": {
-            "type": "string",
-            "description": "The configured asset tag whose history to record.",
-            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
-          }
-        },
-        "additionalProperties": false
       }
     },
     "securitySchemes": {
@@ -2396,24 +2188,12 @@
       "description": "Wallets and balances"
     },
     {
-      "name": "addresses",
-      "description": "Watch-only addresses"
-    },
-    {
       "name": "transactions",
       "description": "History, single transfers, and batches"
     },
     {
-      "name": "logs",
-      "description": "Filtered process-local events"
-    },
-    {
-      "name": "indexing",
-      "description": "Network inspection controls"
-    },
-    {
-      "name": "chains",
-      "description": "Saved nodes and network runtime settings"
+      "name": "networks",
+      "description": "Configured networks, their RPC nodes, and rescans"
     },
     {
       "name": "health",

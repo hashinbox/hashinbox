@@ -4,17 +4,18 @@
 //! code or deserialized from any `serde` format — [`Config::connect`]s to a
 //! node and verifies its identity, and the resulting [`ChainHandle`] then
 //! [`ChainHandle::compose`]s over an opened repository into a
-//! [`wallets::ComposedChain`]. No storage is opened on the first step, which is
+//! [`sdk_config::ComposedChain`]. No storage is opened on the first step, which is
 //! what lets an application check every chain's identity before it opens
-//! anything. [`wallets::Composition`] is what
+//! anything. [`sdk_config::Composition`] is what
 //! holds this chain beside the others.
 
 use std::{collections::BTreeSet, str::FromStr, sync::Arc};
 
 use base::{Networked as _, Unit, Units};
 use indexing::Checkpoint as _;
+use sdk_config::{ComposedChain, Connection};
 use serde::{Deserialize, de};
-use wallets::{ComposedChain, Connection, SubmissionRegistrar};
+use wallets::SubmissionRegistrar;
 
 /// What a store must answer for **this** chain to compose over it.
 ///
@@ -69,7 +70,7 @@ use crate::{
 ///
 /// The cluster's genesis hash is configured and verified, never discovered:
 /// [`Config::connect`] asks the node for its own and refuses a mismatch.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(
     deny_unknown_fields,
     bound = "A: serde::de::DeserializeOwned + FromStr + Ord"
@@ -80,9 +81,10 @@ pub struct Config<A> {
     /// The genesis hash the node is checked against.
     #[serde(deserialize_with = "Config::<A>::deserialize_genesis_hash")]
     pub genesis_hash: GenesisHash,
-    /// The node, and how much a call repeats. Solana reads carry context
-    /// floors and a submission must not be repeated against a second node, so
-    /// the list holds exactly one.
+    /// The nodes, one or more. Whatever `repeat` configures, no Solana call
+    /// is repeated: a read reaches one node, because it carries a context
+    /// floor another node may not have reached, and a submission is broadcast
+    /// to every node the transport holds, each exactly once.
     pub rpc: Rpc,
     /// The asset tag of this cluster's SOL wallets.
     #[serde(default = "Config::<A>::default_asset")]
@@ -132,18 +134,11 @@ impl<A: Ord> Config<A> {
     /// # Errors
     ///
     /// [`ErrorKind::InvalidConfiguration`] for a blank slug, an unusable
-    /// endpoint list, anything but exactly one endpoint, a retry policy whose
-    /// first wait exceeds its own cap, a zero synchronization bound, a
-    /// repeated asset tag, or an unusable token.
+    /// endpoint list, a retry policy whose first wait exceeds its own cap, a
+    /// zero synchronization bound, a repeated asset tag, or an unusable token.
     pub fn validate(&self) -> Result<(), Error> {
         self.cluster().validate()?;
         self.rpc.validate()?;
-        if self.rpc.endpoint_count() != 1 {
-            return Err(Error::new(
-                ErrorKind::InvalidConfiguration,
-                "Solana requires exactly one RPC endpoint",
-            ));
-        }
         self.cadence.validate()?;
         let mut tags = BTreeSet::from([&self.asset]);
         for token in &self.tokens {
@@ -183,7 +178,6 @@ impl<A: Ord> Config<A> {
         transport: Option<Transport>,
     ) -> Result<ChainHandle<A>, Error> {
         self.validate()?;
-        let network = self.cluster();
         let transport = match transport {
             Some(transport) => transport,
             None => {
@@ -192,11 +186,19 @@ impl<A: Ord> Config<A> {
                 transport
             }
         };
-        let rpc = RpcClient::connect(transport, &network).await?;
+        let rpc = self.verified(transport).await?;
+        Ok(ChainHandle { config: self, rpc })
+    }
+
+    /// The node identity checks [`Self::connect`] runs over `transport`: the
+    /// node serves this cluster's genesis hash with its Memo program, and
+    /// every allowlisted mint has the configured decimals.
+    async fn verified(&self, transport: Transport) -> Result<RpcClient<Transport>, Error> {
+        let rpc = RpcClient::connect(transport, &self.cluster()).await?;
         for token in &self.tokens {
             rpc.validate_token(&token.mint, token.decimals).await?;
         }
-        Ok(ChainHandle { config: self, rpc })
+        Ok(rpc)
     }
 
     /// The cluster these two keys name.
@@ -330,21 +332,26 @@ impl<A> ChainHandle<A> {
 }
 
 /// [`ChainHandle::compose`] with this chain's type erased, so one vector holds
-/// every configured chain and [`wallets::Composition`] folds them without
+/// every configured chain and [`sdk_config::Composition`] folds them without
 /// naming any of them. An application writes none of this.
 impl<A: Send + 'static, R: Store> Connection<A, R> for ChainHandle<A> {
     fn compose<'a>(
         self: Box<Self>,
         repository: R,
         registrar: &'a Arc<dyn SubmissionRegistrar>,
-    ) -> base::BoxFuture<'a, Result<ComposedChain<A>, wallets::WalletError>> {
-        Box::pin(async move { Ok((*self).compose(repository, registrar).await?) })
+    ) -> base::BoxFuture<'a, Result<ComposedChain<A>, sdk_config::Error>> {
+        Box::pin(async move {
+            (*self)
+                .compose(repository, registrar)
+                .await
+                .map_err(sdk_config::Error::refused)
+        })
     }
 }
 
 /// One allowlisted SPL token: its mint, the asset tag its wallets use, and the
 /// decimals the mint account is checked against when this chain connects.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields, bound = "A: serde::de::DeserializeOwned")]
 pub struct Token<A> {
     /// The mint address.
@@ -417,7 +424,7 @@ impl<A> Token<A> {
 /// of them involves a file.
 impl<A, R> sdk_config::Chain<A, R> for Config<A>
 where
-    A: Ord + Send + Sync + 'static,
+    A: Clone + Ord + Send + Sync + 'static,
     R: Store,
 {
     fn network(&self) -> base::Network {
@@ -429,15 +436,28 @@ where
         Ok(None)
     }
 
+    fn verify<'a>(
+        &'a self,
+        transport: &'a Transport,
+    ) -> base::BoxFuture<'a, Result<(), sdk_config::Error>> {
+        Box::pin(async move {
+            self.verified(transport.clone())
+                .await
+                .map(drop)
+                .map_err(sdk_config::Error::refused)
+        })
+    }
+
     fn connect<'a>(
-        self: Box<Self>,
+        &'a self,
         secrets: &'a dyn json_rpc::Secrets,
         statistics: &'a mut Vec<json_rpc::Statistics>,
         logger: logging::Logger,
         transport: Option<Transport>,
     ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, sdk_config::Error>> {
         Box::pin(async move {
-            let node = (*self)
+            let node = self
+                .clone()
                 .connect_monitored(secrets, statistics, logger, transport)
                 .await
                 .map_err(sdk_config::Error::refused)?;
@@ -450,9 +470,11 @@ where
 mod tests {
     use std::{collections::BTreeMap, time::Duration};
 
+    use futures_executor::block_on;
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::native::rpc::script::{Script, Scripted};
 
     const GENESIS: &str = "11111111111111111111111111111111";
     const MINT: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
@@ -465,10 +487,10 @@ mod tests {
         Ok(config)
     }
 
-    /// Solana shares the one RPC shape and adds exactly one rule of its own:
-    /// one node. The retired singular `endpoint` key is not aliased.
+    /// Solana shares the one RPC shape, one node or several, like every other
+    /// chain. The retired singular `endpoint` key is not aliased.
     #[test]
-    fn solana_uses_the_one_rpc_shape_and_exactly_one_endpoint() {
+    fn solana_uses_the_one_rpc_shape_with_one_or_more_endpoints() {
         let section = |rpc: Value| {
             json!({
                 "network": "localnet",
@@ -486,15 +508,28 @@ mod tests {
             parse(section(json!({"endpoint": "http://127.0.0.1:8899"}))).is_err(),
             "the singular key is replaced, not aliased"
         );
-        for endpoints in [json!([]), json!(["http://a", "http://b"])] {
-            let error = parse(section(json!({"endpoints": endpoints})))
-                .err()
-                .expect("Solana reads carry context floors");
-            assert!(
-                error.message == "Solana requires exactly one RPC endpoint"
-                    || error.message == "invalid database or RPC configuration",
-                "{error}"
-            );
+        let error = parse(section(json!({"endpoints": []})))
+            .err()
+            .expect("a cluster needs a node");
+        assert_eq!(error.message, "invalid database or RPC configuration");
+        let secrets = BTreeMap::from([("SECOND_KEY".to_owned(), "two".to_owned())]);
+        for endpoints in [
+            json!(["http://127.0.0.1:8899", "http://127.0.0.1:8900"]),
+            json!([
+                "http://127.0.0.1:8899",
+                {"url": "http://127.0.0.1:8900", "headers": {"x-api-key": "${SECOND_KEY}"},
+                 "bounds": {"timeout_ms": 3000}},
+                "http://127.0.0.1:8901"
+            ]),
+        ] {
+            let count = endpoints.as_array().map_or(0, Vec::len);
+            let config = parse(section(json!({"endpoints": endpoints})))
+                .expect("several nodes, as on every chain");
+            assert_eq!(config.rpc.endpoint_count(), count);
+            config
+                .rpc
+                .transport(&secrets)
+                .expect("every node composes with its own settings");
         }
         parse(section(
             json!({"endpoints": ["http://127.0.0.1:8899"], "repeat": "off"}),
@@ -705,5 +740,66 @@ mod tests {
             config.validate().unwrap_err().message,
             "index polling and batch values must be positive"
         );
+    }
+
+    /// [`sdk_config::Chain::verify`] over a scripted node: the identity check
+    /// `connect` runs, and the one a replacement node list must pass.
+    fn verify(config: &Config<String>, script: &Script) -> Result<(), sdk_config::Error> {
+        let transport: Transport = Arc::new(script.clone());
+        let chain: &dyn sdk_config::Chain<String, indexing::memory::Repository> = config;
+        block_on(chain.verify(&transport))
+    }
+
+    fn localnet() -> Config<String> {
+        parse(json!({
+            "network": "localnet",
+            "genesis_hash": GENESIS,
+            "rpc": {"endpoints": ["http://127.0.0.1:8899"]}
+        }))
+        .expect("the smallest section")
+    }
+
+    #[test]
+    fn verify_accepts_a_node_serving_the_configured_network() {
+        let memo = json!({
+            "context": {"slot": 41},
+            "value": {
+                "lamports": 1, "owner": GENESIS, "executable": true,
+                "data": ["", "base64"], "space": 0
+            }
+        });
+        let script = Script::exchanges([
+            ("getGenesisHash", json!([]), json!(GENESIS)),
+            ("getSlot", json!([{"commitment": "finalized"}]), json!(41)),
+            (
+                "getAccountInfo",
+                json!([
+                    "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+                    {"encoding": "base64", "commitment": "finalized", "minContextSlot": 41}
+                ]),
+                memo,
+            ),
+        ]);
+
+        verify(&localnet(), &script).expect("the configured genesis and an executable Memo-v3");
+
+        script.exhausted();
+    }
+
+    /// A node reporting another genesis hash is refused before the Memo-v3
+    /// probe.
+    #[test]
+    fn verify_refuses_a_node_serving_another_network() {
+        let other = solana_hash::Hash::new_from_array([7; 32]).to_string();
+        let script = Script::exchanges([("getGenesisHash", json!([]), json!(other))]);
+
+        let error = verify(&localnet(), &script).expect_err("another cluster");
+
+        assert_eq!(error.kind, sdk_config::ErrorKind::Section);
+        assert_eq!(
+            error.message,
+            "Solana RPC genesis hash does not match configuration"
+        );
+        script.exhausted();
     }
 }

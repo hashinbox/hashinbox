@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use base::{MovementKind, Networked};
 use indexing::{
-    BlockInterpreter as Interpret, IndexError, InterpretedBlock, MovementId, Network, NetworkFee,
-    ObservationDraft, ObservationDraftStatus, ValueMovement,
+    BlockInterpreter as Interpret, BlockRef, BlockWithOutputs, IndexError, MovementId, Network,
+    NetworkFee, Status, ValueMovement,
 };
 
 use crate::native::{
@@ -50,26 +50,31 @@ impl BlockInterpreter {
     /// rather than the transactions it keeps: the same transaction must carry
     /// the same ordinal under every address selection. Solana has no other
     /// meaningful order within a slot — a first signature sorts by nothing a
-    /// caller cares about.
-    fn observation(&self, transaction: &Transaction, order: u64) -> ObservationDraft {
+    /// caller cares about. `block` is the block being inspected.
+    fn observation(
+        &self,
+        transaction: &Transaction,
+        order: u64,
+        block: &BlockRef,
+    ) -> indexing::Transaction {
+        let block = block.clone();
         let status = if transaction.succeeded() {
-            ObservationDraftStatus::Included
+            Status::Included { block }
         } else {
-            ObservationDraftStatus::Failed {
+            Status::Failed {
+                block,
                 reason: Some("Solana transaction execution failed".to_owned()),
             }
         };
-        ObservationDraft {
-            transaction: indexing::Transaction {
-                transaction_id: transaction.id().canonical(&self.network),
-                movements: transaction
-                    .movements()
-                    .iter()
-                    .filter_map(|movement| self.movement(movement))
-                    .collect(),
-                fee: transaction.fee().map(|fee| self.fee(fee)),
-            },
-            transaction_order: order,
+        indexing::Transaction {
+            id: transaction.id().canonical(&self.network),
+            movements: transaction
+                .movements()
+                .iter()
+                .filter_map(|movement| self.movement(movement))
+                .collect(),
+            fee: transaction.fee().map(|fee| self.fee(fee)),
+            order,
             status,
         }
     }
@@ -128,9 +133,10 @@ impl Interpret for BlockInterpreter {
         &self,
         block: &RawBlock,
         addresses: &[base::Address],
-    ) -> Result<InterpretedBlock, IndexError> {
+    ) -> Result<BlockWithOutputs, IndexError> {
         let parsed = block.parse()?;
         let selected: BTreeSet<Address> = indexing::select_addresses(&self.network, addresses)?;
+        let reference = block.reference().clone();
         let mut transactions = Vec::new();
         // Enumerated over the complete, block-ordered list `getBlock` returned
         // under `transactionDetails: "full"`; the filter is inside the loop, so
@@ -141,10 +147,10 @@ impl Interpret for BlockInterpreter {
                 transaction.reconcile(&selected)?;
             }
             if Self::selects(transaction, &selected) {
-                transactions.push(self.observation(transaction, order));
+                transactions.push(self.observation(transaction, order, &reference));
             }
         }
-        InterpretedBlock::new(parsed.network(), block.reference().clone(), transactions)
+        BlockWithOutputs::new(parsed.network(), reference, transactions)
     }
 }
 
@@ -344,10 +350,10 @@ mod tests {
         let reported = inspect(vec![value], &[selected(2)])
             .expect("a watched owner is reached through the token balances alone");
         let draft = &reported.block.transactions()[0];
-        assert_eq!(draft.transaction.transaction_id.id.as_str(), signature(50));
-        assert_eq!(draft.status, ObservationDraftStatus::Included);
-        assert_eq!(draft.transaction.movements.len(), 1);
-        let movement = &draft.transaction.movements[0];
+        assert_eq!(draft.id.id.as_str(), signature(50));
+        assert!(matches!(draft.status, Status::Included { .. }));
+        assert_eq!(draft.movements.len(), 1);
+        let movement = &draft.movements[0];
         assert_eq!(movement.id, MovementId(format!("{}:ix:0", signature(50))));
         assert_eq!(movement.kind(), MovementKind::Transfer);
         assert_eq!(movement.asset, mint_asset());
@@ -356,7 +362,7 @@ mod tests {
         // The owners, not the token accounts at keys 1 and 2.
         assert_eq!(movement.from(), Some(&selected(1)));
         assert_eq!(movement.to(), Some(&selected(2)));
-        let fee = draft.transaction.fee.as_ref().expect("exact fee");
+        let fee = draft.fee.as_ref().expect("exact fee");
         assert_eq!(fee.asset, base::AssetId::native(crate::CHAIN_NAME));
         assert_eq!(fee.amount.to_string(), "5000");
     }
@@ -373,16 +379,16 @@ mod tests {
         let reported = inspect(vec![created], &[selected(2)])
             .expect("a missing pre entry is zero, not a rejection");
         let draft = &reported.block.transactions()[0];
-        assert_eq!(draft.transaction.movements.len(), 1);
+        assert_eq!(draft.movements.len(), 1);
         assert_eq!(
-            draft.transaction.movements[0].id,
+            draft.movements[0].id,
             MovementId(format!("{}:token:2", signature(51)))
         );
-        assert_eq!(draft.transaction.movements[0].kind(), MovementKind::Mint);
-        assert_eq!(draft.transaction.movements[0].asset, mint_asset());
-        assert_eq!(draft.transaction.movements[0].to(), Some(&selected(2)));
-        assert_eq!(draft.transaction.movements[0].from(), None);
-        assert_eq!(draft.transaction.movements[0].amount.to_string(), "600000");
+        assert_eq!(draft.movements[0].kind(), MovementKind::Mint);
+        assert_eq!(draft.movements[0].asset, mint_asset());
+        assert_eq!(draft.movements[0].to(), Some(&selected(2)));
+        assert_eq!(draft.movements[0].from(), None);
+        assert_eq!(draft.movements[0].amount.to_string(), "600000");
 
         // Burned and closed: no post entry.
         let closed = token_value(
@@ -394,15 +400,15 @@ mod tests {
         let reported = inspect(vec![closed], &[selected(1)])
             .expect("a missing post entry is zero, not a rejection");
         let draft = &reported.block.transactions()[0];
-        assert_eq!(draft.transaction.movements.len(), 1);
+        assert_eq!(draft.movements.len(), 1);
         assert_eq!(
-            draft.transaction.movements[0].id,
+            draft.movements[0].id,
             MovementId(format!("{}:token:1", signature(52)))
         );
-        assert_eq!(draft.transaction.movements[0].kind(), MovementKind::Burn);
-        assert_eq!(draft.transaction.movements[0].from(), Some(&selected(1)));
-        assert_eq!(draft.transaction.movements[0].to(), None);
-        assert_eq!(draft.transaction.movements[0].amount.to_string(), "600000");
+        assert_eq!(draft.movements[0].kind(), MovementKind::Burn);
+        assert_eq!(draft.movements[0].from(), Some(&selected(1)));
+        assert_eq!(draft.movements[0].to(), None);
+        assert_eq!(draft.movements[0].amount.to_string(), "600000");
     }
 
     #[test]
@@ -418,12 +424,12 @@ mod tests {
         let reported = inspect(vec![partial], &[selected(2)])
             .expect("a null preTokenBalances must not halt indexing");
         let draft = &reported.block.transactions()[0];
-        assert_eq!(draft.transaction.movements.len(), 1);
+        assert_eq!(draft.movements.len(), 1);
         assert_eq!(
-            draft.transaction.movements[0].id,
+            draft.movements[0].id,
             MovementId(format!("{}:token:2", signature(53)))
         );
-        assert_eq!(draft.transaction.movements[0].kind(), MovementKind::Mint);
+        assert_eq!(draft.movements[0].kind(), MovementKind::Mint);
 
         // Neither side recorded, and the fields omitted entirely: the token
         // effect is invisible, the block still indexes.
@@ -460,7 +466,6 @@ mod tests {
         let draft = &reported.block.transactions()[0];
         assert_eq!(
             draft
-                .transaction
                 .movements
                 .iter()
                 .map(|movement| (
@@ -482,8 +487,8 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(draft.transaction.movements[0].to(), Some(&selected(6)));
-        assert_eq!(draft.transaction.movements[1].to(), Some(&selected(2)));
+        assert_eq!(draft.movements[0].to(), Some(&selected(6)));
+        assert_eq!(draft.movements[1].to(), Some(&selected(2)));
     }
 
     #[test]
@@ -501,7 +506,6 @@ mod tests {
         let draft = &reported.block.transactions()[0];
         assert_eq!(
             draft
-                .transaction
                 .movements
                 .iter()
                 .map(|movement| (movement.id.0.clone(), movement.kind()))
@@ -511,16 +515,16 @@ mod tests {
                 (format!("{}:token:2", signature(56)), MovementKind::Mint),
             ]
         );
-        assert_eq!(draft.transaction.movements[0].from(), Some(&selected(1)));
-        assert_eq!(draft.transaction.movements[1].to(), Some(&selected(2)));
-        assert_eq!(draft.transaction.movements[0].amount.to_string(), "600000");
-        assert_eq!(draft.transaction.movements[1].amount.to_string(), "600000");
+        assert_eq!(draft.movements[0].from(), Some(&selected(1)));
+        assert_eq!(draft.movements[1].to(), Some(&selected(2)));
+        assert_eq!(draft.movements[0].amount.to_string(), "600000");
+        assert_eq!(draft.movements[1].amount.to_string(), "600000");
     }
 
     fn inspect(
         transactions: Vec<Value>,
         selected: &[base::Address],
-    ) -> Result<InterpretedBlock, IndexError> {
+    ) -> Result<BlockWithOutputs, IndexError> {
         BlockInterpreter::new(&network())?.inspect(&block(transactions), selected)
     }
 
@@ -575,7 +579,7 @@ mod tests {
         assert!(interpreted.block.transactions().is_empty());
     }
 
-    /// A draft's `transaction_order` is its place in the **block**, not its
+    /// A transaction's `order` is its place in the **block**, not its
     /// place in what `inspect` reported.
     ///
     /// The block holds three transactions and only the last touches a selected
@@ -585,7 +589,7 @@ mod tests {
     /// carries the same ordinal under every selection. Solana needs this more
     /// than the other two chains do: a first signature sorts by nothing a caller
     /// cares about, so without the ordinal a slot's history has no meaningful
-    /// order at all (`indexing::ObservationDraft::transaction_order`).
+    /// order at all (`indexing::Transaction::order`).
     #[test]
     fn a_draft_carries_its_place_in_the_block_not_in_the_selection() {
         let paying = |signature_byte: u8, payer: u8, recipient: u8| {
@@ -606,15 +610,8 @@ mod tests {
             1,
             "one transaction is selected"
         );
-        assert_eq!(narrow.block.transactions()[0].transaction_order, 2);
-        assert_eq!(
-            narrow.block.transactions()[0]
-                .transaction
-                .transaction_id
-                .id
-                .as_str(),
-            signature(3)
-        );
+        assert_eq!(narrow.block.transactions()[0].order, 2);
+        assert_eq!(narrow.block.transactions()[0].id.id.as_str(), signature(3));
 
         // The wider selection reports all three, and the last keeps the very
         // ordinal it had when it was reported alone.
@@ -624,7 +621,7 @@ mod tests {
             .block
             .transactions()
             .iter()
-            .map(|draft| draft.transaction_order)
+            .map(|draft| draft.order)
             .collect();
         assert_eq!(orders, [0, 1, 2]);
     }
@@ -636,18 +633,18 @@ mod tests {
         assert!(interpreted.outputs.spent.is_empty());
         assert!(interpreted.outputs.tracked_spends.is_empty());
         let draft = &interpreted.block.transactions()[0];
-        assert_eq!(draft.transaction.transaction_id.id.as_str(), signature(9));
-        assert_eq!(draft.status, ObservationDraftStatus::Included);
-        assert_eq!(draft.transaction.movements.len(), 1);
+        assert_eq!(draft.id.id.as_str(), signature(9));
+        assert!(matches!(draft.status, Status::Included { .. }));
+        assert_eq!(draft.movements.len(), 1);
         assert_eq!(
-            draft.transaction.movements[0].id,
+            draft.movements[0].id,
             MovementId(format!("{}:ix:0", signature(9)))
         );
-        assert_eq!(draft.transaction.movements[0].from(), Some(&selected(1)));
-        assert_eq!(draft.transaction.movements[0].to(), Some(&selected(2)));
-        assert_eq!(draft.transaction.movements[0].amount.to_string(), "10");
-        assert_eq!(draft.transaction.movements[0].amount.scale(), 0);
-        let fee = draft.transaction.fee.as_ref().expect("exact fee");
+        assert_eq!(draft.movements[0].from(), Some(&selected(1)));
+        assert_eq!(draft.movements[0].to(), Some(&selected(2)));
+        assert_eq!(draft.movements[0].amount.to_string(), "10");
+        assert_eq!(draft.movements[0].amount.scale(), 0);
+        let fee = draft.fee.as_ref().expect("exact fee");
         assert_eq!(fee.amount.to_string(), "7");
         assert_eq!(fee.payer.as_ref(), Some(&selected(1)));
     }
@@ -671,7 +668,7 @@ mod tests {
 
         let interpreted = inspect(vec![value], &[selected(2)]).expect("version-zero transfer");
         assert_eq!(
-            interpreted.block.transactions()[0].transaction.movements[0].to(),
+            interpreted.block.transactions()[0].movements[0].to(),
             Some(&selected(2))
         );
     }
@@ -691,17 +688,13 @@ mod tests {
 
         let interpreted = inspect(vec![value], &[selected(2)]).expect("distinct payer and source");
         let draft = &interpreted.block.transactions()[0];
-        assert_eq!(draft.transaction.transaction_id.id.as_str(), signature(17));
+        assert_eq!(draft.id.id.as_str(), signature(17));
         assert_eq!(
-            draft
-                .transaction
-                .fee
-                .as_ref()
-                .and_then(|fee| fee.payer.as_ref()),
+            draft.fee.as_ref().and_then(|fee| fee.payer.as_ref()),
             Some(&selected(1))
         );
-        assert_eq!(draft.transaction.movements[0].from(), Some(&selected(3)));
-        assert_eq!(draft.transaction.movements[0].to(), Some(&selected(2)));
+        assert_eq!(draft.movements[0].from(), Some(&selected(3)));
+        assert_eq!(draft.movements[0].to(), Some(&selected(2)));
     }
 
     #[test]
@@ -738,7 +731,7 @@ mod tests {
         }]);
 
         let interpreted = inspect(vec![value], &[selected(2)]).expect("complete inner transfers");
-        let movements = &interpreted.block.transactions()[0].transaction.movements;
+        let movements = &interpreted.block.transactions()[0].movements;
         assert_eq!(movements.len(), 4);
         assert_eq!(movements[1].from(), Some(&selected(3)));
         assert_eq!(movements[1].to(), Some(&selected(4)));
@@ -769,27 +762,14 @@ mod tests {
 
         let payer = inspect(vec![value.clone()], &[selected(1)]).expect("failed payer history");
         let draft = &payer.block.transactions()[0];
-        assert!(draft.transaction.movements.is_empty());
-        assert!(matches!(
-            draft.status,
-            ObservationDraftStatus::Failed { .. }
-        ));
+        assert!(draft.movements.is_empty());
+        assert!(matches!(draft.status, Status::Failed { .. }));
         assert_eq!(
-            draft
-                .transaction
-                .fee
-                .as_ref()
-                .expect("failed fee")
-                .amount
-                .to_string(),
+            draft.fee.as_ref().expect("failed fee").amount.to_string(),
             "5"
         );
         assert_eq!(
-            draft
-                .transaction
-                .fee
-                .as_ref()
-                .and_then(|fee| fee.payer.as_ref()),
+            draft.fee.as_ref().and_then(|fee| fee.payer.as_ref()),
             Some(&selected(1))
         );
 
@@ -809,15 +789,9 @@ mod tests {
         );
         let interpreted = inspect(vec![value], &[selected(1)]).expect("fee-only success");
         assert_eq!(interpreted.block.transactions().len(), 1);
-        assert!(
-            interpreted.block.transactions()[0]
-                .transaction
-                .movements
-                .is_empty()
-        );
+        assert!(interpreted.block.transactions()[0].movements.is_empty());
         assert_eq!(
             interpreted.block.transactions()[0]
-                .transaction
                 .fee
                 .as_ref()
                 .and_then(|fee| fee.payer.as_ref()),
@@ -863,7 +837,6 @@ mod tests {
             .expect("a node without inner instructions must not halt the chain");
         let draft = &reported.block.transactions()[0];
         let ids = draft
-            .transaction
             .movements
             .iter()
             .map(|movement| movement.id.0.clone())
@@ -878,16 +851,13 @@ mod tests {
         );
         // The decoded outer transfer keeps both endpoints; the undecodable
         // inner one is a one-sided pair of exact amounts.
-        assert_eq!(
-            draft.transaction.movements[0].kind(),
-            MovementKind::Transfer
-        );
-        assert_eq!(draft.transaction.movements[1].kind(), MovementKind::Burn);
-        assert_eq!(draft.transaction.movements[1].from(), Some(&selected(1)));
-        assert_eq!(draft.transaction.movements[1].amount.to_string(), "5");
-        assert_eq!(draft.transaction.movements[2].kind(), MovementKind::Mint);
-        assert_eq!(draft.transaction.movements[2].to(), Some(&selected(3)));
-        assert_eq!(draft.transaction.movements[2].amount.to_string(), "5");
+        assert_eq!(draft.movements[0].kind(), MovementKind::Transfer);
+        assert_eq!(draft.movements[1].kind(), MovementKind::Burn);
+        assert_eq!(draft.movements[1].from(), Some(&selected(1)));
+        assert_eq!(draft.movements[1].amount.to_string(), "5");
+        assert_eq!(draft.movements[2].kind(), MovementKind::Mint);
+        assert_eq!(draft.movements[2].to(), Some(&selected(3)));
+        assert_eq!(draft.movements[2].amount.to_string(), "5");
     }
 
     #[test]
@@ -907,28 +877,28 @@ mod tests {
         let reported =
             inspect(vec![value], &[selected(2)]).expect("a residual is data, not a rejection");
         let draft = &reported.block.transactions()[0];
-        assert_eq!(draft.transaction.transaction_id.id.as_str(), signature(15));
-        assert_eq!(draft.status, ObservationDraftStatus::Included);
-        assert_eq!(draft.transaction.movements.len(), 2);
+        assert_eq!(draft.id.id.as_str(), signature(15));
+        assert!(matches!(draft.status, Status::Included { .. }));
+        assert_eq!(draft.movements.len(), 2);
         // The payer moved 10 lamports beyond the 3 it paid in fee, which
         // `NetworkFee` still carries on its own.
-        assert_eq!(draft.transaction.movements[0].kind(), MovementKind::Burn);
+        assert_eq!(draft.movements[0].kind(), MovementKind::Burn);
         assert_eq!(
-            draft.transaction.movements[0].id,
+            draft.movements[0].id,
             MovementId(format!("{}:residual:0", signature(15)))
         );
-        assert_eq!(draft.transaction.movements[0].from(), Some(&selected(1)));
-        assert_eq!(draft.transaction.movements[0].to(), None);
-        assert_eq!(draft.transaction.movements[0].amount.to_string(), "10");
-        assert_eq!(draft.transaction.movements[1].kind(), MovementKind::Mint);
+        assert_eq!(draft.movements[0].from(), Some(&selected(1)));
+        assert_eq!(draft.movements[0].to(), None);
+        assert_eq!(draft.movements[0].amount.to_string(), "10");
+        assert_eq!(draft.movements[1].kind(), MovementKind::Mint);
         assert_eq!(
-            draft.transaction.movements[1].id,
+            draft.movements[1].id,
             MovementId(format!("{}:residual:1", signature(15)))
         );
-        assert_eq!(draft.transaction.movements[1].to(), Some(&selected(2)));
-        assert_eq!(draft.transaction.movements[1].from(), None);
-        assert_eq!(draft.transaction.movements[1].amount.to_string(), "10");
-        let fee = draft.transaction.fee.as_ref().expect("exact fee");
+        assert_eq!(draft.movements[1].to(), Some(&selected(2)));
+        assert_eq!(draft.movements[1].from(), None);
+        assert_eq!(draft.movements[1].amount.to_string(), "10");
+        let fee = draft.fee.as_ref().expect("exact fee");
         assert_eq!(fee.amount.to_string(), "3");
         assert_eq!(fee.payer.as_ref(), Some(&selected(1)));
     }
@@ -936,7 +906,7 @@ mod tests {
     /// The settled balance of `of` in SOL, folded from `interpreted` exactly
     /// as a store folds the rows it wrote from it, under this chain's own
     /// fee rule.
-    fn folded(interpreted: &InterpretedBlock, of: base::Address) -> indexing::Balance {
+    fn folded(interpreted: &BlockWithOutputs, of: base::Address) -> indexing::Balance {
         let subject = indexing::Subject {
             address: of,
             asset: AssetKind::Native.id(),
@@ -946,24 +916,8 @@ mod tests {
             .settlement();
         let mut ledger = indexing::Fold::new(&subject);
         for draft in interpreted.block.transactions() {
-            let status = match &draft.status {
-                ObservationDraftStatus::Included => indexing::CanonicalStatus::Included {
-                    block: interpreted.block.reference().clone(),
-                },
-                ObservationDraftStatus::Failed { reason } => indexing::CanonicalStatus::Failed {
-                    block: interpreted.block.reference().clone(),
-                    reason: reason.clone(),
-                },
-            };
             ledger
-                .apply(
-                    &indexing::CanonicalTransaction {
-                        transaction: draft.transaction.clone(),
-                        transaction_order: draft.transaction_order,
-                        status,
-                    },
-                    settlement,
-                )
+                .apply(draft, settlement)
                 .expect("interpreted amounts are storable");
         }
         ledger.balance(Some(interpreted.block.reference().clone()))
@@ -1034,7 +988,6 @@ mod tests {
         let draft = &reported.block.transactions()[0];
         assert_eq!(
             draft
-                .transaction
                 .movements
                 .iter()
                 .map(|movement| (movement.id.0.clone(), movement.kind()))
@@ -1045,17 +998,16 @@ mod tests {
                 (format!("{}:residual:2", signature(19)), MovementKind::Burn),
             ]
         );
-        assert_eq!(draft.transaction.movements[0].from(), Some(&selected(1)));
-        assert_eq!(draft.transaction.movements[0].to(), Some(&selected(2)));
-        assert_eq!(draft.transaction.movements[0].amount.to_string(), "10");
-        assert_eq!(draft.transaction.movements[1].to(), Some(&selected(2)));
-        assert_eq!(draft.transaction.movements[1].amount.to_string(), "5");
-        assert_eq!(draft.transaction.movements[2].from(), Some(&selected(3)));
-        assert_eq!(draft.transaction.movements[2].amount.to_string(), "5");
+        assert_eq!(draft.movements[0].from(), Some(&selected(1)));
+        assert_eq!(draft.movements[0].to(), Some(&selected(2)));
+        assert_eq!(draft.movements[0].amount.to_string(), "10");
+        assert_eq!(draft.movements[1].to(), Some(&selected(2)));
+        assert_eq!(draft.movements[1].amount.to_string(), "5");
+        assert_eq!(draft.movements[2].from(), Some(&selected(3)));
+        assert_eq!(draft.movements[2].amount.to_string(), "5");
         // The payer's own delta is the transfer and the fee, so it has none.
         assert!(
             !draft
-                .transaction
                 .movements
                 .iter()
                 .any(|movement| movement.id.0.ends_with(":residual:0"))

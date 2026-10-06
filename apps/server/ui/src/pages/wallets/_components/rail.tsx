@@ -29,6 +29,8 @@ interface Props {
   selected: string | null;
   onSelect: (id: string) => void;
   onAdded: (wallet: Wallet) => void;
+  archived: boolean;
+  onArchived: (archived: boolean) => void;
 }
 
 /** The address with its middle elided, so both ends stay checkable. */
@@ -36,7 +38,7 @@ function middle(text: string): string {
   return text.length > 22 ? `${text.slice(0, 10)}…${text.slice(-8)}` : text;
 }
 
-export function Rail({ shell, wallets, selected, onSelect, onAdded }: Props) {
+export function Rail({ shell, wallets, selected, onSelect, onAdded, archived, onArchived }: Props) {
   const [creating, setCreating] = useState(false);
   const [filtering, setFiltering] = useState(false);
   const [query, setQuery] = useState('');
@@ -45,10 +47,13 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded }: Props) {
   const needle = query.trim().toLowerCase();
   const shown = wallets.filter(
     (w) =>
-      (asset === null || w.asset === asset) &&
-      (needle === '' || w.address.toLowerCase().includes(needle) || w.id.includes(needle)),
+      (asset === null || (w.asset ?? w.asset_id) === asset) &&
+      (needle === '' ||
+        w.address.toLowerCase().includes(needle) ||
+        w.id.includes(needle) ||
+        (w.label?.toLowerCase().includes(needle) ?? false)),
   );
-  const assets = [...new Set(wallets.map((w) => w.asset))].sort();
+  const assets = [...new Set(wallets.map((w) => w.asset ?? w.asset_id))].sort();
 
   return (
     <Box
@@ -96,11 +101,11 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded }: Props) {
       <Collapse in={filtering}>
         <Stack spacing={1.25} sx={{ pb: 2 }}>
           <TextField
-            placeholder="address or id"
+            placeholder="label, address or id"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             slotProps={{
-              htmlInput: { 'aria-label': 'Filter by address or id', spellCheck: false },
+              htmlInput: { 'aria-label': 'Filter by label, address or id', spellCheck: false },
             }}
           />
           <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
@@ -114,6 +119,12 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded }: Props) {
                 icon={<Coin symbol={a} size={16} />}
               />
             ))}
+            <Chip
+              size="small"
+              label="Archived"
+              variant={archived ? 'filled' : 'outlined'}
+              onClick={() => onArchived(!archived)}
+            />
           </Stack>
         </Stack>
       </Collapse>
@@ -126,14 +137,22 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded }: Props) {
             onClick={() => onSelect(w.id)}
             sx={{ gap: 1.5, py: 1.25, px: 1 }}
           >
-            <Coin symbol={w.asset} />
+            <Coin symbol={w.asset ?? w.asset_id} />
             <Box sx={{ minWidth: 0, flexGrow: 1 }}>
-              <Typography noWrap sx={{ fontFamily: mono, fontSize: 12.5 }}>
-                {middle(w.address)}
-              </Typography>
+              {w.label != null ? (
+                <Typography noWrap sx={{ fontSize: 13 }}>
+                  {w.label}
+                </Typography>
+              ) : (
+                <Typography noWrap sx={{ fontFamily: mono, fontSize: 12.5 }}>
+                  {middle(w.address)}
+                </Typography>
+              )}
               <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary' }}>
-                {w.asset.toUpperCase()} · {w.network.chain}/{w.network.name}
+                {w.label != null && `${middle(w.address)} · `}
+                {(w.asset ?? w.asset_id).toUpperCase()} · {w.network.chain}/{w.network.name}
                 {w.watch_only && ' · watch only'}
+                {w.archived_at != null && ' · archived'}
               </Typography>
             </Box>
           </ListItemButton>
@@ -197,8 +216,10 @@ function AssetField({
 
 function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
   const [asset, setAsset] = useState('');
+  const [label, setLabel] = useState('');
   const [busy, setBusy] = useState(false);
   const chosen = asset || (shell.listings[0]?.asset ?? '');
+  const named = label.trim();
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="xs">
       <Box
@@ -206,8 +227,12 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
         onSubmit={(event: SubmitEvent<HTMLFormElement>) => {
           event.preventDefault();
           setBusy(true);
-          call(client.POST('/v1/wallets', { body: { asset: chosen } }))
-            .then(onDone)
+          const body = named === '' ? { asset: chosen } : { asset: chosen, label: named };
+          call(client.POST('/v1/wallets', { body }))
+            .then((wallet) => {
+              setLabel('');
+              onDone(wallet);
+            })
             .catch(shell.fail)
             .finally(() => setBusy(false));
         }}
@@ -217,7 +242,15 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
           <DialogContentText sx={{ fontSize: 13, mb: 2 }}>
             Generates a key, keeps it on this server, and watches the address from now.
           </DialogContentText>
-          <AssetField shell={shell} value={chosen} onChange={setAsset} />
+          <Stack spacing={2}>
+            <AssetField shell={shell} value={chosen} onChange={setAsset} />
+            <TextField
+              label="Label (optional)"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              slotProps={{ htmlInput: { maxLength: 64 } }}
+            />
+          </Stack>
         </DialogContent>
         <DialogActions>
           <Button color="inherit" onClick={onClose}>

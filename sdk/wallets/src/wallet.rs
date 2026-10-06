@@ -1,7 +1,7 @@
 use std::any::Any;
 
+use base::{Address, Holder};
 use base::{BoxFuture, Broadcaster, Signer, TransactionBuilder, TransactionId};
-use indexing::{Address, Holder};
 
 use crate::{Amount, WalletError};
 
@@ -42,7 +42,7 @@ pub trait SingleSender: Send + Sync {
 /// What every wallet is, whatever its asset: an address holding one asset,
 /// and a key that signs.
 ///
-/// It is an [`indexing::Holder`], so `index.watch(&id, &*wallet, start)` and
+/// It is an [`base::Holder`], so `index.watch(&id, &*wallet, start)` and
 /// every index read take the wallet itself — balance and history need no key
 /// and no send pipeline, which is why a watch-only address answers them the
 /// same way.

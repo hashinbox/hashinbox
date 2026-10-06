@@ -504,7 +504,9 @@ mod tests {
     };
 
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use json_rpc::{Batch, BoxFuture, CallResult, RawJson, Request};
+    use json_rpc::{
+        Batch, BoxFuture, CallError, CallResult, Cluster, Policy, RawJson, Request, testing::Reply,
+    };
     use serde_json::{Value, json};
     use solana_signature::Signature;
     use tokio::sync::Notify;
@@ -1332,5 +1334,225 @@ mod tests {
 
     fn signed_by(byte: u8) -> SignedTransaction {
         signed(&key(byte), 5, BUILD_SLOT)
+    }
+
+    fn reply((method, params, value): Exchange) -> Reply {
+        Reply::ok(method, value).expecting(params)
+    }
+
+    /// One node's answer to a cluster's tip probe.
+    fn probed(tip: u64) -> Reply {
+        Reply::ok("getSlot", json!(tip)).expecting(json!([{"commitment":"processed"}]))
+    }
+
+    /// The tip probe of a test cluster.
+    fn tip(node: &Script) -> BoxFuture<'_, Result<u64, CallError>> {
+        Box::pin(async move {
+            let probe = Request::new("getSlot", json!([{"commitment":"processed"}]));
+            let raw = json_rpc::Client::request(node, probe).await??;
+            Ok(raw.deserialize()?)
+        })
+    }
+
+    /// Two nodes behind a cluster that re-probes before every read, so its
+    /// primary can change between any two reads of one acquisition: before
+    /// read `i` the node `reads[i].0` probes highest and answers it. A
+    /// broadcast probes nothing; each node then answers its own `sends`.
+    async fn switching(
+        reads: Vec<(usize, Reply)>,
+        sends: [Vec<Reply>; 2],
+    ) -> ([Script; 2], Cluster<Script>) {
+        let nodes = [(); 2].map(|()| Script::default().once_only("sendTransaction"));
+        let round = |serving: usize| {
+            for (index, node) in nodes.iter().enumerate() {
+                node.push([probed(if index == serving { 2 } else { 1 })]);
+            }
+        };
+        round(reads.first().map_or(0, |(serving, _)| *serving));
+        for (serving, answer) in reads {
+            round(serving);
+            nodes[serving].push([answer]);
+        }
+        for (node, answers) in nodes.iter().zip(sends) {
+            node.push(answers);
+        }
+        let policy = Policy {
+            refresh: std::time::Duration::ZERO,
+            ..Policy::default()
+        };
+        let cluster = Cluster::new(nodes.to_vec(), tip, policy).await.unwrap();
+        (nodes, cluster)
+    }
+
+    fn sent(node: &Script) -> usize {
+        node.methods()
+            .iter()
+            .filter(|method| *method == "sendTransaction")
+            .count()
+    }
+
+    /// Reads stay on one node at a time and each carries the previous read's
+    /// slot as its floor. A primary that changes to a node behind that floor
+    /// fails the acquisition — the node's own "minimum context slot" refusal
+    /// or a stale context alike — before anything is signed or submitted.
+    #[tokio::test]
+    async fn a_primary_switch_behind_the_floor_fails_before_any_submission() {
+        let signer = key(7);
+        let to = key(8).address().clone();
+        let floor = json!([{"commitment":"confirmed","minContextSlot":6}]);
+        for behind in [
+            Reply::failure(
+                "getLatestBlockhash",
+                -32_016,
+                "Minimum context slot not reached",
+            )
+            .expecting(floor.clone()),
+            Reply::ok(
+                "getLatestBlockhash",
+                json!({"context":{"slot":5},"value":{
+                    "blockhash": lifetime().blockhash().to_string(), "lastValidBlockHeight": 44,
+                }}),
+            )
+            .expecting(floor.clone()),
+        ] {
+            let mut reads = bracketed(&[signer.address(), &to], json!([wallet(100), null]))
+                .into_iter()
+                .take(4)
+                .map(|exchange| (0, reply(exchange)))
+                .collect::<Vec<_>>();
+            reads.push((1, behind));
+            let (nodes, cluster) = switching(reads, [Vec::new(), Vec::new()]).await;
+            let outbox = build(
+                Client::unverified(cluster, Script::network()),
+                Registrar::closed(),
+                Arc::new(Resolution::default()),
+            );
+            let error = outbox.send(vec![item(&signer, &to, 10)]).await.unwrap_err();
+            assert_definite(
+                &error,
+                None,
+                WalletErrorKind::Unavailable,
+                "Solana transaction preparation failed",
+            );
+            assert!(!busy(&outbox, signer.address()));
+            for node in &nodes {
+                node.exhausted();
+                assert_eq!(sent(node), 0);
+            }
+        }
+    }
+
+    /// The other half of the guarantee: a node at or above the floor takes
+    /// over mid-acquisition and the transfer completes consistently, every
+    /// later read at the floor the earlier node established, and the exact
+    /// envelope then reaches every node exactly once.
+    #[tokio::test]
+    async fn a_primary_switch_at_the_floor_submits_to_every_node_once() {
+        let signer = key(7);
+        let to = key(8).address().clone();
+        let unsigned = message(&signer, &to, 3);
+        let bytes = unsigned.bytes().unwrap();
+        let expected = unsigned
+            .sign(signer.address(), lifetime(), BUILD_SLOT, signer.as_ref())
+            .await
+            .unwrap();
+        let mut exchanges = bracketed(&[signer.address(), &to], json!([wallet(100), null]));
+        exchanges.push(fee(&bytes, 7, BUILD_SLOT));
+        exchanges.push(simulation(
+            &expected,
+            BUILD_SLOT,
+            json!({"context":{"slot":FLOOR_SLOT},"value":{"err":null}}),
+        ));
+        exchanges.push(height(json!(44)));
+        let reads = exchanges
+            .into_iter()
+            .enumerate()
+            .map(|(index, exchange)| (usize::from(index >= 4), reply(exchange)))
+            .collect();
+        let accepted = || vec![reply(send(&expected, json!(expected.id.to_string())))];
+        let (nodes, cluster) = switching(reads, [accepted(), accepted()]).await;
+        let registrar = Registrar::accepting();
+        let outbox = Arc::new(
+            build(
+                Client::unverified(cluster, Script::network()),
+                registrar.clone(),
+                Arc::new(Resolution::default()),
+            )
+            .with_memos([Memo::from_bytes([3; Memo::LENGTH])]),
+        );
+        let (signed, _) = outbox.sign(item(&signer, &to, 10)).await.expect("signed");
+        assert_eq!(signed, expected);
+        let broadcasting = outbox.clone();
+        let waiter =
+            tokio::spawn(async move { broadcasting.broadcast(&signed.id, &signed.envelope).await });
+        tokio::task::yield_now().await;
+        registrar.task().run().await;
+        assert_eq!(
+            waiter.await.unwrap().expect("broadcast"),
+            base::TransactionId::from(expected.id)
+        );
+        for node in &nodes {
+            node.exhausted();
+            assert_eq!(sent(node), 1);
+        }
+    }
+
+    /// Every node failed, one of them without an answer: that node may have
+    /// accepted the envelope, so the submission is unknown, never a definite
+    /// refusal, and the sender stays reserved for recovery.
+    #[tokio::test]
+    async fn an_all_node_failure_with_a_transport_failure_stays_ambiguous() {
+        let transaction = signed(&key(7), 3, BUILD_SLOT);
+        let timeout = json_rpc::Error {
+            kind: json_rpc::ErrorKind::Timeout,
+            message: "timed out".to_owned(),
+        };
+        let (_, params, _) = send(&transaction, Value::Null);
+        let nodes = [
+            Script::new([
+                probed(1),
+                Reply::failure("sendTransaction", -32_002, "preflight failure")
+                    .expecting(params.clone()),
+                reply(status(
+                    &transaction,
+                    json!({"context":{"slot":15},"value":[null]}),
+                )),
+                reply(height(json!(45))),
+            ]),
+            Script::new([
+                probed(1),
+                Reply::result("sendTransaction", Err(timeout)).expecting(params),
+            ]),
+        ]
+        .map(|node| node.once_only("sendTransaction"));
+        let cluster = Cluster::new(nodes.to_vec(), tip, Policy::default())
+            .await
+            .unwrap();
+        let outbox = build(
+            Client::unverified(cluster, Script::network()),
+            Registrar::closed(),
+            Arc::new(Resolution::default()),
+        );
+        let (prepared, admission) = prepared(&outbox, vec![transaction.clone()]);
+        let dispatch = Dispatch {
+            submitter: outbox.submitter.clone(),
+        };
+        let Outcome::Unknown {
+            error,
+            transaction: retained,
+        } = dispatch.run(prepared.0, admission.settlement()).await
+        else {
+            panic!("an all-node failure that includes a transport failure is ambiguous");
+        };
+        assert_eq!(*retained, transaction);
+        assert_eq!(
+            error.ambiguous_transaction_id,
+            Some(base::TransactionId::from(transaction.id))
+        );
+        assert!(busy(&outbox, key(7).address()), "retained for recovery");
+        for node in &nodes {
+            node.exhausted();
+            assert_eq!(sent(node), 1);
+        }
     }
 }

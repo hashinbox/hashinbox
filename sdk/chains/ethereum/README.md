@@ -11,8 +11,8 @@ the SDK.
 use std::{collections::BTreeMap, sync::Arc};
 
 use chain_ethereum::{Config, Error, Network, Store};
-use sdk_config::Rpc;
-use wallets::{ComposedChain, SubmissionRegistrar};
+use sdk_config::{ComposedChain, Rpc};
+use wallets::SubmissionRegistrar;
 
 /// `repository` is the one store every network is indexed into.
 async fn ethereum<R: Store>(
@@ -72,10 +72,3 @@ Contracts that reject this probe are refused without a fallback. The resolved
 transfer is preflighted again and refused if its execution exceeds the quoted fee
 budget. ERC-20 sweeps transfer the remaining token units
 while native ETH independently funds gas. Incoming batch transfers are not funding.
-
-For an independent balance check, capture `indexing::BalanceEvidence` from the
-repository's atomic balance answer and its query, then pass `&evidence` to
-`factory.witness().attest`. After `Attestation::Agreed`, record that same capture
-with the repository's optional `record_evidence` method. It rejects a stale
-checkpoint or changed total; neither operation replaces the indexed amount or
-claims complete history.

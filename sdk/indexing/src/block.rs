@@ -1,11 +1,11 @@
-//! Chain-neutral block contents: transactionless credits, interpreted blocks,
-//! and validated canonical blocks. No storage, policy, or I/O.
+//! Chain-neutral block contents: transactionless credits and a block with its
+//! transactions and output changes. No storage, policy, or I/O.
 
 use std::collections::BTreeSet;
 
 use crate::{
-    Address, AssetId, Block, BlockParent, BlockRef, CanonicalTransaction, Decimal, IndexError,
-    IndexErrorKind, MovementId, Network, Networked, ObservationDraft, OutputChanges, Transactions,
+    Address, AssetId, Block, BlockParent, BlockRef, Decimal, IndexError, IndexErrorKind,
+    MovementId, Network, Networked, OutputChanges, Transaction, Transactions,
 };
 
 /// One value change a block makes with no transaction to name it.
@@ -89,14 +89,26 @@ impl BlockCredit {
     }
 }
 
-/// What a chain's interpreter returns for one native block, before validation.
+/// One block's indexing facts: the inspected block with every transaction
+/// that touched a selected address, its live-output changes, and the value it
+/// moved with no transaction to name it.
+///
+/// What an interpreter returns and what a commit or a pending read consumes;
+/// [`Self::validate`] is the check between them, not a conversion.
+///
+/// It holds no raw protocol payload — those are the chain's type and megabytes
+/// apiece, and the native-block cache in `fetch.rs` keeps them for the one path
+/// that wants one again — and no database precondition. Which checkpoint
+/// storage must hold before these facts may be written is a property of the
+/// *write*, and lives on [`IndexedBatch`](crate::IndexedBatch).
+// linter:disable rust/struct-word-count -- the name design 048 fixes for a block with its outputs.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InterpretedBlock {
+pub struct BlockWithOutputs {
     /// The inspected block in its network, with every transaction that touched
     /// a selected address, in block order, each carrying its own native place
-    /// in the block it came from ([`ObservationDraft::transaction_order`])
-    /// rather than its place in this list.
-    pub block: Block<ObservationDraft>,
+    /// in the block it came from ([`Transaction::order`]) rather than its
+    /// place in this list.
+    pub block: Block<Transaction>,
     /// Live-output changes (UTXO chains); empty for account chains.
     pub outputs: OutputChanges,
     /// Value the block moved to a selected address with no transaction to
@@ -104,7 +116,7 @@ pub struct InterpretedBlock {
     pub credits: Vec<BlockCredit>,
 }
 
-impl InterpretedBlock {
+impl BlockWithOutputs {
     /// Assembles the block `reference` names in `network` from
     /// `transactions`, kept in the given order, with no output changes and no
     /// credits; a chain that has either sets the field.
@@ -117,7 +129,7 @@ impl InterpretedBlock {
     pub fn new(
         network: &impl Networked,
         reference: BlockRef,
-        transactions: Vec<ObservationDraft>,
+        transactions: Vec<Transaction>,
     ) -> Result<Self, IndexError> {
         let transactions = Transactions::new(transactions).map_err(|_| {
             IndexError::new(
@@ -148,129 +160,55 @@ impl InterpretedBlock {
         }
         Ok(())
     }
-}
 
-/// One block's validated indexing facts: its reference, the transactions and
-/// output changes it made, and the value it moved with no transaction to name
-/// it.
-///
-/// The step after [`InterpretedBlock`], and the last one before the facts are
-/// either read or written: every draft has become a
-/// [`CanonicalTransaction`](crate::CanonicalTransaction), the output changes do
-/// not overlap, no two transactions share a native place, and every credit is
-/// valid and uniquely identified.
-///
-/// Private fields and [`Self::new`] keep unvalidated facts out of this type.
-///
-/// It holds no raw protocol payload — those are the chain's type and megabytes
-/// apiece, and the native-block cache in `fetch.rs` keeps them for the one path that
-/// wants one again — and no database precondition. Which checkpoint storage
-/// must hold before these facts may be written is a property of the *write*,
-/// and lives on [`IndexedBatch`](crate::IndexedBatch); the facts themselves
-/// are equally what a pending-block read answers from.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CanonicalBlock {
-    block: Block<CanonicalTransaction>,
-    outputs: OutputChanges,
-    credits: Vec<BlockCredit>,
-}
-
-impl CanonicalBlock {
-    /// Validates `interpreted` as `network`'s facts and binds every
-    /// transaction to the block: non-overlapping and uniquely identified
-    /// output changes, one transaction per native place, network-bound
-    /// movements and fees, and uniquely identified block credits. The
-    /// reference, the output changes and the credits are kept as they came.
+    /// Checks these facts as `network`'s: the block's network, non-overlapping
+    /// and uniquely identified output changes, one transaction per native
+    /// place, every transaction valid and included in this very block, and
+    /// uniquely identified valid credits.
     ///
-    /// Transaction identifiers are already unique: [`InterpretedBlock::new`]
-    /// refused a repeated one when the interpreter's output was assembled.
-    ///
-    /// Nothing here consults storage or a node, and nothing here knows where
-    /// the block will be written.
+    /// Transaction identifiers are already unique: [`Transactions`] refuses a
+    /// repeated one when the block is assembled. Nothing here consults storage
+    /// or a node.
     ///
     /// # Errors
     ///
     /// [`IndexErrorKind::InvalidBlock`] for invalid content, and
     /// [`IndexErrorKind::NetworkMismatch`] for a block or a transaction of
     /// another network.
-    pub fn new(network: Network, interpreted: InterpretedBlock) -> Result<Self, IndexError> {
-        let InterpretedBlock {
-            block,
-            outputs,
-            credits,
-        } = interpreted;
-        let (stated, reference, drafts) = block.into_parts();
-        if stated != network {
+    pub fn validate(&self, network: &Network) -> Result<(), IndexError> {
+        if self.block.network() != network {
             return Err(IndexError::new(
                 IndexErrorKind::NetworkMismatch,
                 "block belongs to another network",
                 false,
             ));
         }
-        outputs.validate(&network, reference.height)?;
+        let reference = self.block.reference();
+        self.outputs.validate(network, reference.height)?;
         let mut orders = BTreeSet::<u64>::new();
-        let mut transactions = Vec::with_capacity(drafts.len());
-        for draft in drafts {
+        for transaction in self.block.transactions().iter() {
             // Two transactions of one block cannot occupy one native place, so a
             // repeated ordinal says the interpreter numbered the list it
             // *reported* rather than the list the chain executed — which is the
-            // one thing `ObservationDraft::transaction_order` may not be, and the
-            // only moment anything still holds both lists to tell.
-            if !orders.insert(draft.transaction_order) {
+            // one thing `Transaction::order` may not be, and the only moment
+            // anything still holds both lists to tell.
+            if !orders.insert(transaction.order) {
                 return Err(IndexError::new(
                     IndexErrorKind::InvalidBlock,
                     "block contains two transactions at one native place",
                     false,
                 ));
             }
-            transactions.push(draft.canonical(&network, &reference)?);
+            transaction.validate(network)?;
+            if transaction.block() != reference {
+                return Err(IndexError::new(
+                    IndexErrorKind::InvalidBlock,
+                    "transaction names another block",
+                    false,
+                ));
+            }
         }
-        BlockCredit::validate_all(&credits, &network)?;
-
-        let transactions = Transactions::new(transactions).map_err(|_| {
-            IndexError::new(
-                IndexErrorKind::InvalidBlock,
-                "block contains a duplicate transaction",
-                false,
-            )
-        })?;
-        Ok(Self {
-            block: Block::new(&network, reference, transactions),
-            outputs,
-            credits,
-        })
-    }
-
-    /// The network the block belongs to.
-    #[must_use]
-    pub const fn network(&self) -> &Network {
-        self.block.network()
-    }
-
-    /// The block these facts were read from.
-    #[must_use]
-    pub const fn block(&self) -> &BlockRef {
-        self.block.reference()
-    }
-
-    /// The block's validated transactions in block order, with inclusion
-    /// status.
-    #[must_use]
-    pub const fn transactions(&self) -> &Transactions<CanonicalTransaction> {
-        self.block.transactions()
-    }
-
-    /// The block's live-output changes.
-    #[must_use]
-    pub const fn outputs(&self) -> &OutputChanges {
-        &self.outputs
-    }
-
-    /// The value the block moved with no transaction to name it, in block
-    /// order.
-    #[must_use]
-    pub fn credits(&self) -> &[BlockCredit] {
-        &self.credits
+        BlockCredit::validate_all(&self.credits, network)
     }
 
     /// Checks that this block extends `checkpoint`: height one above it,
@@ -286,7 +224,7 @@ impl CanonicalBlock {
     /// checkpoint's height has no successor.
     pub(crate) fn connects_to(&self, checkpoint: Option<&BlockRef>) -> Result<(), IndexError> {
         match checkpoint {
-            Some(checkpoint) if !extends(self.block(), checkpoint)? => Err(
+            Some(checkpoint) if !extends(self.block.reference(), checkpoint)? => Err(
                 IndexError::disconnected("block does not connect to the checkpoint"),
             ),
             _ => Ok(()),
@@ -300,7 +238,7 @@ impl CanonicalBlock {
 /// **The linkage rule, stated once.** A reading checks each block it fetches
 /// against the one before it ([`crate::scan::Scan`]) and a batch checks each
 /// block it carries against the line it extends
-/// ([`CanonicalBlock::connects_to`]); both ask here, so a block cannot be
+/// ([`BlockWithOutputs::connects_to`]); both ask here, so a block cannot be
 /// accepted into memory under one rule and refused by a commit under another.
 /// What a broken link *means* differs — a fork in flight, a batch that does not
 /// fit its checkpoint — so each caller words its own refusal.
@@ -335,8 +273,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        AssetId, BlockHash, BlockHeight, BlockPosition, CanonicalStatus, IndexedOutput, NetworkFee,
-        ObservationDraftStatus, OutputId, OutputKey, Transaction, TransactionRef, ValueMovement,
+        AssetId, BlockHash, BlockHeight, BlockPosition, IndexedOutput, NetworkFee, OutputId,
+        OutputKey, Status, Transaction, TransactionRef, ValueMovement,
     };
 
     fn network() -> Network {
@@ -418,43 +356,38 @@ mod tests {
         }
     }
 
-    fn draft(amount: Decimal) -> ObservationDraft {
-        ObservationDraft {
-            transaction: Transaction {
-                transaction_id: TransactionRef::new(network(), "transaction"),
-                movements: vec![ValueMovement::mint(
-                    MovementId("movement".into()),
-                    asset(),
-                    amount,
-                    address(),
-                )],
-                fee: None,
-            },
-            transaction_order: 0,
-            status: ObservationDraftStatus::Included,
+    fn draft(amount: Decimal) -> Transaction {
+        Transaction {
+            id: TransactionRef::new(network(), "transaction"),
+            movements: vec![ValueMovement::mint(
+                MovementId("movement".into()),
+                asset(),
+                amount,
+                address(),
+            )],
+            fee: None,
+            order: 0,
+            status: Status::Included { block: block(1) },
         }
     }
 
-    fn interpreted(
-        transactions: Vec<ObservationDraft>,
-        outputs: OutputChanges,
-    ) -> InterpretedBlock {
-        InterpretedBlock {
+    fn interpreted(transactions: Vec<Transaction>, outputs: OutputChanges) -> BlockWithOutputs {
+        BlockWithOutputs {
             outputs,
-            ..InterpretedBlock::new(&network(), block(1), transactions).expect("unique ids")
+            ..BlockWithOutputs::new(&network(), block(1), transactions).expect("unique ids")
         }
     }
 
     /// A valid draft of its own: its own identifier and its own native place.
-    fn placed(id: &str, order: u64) -> ObservationDraft {
+    fn placed(id: &str, order: u64) -> Transaction {
         let mut value = draft(Decimal::zero());
-        value.transaction.transaction_id = TransactionRef::new(network(), id);
-        value.transaction_order = order;
+        value.id = TransactionRef::new(network(), id);
+        value.order = order;
         value
     }
 
-    fn refusal(interpreted: InterpretedBlock) -> IndexError {
-        CanonicalBlock::new(network(), interpreted).expect_err("invalid facts")
+    fn refusal(interpreted: BlockWithOutputs) -> IndexError {
+        interpreted.validate(&network()).expect_err("invalid facts")
     }
 
     fn credit(id: &str, amount: &str) -> BlockCredit {
@@ -566,7 +499,7 @@ mod tests {
         ));
 
         let mut fee_draft = draft(Decimal::zero());
-        fee_draft.transaction.fee = Some(NetworkFee {
+        fee_draft.fee = Some(NetworkFee {
             asset: asset(),
             amount: negative,
             payer: Some(address()),
@@ -601,7 +534,7 @@ mod tests {
         );
     }
 
-    /// The refusal `CanonicalBlock::new` used to make, one stage earlier: two
+    /// Two transactions under one identifier are refused when the block is assembled: two
     /// transactions under one identifier never become facts at all, so nothing
     /// downstream — not validation, not a store — has to look for them.
     ///
@@ -612,8 +545,8 @@ mod tests {
     fn two_transactions_under_one_id_are_refused_where_the_facts_are_assembled() {
         let valid = draft(Decimal::zero());
         let invalid = draft("-1".parse().expect("negative decimal"));
-        let apart = ObservationDraft {
-            transaction_order: 9,
+        let apart = Transaction {
+            order: 9,
             ..valid.clone()
         };
         for transactions in [
@@ -621,7 +554,7 @@ mod tests {
             vec![invalid, valid.clone()],
             vec![placed("other", 1), valid.clone(), placed("third", 2), apart],
         ] {
-            let error = InterpretedBlock::new(&network(), block(1), transactions)
+            let error = BlockWithOutputs::new(&network(), block(1), transactions)
                 .expect_err("one identifier, two transactions");
             assert_eq!(
                 error,
@@ -633,7 +566,7 @@ mod tests {
             );
         }
 
-        let kept = InterpretedBlock::new(
+        let kept = BlockWithOutputs::new(
             &network(),
             block(1),
             vec![placed("second", 5), placed("first", 2), valid],
@@ -641,8 +574,7 @@ mod tests {
         .expect("three identifiers");
         let ids = kept.block.transactions().iter();
         assert_eq!(
-            ids.map(|draft| draft.transaction.transaction_id.id.as_str())
-                .collect::<Vec<_>>(),
+            ids.map(|draft| draft.id.id.as_str()).collect::<Vec<_>>(),
             ["second", "first", "transaction"]
         );
         assert_eq!(kept.block.reference(), &block(1));
@@ -683,8 +615,8 @@ mod tests {
     #[test]
     fn a_block_of_another_network_is_refused_even_when_it_is_empty() {
         let elsewhere = Network::new(network().chain, "other");
-        let empty = InterpretedBlock::new(&elsewhere, block(1), Vec::new()).expect("no ids");
-        let error = CanonicalBlock::new(network(), empty).expect_err("another network");
+        let empty = BlockWithOutputs::new(&elsewhere, block(1), Vec::new()).expect("no ids");
+        let error = empty.validate(&network()).expect_err("another network");
         assert_eq!(
             error,
             IndexError::new(
@@ -695,59 +627,25 @@ mod tests {
         );
     }
 
-    /// Validation binds the transactions and changes nothing else: the
-    /// reference, the network, the output changes and the credits of the
-    /// sealed block are the values the interpreter reported, in its order.
+    /// A transaction must name the block it was read from: one carrying
+    /// another block's reference is refused even when it is otherwise valid.
     #[test]
-    fn validation_binds_the_transactions_and_keeps_everything_else() {
-        let created = |id: &str, amount: u64| IndexedOutput {
-            id: output_key(id).output,
-            address: address(),
-            asset: asset(),
-            amount: Decimal::from(amount),
-            evidence: vec![1, 2, 3],
-            created_at: BlockHeight(1),
-            coinbase: false,
+    fn a_transaction_naming_another_block_is_refused() {
+        let mut stray = placed("stray", 0);
+        stray.status = Status::Failed {
+            block: block(2),
+            reason: None,
         };
-        let outputs = OutputChanges {
-            created: vec![created("made-second", 7), created("made-first", 5)],
-            spent: vec![output_key("spent-b"), output_key("spent-a")],
-            tracked_spends: vec![output_key("tracked")],
-        };
-        let credits = vec![credit("withdrawal:9", "4"), credit("withdrawal:2", "6")];
-        let mut failed = placed("failed", 4);
-        failed.status = ObservationDraftStatus::Failed {
-            reason: Some("reverted".into()),
-        };
-        failed.transaction.movements.clear();
-        let drafts = vec![placed("late", 8), failed, placed("early", 1)];
-        let reported = InterpretedBlock {
-            outputs: outputs.clone(),
-            credits: credits.clone(),
-            ..InterpretedBlock::new(&network(), block(1), drafts.clone()).expect("unique ids")
-        };
-
-        let sealed = CanonicalBlock::new(network(), reported).expect("valid facts");
-
-        assert_eq!(sealed.outputs(), &outputs);
-        assert_eq!(sealed.credits(), credits);
-        assert_eq!(sealed.block(), &block(1));
-        assert_eq!(sealed.network(), &network());
-        let bound = sealed.transactions().iter().collect::<Vec<_>>();
-        assert_eq!(bound.len(), drafts.len());
-        for (canonical, draft) in bound.into_iter().zip(drafts) {
-            assert_eq!(canonical.transaction, draft.transaction);
-            assert_eq!(canonical.transaction_order, draft.transaction_order);
-            assert_eq!(canonical.block(), &block(1));
-            let expected = match draft.status {
-                ObservationDraftStatus::Included => CanonicalStatus::Included { block: block(1) },
-                ObservationDraftStatus::Failed { reason } => CanonicalStatus::Failed {
-                    block: block(1),
-                    reason,
-                },
-            };
-            assert_eq!(canonical.status, expected);
-        }
+        stray.movements.clear();
+        let error = refusal(interpreted(vec![stray], OutputChanges::default()));
+        assert_eq!(
+            error,
+            IndexError::new(
+                IndexErrorKind::InvalidBlock,
+                "transaction names another block",
+                false,
+            )
+        );
     }
 
     /// Two transactions of one block cannot occupy one native place, and this
@@ -775,77 +673,11 @@ mod tests {
             )
         );
 
-        CanonicalBlock::new(
-            network(),
-            interpreted(
-                vec![placed("first", 3), placed("second", 9)],
-                OutputChanges::default(),
-            ),
+        interpreted(
+            vec![placed("first", 3), placed("second", 9)],
+            OutputChanges::default(),
         )
+        .validate(&network())
         .expect("a selection is a subset, so its places may have gaps");
-    }
-
-    #[test]
-    fn canonical_validation_preserves_network_status_movement_and_fee_order() {
-        let own_network = network();
-        let mut value = draft("-1".parse().expect("negative decimal"));
-        value.transaction.transaction_id.network.name = "other".into();
-        value.status = ObservationDraftStatus::Failed {
-            reason: Some("failed".into()),
-        };
-        value.transaction.fee = Some(NetworkFee {
-            asset: asset(),
-            amount: "-1".parse().expect("negative decimal"),
-            payer: None,
-        });
-        let error = value
-            .clone()
-            .canonical(&own_network, &block(1))
-            .expect_err("a transaction of another network");
-        assert_eq!(
-            error,
-            IndexError::new(
-                IndexErrorKind::NetworkMismatch,
-                "transaction belongs to another network",
-                false,
-            )
-        );
-        value.transaction.transaction_id.network = own_network.clone();
-        for message in [
-            "failed transaction contains movements",
-            "transaction contains an invalid movement",
-            "transaction contains an invalid network fee",
-        ] {
-            let error = value
-                .clone()
-                .canonical(&own_network, &block(1))
-                .expect_err(message);
-            assert_eq!(
-                error,
-                IndexError::new(IndexErrorKind::InvalidBlock, message, false)
-            );
-            if matches!(value.status, ObservationDraftStatus::Failed { .. }) {
-                value.status = ObservationDraftStatus::Included;
-            } else {
-                value.transaction.movements.clear();
-            }
-        }
-        value.status = ObservationDraftStatus::Failed {
-            reason: Some("failed".into()),
-        };
-        value.transaction.fee.as_mut().expect("a fee").amount = Decimal::from(7_u64);
-        let canonical = value
-            .clone()
-            .canonical(&own_network, &block(1))
-            .expect("a valid failed transaction");
-        assert_eq!(canonical.transaction.fee, value.transaction.fee);
-        assert_eq!(
-            canonical.status,
-            CanonicalStatus::Failed {
-                block: block(1),
-                reason: Some("failed".into()),
-            }
-        );
-        assert!(canonical.transaction.movements.is_empty());
     }
 }

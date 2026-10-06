@@ -50,8 +50,20 @@ pub struct Watch {
     pub start: BlockPosition,
 }
 
+impl Watch {
+    /// Rejects a holding no store can hold rows for.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexErrorKind::InvalidRequest`](crate::IndexErrorKind::InvalidRequest)
+    /// for a blank address or an asset of another chain.
+    pub fn validate(&self) -> Result<(), IndexError> {
+        crate::holder::require_holding(&self.address, &self.asset)
+    }
+}
+
 /// A stored watch is the holding it observes, under an id and a birthday, so
-/// [`Holder::validate`] is the whole of what a store owes its address and asset
+/// [`Watch::validate`] is the whole of what a store owes its address and asset
 /// — the blank address and the foreign asset [`crate::WatchStore::add`]
 /// refuses, checked by the row rather than by each store that holds one.
 impl Holder for Watch {
@@ -83,7 +95,9 @@ pub trait Watching: Send + Sync {
     ///
     /// Re-watching the same address under the same id is a no-op; a known
     /// address under another id, another `Birthday::At`, or a known id on another
-    /// address, is `Conflict`.
+    /// address, is `Conflict`. An unwatched (archived) address is watched again
+    /// only under its own id; a [`crate::WalletRegistry`] row filed before
+    /// anything observed it is observed by watching its id.
     ///
     /// # Errors
     ///
@@ -98,18 +112,15 @@ pub trait Watching: Send + Sync {
         start: Birthday,
     ) -> BoxFuture<'a, Result<Watch, IndexError>>;
 
-    /// Stops observing whatever `id` watches, and returns the row it removed.
+    /// Stops observing whatever `id` watches, and returns the watch it
+    /// archived.
     ///
     /// **No indexed row is deleted.** The history, the live outputs and the
     /// credits of the address all stay; what stops is future inspection. Rows
     /// nothing claims are the price, and it is the cheaper one: deleting would be
     /// a second removal path beside the offline
     /// [`crate::Purging::purge_network`] and an irreversible one, for an act
-    /// that is otherwise entirely reversible. Nor are the rows reachable
-    /// meanwhile *through an application*: a wallet is addressed by `id`, so
-    /// `GET /v1/wallets/{id}/balance` and the history page answer `404` the
-    /// moment the row is gone, exactly as they do for an id that was never
-    /// watched. An SDK caller holding the bare address still reads them, because
+    /// that is otherwise entirely reversible. The rows stay readable, because
     /// [`crate::ConfirmedHistory`] and [`crate::BalanceStore`] answer for an
     /// address and asset and are keyed by no watch — which is the same reason
     /// they answer for an address this process watched a moment ago. What the
@@ -126,7 +137,8 @@ pub trait Watching: Send + Sync {
     /// the chain, so it goes with the observation. Another observation of the same
     /// address keeps its own, earned under its own birthday.
     ///
-    /// **The address may be watched again**, under any id and from any
+    /// **The address may be watched again**, under its own id — the store keeps
+    /// the row archived and reserves its pair for that id — from any
     /// [`Birthday`], and it then reads its range again rather than inheriting a
     /// settled claim: bounded by the same
     /// [`SyncPolicy::max_backfill_blocks`](crate::SyncPolicy) the first watch was

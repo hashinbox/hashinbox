@@ -217,6 +217,12 @@ pub trait Authorship: Sender {
     fn author(&self, wallet: &Arc<dyn Wallet>) -> Result<Arc<dyn Author>, WalletError>;
 }
 
+impl<T: Authorship + ?Sized> Authorship for Arc<T> {
+    fn author(&self, wallet: &Arc<dyn Wallet>) -> Result<Arc<dyn Author>, WalletError> {
+        (**self).author(wallet)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

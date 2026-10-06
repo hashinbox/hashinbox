@@ -17,7 +17,8 @@ use crate::native::{Error, ErrorKind, SignedTransaction, TransactionId};
 pub trait Submitter: Send + Sync {
     /// Submits one exact signed envelope and verifies the returned hash.
     ///
-    /// Implementations make one visible submission attempt. Any
+    /// Implementations make one visible submission attempt at every node
+    /// the transport reaches (`json_rpc::Client::broadcast`). Any
     /// [`ErrorKind::RpcUnavailable`] means the attempt may have reached the
     /// node: the outcome is unknown and only `transaction.id` identifies it.
     /// Every other kind is a definite failure before the wire.
@@ -46,7 +47,7 @@ impl<C: json_rpc::Client> Submitter for Client<C> {
             }
             let method = "eth_sendRawTransaction";
             let raw = match self
-                .call_once(method, json!([hex::encode_prefixed(bytes)]))
+                .broadcast_once(method, json!([hex::encode_prefixed(bytes)]))
                 .await
             {
                 Ok(raw) => raw,
@@ -126,7 +127,10 @@ mod tests {
     use futures_executor::block_on;
 
     use super::*;
-    use crate::native::rpc::script::{Reply, Script, Scripted};
+    use crate::native::{
+        Network,
+        rpc::script::{CHAIN_ID, Reply, Script, Scripted},
+    };
 
     fn signed(bytes: &[u8]) -> SignedTransaction {
         SignedTransaction {
@@ -223,6 +227,50 @@ mod tests {
             "Ethereum submission outcome is ambiguous: Ethereum RPC reported an \
              already-known transaction but did not expose the matching hash"
         );
+    }
+
+    /// The injected tip probe of a test cluster.
+    fn tip(client: &Script) -> BoxFuture<'_, Result<u64, CallError>> {
+        Box::pin(async move {
+            let probe = json_rpc::Request::new("eth_blockNumber", json!([]));
+            let raw = json_rpc::Client::request(client, probe).await??;
+            Ok(raw.deserialize()?)
+        })
+    }
+
+    #[test]
+    fn submission_reaches_every_node_of_a_cluster_once() {
+        let transaction = signed(&[0x02, 0x0c, 0x0d]);
+        let id = transaction.id.to_string();
+        let height = || Reply::ok("eth_blockNumber", json!(1));
+        let nodes = [
+            Script::node(vec![
+                height(),
+                Reply::ok("eth_sendRawTransaction", json!(id)),
+            ]),
+            Script::node(vec![
+                height(),
+                Reply::failure("eth_sendRawTransaction", -32_000, "nonce too low"),
+            ]),
+        ];
+        let cluster = block_on(json_rpc::Cluster::new(
+            nodes.to_vec(),
+            tip,
+            json_rpc::Policy::default(),
+        ))
+        .unwrap();
+        let client = Client::unverified(cluster, Network::new(CHAIN_ID, "anvil"));
+        assert_eq!(
+            block_on(client.broadcast(transaction.clone())).unwrap(),
+            transaction.id
+        );
+        for node in &nodes {
+            node.exhausted();
+            assert_eq!(
+                node.methods(),
+                ["eth_blockNumber", "eth_sendRawTransaction"]
+            );
+        }
     }
 
     #[test]

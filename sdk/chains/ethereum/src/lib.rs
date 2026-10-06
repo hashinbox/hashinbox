@@ -19,8 +19,7 @@ pub use indexer::{IndexerParams, indexer};
 pub use interpreter::BlockInterpreter;
 pub use native::{
     Address, AssetKind, CHAIN_NAME, ETH, Error, ErrorKind, KeyPair, NETWORKS, Network, Wei,
-    rpc::{Attestation, Client as RpcClient},
-    transaction::FeeLimits,
+    rpc::Client as RpcClient, transaction::FeeLimits,
 };
 pub use source::Source;
-pub use wallet::{BalanceWitness, WalletConfig, WalletFactory};
+pub use wallet::{WalletConfig, WalletFactory};

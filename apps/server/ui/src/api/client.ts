@@ -12,6 +12,7 @@ export type Transaction = Schemas['Transaction'];
 export type TransactionPage = Schemas['TransactionPage'];
 export type Report = Schemas['Report'];
 export type Fee = Schemas['Fee'];
+export type ConfiguredNetwork = Schemas['ConfiguredNetwork'];
 
 /** Raised for any non-2xx answer; `message` is the server's own. */
 export class ApiError extends Error {
@@ -52,12 +53,12 @@ const baseUrl = settings.apiBase;
 export const client = createClient<paths>({ baseUrl });
 
 /**
- * The health report. `/healthz` answers 503 with the same body when the server
+ * The health report. `/health` answers 503 with the same body when the server
  * is not ready, which the typed client would treat as an error; a not-ready
  * report is still a report, so it is read directly.
  */
 export async function health(): Promise<Report> {
-  const response = await fetch(`${baseUrl}/healthz`, { headers: { Accept: 'application/json' } });
+  const response = await fetch(`${baseUrl}/health`, { headers: { Accept: 'application/json' } });
   return (await response.json()) as Report;
 }
 client.use(auth);
@@ -73,4 +74,53 @@ export async function call<T>(
       ? error.message
       : `${response.status} ${response.statusText}`;
   throw new ApiError(response.status, message);
+}
+
+/** The server's own OpenAPI document; public, so it needs no token. */
+export async function openapi(): Promise<unknown> {
+  const response = await fetch(`${baseUrl}/openapi.json`, {
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok)
+    throw new ApiError(response.status, `${response.status} ${response.statusText}`);
+  return response.json();
+}
+
+/** One request and its answer, whatever the status: the docs console's view. */
+export interface Exchange {
+  status: number;
+  statusText: string;
+  millis: number;
+  contentType: string | null;
+  body: string;
+}
+
+/**
+ * Sends `method path` exactly as the docs console composed it, with this tab's
+ * token when it holds one. Any status is an answer, not an error; only a
+ * request that never reached the server throws.
+ */
+export async function exchange(method: string, path: string, body?: string): Promise<Exchange> {
+  const headers = new Headers({ Accept: 'application/json' });
+  if (body !== undefined) headers.set('Content-Type', 'application/json');
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const started = performance.now();
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: method.toUpperCase(),
+    headers,
+    ...(body === undefined ? {} : { body }),
+  });
+  const text = await response.text();
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    millis: Math.round(performance.now() - started),
+    contentType: response.headers.get('Content-Type'),
+    body: text,
+  };
+}
+
+/** The absolute URL of `path` on this server, for a copied command. */
+export function address(path: string): string {
+  return new URL(`${baseUrl}${path}`, window.location.href).toString();
 }

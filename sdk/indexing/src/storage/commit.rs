@@ -14,7 +14,7 @@
 //! outlive the rows behind it.
 
 use crate::{
-    BlockRef, BoxFuture, CanonicalBlock, FeeSettlement, IndexError, IndexErrorKind, Network,
+    BlockRef, BlockWithOutputs, BoxFuture, FeeSettlement, IndexError, IndexErrorKind, Network,
     OutputKey,
 };
 
@@ -92,7 +92,7 @@ pub struct IndexedBatch {
     network: Network,
     expected_checkpoint: Option<BlockRef>,
     checkpoint: Option<BlockRef>,
-    blocks: Vec<CanonicalBlock>,
+    blocks: Vec<BlockWithOutputs>,
     progress: Vec<Progress>,
     settlement: FeeSettlement,
 }
@@ -120,7 +120,7 @@ impl IndexedBatch {
     pub fn new(
         network: Network,
         expected_checkpoint: Option<BlockRef>,
-        blocks: Vec<CanonicalBlock>,
+        blocks: Vec<BlockWithOutputs>,
         progress: Vec<Progress>,
         settlement: FeeSettlement,
     ) -> Result<Self, IndexError> {
@@ -155,19 +155,20 @@ impl IndexedBatch {
     fn line(
         network: &Network,
         expected: Option<&BlockRef>,
-        blocks: &[CanonicalBlock],
+        blocks: &[BlockWithOutputs],
     ) -> Result<Option<BlockRef>, IndexError> {
         let mut line = expected.cloned();
         let mut previous = None;
         for canonical in blocks {
-            let block = canonical.block();
-            if canonical.network() != network {
+            let block = canonical.block.reference();
+            if canonical.block.network() != network {
                 return Err(IndexError::new(
                     IndexErrorKind::NetworkMismatch,
                     "an indexed block belongs to another network",
                     false,
                 ));
             }
+            canonical.validate(network)?;
             if previous.is_some_and(|previous| block.position <= previous) {
                 return Err(IndexError::new(
                     IndexErrorKind::InvalidBlock,
@@ -196,7 +197,7 @@ impl IndexedBatch {
     /// twice, and one this batch cannot support.
     fn claims(
         checkpoint: Option<&BlockRef>,
-        blocks: &[CanonicalBlock],
+        blocks: &[BlockWithOutputs],
         progress: &[Progress],
     ) -> Result<(), IndexError> {
         for (index, claim) in progress.iter().enumerate() {
@@ -220,7 +221,7 @@ impl IndexedBatch {
     /// behind, below its own expectation, or naming a block it cannot point at.
     fn justified(
         checkpoint: Option<&BlockRef>,
-        blocks: &[CanonicalBlock],
+        blocks: &[BlockWithOutputs],
         claim: &Progress,
     ) -> Result<(), IndexError> {
         // Progress is persisted only through the confirmed boundary: above it a
@@ -264,10 +265,13 @@ impl IndexedBatch {
     /// position that happens to match one.
     fn supports(
         checkpoint: Option<&BlockRef>,
-        blocks: &[CanonicalBlock],
+        blocks: &[BlockWithOutputs],
         block: &BlockRef,
     ) -> bool {
-        checkpoint == Some(block) || blocks.iter().any(|canonical| canonical.block() == block)
+        checkpoint == Some(block)
+            || blocks
+                .iter()
+                .any(|canonical| canonical.block.reference() == block)
     }
 
     /// The network every block and claim in the batch belongs to.
@@ -301,7 +305,7 @@ impl IndexedBatch {
 
     /// The batch's blocks, ascending.
     #[must_use]
-    pub fn blocks(&self) -> &[CanonicalBlock] {
+    pub fn blocks(&self) -> &[BlockWithOutputs] {
         &self.blocks
     }
 
@@ -444,7 +448,7 @@ mod tests {
     use base::ChainName;
 
     use super::*;
-    use crate::{BlockHash, BlockHeight, BlockParent, BlockPosition, InterpretedBlock};
+    use crate::{BlockHash, BlockHeight, BlockParent, BlockPosition, BlockWithOutputs};
 
     fn network() -> Network {
         Network::new(ChainName::new("test"), "mainnet")
@@ -463,14 +467,10 @@ mod tests {
         }
     }
 
-    /// The facts of an empty block at `height`, already validated.
-    fn canonical(height: u64) -> CanonicalBlock {
-        CanonicalBlock::new(
-            network(),
-            InterpretedBlock::new(&network(), block(height), Vec::new())
-                .expect("unique transaction ids"),
-        )
-        .expect("valid facts")
+    /// The facts of an empty block at `height`.
+    fn canonical(height: u64) -> BlockWithOutputs {
+        BlockWithOutputs::new(&network(), block(height), Vec::new())
+            .expect("unique transaction ids")
     }
 
     fn advance(watch: &str, expected: Option<BlockRef>, through: u64) -> Progress {
@@ -488,9 +488,8 @@ mod tests {
             position: BlockPosition(1),
             hash: BlockHash(vec![99]),
         });
-        let interpreted =
-            InterpretedBlock::new(&network(), reference, Vec::new()).expect("no transactions");
-        let forked = CanonicalBlock::new(network(), interpreted).expect("valid facts");
+        let forked =
+            BlockWithOutputs::new(&network(), reference, Vec::new()).expect("no transactions");
 
         let error = IndexedBatch::new(
             network(),
@@ -503,6 +502,33 @@ mod tests {
 
         assert_eq!(error.kind, IndexErrorKind::Disconnected);
         assert!(error.retryable);
+    }
+
+    /// A batch validates every block it carries, so facts that never passed
+    /// [`BlockWithOutputs::validate`] cannot reach a store: here a transaction
+    /// that names another block than the one carrying it.
+    #[test]
+    fn a_batch_refuses_a_block_whose_facts_are_invalid() {
+        let stray = crate::Transaction {
+            id: crate::TransactionRef::new(network(), "stray"),
+            movements: Vec::new(),
+            fee: None,
+            order: 0,
+            status: crate::Status::Included { block: block(2) },
+        };
+        let facts = BlockWithOutputs::new(&network(), block(1), vec![stray]).expect("one id");
+
+        let error = IndexedBatch::new(
+            network(),
+            None,
+            vec![facts],
+            Vec::new(),
+            FeeSettlement::Charged,
+        )
+        .expect_err("a transaction of another block");
+
+        assert_eq!(error.kind, IndexErrorKind::InvalidBlock);
+        assert_eq!(error.message, "transaction names another block");
     }
 
     /// The line a batch leaves behind is derived from its blocks: one that only
@@ -567,16 +593,12 @@ mod tests {
         .expect_err("descending blocks");
         assert_eq!(error.kind, IndexErrorKind::InvalidBlock);
 
-        let elsewhere = CanonicalBlock::new(
-            Network::new(ChainName::new("other"), "mainnet"),
-            InterpretedBlock::new(
-                &Network::new(ChainName::new("other"), "mainnet"),
-                block(2),
-                Vec::new(),
-            )
-            .expect("unique transaction ids"),
+        let elsewhere = BlockWithOutputs::new(
+            &Network::new(ChainName::new("other"), "mainnet"),
+            block(2),
+            Vec::new(),
         )
-        .expect("valid facts");
+        .expect("unique transaction ids");
         let error = IndexedBatch::new(
             network(),
             Some(block(1)),

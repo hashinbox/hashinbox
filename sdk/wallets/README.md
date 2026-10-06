@@ -2,13 +2,13 @@
 
 Create wallets, import keys and send payments on any chain without naming a
 chain crate. `Wallets` is a map from your own asset tags to the wallet factory
-each chain provides, and `Composition` assembles the configured chains into one
-index and one wallet map. Balance and history reads are `indexing`'s.
+each chain provides. It depends on `base` only; `sdk_config::Composition`
+assembles configured chains into one index and one wallet map.
 
 ## Usage
 
 ```rust
-use indexing::Holder;
+use base::Holder;
 use wallets::{SecretBytes, Transfer, WalletFactory, Wallets};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -45,8 +45,20 @@ async fn run(factory: impl WalletFactory + 'static, key: SecretBytes) -> Result<
 - A failed batch is not rolled back. `SendError::accepted` lists the
   transactions a node already accepted, so resending the whole batch pays those
   transfers twice.
+- Feature `testing` (off by default, dev-dependency only) adds `wallets::testing`:
+  one scripted factory with an `Outbox` that records every send and answers with a
+  chosen `Outcome`. Use it instead of writing another wallet double.
+- `Wallets::queue(&Policy)` puts every sending asset behind an in-memory
+  `Queue`: FIFO, bounded in flight per network, retried only when nothing was
+  accepted. Pass a `Pause` (e.g. `tokio::time::sleep`); `queues()` reads its
+  `Stats`, and `close()` refuses new sends while admitted ones finish.
+- `Wallets::pause(&network)` refuses every later queued send of that network's
+  assets and every `Wallets::admit` (non-send work an application counts, such as
+  registering a watch) with `WalletErrorKind::Paused`; `Suspension::drained()` waits for
+  those already admitted, and dropping the `Suspension` admits again. It is the
+  application's half of an online rescan.
 - An accepted send means submitted, not confirmed. Confirmation comes from
-  indexing.
+  the index.
 
 Transfers accept `Amount::Exact(decimal)` or `Amount::All`. A sweep resolves
 inside the chain's existing send reservation; a batch may contain one sweep

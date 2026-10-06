@@ -12,9 +12,9 @@
 //! them are the repository's and are passed on as they were answered.
 
 use crate::{
-    BlockRef, BoxFuture, CanonicalBlock, CanonicalPage, CanonicalStatus, CanonicalTransaction,
-    Completeness, ConfirmedHistory, HistoryPosition, HistoryQuery, Holder, IndexError,
-    IndexErrorKind, Page, PendingJoin,
+    BlockRef, BlockWithOutputs, BoxFuture, Completeness, ConfirmedHistory, ConfirmedHistoryPage,
+    HistoryPosition, HistoryQuery, Holder, IndexError, IndexErrorKind, Page, PendingJoin, Status,
+    Transaction,
 };
 
 /// A transaction's status as [`History`] reports it.
@@ -50,8 +50,8 @@ pub enum TransactionStatus {
 /// A history entry: an indexed [`crate::Transaction`] with its read-time status.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedTransaction {
-    /// The transaction's identity, native fee and selected movements.
-    /// Movements retain the repository query's asset projection.
+    /// The indexed transaction with its selected movements; movements retain
+    /// the repository query's asset projection.
     pub transaction: crate::Transaction,
     /// Status with confirmation depth.
     pub status: TransactionStatus,
@@ -82,7 +82,7 @@ pub struct TransactionPage {
     /// caller paging to the end mid-backfill would hold what reads as a
     /// complete export and is not one.
     ///
-    /// It is [`CanonicalPage::completeness`], unchanged. The repository
+    /// It is [`ConfirmedHistoryPage::completeness`], unchanged. The repository
     /// answered it from the snapshot the rows came from, and the blocks above
     /// the line add nothing to a claim about the range below it.
     pub completeness: Completeness,
@@ -134,17 +134,17 @@ impl<R: ConfirmedHistory> History for PendingJoin<R> {
 impl<R> PendingJoin<R> {
     /// Confirmations count from the newest block anything is known about, so
     /// the number keeps meaning "how deep is this" across the line.
-    fn depth_from(page: &CanonicalPage, pending: &[CanonicalBlock]) -> Option<BlockRef> {
+    fn depth_from(page: &ConfirmedHistoryPage, pending: &[BlockWithOutputs]) -> Option<BlockRef> {
         pending
             .last()
-            .map(|held| held.block().clone())
+            .map(|held| held.block.reference().clone())
             .or_else(|| page.checkpoint.clone())
     }
 
     fn observe(
         request: &HistoryQuery,
-        page: CanonicalPage,
-        pending: &[CanonicalBlock],
+        page: ConfirmedHistoryPage,
+        pending: &[BlockWithOutputs],
     ) -> Result<TransactionPage, IndexError> {
         let tip = Self::depth_from(&page, pending);
         let transactions = page
@@ -168,7 +168,7 @@ impl<R> PendingJoin<R> {
     /// rows change with every block, so they would break exactly that.
     fn pending_page(
         request: &HistoryQuery,
-        pending: &[CanonicalBlock],
+        pending: &[BlockWithOutputs],
         tip: Option<&BlockRef>,
     ) -> Result<Vec<ObservedTransaction>, IndexError> {
         if request.after.is_some() {
@@ -176,20 +176,21 @@ impl<R> PendingJoin<R> {
         }
         pending
             .iter()
-            .flat_map(CanonicalBlock::transactions)
+            .flat_map(|facts| facts.block.transactions())
             .filter_map(|transaction| request.select(transaction.clone()))
             .map(|transaction| Self::observed(transaction, tip, false))
             .collect()
     }
 
     fn observed(
-        transaction: CanonicalTransaction,
+        transaction: Transaction,
         tip: Option<&BlockRef>,
         committed: bool,
     ) -> Result<ObservedTransaction, IndexError> {
+        let status = Self::observe_status(transaction.status.clone(), tip, committed)?;
         Ok(ObservedTransaction {
-            transaction: transaction.transaction,
-            status: Self::observe_status(transaction.status, tip, committed)?,
+            transaction,
+            status,
         })
     }
 
@@ -197,13 +198,13 @@ impl<R> PendingJoin<R> {
     /// when the durable store holds it, which is when it is at or below the
     /// chain's confirmed line and will not revert.
     fn observe_status(
-        status: CanonicalStatus,
+        status: Status,
         tip: Option<&BlockRef>,
         committed: bool,
     ) -> Result<TransactionStatus, IndexError> {
         let block = match status {
-            CanonicalStatus::Included { block } => block,
-            CanonicalStatus::Failed { block, reason } => {
+            Status::Included { block } => block,
+            Status::Failed { block, reason } => {
                 return Ok(TransactionStatus::Failed { block, reason });
             }
         };
@@ -255,8 +256,8 @@ mod tests {
     /// `page` as the join reports it over `pending`.
     fn observe(
         request: &HistoryQuery,
-        page: CanonicalPage,
-        pending: &[CanonicalBlock],
+        page: ConfirmedHistoryPage,
+        pending: &[BlockWithOutputs],
     ) -> Result<TransactionPage, IndexError> {
         PendingJoin::<Paged>::observe(request, page, pending)
     }
@@ -287,7 +288,7 @@ mod tests {
             asset: "token".into(),
         };
         let mut canonical = transaction(2);
-        canonical.transaction.movements = [native.clone(), token]
+        canonical.movements = [native.clone(), token]
             .into_iter()
             .enumerate()
             .map(|(index, asset)| {
@@ -299,7 +300,7 @@ mod tests {
                 )
             })
             .collect();
-        canonical.transaction.fee = Some(crate::NetworkFee {
+        canonical.fee = Some(crate::NetworkFee {
             asset: native.clone(),
             amount: 3_u64.into(),
             payer: Some(address("owner")),
@@ -307,13 +308,13 @@ mod tests {
         let selected = query(None)
             .select(canonical)
             .expect("native movement matches");
-        assert_eq!(selected.transaction.movements.len(), 1);
-        assert_eq!(selected.transaction.movements[0].asset, native);
+        assert_eq!(selected.movements.len(), 1);
+        assert_eq!(selected.movements[0].asset, native);
         for committed in [false, true] {
             let observed =
                 PendingJoin::<Paged>::observed(selected.clone(), Some(&block(3)), committed)
                     .expect("read-time status");
-            assert_eq!(observed.transaction, selected.transaction);
+            assert_eq!(observed.transaction, selected);
         }
     }
 
@@ -400,7 +401,7 @@ mod tests {
     #[test]
     fn failed_history_keeps_its_existing_passthrough_semantics() {
         let mut failed = transaction(2);
-        failed.status = CanonicalStatus::Failed {
+        failed.status = Status::Failed {
             block: block(2),
             reason: Some("reverted".into()),
         };
@@ -442,7 +443,7 @@ mod tests {
                 .transactions
                 .iter()
                 .chain(&page.pending)
-                .filter(|entry| entry.transaction.transaction_id.id.to_string() == "tx-4")
+                .filter(|entry| entry.transaction.id.id.to_string() == "tx-4")
                 .count();
             assert_eq!(
                 reported, 1,

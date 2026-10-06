@@ -24,6 +24,7 @@ edition = "2024"
 rust-version = "1.91"
 
 [workspace.dependencies]
+clap = { version = "4.6", features = ["derive"] }
 alloy-primitives = { version = "1", default-features = false, features = ["std"] }
 alloy-consensus = { version = "1.8", features = ["k256"] }
 alloy-eips = "1.8"
@@ -41,6 +42,10 @@ jsonrpsee = { version = "=0.24.10", default-features = false, features = ["http-
 serde = { version = "1", default-features = false }
 serde_json = "1"
 sha2 = "=0.10.9"
+# The embedded SQL store (`indexing::sqlite`) and the server's one table: bundled
+# SQLite on Tokio, runtime-checked queries and `FromRow`, no macros reading a
+# database at build time. 0.8 because 0.9 needs a newer Rust than the MSRV.
+sqlx = { version = "=0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "derive"] }
 tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "=1.18.1", features = ["v7"] }
 zeroize = "=1.8.2"
@@ -58,3 +63,13 @@ bare_urls = "warn"
 
 [workspace.lints.clippy]
 all = "warn"
+
+# Build speed. Line tables keep backtraces readable at a fraction of full debug
+# info; dependencies are optimized once (they rarely rebuild) so tests that hash,
+# sign or run SQLite are not slowed by unoptimized third-party code.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 1
+debug = false

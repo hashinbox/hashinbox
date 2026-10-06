@@ -8,22 +8,18 @@
 //! authoritative empty answer, and a restart inside the window resumes scanning
 //! without a second purge.
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use base::Decimal;
 use indexing::{
-    Address, AssetId, Balance, BalanceQuery, BalanceStore, BlockHash, BlockHeight,
-    BlockInterpreter, BlockParent, BlockPosition, BlockRef, BlockSource, BoxFuture, CanonicalPage,
-    ChainName, ChainTips, Completeness, ConfirmedHistory, FeeSettlement, HistoryQuery, Index,
-    IndexError, IndexErrorKind, IndexedOutput, Indexer, Indexing, InterpretedBlock, MovementId,
-    NativeBlock, Network, ObservationDraft, ObservationDraftStatus, OutputChanges, OutputId,
-    OutputPage, OutputRequest, OutputStore, Page, Purging, Repository, Schedules, SourceError,
-    Subject, Supervisor, SyncConfig, SyncControl, SyncMonitor, SyncPolicy, SyncReport,
-    TransactionRef, ValueMovement, Watch, WatchProgress, memory, sqlite,
+    Address, AssetId, Balance, BalanceQuery, BalanceStore, BlockHeight, BlockPosition, BlockRef,
+    ChainName, Completeness, ConfirmedHistory, ConfirmedHistoryPage, HistoryQuery, Index,
+    IndexError, IndexErrorKind, IndexedOutput, Indexer, Indexing, MovementId, Network,
+    OutputChanges, OutputId, OutputPage, OutputRequest, OutputStore, Page, PurgedRows, Purging,
+    Repository, RescanError, Schedules, Status, Subject, Supervisor, SyncConfig, SyncControl,
+    SyncMonitor, SyncPolicy, SyncReport, Transaction, TransactionRef, ValueMovement, Watch,
+    WatchProgress, memory, sqlite,
+    testing::{Chain, block},
 };
 use tempfile::TempDir;
 use tokio::{sync::watch, task::JoinHandle};
@@ -38,19 +34,6 @@ fn reindexed() -> Network {
 
 fn elsewhere() -> Network {
     Network::new(ChainName::new("online"), "elsewhere")
-}
-
-fn block(height: u64) -> BlockRef {
-    BlockRef {
-        position: BlockPosition(height),
-        height: BlockHeight(height),
-        hash: BlockHash(height.to_be_bytes().to_vec()),
-        parent: height.checked_sub(1).map(|parent| BlockParent {
-            position: BlockPosition(parent),
-            hash: BlockHash(parent.to_be_bytes().to_vec()),
-        }),
-        timestamp: None,
-    }
 }
 
 fn subject(network: &Network, address: &str) -> Subject {
@@ -80,144 +63,63 @@ fn watches() -> Vec<Watch> {
     ]
 }
 
-#[derive(Clone, Debug)]
-struct Block(BlockRef);
-
-impl NativeBlock for Block {
-    fn block_ref(&self) -> BlockRef {
-        self.0.clone()
-    }
-}
-
-/// Every block through [`TIP`], confirmed.
-#[derive(Clone)]
-struct Source;
-
-impl ChainTips for Source {
-    fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
-        Box::pin(async { Ok(block(TIP)) })
-    }
-
-    fn confirmed_tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
-        Box::pin(async { Ok(block(TIP)) })
-    }
-}
-
-impl BlockSource for Source {
-    type Block = Block;
-
-    fn blocks<'a>(
-        &'a self,
-        start: BlockPosition,
-        end: BlockPosition,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<Self::Block>, SourceError>> {
-        let blocks = (start.0..=end.0.min(TIP))
-            .take(limit)
-            .map(|height| Block(block(height)))
-            .collect();
-        Box::pin(async move { Ok(blocks) })
-    }
-
-    fn canonical_at<'a>(
-        &'a self,
-        position: BlockPosition,
-    ) -> BoxFuture<'a, Result<Option<BlockRef>, SourceError>> {
-        let found = (position.0 <= TIP).then(|| block(position.0));
-        Box::pin(async move { Ok(found) })
-    }
-}
-
-/// Pays every selected address 10 in every block it is handed, as one
-/// transaction and one live output, and records which addresses each block was
-/// inspected for: where a rescan started is invisible from the store.
-/// One block's height, and the addresses it was inspected for.
-type Inspected = (u64, Vec<String>);
-
-#[derive(Clone)]
-struct Interpreter {
-    network: Network,
-    inspected: Arc<Mutex<Vec<Inspected>>>,
-}
-
-impl Interpreter {
-    fn new(network: Network) -> Self {
-        Self {
-            network,
-            inspected: Arc::default(),
+/// Every block of `network` through [`TIP`], confirmed, paying each address
+/// [`watches`] holds there 10 in every block, as one transaction and one live
+/// output.
+fn chain(network: &Network) -> Chain {
+    let chain = Chain::dense(network.clone(), TIP);
+    let owners = watches().into_iter().map(|watch| watch.address);
+    for (order, address) in (0_u64..).zip(owners.filter(|at| at.belongs_to(network))) {
+        for height in 0..=TIP {
+            pay(&chain, BlockHeight(height), order, &address);
         }
     }
-
-    fn inspected(&self) -> Vec<Inspected> {
-        self.inspected.lock().expect("inspections").clone()
-    }
-
-    fn forget(&self) {
-        self.inspected.lock().expect("inspections").clear();
-    }
+    chain
 }
 
-impl BlockInterpreter for Interpreter {
-    type Block = Block;
-
-    fn settlement(&self) -> FeeSettlement {
-        FeeSettlement::Charged
-    }
-
-    fn inspect(
-        &self,
-        block: &Self::Block,
-        addresses: &[Address],
-    ) -> Result<InterpretedBlock, IndexError> {
-        let reference = block.block_ref();
-        let height = reference.height;
-        self.inspected.lock().expect("inspections").push((
-            height.0,
-            addresses.iter().map(|at| at.value.clone()).collect(),
-        ));
-        let asset = AssetId::native(self.network.chain.clone());
-        let mut transactions = Vec::new();
-        let mut created = Vec::new();
-        for (order, address) in (0_u64..).zip(addresses) {
-            let id = TransactionRef::new(
-                self.network.clone(),
-                format!("{}-{}", address.value, height.0),
-            );
-            transactions.push(ObservationDraft {
-                transaction: indexing::Transaction {
-                    transaction_id: id.clone(),
-                    movements: vec![ValueMovement::mint(
-                        MovementId("0".into()),
-                        asset.clone(),
-                        Decimal::from(10_u64),
-                        address.clone(),
-                    )],
-                    fee: None,
-                },
-                transaction_order: order,
-                status: ObservationDraftStatus::Included,
-            });
-            created.push(IndexedOutput {
-                id: OutputId {
-                    transaction: id,
-                    index: 0,
-                },
-                address: address.clone(),
-                asset: asset.clone(),
-                amount: Decimal::from(10_u64),
-                evidence: vec![1],
-                created_at: height,
-                coinbase: false,
-            });
-        }
-        Ok(InterpretedBlock {
-            outputs: OutputChanges {
-                created,
-                ..OutputChanges::default()
+/// One transaction of block `height` minting `address` 10 at `order`, and the
+/// live output it creates.
+fn pay(chain: &Chain, height: BlockHeight, order: u64, address: &Address) {
+    let network = &address.network;
+    let asset = AssetId::native(network.chain.clone());
+    let id = TransactionRef::new(network.clone(), format!("{}-{}", address.value, height.0));
+    let movement = ValueMovement::mint(
+        MovementId("0".into()),
+        asset.clone(),
+        Decimal::from(10_u64),
+        address.clone(),
+    );
+    chain.include(
+        &block(height.0),
+        Transaction {
+            id: id.clone(),
+            movements: vec![movement],
+            fee: None,
+            order,
+            status: Status::Included {
+                block: block(height.0),
             },
-            ..InterpretedBlock::new(&self.network, reference, transactions)?
-        })
-    }
+        },
+    );
+    let output = IndexedOutput {
+        id: OutputId {
+            transaction: id,
+            index: 0,
+        },
+        address: address.clone(),
+        asset,
+        amount: Decimal::from(10_u64),
+        evidence: vec![1],
+        created_at: height,
+        coinbase: false,
+    };
+    chain.change_outputs(
+        &block(height.0),
+        OutputChanges {
+            created: vec![output],
+            ..OutputChanges::default()
+        },
+    );
 }
 
 /// What a store must answer for this scenario: the minimum, the purge, and the
@@ -232,14 +134,16 @@ impl<T> Store for T where
 {
 }
 
-type Unit<R> = Indexer<Source, Interpreter, R>;
+type Unit<R> = Indexer<Chain, Chain, R>;
 
 /// Both networks over one repository, supervised.
 struct Running<R: Store> {
     repository: R,
     reindexed: Arc<Unit<R>>,
-    reindexed_log: Interpreter,
-    elsewhere_log: Interpreter,
+    /// The two chains, which record what each block was inspected for: where
+    /// a rescan started is invisible from the store.
+    reindexed_chain: Chain,
+    elsewhere_chain: Chain,
     control: SyncControl,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
@@ -250,18 +154,18 @@ impl<R: Store> Running<R> {
     /// paused when `paused`, as an application restores a persisted pause.
     fn start(repository: R, paused: bool) -> Self {
         let unit = |network: Network| {
-            let interpreter = Interpreter::new(network.clone());
+            let chain = chain(&network);
             let config = SyncConfig::new(&network, SyncPolicy::new(100)).expect("sync config");
             let unit = Arc::new(Indexer::new(
-                Source,
-                interpreter.clone(),
+                chain.clone(),
+                chain.clone(),
                 repository.clone(),
                 config,
             ));
-            (unit, interpreter)
+            (unit, chain)
         };
-        let (rescanned, reindexed_log) = unit(reindexed());
-        let (other, elsewhere_log) = unit(elsewhere());
+        let (rescanned, reindexed_chain) = unit(reindexed());
+        let (other, elsewhere_chain) = unit(elsewhere());
         let units: Vec<Arc<dyn Indexing>> = vec![rescanned.clone(), other];
         let index = Arc::new(Index::of(units).expect("disjoint networks"));
         let (report, _readiness) = SyncReport::watching(index.networks());
@@ -278,8 +182,8 @@ impl<R: Store> Running<R> {
         Self {
             repository,
             reindexed: rescanned,
-            reindexed_log,
-            elsewhere_log,
+            reindexed_chain,
+            elsewhere_chain,
             control,
             stop,
             task: tokio::spawn(supervisor.run(shutdown)),
@@ -310,7 +214,7 @@ impl<R: Store> Running<R> {
         self.task.await.expect("the supervisor ends cleanly");
     }
 
-    async fn history(&self, network: &Network, address: &str) -> CanonicalPage {
+    async fn history(&self, network: &Network, address: &str) -> ConfirmedHistoryPage {
         let query = HistoryQuery::new(&subject(network, address), Page::first(100));
         self.repository.history(query).await.expect("history")
     }
@@ -367,26 +271,28 @@ impl<R: Store> Running<R> {
         assert!(refused.retryable, "it clears at the first commit");
     }
 
-    /// The rescan began at the earliest birthday, not at genesis, and each
-    /// observation was inspected only from its own.
+    /// The rescan, made of the inspections after the first `since`, began at
+    /// the earliest birthday, not at genesis, and each observation was
+    /// inspected only from its own.
     ///
     /// Block 2 is read for no address: it is the anchor below the earliest
     /// birthday, the parent the first committed block must connect to.
-    fn assert_rederived_from_birthdays(&self) {
-        let inspected = self.reindexed_log.inspected();
-        let heights: Vec<u64> = inspected.iter().map(|(height, _)| *height).collect();
+    fn assert_rederived_from_birthdays(&self, since: usize) {
+        let inspected = self.reindexed_chain.inspections().split_off(since);
+        let heights: Vec<u64> = inspected.iter().map(|(height, _)| height.0).collect();
         assert_eq!(
             heights,
             (2..=TIP).collect::<Vec<_>>(),
             "read again from the earliest birthday's anchor, once each",
         );
         for (height, addresses) in inspected {
-            let expected: &[&str] = match height {
+            let addresses: Vec<&str> = addresses.iter().map(|at| at.value.as_str()).collect();
+            let expected: &[&str] = match height.0 {
                 ..3 => &[],
                 3..5 => &["early"],
                 _ => &["early", "late"],
             };
-            assert_eq!(addresses, expected, "block {height}");
+            assert_eq!(addresses, expected, "block {}", height.0);
         }
     }
 }
@@ -400,10 +306,10 @@ struct Rows {
     outputs: Vec<IndexedOutput>,
 }
 
-fn ids(page: &CanonicalPage) -> Vec<String> {
+fn ids(page: &ConfirmedHistoryPage) -> Vec<String> {
     page.transactions
         .iter()
-        .map(|entry| entry.transaction.transaction_id.id.to_string())
+        .map(|entry| entry.id.id.to_string())
         .collect()
 }
 
@@ -427,10 +333,10 @@ async fn online_reindex<R: Store>(repository: R) {
     let other = running.rows(&elsewhere(), "other").await;
     assert_eq!(early.history.len(), 6, "blocks 3 through 8");
     assert_eq!(late.history.len(), 4, "blocks 5 through 8");
-    let other_inspections = running.elsewhere_log.inspected();
+    let other_inspections = running.elsewhere_chain.inspections();
 
     running.control.pause(&reindexed()).await.expect("paused");
-    running.reindexed_log.forget();
+    let rescan = running.reindexed_chain.inspections().len();
     let removed = running
         .repository
         .purge_network(&reindexed())
@@ -458,22 +364,124 @@ async fn online_reindex<R: Store>(repository: R) {
     running.control.resume(&reindexed()).expect("resumed");
     running.settles(&reindexed()).await;
 
-    running.assert_rederived_from_birthdays();
+    running.assert_rederived_from_birthdays(rescan);
     assert_eq!(running.rows(&reindexed(), "early").await, early);
     assert_eq!(running.rows(&reindexed(), "late").await, late);
     assert_eq!(running.rows(&elsewhere(), "other").await, other);
     assert_eq!(
-        running.elsewhere_log.inspected(),
+        running.elsewhere_chain.inspections(),
         other_inspections,
         "the other network read nothing again",
     );
     running.shut_down().await;
 }
 
+/// The same window as one operation of the controller: what it leaves
+/// behind is what the steps written out leave.
+async fn rescan_operation<R: Store>(repository: R) {
+    let running = indexed(repository).await;
+    let early = running.rows(&reindexed(), "early").await;
+    let other = running.rows(&elsewhere(), "other").await;
+    let other_inspections = running.elsewhere_chain.inspections();
+    let since = running.reindexed_chain.inspections().len();
+
+    let removed = running
+        .control
+        .rescan(running.reindexed.as_ref(), &running.repository)
+        .await
+        .expect("rescanned online");
+    assert_eq!(removed.history, 10);
+    running.settles(&reindexed()).await;
+
+    running.assert_rederived_from_birthdays(since);
+    assert_eq!(running.rows(&reindexed(), "early").await, early);
+    assert_eq!(running.rows(&elsewhere(), "other").await, other);
+    assert_eq!(running.elsewhere_chain.inspections(), other_inspections);
+    running.shut_down().await;
+}
+
+/// A purge that fails changes nothing and resumes the network; one that
+/// "succeeds" without removing the checkpoint stops the window after it, at
+/// the reset, and leaves the network paused for another rescan to finish.
+async fn a_rescan_reports_where_it_stopped<R: Store>(repository: R) {
+    let running = indexed(repository).await;
+    let refused = running
+        .control
+        .rescan(running.reindexed.as_ref(), &Purge::Fails)
+        .await
+        .expect_err("the purge fails");
+    assert!(matches!(refused, RescanError::NotStarted(_)), "{refused}");
+    running.reindexed_chain.extend_to(TIP + 1);
+    let resumed = async {
+        while running
+            .repository
+            .checkpoint(&reindexed())
+            .await
+            .expect("tip")
+            != Some(block(TIP + 1))
+        {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), resumed)
+        .await
+        .expect("the network resumed and indexes on");
+
+    let stopped = running
+        .control
+        .rescan(running.reindexed.as_ref(), &Purge::Keeps)
+        .await
+        .expect_err("the reset refuses a network that still has a checkpoint");
+    assert!(matches!(stopped, RescanError::Interrupted(_)), "{stopped}");
+    assert!(
+        stopped.to_string().contains("the network is paused"),
+        "{stopped}"
+    );
+    running.reindexed_chain.extend_to(TIP + 2);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        running
+            .repository
+            .checkpoint(&reindexed())
+            .await
+            .expect("tip"),
+        Some(block(TIP + 1)),
+        "left paused"
+    );
+    running
+        .control
+        .rescan(running.reindexed.as_ref(), &running.repository)
+        .await
+        .expect("a second rescan finishes the window");
+    running.shut_down().await;
+}
+
+/// A store whose purge does not do its job.
+enum Purge {
+    /// Refuses, removing nothing.
+    Fails,
+    /// Answers success and removes nothing.
+    Keeps,
+}
+
+impl Purging for Purge {
+    fn purge_network<'a>(
+        &'a self,
+        _network: &'a Network,
+    ) -> base::BoxFuture<'a, Result<PurgedRows, IndexError>> {
+        Box::pin(async move {
+            match self {
+                Self::Fails => Err(IndexError::new(IndexErrorKind::Store, "disk full", true)),
+                Self::Keeps => Ok(PurgedRows::default()),
+            }
+        })
+    }
+}
+
 /// A process that stops after the purge and before the resume restarts into
 /// the same honest window and finishes by scanning, not by purging again.
-async fn restart_inside_the_window<R: Store>(open: impl Fn() -> R) {
-    let running = indexed(open()).await;
+async fn restart_inside_the_window<R: Store, F: Future<Output = R>>(open: impl Fn() -> F) {
+    let running = indexed(open().await).await;
     let early = running.rows(&reindexed(), "early").await;
     let other = running.rows(&elsewhere(), "other").await;
     running.control.pause(&reindexed()).await.expect("paused");
@@ -484,7 +492,7 @@ async fn restart_inside_the_window<R: Store>(open: impl Fn() -> R) {
         .expect("purged online");
     running.shut_down().await;
 
-    let restarted = Running::start(open(), true);
+    let restarted = Running::start(open().await, true);
     restarted.assert_window().await;
     assert!(
         restarted
@@ -504,11 +512,11 @@ async fn restart_inside_the_window<R: Store>(open: impl Fn() -> R) {
     restarted.control.resume(&reindexed()).expect("resumed");
     restarted.settles(&reindexed()).await;
 
-    restarted.assert_rederived_from_birthdays();
+    restarted.assert_rederived_from_birthdays(0);
     assert_eq!(restarted.rows(&reindexed(), "early").await, early);
     assert_eq!(restarted.rows(&elsewhere(), "other").await, other);
     assert!(
-        restarted.elsewhere_log.inspected().is_empty(),
+        restarted.elsewhere_chain.inspections().is_empty(),
         "the other network resumed at its own line",
     );
     restarted.shut_down().await;
@@ -530,13 +538,29 @@ impl File {
         }
     }
 
-    fn open(&self) -> sqlite::Repository {
-        sqlite::Repository::new(sqlite::Database::open(&self.path).expect("sqlite database"))
+    async fn open(&self) -> sqlite::Repository {
+        let database = sqlite::Database::open(&self.path)
+            .await
+            .expect("sqlite database");
+        sqlite::Repository::new(database)
     }
 }
 
 mod memory_store {
-    use super::{memory, online_reindex, restart_inside_the_window};
+    use super::{
+        a_rescan_reports_where_it_stopped, memory, online_reindex, rescan_operation,
+        restart_inside_the_window,
+    };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_rescan_operation_rederives_from_the_earliest_birthday() {
+        rescan_operation(memory::Repository::new()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_rescan_says_whether_the_network_is_paused() {
+        a_rescan_reports_where_it_stopped(memory::Repository::new()).await;
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pause_purge_reset_resume_rederives_from_the_earliest_birthday() {
@@ -548,16 +572,29 @@ mod memory_store {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_restart_inside_the_window_resumes_without_purging_again() {
         let repository = memory::Repository::new();
-        restart_inside_the_window(|| repository.clone()).await;
+        restart_inside_the_window(|| std::future::ready(repository.clone())).await;
     }
 }
 
 mod sqlite_store {
-    use super::{File, online_reindex, restart_inside_the_window};
+    use super::{
+        File, a_rescan_reports_where_it_stopped, online_reindex, rescan_operation,
+        restart_inside_the_window,
+    };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_rescan_operation_rederives_from_the_earliest_birthday() {
+        rescan_operation(File::new().open().await).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_rescan_says_whether_the_network_is_paused() {
+        a_rescan_reports_where_it_stopped(File::new().open().await).await;
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pause_purge_reset_resume_rederives_from_the_earliest_birthday() {
-        online_reindex(File::new().open()).await;
+        online_reindex(File::new().open().await).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

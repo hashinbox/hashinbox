@@ -8,8 +8,10 @@
 //! `transaction::Preflight`; block reads for indexing and the identity checks
 //! are inherent methods in `blocks` and `node`.
 //!
-//! Every call is one attempt: configure the transport's timeout and size
-//! limits, and expect no transparent retry or failover.
+//! Every call is one attempt, never repeated by a transport decorator: a read
+//! reaches one node, and a submission is broadcast to every node the
+//! transport holds, each exactly once. Configure the transport's timeout and
+//! size limits, and expect no transparent retry or failover.
 
 mod accounts;
 mod blocks;

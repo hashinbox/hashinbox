@@ -1,7 +1,7 @@
 //! Contract coverage for the two shipped stores.
 //!
 //! The shared `contracts::{BackfillContract, BalanceContract, HistoryContract,
-//! PurgeContract, SpendContract, WatchContract}` scenarios run
+//! PurgeContract, SpendContract, WalletContract, WatchContract}` scenarios run
 //! here, and each one runs **twice**: once against `indexing::memory::Repository`
 //! on maps and once against `indexing::sqlite::Repository` on a fresh file. Two
 //! implementations, one set of scenarios, so they stay a statement about the
@@ -20,24 +20,26 @@ use base::Decimal;
 use indexing::{memory, sqlite};
 
 use contracts::{
-    BackfillContract, BalanceContract, HistoryContract, PurgeContract, SpendContract, WatchContract,
+    BackfillContract, BalanceContract, HistoryContract, PurgeContract, SpendContract,
+    WalletContract, WatchContract,
 };
 use indexing::{
-    Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, CanonicalBlock,
-    ChainName, ConfirmedHistory, HistoryQuery, IndexErrorKind, IndexStore, IndexedOutput,
-    InterpretedBlock, MovementId, Network, ObservationDraft, ObservationDraftStatus, OutputChanges,
-    OutputId, OutputRequest, OutputStore, TransactionRef, ValueMovement,
+    Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef,
+    BlockWithOutputs, ChainName, ConfirmedHistory, HistoryQuery, IndexErrorKind, IndexStore,
+    IndexedOutput, MovementId, Network, OutputChanges, OutputId, OutputRequest, OutputStore,
+    Status, Transaction, TransactionRef, ValueMovement,
 };
 use tempfile::TempDir;
 
-/// SQLite work runs on `tokio::task::spawn_blocking`, so these scenarios need
-/// a Tokio runtime rather than a bare executor.
+/// The SQLite store runs on `sqlx`, which needs a Tokio runtime with its
+/// timer rather than a bare executor.
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     RUNTIME
         .get_or_init(|| {
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
+                .enable_all()
                 .build()
                 .expect("test runtime")
         })
@@ -52,7 +54,7 @@ fn network() -> Network {
 }
 
 fn open(path: &Path) -> sqlite::Repository {
-    let storage = sqlite::Database::open(path).expect("temporary sqlite database");
+    let storage = block_on(sqlite::Database::open(path)).expect("temporary sqlite database");
     sqlite::Repository::new(storage)
 }
 
@@ -102,24 +104,24 @@ fn transaction(value: &str) -> TransactionRef {
     }
 }
 
-fn draft(id: &str) -> ObservationDraft {
-    ObservationDraft {
-        transaction: indexing::Transaction {
-            transaction_id: transaction(id),
-            movements: vec![ValueMovement::transfer(
-                MovementId(format!("movement-{id}")),
-                AssetId {
-                    chain: network().chain,
-                    asset: "native".into(),
-                },
-                Decimal::from(1_u64),
-                address("sender"),
-                address("receiver"),
-            )],
-            fee: None,
+fn draft(id: &str, block: &BlockRef) -> Transaction {
+    Transaction {
+        id: transaction(id),
+        movements: vec![ValueMovement::transfer(
+            MovementId(format!("movement-{id}")),
+            AssetId {
+                chain: network().chain,
+                asset: "native".into(),
+            },
+            Decimal::from(1_u64),
+            address("sender"),
+            address("receiver"),
+        )],
+        fee: None,
+        order: 0,
+        status: Status::Included {
+            block: block.clone(),
         },
-        transaction_order: 0,
-        status: ObservationDraftStatus::Included,
     }
 }
 
@@ -147,15 +149,11 @@ fn addition(
     transaction: &str,
     outputs: OutputChanges,
 ) -> indexing::IndexedBatch {
-    let canonical = CanonicalBlock::new(
-        network(),
-        InterpretedBlock {
-            outputs,
-            ..InterpretedBlock::new(&network(), block, vec![draft(transaction)])
-                .expect("unique transaction ids")
-        },
-    )
-    .expect("valid block facts");
+    let transactions = vec![draft(transaction, &block)];
+    let canonical = BlockWithOutputs {
+        outputs,
+        ..BlockWithOutputs::new(&network(), block, transactions).expect("unique transaction ids")
+    };
     indexing::IndexedBatch::new(
         network(),
         expected,
@@ -183,7 +181,7 @@ fn history(repository: &sqlite::Repository) -> Vec<String> {
     .expect("history")
     .transactions
     .into_iter()
-    .map(|transaction| transaction.transaction.transaction_id.id.to_string())
+    .map(|transaction| transaction.id.id.to_string())
     .collect()
 }
 
@@ -210,17 +208,20 @@ fn duplicate_output_identity_is_rejected_before_repository_add() {
     let mut second = first.clone();
     second.address = address("another-receiver");
 
-    let error = CanonicalBlock::new(
-        network(),
-        InterpretedBlock {
-            outputs: OutputChanges {
-                created: vec![first, second],
-                ..OutputChanges::default()
-            },
-            ..InterpretedBlock::new(&network(), block(1, 1, 0), vec![draft("duplicate")])
-                .expect("unique transaction ids")
+    let first_block = block(1, 1, 0);
+    let error = BlockWithOutputs {
+        outputs: OutputChanges {
+            created: vec![first, second],
+            ..OutputChanges::default()
         },
-    )
+        ..BlockWithOutputs::new(
+            &network(),
+            first_block.clone(),
+            vec![draft("duplicate", &first_block)],
+        )
+        .expect("unique transaction ids")
+    }
+    .validate(&network())
     .expect_err("duplicate output identity");
 
     assert_eq!(error.kind, IndexErrorKind::InvalidBlock);
@@ -277,18 +278,12 @@ fn history_pages_survive_a_moving_checkpoint_and_output_pages_do_not() {
     let page = history_page(None).expect("first history page");
     assert_eq!(page.checkpoint, Some(second.clone()));
     assert_eq!(page.transactions.len(), 1);
-    assert_eq!(
-        page.transactions[0].transaction.transaction_id,
-        transaction("one")
-    );
+    assert_eq!(page.transactions[0].id, transaction("one"));
     let history_cursor = page.next.expect("history continuation");
     let page = history_page(Some(history_cursor.clone())).expect("final history page");
     assert_eq!(page.checkpoint, Some(second.clone()));
     assert_eq!(page.transactions.len(), 1);
-    assert_eq!(
-        page.transactions[0].transaction.transaction_id,
-        transaction("two")
-    );
+    assert_eq!(page.transactions[0].id, transaction("two"));
     assert_eq!(page.next, None);
 
     let page = output_page(None).expect("first output page");
@@ -311,15 +306,9 @@ fn history_pages_survive_a_moving_checkpoint_and_output_pages_do_not() {
     // have appended above the cursor: the page is the same one.
     let page = history_page(Some(history_cursor)).expect("an ascending cursor stays valid");
     assert_eq!(page.transactions.len(), 1);
-    assert_eq!(
-        page.transactions[0].transaction.transaction_id,
-        transaction("two")
-    );
+    assert_eq!(page.transactions[0].id, transaction("two"));
     let page = history_page(page.next).expect("the appended row is simply the next page");
-    assert_eq!(
-        page.transactions[0].transaction.transaction_id,
-        transaction("three")
-    );
+    assert_eq!(page.transactions[0].id, transaction("three"));
     assert_eq!(page.next, None);
     // The live-output set is not append-only — a spend removes a row — so its
     // cursor is still bound to the checkpoint it was issued at.
@@ -510,12 +499,6 @@ contract!(
 
 contract!(
     BalanceContract,
-    activity_pages_preserve_every_effect_and_native_order,
-    opening_evidence_requires_the_exact_caught_up_snapshot,
-    opening_evidence_follows_progress_and_is_invalidated_by_new_old_effects,
-    a_forward_deficit_cannot_resurrect_opening_evidence,
-    a_deficit_inside_one_batch_invalidates_opening_evidence,
-    insertion_order_inside_one_block_keeps_opening_evidence,
     folds_the_movements_of_one_holding,
     never_charges_a_settled_fee_twice,
     charges_a_fee_to_the_fee_asset_only,
@@ -570,6 +553,32 @@ contract!(
     answers_only_its_own_network,
 );
 
+// The scenarios the two stores once answered differently
+// (`contracts/agreement.rs`): withdrawal by identity, and conflicting
+// definitions refused for good by `add` and `cancel_backfill` alike.
+contract!(
+    WatchContract,
+    forgets_by_identity_and_never_by_pair,
+    refuses_to_move_an_identity_to_another_pair,
+    refuses_a_reanchor_onto_a_taken_pair_for_good,
+    refuses_a_reanchor_of_another_networks_identity,
+    refuses_every_conflicting_definition_for_good,
+);
+
+// The application's half of the watch list's table (`contracts/wallets.rs`):
+// filing, restoring and archiving wallets, and what scanning never sees.
+contract!(
+    WalletContract,
+    files_an_unknown_pair_unobserved,
+    restores_an_archived_pair_under_its_original_id,
+    refuses_every_conflicting_registration_for_good,
+    forgetting_archives_and_keeps_the_facts_readable,
+    an_archived_row_takes_no_claim_and_no_total,
+    reactivates_through_add_and_cancel_backfill,
+    purging_keeps_labels_keys_and_archives,
+    a_key_round_trips_and_is_never_printed,
+);
+
 contract!(
     SpendContract,
     an_unknown_required_spend_is_reported_not_refused,
@@ -613,134 +622,5 @@ mod purge_network_removes_only_its_own_network {
             PurgeContract::new(&store, network(), elsewhere())
                 .purge_network_removes_only_its_own_network(),
         );
-    }
-}
-
-#[test]
-fn sqlite_restores_verified_opening_evidence_after_reopen() {
-    let directory = TempDir::new().expect("directory");
-    let path = directory.path().join("opening.db");
-    let query = indexing::BalanceQuery {
-        address: Address::new(network(), "a"),
-        asset: AssetId::native(network().chain),
-    };
-    let before = {
-        let store = open(&path);
-        block_on(
-            BalanceContract::new(&store, network())
-                .opening_evidence_requires_the_exact_caught_up_snapshot(),
-        );
-        block_on(indexing::BalanceStore::balance(&store, query.clone())).expect("balance")
-    };
-    assert!(before.opening.is_some());
-    let reopened = open(&path);
-    let after = block_on(indexing::BalanceStore::balance(&reopened, query)).expect("reopened");
-    assert_eq!(after, before);
-}
-
-#[test]
-fn receipt_logs_follow_atomic_commits_and_not_reinspection() {
-    use indexing::Watch;
-    use std::sync::Arc;
-    let directory = TempDir::new().unwrap();
-    for disk in [false, true] {
-        let logs = Arc::new(logging::Memory::default());
-        let logger = logging::Logger::new(logs.clone());
-        let store: Box<dyn indexing::Repository> = if disk {
-            Box::new(open(&directory.path().join("logged.db")).with_logger(logger))
-        } else {
-            Box::new(memory::Repository::new().with_logger(logger))
-        };
-        block_on(store.add(vec![Watch {
-            id: "receiver".into(),
-            address: address("receiver"),
-            asset: AssetId::native(network().chain),
-            start: BlockPosition(0),
-        }]))
-        .unwrap();
-        let first = block(1, 1, 0);
-        block_on(store.commit(addition(
-            first.clone(),
-            None,
-            "incoming",
-            OutputChanges::default(),
-        )))
-        .unwrap();
-        let events = logs.page(0, 100, &logging::Filter::default());
-        assert_eq!(events.entries.len(), 1);
-        assert_eq!(events.entries[0].fields["amount"], "1");
-        assert_eq!(events.entries[0].fields["block_time"], "1001");
-        block_on(store.commit(addition(
-            first.clone(),
-            Some(first.clone()),
-            "incoming",
-            OutputChanges::default(),
-        )))
-        .unwrap();
-        assert_eq!(
-            logs.page(0, 100, &logging::Filter::default()).entries.len(),
-            1
-        );
-        // Conflicting expected state is rejected and emits no receipt.
-        assert!(
-            block_on(store.commit(addition(
-                block(2, 2, 1),
-                None,
-                "rejected",
-                OutputChanges::default()
-            )))
-            .is_err()
-        );
-        assert_eq!(
-            logs.page(0, 100, &logging::Filter::default()).entries.len(),
-            1
-        );
-        let mut self_transfer = draft("self");
-        self_transfer.transaction.movements = vec![ValueMovement::transfer(
-            MovementId("self".into()),
-            AssetId::native(network().chain),
-            Decimal::from(4_u64),
-            address("receiver"),
-            address("receiver"),
-        )];
-        let mut change = draft("change");
-        change.transaction_order = 1;
-        change.transaction.movements.push(ValueMovement::transfer(
-            MovementId("spend".into()),
-            AssetId::native(network().chain),
-            Decimal::from(10_u64),
-            address("receiver"),
-            address("outside"),
-        ));
-        let second = block(2, 2, 1);
-        let mut interpreted =
-            InterpretedBlock::new(&network(), second.clone(), vec![self_transfer, change]).unwrap();
-        interpreted.credits.push(indexing::BlockCredit {
-            id: MovementId("withdrawal".into()),
-            asset: AssetId::native(network().chain),
-            amount: Decimal::from(3_u64),
-            to: address("receiver"),
-        });
-        let canonical = CanonicalBlock::new(network(), interpreted).unwrap();
-        for expected in [first, second] {
-            let batch = indexing::IndexedBatch::new(
-                network(),
-                Some(expected),
-                vec![canonical.clone()],
-                vec![],
-                indexing::FeeSettlement::Charged,
-            )
-            .unwrap();
-            block_on(store.commit(batch)).unwrap();
-        }
-        let events = logs.page(0, 100, &logging::Filter::default());
-        assert_eq!(
-            events.entries.len(),
-            2,
-            "no self-transfer, change, or repeated withdrawal event"
-        );
-        assert_eq!(events.entries[1].fields["credit_id"], "withdrawal");
-        assert_eq!(events.entries[1].fields["amount"], "3");
-        assert!(!events.entries[1].fields.contains_key("transaction_id"));
     }
 }

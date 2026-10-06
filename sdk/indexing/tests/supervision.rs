@@ -18,7 +18,7 @@ use indexing::{
     ChainName, Checkpoint, Holder, Index, IndexError, IndexErrorKind, Indexing, Network,
     NetworkState, SyncHealth, SyncPhase, SyncStatus, Watch, Watching,
 };
-use indexing::{NetworkEvent, Schedules, Supervisor, SyncControl, SyncMonitor};
+use indexing::{Schedules, Supervisor, SyncControl, SyncMonitor};
 use tokio::sync::watch;
 
 /// What one scripted pass does.
@@ -143,24 +143,33 @@ impl Indexing for Probe {
     }
 }
 
-/// Records every event and publishes the snapshot a test waits on.
+/// Records every transition or failed attempt it observes and publishes the
+/// snapshot a test waits on.
 struct Recorder {
     events: Mutex<Vec<(String, NetworkState, NetworkState)>>,
+    last: Mutex<std::collections::HashMap<String, NetworkState>>,
     report: Arc<indexing::SyncReport>,
 }
 
 impl SyncMonitor for Recorder {
     fn network_observed(&self, health: &indexing::NetworkHealth) {
+        let chain = health.status.network.chain.to_string();
+        let previous = self
+            .last
+            .lock()
+            .expect("last")
+            .insert(chain.clone(), health.state)
+            .unwrap_or(NetworkState::CatchingUp);
+        if previous != health.state
+            || health.state == NetworkState::Retrying
+            || health.failure.is_some()
+        {
+            self.events
+                .lock()
+                .expect("events")
+                .push((chain, previous, health.state));
+        }
         self.report.network_observed(health);
-    }
-
-    fn network_changed(&self, event: &NetworkEvent) {
-        self.events.lock().expect("events").push((
-            event.health.status.network.chain.to_string(),
-            event.previous,
-            event.health.state,
-        ));
-        self.report.network_changed(event);
     }
 }
 
@@ -230,6 +239,7 @@ impl Supervised {
         let health = readiness.receiver();
         let recorder = Arc::new(Recorder {
             events: Mutex::new(Vec::new()),
+            last: Mutex::default(),
             report,
         });
         let supervisor = Supervisor::new(

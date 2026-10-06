@@ -11,15 +11,14 @@ use tokio::sync::watch;
 /// again" — arrives long after the event that reported the failure.
 ///
 /// **Online rescan of one network.** The controller of a network may purge it
-/// while every other network keeps syncing, in this order: block the network's
-/// admissions (the application's), [`Self::pause`], purge it
-/// ([`crate::Purging::purge_network`]), reset its indexer
-/// ([`crate::Indexing::reset`]), [`Self::discard_progress`], [`Self::resume`].
-/// The next pass re-derives the network from its registered birthdays. Reads
-/// are not gated here: the purged store answers them honestly by itself
-/// ([`crate::Purging`]). Persisting which step was reached is the
-/// application's; a restart after the purge resumes scanning without purging
-/// again.
+/// while every other network keeps syncing: block the network's admissions
+/// (the application's), then [`Self::rescan`], which runs [`Self::pause`],
+/// [`crate::Purging::purge_network`], [`crate::Indexing::reset`],
+/// [`Self::discard_progress`] and [`Self::resume`] in that order, then reopen
+/// the admissions. The next pass re-derives the network from its registered
+/// birthdays. Reads are not gated here: the purged store answers them honestly
+/// by itself ([`crate::Purging`]). A restart after the purge resumes scanning
+/// without purging again.
 ///
 /// Cheap to clone; every clone reaches the same supervisor.
 #[derive(Clone)]

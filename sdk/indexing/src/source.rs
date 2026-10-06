@@ -1,11 +1,11 @@
 //! What a chain must implement to be indexed: `NativeBlock` (a native block
 //! that can state its `BlockRef`), `ChainTips` (the produced and confirmed
 //! lines), `BlockSource` (reading blocks) and `BlockInterpreter` (turning one
-//! block into an `ObservationDraft`). Four traits, no implementations, and the
+//! block into an `Transaction`). Four traits, no implementations, and the
 //! one answer an interpreter gives about its chain: `FeeSettlement`.
 
 use crate::{
-    Address, BlockPosition, BlockRef, BoxFuture, IndexError, InterpretedBlock, SourceError,
+    Address, BlockPosition, BlockRef, BlockWithOutputs, BoxFuture, IndexError, SourceError,
 };
 
 /// Gives generic synchronization access to a chain-native block identity.
@@ -101,19 +101,19 @@ pub trait BlockInterpreter: Send + Sync {
 
     /// Extracts the transactions and output changes that touch `addresses`.
     ///
-    /// The reference of the returned [`InterpretedBlock::block`] must equal
+    /// The reference of the returned [`BlockWithOutputs::block`] must equal
     /// [`NativeBlock::block_ref`], and its network must be the one being
     /// synchronized; synchronization rejects anything else as
     /// [`IndexErrorKind::InvalidBlock`](crate::IndexErrorKind::InvalidBlock) or
     /// [`IndexErrorKind::NetworkMismatch`](crate::IndexErrorKind::NetworkMismatch).
-    /// The output is assembled with [`InterpretedBlock::new`], which refuses
+    /// The output is assembled with [`BlockWithOutputs::new`], which refuses
     /// two transactions under one identifier.
     /// Malformed native content is also `InvalidBlock` (terminal).
     fn inspect(
         &self,
         block: &Self::Block,
         addresses: &[Address],
-    ) -> Result<InterpretedBlock, IndexError>;
+    ) -> Result<BlockWithOutputs, IndexError>;
 
     /// Where this chain's network fee already sits, relative to the movements
     /// [`Self::inspect`] emits.

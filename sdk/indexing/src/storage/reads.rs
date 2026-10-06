@@ -154,6 +154,16 @@ pub struct BalanceQuery {
 }
 
 impl BalanceQuery {
+    /// Rejects a holding no store can hold rows for.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexErrorKind::InvalidRequest`](crate::IndexErrorKind::InvalidRequest)
+    /// for a blank address or an asset of another chain.
+    pub fn validate(&self) -> Result<(), IndexError> {
+        crate::holder::require_holding(&self.address, &self.asset)
+    }
+
     /// The query that folds `of`'s holding.
     #[must_use]
     pub fn new(of: &dyn Holder) -> Self {
@@ -256,8 +266,10 @@ pub trait Purging: Send + Sync {
     /// owes the quiesced window: admissions for the network are blocked (the
     /// application's), its unit is paused (`SyncControl::pause` has returned,
     /// so no pass is mid-commit), and before resuming it the caller resets that
-    /// network's indexer ([`crate::Indexing::reset`]). The next pass then
-    /// re-derives every row from the registered birthdays.
+    /// network's indexer ([`crate::Indexing::reset`]). `SyncControl::rescan`
+    /// (feature `supervisor`) is that window as one operation, admissions
+    /// aside. The next pass then re-derives every row from the registered
+    /// birthdays.
     ///
     /// **Reads need no gate of the controller's: the purged rows answer for
     /// themselves.** From this purge until the first commit after resume, the

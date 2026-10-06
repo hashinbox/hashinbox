@@ -26,43 +26,41 @@ mod storage;
 #[cfg(feature = "supervisor")]
 mod supervisor;
 mod sync;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod watch;
 mod watch_set;
 mod watches;
 
 pub use base::{
     Address, AssetId, Block, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef,
-    BoxFuture, ChainName, Decimal, Identified, MovementKind, Network, Networked, TransactionRef,
-    Transactions,
+    BoxFuture, ChainName, Decimal, Holder, Identified, MovementKind, Network, Networked, Subject,
+    TransactionRef, Transactions,
 };
 
 // What a chain implements, and the vocabulary it produces.
-pub use block::{BlockCredit, CanonicalBlock, InterpretedBlock};
+pub use block::{BlockCredit, BlockWithOutputs};
 pub use network::{require_chain, select_addresses};
-pub use observation::{
-    CanonicalStatus, CanonicalTransaction, MovementId, NetworkFee, ObservationDraft,
-    ObservationDraftStatus, Transaction, ValueMovement,
-};
+pub use observation::{MovementId, NetworkFee, Status, Transaction, ValueMovement};
 pub use output::{IndexedOutput, OutputChanges, OutputId, OutputKey};
 pub use source::{BlockInterpreter, BlockSource, ChainTips, FeeSettlement, NativeBlock};
 // What a store implements: the required ports, the capabilities, their rows.
 pub use storage::{
-    Activity, ActivityKind, ActivityPage, ActivityPosition, ActivityQuery, ActivityTransaction,
-    BalanceEvidence, BalanceQuery, BalanceStore, Direction, IndexStore, IndexedBatch, Inspection,
-    OutputStore, Progress, PurgedRows, Purging, Repository, WatchProgress, WatchStore,
+    BalanceQuery, BalanceStore, IndexStore, IndexedBatch, Inspection, OutputStore, Progress,
+    PurgedRows, Purging, Registration, Repository, Wallet, WalletRegistry, WatchProgress,
+    WatchStore,
 };
 // What an application calls: the index, the two facts only it holds, and the
 // hook. The queries and their vocabulary are the repository's, from `storage`.
 pub use backfill::Backfilling;
 pub use error::{IndexError, IndexErrorKind, SourceError};
 pub use health::{NetworkHealth, NetworkState, SyncHealth};
-pub use holder::{Holder, Subject};
 pub use indexer::{Checkpoint, Indexer, Indexing};
 pub use listeners::{BlockCommit, Listener};
 pub use pending::{Checkpointed, Pending, PendingSample};
 pub use storage::{
-    Balance, CanonicalPage, Completeness, ConfirmedHistory, Fold, HistoryPosition, HistoryQuery,
-    MovementEffect, OutputCursor, OutputPage, OutputRequest, Page, PendingValue,
+    Balance, Completeness, ConfirmedHistory, ConfirmedHistoryPage, Fold, HistoryPosition,
+    HistoryQuery, MovementEffect, OutputCursor, OutputPage, OutputRequest, Page, PendingValue,
 };
 // The pending-inclusive reads: a repository's answers joined to the blocks its
 // index holds above the confirmed line.
@@ -72,7 +70,7 @@ pub use storage::{
 pub use sync::{BackfillStatus, SyncPhase, SyncStatus};
 pub use watch::{Birthday, ForwardRange, Watch, Watching};
 // What the pass owns: the owners, the router, the policy and the cadence.
-pub use index::{Assembly, Index, SyncUnit};
+pub use index::{Index, SyncUnit};
 pub use policy::{SyncConfig, SyncPolicy};
 pub use schedule::{Schedule, Schedules};
 
@@ -87,4 +85,4 @@ pub use storage::sqlite;
 pub use storage::memory;
 
 #[cfg(feature = "supervisor")]
-pub use supervisor::{NetworkEvent, Readiness, Supervisor, SyncControl, SyncMonitor, SyncReport};
+pub use supervisor::{Readiness, RescanError, Supervisor, SyncControl, SyncMonitor, SyncReport};

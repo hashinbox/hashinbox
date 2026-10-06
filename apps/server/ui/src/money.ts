@@ -32,7 +32,9 @@ export function listingOf(wallet: Wallet, listings: Listing[]): Listing | undefi
 }
 
 export function unitOf(wallet: Wallet, listings: Listing[]): string {
-  return listingOf(wallet, listings)?.metadata.ticker ?? wallet.asset.toUpperCase();
+  return (
+    listingOf(wallet, listings)?.metadata.ticker ?? (wallet.asset ?? wallet.asset_id).toUpperCase()
+  );
 }
 
 export function decimalsOf(wallet: Wallet, listings: Listing[]): number {

@@ -157,7 +157,7 @@ impl Recovery {
                 .transactions
                 .iter()
                 .chain(&page.pending)
-                .any(|observed| observed.transaction.transaction_id.id == id);
+                .any(|observed| observed.transaction.id.id == id);
             if seen {
                 return Scan::Present;
             }
@@ -263,9 +263,6 @@ mod tests {
         let commit = BlockCommit {
             network: network(),
             block: block.clone(),
-            transactions: Vec::new(),
-            outputs: indexing::OutputChanges::default(),
-            unmatched_spends: Vec::new(),
         };
         for listener in [announce, seen.clone() as Arc<dyn Listener>] {
             listener.committed(&commit);

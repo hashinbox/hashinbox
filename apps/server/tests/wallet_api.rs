@@ -316,22 +316,13 @@ async fn usdc_wallet_is_generated_sent_and_indexed() -> Result<(), Box<dyn std::
 }
 
 async fn start_api(chains: Value) -> Result<RunningApi, Box<dyn std::error::Error>> {
-    start_api_with(chains, json!([]), &[]).await
-}
-
-async fn start_api_with(
-    chains: Value,
-    wallets: Value,
-    secrets: &[(&str, &str)],
-) -> Result<RunningApi, Box<dyn std::error::Error>> {
-    start_api_in(chains, wallets, secrets, Arc::new(TempDir::new()?)).await
+    start_api_in(chains, &[], Arc::new(TempDir::new()?)).await
 }
 
 /// Starts the server on the index file inside `storage`. Passing the same
 /// directory twice restarts the server on the index it already wrote.
 async fn start_api_in(
     chains: Value,
-    wallets: Value,
     secrets: &[(&str, &str)],
     storage: Arc<TempDir>,
 ) -> Result<RunningApi, Box<dyn std::error::Error>> {
@@ -340,7 +331,7 @@ async fn start_api_in(
         .iter()
         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
         .collect::<Vec<_>>();
-    start_server(configured, chains, wallets, &secrets, Some(storage)).await
+    start_server(configured, chains, &secrets, Some(storage)).await
 }
 
 /// Starts the composed server binary on `storage`, with its secrets in the
@@ -348,7 +339,6 @@ async fn start_api_in(
 async fn start_server(
     storage: Value,
     chains: Value,
-    wallets: Value,
     secrets: &[(String, String)],
     storage_directory: Option<Arc<TempDir>>,
 ) -> Result<RunningApi, Box<dyn std::error::Error>> {
@@ -361,11 +351,11 @@ async fn start_server(
             "bind": bind,
             "bearer_token_env": "SYSTEM_TEST_TOKEN",
             "storage": storage,
-            "chains": chains,
-            "wallets": wallets
+            "chains": chains
         }))?,
     )?;
     let child = Command::new(env!("CARGO_BIN_EXE_payment-server"))
+        .arg("serve")
         .arg(config_path)
         .env("SYSTEM_TEST_TOKEN", TOKEN)
         .envs(secrets.iter().map(|(name, value)| (name, value)))
@@ -605,7 +595,7 @@ async fn get(url: &str) -> Option<Value> {
 }
 
 async fn wait_ready(root: &str) {
-    let url = format!("{root}/healthz");
+    let url = format!("{root}/health");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let ready = reqwest::get(&url)

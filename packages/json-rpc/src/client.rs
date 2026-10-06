@@ -20,6 +20,16 @@ pub trait Client: Send + Sync {
 
     /// Executes one batch under this implementation's policy.
     fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>>;
+
+    /// Executes one request at every node this client reaches, each node
+    /// exactly once: the deliberate multi-node path for submitting one signed
+    /// envelope. A single node is reached once, so the default is
+    /// [`Self::request`]. A decorator forwards this method rather than
+    /// inheriting the default, which would silently narrow a broadcast to one
+    /// node; [`crate::Cluster`] is the implementation that fans out.
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+        self.request(request)
+    }
 }
 
 /// A shared client is a client, so one decorated handle serves every chain.
@@ -30,6 +40,10 @@ impl<C: Client + ?Sized> Client for Arc<C> {
 
     fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
         (**self).batch(batch)
+    }
+
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+        (**self).broadcast(request)
     }
 }
 

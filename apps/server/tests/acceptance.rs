@@ -22,22 +22,10 @@ fn ethereum_index(node: &EthereumNode) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn configured_wallet_history_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
+async fn generated_wallet_history_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
     let bitcoin = BitcoinNode::start().await;
     let ethereum = EthereumNode::start().await;
     let storage = Arc::new(TempDir::new()?);
-    let wallets = json!([
-        {"id": "btc-restart", "asset": "btc", "secret_env": "BTC_TEST_SECRET", "start": 1},
-        {"id": "eth-restart", "asset": "eth", "secret_env": "ETH_TEST_SECRET", "start": 1}
-    ]);
-    let secrets = [
-        ("BTC_TEST_SECRET", hex::encode([3_u8; 32])),
-        ("ETH_TEST_SECRET", hex::encode([4_u8; 32])),
-    ];
-    let environment = secrets
-        .iter()
-        .map(|(name, value)| (*name, value.as_str()))
-        .collect::<Vec<_>>();
     let chains = || {
         json!({
             "bitcoin": bitcoin_index(&bitcoin),
@@ -45,15 +33,11 @@ async fn configured_wallet_history_survives_restart() -> Result<(), Box<dyn std:
         })
     };
 
-    let first = start_api_in(
-        chains(),
-        wallets.clone(),
-        &environment,
-        Arc::clone(&storage),
-    )
-    .await?;
-    let btc = wallet_summary(&first.root, "btc-restart").await?;
-    let eth = wallet_summary(&first.root, "eth-restart").await?;
+    let first = start_api_in(chains(), &[], Arc::clone(&storage)).await?;
+    let btc = create_wallet(&first.root, "btc").await?;
+    let eth = create_wallet(&first.root, "eth").await?;
+    let btc_wallet = wallet_id(&btc);
+    let eth_wallet = wallet_id(&eth);
     let btc_id = bitcoin.fund(vec![FundingOutput::new(
         btc["address"].as_str().expect("Bitcoin wallet address"),
         60_000,
@@ -70,15 +54,15 @@ async fn configured_wallet_history_survives_restart() -> Result<(), Box<dyn std:
         1_000_000_000_000_000_000,
     )]);
     ethereum.append(Vec::new());
-    wait_history(&first.root, "btc-restart", &btc_id).await;
-    wait_history(&first.root, "eth-restart", &eth_id).await;
+    wait_history(&first.root, btc_wallet, &btc_id).await;
+    wait_history(&first.root, eth_wallet, &eth_id).await;
     first.stop().await;
 
-    let second = start_api_in(chains(), wallets, &environment, storage).await?;
-    assert_eq!(wallet_summary(&second.root, "btc-restart").await?, btc);
-    assert_eq!(wallet_summary(&second.root, "eth-restart").await?, eth);
-    wait_history(&second.root, "btc-restart", &btc_id).await;
-    wait_history(&second.root, "eth-restart", &eth_id).await;
+    let second = start_api_in(chains(), &[], storage).await?;
+    assert_eq!(wallet_summary(&second.root, btc_wallet).await?, btc);
+    assert_eq!(wallet_summary(&second.root, eth_wallet).await?, eth);
+    wait_history(&second.root, btc_wallet, &btc_id).await;
+    wait_history(&second.root, eth_wallet, &eth_id).await;
 
     second.stop().await;
     bitcoin.stop().await;
@@ -408,7 +392,7 @@ async fn generated_wallet_survives_restart_and_spends_without_configured_keys()
     let bitcoin = BitcoinNode::start().await;
     let storage = Arc::new(TempDir::new()?);
     let chains = || json!({"bitcoin": bitcoin_index(&bitcoin)});
-    let first = start_api_in(chains(), json!([]), &[], storage.clone()).await?;
+    let first = start_api_in(chains(), &[], storage.clone()).await?;
     let wallet = create_wallet(&first.root, "btc").await?;
     let id = wallet_id(&wallet).to_owned();
     assert_eq!(wallet["watch_only"], false);
@@ -429,7 +413,7 @@ async fn generated_wallet_survives_restart_and_spends_without_configured_keys()
     bitcoin.mine();
     wait_history(&first.root, &id, &transaction).await;
     first.stop().await;
-    let second = start_api_in(chains(), json!([]), &[], storage).await?;
+    let second = start_api_in(chains(), &[], storage).await?;
     assert_eq!(wallet_summary(&second.root, &id).await?, wallet);
     let sent = send(&second.root, &id, &bitcoin_destination(9), "all").await?;
     assert!(!sent.is_empty(), "restored key signs and submits");

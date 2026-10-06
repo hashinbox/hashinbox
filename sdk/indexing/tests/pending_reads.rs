@@ -12,13 +12,12 @@ use std::sync::Arc;
 use base::Decimal;
 use futures_executor::block_on;
 use indexing::{
-    Address, AssetId, Balances, Birthday, BlockHash, BlockHeight, BlockInterpreter, BlockParent,
-    BlockPosition, BlockRef, BlockSource, BoxFuture, ChainName, ChainTips, Completeness,
+    Address, AssetId, Balances, Birthday, BlockHeight, BlockPosition, ChainName, Completeness,
     FeeSettlement, History, IndexError, IndexErrorKind, IndexedOutput, Indexer, Indexing,
-    InterpretedBlock, MovementId, NativeBlock, Network, ObservationDraft, ObservationDraftStatus,
-    OutputChanges, OutputId, OutputPage, OutputRequest, OutputStore, Page, PendingJoin,
-    SourceError, Subject, SyncConfig, SyncPolicy, TransactionRef, TransactionStatus, ValueMovement,
-    Watching, memory,
+    MovementId, Network, OutputChanges, OutputId, OutputPage, OutputRequest, OutputStore, Page,
+    PendingJoin, Status, Subject, SyncConfig, SyncPolicy, Transaction, TransactionRef,
+    TransactionStatus, ValueMovement, Watching, memory,
+    testing::{Chain, block},
 };
 
 /// Block 2 funds the owner with one output, and block 6 spends it and returns
@@ -45,19 +44,6 @@ fn owner() -> Subject {
     }
 }
 
-fn block(height: u64) -> BlockRef {
-    BlockRef {
-        position: BlockPosition(height),
-        height: BlockHeight(height),
-        hash: BlockHash(height.to_be_bytes().to_vec()),
-        parent: height.checked_sub(1).map(|parent| BlockParent {
-            position: BlockPosition(parent),
-            hash: BlockHash(parent.to_be_bytes().to_vec()),
-        }),
-        timestamp: None,
-    }
-}
-
 fn transaction(height: u64) -> TransactionRef {
     TransactionRef::new(network(), format!("tx-{height}"))
 }
@@ -78,134 +64,65 @@ fn output(height: u64, amount: u64) -> IndexedOutput {
     }
 }
 
-/// A chain of `tip + 1` blocks whose newest `depth` are not confirmed yet.
-#[derive(Clone)]
-struct Source {
-    tip: u64,
-    depth: u64,
-}
-
-#[derive(Clone)]
-struct Block(BlockRef);
-
-impl NativeBlock for Block {
-    fn block_ref(&self) -> BlockRef {
-        self.0.clone()
+/// One transfer of `amount` between the owner and somebody else, in block
+/// `height`.
+fn moved(height: u64, amount: u64, from: &str, to: &str) -> Transaction {
+    Transaction {
+        id: transaction(height),
+        movements: vec![ValueMovement::transfer(
+            MovementId("0".into()),
+            asset(),
+            Decimal::from(amount),
+            address(from),
+            address(to),
+        )],
+        fee: None,
+        order: 0,
+        status: Status::Included {
+            block: block(height),
+        },
     }
 }
 
-impl ChainTips for Source {
-    fn tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
-        Box::pin(async move { Ok(block(self.tip)) })
-    }
-
-    fn confirmed_tip<'a>(&'a self) -> BoxFuture<'a, Result<BlockRef, SourceError>> {
-        Box::pin(async move { Ok(block(self.tip - self.depth)) })
-    }
+/// A chain of `tip + 1` blocks whose newest `depth` are not confirmed yet,
+/// holding the owner's two transactions: reported, as a chain reports them,
+/// only while the owner is among the addresses a block is inspected for.
+fn chain(tip: u64, depth: u64) -> Chain {
+    let chain = Chain::dense(network(), tip)
+        .confirming(depth)
+        .settling(FeeSettlement::Embedded);
+    chain.include(&block(FUNDED), moved(FUNDED, 100, "payer", "owner"));
+    chain.change_outputs(
+        &block(FUNDED),
+        OutputChanges {
+            created: vec![output(FUNDED, 100)],
+            ..OutputChanges::default()
+        },
+    );
+    chain.include(&block(SPENT), moved(SPENT, 10, "owner", "payee"));
+    chain.change_outputs(
+        &block(SPENT),
+        OutputChanges {
+            created: vec![output(SPENT, 90)],
+            spent: vec![output(FUNDED, 100).key()],
+            ..OutputChanges::default()
+        },
+    );
+    chain
 }
 
-impl BlockSource for Source {
-    type Block = Block;
+type Index = Indexer<Chain, Chain, memory::Repository>;
 
-    fn blocks<'a>(
-        &'a self,
-        start: BlockPosition,
-        end: BlockPosition,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<Self::Block>, SourceError>> {
-        let blocks = (start.0..=end.0.min(self.tip))
-            .take(limit)
-            .map(|height| Block(block(height)))
-            .collect();
-        Box::pin(async move { Ok(blocks) })
-    }
-
-    fn canonical_at<'a>(
-        &'a self,
-        position: BlockPosition,
-    ) -> BoxFuture<'a, Result<Option<BlockRef>, SourceError>> {
-        let found = (position.0 <= self.tip).then(|| block(position.0));
-        Box::pin(async move { Ok(found) })
-    }
-}
-
-/// Reports the owner's two transactions, and only while the owner is among
-/// the addresses a block is inspected for.
-struct Interpreter;
-
-impl Interpreter {
-    /// One transfer of `amount` between the owner and somebody else.
-    fn moved(height: u64, amount: u64, from: &str, to: &str) -> ObservationDraft {
-        ObservationDraft {
-            transaction: indexing::Transaction {
-                transaction_id: transaction(height),
-                movements: vec![ValueMovement::transfer(
-                    MovementId("0".into()),
-                    asset(),
-                    Decimal::from(amount),
-                    address(from),
-                    address(to),
-                )],
-                fee: None,
-            },
-            transaction_order: 0,
-            status: ObservationDraftStatus::Included,
-        }
-    }
-}
-
-impl BlockInterpreter for Interpreter {
-    type Block = Block;
-
-    fn settlement(&self) -> FeeSettlement {
-        FeeSettlement::Embedded
-    }
-
-    fn inspect(
-        &self,
-        block: &Self::Block,
-        addresses: &[Address],
-    ) -> Result<InterpretedBlock, IndexError> {
-        let reference = block.block_ref();
-        let height = reference.height.0;
-        let watched = addresses.contains(&address("owner"));
-        let (transactions, outputs) = match height {
-            FUNDED if watched => (
-                vec![Self::moved(height, 100, "payer", "owner")],
-                OutputChanges {
-                    created: vec![output(FUNDED, 100)],
-                    ..OutputChanges::default()
-                },
-            ),
-            SPENT if watched => (
-                vec![Self::moved(height, 10, "owner", "payee")],
-                OutputChanges {
-                    created: vec![output(SPENT, 90)],
-                    spent: vec![output(FUNDED, 100).key()],
-                    ..OutputChanges::default()
-                },
-            ),
-            _ => (Vec::new(), OutputChanges::default()),
-        };
-        Ok(InterpretedBlock {
-            outputs,
-            ..InterpretedBlock::new(&network(), reference, transactions)?
-        })
-    }
-}
-
-type Index = Indexer<Source, Interpreter, memory::Repository>;
-
-/// An index of `source` over `repository`, reading at most `batch` blocks a
+/// An index of `chain` over `repository`, reading at most `batch` blocks a
 /// pass, and the join a chain pairs from the two.
 fn joined(
     repository: &memory::Repository,
-    source: Source,
+    chain: Chain,
     batch: usize,
 ) -> (Arc<Index>, PendingJoin<memory::Repository>) {
     let index = Arc::new(Indexer::new(
-        source,
-        Interpreter,
+        chain.clone(),
+        chain,
         repository.clone(),
         SyncConfig::new(&network(), SyncPolicy::new(batch)).expect("a valid policy"),
     ));
@@ -238,7 +155,7 @@ fn listed(page: &OutputPage) -> Vec<String> {
 #[test]
 fn a_held_block_is_folded_into_every_read_of_the_repository_below_it() {
     let repository = memory::Repository::new();
-    let (index, join) = joined(&repository, Source { tip: 6, depth: 1 }, 100);
+    let (index, join) = joined(&repository, chain(6, 1), 100);
     block_on(index.watch("owner", &owner(), Birthday::At(BlockPosition(0)))).expect("watch");
 
     let status = block_on(Indexing::sync(&*index)).expect("the pass");
@@ -304,7 +221,7 @@ fn a_held_block_is_folded_into_every_read_of_the_repository_below_it() {
 #[test]
 fn a_partly_inspected_address_is_refused_its_outputs_through_the_join() {
     let repository = memory::Repository::new();
-    let source = Source { tip: 8, depth: 0 };
+    let source = chain(8, 0);
     let (index, _) = joined(&repository, source.clone(), 100);
     block_on(Indexing::sync(&*index)).expect("the pass that reaches the line");
     drop(index);

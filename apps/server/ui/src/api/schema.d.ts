@@ -4,7 +4,7 @@
  */
 
 export interface paths {
-    "/healthz": {
+    "/health": {
         parameters: {
             query?: never;
             header?: never;
@@ -44,26 +44,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/addresses": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Observe an address without its key
-         * @description Observes an address from registration without its key. The entry is watch-only; sending from it answers 422.
-         */
-        post: operations["watch_address"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/assets": {
         parameters: {
             query?: never;
@@ -84,7 +64,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/chains": {
+    "/v1/networks": {
         parameters: {
             query?: never;
             header?: never;
@@ -92,10 +72,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read chain settings and runtime progress
-         * @description Returns saved settings, active revisions and reindex progress. Configured RPC URLs are returned for operator editing; environment references are not resolved and authentication headers are omitted.
+         * List every configured network and its RPC nodes
+         * @description Every network the configuration names, its state, and the nodes it uses now. Nodes come from the database once a network has stored them; the configuration file only seeds that list on the first start. Only each node's origin is returned.
          */
-        get: operations["list_chain_settings"];
+        get: operations["list_networks"];
         put?: never;
         post?: never;
         delete?: never;
@@ -104,7 +84,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/chains/{chain}": {
+    "/v1/networks/{chain}/{network}/rescans": {
         parameters: {
             query?: never;
             header?: never;
@@ -112,51 +92,31 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /**
-         * Save chain nodes and requested indexing state
-         * @description Persists desired settings before asynchronous verification. Failed candidates keep the active connection. Existing network identities and asset parameters cannot be replaced; networks can be added and nodes edited or reordered.
-         */
-        put: operations["save_chain_settings"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/indexing": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /**
-         * Pause, resume or reindex one network
-         * @description Persists requested indexing state. Reindex pauses operations, purges indexed facts, preserves wallet keys and birthdays, then scans again. Poll chain settings for progress.
-         */
-        put: operations["control_indexing"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/logs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Read filtered retained logs
-         * @description Returns bounded in-memory events matching every supplied filter. Use the returned cursor for polling; a changed session requires restarting the cursor.
-         */
-        get: operations["read_logs"];
         put?: never;
+        /**
+         * Purge a network's indexed facts and index it again
+         * @description One action: refuses new wallets and sends on the network and waits for those running, pauses its indexing, deletes its indexed history, balances, outputs and checkpoint, and resumes indexing from every watch's birthday. Answers once indexing has resumed; the network then reports `catching_up` until it reaches the tip. Watches, wallet keys and every other network are untouched. A failure after the deletion leaves the network paused; rescanning again finishes it.
+         */
+        post: operations["rescan_network"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/networks/{chain}/{network}/rpc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace a network's RPC nodes
+         * @description Verifies the nodes with the chain's own startup check over the new list, stores them, then sends every later call to them; calls already sent finish on the node they reached. A node that fails the check leaves the current nodes in use and stores nothing. The stored list is used on every later start, whatever the configuration file says. Credentials are stored as sent; prefer `${NAME}` references. A network that is unavailable stores the verified nodes and uses them from the next start.
+         */
+        put: operations["replace_network_rpc"];
         post?: never;
         delete?: never;
         options?: never;
@@ -192,14 +152,14 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List every wallet and watched address
-         * @description Every registered wallet and watched address in wallet ID order.
+         * List the wallets
+         * @description Every active wallet and watched address in wallet ID order; with `archived=true`, the archived ones too.
          */
         get: operations["list_wallets"];
         put?: never;
         /**
-         * Generate a wallet for one configured asset
-         * @description Generates a wallet, stores its key in the application registry, then watches it from creation. Keys never leave the server. Retrying creates another wallet.
+         * Generate a wallet, or watch an address, for one configured asset
+         * @description Without `address`, generates a wallet, stores it with its key, then watches it from creation. Keys never leave the server. Retrying creates another wallet. With `address`, stores and observes that address from registration without its key: the wallet is watch-only, and sending from it answers 422. `label` names either. An archived wallet's address is restored instead: the answer is that wallet, under its original ID, with its key and history, observed again from its original birthday; a given `label` replaces its label.
          */
         post: operations["create_wallet"];
         delete?: never;
@@ -217,12 +177,16 @@ export interface paths {
         };
         /**
          * Read one wallet's public metadata
-         * @description The wallet's asset, network, canonical address, and watch-only flag; never its key.
+         * @description The wallet's asset, network, canonical address, watch-only flag, label and archive time, archived or not; never its key.
          */
         get: operations["read_wallet"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Archive a wallet
+         * @description Marks the wallet archived and stops observing its address. Its history and balance stay readable from what was indexed; sending from it answers 409. Archiving again answers the same wallet. Creating a wallet of its address again restores it.
+         */
+        delete: operations["archive_wallet"];
         options?: never;
         head?: never;
         patch?: never;
@@ -276,8 +240,6 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** @enum {string} */
-        Action: "pause" | "resume" | "reindex";
         /** @description A canonical address within its network. */
         Address: {
             /** @description The address's chain and network. */
@@ -382,7 +344,7 @@ export interface components {
             /** @description Accepted transaction IDs in chain-native submission order. */
             transaction_ids: string[];
         };
-        /** @description One ordered item of a [`TransferBatch`]. */
+        /** @description One ordered item of a `TransferBatch`. */
         BatchedTransfer: {
             /** @description Exact decimal in display units, or `all` to sweep spendable funds. */
             amount: string;
@@ -407,36 +369,49 @@ export interface components {
              */
             position: number;
         };
-        ChainSettings: {
-            id: string;
-            networks: components["schemas"]["NetworkSettings"][];
-            /** Format: int64 */
-            revision: number;
-        };
-        ChainUpdate: {
-            networks: components["schemas"]["NetworkUpdate"][];
-            /**
-             * Format: int64
-             * @description Null when creating a chain; otherwise the last read revision.
-             */
-            revision?: number | null;
-        };
-        Command: {
-            action: components["schemas"]["Action"];
-            network: components["schemas"]["Network"];
-        };
         /**
          * @description How much of the history behind an answer the index can prove it holds.
          *
          *     It is a property of the read, not of the wallet, and the balance and the
-         *     history page share the vocabulary; opening evidence applies only to balances.
+         *     history page share the vocabulary.
          * @enum {string}
          */
-        Completeness: "complete_history" | "verified_opening_balance" | "incomplete" | "overdrawn";
-        /** @description `POST /v1/wallets` body: generate a wallet for one configured asset. */
+        Completeness: "complete_history" | "incomplete" | "overdrawn";
+        /** @description One configured network, its state, and its nodes. */
+        ConfiguredNetwork: {
+            network: components["schemas"]["Network"];
+            /** @description Nodes in failover order; ordinal `i` is `rpc[i]` of `GET /health`. */
+            nodes: components["schemas"]["RpcNode"][];
+            state: components["schemas"]["ServiceState"];
+        };
+        /**
+         * @description `POST /v1/wallets` body: generate a wallet for one configured asset, or
+         *     watch an existing address of it without its key.
+         */
         CreateWallet: {
-            /** @description The configured asset tag the new wallet holds (`GET /v1/assets`). */
+            /**
+             * @description Address text in any form the asset's chain accepts. Present: watch this
+             *     address without its key. Absent: generate a new wallet.
+             */
+            address?: string;
+            /** @description The configured asset tag the wallet holds (`GET /v1/assets`). */
             asset: string;
+            /** @description The operator's name for the wallet, 1 to 64 characters. */
+            label?: string;
+        };
+        /** @description A node with its own headers and bounds. */
+        DetailedEndpoint: {
+            /**
+             * @description Per-call limits: `timeout_ms`, `max_request_bytes`,
+             *     `max_response_bytes`; each defaults when absent.
+             */
+            bounds?: Record<string, never> | null;
+            /** @description Headers every call carries. */
+            headers?: {
+                [key: string]: string;
+            };
+            /** @description `http` or `https` URL naming a host, without a fragment. */
+            url: string;
         };
         /**
          * @description The body of every error response: `message` is always present, the
@@ -460,28 +435,6 @@ export interface components {
              *     Present only when that accepted prefix is non-empty.
              */
             transaction_ids?: string[];
-        };
-        /** @description One retained event, with public context and no raw request or provider payload. */
-        Event: {
-            event: string;
-            fields: {
-                [key: string]: string;
-            };
-            level: string;
-            message: string;
-            /** Format: int64 */
-            sequence: number;
-            /** Format: int64 */
-            timestamp: number;
-            truncated: boolean;
-        };
-        /** @description Polling result. A gap means some records were lost; logs are not an audit ledger. */
-        Events: {
-            entries: components["schemas"]["Event"][];
-            gap: boolean;
-            /** Format: int64 */
-            next: number;
-            session: string;
         };
         /** @description A transaction fee, always in the chain's native asset. */
         Fee: {
@@ -567,49 +520,10 @@ export interface components {
             /** @description What this network's synchronization is doing. */
             state: components["schemas"]["IndexState"];
         };
-        NetworkSettings: {
-            /** Format: int64 */
-            active_revision?: number | null;
-            /** Format: int64 */
-            checkpoint?: number | null;
-            error?: string | null;
-            history_pending: number;
-            /** Format: int64 */
-            history_resume?: number | null;
-            indexing: components["schemas"]["Requested"];
-            name: string;
-            nodes: components["schemas"]["NodeStatus"][];
-            /** @description Chain-owned configuration, excluding RPC addresses and credentials. */
-            parameters: unknown;
-            /** Format: int64 */
-            pending_block?: number | null;
-            rebuild?: null | components["schemas"]["ReindexStatus"];
-        };
-        NetworkUpdate: {
-            indexing?: components["schemas"]["Requested"];
-            name: string;
-            nodes: components["schemas"]["NodeUpdate"][];
-            /** @description Chain configuration with an explicit asset tag. Existing parameters are immutable. */
-            parameters: unknown;
-        };
-        NodeStatus: {
-            active: boolean;
-            /** Format: int64 */
-            attempts: number;
-            /** Format: int64 */
-            failures: number;
-            id: string;
-            last_failure?: string | null;
-            /** @description URL origin for the node card. */
-            origin?: string | null;
-            /** @description Configured URL for operator editing; environment references remain unresolved. */
-            url?: string | null;
-        };
-        NodeUpdate: {
-            /** @description URL string or endpoint object (url, headers, bounds). Omit to retain existing credentials. */
-            endpoint?: unknown;
-            /** @description Stable identifier; changing URL or order preserves this ID. */
-            id: string;
+        /** @description `GET /v1/networks`: every configured network. */
+        NetworkList: {
+            /** @description Networks in configuration order. */
+            networks: components["schemas"]["ConfiguredNetwork"][];
         };
         /** @description The parent of a [`Block`]. */
         ParentBlock: {
@@ -621,25 +535,31 @@ export interface components {
              */
             position: number;
         };
-        /** @enum {string} */
-        Phase: "requested" | "purging" | "scanning";
-        ReindexStatus: {
-            id: string;
-            phase: components["schemas"]["Phase"];
-            /** Format: int64 */
-            target?: number | null;
+        /** @description One asset's in-memory send queue, read without touching its dispatch. */
+        Queue: {
+            /** @description The configured asset tag whose sends wait in this queue. */
+            asset: string;
+            /**
+             * Format: int64
+             * @description Sends answered since the process started, success or failure.
+             */
+            completed: number;
+            /** @description Sends admitted and not yet answered. */
+            depth: number;
+            /** @description Sends with the node right now. */
+            in_flight: number;
         };
         /** @description The memory-only health snapshot of this process. */
         Report: {
             /** @description Latest notification for each network; no repository or node calls. */
             networks: components["schemas"]["NetworkCheckpoint"][];
+            /** @description One send queue per asset that sends, in asset tag order. */
+            queues: components["schemas"]["Queue"][];
             /** @description Every network settled and at least one ready; false if reporting stopped. */
             ready: boolean;
             /** @description One set of counters per configured RPC endpoint. */
             rpc: components["schemas"]["Rpc"][];
         };
-        /** @enum {string} */
-        Requested: "running" | "paused";
         /** @description One RPC endpoint's sanitized execution counters. */
         Rpc: {
             /**
@@ -652,7 +572,10 @@ export interface components {
              * @description Failed completions since the last successful completion.
              */
             consecutive_failures: number;
-            /** @description Zero-based endpoint ordinal in that network's configuration. */
+            /**
+             * @description Zero-based ordinal of the node in the network's current list
+             *     (`GET /v1/networks`).
+             */
             endpoint: number;
             /**
              * Format: int64
@@ -664,10 +587,31 @@ export interface components {
             /** @description Chain and network this client serves. */
             network: components["schemas"]["Network"];
         };
-        SavedRevision: {
-            /** Format: int64 */
-            revision: number;
+        /**
+         * @description One RPC node, written as the configuration file's `rpc.endpoints` writes
+         *     it. `${NAME}` anywhere in the URL or a header value stands for the
+         *     server's environment variable `NAME`.
+         */
+        RpcEndpoint: string | components["schemas"]["DetailedEndpoint"];
+        /** @description One RPC node as it may be shown. */
+        RpcNode: {
+            /**
+             * @description Scheme, host and port of the node's URL. User information, path,
+             *     query and headers are never returned: any of them may hold a
+             *     credential.
+             */
+            origin: string;
         };
+        /** @description `PUT /v1/networks/{chain}/{network}/rpc` body. */
+        RpcNodes: {
+            /** @description One to 16 nodes, in failover order. */
+            endpoints: components["schemas"]["RpcEndpoint"][];
+        };
+        /**
+         * @description What a configured network is doing.
+         * @enum {string}
+         */
+        ServiceState: "unavailable" | "rescanning" | "paused" | "catching_up" | "ready" | "retrying" | "quarantined";
         /** @description Where a history transaction stands relative to its chain's confirmed line. */
         Status: {
             /** @description The including block. */
@@ -757,32 +701,41 @@ export interface components {
             transfers: components["schemas"]["BatchedTransfer"][];
         };
         /**
-         * @description Public wallet fields returned by wallet creation, import, watch, lookup,
-         *     and listing.
+         * @description One wallet: its public identity and its lifecycle. Its wire form is what
+         *     every wallet route returns; it never holds the key.
          */
         Wallet: {
             /** @description Canonical address text. */
             address: string;
-            /** @description The configured asset tag this wallet holds and sends. */
-            asset: string;
-            /** @description Wallet ID (a UUIDv7 for wallets and addresses the API registered). */
+            /**
+             * Format: int64
+             * @description Unix seconds when the wallet was archived; null while it is active.
+             *     Always present.
+             */
+            archived_at: number | null;
+            /**
+             * @description The configured asset tag this wallet holds and sends; null when no
+             *     configured asset holds it any more. Always present.
+             */
+            asset: string | null;
+            /**
+             * @description The asset's identity within its chain: `native`, or a token
+             *     identifier.
+             */
+            asset_id: string;
+            /** @description Wallet ID, a UUIDv7 the API minted. */
             id: string;
+            /** @description The operator's label; null when none was given. Always present. */
+            label: string | null;
             /** @description The chain and network of the wallet's address. */
             network: components["schemas"]["Network"];
-            /** @description Observed without a key: history only, no balance or sends. */
+            /** @description Observed without a key: history and balance only, no sends. */
             watch_only: boolean;
         };
-        /** @description `GET /v1/wallets`: every wallet and watched address. */
+        /** @description `GET /v1/wallets`: the wallets. */
         WalletList: {
             /** @description Wallets in ID order. */
             wallets: components["schemas"]["Wallet"][];
-        };
-        /** @description `POST /v1/addresses` body: observe an address without its key. */
-        WatchAddress: {
-            /** @description Address text in any form the asset's chain accepts. */
-            address: string;
-            /** @description The configured asset tag whose history to record. */
-            asset: string;
         };
     };
     responses: never;
@@ -851,75 +804,6 @@ export interface operations {
             };
         };
     };
-    watch_address: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["WatchAddress"];
-            };
-        };
-        responses: {
-            /** @description Address registered for indexing */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Wallet"];
-                };
-            };
-            /** @description Malformed body, asset tag, or address text */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Missing or invalid bearer token */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Asset is not configured */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description The address is already registered */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Address registration is unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
     list_assets: {
         parameters: {
             query?: never;
@@ -949,7 +833,7 @@ export interface operations {
             };
         };
     };
-    list_chain_settings: {
+    list_networks: {
         parameters: {
             query?: never;
             header?: never;
@@ -958,26 +842,17 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Saved chains */
+            /** @description Networks in configuration order */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ChainSettings"][];
+                    "application/json": components["schemas"]["NetworkList"];
                 };
             };
-            /** @description Unauthorized */
+            /** @description Missing or invalid bearer token */
             401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Runtime controls unavailable */
-            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -987,41 +862,30 @@ export interface operations {
             };
         };
     };
-    save_chain_settings: {
+    rescan_network: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /** @description Registered chain name */
+                /** @description Chain name, as `GET /v1/networks` lists it. */
                 chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
             };
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ChainUpdate"];
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description Desired settings saved */
+            /** @description Purged; indexing has resumed from the birthdays */
             202: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SavedRevision"];
+                    "application/json": components["schemas"]["ConfiguredNetwork"];
                 };
             };
-            /** @description Invalid settings or conflicting revision */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Unauthorized */
+            /** @description Missing or invalid bearer token */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1030,63 +894,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Runtime controls unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    control_indexing: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["Command"];
-            };
-        };
-        responses: {
-            /** @description Indexing request persisted */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Indexing control applied */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Invalid command */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Network not configured */
+            /** @description Network is not configured */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1095,7 +903,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Supervisor stopped */
+            /** @description A rescan or node change of this network is in progress, or the network is not in service */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1104,7 +912,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Control unavailable or still pausing */
+            /** @description The rescan failed; the message says whether the network is paused */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -1115,32 +923,34 @@ export interface operations {
             };
         };
     };
-    read_logs: {
+    replace_network_rpc: {
         parameters: {
-            query?: {
-                chain?: string;
-                network?: string;
-                node_id?: string;
-                component?: string;
-                after?: number;
-                limit?: number;
-            };
+            query?: never;
             header?: never;
-            path?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+            };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RpcNodes"];
+            };
+        };
         responses: {
-            /** @description Retained events */
+            /** @description Nodes verified, stored and in use */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Events"];
+                    "application/json": components["schemas"]["ConfiguredNetwork"];
                 };
             };
-            /** @description Invalid query */
+            /** @description Malformed node list, a node the chain refuses, or an unset `${NAME}` */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1149,8 +959,35 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Unauthorized */
+            /** @description Missing or invalid bearer token */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Network is not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The node was unreachable or serves another network; the message says which, and the current nodes stay in use */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Another change to this network is in progress, or the nodes could not be stored */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1209,6 +1046,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The batch asset's network is being rescanned */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Definite batch failure; transaction_ids is present only for a definitely acknowledged prefix and failed_index only for a truthful item-scoped failure */
             422: {
                 headers: {
@@ -1231,7 +1077,10 @@ export interface operations {
     };
     list_wallets: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Include archived wallets; they are left out by default. */
+                archived?: boolean;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -1245,6 +1094,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WalletList"];
+                };
+            };
+            /** @description Malformed query */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -1280,7 +1138,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Wallet generated and registered for indexing */
+            /** @description Wallet generated, address watched, or archived wallet restored, and registered for indexing */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -1289,7 +1147,7 @@ export interface operations {
                     "application/json": components["schemas"]["Wallet"];
                 };
             };
-            /** @description Malformed body or asset tag */
+            /** @description Malformed body, asset tag, label, or address text */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1316,7 +1174,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Wallet ID or address is already registered */
+            /** @description The address is already an active wallet, an archived wallet of it holds another key, or the asset's network is being rescanned */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1368,6 +1226,65 @@ export interface operations {
             };
             /** @description Wallet is unknown */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    archive_wallet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The wallet ID a create or watch call returned. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The archived wallet */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Wallet"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Wallet is unknown */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The wallet's network is being rescanned */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The wallet could not be archived or unwatched */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1545,6 +1462,15 @@ export interface operations {
             };
             /** @description Wallet is unknown */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The wallet's network is being rescanned */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

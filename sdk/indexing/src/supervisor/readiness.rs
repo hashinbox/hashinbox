@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use super::{NetworkEvent, SyncMonitor};
+use super::SyncMonitor;
 use crate::{Network, NetworkHealth, SyncHealth};
 
 /// The monitor that keeps one [`SyncHealth`] snapshot current, and publishes
@@ -14,7 +14,7 @@ use crate::{Network, NetworkHealth, SyncHealth};
 ///
 /// It does no I/O, as [`SyncMonitor`] requires, and it writes nothing: an
 /// application that wants a line per transition implements [`SyncMonitor`]
-/// itself and forwards both `network_observed` and `network_changed` here.
+/// itself and forwards `network_observed` here.
 pub struct SyncReport {
     snapshot: watch::Sender<SyncHealth>,
     /// What every network looks like before it has reported, kept so
@@ -54,10 +54,6 @@ impl SyncMonitor for SyncReport {
     fn network_observed(&self, health: &NetworkHealth) {
         self.snapshot.send_modify(|snapshot| snapshot.apply(health));
     }
-
-    fn network_changed(&self, event: &NetworkEvent) {
-        self.network_observed(&event.health);
-    }
 }
 
 impl Readiness {
@@ -96,13 +92,10 @@ mod tests {
         }
     }
 
-    fn event(network: &Network, state: NetworkState) -> NetworkEvent {
-        NetworkEvent {
-            previous: NetworkState::CatchingUp,
-            health: NetworkHealth {
-                state,
-                ..NetworkHealth::starting(network)
-            },
+    fn event(network: &Network, state: NetworkState) -> NetworkHealth {
+        NetworkHealth {
+            state,
+            ..NetworkHealth::starting(network)
         }
     }
 
@@ -112,15 +105,15 @@ mod tests {
         let (report, mut readiness) = SyncReport::watching(&[first.clone(), second.clone()]);
         let waiting = tokio::spawn(async move { readiness.settled().await });
 
-        report.network_changed(&event(&first, NetworkState::Ready));
-        report.network_changed(&event(&second, NetworkState::Retrying));
+        report.network_observed(&event(&first, NetworkState::Ready));
+        report.network_observed(&event(&second, NetworkState::Retrying));
         tokio::task::yield_now().await;
         assert!(
             !waiting.is_finished(),
             "one network has reached its tip and the other is still trying"
         );
 
-        report.network_changed(&event(&second, NetworkState::Ready));
+        report.network_observed(&event(&second, NetworkState::Ready));
 
         let settled = waiting.await.expect("waiter").expect("a live report");
         assert!(settled.ready());
@@ -138,8 +131,8 @@ mod tests {
         let (report, mut readiness) = SyncReport::watching(&[first.clone(), second.clone()]);
         let waiting = tokio::spawn(async move { readiness.settled().await });
 
-        report.network_changed(&event(&first, NetworkState::Quarantined));
-        report.network_changed(&event(&second, NetworkState::Ready));
+        report.network_observed(&event(&first, NetworkState::Quarantined));
+        report.network_observed(&event(&second, NetworkState::Ready));
         tokio::task::yield_now().await;
 
         assert!(waiting.is_finished(), "a quarantine heals by no waiting");
@@ -154,7 +147,7 @@ mod tests {
         let (report, mut readiness) = SyncReport::watching(std::slice::from_ref(&only));
         let waiting = tokio::spawn(async move { readiness.settled().await });
 
-        report.network_changed(&event(&only, NetworkState::Quarantined));
+        report.network_observed(&event(&only, NetworkState::Quarantined));
         tokio::task::yield_now().await;
 
         assert!(waiting.is_finished(), "nothing is left to wait for");
@@ -169,7 +162,7 @@ mod tests {
     async fn a_transition_on_an_unwatched_network_settles_nothing() {
         let (report, readiness) = SyncReport::watching(&[network("watched")]);
 
-        report.network_changed(&event(&network("other"), NetworkState::Ready));
+        report.network_observed(&event(&network("other"), NetworkState::Ready));
 
         assert!(!readiness.receiver().borrow().ever_settled());
     }
@@ -178,7 +171,7 @@ mod tests {
     async fn a_reset_report_has_to_settle_again() {
         let only = network("only");
         let (report, mut readiness) = SyncReport::watching(std::slice::from_ref(&only));
-        report.network_changed(&event(&only, NetworkState::Ready));
+        report.network_observed(&event(&only, NetworkState::Ready));
         assert!(readiness.settled().await.is_some());
 
         report.reset();

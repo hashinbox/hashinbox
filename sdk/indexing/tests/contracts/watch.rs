@@ -6,13 +6,14 @@
 //! an atomic batch write; recognition of an exact repeat that leaves recorded
 //! progress alone; refusal of a redefinition under a name that is taken; one
 //! snapshot pairing each observation with its own coverage; a withdrawal that
-//! takes the claim and leaves the facts; and a re-anchor that moves a birthday
-//! and discards the claim earned under it without the row ever being absent.
+//! archives the row, takes the claim and leaves the facts; and a re-anchor that
+//! moves a birthday and discards the claim earned under it without the row ever
+//! being absent.
 
 use indexing::{
-    Address, AssetId, BlockHash, BlockHeight, BlockPosition, BlockRef, CanonicalBlock,
-    FeeSettlement, IndexErrorKind, IndexStore, IndexedBatch, InterpretedBlock, Network, Progress,
-    Watch, WatchProgress, WatchStore,
+    Address, AssetId, BlockHash, BlockHeight, BlockPosition, BlockRef, BlockWithOutputs,
+    FeeSettlement, IndexErrorKind, IndexStore, IndexedBatch, Network, Progress, Watch,
+    WatchProgress, WatchStore,
 };
 
 /// The [`WatchStore`] contract, checked against one repository bound to
@@ -23,7 +24,7 @@ use indexing::{
 /// not state what `add` must leave alone.
 pub struct WatchContract<'a, R> {
     pub(super) repository: &'a R,
-    network: Network,
+    pub(super) network: Network,
 }
 
 impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
@@ -184,14 +185,15 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
         assert!(self.watches().await.is_empty());
     }
 
-    /// A forgotten identity frees both of its uniqueness constraints, and
-    /// forgetting one nothing holds is not an error.
+    /// A forgotten identity is archived, not freed, and forgetting one nothing
+    /// holds is not an error.
     ///
     /// The durable half of an `unwatch`, so what it proves is what makes the act
-    /// reversible: the id and the `(address, asset)` pair can both be observed
-    /// again, from a different birthday, without the store remembering the row
-    /// that was removed — including its coverage, which was a claim about the
-    /// withdrawn watch and not about the chain.
+    /// reversible: the same id and `(address, asset)` pair are observed again,
+    /// from a different birthday, without inheriting the archived row's
+    /// coverage, which was a claim about the withdrawn watch and not about the
+    /// chain. The pair stays reserved for that id meanwhile
+    /// (`contracts/wallets.rs`).
     pub async fn forgets_an_identity_and_accepts_it_again(&self) {
         let watch = self.watch("withdrawn", "native", "a", 1);
         self.forget(&watch).await;
@@ -420,12 +422,8 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
             parent: None,
             timestamp: None,
         };
-        let canonical = CanonicalBlock::new(
-            self.network.clone(),
-            InterpretedBlock::new(&self.network, block.clone(), Vec::new())
-                .expect("unique transaction ids"),
-        )
-        .expect("valid fixture facts");
+        let canonical = BlockWithOutputs::new(&self.network, block.clone(), Vec::new())
+            .expect("unique transaction ids");
         let batch = IndexedBatch::new(
             self.network.clone(),
             None,

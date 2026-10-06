@@ -21,9 +21,9 @@ use num_bigint::BigUint;
 use num_bigint::{BigInt, Sign};
 
 use crate::{
-    Address, BalanceQuery, BalanceStore, BlockCredit, BlockRef, BoxFuture, CanonicalBlock,
-    CanonicalTransaction, Checkpointed, Decimal, FeeSettlement, Holder, IndexError, IndexErrorKind,
-    PendingJoin, ValueMovement,
+    Address, BalanceQuery, BalanceStore, BlockCredit, BlockRef, BlockWithOutputs, BoxFuture,
+    Checkpointed, Decimal, FeeSettlement, Holder, IndexError, IndexErrorKind, PendingJoin,
+    Transaction, ValueMovement,
 };
 
 /// One address's holding of one asset, on both sides of the confirmed line.
@@ -46,9 +46,6 @@ pub struct Balance {
     /// How much of the history behind `amount` the repository can prove it
     /// holds.
     pub completeness: Completeness,
-    /// Externally verified opening amount, still supported by contiguous inspection.
-    /// Independent of complete-history coverage; never changes `amount`.
-    pub opening: Option<crate::BalanceEvidence>,
 }
 
 /// The line the settled amount was folded at is the line a pending sample is
@@ -252,16 +249,16 @@ impl<'a> Fold<'a> {
     /// integer, which the write path forbids.
     pub fn apply(
         &mut self,
-        transaction: &CanonicalTransaction,
+        transaction: &Transaction,
         settlement: FeeSettlement,
     ) -> Result<(), IndexError> {
-        for movement in &transaction.transaction.movements {
+        for movement in &transaction.movements {
             if &movement.asset != self.of.asset() {
                 continue;
             }
             self.record(&movement.effect(self.of.address()))?;
         }
-        let charged = transaction.transaction.fee.as_ref().filter(|fee| {
+        let charged = transaction.fee.as_ref().filter(|fee| {
             settlement == FeeSettlement::Charged
                 && fee.payer.as_ref() == Some(self.of.address())
                 && &fee.asset == self.of.asset()
@@ -306,7 +303,6 @@ impl<'a> Fold<'a> {
             observed_at,
             pending: PendingValue::none(),
             completeness,
-            opening: None,
         }
     }
 
@@ -363,11 +359,11 @@ impl<R> PendingJoin<R> {
     /// thing reported here that the pending half of a *history* page cannot
     /// show: a credit is not a transaction. Leaving it out would understate
     /// an address for the whole depth of the confirmed line.
-    fn moving(of: &dyn Holder, blocks: &[CanonicalBlock]) -> PendingValue {
+    fn moving(of: &dyn Holder, blocks: &[BlockWithOutputs]) -> PendingValue {
         let movements = blocks
             .iter()
-            .flat_map(CanonicalBlock::transactions)
-            .flat_map(|transaction| &transaction.transaction.movements)
+            .flat_map(|facts| facts.block.transactions())
+            .flat_map(|transaction| &transaction.movements)
             .filter(|movement| &movement.asset == of.asset());
         let (mut incoming, mut outgoing) = (Vec::new(), Vec::new());
         for movement in movements {
@@ -377,13 +373,13 @@ impl<R> PendingJoin<R> {
         }
         let credits = blocks
             .iter()
-            .flat_map(CanonicalBlock::credits)
+            .flat_map(|facts| facts.credits.as_slice())
             .filter(|credit| &credit.asset == of.asset() && &credit.to == of.address());
         incoming.extend(credits.map(|credit| credit.amount.clone()));
         PendingValue {
             incoming: Decimal::total(&incoming),
             outgoing: Decimal::total(&outgoing),
-            block: blocks.last().map(|held| held.block().clone()),
+            block: blocks.last().map(|held| held.block.reference().clone()),
         }
     }
 }
@@ -394,8 +390,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        AssetId, BlockHash, BlockHeight, BlockPosition, CanonicalStatus, MovementId, Network,
-        NetworkFee, Subject, TransactionRef,
+        AssetId, BlockHash, BlockHeight, BlockPosition, MovementId, Network, NetworkFee, Status,
+        Subject, TransactionRef,
     };
 
     fn network() -> Network {
@@ -424,25 +420,23 @@ mod tests {
     }
 
     /// A transfer of `amount` to `to`, with `payer` charged a fee of 3.
-    fn transaction(to: &str, amount: u64, payer: &str) -> CanonicalTransaction {
-        CanonicalTransaction {
-            transaction: crate::Transaction {
-                transaction_id: TransactionRef::new(network(), "transaction"),
-                movements: vec![ValueMovement::transfer(
-                    MovementId("value".into()),
-                    native(),
-                    Decimal::from(amount),
-                    Address::new(network(), "sender"),
-                    Address::new(network(), to),
-                )],
-                fee: Some(NetworkFee {
-                    asset: native(),
-                    amount: Decimal::from(3_u64),
-                    payer: Some(Address::new(network(), payer)),
-                }),
-            },
-            transaction_order: 0,
-            status: CanonicalStatus::Included { block: block() },
+    fn transaction(to: &str, amount: u64, payer: &str) -> Transaction {
+        Transaction {
+            id: TransactionRef::new(network(), "transaction"),
+            movements: vec![ValueMovement::transfer(
+                MovementId("value".into()),
+                native(),
+                Decimal::from(amount),
+                Address::new(network(), "sender"),
+                Address::new(network(), to),
+            )],
+            fee: Some(NetworkFee {
+                asset: native(),
+                amount: Decimal::from(3_u64),
+                payer: Some(Address::new(network(), payer)),
+            }),
+            order: 0,
+            status: Status::Included { block: block() },
         }
     }
 
@@ -518,7 +512,7 @@ mod tests {
     fn a_credit_discharges_an_overdrawn_fold_instead_of_masking_it() {
         let holder = subject("spender");
         let mut spent = transaction("elsewhere", 0, "spender");
-        spent.transaction.movements.clear();
+        spent.movements.clear();
 
         let mut short = Fold::new(&holder);
         short
@@ -541,9 +535,7 @@ mod tests {
 
 #[cfg(test)]
 mod joined {
-    use crate::{
-        AssetId, BlockCredit, CanonicalBlock, HistoryQuery, InterpretedBlock, MovementId, Subject,
-    };
+    use crate::{AssetId, BlockCredit, BlockWithOutputs, HistoryQuery, MovementId, Subject};
 
     use super::*;
     use crate::storage::join::tests::{
@@ -581,16 +573,16 @@ mod joined {
             address: address("beneficiary"),
             asset: AssetId::native(network().chain),
         };
-        let interpreted = InterpretedBlock {
+        let interpreted = BlockWithOutputs {
             credits: vec![BlockCredit {
                 id: MovementId("withdrawal:1".into()),
                 asset: holder.asset.clone(),
                 amount: Decimal::from(2_u64),
                 to: holder.address.clone(),
             }],
-            ..InterpretedBlock::new(&network(), block(1), Vec::new()).expect("an empty block")
+            ..BlockWithOutputs::new(&network(), block(1), Vec::new()).expect("an empty block")
         };
-        let held = vec![CanonicalBlock::new(network(), interpreted).expect("a valid block")];
+        let held = vec![interpreted];
 
         let pending = PendingJoin::<Paged>::moving(&holder, &held);
 

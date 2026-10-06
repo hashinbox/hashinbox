@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, de::DeserializeOwned};
 
-use crate::{Chain, Chains, Error, ErrorKind};
+use crate::{Chain, Chains, Error, ErrorKind, chain::Endpoints};
 
 /// A document's chain table as it arrives: one named section per chain, none
 /// of them decoded yet.
@@ -30,6 +30,16 @@ impl Sections {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+/// A table assembled from named sections, the inverse of
+/// [`Sections::into_values`]: an application that keeps part of a section
+/// elsewhere (its RPC endpoints, say) hands the amended sections back to a
+/// [`Registry`]. A repeated name keeps the last section.
+impl FromIterator<(String, serde_json::Value)> for Sections {
+    fn from_iter<I: IntoIterator<Item = (String, serde_json::Value)>>(sections: I) -> Self {
+        Self(sections.into_iter().collect())
     }
 }
 
@@ -110,7 +120,9 @@ impl<A: 'static, R: 'static> Registry<A, R> {
                 .parsers
                 .get(name)
                 .ok_or_else(|| self.unregistered().in_section(name))?;
-            chains.push(name.clone(), parse(value).map_err(|e| e.in_section(name))?)?;
+            let chain = parse(value).map_err(|e| e.in_section(name))?;
+            let endpoints = Endpoints::of(value).map_err(|e| e.in_section(name))?;
+            chains.push_parsed(name.clone(), chain, endpoints)?;
         }
         Ok(chains)
     }
@@ -170,13 +182,20 @@ mod tests {
             Ok(Some(format!("fixture: {} blocks", self.depth)))
         }
 
+        fn verify<'a>(
+            &'a self,
+            _transport: &'a crate::Transport,
+        ) -> BoxFuture<'a, Result<(), Error>> {
+            Box::pin(async { Err(Error::refused("a fixture chain contacts no node")) })
+        }
+
         fn connect<'a>(
-            self: Box<Self>,
+            &'a self,
             _secrets: &'a dyn json_rpc::Secrets,
             _statistics: &'a mut Vec<json_rpc::Statistics>,
             _logger: logging::Logger,
             _transport: Option<crate::Transport>,
-        ) -> BoxFuture<'a, Result<Box<dyn wallets::Connection<&'static str, ()>>, Error>> {
+        ) -> BoxFuture<'a, Result<Box<dyn crate::Connection<&'static str, ()>>, Error>> {
             Box::pin(async { Err(Error::refused("a fixture chain contacts no node")) })
         }
     }
@@ -237,6 +256,21 @@ mod tests {
         assert_eq!(
             refused.to_string(),
             "fixture: invalid database or RPC configuration"
+        );
+    }
+
+    /// Sections taken apart and assembled again parse to the same chains.
+    #[test]
+    fn sections_reassemble_from_their_values() {
+        let original = sections(good());
+        let mut values = original.clone().into_values();
+        values.get_mut("fixture").expect("the fixture section")["network"] =
+            serde_json::json!("two");
+        let amended: Sections = values.into_iter().collect();
+        assert_eq!(amended.names().collect::<Vec<_>>(), ["fixture"]);
+        assert_eq!(
+            registry().chains(&amended).expect("one chain").networks(),
+            [base::Network::new(base::ChainName::new("fixture"), "two")]
         );
     }
 

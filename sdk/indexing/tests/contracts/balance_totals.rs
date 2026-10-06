@@ -29,9 +29,9 @@
 use base::Decimal;
 
 use indexing::{
-    AssetId, BalanceQuery, BalanceStore, BlockPosition, CanonicalBlock, Completeness, IndexStore,
-    IndexedBatch, InterpretedBlock, MovementId, NetworkFee, ObservationDraft,
-    ObservationDraftStatus, Progress, TransactionRef, ValueMovement, Watch, WatchStore,
+    AssetId, BalanceQuery, BalanceStore, BlockPosition, BlockWithOutputs, Completeness, IndexStore,
+    IndexedBatch, MovementId, NetworkFee, Progress, Status, Transaction, TransactionRef,
+    ValueMovement, Watch, WatchStore,
 };
 
 use super::{balance::BalanceContract, fixture::Fixture};
@@ -132,20 +132,16 @@ impl<R: BalanceStore + IndexStore + WatchStore> BalanceContract<'_, R> {
             .expect("credit exactly repays the deficit");
         assert_eq!(self.reads("d").await, Decimal::zero());
         assert_ne!(self.proof("d").await.1, Completeness::Overdrawn);
-        let historical = CanonicalBlock::new(
-            self.fixture.network.clone(),
-            InterpretedBlock {
-                credits: vec![indexing::BlockCredit {
-                    id: MovementId("late-credit".into()),
-                    asset: self.fixture.native(),
-                    amount: Decimal::from(1_u64),
-                    to: self.fixture.address("d"),
-                }],
-                ..InterpretedBlock::new(&self.fixture.network, self.fixture.block(1), Vec::new())
-                    .expect("empty block")
-            },
-        )
-        .expect("historical credit");
+        let historical = BlockWithOutputs {
+            credits: vec![indexing::BlockCredit {
+                id: MovementId("late-credit".into()),
+                asset: self.fixture.native(),
+                amount: Decimal::from(1_u64),
+                to: self.fixture.address("d"),
+            }],
+            ..BlockWithOutputs::new(&self.fixture.network, self.fixture.block(1), Vec::new())
+                .expect("empty block")
+        };
         for _ in 0..2 {
             self.fixture
                 .repository
@@ -315,36 +311,32 @@ impl<R: BalanceStore + IndexStore + WatchStore> BalanceContract<'_, R> {
     /// A ninth block whose one movement is named exactly as a fee row is, spends
     /// from the same subject in the same asset, and rides in the very
     /// transaction whose fee that subject pays.
-    fn fee_named(fixture: &Fixture<'_, R>) -> CanonicalBlock {
+    fn fee_named(fixture: &Fixture<'_, R>) -> BlockWithOutputs {
         let native = fixture.native();
-        let interpreted = InterpretedBlock::new(
+        BlockWithOutputs::new(
             &fixture.network,
             fixture.block(9),
-            vec![ObservationDraft {
-                transaction: indexing::Transaction {
-                    transaction_id: TransactionRef::new(
-                        fixture.network.clone(),
-                        "named-like-a-fee",
-                    ),
-                    movements: vec![ValueMovement::transfer(
-                        MovementId("fee".into()),
-                        native.clone(),
-                        Decimal::from(3_u64),
-                        fixture.address("a"),
-                        fixture.address("b"),
-                    )],
-                    fee: Some(NetworkFee {
-                        asset: native,
-                        amount: Decimal::from(1_u64),
-                        payer: Some(fixture.address("a")),
-                    }),
+            vec![Transaction {
+                id: TransactionRef::new(fixture.network.clone(), "named-like-a-fee"),
+                movements: vec![ValueMovement::transfer(
+                    MovementId("fee".into()),
+                    native.clone(),
+                    Decimal::from(3_u64),
+                    fixture.address("a"),
+                    fixture.address("b"),
+                )],
+                fee: Some(NetworkFee {
+                    asset: native,
+                    amount: Decimal::from(1_u64),
+                    payer: Some(fixture.address("a")),
+                }),
+                order: 0,
+                status: Status::Included {
+                    block: fixture.block(9),
                 },
-                transaction_order: 0,
-                status: ObservationDraftStatus::Included,
             }],
         )
-        .expect("unique transaction ids");
-        CanonicalBlock::new(fixture.network.clone(), interpreted).expect("valid fixture facts")
+        .expect("unique transaction ids")
     }
 
     /// The settled amount the store answers for `address` in the native asset.

@@ -3,25 +3,34 @@
 //!
 //! Separate from the parent module because the split falls where the ports do:
 //! this is the only table an application writes and the index merely reads
-//! back. Its rows are the observations themselves, which is what it is named
-//! for — an address is one field of one.
+//! back. Its rows are wallets, observed or archived, exactly as SQLite's
+//! `wallet` rows are; what this port reads and writes are the observed ones,
+//! and a withdrawal archives a row rather than removing it.
 //!
 //! One `apply` for the whole batch, which is how a map-backed store expresses
 //! atomicity: the staged copy is installed only if every watch in the batch was
 //! accepted, so a conflicting definition anywhere leaves no row behind.
 
 use crate::{
-    Address, BoxFuture, Holder, IndexError, IndexErrorKind, Network, Watch, WatchProgress,
+    Address, AssetId, BoxFuture, IndexError, IndexErrorKind, Network, Watch, WatchProgress,
     WatchStore,
 };
 
-use super::{Repository, Tables, conflict};
+use super::{Repository, Tables, WalletRow};
+use crate::storage::{wallet, watch::redefinition};
+
+/// Where one wallet row is filed: `(network, asset, address)`.
+pub(super) type WalletKey = (Network, AssetId, String);
 
 impl WatchStore for Repository {
     fn add<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
         Box::pin(async move {
             Self::one_network(&watches)?;
-            self.apply(|tables| Self::register_all(tables, &watches))
+            self.apply(|tables| {
+                watches
+                    .iter()
+                    .try_for_each(|watch| Self::register(tables, watch))
+            })
         })
     }
 
@@ -51,7 +60,7 @@ impl WatchStore for Repository {
                 ));
             }
             self.apply(|tables| {
-                Self::withdraw(tables, network, watch);
+                Self::archive(tables, network, &watch.id);
                 Ok(())
             })
         })
@@ -60,81 +69,102 @@ impl WatchStore for Repository {
     fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
         Box::pin(async move {
             Self::one_network(&watches)?;
-            // One `apply`, so the withdrawal and the registration are staged
-            // together and installed once: no reader ever sees the tables without
-            // the row, which is the transaction this operation asks for.
-            self.apply(|tables| Self::renewed(tables, &watches))
+            // One `apply`, so every re-anchor is staged together and installed
+            // once: no reader ever sees the tables without the row, which is the
+            // transaction this operation asks for.
+            self.apply(|tables| {
+                watches
+                    .iter()
+                    .try_for_each(|watch| Self::reanchor(tables, watch))
+            })
         })
     }
 }
 
 impl Repository {
-    /// Every observation of the batch at the birthday it now carries, with the
+    /// One observation of the batch at the birthday it now carries, with the
     /// claim it earned under the old one gone.
     ///
-    /// The withdrawal and the registration `forget` and `add` already own, in one
-    /// staged copy rather than two installed ones — which is the whole of what the
-    /// port asks for, so nothing new decides anything here.
-    fn renewed(tables: &mut Tables, watches: &[Watch]) -> Result<(), IndexError> {
-        for watch in watches {
-            Self::raises(tables, watch)?;
-        }
-        for watch in watches {
-            // By identity, exactly as a SQL store's delete is keyed: the row this
-            // re-anchors is the one wearing that name. A `(asset, address)` pair
-            // some *other* identity holds is a conflict the registration below
-            // refuses, not a name a re-anchor takes.
-            let held = tables
-                .watches
-                .values()
-                .find(|held| held.id == watch.id)
-                .cloned();
-            if let Some(held) = held {
-                Self::withdraw(tables, &held.address.network, &held);
+    /// The preconditions are narrow on purpose: a re-anchor is a postcondition
+    /// and repeating it is how a lost acknowledgement is settled, so a row the
+    /// store does not hold — or holds archived — is observed as described. An
+    /// identity held under another `(address, asset)` pair, in this network or
+    /// another, is a different observation, which a re-anchor neither moves nor
+    /// re-dates; a pair another identity holds is a name it does not take; and
+    /// a birthday that goes *down* is refused for good, which is what stops a
+    /// range that was never inspected from being claimed.
+    fn reanchor(tables: &mut Tables, watch: &Watch) -> Result<(), IndexError> {
+        let wallet_key = Self::wallet_key(watch);
+        match Self::located(tables, &watch.id) {
+            Some((held, _)) if held != wallet_key => Err(redefinition()),
+            Some((_, row)) if row.archived_at.is_some() => {
+                Self::observe(tables, &wallet_key, watch)
             }
+            Some((_, row)) if row.birthday.is_some_and(|stored| watch.start < stored) => {
+                Err(IndexError::new(
+                    IndexErrorKind::Conflict,
+                    "a re-anchor must not lower an observation's birthday",
+                    false,
+                ))
+            }
+            Some(_) => {
+                if let Some(row) = tables.wallets.get_mut(&wallet_key) {
+                    row.birthday = Some(watch.start);
+                }
+                drop(tables.progress.remove(&(wallet_key.0, watch.id.clone())));
+                Ok(())
+            }
+            None => Self::register(tables, watch),
         }
-        Self::register_all(tables, watches)
     }
 
-    /// Refuses a re-anchor that would lower an observation's birthday.
+    /// Archives the observed row `network` holds under `id`, if any: its claim
+    /// and total go; its birthday, label, key and every indexed fact stay.
     ///
-    /// The one precondition the operation has, and it is narrow on purpose: a
-    /// re-anchor is a postcondition and repeating it is how a lost
-    /// acknowledgement is settled, so refusing a row the store does not hold
-    /// would make that recovery impossible. Refusing a birthday that goes *down*
-    /// costs none of it — raising to a birthday already stored is a no-op — and
-    /// it is what stops a range that was never inspected from being claimed.
-    fn raises(tables: &Tables, watch: &Watch) -> Result<(), IndexError> {
-        let held = tables.watches.values().find(|held| held.id == watch.id);
-        match held {
-            Some(held) if watch.start < held.start => Err(conflict(
-                "a re-anchor must not lower an observation's birthday",
-            )),
-            _ => Ok(()),
+    /// By identity, exactly as a SQL store's update is keyed: the `(asset,
+    /// address)` pair a caller's watch names may be held by another identity,
+    /// and that row is not this withdrawal's to archive.
+    fn archive(tables: &mut Tables, network: &Network, id: &str) {
+        let Some((wallet_key, row)) = Self::located(tables, id) else {
+            return;
+        };
+        if wallet_key.0 != *network || row.archived_at.is_some() {
+            return;
+        }
+        drop(tables.balances.remove(&wallet_key));
+        drop(tables.progress.remove(&(network.clone(), id.to_owned())));
+        if let Some(row) = tables.wallets.get_mut(&wallet_key) {
+            row.archived_at = Some(wallet::now());
         }
     }
 
-    /// Every watch of the batch, or none of them.
-    fn register_all(tables: &mut Tables, watches: &[Watch]) -> Result<(), IndexError> {
-        for watch in watches {
-            Self::register(tables, watch)?;
-        }
-        Ok(())
+    /// The holding the row registered under `id` names, and the row, in
+    /// whichever network holds it.
+    ///
+    /// Identities are unique across the whole store, so there is at most one.
+    pub(super) fn located(tables: &Tables, id: &str) -> Option<(WalletKey, WalletRow)> {
+        let network = tables.identities.get(id)?;
+        tables
+            .wallets
+            .iter()
+            .find(|((bound, ..), row)| bound == network && row.id == id)
+            .map(|(wallet_key, row)| (wallet_key.clone(), row.clone()))
     }
 
     /// Every observation of `network`, each beside the progress recorded for it,
     /// out of one snapshot.
     fn paired(tables: &Tables, network: &Network) -> Vec<WatchProgress> {
         tables
-            .watches
+            .wallets
             .iter()
             .filter(|((bound, ..), _)| bound == network)
-            .map(|(_, watch)| WatchProgress {
+            .filter_map(|(wallet_key, row)| row.watch(wallet_key))
+            .map(|watch| WatchProgress {
                 indexed_through: tables
                     .progress
                     .get(&(network.clone(), watch.id.clone()))
                     .cloned(),
-                watch: watch.clone(),
+                watch,
             })
             .collect()
     }
@@ -151,25 +181,6 @@ impl Repository {
             .into_iter()
             .filter(|observed| observed.watch.address == *address)
             .collect()
-    }
-
-    /// Removes one observation, its identity and the progress it earned.
-    ///
-    /// Progress is per observation, so there is no shared row to orphan: another
-    /// observation of the same address keeps its own claim, earned under its own
-    /// birthday.
-    fn withdraw(tables: &mut Tables, network: &Network, watch: &Watch) {
-        let key = (
-            network.clone(),
-            watch.asset.clone(),
-            watch.address.value.clone(),
-        );
-        tables.balances.remove(&key);
-        tables.openings.remove(&key);
-        if tables.watches.remove(&key).is_some() {
-            drop(tables.identities.remove(&watch.id));
-        }
-        drop(tables.progress.remove(&(network.clone(), watch.id.clone())));
     }
 
     /// Refuses a batch this store cannot write as one change.
@@ -198,31 +209,67 @@ impl Repository {
     ///
     /// Both of the store's uniqueness constraints are consulted — the
     /// `(asset, address)` pair and the identity — because a repeat collides on
-    /// both and a redefinition on one.
+    /// both and a redefinition on one. An archived row of the same identity
+    /// and holding is observed again, from the birthday given.
     fn register(tables: &mut Tables, watch: &Watch) -> Result<(), IndexError> {
-        let network = watch.address.network.clone();
-        let key = (
-            network.clone(),
-            watch.asset.clone(),
-            watch.address.value.clone(),
-        );
-        let claimed = tables.identities.get(&watch.id);
-        match (tables.watches.get(&key), claimed) {
-            (Some(stored), _) if stored == watch => Ok(()),
-            (Some(_), _) | (None, Some(_)) => Err(conflict(
-                "an address is already registered for this identity or network",
-            )),
-            (None, None) => {
-                let query = crate::BalanceQuery {
-                    address: watch.address.clone(),
-                    asset: watch.asset.clone(),
-                };
-                let net = Self::recomputed(&query, tables)?;
-                tables.balances.insert(key.clone(), net);
-                tables.identities.insert(watch.id.clone(), network);
-                tables.watches.insert(key, watch.clone());
-                Ok(())
+        let wallet_key = Self::wallet_key(watch);
+        match tables.wallets.get(&wallet_key) {
+            Some(row) if row.watch(&wallet_key).as_ref() == Some(watch) => Ok(()),
+            Some(row) if row.id == watch.id && row.archived_at.is_some() => {
+                Self::observe(tables, &wallet_key, watch)
+            }
+            Some(_) => Err(redefinition()),
+            None if tables.identities.contains_key(&watch.id) => Err(redefinition()),
+            None => {
+                tables
+                    .identities
+                    .insert(watch.id.clone(), wallet_key.0.clone());
+                tables.wallets.insert(
+                    wallet_key.clone(),
+                    WalletRow {
+                        id: watch.id.clone(),
+                        birthday: None,
+                        label: None,
+                        secret: None,
+                        archived_at: None,
+                    },
+                );
+                Self::observe(tables, &wallet_key, watch)
             }
         }
+    }
+
+    /// Observes the row at `holding` from `watch`'s birthday, with nothing
+    /// inspected for it and its total seeded from the rows already stored.
+    fn observe(
+        tables: &mut Tables,
+        wallet_key: &WalletKey,
+        watch: &Watch,
+    ) -> Result<(), IndexError> {
+        let query = crate::BalanceQuery {
+            address: watch.address.clone(),
+            asset: watch.asset.clone(),
+        };
+        let net = Self::recomputed(&query, tables)?;
+        tables.balances.insert(wallet_key.clone(), net);
+        drop(
+            tables
+                .progress
+                .remove(&(wallet_key.0.clone(), watch.id.clone())),
+        );
+        if let Some(row) = tables.wallets.get_mut(wallet_key) {
+            row.birthday = Some(watch.start);
+            row.archived_at = None;
+        }
+        Ok(())
+    }
+
+    /// The holding `watch` names.
+    fn wallet_key(watch: &Watch) -> WalletKey {
+        (
+            watch.address.network.clone(),
+            watch.asset.clone(),
+            watch.address.value.clone(),
+        )
     }
 }

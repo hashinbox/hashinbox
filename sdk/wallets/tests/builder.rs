@@ -17,13 +17,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use base::Holder;
 use base::{
     Address, Broadcaster, ChainName, Decimal, Draft, Network, SignFuture, SignRequest,
     SignedTransaction, Signer, Submission, TransactionBuilder, TransactionError,
     TransactionErrorKind, TransactionFuture, TransactionId, TransactionSnapshot,
 };
 use futures_executor::block_on;
-use indexing::Holder;
 use wallets::{
     AddressParser, Author, Authorship, FactoryProfile, FutureResult, Generation, SecretBytes,
     SendFuture, Sender, SingleSender, TransactionFactory, Transfer, Wallet, WalletFactory, Wallets,

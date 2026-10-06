@@ -2,7 +2,11 @@
 
 > "this sounds to me that adding runtime is just patch to crappy design"
 
-Status: **proposal.** Verdict up front: the orchestration layer in
+Status: **superseded by `042`.** The server repairs below were implemented, then
+deleted with the runtime; §1's SDK contract (quiesced online purge) remains in
+`indexing`, unused by the server. Original text follows.
+
+Status at writing: **proposal.** Verdict up front: the orchestration layer in
 `apps/server` is **required by `SYSTEM_REQUIREMENTS`** (durable settings,
 persisted run/pause, revision-checked node switching with drain, online
 reindex with persisted phase, per-network independence) and its placement is

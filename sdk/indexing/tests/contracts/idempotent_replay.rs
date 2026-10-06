@@ -23,9 +23,8 @@
 //! keeps the spend while doing it.
 
 use indexing::{
-    BalanceStore, BlockHeight, BlockPosition, BlockRef, CanonicalBlock, ConfirmedHistory,
-    FeeSettlement, IndexStore, IndexedBatch, InterpretedBlock, OutputChanges, OutputKey,
-    OutputStore, Repository,
+    BalanceStore, BlockHeight, BlockPosition, BlockRef, BlockWithOutputs, ConfirmedHistory,
+    FeeSettlement, IndexStore, IndexedBatch, OutputChanges, OutputKey, OutputStore, Repository,
 };
 
 use super::{backfill::BackfillContract, unmatched_spends::SpendContract};
@@ -85,15 +84,14 @@ impl<R: IndexStore + OutputStore + ConfirmedHistory> SpendContract<'_, R> {
 
     /// Block `height` of the fixture chain, carrying `outputs` and the one
     /// transaction every fixture block carries.
-    fn block(&self, height: u64, outputs: OutputChanges) -> CanonicalBlock {
+    fn block(&self, height: u64, outputs: OutputChanges) -> BlockWithOutputs {
         let block = self.fixture.block(height);
         let transactions = vec![self.fixture.paid("owner", block.height)];
-        let interpreted = InterpretedBlock {
+        BlockWithOutputs {
             outputs,
-            ..InterpretedBlock::new(&self.fixture.network, block, transactions)
+            ..BlockWithOutputs::new(&self.fixture.network, block, transactions)
                 .expect("unique transaction ids")
-        };
-        CanonicalBlock::new(self.fixture.network.clone(), interpreted).expect("valid fixture facts")
+        }
     }
 
     /// One batch of `blocks` above `checkpoint`, and the spends it could not
@@ -101,7 +99,7 @@ impl<R: IndexStore + OutputStore + ConfirmedHistory> SpendContract<'_, R> {
     async fn commit(
         &self,
         checkpoint: Option<BlockRef>,
-        blocks: Vec<CanonicalBlock>,
+        blocks: Vec<BlockWithOutputs>,
     ) -> Vec<OutputKey> {
         let batch = IndexedBatch::new(
             self.fixture.network.clone(),

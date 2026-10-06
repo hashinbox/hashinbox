@@ -132,9 +132,8 @@ mod tests {
 
     use indexing::{
         Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef,
-        CanonicalBlock, Decimal, IndexStore as _, IndexedBatch, InterpretedBlock, MovementId,
-        ObservationDraft, ObservationDraftStatus, TransactionRef, ValueMovement, Watch,
-        WatchStore as _,
+        BlockWithOutputs, Decimal, IndexStore as _, IndexedBatch, MovementId, Status, Transaction,
+        TransactionRef, ValueMovement, Watch, WatchStore as _,
     };
     use serde_json::{Value, json};
 
@@ -177,35 +176,33 @@ mod tests {
     /// One committed block crediting `owner`: a checkpoint and one history
     /// entry, so the reported counts cannot all be zero by accident.
     fn indexed(network: &Network) -> IndexedBatch {
-        let interpreted = InterpretedBlock::new(
+        let block = BlockRef {
+            position: BlockPosition(1),
+            height: BlockHeight(1),
+            hash: BlockHash(vec![1]),
+            parent: Some(BlockParent {
+                position: BlockPosition(0),
+                hash: BlockHash(vec![0]),
+            }),
+            timestamp: Some(1_000),
+        };
+        let facts = BlockWithOutputs::new(
             network,
-            BlockRef {
-                position: BlockPosition(1),
-                height: BlockHeight(1),
-                hash: BlockHash(vec![1]),
-                parent: Some(BlockParent {
-                    position: BlockPosition(0),
-                    hash: BlockHash(vec![0]),
-                }),
-                timestamp: Some(1_000),
-            },
-            vec![ObservationDraft {
-                transaction: indexing::Transaction {
-                    transaction_id: TransactionRef::new(network.clone(), "credit"),
-                    movements: vec![ValueMovement::mint(
-                        MovementId("0".into()),
-                        AssetId::native(network.chain.clone()),
-                        Decimal::from(5_u64),
-                        Address::new(network.clone(), "owner"),
-                    )],
-                    fee: None,
-                },
-                transaction_order: 0,
-                status: ObservationDraftStatus::Included,
+            block.clone(),
+            vec![Transaction {
+                id: TransactionRef::new(network.clone(), "credit"),
+                movements: vec![ValueMovement::mint(
+                    MovementId("0".into()),
+                    AssetId::native(network.chain.clone()),
+                    Decimal::from(5_u64),
+                    Address::new(network.clone(), "owner"),
+                )],
+                fee: None,
+                order: 0,
+                status: Status::Included { block },
             }],
         )
         .expect("unique transaction ids");
-        let facts = CanonicalBlock::new(network.clone(), interpreted).expect("valid fixture facts");
         IndexedBatch::new(
             network.clone(),
             None,
@@ -359,14 +356,14 @@ mod tests {
             watch.start = BlockPosition(0);
             repository.add(vec![watch]).await.expect("late watch");
         }
-        let sentinel =
-            rusqlite::Connection::open(directory.path().join("payment.db")).expect("connection");
-        sentinel
-            .execute_batch(
-                "CREATE TABLE app_sentinel(secret TEXT);
+        let sentinel = store.pool();
+        sqlx::raw_sql(
+            "CREATE TABLE app_sentinel(secret TEXT);
              INSERT INTO app_sentinel VALUES ('untouched')",
-            )
-            .expect("application row");
+        )
+        .execute(&sentinel)
+        .await
+        .expect("application row");
         let before = repository.all(&other).await.expect("other watches");
         parse(["--cancel-backfill", "solana/localnet"])
             .expect("command")
@@ -394,12 +391,10 @@ mod tests {
                 BlockPosition(1)
             );
         }
-        assert_eq!(
-            sentinel
-                .query_row("SELECT secret FROM app_sentinel", [], |row| row
-                    .get::<_, String>(0))
-                .expect("application row"),
-            "untouched"
-        );
+        let kept: String = sqlx::query_scalar("SELECT secret FROM app_sentinel")
+            .fetch_one(&sentinel)
+            .await
+            .expect("application row");
+        assert_eq!(kept, "untouched");
     }
 }

@@ -30,7 +30,7 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    Address, BackfillStatus, BlockInterpreter, BlockRef, BlockSource, CanonicalBlock, IndexError,
+    Address, BackfillStatus, BlockInterpreter, BlockRef, BlockSource, BlockWithOutputs, IndexError,
     IndexErrorKind, IndexedBatch, Indexer, NativeBlock, Network, Progress, SyncPlan,
     pass::CommitTally, scan::Scan, watches::OwedRange,
 };
@@ -175,8 +175,8 @@ where
     /// error and never a settlement: settling a range nothing read would claim
     /// coverage that does not exist, and nothing downstream would ever re-derive
     /// it.
-    fn reached(last: Option<&CanonicalBlock>) -> Result<BlockRef, IndexError> {
-        last.map(|canonical| canonical.block().clone())
+    fn reached(last: Option<&BlockWithOutputs>) -> Result<BlockRef, IndexError> {
+        last.map(|canonical| canonical.block.reference().clone())
             .ok_or_else(|| {
                 IndexError::new(
                     IndexErrorKind::Source,
@@ -208,7 +208,7 @@ where
         &self,
         blocks: Vec<I::Block>,
         owed: &[OwedRange],
-    ) -> Result<Vec<CanonicalBlock>, IndexError> {
+    ) -> Result<Vec<BlockWithOutputs>, IndexError> {
         let mut scan = Scan::after(None);
         let mut filled = Vec::with_capacity(blocks.len());
         for block in &blocks {
@@ -233,7 +233,7 @@ where
     /// observation resumed from.
     fn proved(
         owed: &[OwedRange],
-        filled: &[CanonicalBlock],
+        filled: &[BlockWithOutputs],
         reached: &BlockRef,
     ) -> Result<Vec<Progress>, IndexError> {
         owed.iter()
@@ -244,7 +244,7 @@ where
                 // of these.
                 let first = filled
                     .iter()
-                    .map(CanonicalBlock::block)
+                    .map(|facts| facts.block.reference())
                     .find(|block| block.position >= entry.resume)
                     .unwrap_or(reached);
                 Scan::after(entry.expected.clone()).follows(first)?;

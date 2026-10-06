@@ -150,11 +150,10 @@ pub(crate) mod tests {
 
     use crate::{
         Address, AssetId, Balance, BalanceQuery, BalanceStore, BlockHash, BlockHeight,
-        BlockPosition, CanonicalBlock, CanonicalPage, CanonicalStatus, CanonicalTransaction,
-        ChainName, Completeness, ConfirmedHistory, Decimal, HistoryQuery, IndexError,
-        IndexedOutput, InterpretedBlock, MovementId, Network, ObservationDraft,
-        ObservationDraftStatus, OutputChanges, OutputId, OutputPage, OutputRequest, OutputStore,
-        Page, PendingValue, Subject, TransactionRef, ValueMovement,
+        BlockPosition, BlockWithOutputs, ChainName, Completeness, ConfirmedHistory,
+        ConfirmedHistoryPage, Decimal, HistoryQuery, IndexError, IndexedOutput, MovementId,
+        Network, OutputChanges, OutputId, OutputPage, OutputRequest, OutputStore, Page,
+        PendingValue, Status, Subject, Transaction, TransactionRef, ValueMovement,
     };
     use base::{BlockRef, BoxFuture};
 
@@ -168,11 +167,11 @@ pub(crate) mod tests {
     /// moves with every change — and nothing else. That an index's own list
     /// keeps the same two properties is the index's test, not this crate's.
     #[derive(Default)]
-    pub(crate) struct Held(Mutex<(Vec<CanonicalBlock>, u64)>);
+    pub(crate) struct Held(Mutex<(Vec<BlockWithOutputs>, u64)>);
 
     impl Held {
         /// Holds `block` above the line.
-        pub(crate) fn admit(&self, block: CanonicalBlock) {
+        pub(crate) fn admit(&self, block: BlockWithOutputs) {
             let mut held = self.0.lock().expect("the held blocks");
             held.0.push(block);
             held.1 += 1;
@@ -182,7 +181,7 @@ pub(crate) mod tests {
         pub(crate) fn committed(&self, block: &BlockRef) {
             let mut held = self.0.lock().expect("the held blocks");
             assert_eq!(
-                held.0.first().map(CanonicalBlock::block),
+                held.0.first().map(|facts| facts.block.reference()),
                 Some(block),
                 "only the oldest held block commits"
             );
@@ -228,15 +227,13 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn transaction(height: u64) -> CanonicalTransaction {
-        CanonicalTransaction {
-            transaction: crate::Transaction {
-                transaction_id: TransactionRef::new(network(), "tx"),
-                movements: Vec::new(),
-                fee: None,
-            },
-            transaction_order: 0,
-            status: CanonicalStatus::Included {
+    pub(crate) fn transaction(height: u64) -> Transaction {
+        Transaction {
+            id: TransactionRef::new(network(), "tx"),
+            movements: Vec::new(),
+            fee: None,
+            order: 0,
+            status: Status::Included {
                 block: block(height),
             },
         }
@@ -244,22 +241,22 @@ pub(crate) mod tests {
 
     /// A repository that answers one page, whatever it is asked.
     #[derive(Clone)]
-    pub(crate) struct Paged(pub(crate) CanonicalPage);
+    pub(crate) struct Paged(pub(crate) ConfirmedHistoryPage);
 
     impl ConfirmedHistory for Paged {
         fn history<'a>(
             &'a self,
             _request: HistoryQuery,
-        ) -> BoxFuture<'a, Result<CanonicalPage, IndexError>> {
+        ) -> BoxFuture<'a, Result<ConfirmedHistoryPage, IndexError>> {
             Box::pin(async move { Ok(self.0.clone()) })
         }
     }
 
     pub(crate) fn page(
         checkpoint: Option<BlockRef>,
-        transactions: Vec<CanonicalTransaction>,
-    ) -> CanonicalPage {
-        CanonicalPage {
+        transactions: Vec<Transaction>,
+    ) -> ConfirmedHistoryPage {
+        ConfirmedHistoryPage {
             checkpoint,
             transactions,
             next: None,
@@ -278,26 +275,24 @@ pub(crate) mod tests {
 
     /// One transfer of `amount` from `payer` to `to` at `height`, as an index
     /// holds it.
-    pub(crate) fn admitted(height: u64, amount: u64, to: &str) -> CanonicalBlock {
+    pub(crate) fn admitted(height: u64, amount: u64, to: &str) -> BlockWithOutputs {
         let network = network();
-        let draft = ObservationDraft {
-            transaction: crate::Transaction {
-                transaction_id: TransactionRef::new(network.clone(), format!("tx-{height}")),
-                movements: vec![ValueMovement::transfer(
-                    MovementId("0".into()),
-                    AssetId::native(network.chain.clone()),
-                    Decimal::from(amount),
-                    address("payer"),
-                    address(to),
-                )],
-                fee: None,
+        let draft = Transaction {
+            id: TransactionRef::new(network.clone(), format!("tx-{height}")),
+            movements: vec![ValueMovement::transfer(
+                MovementId("0".into()),
+                AssetId::native(network.chain.clone()),
+                Decimal::from(amount),
+                address("payer"),
+                address(to),
+            )],
+            fee: None,
+            order: 0,
+            status: Status::Included {
+                block: block(height),
             },
-            transaction_order: 0,
-            status: ObservationDraftStatus::Included,
         };
-        let interpreted =
-            InterpretedBlock::new(&network, block(height), vec![draft]).expect("one transaction");
-        CanonicalBlock::new(network, interpreted).expect("a valid pending block")
+        BlockWithOutputs::new(&network, block(height), vec![draft]).expect("one transaction")
     }
 
     /// Where an interleaved commit lands around a durable read.
@@ -334,7 +329,7 @@ pub(crate) mod tests {
     struct Stored {
         checkpoint: BlockRef,
         outputs: Vec<IndexedOutput>,
-        transactions: Vec<CanonicalTransaction>,
+        transactions: Vec<Transaction>,
         amount: u64,
     }
 
@@ -407,9 +402,9 @@ pub(crate) mod tests {
         fn history<'a>(
             &'a self,
             _request: HistoryQuery,
-        ) -> BoxFuture<'a, Result<CanonicalPage, IndexError>> {
+        ) -> BoxFuture<'a, Result<ConfirmedHistoryPage, IndexError>> {
             let stored = self.read();
-            let page = CanonicalPage {
+            let page = ConfirmedHistoryPage {
                 completeness: self.claim,
                 ..page(Some(stored.checkpoint.clone()), stored.transactions.clone())
             };
@@ -428,7 +423,6 @@ pub(crate) mod tests {
                 observed_at: Some(stored.checkpoint.clone()),
                 pending: PendingValue::none(),
                 completeness: self.claim,
-                opening: None,
             };
             Box::pin(async move { Ok(balance) })
         }
@@ -475,39 +469,36 @@ pub(crate) mod tests {
     }
 
     /// Block four's transaction, as the store holds it once committed.
-    fn committed() -> CanonicalTransaction {
+    fn committed() -> Transaction {
         let mut committed = transaction(4);
-        committed.transaction.transaction_id = TransactionRef::new(network(), "tx-4");
+        committed.id = TransactionRef::new(network(), "tx-4");
         committed
     }
 
     /// Block four, as an index holds it: one credit, one spend, one change
     /// output.
-    pub(crate) fn spending() -> CanonicalBlock {
-        let draft = ObservationDraft {
-            transaction: crate::Transaction {
-                transaction_id: TransactionRef::new(network(), "tx-4"),
-                movements: vec![ValueMovement::transfer(
-                    MovementId("0".into()),
-                    AssetId::native(network().chain),
-                    Decimal::from(10_u64),
-                    address("payer"),
-                    address("owner"),
-                )],
-                fee: None,
-            },
-            transaction_order: 0,
-            status: ObservationDraftStatus::Included,
+    pub(crate) fn spending() -> BlockWithOutputs {
+        let draft = Transaction {
+            id: TransactionRef::new(network(), "tx-4"),
+            movements: vec![ValueMovement::transfer(
+                MovementId("0".into()),
+                AssetId::native(network().chain),
+                Decimal::from(10_u64),
+                address("payer"),
+                address("owner"),
+            )],
+            fee: None,
+            order: 0,
+            status: Status::Included { block: block(4) },
         };
-        let interpreted = InterpretedBlock {
+        BlockWithOutputs {
             outputs: OutputChanges {
                 created: vec![change()],
                 spent: vec![funding().key()],
                 tracked_spends: Vec::new(),
             },
-            ..InterpretedBlock::new(&network(), block(4), vec![draft]).expect("one transaction")
-        };
-        CanonicalBlock::new(network(), interpreted).expect("a valid pending block")
+            ..BlockWithOutputs::new(&network(), block(4), vec![draft]).expect("one transaction")
+        }
     }
 
     /// The join over a store whose read a commit of block four lands inside.
@@ -534,7 +525,7 @@ pub(crate) mod tests {
         ] {
             let held = Arc::new(Held::default());
             held.admit(admitted(4, 5, "owner"));
-            let stored = CanonicalPage {
+            let stored = ConfirmedHistoryPage {
                 completeness: claim,
                 ..page(Some(block(3)), vec![transaction(2)])
             };

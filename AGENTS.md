@@ -1,5 +1,8 @@
 # Repository guide
 
+DO ONLY BARE MINIMUM YOU ARE ASKED FOR.
+SET TIMEOUTS ON EVERY COMMAND, no command should take more then minute, unless you are told otherwise.
+
 Build a small, reliable SDK for third parties and `apps/server`; prefer less code,
 clear ownership and observable correctness.
 
@@ -16,7 +19,8 @@ This is for interaction with user.
   obsolete architecture because a document describes it. ADRs record history.
 - Pre-release: replace obsolete internal APIs/formats directly; no compatibility
   aliases, legacy readers or invented V1/V2 DTOs. External protocol contracts remain.
-  SQLite schema changes are transactional and versioned; reject unknown file versions.
+  SQLite has no migrations: one schema per owner, applied to an empty file; any other
+  version is refused.
 - Leave `old/` and `reference/` alone unless requested. If `.codegraph/` exists, use
   `codegraph explore` before broad source searches; otherwise use `rg`.
 
@@ -30,15 +34,16 @@ separate indexer service, raw-block archive or multi-writer deployment.
 
 | Owner | Responsibility |
 | --- | --- |
-| `apps/server` | The one application, a binary with no library target; composition root: concrete chains (`src/chains.rs` only), configuration, storage choice, supervision, readiness and shutdown |
-| `apps/server/src/api/` | Thin HTTP/OpenAPI adapters, wire models and process signing map; names no concrete chain, `sdk_config` or storage backend (`scripts/check-chains.sh` check 8) |
+| `apps/server` | The one application, a binary with no library target. Every module is a model, the API, or composition: `main.rs` composes (with `config.rs`, `chains.rs` (the only file naming chains), `storage.rs`, `asset.rs`, `state.rs`, `operator.rs`, `ui.rs`), including startup's node plan, the live transports and the candidate-node verifier; generic mechanics belong to the owning SDK crate or package |
+| `apps/server/src/models/` | The server's nouns, one file each: validated type, its own serde/utoipa wire form, and for durable ones their storage: `Wallet` reads indexing's `wallet` rows through `WalletRegistry`, `RpcEndpoints` is SQL on the one SQLite pool in `models/schema.sql` (created with indexing's on an empty file, no migrations). No axum, routes, `sdk_config` or chain (check 8) |
+| `apps/server/src/api/` | One file per HTTP resource (`wallets`, `balance`, `transactions`, `assets`, `networks`, `health`, `openapi`) with its routes, request/response models and tests; `mod.rs` assembles the router and OpenAPI root and holds the shared `Error`/`ErrorBody`; `harness.rs` is test-only. Handler state is `src/state.rs`; each configured network's live handles are in `networks.rs`; handlers call SDK operations and model stores directly. None of `api/`, `asset.rs`, `state.rs` names a concrete chain, `sdk_config` or storage backend (`scripts/check-chains.sh` check 8) |
 | `sdk/base` | Small chain-neutral values and signing/broadcast contracts; no chains, RPC, indexing or wallets |
 | `sdk/chains/*` | Native protocol, RPC, addresses, signing, transaction construction/broadcast and indexing translation |
-| `sdk/wallets` | Factory collection, wallet capabilities and batch orchestration; no reads, custody or durable watch ownership |
+| `sdk/wallets` | Factory collection, wallet capabilities and batch orchestration; no reads, custody or durable watch ownership; imports only `base` (no `indexing`, either direction) |
 | `sdk/indexing` | Watches, block inspection, continuity, confirmation, pending blocks and atomic commit coordination |
 | `sdk/indexing/src/storage/` | Repository contracts/implementations, balance, history and output queries, and their pending-inclusive reads (`PendingJoin`) |
 | `sdk/indexing/src/supervisor/` | Optional Tokio driver, retry, quarantine and network status |
-| `sdk/config` | Configuration parsing and chain registration without concrete chain dependencies |
+| `sdk/config` | Configuration parsing and chain registration without concrete chain dependencies; composition of factories, indexers, and read handles over registered chains (`Composition`) |
 | `packages/*` | Reusable mechanics; never import SDK/application crates |
 
 Concrete chains are selected at composition, never in business/HTTP code; chains do
@@ -58,7 +63,9 @@ These are ownership requirements, including where current code still differs.
 - Required persistence is `WatchStore` plus `IndexStore`: registrations, restored
   watch progress, checkpoints and atomic commits. Third-party repositories need no
   balance/history/output query API and can write application reactions transactionally.
-- A watch contains public identity, address, asset and inclusive birthday, never keys.
+- A watch contains public identity, address, asset and inclusive birthday. A `Watch`
+  carries no key; the store's `wallet` row may hold a label and key via `WalletRegistry`;
+  scanning never reads them.
   Persist registration before publishing it to live scanning; coordinate additions
   with active passes. Unwatch stops inspection without deleting indexed facts.
 - Track contiguous, hash-verified progress per watch, including inspected empty blocks.
@@ -81,6 +88,9 @@ These are ownership requirements, including where current code still differs.
   do not rely on the indexer to repair an unsafe or misleading repository answer.
 - SQLite and memory stay inside `storage/`, independently feature-gated; memory is a
   legitimate backend. Fixtures and contract suites belong in `tests/`, not public API.
+  Exception: a crate may ship one test double of its own traits behind an off-by-default
+  `testing` feature, used only as a dev-dependency (`json_rpc::testing`, `wallets::testing`);
+  never hand-roll another copy of it elsewhere.
   The layout and import rules of `storage/` are in `ARCHITECTURE.md`, "Dependency direction".
 - Persist signed absolute watched balances atomically with unified balance movements;
   transactionless credits have no transaction identity. Preserve spent-output facts so
@@ -111,7 +121,7 @@ These are ownership requirements, including where current code still differs.
 - Chains construct payloads, invoke injected signers, validate signatures and broadcast
   exact signed bytes. Validate a non-empty same-chain batch before external effects.
   Preserve Ethereum nonce ordering/accepted prefixes and Solana expiry/ambiguity recovery.
-  Solana uses one endpoint and non-repeating RPC requests.
+  Solana calls are never repeated; submission is broadcast to every configured node.
 - RPC acceptance means submitted, not confirmed; ambiguous failure does not prove a drop.
   Preserve signed bytes across retries; indexing establishes confirmation.
 - Never expose secrets in logs, JSON, Debug or clones; use zeroizing storage. Never use
@@ -125,7 +135,7 @@ These are ownership requirements, including where current code still differs.
 - Retry transient network failures with bounded backoff; quarantine terminal failures/panics
   per network until explicit recovery. Application readiness/shutdown policy stays outside
   scanning; preserve pending query and sender recovery behavior during refactors.
-- Production Rust limit: 500 counted lines, excluding test-only code; split by responsibility,
+- Production Rust limit: 1000 counted lines, excluding test-only code; split by responsibility,
   not numbered fragments or include tricks. Comments explain contracts/non-obvious reasons.
   Public APIs need rustdoc; crate READMEs are crate docs with compiling usage examples.
 

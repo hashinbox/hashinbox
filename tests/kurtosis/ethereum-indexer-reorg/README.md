@@ -87,9 +87,9 @@ in captured output.
    no confirmation depth: the node states its own `finalized` block and the
    server commits there. Storage is a fresh index file. Start the server
    using `apps/server/README.md`, including the wallet passphrase, and wait for
-   `GET /healthz` to answer `200`.
-2. Watch an address with `POST /v1/addresses`, and record the returned wallet
-   ID. Note the checkpoint in `GET /healthz` before sending anything.
+   `GET /health` to answer `200`.
+2. Watch an address with `POST /v1/wallets` and an `address`, and record the
+   returned wallet ID. Note the checkpoint in `GET /health` before sending anything.
 3. Use the enclave's disposable prefunded test account to send that address a
    transfer through participant 1. This is devnet-only test value; never reuse
    a real key.
@@ -109,7 +109,7 @@ in captured output.
 
 - The pre-heal inclusion hash recorded in step 4 is no longer canonical at its
   height on participant 1.
-- `GET /healthz` shows `checkpoint` moving **forward only** across the whole
+- `GET /health` shows `checkpoint` moving **forward only** across the whole
   scenario: the fork is above the confirmed line, so no committed block is ever
   taken back. `pending_block` follows the branch that wins.
 - `GET /v1/wallets/{id}/transactions` no longer lists the orphaned inclusion in
