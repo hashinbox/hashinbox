@@ -12,7 +12,7 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use indexing::{
-    Birthday, Page, Subject, Supervisor, SyncReport, Watching as _,
+    Birthday, Report, Subject, Supervisor, Watching as _,
     sqlite::{Database, Repository},
 };
 use json_rpc::Client as _;
@@ -72,8 +72,6 @@ async fn main() -> Result<(), AnyError> {
     let registrar: Arc<dyn SubmissionRegistrar> = submissions.clone();
     let Composition {
         index,
-        history,
-        balance: balances,
         wallets,
         units,
         schedules,
@@ -113,7 +111,7 @@ async fn main() -> Result<(), AnyError> {
         }
     }
 
-    // 6. One watched address: history only, no key, no sends.
+    // 6. One watched address: observed, no key, no sends.
     let ether = "eth".to_owned();
     let watched = Subject {
         address: wallets.parse(&ether, WATCHED)?,
@@ -149,44 +147,30 @@ async fn main() -> Result<(), AnyError> {
     // 8. One sync loop over the composed index serves every address, watched
     //    or held; wait until every network has reached its node's tip.
     let (stop, stopped) = watch::channel(false);
-    let (monitor, mut readiness) = SyncReport::watching(index.networks());
+    let (monitor, mut readiness) = Report::watching(index.networks());
     let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
     let health = readiness.settled().await.ok_or("synchronization stopped")?;
     if let Some(error) = health.networks().iter().find_map(|row| row.failure.clone()) {
         return Err(error.into());
     }
 
-    // 9. One send per chain, from the wallet this file holds, once the index
-    //    has seen its funds. The map hands out an author only for an asset
-    //    this system sends.
+    // 9. One send per chain, from the wallet this file holds, retried until
+    //    the index has seen its funds. The map hands out an author only for
+    //    an asset this system sends.
     for (asset, (sender, _), (receiver, _), amount) in TRANSFERS {
         let asset = asset.to_owned();
-        while balances
-            .balance(signers[sender].as_ref())
-            .await?
-            .amount
-            .is_zero()
-        {
-            tokio::time::sleep(INTERVAL).await;
-        }
         let to = wallets.parse(&asset, &signers[receiver].address().value)?;
         let author = wallets.author(&asset, &signers[sender])?;
-        let id = author
-            .send(to, amount.parse::<base::Decimal>()?.into())
-            .await?;
+        let id = send_when_funded(author.as_ref(), &to, amount).await?;
         println!("{sender} sent {amount} to {receiver} in {id}");
     }
 
-    // 10. The watched address is served like any other.
-    let page = history.history(&watched, Page::first(10)).await?;
+    // 10. The watched address is indexed like any other; reading its rows is
+    //     the application's own SQL.
     let unit = units
         .of(&watched.address.network, &watched.asset)
         .ok_or("ether's unit")?;
-    println!(
-        "{WATCHED}: {} transaction(s), fees in {} digits",
-        page.transactions.len(),
-        unit.decimals
-    );
+    println!("{WATCHED}: watched, fees in {} digits", unit.decimals);
 
     // Finish ambiguous submissions while indexing can still reconcile them.
     submissions.drain().await?;
@@ -212,4 +196,33 @@ async fn call(
         .request(json_rpc::Request::once(method, params))
         .await?;
     Ok(result.map_err(json_rpc::CallError::from)?.deserialize()?)
+}
+
+/// Sends `amount` of `author`'s asset to `to`, retried while the sender's
+/// funds are not indexed yet. Only a definite refusal is retried: it accepted
+/// nothing, so trying again cannot send twice.
+async fn send_when_funded(
+    author: &dyn wallets::Author,
+    to: &base::Address,
+    amount: &str,
+) -> Result<base::TransactionId, AnyError> {
+    let amount = amount.parse::<base::Decimal>()?;
+    for _ in 0..60 {
+        match author.send(to.clone(), amount.clone().into()).await {
+            Ok(id) => return Ok(id),
+            Err(error) if error.ambiguous_transaction_id.is_none() && !accepted(&error) => {
+                tokio::time::sleep(INTERVAL).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err("the sender's funds were never indexed".into())
+}
+
+/// Whether a failed send may have reached the chain.
+const fn accepted(error: &wallets::WalletError) -> bool {
+    !matches!(
+        error.kind,
+        wallets::WalletErrorKind::Transaction | wallets::WalletErrorKind::Unavailable
+    )
 }

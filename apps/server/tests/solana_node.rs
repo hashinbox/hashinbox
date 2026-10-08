@@ -469,18 +469,18 @@ async fn native_sol_submission_indexing_and_central_storage() {
         .expect("Solana indexer"),
     );
     let tasks = Arc::new(Tasks::default());
-    // The sender's absence proof: the repository's own confirmed pages joined to
-    // the blocks this index holds above its line, by the pair that belongs
-    // together.
-    let history = Arc::new(indexing::PendingJoin::new(
-        repository.clone(),
+    // The sender's absence proof: the store's confirmed transactions with the
+    // blocks this index holds above its line folded in, by the pair that
+    // belongs together.
+    let presence = Arc::new(chain_solana::sender::IndexPresence::new(
+        Arc::new(repository.clone()),
         service.clone(),
     ));
     let factory = WalletFactory::new(
         WalletConfig::new(&native),
         &client,
         &service,
-        history.clone(),
+        presence.clone(),
     )
     .expect("native SOL factory")
     .with_registrar(tasks.clone());
@@ -527,19 +527,20 @@ async fn native_sol_submission_indexing_and_central_storage() {
     tasks.drain().await;
     finalized(&validator.endpoint, &transaction.to_string()).await;
 
-    let mut observed = None;
+    let sent = base::TransactionRef {
+        network: network.clone(),
+        id: transaction.clone(),
+    };
+    let mut observed = false;
     for _ in 0..100 {
         service.sync().await.expect("sparse synchronization");
-        observed = transactions(&*history, &asset, &source)
-            .await
-            .into_iter()
-            .find(|entry| entry.transaction.id.id == transaction);
-        if observed.is_some() {
+        observed = landed(&*presence, &sent).await;
+        if observed {
             break;
         }
         sleep(Duration::from_millis(100)).await;
     }
-    if observed.is_none() {
+    if !observed {
         let status = call(
             &validator.endpoint,
             "getSignatureStatuses",
@@ -549,16 +550,14 @@ async fn native_sol_submission_indexing_and_central_storage() {
         let checkpoint = service.checkpoint(&network).await.expect("checkpoint");
         panic!("submitted transaction not canonical: status={status}, checkpoint={checkpoint:?}");
     }
-    let observed = observed.expect("submitted transaction became canonical");
-    assert_eq!(observed.transaction.movements.len(), 1);
+    let (movements, fee) = stored(file.pool(), &sent, &source, &asset).await;
+    assert_eq!(movements.len(), 1);
     assert_eq!(
-        unit.display(&observed.transaction.movements[0].amount)
-            .expect("exact SOL movement"),
+        unit.display(&movements[0]).expect("exact SOL movement"),
         amount
     );
     assert_eq!(
-        unit.display(&observed.transaction.fee.expect("exact network fee").amount)
-            .expect("exact SOL fee"),
+        unit.display(&fee).expect("exact SOL fee"),
         "0.000005".parse::<Decimal>().expect("exact SOL fee")
     );
 
@@ -606,8 +605,10 @@ async fn native_sol_submission_indexing_and_central_storage() {
         })
         .expect("restarted Solana indexer"),
     );
-    let restored_history =
-        indexing::PendingJoin::new(restarted_repository.clone(), restarted_service.clone());
+    let restored_presence = chain_solana::sender::IndexPresence::new(
+        Arc::new(restarted_repository.clone()),
+        restarted_service.clone(),
+    );
 
     // Nothing re-watches anything: the restarted index reads its own durable
     // rows and resumes with the addresses it had.
@@ -628,10 +629,7 @@ async fn native_sol_submission_indexing_and_central_storage() {
             .sync()
             .await
             .expect("restart synchronization");
-        restored = transactions(&restored_history, &asset, &source)
-            .await
-            .iter()
-            .any(|entry| entry.transaction.id.id == transaction);
+        restored = landed(&restored_presence, &sent).await;
         if restored {
             break;
         }
@@ -661,21 +659,50 @@ async fn native_sol_submission_indexing_and_central_storage() {
     );
 }
 
-/// One page of `address`'s confirmed history, exactly as the reader over this
-/// index holds it: every amount atomic, which is the only unit `indexing` can
-/// produce.
-async fn transactions(
-    history: &dyn indexing::History,
-    asset: &base::AssetId,
-    address: &base::Address,
-) -> Vec<indexing::ObservedTransaction> {
-    let subject = indexing::Subject {
-        address: address.clone(),
-        asset: asset.clone(),
-    };
-    history
-        .history(&subject, indexing::Page::first(100))
+/// Whether the index holds `transaction`, confirmed or above its line.
+async fn landed(
+    presence: &dyn chain_solana::sender::Presence,
+    transaction: &base::TransactionRef,
+) -> bool {
+    presence
+        .landed(transaction)
         .await
-        .expect("canonical SOL history")
-        .transactions
+        .expect("an indexed answer")
+        .present
+}
+
+/// `address`'s stored movements of `asset` in `transaction`, and the fee it
+/// paid: atomic amounts, read with plain SQL from indexing's own rows.
+async fn stored(
+    pool: &sqlx::SqlitePool,
+    transaction: &base::TransactionRef,
+    address: &base::Address,
+    asset: &base::AssetId,
+) -> (Vec<Decimal>, Decimal) {
+    let network = &transaction.network;
+    let movements: Vec<String> = sqlx::query_scalar(
+        "SELECT amount FROM ledger
+         WHERE chain = ?1 AND network = ?2 AND address = ?3 AND asset = ?4
+           AND transaction_id = ?5 AND kind < 5",
+    )
+    .bind(network.chain.as_str())
+    .bind(&network.name)
+    .bind(&address.value)
+    .bind(&asset.asset)
+    .bind(transaction.id.as_str())
+    .fetch_all(pool)
+    .await
+    .expect("stored movements");
+    let fee: String = sqlx::query_scalar(
+        "SELECT fee_amount FROM \"transaction\"
+         WHERE chain = ?1 AND network = ?2 AND transaction_id = ?3",
+    )
+    .bind(network.chain.as_str())
+    .bind(&network.name)
+    .bind(transaction.id.as_str())
+    .fetch_one(pool)
+    .await
+    .expect("a stored network fee");
+    let atomic = |text: String| text.parse::<Decimal>().expect("an atomic amount");
+    (movements.into_iter().map(atomic).collect(), atomic(fee))
 }

@@ -1,13 +1,14 @@
 //! Watch-only addresses: observe an address on every chain without holding a
 //! key for it. `index.watch` takes any `indexing::Holder` — a wallet, or a
-//! bare `Subject` of address and asset — and the index serves its history and
-//! balance like any wallet's. Needs all three local nodes (examples/README.md):
+//! bare `Subject` of address and asset — and the index stores its history and
+//! balance like any wallet's, for the application's own reads. Needs all three
+//! local nodes (examples/README.md):
 //! `cargo run -p payment-examples --example watch_only`
 
 use std::{collections::BTreeMap, sync::Arc};
 
 use indexing::{
-    Birthday, Page, Subject, Supervisor, SyncReport, Watching as _,
+    Birthday, Checkpoint as _, Report, Subject, Supervisor, Watching as _,
     sqlite::{Database, Repository},
 };
 use json_rpc::Client as _;
@@ -61,10 +62,7 @@ async fn main() -> Result<(), AnyError> {
     let registrar: Arc<dyn SubmissionRegistrar> = Arc::new(Submissions::new());
     let Composition {
         index,
-        history,
-        balance: balances,
         wallets,
-        units,
         schedules,
         ..
     } = chains
@@ -83,7 +81,6 @@ async fn main() -> Result<(), AnyError> {
     // 4. Observe one address per asset. `parse` turns text into the asset
     //    network's canonical address; a `Subject` is that address and the
     //    asset to read it in, which is all a watch needs.
-    let mut subjects = Vec::new();
     for (asset, id, seed) in OBSERVED {
         let asset = asset.to_owned();
         let secret = SecretBytes::new(vec![seed; 32]);
@@ -94,33 +91,23 @@ async fn main() -> Result<(), AnyError> {
         };
         index.watch(id, &subject, Birthday::Fresh).await?;
         println!("{id}: watching {}", subject.address.value);
-        let unit = units
-            .of(&subject.address.network, &subject.asset)
-            .ok_or("a declared unit")?
-            .clone();
-        subjects.push((id, unit, subject));
     }
 
     // 5. One sync loop serves a watched address exactly like a wallet's. Wait
     //    until every network has reached its node's tip.
     let (stop, stopped) = watch::channel(false);
-    let (monitor, mut readiness) = SyncReport::watching(index.networks());
+    let (monitor, mut readiness) = Report::watching(index.networks());
     let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
     let health = readiness.settled().await.ok_or("synchronization stopped")?;
     if let Some(error) = health.networks().iter().find_map(|row| row.failure.clone()) {
         return Err(error.into());
     }
 
-    // 6. History and balance need no key: each is the repository's own
-    //    answer, completed by the blocks above its confirmed line.
-    for (id, unit, subject) in &subjects {
-        let page = history.history(subject, Page::first(10)).await?;
-        let balance = balances.balance(subject).await?;
-        println!(
-            "{id}: {} transaction(s), {} settled, watch_only=true",
-            page.transactions.len(),
-            unit.display(&balance.amount)?,
-        );
+    // 6. Each network's index has inspected the watched addresses up to its
+    //    checkpoint; their rows are the application's to read, and need no key.
+    for network in index.networks() {
+        let checkpoint = index.checkpoint(network).await?;
+        println!("{}/{}: {checkpoint:?}", network.chain, network.name);
     }
     stop.send(true)?;
     Ok(sync.await?)

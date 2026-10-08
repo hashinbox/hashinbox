@@ -8,12 +8,12 @@ use json_rpc::{Batch, CallResult, RawJson, Request};
 use serde_json::{Value, json};
 
 use base::{BlockHash, BlockHeight, BlockPosition, BlockRef, BoxFuture, Networked};
-use indexing::{Checkpoint, History, IndexError, Network, TransactionPage};
+use indexing::{Checkpoint, IndexError, Network};
 use solana_hash::Hash;
 
 use wallets::{RegistrationError, RegistrationFuture, SubmissionRegistrar, SubmissionTask};
 
-use super::{Outbox, recovery::Settler, reservation::Reservations};
+use super::{Landing, Outbox, Presence, recovery::Settler, reservation::Reservations};
 use crate::native::{
     Address, KeyPair, Lamport, Memo, Seed, SignedTransaction,
     rpc::{
@@ -68,7 +68,7 @@ pub(crate) fn checkpoint(height: u64) -> BlockRef {
     }
 }
 
-/// An index whose history is always empty at `page_checkpoint`.
+/// An index that never holds the transaction, answering at `page_checkpoint`.
 #[derive(Default)]
 pub(crate) struct Index {
     pub(crate) checkpoint: Option<BlockRef>,
@@ -84,19 +84,15 @@ impl Checkpoint for Index {
     }
 }
 
-impl History for Index {
-    fn history<'a>(
+impl Presence for Index {
+    fn landed<'a>(
         &'a self,
-        _of: &'a dyn indexing::Holder,
-        _page: indexing::Page,
-    ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
+        _transaction: &'a base::TransactionRef,
+    ) -> BoxFuture<'a, Result<Landing, IndexError>> {
         Box::pin(async move {
-            Ok(TransactionPage {
+            Ok(Landing {
                 checkpoint: self.page_checkpoint.clone(),
-                transactions: Vec::new(),
-                pending: Vec::new(),
-                next: None,
-                completeness: indexing::Completeness::Incomplete,
+                present: false,
             })
         })
     }

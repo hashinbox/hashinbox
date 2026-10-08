@@ -17,9 +17,8 @@ use base::Decimal;
 
 use indexing::{
     Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef,
-    BlockWithOutputs, ConfirmedHistory, FeeSettlement, HistoryQuery, IndexStore, IndexedBatch,
-    IndexedOutput, MovementId, Network, OutputId, OutputRequest, OutputStore, Status, Transaction,
-    TransactionRef, ValueMovement,
+    BlockWithOutputs, FeeSettlement, IndexedBatch, IndexedOutput, MovementId, Network, OutputId,
+    OutputRequest, OutputStore, Status, Transaction, TransactionRef, ValueMovement,
 };
 
 /// One network's fixture over one repository.
@@ -32,6 +31,8 @@ pub(super) struct Fixture<'a, R> {
     /// contract that wants both rules writes two chains rather than reading one
     /// twice.
     pub(super) settlement: FeeSettlement,
+    /// The file's own rows, when the store is a file a reader can open.
+    pub(super) rows: Option<super::Rows>,
 }
 
 impl<'a, R> Fixture<'a, R> {
@@ -52,6 +53,7 @@ impl<'a, R> Fixture<'a, R> {
             repository,
             network,
             settlement,
+            rows: None,
         }
     }
 
@@ -81,15 +83,6 @@ impl<'a, R> Fixture<'a, R> {
     /// The asset every chain has and every fee is paid in.
     pub(super) fn native(&self) -> AssetId {
         AssetId::native(self.network.chain.clone())
-    }
-
-    /// The one non-native asset the fixtures name, so a query over an asset
-    /// can be wrong about which one it selected.
-    pub(super) fn token(&self) -> AssetId {
-        AssetId {
-            chain: self.network.chain.clone(),
-            asset: "token".into(),
-        }
     }
 
     /// One transaction paying `owner` 5 at `height`, so a fixture block has
@@ -156,16 +149,6 @@ impl<'a, R> Fixture<'a, R> {
         BlockWithOutputs::new(&self.network, block, drafts).expect("unique transaction ids")
     }
 
-    /// One block's facts per draft, heights 1 upward, each connecting to the
-    /// one before, so [`Self::commit`] can write the chain in order.
-    pub(super) fn chain(&self, drafts: Vec<Transaction>) -> Vec<BlockWithOutputs> {
-        let heights = 1_u64..;
-        heights
-            .zip(drafts)
-            .map(|(height, draft)| self.canonical(height, draft))
-            .collect()
-    }
-
     /// One fixture block as the one write a store takes, extending
     /// `checkpoint` and claiming no progress.
     pub(super) fn batch(
@@ -184,44 +167,23 @@ impl<'a, R> Fixture<'a, R> {
     }
 }
 
-impl<R: IndexStore> Fixture<'_, R> {
-    /// Commits `blocks` in order, each authorised by the one before.
-    pub(super) async fn commit(&self, blocks: Vec<BlockWithOutputs>) {
-        let mut checkpoint = None;
-        for canonical in blocks {
-            let block = canonical.block.reference().clone();
-            self.repository
-                .commit(self.batch(checkpoint, canonical))
-                .await
-                .expect("fixture block");
-            checkpoint = Some(block);
-        }
-    }
-}
-
-impl<R: ConfirmedHistory> Fixture<'_, R> {
-    /// The ids of every stored transaction of `address` in `asset`, in order.
+impl<R> Fixture<'_, R> {
+    /// The ids of every stored transaction of `address` in `asset`, in order,
+    /// when the store's rows can be read.
     pub(super) async fn history(
         &self,
         address: &str,
         asset: &AssetId,
         limit: usize,
-    ) -> Vec<String> {
-        ConfirmedHistory::history(
-            self.repository,
-            HistoryQuery {
-                address: self.address(address),
-                asset: asset.clone(),
-                after: None,
-                limit,
-            },
-        )
-        .await
-        .expect("history page")
-        .transactions
-        .into_iter()
-        .map(|transaction| transaction.id.id.to_string())
-        .collect()
+    ) -> Option<Vec<String>> {
+        let rows = self.rows.as_ref()?;
+        Some(rows.history(&self.address(address), asset, limit).await)
+    }
+
+    /// `address`'s settled total in `asset`, when the store's rows can be read.
+    pub(super) async fn settled(&self, address: &str, asset: &AssetId) -> Option<Decimal> {
+        let rows = self.rows.as_ref()?;
+        Some(rows.settled(&self.address(address), asset).await)
     }
 }
 

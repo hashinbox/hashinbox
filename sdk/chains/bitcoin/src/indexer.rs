@@ -1,6 +1,6 @@
 //! The Bitcoin indexer: [`indexer`] over [`IndexerParams`].
 
-use indexing::{IndexError, Indexer, SyncConfig, SyncPolicy};
+use indexing::{Budget, Config, IndexError, Indexer};
 
 use crate::{BlockInterpreter, RpcClient, Source};
 
@@ -13,7 +13,7 @@ pub struct IndexerParams<C, R> {
     /// serves every network, so the same value is handed to every chain.
     pub repository: R,
     /// Defaults to [`IndexerParams::SYNC`].
-    pub sync: SyncPolicy,
+    pub sync: Budget,
     /// How many blocks below the node's tip the confirmed line sits.
     /// Defaults to [`IndexerParams::CONFIRMED_DEPTH`].
     pub confirmed_depth: u64,
@@ -21,7 +21,7 @@ pub struct IndexerParams<C, R> {
 
 impl<C, R> IndexerParams<C, R> {
     /// Batches of a hundred blocks.
-    pub const SYNC: SyncPolicy = SyncPolicy::new(100);
+    pub const SYNC: Budget = Budget::new(100);
 
     /// Blocks held above the confirmed line by default.
     ///
@@ -78,10 +78,10 @@ impl<C, R> IndexerParams<C, R> {
 /// rather than a newtype that forwarded every capability to one. Store it as
 /// `Arc<dyn indexing::Indexing>` or combine several in an `indexing::Index`.
 /// Unlike an account chain it also materializes UTXOs. Reading them is the
-/// repository's (`indexing::OutputStore`), and `indexing::PendingJoin` folds this
-/// index's pending blocks into that page so a wallet can spend its own change at
-/// depth one; `crate::WalletFactory` spends the result as its
-/// `Arc<dyn indexing::OutputStore>`. Not an impl on the index, because the rows
+/// repository's (`indexing::OutputStore`), and `crate::sender::Spendable` folds
+/// this index's pending blocks into those rows so a wallet can spend its own
+/// change at depth one; `crate::WalletFactory` takes it as its
+/// `Arc<dyn crate::sender::UtxoSource>`. Not an impl on the index, because the rows
 /// are the store's: what the index adds is the half above its own confirmed
 /// line.
 ///
@@ -91,7 +91,7 @@ impl<C, R> IndexerParams<C, R> {
 ///
 /// # Errors
 ///
-/// `InvalidRequest` for an invalid [`SyncPolicy`] or confirmation depth.
+/// `InvalidRequest` for an invalid [`Budget`] or confirmation depth.
 pub fn indexer<C, R>(
     params: IndexerParams<C, R>,
 ) -> Result<Indexer<Source<C>, BlockInterpreter, R>, IndexError> {
@@ -102,7 +102,7 @@ pub fn indexer<C, R>(
         Source::new(params.rpc, depth),
         BlockInterpreter::new(&network)?,
         params.repository,
-        SyncConfig::new(&network, params.sync)?,
+        Config::new(&network, params.sync)?,
     ))
 }
 
@@ -126,7 +126,7 @@ mod tests {
     fn construction_rejects_a_zero_batch_without_rpc() {
         let script = Script::node(Vec::new());
         let error = indexer(IndexerParams {
-            sync: SyncPolicy::new(0),
+            sync: Budget::new(0),
             ..IndexerParams::new(script.client(), ())
         })
         .err()

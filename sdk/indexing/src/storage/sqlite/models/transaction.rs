@@ -166,6 +166,28 @@ impl Transaction {
             .await
     }
 
+    /// The row of `id` in `network`.
+    pub(in crate::storage::sqlite) async fn get_by_id(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        id: &str,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT * FROM \"transaction\"
+             WHERE chain = ?1 AND network = ?2 AND transaction_id = ?3",
+        )
+        .bind(network.chain.as_str())
+        .bind(&network.name)
+        .bind(id)
+        .fetch_one(connection)
+        .await
+    }
+
+    /// The block that includes this transaction.
+    pub(in crate::storage::sqlite) fn block(self) -> Result<crate::BlockRef, IndexError> {
+        self.block.try_into()
+    }
+
     /// Removes every transaction of `network`; how many rows that was.
     pub(in crate::storage::sqlite) async fn purge(
         connection: &mut SqliteConnection,

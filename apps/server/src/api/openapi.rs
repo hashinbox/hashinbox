@@ -69,7 +69,7 @@ pub(crate) fn emits_required(schema: &str, value: impl serde::Serialize) {
 mod tests {
     use axum::http::StatusCode;
 
-    use crate::api::harness::App;
+    use crate::app::App;
     use std::{collections::BTreeSet, path::PathBuf};
 
     use serde_json::{Value, json};
@@ -224,26 +224,23 @@ mod tests {
         }
     }
 
-    /// Both reads that can be short report it with the same vocabulary.
+    /// Both reads that can be short say how far behind they are, the same way.
     #[test]
-    fn the_balance_and_the_history_page_state_completeness_the_same_way() {
+    fn the_balance_and_the_history_page_state_how_far_behind_they_are() {
         let document = document();
-
-        assert_eq!(
-            document["components"]["schemas"]["Completeness"]["enum"],
-            json!(["complete_history", "incomplete", "overdrawn"]),
-        );
+        assert!(document["components"]["schemas"]["Completeness"].is_null());
         for schema in ["Balance", "TransactionPage"] {
+            let behind = &document["components"]["schemas"][schema]["properties"]["behind"];
             assert_eq!(
-                document["components"]["schemas"][schema]["properties"]["completeness"]["$ref"],
-                json!("#/components/schemas/Completeness"),
-                "{schema}.completeness references the shared vocabulary"
+                behind["type"],
+                json!("integer"),
+                "{schema}.behind is a count"
             );
             assert!(
                 document["components"]["schemas"][schema]["required"]
                     .as_array()
-                    .is_some_and(|required| required.iter().any(|value| value == "completeness")),
-                "{schema} always states how complete it is"
+                    .is_some_and(|required| required.iter().any(|value| value == "behind")),
+                "{schema} always states how far behind it is"
             );
         }
     }

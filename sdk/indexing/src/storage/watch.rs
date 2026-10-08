@@ -12,7 +12,7 @@
 //! progress earned under a registration it no longer holds, and the caller
 //! would have no way to tell.
 
-use crate::{BlockPosition, BlockRef, BoxFuture, IndexError, Network, Watch};
+use crate::{BlockPosition, BlockRef, BoxFuture, IndexError, IndexErrorKind, Network, Watch};
 
 /// One observed watch, and the block through which it has been inspected.
 ///
@@ -124,11 +124,6 @@ impl WatchProgress {
 /// the other is [`crate::IndexStore`]. Nothing here reads a balance, a history
 /// page or an output: those are consumer capabilities a repository may also
 /// offer, and an index neither calls nor requires them.
-// linter:disable rust/trait-method-count -- re-anchoring must be one transaction.
-// A fourth method is what buys that: expressed as `forget` then `add`, the
-// operation passes through a state in which the address is watched by nothing,
-// and a crash there leaves it there. A smaller method count is not worth a weaker
-// transaction boundary.
 pub trait WatchStore: Send + Sync {
     /// Atomically records every observation in `watches`, with no progress.
     ///
@@ -219,50 +214,6 @@ pub trait WatchStore: Send + Sync {
         network: &'a Network,
         watch: &'a Watch,
     ) -> BoxFuture<'a, Result<(), IndexError>>;
-
-    /// Moves every observation in `watches` to the birthday it now carries and
-    /// discards the progress recorded for it, **in one transaction**.
-    ///
-    /// The durable half of [`crate::Backfilling::cancel_backfill`]. A range nobody is
-    /// going to read is settled by raising the observation's birthday above it,
-    /// and the claim earned under the old birthday goes with it, because it
-    /// described a range that is no longer owed. Nothing else is touched: the
-    /// history, credits and live outputs of the address stay and are still
-    /// served.
-    ///
-    /// **This exists instead of a [`Self::forget`] followed by a [`Self::add`],
-    /// and that is the whole of its reason.** Those two reach the same rows
-    /// through a state in which the address is watched by nothing, and a crash
-    /// between them leaves it there. A store cannot repair that, because from
-    /// outside there is nothing to distinguish it from an address nobody ever
-    /// registered. Here there is no such state to be left in: every observation
-    /// in the batch carries its new birthday and no progress, or every one still
-    /// carries the pair it had. The batch is one transaction for the same reason
-    /// [`Self::add`]'s is — a cancellation is one act over a network, and half of
-    /// one is not a state anybody asked for.
-    ///
-    /// **It states what must be true afterwards, not what to change**, exactly as
-    /// [`Self::add`] does, and the network it is about comes from the rows rather
-    /// than beside them. So the store holds each observation as given whether or
-    /// not it held it before — an archived row of the same identity and pair is
-    /// observed again from the birthday given — and **repeating the call is how an uncertain one is
-    /// settled**: a caller that lost the answer cannot tell a store that applied
-    /// the batch from one that applied none of it, nor either from one whose row
-    /// has since been withdrawn, and presenting the same batch again settles all
-    /// three without having to.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::IndexErrorKind::Conflict`], not retryable, when an entry names
-    /// an `(address, asset)` pair another identity holds, or an identity held
-    /// under another pair or network — the pair is the row's other name, and
-    /// re-anchoring neither takes a name that is in use nor moves an
-    /// observation to another holding — a non-retryable `Conflict` too when an
-    /// entry would lower an observed row's birthday,
-    /// [`crate::IndexErrorKind::InvalidRequest`] for a blank address, an asset of
-    /// another chain than its address, or a batch spanning more than one network,
-    /// and the store's own error.
-    fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>>;
 }
 
 /// A definition refused because another observation holds one of its names.
@@ -306,9 +257,98 @@ impl<T: WatchStore + ?Sized> WatchStore for std::sync::Arc<T> {
     ) -> BoxFuture<'a, Result<(), IndexError>> {
         (**self).forget(network, watch)
     }
+}
 
-    fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
-        (**self).cancel_backfill(watches)
+/// How far one address has been inspected, as one snapshot holds it: every
+/// observation of the address, and the confirmed line of the same read.
+///
+/// **What keeps a read honest about rows that are not there yet.** A store
+/// answers from the rows it holds, and a backfill exists precisely because some
+/// are missing: the range between an observation's recorded progress and the
+/// line has not been read for the address. Only the store can say so without a
+/// second read, because the observations and the rows are in one snapshot. So
+/// each shipped store loads this beside the rows it answers with and asks it
+/// what the answer may claim.
+///
+/// **Scoped to the address, not to the observation**, and deliberately. One
+/// inspection of an address serves every asset observed at it
+/// ([`crate::BlockInterpreter::inspect`] takes addresses and no asset), so the
+/// rows a token read folds are the rows its native sibling's catch-up is still
+/// inserting. The conservative answer is the true one.
+///
+/// Shared by the two shipped stores because it is a rule about
+/// [`WatchProgress`] rather than about either backend. A third-party store
+/// owes the same answers (`tests/contracts/`); it may ask this for them, or
+/// derive them its own way.
+pub struct Inspection<'a> {
+    observations: &'a [WatchProgress],
+    checkpoint: Option<&'a BlockRef>,
+}
+
+impl<'a> Inspection<'a> {
+    /// `observations` is every observation of one address, whatever its asset,
+    /// and `checkpoint` the line of the snapshot they were read in.
+    #[must_use]
+    pub const fn new(observations: &'a [WatchProgress], checkpoint: Option<&'a BlockRef>) -> Self {
+        Self {
+            observations,
+            checkpoint,
+        }
+    }
+
+    /// Whether any observation of the address is still reading its own past.
+    ///
+    /// [`WatchProgress::caught_up`] decides, which is the comparison a pass
+    /// selects by: a store and an index cannot disagree about what "still
+    /// catching up" means.
+    ///
+    /// **An observed address at a network with no line has read nothing.** A
+    /// pass owes nothing below a line that does not exist, so `caught_up` says
+    /// yes there; a read cannot, because no block has been committed for the
+    /// network since it was created or purged ([`crate::IndexStore::purge`]). An empty answer
+    /// from that snapshot is the absence of reading, not of rows.
+    fn outstanding(&self) -> bool {
+        let Some(line) = self.checkpoint else {
+            return !self.observations.is_empty();
+        };
+        self.observations
+            .iter()
+            .any(|observed| !observed.caught_up(Some(line)))
+    }
+
+    /// Refuses a spendable set while the rows it would be read from are still
+    /// arriving.
+    ///
+    /// **The one read that cannot be weakened instead.** A balance and a
+    /// history page can say how far behind their rows are, so they answer
+    /// honestly while an inspection is outstanding and the caller decides what
+    /// a partial answer is worth. An [`crate::OutputPage`] carries no such
+    /// claim and could not use one:
+    /// its consumer is coin selection, which pages the set and spends the
+    /// union, so an output offered becomes a transaction input. An unspent row
+    /// at block 0 is only unspent *as far as has been read*, and until the
+    /// inspection reaches the checkpoint the page is read at, the blocks
+    /// between may hold the very spend that settles it. The rows exist, the
+    /// checkpoint is real, and the two together are still a lie, which leaves
+    /// refusing as the only honest answer.
+    ///
+    /// # Errors
+    ///
+    /// A retryable [`IndexErrorKind::Conflict`], the refusal every caller of
+    /// [`crate::OutputStore`] already restarts on. It clears the moment the catch-up
+    /// reaches the line, or, at a network with no line yet (never indexed, or
+    /// [`crate::IndexStore::purge`] emptied it), at the first commit.
+    pub fn spendable(&self) -> Result<(), IndexError> {
+        if !self.outstanding() {
+            return Ok(());
+        }
+        Err(IndexError::new(
+            IndexErrorKind::Conflict,
+            "spendable outputs are not readable while this address's own history \
+             is still being inspected: an unspent row cannot be proven unspent \
+             below the checkpoint it was read at",
+            true,
+        ))
     }
 }
 

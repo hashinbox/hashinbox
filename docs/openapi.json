@@ -735,7 +735,7 @@
           "wallets"
         ],
         "summary": "Read a wallet's balance in its own asset",
-        "description": "The confirmed indexed total and pending incoming/outgoing amounts in the asset's display units, with the confirmed and pending heights and history completeness. Chain spending rules still apply. A watch-only address reads the same balance without a key.",
+        "description": "The confirmed indexed total and pending incoming/outgoing amounts in the asset's display units, with the confirmed and pending heights and how many blocks the address's inspection is behind. Chain spending rules still apply. A watch-only address reads the same balance without a key.",
         "operationId": "read_wallet_balance",
         "parameters": [
           {
@@ -803,7 +803,7 @@
           "transactions"
         ],
         "summary": "Read one page of a wallet's history",
-        "description": "The wallet's canonical history in the wallet's own asset. `transactions` is confirmed and append-only, so its cursor stays valid however far the checkpoint moves; `pending` carries the transactions above the confirmed line and is populated on the first page only; `completeness` says how much of the history behind the page the index can prove it holds, in the same three words the balance uses.",
+        "description": "The wallet's canonical history in the wallet's own asset. `transactions` is confirmed and append-only, so its cursor stays valid however far the checkpoint moves; `pending` carries the transactions above the confirmed line and is populated on the first page only; `behind` says how many blocks the address's inspection trails the confirmed line, as the balance does.",
         "operationId": "read_wallet_transactions",
         "parameters": [
           {
@@ -1092,7 +1092,7 @@
       },
       "Backfill": {
         "type": "object",
-        "description": "The history one network still owes addresses watched from below its\ncheckpoint, and why the last attempt at it stopped.\n\nIt is reported and never gating: a range a pruned node can no longer serve\nwould otherwise hold `ready` at false for the life of the process while\nforward indexing answered every question a client actually asks. The range\nis published here, and the reads it weakens say so themselves through their\nown `completeness`.",
+        "description": "The history one network still owes addresses watched from below its\ncheckpoint, and why the last attempt at it stopped.\n\nIt is reported and never gating: a range a pruned node can no longer serve\nwould otherwise hold `ready` at false for the life of the process while\nforward indexing answered every question a client actually asks. The range\nis published here, and the reads it weakens say so themselves through their\nown `behind`.",
         "required": [
           "pending",
           "resume",
@@ -1133,23 +1133,25 @@
       },
       "Balance": {
         "type": "object",
-        "description": "A wallet's balance in its asset, on both sides of its chain's confirmed\nline.\n\n`amount` is the confirmed indexed total. Completeness states whether history\nis missing; chain spending rules, such as coinbase maturity, still apply.\nThe two pending figures describe blocks above the confirmed line: they are\nreported apart rather than netted, because \"3.0 arriving\" and \"1.0\nleaving\" are different facts to a payments operator, and neither is ever\nnegative. Pending fees are not folded in; a pending transaction's fee is\nreported with it in history.",
+        "description": "A wallet's balance in its asset, on both sides of its chain's confirmed\nline.\n\n`amount` is the confirmed indexed total, negative when indexed debits\nexceed known credits; `behind` states how far the address's inspection\ntrails the confirmed line. Chain spending rules, such as coinbase\nmaturity, still apply.\nThe two pending figures describe blocks above the confirmed line: they are\nreported apart rather than netted, because \"3.0 arriving\" and \"1.0\nleaving\" are different facts to a payments operator, and neither is ever\nnegative. Pending fees are not folded in; a pending transaction's fee is\nreported with it in history.",
         "required": [
           "amount",
           "pending_incoming",
           "pending_outgoing",
           "observed_height",
           "pending_height",
-          "completeness"
+          "behind"
         ],
         "properties": {
           "amount": {
             "type": "string",
-            "description": "Confirmed indexed amount in exact display units, e.g. `12.5`.\nCompleteness and chain spending rules apply separately."
+            "description": "Confirmed indexed amount in exact display units, e.g. `12.5`; negative,\ne.g. `-0.5`, when indexed debits exceed known credits. Chain spending\nrules apply separately."
           },
-          "completeness": {
-            "$ref": "#/components/schemas/Completeness",
-            "description": "How much of the history behind `amount` the index can prove it holds.\n`incomplete` while this address still owes a historical range, and\n`overdrawn` when indexed debits exceed known credits."
+          "behind": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many blocks this address's inspection is behind the confirmed\nline; 0 when caught up. While it is above 0, `amount` may still change\nas history below the line is read.",
+            "minimum": 0
           },
           "observed_height": {
             "type": [
@@ -1258,15 +1260,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "Completeness": {
-        "type": "string",
-        "description": "How much of the history behind an answer the index can prove it holds.\n\nIt is a property of the read, not of the wallet, and the balance and the\nhistory page share the vocabulary.",
-        "enum": [
-          "complete_history",
-          "incomplete",
-          "overdrawn"
-        ]
       },
       "ConfiguredNetwork": {
         "type": "object",
@@ -2001,9 +1994,15 @@
           "transactions",
           "pending",
           "next_cursor",
-          "completeness"
+          "behind"
         ],
         "properties": {
+          "behind": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many blocks this address's inspection is behind the confirmed\nline; 0 when caught up. `next_cursor` cannot carry it — that speaks\nabout what follows the page, and a backfill inserts rows *before* it —\nso a caller paging to the end mid-backfill reads a non-zero `behind`\nrather than a complete export.",
+            "minimum": 0
+          },
           "checkpoint": {
             "oneOf": [
               {
@@ -2014,10 +2013,6 @@
                 "description": "The confirmed line the page was read at; null before the first sync.\nAlways present."
               }
             ]
-          },
-          "completeness": {
-            "$ref": "#/components/schemas/Completeness",
-            "description": "How much of the history behind this page the index can prove it holds.\n`next_cursor` cannot carry it — that speaks about what follows the page,\nand a backfill inserts rows *before* it — so a caller paging to the end\nmid-backfill reads `incomplete` rather than a complete export."
           },
           "next_cursor": {
             "type": [

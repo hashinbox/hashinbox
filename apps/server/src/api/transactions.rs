@@ -19,7 +19,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody};
 use crate::{
-    models::{Asset, Block, Completeness, Network, Wallet},
+    models::{Asset, Block, Entry, Network, Page, Position, Standing, Wallet},
     state::AppState,
 };
 
@@ -42,23 +42,6 @@ struct HistoryQuery {
     limit: usize,
 }
 
-impl TryFrom<HistoryQuery> for indexing::Page {
-    type Error = Error;
-
-    fn try_from(query: HistoryQuery) -> Result<Self, Self::Error> {
-        if query.limit == 0 || query.limit > 1_000 {
-            return Err(Error::invalid_request(
-                "history limit must be between 1 and 1000",
-            ));
-        }
-        let after = query.cursor.as_deref().map(Cursor::decode).transpose()?;
-        Ok(Self {
-            after,
-            limit: query.limit,
-        })
-    }
-}
-
 impl HistoryQuery {
     const fn default_limit() -> usize {
         100
@@ -73,8 +56,8 @@ impl HistoryQuery {
     description = "The wallet's canonical history in the wallet's own asset. `transactions` \
         is confirmed and append-only, so its cursor stays valid however far the checkpoint \
         moves; `pending` carries the transactions above the confirmed line and is populated \
-        on the first page only; `completeness` says how much of the history behind the page the \
-        index can prove it holds, in the same three words the balance uses.",
+        on the first page only; `behind` says how many blocks the address's inspection trails \
+        the confirmed line, as the balance does.",
     params(WalletPath, HistoryQuery),
     security(("bearerAuth" = [])),
     responses(
@@ -93,12 +76,37 @@ async fn history(
     query: Result<Query<HistoryQuery>, QueryRejection>,
 ) -> Result<Json<HistoryResponse>, Error> {
     let Query(query) = query.map_err(Error::invalid_query)?;
-    let page = query.try_into()?;
+    if query.limit == 0 || query.limit > 1_000 {
+        return Err(Error::invalid_request(
+            "history limit must be between 1 and 1000",
+        ));
+    }
+    let after = query.cursor.as_deref().map(Cursor::decode).transpose()?;
     let wallet = Wallet::find(state.registry.as_ref(), &state.wallets, &path.id).await?;
     let subject = wallet.subject()?;
-    // The reader that owns the wallet's network answers in atomic units;
-    // the page projects them by each asset's declared unit.
-    let page = state.history.history(subject, page).await?;
+    // The pending blocks are sampled before the rows are read, and narrowed
+    // by the line the rows were read at, so a commit landing in between is
+    // listed once. The page is in atomic units; each asset's declared unit
+    // scales it below.
+    let pending = state
+        .pending
+        .iter()
+        .find(|(network, _)| *network == subject.address.network)
+        .map(|(_, pending)| pending.clone())
+        .ok_or_else(|| {
+            indexing::IndexError::new(
+                indexing::IndexErrorKind::NetworkMismatch,
+                "index network is not configured",
+                false,
+            )
+        })?;
+    let sample = pending.sampled()?;
+    let unavailable = |_| Error::indexed("the index database is unavailable");
+    // One deferred transaction: every row of the page is one snapshot.
+    let mut read = state.pool.begin().await.map_err(unavailable)?;
+    let confirmed = Page::read(&mut read, subject, after.as_ref(), query.limit).await?;
+    read.rollback().await.map_err(unavailable)?;
+    let page = confirmed.completed(subject, after.is_none(), sample)?;
     // The page is refused whole, before any of it is converted, when it left
     // the queried network (another network's identity would reach a caller as
     // if it were theirs) or is denominated in anything the query did not ask
@@ -175,12 +183,12 @@ async fn history(
             payer,
         })
     };
-    let transaction = |observed: indexing::ObservedTransaction| {
+    let transaction = |observed: Entry| {
         let transaction = observed.transaction;
         Ok::<_, Error>(Transaction {
             network: transaction.id.network.clone().into(),
             transaction_id: transaction.id.id.to_string(),
-            status: observed.status.into(),
+            status: observed.standing.into(),
             movements: transaction
                 .movements
                 .into_iter()
@@ -189,7 +197,7 @@ async fn history(
             fee: transaction.fee.map(&fee).transpose()?,
         })
     };
-    let convert = |observed: Vec<indexing::ObservedTransaction>| {
+    let convert = |observed: Vec<Entry>| {
         observed
             .into_iter()
             .map(&transaction)
@@ -197,7 +205,7 @@ async fn history(
     };
     Ok(Json(HistoryResponse {
         next_cursor: page.next.as_ref().map(Cursor::encode).transpose()?,
-        completeness: page.completeness.into(),
+        behind: page.behind,
         checkpoint: page.checkpoint.map(Into::into),
         transactions: convert(page.transactions)?,
         pending: convert(page.pending)?,
@@ -291,24 +299,24 @@ enum Status {
     },
 }
 
-impl From<indexing::TransactionStatus> for Status {
-    fn from(value: indexing::TransactionStatus) -> Self {
+impl From<Standing> for Status {
+    fn from(value: Standing) -> Self {
         match value {
-            indexing::TransactionStatus::Pending {
+            Standing::Pending {
                 block,
                 confirmations,
             } => Self::Pending {
                 block: block.into(),
                 confirmations,
             },
-            indexing::TransactionStatus::Confirmed {
+            Standing::Confirmed {
                 block,
                 confirmations,
             } => Self::Confirmed {
                 block: block.into(),
                 confirmations,
             },
-            indexing::TransactionStatus::Failed { block, reason } => Self::Failed {
+            Standing::Failed { block, reason } => Self::Failed {
                 block: block.into(),
                 reason,
             },
@@ -354,11 +362,12 @@ struct HistoryResponse {
     /// Always present.
     #[schema(required)]
     next_cursor: Option<String>,
-    /// How much of the history behind this page the index can prove it holds.
-    /// `next_cursor` cannot carry it — that speaks about what follows the page,
-    /// and a backfill inserts rows *before* it — so a caller paging to the end
-    /// mid-backfill reads `incomplete` rather than a complete export.
-    completeness: Completeness,
+    /// How many blocks this address's inspection is behind the confirmed
+    /// line; 0 when caught up. `next_cursor` cannot carry it — that speaks
+    /// about what follows the page, and a backfill inserts rows *before* it —
+    /// so a caller paging to the end mid-backfill reads a non-zero `behind`
+    /// rather than a complete export.
+    behind: u64,
 }
 
 /// The opaque `cursor` of a history page: a position in one address's
@@ -383,7 +392,7 @@ struct Cursor {
 }
 
 impl Cursor {
-    fn encode(position: &indexing::HistoryPosition) -> Result<String, Error> {
+    fn encode(position: &Position) -> Result<String, Error> {
         use base64::Engine;
 
         let bytes = serde_json::to_vec(&Self {
@@ -391,13 +400,13 @@ impl Cursor {
             network: position.transaction.network.name.clone(),
             transaction: position.transaction.id.to_string(),
             height: position.height.0,
-            order: position.transaction_order,
+            order: position.order,
         })
         .map_err(|_| Self::invalid_response("history cursor could not be encoded"))?;
         Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
     }
 
-    fn decode(value: &str) -> Result<indexing::HistoryPosition, Error> {
+    fn decode(value: &str) -> Result<Position, Error> {
         use base64::Engine;
 
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -412,9 +421,9 @@ impl Cursor {
             chain: base::ChainName::new(cursor.chain),
             name: cursor.network,
         };
-        Ok(indexing::HistoryPosition {
+        Ok(Position {
             height: base::BlockHeight(cursor.height),
-            transaction_order: cursor.order,
+            order: cursor.order,
             transaction: base::TransactionRef {
                 network,
                 id: cursor.transaction.into(),
@@ -701,19 +710,18 @@ fn amount(text: &str) -> Result<wallets::Amount, Error> {
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
-    use base::{BlockHash, BlockHeight, BlockRef, Decimal};
-    use indexing::WalletRegistry as _;
-    use indexing::{AssetId, ChainName, MovementId, Network, TransactionRef};
+    use base::{BlockHash, BlockHeight, BlockRef};
+    use indexing::{ChainName, Network, TransactionRef};
     use serde_json::json;
     use wallets::{
         Amount, WalletErrorKind,
-        testing::{Factory, Outcome, Submission},
+        testing::{Outcome, Submission},
     };
 
     use super::*;
-    use crate::api::{
-        emits_required,
-        harness::{App, Reply},
+    use crate::{
+        api::emits_required,
+        app::{App, Reply},
     };
 
     #[tokio::test]
@@ -741,23 +749,10 @@ mod tests {
         assert_eq!(history["pending"][0]["status"]["kind"], "pending");
         assert_eq!(history["pending"][0]["status"]["block"]["height"], 9);
         assert_eq!(
-            history["completeness"], "incomplete",
-            "a page states its completeness in the same words the balance does"
+            history["behind"], 0,
+            "a page states how far behind it is, as the balance does"
         );
         assert_eq!(history["transactions"][0]["movements"][0]["amount"], "1.5");
-    }
-
-    /// Included in block one, as the projected pages are.
-    fn included() -> indexing::Status {
-        indexing::Status::Included {
-            block: BlockRef {
-                position: base::BlockPosition(1),
-                height: BlockHeight(1),
-                hash: BlockHash(vec![1]),
-                parent: None,
-                timestamp: None,
-            },
-        }
     }
 
     #[test]
@@ -798,7 +793,7 @@ mod tests {
                 transactions: Vec::new(),
                 pending: Vec::new(),
                 next_cursor: None,
-                completeness: Completeness::Overdrawn,
+                behind: 3,
             },
         );
         let block = serde_json::json!({
@@ -826,190 +821,6 @@ mod tests {
         }
     }
 
-    fn address(value: &str) -> base::Address {
-        base::Address {
-            network: network(),
-            value: value.to_owned(),
-        }
-    }
-
-    /// Metadata of the example chain's 8-decimal native asset.
-    const COIN: base::Asset = base::Asset::new(
-        base::ChainNetwork::new(
-            base::ChainName::from_static("bitcoin"),
-            "regtest",
-            base::NetworkKind::Testnet,
-            "BTC",
-        ),
-        "Bitcoin",
-        "BTC",
-        8,
-    );
-
-    /// What the chain declares: its own currency at 8 decimals, and one
-    /// 6-decimal token of the same network.
-    fn units() -> base::Units {
-        base::Units::from_iter([
-            (
-                (network(), AssetId::native(network().chain)),
-                base::Unit::native(&COIN),
-            ),
-            ((network(), token()), base::Unit::token(6)),
-        ])
-    }
-
-    fn token() -> AssetId {
-        AssetId {
-            chain: network().chain,
-            asset: "token".to_owned(),
-        }
-    }
-
-    /// A history read that answers every query with one page.
-    struct Answering(indexing::TransactionPage);
-
-    impl indexing::History for Answering {
-        fn history<'a>(
-            &'a self,
-            _of: &'a dyn indexing::Holder,
-            _page: indexing::Page,
-        ) -> indexing::BoxFuture<'a, Result<indexing::TransactionPage, indexing::IndexError>>
-        {
-            Box::pin(async move { Ok(self.0.clone()) })
-        }
-    }
-
-    /// What the history handler answers when the index reads `indexed` for a
-    /// Bitcoin regtest wallet of `asset`, under the units of [`units`].
-    async fn project(
-        indexed: indexing::TransactionPage,
-        asset: &AssetId,
-    ) -> Result<HistoryResponse, Error> {
-        let factory = Factory::new(network());
-        let factory = if asset.is_native() {
-            factory
-        } else {
-            factory.token(asset.asset.clone())
-        };
-        let app = App::without_usdc(factory).await;
-        let registration = indexing::Registration {
-            id: "wallet-1".to_owned(),
-            address: address("addr-07"),
-            asset: asset.clone(),
-            label: None,
-            secret: None,
-        };
-        app.state
-            .registry
-            .register(registration)
-            .await
-            .expect("a registered wallet");
-        let state = AppState {
-            history: Arc::new(Answering(indexed)),
-            units: Arc::new(units()),
-            ..app.state.clone()
-        };
-        let path = WalletPath {
-            id: "wallet-1".to_owned(),
-        };
-        let query = HistoryQuery {
-            cursor: None,
-            limit: 10,
-        };
-        let Json(page) = history(State(Arc::new(state)), Path(path), Ok(Query(query))).await?;
-        Ok(page)
-    }
-
-    /// The projection is the whole of the edge: the index answers in atomic
-    /// units and the asset's decimals — which it never learns — turn them
-    /// into the same wire body the three-model path produced.
-    #[tokio::test]
-    async fn history_conversion_scales_atomic_amounts_and_preserves_typed_facts() {
-        let block = BlockRef {
-            position: base::BlockPosition(12),
-            height: BlockHeight(12),
-            hash: BlockHash(vec![0xab; 32]),
-            parent: Some(base::BlockParent {
-                position: base::BlockPosition(11),
-                hash: BlockHash(vec![0xcd; 32]),
-            }),
-            timestamp: Some(44),
-        };
-        let native = AssetId::native(network().chain);
-        let transaction = indexing::Transaction {
-            id: TransactionRef {
-                network: network(),
-                id: "tx-1".to_owned().into(),
-            },
-            movements: vec![
-                indexing::ValueMovement::input(
-                    MovementId("input:0".to_owned()),
-                    native.clone(),
-                    Decimal::from(123_000_000_u64),
-                    Some(address("sender")),
-                ),
-                indexing::ValueMovement::output(
-                    MovementId("output:0".to_owned()),
-                    native.clone(),
-                    Decimal::from(122_000_000_u64),
-                    Some(address("recipient")),
-                ),
-            ],
-            fee: Some(indexing::NetworkFee {
-                asset: native.clone(),
-                amount: Decimal::from(1_000_000_u64),
-                payer: Some(address("sender")),
-            }),
-            order: 0,
-            status: indexing::Status::Included {
-                block: block.clone(),
-            },
-        };
-        let indexed = indexing::TransactionPage {
-            checkpoint: Some(block.clone()),
-            pending: Vec::new(),
-            transactions: vec![indexing::ObservedTransaction {
-                transaction,
-                status: indexing::TransactionStatus::Confirmed {
-                    block,
-                    confirmations: 7,
-                },
-            }],
-            next: None,
-            completeness: indexing::Completeness::Incomplete,
-        };
-
-        let page = project(indexed, &native).await.expect("projected history");
-        let transaction = &page.transactions[0];
-        assert_eq!(page.checkpoint.as_ref().map(|value| value.height), Some(12));
-        assert_eq!(transaction.network.name, "regtest");
-        assert_eq!(transaction.transaction_id, "tx-1");
-        assert_eq!(transaction.movements.len(), 2);
-        assert_eq!(transaction.movements[0].amount, "1.23");
-        assert_eq!(transaction.movements[0].asset.decimals, 8);
-        assert_eq!(transaction.movements[0].to, None);
-        assert_eq!(transaction.movements[1].kind, MovementKind::Output);
-        assert_eq!(transaction.fee.as_ref().expect("fee").amount, "0.01");
-        assert!(matches!(
-            transaction.status,
-            Status::Confirmed {
-                confirmations: 7,
-                ..
-            }
-        ));
-        let status = serde_json::to_value(&transaction.status).expect("status serializes");
-        assert_eq!(status["kind"], "confirmed");
-        assert_eq!(status["confirmations"], 7);
-        assert_eq!(status["block"]["position"], 12);
-        assert_eq!(status["block"]["height"], 12);
-        assert_eq!(status["block"]["parent"]["position"], 11);
-        assert_eq!(status["block"]["parent"]["hash"], "cd".repeat(32));
-        assert!(status["block"].get("parent_hash").is_none());
-        assert!(status["block"].get("block").is_none());
-        assert!(status["block"].get("timestamp").is_none());
-        assert!(status.get("proof").is_none());
-    }
-
     /// Each status's whole body, byte for byte: its fields, their order, and
     /// the `null` a failure without a reason still writes.
     ///
@@ -1033,28 +844,28 @@ mod tests {
         );
         for (status, tail) in [
             (
-                indexing::TransactionStatus::Pending {
+                Standing::Pending {
                     block: block.clone(),
                     confirmations: 1,
                 },
                 r#""kind":"pending","confirmations":1"#,
             ),
             (
-                indexing::TransactionStatus::Confirmed {
+                Standing::Confirmed {
                     block: block.clone(),
                     confirmations: 7,
                 },
                 r#""kind":"confirmed","confirmations":7"#,
             ),
             (
-                indexing::TransactionStatus::Failed {
+                Standing::Failed {
                     block: block.clone(),
                     reason: Some("out of gas".to_owned()),
                 },
                 r#""kind":"failed","reason":"out of gas""#,
             ),
             (
-                indexing::TransactionStatus::Failed {
+                Standing::Failed {
                     block: block.clone(),
                     reason: None,
                 },
@@ -1078,134 +889,6 @@ mod tests {
         }
     }
 
-    /// A page that left the query is refused whole, before any of it is
-    /// converted: another network's transaction, an asset the query did not
-    /// ask for, or a fee priced in anything but the chain's own currency.
-    #[tokio::test]
-    async fn a_page_outside_the_query_is_refused_before_conversion() {
-        let elsewhere = Network {
-            chain: ChainName::new("bitcoin"),
-            name: "mainnet".to_owned(),
-        };
-        let native = AssetId::native(network().chain);
-        let transaction = |network: &Network, asset: AssetId, fee: Option<AssetId>| {
-            indexing::ObservedTransaction {
-                transaction: indexing::Transaction {
-                    id: TransactionRef {
-                        network: network.clone(),
-                        id: "tx-1".to_owned().into(),
-                    },
-                    movements: vec![indexing::ValueMovement::mint(
-                        MovementId("mint".to_owned()),
-                        asset,
-                        Decimal::from(1_u64),
-                        address("recipient"),
-                    )],
-                    fee: fee.map(|asset| indexing::NetworkFee {
-                        asset,
-                        amount: Decimal::from(1_u64),
-                        payer: None,
-                    }),
-                    order: 0,
-                    status: included(),
-                },
-                status: indexing::TransactionStatus::Failed {
-                    block: BlockRef {
-                        position: base::BlockPosition(1),
-                        height: BlockHeight(1),
-                        hash: BlockHash(vec![1]),
-                        parent: None,
-                        timestamp: None,
-                    },
-                    reason: None,
-                },
-            }
-        };
-        let page = |transactions| indexing::TransactionPage {
-            checkpoint: None,
-            transactions,
-            pending: Vec::new(),
-            next: None,
-            completeness: indexing::Completeness::Incomplete,
-        };
-
-        for (refused, reason) in [
-            (
-                page(vec![transaction(&elsewhere, native.clone(), None)]),
-                "a transaction of another network",
-            ),
-            (
-                page(vec![transaction(&network(), token(), None)]),
-                "an asset outside the query",
-            ),
-            (
-                page(vec![transaction(&network(), native.clone(), Some(token()))]),
-                "a fee that is not the chain's own currency",
-            ),
-        ] {
-            project(refused, &native).await.expect_err(reason);
-        }
-    }
-
-    /// A token's amounts scale by the token's own decimals and its fees by the
-    /// chain's currency, in one page: the two scales are resolved per asset,
-    /// by the identity each amount already carries.
-    #[tokio::test]
-    async fn a_token_page_scales_each_amount_by_its_own_assets_unit() {
-        let indexed = indexing::TransactionPage {
-            checkpoint: None,
-            pending: Vec::new(),
-            transactions: vec![indexing::ObservedTransaction {
-                transaction: indexing::Transaction {
-                    id: TransactionRef {
-                        network: network(),
-                        id: "tx-1".to_owned().into(),
-                    },
-                    movements: vec![indexing::ValueMovement::transfer(
-                        MovementId("transfer:0".to_owned()),
-                        token(),
-                        Decimal::from(1_500_000_u64),
-                        address("sender"),
-                        address("recipient"),
-                    )],
-                    fee: Some(indexing::NetworkFee {
-                        asset: AssetId::native(network().chain),
-                        amount: Decimal::from(1_000_000_u64),
-                        payer: Some(address("sender")),
-                    }),
-                    order: 0,
-                    status: included(),
-                },
-                status: indexing::TransactionStatus::Confirmed {
-                    block: BlockRef {
-                        position: base::BlockPosition(1),
-                        height: BlockHeight(1),
-                        hash: BlockHash(vec![1]),
-                        parent: None,
-                        timestamp: None,
-                    },
-                    confirmations: 1,
-                },
-            }],
-            next: None,
-            completeness: indexing::Completeness::Incomplete,
-        };
-
-        let page = project(indexed, &token())
-            .await
-            .expect("projected token history");
-
-        let transaction = &page.transactions[0];
-        assert_eq!(transaction.movements[0].amount, "1.5");
-        assert_eq!(transaction.movements[0].asset.decimals, 6);
-        assert_eq!(transaction.movements[0].asset.id, "token");
-        assert_eq!(transaction.movements[0].asset.ticker, None);
-        let fee = transaction.fee.as_ref().expect("fee");
-        assert_eq!(fee.amount, "0.01");
-        assert_eq!(fee.asset.decimals, 8);
-        assert_eq!(fee.asset.ticker.as_deref(), Some("BTC"));
-    }
-
     /// The cursor is a position and nothing else. It used to carry the
     /// checkpoint it was issued at, so the index could refuse one whose
     /// checkpoint had moved; the confirmed store is append-only now, so that
@@ -1214,9 +897,9 @@ mod tests {
     fn a_history_cursor_carries_only_its_position() {
         use base64::Engine;
 
-        let position = indexing::HistoryPosition {
+        let position = Position {
             height: BlockHeight(9),
-            transaction_order: 2,
+            order: 2,
             transaction: TransactionRef {
                 network: network(),
                 id: "tx-1".to_owned().into(),

@@ -4,9 +4,9 @@
 //! [`Repository`] is the second store this crate ships, and it is a store
 //! rather than a test double: it answers the two required ports,
 //! [`WatchStore`](crate::WatchStore) and [`IndexStore`](crate::IndexStore), and
-//! every consumer capability — [`BalanceStore`](crate::BalanceStore),
-//! [`OutputStore`](crate::OutputStore), [`Purging`](crate::Purging) and its own
-//! [`ConfirmedHistory`](crate::ConfirmedHistory) — exactly as
+//! every narrow port — [`OutputStore`](crate::OutputStore),
+//! [`TransactionStore`](crate::TransactionStore) — and the purge exactly
+//! as
 //! `sqlite::Repository` does (a code span, not a link: `sqlite` may be off),
 //! and passes the same contract scenarios unmodified.
 //!
@@ -47,23 +47,19 @@
 //! Atomicity is expressed the only way a map-backed store can: a commit mutates
 //! a copy and installs it, so a rejected change leaves every row as it was.
 
-mod balances;
-mod commits;
-mod observations;
-mod wallets;
-
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
-};
-
+use crate::storage::watch::redefinition;
+use crate::storage::{Probe, wallet};
 use crate::{
-    Address, AssetId, Balance, BalanceQuery, BalanceStore, BlockCredit, BlockHeight, BlockRef,
-    BoxFuture, Completeness, ConfirmedHistory, ConfirmedHistoryPage, FeeSettlement, Fold,
-    HistoryQuery, Holder, IndexError, IndexErrorKind, IndexedOutput, Inspection, MovementId,
-    Network, OutputCursor, OutputId, OutputKey, OutputPage, OutputRequest, OutputStore,
-    Transaction, TransactionRef, Watch, storage::Probe,
+    Address, AssetId, BlockCredit, BlockHeight, BlockRef, BoxFuture, FeeSettlement, IndexError,
+    IndexErrorKind, IndexedOutput, Inspection, Location, MovementId, Network, OutputCursor,
+    OutputId, OutputKey, OutputPage, OutputRequest, OutputStore, Registration, Transaction,
+    TransactionRef, TransactionStore, Wallet, WalletRegistry, Watch, WatchProgress, WatchStore,
 };
+use crypto::SecretBytes;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+
+mod commits;
 
 /// Every stored row, keyed by the domain values themselves.
 #[derive(Clone, Default)]
@@ -225,70 +221,31 @@ impl Repository {
     }
 }
 
-impl ConfirmedHistory for Repository {
-    fn history<'a>(
+impl TransactionStore for Repository {
+    fn locate<'a>(
         &'a self,
-        query: HistoryQuery,
-    ) -> BoxFuture<'a, Result<ConfirmedHistoryPage, IndexError>> {
+        transaction: &'a TransactionRef,
+    ) -> BoxFuture<'a, Result<Location, IndexError>> {
         Box::pin(async move {
-            query.validate()?;
-            self.read(|tables| Ok(Self::history_page(&query, tables)))
+            self.read(|tables| {
+                let block = tables
+                    .history
+                    .values()
+                    .find(|held| &held.id == transaction)
+                    .map(|held| held.block().clone());
+                Ok(Location {
+                    checkpoint: tables.checkpoints.get(&transaction.network).cloned(),
+                    block,
+                })
+            })
         })
     }
 }
 
 impl Repository {
-    /// One page of `query`, selected out of the rows the address owns.
-    fn history_page(query: &HistoryQuery, tables: &Tables) -> ConfirmedHistoryPage {
-        let checkpoint = tables.checkpoints.get(&query.address.network).cloned();
-        let completeness = Self::provenance(query, tables, checkpoint.as_ref());
-        let probe = Probe::new(query.limit);
-        let read = Self::address_history(query, tables, probe.rows());
-        let (transactions, next) = probe.page(read, |last| last.into());
-        ConfirmedHistoryPage {
-            checkpoint,
-            transactions,
-            next,
-            completeness,
-        }
-    }
-
-    /// Up to `rows` matching transactions after the position, in order.
-    fn address_history(query: &HistoryQuery, tables: &Tables, rows: usize) -> Vec<Transaction> {
-        let after = query.after.as_ref().map(|after| {
-            (
-                after.height,
-                after.transaction_order,
-                after.transaction.clone(),
-            )
-        });
-        tables
-            .history
-            .iter()
-            .filter(|((network, address, ..), _)| Self::owns(network, address, &query.address))
-            .filter(|((.., height, order, id), _)| Self::after(after.as_ref(), *height, *order, id))
-            .filter_map(|(_, transaction)| query.select(transaction.clone()))
-            .take(rows)
-            .collect()
-    }
-
     /// Whether a row keyed by `(network, address)` belongs to this query.
     fn owns(network: &Network, address: &str, requested: &Address) -> bool {
         network == &requested.network && address == requested.value
-    }
-
-    /// Whether a history row is strictly after the cursor position.
-    ///
-    /// The three components compare in page order, so the ordinal decides
-    /// between two transactions of one block and the identity only breaks a tie
-    /// no chain produces.
-    fn after(
-        cursor: Option<&(BlockHeight, u64, TransactionRef)>,
-        height: BlockHeight,
-        order: u64,
-        id: &TransactionRef,
-    ) -> bool {
-        cursor.is_none_or(|(at, ordinal, after)| (height, order, id) > (*at, *ordinal, after))
     }
 }
 
@@ -326,7 +283,6 @@ impl Repository {
         let (outputs, next) = probe.page(read, |output| OutputCursor {
             checkpoint: checkpoint.clone(),
             position: position(&output.id),
-            revision: None,
         });
         Ok(OutputPage {
             checkpoint,
@@ -354,55 +310,7 @@ fn poisoned() -> IndexError {
     )
 }
 
-impl BalanceStore for Repository {
-    fn balance<'a>(&'a self, query: BalanceQuery) -> BoxFuture<'a, Result<Balance, IndexError>> {
-        Box::pin(async move {
-            query.validate()?;
-            self.read(|tables| Self::settled(&query, tables))
-        })
-    }
-}
-
 impl Repository {
-    /// The stored watched amount (or an unwatched fold), with one snapshot's provenance.
-    fn settled(query: &BalanceQuery, tables: &Tables) -> Result<Balance, IndexError> {
-        let key = (
-            query.address.network.clone(),
-            query.asset.clone(),
-            query.address.value.clone(),
-        );
-        let net = match tables.balances.get(&key) {
-            Some(net) => net.clone(),
-            None => Self::recomputed(query, tables)?,
-        };
-        let ledger = Fold::from_net(query, net);
-        let mut balance = ledger.balance(tables.checkpoints.get(&query.address.network).cloned());
-        // Provenance only ever weakens the arithmetic's own answer: `Overdrawn`
-        // is a proof the rows carry, and a claim about the range cannot talk it
-        // away.
-        if balance.completeness != Completeness::Overdrawn {
-            balance.completeness = Self::provenance(query, tables, balance.observed_at.as_ref());
-        }
-        Ok(balance)
-    }
-
-    /// What the observations of `of`'s address can claim about the history
-    /// behind the rows this store holds for it, at the `checkpoint` those rows
-    /// are read at.
-    ///
-    /// The same rule the file-backed store applies, asked of the one owner both
-    /// share ([`Inspection`]) because it is a property of the *watch rows*
-    /// rather than of either backend.
-    ///
-    /// **Both reads ask it.** A balance and a history page project one
-    /// address's rows two ways, so what is provable about the range behind them
-    /// is one answer; a second copy of this rule for pages could disagree with
-    /// this one, and nothing would say which had lied.
-    fn provenance(of: &dyn Holder, tables: &Tables, checkpoint: Option<&BlockRef>) -> Completeness {
-        let observations = Self::observing(tables, of.address());
-        Inspection::new(&observations, checkpoint).completeness(of)
-    }
-
     /// Where one credit is filed: the address it credits, the height it was
     /// made at, and its own identity — the key both write paths share.
     fn credit_key(
@@ -416,5 +324,330 @@ impl Repository {
             height,
             credit.id.clone(),
         )
+    }
+}
+
+// The in-memory store's watch list: what it was told to observe, and how far
+// each observation has been inspected.
+//
+// Separate from the parent module because the split falls where the ports do:
+// this is the only table an application writes and the index merely reads
+// back. Its rows are wallets, observed or archived, exactly as SQLite's
+// `wallet` rows are; what this port reads and writes are the observed ones,
+// and a withdrawal archives a row rather than removing it.
+//
+// One `apply` for the whole batch, which is how a map-backed store expresses
+// atomicity: the staged copy is installed only if every watch in the batch was
+// accepted, so a conflicting definition anywhere leaves no row behind.
+
+/// Where one wallet row is filed: `(network, asset, address)`.
+pub(super) type WalletKey = (Network, AssetId, String);
+
+impl WatchStore for Repository {
+    fn add<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
+        Box::pin(async move {
+            Self::one_network(&watches)?;
+            self.apply(|tables| {
+                watches
+                    .iter()
+                    .try_for_each(|watch| Self::register(tables, watch))
+            })
+        })
+    }
+
+    fn all<'a>(
+        &'a self,
+        network: &'a Network,
+    ) -> BoxFuture<'a, Result<Vec<WatchProgress>, IndexError>> {
+        Box::pin(async move {
+            // One `read`, so the observations and their progress are one
+            // snapshot: the pairing below cannot be of a watch and another
+            // watch's progress, whatever else is writing.
+            self.read(|tables| Ok(Self::paired(tables, network)))
+        })
+    }
+
+    fn forget<'a>(
+        &'a self,
+        network: &'a Network,
+        watch: &'a Watch,
+    ) -> BoxFuture<'a, Result<(), IndexError>> {
+        Box::pin(async move {
+            if !watch.address.belongs_to(network) {
+                return Err(IndexError::new(
+                    IndexErrorKind::NetworkMismatch,
+                    "watch belongs to another network",
+                    false,
+                ));
+            }
+            self.apply(|tables| {
+                Self::archive(tables, network, &watch.id);
+                Ok(())
+            })
+        })
+    }
+}
+
+impl Repository {
+    /// Archives the observed row `network` holds under `id`, if any: its claim
+    /// and total go; its birthday, label, key and every indexed fact stay.
+    ///
+    /// By identity, exactly as a SQL store's update is keyed: the `(asset,
+    /// address)` pair a caller's watch names may be held by another identity,
+    /// and that row is not this withdrawal's to archive.
+    fn archive(tables: &mut Tables, network: &Network, id: &str) {
+        let Some((wallet_key, row)) = Self::located(tables, id) else {
+            return;
+        };
+        if wallet_key.0 != *network || row.archived_at.is_some() {
+            return;
+        }
+        drop(tables.balances.remove(&wallet_key));
+        drop(tables.progress.remove(&(network.clone(), id.to_owned())));
+        if let Some(row) = tables.wallets.get_mut(&wallet_key) {
+            row.archived_at = Some(wallet::now());
+        }
+    }
+
+    /// The holding the row registered under `id` names, and the row, in
+    /// whichever network holds it.
+    ///
+    /// Identities are unique across the whole store, so there is at most one.
+    fn located(tables: &Tables, id: &str) -> Option<(WalletKey, WalletRow)> {
+        let network = tables.identities.get(id)?;
+        tables
+            .wallets
+            .iter()
+            .find(|((bound, ..), row)| bound == network && row.id == id)
+            .map(|(wallet_key, row)| (wallet_key.clone(), row.clone()))
+    }
+
+    /// Every observation of `network`, each beside the progress recorded for it,
+    /// out of one snapshot.
+    fn paired(tables: &Tables, network: &Network) -> Vec<WatchProgress> {
+        tables
+            .wallets
+            .iter()
+            .filter(|((bound, ..), _)| bound == network)
+            .filter_map(|(wallet_key, row)| row.watch(wallet_key))
+            .map(|watch| WatchProgress {
+                indexed_through: tables
+                    .progress
+                    .get(&(network.clone(), watch.id.clone()))
+                    .cloned(),
+                watch,
+            })
+            .collect()
+    }
+
+    /// Every observation of `address`, whatever its asset, each beside the
+    /// progress recorded for it.
+    ///
+    /// What a query of the address's rows is honest with
+    /// ([`crate::Inspection`]). It is read under the same lock as
+    /// those rows, so a claim about how far the address has been inspected is a
+    /// claim about the very rows returned.
+    fn observing(tables: &Tables, address: &Address) -> Vec<WatchProgress> {
+        Self::paired(tables, &address.network)
+            .into_iter()
+            .filter(|observed| observed.watch.address == *address)
+            .collect()
+    }
+
+    /// Refuses a batch this store cannot write as one change.
+    ///
+    /// One network is the only rule this store owns: the staged copy is
+    /// installed once, so two networks would be one change over rows of both.
+    /// Each row's own address and asset are [`Watch`]'s to answer for.
+    fn one_network(watches: &[Watch]) -> Result<(), IndexError> {
+        let Some(first) = watches.first() else {
+            return Ok(());
+        };
+        for watch in watches {
+            watch.validate()?;
+            if watch.address.network != first.address.network {
+                return Err(IndexError::new(
+                    IndexErrorKind::InvalidRequest,
+                    "a batch of watches must all belong to one network",
+                    false,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Insert-if-absent, verify-if-present, for one watch of the batch.
+    ///
+    /// Both of the store's uniqueness constraints are consulted — the
+    /// `(asset, address)` pair and the identity — because a repeat collides on
+    /// both and a redefinition on one. An archived row of the same identity
+    /// and holding is observed again, from the birthday given.
+    fn register(tables: &mut Tables, watch: &Watch) -> Result<(), IndexError> {
+        let wallet_key = Self::wallet_key(watch);
+        match tables.wallets.get(&wallet_key) {
+            Some(row) if row.watch(&wallet_key).as_ref() == Some(watch) => Ok(()),
+            Some(row) if row.id == watch.id && row.archived_at.is_some() => {
+                Self::observe(tables, &wallet_key, watch)
+            }
+            Some(_) => Err(redefinition()),
+            None if tables.identities.contains_key(&watch.id) => Err(redefinition()),
+            None => {
+                tables
+                    .identities
+                    .insert(watch.id.clone(), wallet_key.0.clone());
+                tables.wallets.insert(
+                    wallet_key.clone(),
+                    WalletRow {
+                        id: watch.id.clone(),
+                        birthday: None,
+                        label: None,
+                        secret: None,
+                        archived_at: None,
+                    },
+                );
+                Self::observe(tables, &wallet_key, watch)
+            }
+        }
+    }
+
+    /// Observes the row at `holding` from `watch`'s birthday, with nothing
+    /// inspected for it and its total seeded from the rows already stored.
+    fn observe(
+        tables: &mut Tables,
+        wallet_key: &WalletKey,
+        watch: &Watch,
+    ) -> Result<(), IndexError> {
+        let subject = crate::Subject {
+            address: watch.address.clone(),
+            asset: watch.asset.clone(),
+        };
+        let net = Self::recomputed(&subject, tables)?;
+        tables.balances.insert(wallet_key.clone(), net);
+        drop(
+            tables
+                .progress
+                .remove(&(wallet_key.0.clone(), watch.id.clone())),
+        );
+        if let Some(row) = tables.wallets.get_mut(wallet_key) {
+            row.birthday = Some(watch.start);
+            row.archived_at = None;
+        }
+        Ok(())
+    }
+
+    /// The holding `watch` names.
+    fn wallet_key(watch: &Watch) -> WalletKey {
+        (
+            watch.address.network.clone(),
+            watch.asset.clone(),
+            watch.address.value.clone(),
+        )
+    }
+}
+
+// The in-memory store's wallet registry ([`WalletRegistry`]): filing a wallet
+// with its label and key, and reading every row back, archived ones included.
+// The rules are SQLite's, and the shared contract (`tests/contracts/wallets.rs`)
+// holds both stores to them.
+
+impl WalletRegistry for Repository {
+    fn register<'a>(
+        &'a self,
+        registration: Registration,
+    ) -> BoxFuture<'a, Result<Wallet, IndexError>> {
+        Box::pin(async move {
+            registration.validate()?;
+            let (wallet_key, row) = self.apply(|tables| Self::file(tables, registration))?;
+            Self::wallet_of(&wallet_key, &row)
+        })
+    }
+
+    fn wallet<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<Wallet>, IndexError>> {
+        Box::pin(async move {
+            self.read(|tables| Ok(Self::located(tables, id)))?
+                .map(|(wallet_key, row)| Self::wallet_of(&wallet_key, &row))
+                .transpose()
+        })
+    }
+
+    fn wallets<'a>(&'a self) -> BoxFuture<'a, Result<Vec<Wallet>, IndexError>> {
+        Box::pin(async move {
+            let mut rows = self.read(|tables| {
+                Ok(tables
+                    .wallets
+                    .iter()
+                    .map(|(wallet_key, row)| (wallet_key.clone(), row.clone()))
+                    .collect::<Vec<_>>())
+            })?;
+            rows.sort_by(|(_, left), (_, right)| left.id.cmp(&right.id));
+            rows.iter()
+                .map(|(wallet_key, row)| Self::wallet_of(wallet_key, row))
+                .collect()
+        })
+    }
+}
+
+impl Repository {
+    /// Files `registration` under the rules of [`WalletRegistry::register`],
+    /// and returns the row as stored.
+    fn file(
+        tables: &mut Tables,
+        registration: Registration,
+    ) -> Result<(WalletKey, WalletRow), IndexError> {
+        let wallet_key = (
+            registration.address.network.clone(),
+            registration.asset.clone(),
+            registration.address.value.clone(),
+        );
+        let secret = registration.secret.map(Arc::new);
+        let Some(row) = tables.wallets.get_mut(&wallet_key) else {
+            if tables.identities.contains_key(&registration.id) {
+                return Err(redefinition());
+            }
+            let row = WalletRow {
+                id: registration.id,
+                birthday: None,
+                label: registration.label,
+                secret,
+                archived_at: Some(wallet::now()),
+            };
+            tables
+                .identities
+                .insert(row.id.clone(), wallet_key.0.clone());
+            tables.wallets.insert(wallet_key.clone(), row.clone());
+            return Ok((wallet_key, row));
+        };
+        if row.archived_at.is_none() && row.id != registration.id {
+            return Err(redefinition());
+        }
+        match (&row.secret, secret) {
+            (Some(held), Some(given)) if held.as_bytes() != given.as_bytes() => {
+                return Err(wallet::another_key());
+            }
+            (None, given) => row.secret = given,
+            _ => {}
+        }
+        if registration.label.is_some() {
+            row.label = registration.label;
+        }
+        Ok((wallet_key, row.clone()))
+    }
+
+    /// The public wallet one row is, with its own copy of the key.
+    fn wallet_of(
+        (network, asset, address): &WalletKey,
+        row: &WalletRow,
+    ) -> Result<Wallet, IndexError> {
+        let registration = Registration {
+            id: row.id.clone(),
+            address: Address::new(network.clone(), address.clone()),
+            asset: asset.clone(),
+            label: row.label.clone(),
+            secret: row
+                .secret
+                .as_deref()
+                .map(|secret| SecretBytes::new(secret.as_bytes())),
+        };
+        Wallet::new(registration, row.birthday, row.archived_at)
     }
 }

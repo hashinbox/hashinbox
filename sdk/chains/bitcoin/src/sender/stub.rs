@@ -7,16 +7,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use base::{BlockHash, BlockHeight, BlockPosition, BlockRef, BoxFuture, Decimal, SecretBytes};
-use indexing::TransactionPage;
-use indexing::{
-    AssetId, IndexError, IndexedOutput, OutputId, OutputPage, OutputRequest, OutputStore,
-};
+use base::{BlockHash, BlockHeight, BlockPosition, BlockRef, BoxFuture, SecretBytes};
+use indexing::IndexError;
+use wallets::{FutureResult, WalletError, WalletErrorKind};
 
-use super::{Outbox, SendRequest, UtxoReader};
+use super::{Outbox, SendRequest, UtxoSource};
 use crate::native::{
-    Address, AddressType, CHAIN_NAME, Error, KeyPair, Network, Satoshi, SignedTransaction,
-    TransactionId,
+    Address, AddressType, Error, KeyPair, Network, Satoshi, SignedTransaction, TransactionId,
+    block::{Outpoint, Output, Utxo},
     rpc::Submitter,
     transaction::{Acceptance, FeeRate, Preflight, Transfer},
 };
@@ -90,9 +88,8 @@ impl Node {
 
     /// An outbox on regtest whose every dependency is this node.
     pub(crate) fn outbox(self: &Arc<Self>) -> Outbox {
-        let utxos = Arc::new(UtxoReader::new(Network::Regtest, self.clone()));
         let config = WalletConfig::new(&Network::Regtest);
-        Outbox::new(&config, self.clone(), self.clone(), utxos)
+        Outbox::new(&config, self.clone(), self.clone(), self.clone())
     }
 
     /// The P2WPKH regtest address of [`Node::key`]`(byte)`.
@@ -172,57 +169,50 @@ impl Submitter for Node {
     }
 }
 
-impl OutputStore for Node {
-    /// One page at [`Node::checkpoint`]: output `i` of address `a` is
-    /// `(txid [i + 1; 32], index 0)` holding the listed satoshis.
-    fn list<'a>(&'a self, request: OutputRequest) -> BoxFuture<'a, Result<OutputPage, IndexError>> {
-        self.record(request.address.value.clone());
-        let spent = self.spent.lock().unwrap().clone();
-        let page = self.outputs.clone().map(|outputs| OutputPage {
-            checkpoint: Some(Self::checkpoint()),
-            outputs: outputs
-                .into_iter()
+impl UtxoSource for Node {
+    /// Output `i` of address `a` is `(txid [i + 1; 32], index 0)` holding the
+    /// listed satoshis; each address read is recorded, stopping at the first
+    /// failure.
+    fn utxos<'a>(&'a self, addresses: &'a [Address]) -> FutureResult<'a, Vec<Utxo>> {
+        let mut utxos = Vec::new();
+        for owner in addresses {
+            self.record(owner.as_str());
+            let outputs = match &self.outputs {
+                Ok(outputs) => outputs,
+                Err(error) => {
+                    let failure = WalletError::new(WalletErrorKind::Unavailable, &error.message);
+                    return Box::pin(async move { Err(failure) });
+                }
+            };
+            let spent = self.spent.lock().unwrap().clone();
+            let owned = outputs
+                .iter()
                 .zip(1_u8..)
-                .filter(|((address, _), id)| {
-                    address.as_str() == request.address.value && !spent.contains(id)
-                })
-                .map(|((address, value), id)| IndexedOutput {
-                    id: OutputId {
-                        transaction: TransactionId([id; 32]).canonical(&request.network),
-                        index: 0,
-                    },
-                    address: request.address.clone(),
-                    asset: AssetId::native(CHAIN_NAME),
-                    amount: Decimal::from(value),
-                    evidence: address
-                        .script_pubkey(Network::Regtest)
-                        .unwrap()
-                        .into_bytes(),
-                    created_at: BlockHeight(1),
-                    coinbase: false,
-                })
-                .collect(),
-            next: None,
-        });
-        Box::pin(async { page })
+                .filter(|((address, _), id)| address == owner && !spent.contains(id));
+            utxos.extend(owned.map(|((address, value), id)| Self::utxo(address, *value, id)));
+        }
+        Box::pin(async move { Ok(utxos) })
     }
 }
 
-impl indexing::History for Node {
-    fn history<'a>(
-        &'a self,
-        _of: &'a dyn indexing::Holder,
-        _page: indexing::Page,
-    ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
-        Box::pin(async {
-            Ok(TransactionPage {
-                checkpoint: None,
-                transactions: Vec::new(),
-                pending: Vec::new(),
-                next: None,
-                completeness: indexing::Completeness::Incomplete,
-            })
-        })
+impl Node {
+    /// Output number `id` of `address`, holding `value` satoshis.
+    fn utxo(address: &Address, value: u64, id: u8) -> Utxo {
+        let script_pubkey = address
+            .script_pubkey(Network::Regtest)
+            .unwrap()
+            .into_bytes();
+        Utxo {
+            outpoint: Outpoint {
+                transaction_id: TransactionId([id; 32]),
+                output_index: 0,
+            },
+            output: Output {
+                value: Satoshi::from_atomic(value),
+                script_pubkey,
+                address: Some(address.clone()),
+            },
+        }
     }
 }
 

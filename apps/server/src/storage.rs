@@ -201,7 +201,7 @@ mod tests {
                 .expect("seeded");
             let repository = store.repository();
             repository.add(vec![watch.clone()]).await.expect("watched");
-            repository.purge_network(&network).await.expect("purged");
+            repository.purge(&network).await.expect("purged");
         }
 
         let store = config.open().await.expect("reopened");

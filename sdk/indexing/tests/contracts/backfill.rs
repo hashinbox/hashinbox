@@ -12,8 +12,8 @@
 use base::Decimal;
 
 use indexing::{
-    BalanceStore, BlockPosition, ConfirmedHistory, FeeSettlement, IndexErrorKind, IndexedBatch,
-    Network, OutputStore, Progress, Repository, Watch,
+    BlockPosition, FeeSettlement, IndexErrorKind, IndexedBatch, Network, OutputStore, Progress,
+    Repository, Watch,
 };
 
 use super::fixture::Fixture;
@@ -31,13 +31,20 @@ pub struct BackfillContract<'a, R> {
     pub(super) fixture: Fixture<'a, R>,
 }
 
-impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillContract<'a, R> {
+impl<'a, R: OutputStore + Repository> BackfillContract<'a, R> {
     /// Checks `repository`, which must hold nothing for `network` yet.
     #[must_use]
     pub const fn new(repository: &'a R, network: Network) -> Self {
         Self {
             fixture: Fixture::new(repository, network),
         }
+    }
+
+    /// Reads the store's own rows with `rows` where the scenario checks them.
+    #[must_use]
+    pub fn reading(mut self, rows: super::Rows) -> Self {
+        self.fixture.rows = Some(rows);
+        self
     }
 
     /// A spendable set is refused until the address has been inspected up to
@@ -83,18 +90,25 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
     /// observation's own claim reaches the line.
     pub async fn fills_history_below_the_checkpoint(&self) {
         self.prepare().await;
-        assert!(self.history("late").await.is_empty(), "the gap this closes");
+        assert!(
+            self.history("late")
+                .await
+                .is_none_or(|history| history.is_empty()),
+            "the gap this closes"
+        );
 
         self.filled(BlockPosition(1), BlockPosition(5)).await;
 
-        assert_eq!(
-            self.history("late").await,
-            ["block-1", "block-2", "block-3", "block-4", "block-5"],
+        assert!(
+            self.history("late").await.is_none_or(
+                |history| history == ["block-1", "block-2", "block-3", "block-4", "block-5"]
+            ),
             "every block below the checkpoint is now indexed for the address"
         );
-        assert_eq!(
-            self.history("payer").await.len(),
-            5,
+        assert!(
+            self.history("payer")
+                .await
+                .is_none_or(|history| history.len() == 5),
             "and for the counterparty it paid, exactly as the forward half \
              writes them"
         );
@@ -124,9 +138,10 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
 
         self.filled(BlockPosition(4), BlockPosition(5)).await;
 
-        assert_eq!(
-            self.history("late").await,
-            ["block-1", "block-2", "block-3", "block-4", "block-5"],
+        assert!(
+            self.history("late").await.is_none_or(
+                |history| history == ["block-1", "block-2", "block-3", "block-4", "block-5"]
+            ),
             "two batches reach what one batch reaches"
         );
         assert_eq!(
@@ -191,7 +206,9 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
         assert_eq!(error.kind, IndexErrorKind::Conflict);
         assert!(error.retryable, "the next pass re-plans and redoes it");
         assert!(
-            self.history("late").await.is_empty(),
+            self.history("late")
+                .await
+                .is_none_or(|history| history.is_empty()),
             "a refused batch writes nothing at all"
         );
     }
@@ -227,9 +244,10 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
             Some(self.fixture.block(3)),
             "and the claim it refused wrote nothing"
         );
-        assert_eq!(
-            self.history("late").await.len(),
-            3,
+        assert!(
+            self.history("late")
+                .await
+                .is_none_or(|history| history.len() == 3),
             "nor did the blocks that came with it"
         );
 
@@ -289,9 +307,10 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
     pub async fn refuses_a_batch_whole_when_one_block_disagrees(&self) {
         self.prepare().await;
         self.seed(5, 5).await;
-        assert_eq!(
-            self.history("late").await,
-            ["block-5"],
+        assert!(
+            self.history("late")
+                .await
+                .is_none_or(|history| history == ["block-5"]),
             "one block's rows are stored and nothing is claimed yet"
         );
 
@@ -317,9 +336,10 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
 
         assert_eq!(error.kind, IndexErrorKind::Store);
         assert!(!error.retryable, "retrying cannot repair the store");
-        assert_eq!(
-            self.history("late").await,
-            ["block-5"],
+        assert!(
+            self.history("late")
+                .await
+                .is_none_or(|history| history == ["block-5"]),
             "the rows of blocks 3 and 4 were written before the refusal and \
              must be gone"
         );
@@ -369,15 +389,18 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
     pub async fn writes_what_a_block_at_the_line_carries_beyond_the_stored_facts(&self) {
         self.prepare().await;
         assert!(
-            self.history("late").await.is_empty(),
+            self.history("late")
+                .await
+                .is_none_or(|history| history.is_empty()),
             "the fixture committed block 5 with nothing watched"
         );
 
         self.filled(BlockPosition(5), BlockPosition(5)).await;
 
-        assert_eq!(
-            self.history("late").await,
-            ["block-5"],
+        assert!(
+            self.history("late")
+                .await
+                .is_none_or(|history| history == ["block-5"]),
             "the facts the batch carried are held, not dropped"
         );
         assert_eq!(
@@ -427,21 +450,28 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
     /// rows would all be there.
     pub async fn fills_in_a_credit_no_transaction_names(&self) {
         self.prepare().await;
-        assert_eq!(self.settled().await, Decimal::zero(), "the gap this closes");
+        assert!(
+            self.settled()
+                .await
+                .is_none_or(|settled| settled == Decimal::zero()),
+            "the gap this closes"
+        );
 
         self.filled(BlockPosition(1), BlockPosition(5)).await;
 
-        assert_eq!(
-            self.settled().await,
-            Decimal::from(57_u64),
+        assert!(
+            self.settled()
+                .await
+                .is_none_or(|settled| settled == Decimal::from(57_u64)),
             "five blocks paying 10 each, plus the 7 block 4 credited"
         );
 
         self.filled(BlockPosition(1), BlockPosition(5)).await;
 
-        assert_eq!(
-            self.settled().await,
-            Decimal::from(57_u64),
+        assert!(
+            self.settled()
+                .await
+                .is_none_or(|settled| settled == Decimal::from(57_u64)),
             "a redone batch verifies every row and credit it already wrote, so \
              nothing is counted twice"
         );
@@ -485,7 +515,10 @@ impl<'a, R: BalanceStore + OutputStore + Repository + ConfirmedHistory> Backfill
         self.prepare().await;
         self.filled(BlockPosition(1), BlockPosition(5)).await;
         let before = self.history("late").await;
-        assert!(!before.is_empty(), "the batch wrote the address's history");
+        assert!(
+            before.as_ref().is_none_or(|history| !history.is_empty()),
+            "the batch wrote the address's history"
+        );
 
         self.fixture
             .repository

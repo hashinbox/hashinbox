@@ -1,5 +1,5 @@
-//! One model per table of `schema.sql`, one for its `history_entry` view, and
-//! the column rules and statement mechanics they share.
+//! One model per table of `schema.sql` (the `history_entry` view is read by
+//! `apps/server`), and the column rules and statement mechanics they share.
 //!
 //! A model owns every statement that reads or writes its table: each is an
 //! associated function whose first parameter is the connection or transaction
@@ -22,7 +22,6 @@
 
 mod block;
 mod checkpoint;
-mod history_entry;
 mod ledger;
 mod output;
 mod transaction;
@@ -39,7 +38,6 @@ use sqlx::{
 
 pub(super) use block::Block;
 pub(super) use checkpoint::NetworkCheckpoint;
-pub(super) use history_entry::HistoryEntry;
 pub(super) use ledger::{Deltas, Ledger};
 pub(super) use output::Output;
 pub(super) use transaction::Transaction;
@@ -264,10 +262,10 @@ mod chunks_test {
         database_test::{network, open},
     };
     use crate::{
-        Address, AssetId, BalanceQuery, BalanceStore, BlockHash, BlockHeight, BlockParent,
-        BlockPosition, BlockRef, BlockWithOutputs, FeeSettlement, IndexErrorKind, IndexStore,
-        IndexedBatch, IndexedOutput, MovementId, OutputChanges, OutputId, OutputKey, Status,
-        Transaction, TransactionRef, ValueMovement, Watch, WatchStore,
+        Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef,
+        BlockWithOutputs, FeeSettlement, IndexErrorKind, IndexStore, IndexedBatch, IndexedOutput,
+        MovementId, OutputChanges, OutputId, OutputKey, Status, Transaction, TransactionRef,
+        ValueMovement, Watch, WatchStore,
     };
 
     /// Rows of each kind one block carries: 64 + 32 + 4, so a block is written
@@ -360,12 +358,12 @@ mod chunks_test {
         for table in ["\"transaction\"", "transaction_address", "ledger", "output"] {
             counts.push(rows(repository, &format!("SELECT count(*) FROM {table}")).await);
         }
-        let query = BalanceQuery {
-            address: address("payee"),
-            asset: AssetId::native(network().chain),
-        };
-        let total = repository.balance(query).await.expect("balance").amount;
-        (counts, total)
+        let total: String =
+            sqlx::query_scalar("SELECT balance FROM wallet WHERE address = 'payee'")
+                .fetch_one(repository.database.pool())
+                .await
+                .expect("the watched total");
+        (counts, total.parse().expect("an atomic total"))
     }
 
     #[tokio::test]

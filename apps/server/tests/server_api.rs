@@ -275,7 +275,7 @@ async fn every_framework_rejection_answers_json_over_the_wire()
 /// through the API may move it.
 ///
 /// Admitting an address takes its network's watch/commit handshake
-/// (`indexing::CommitGate`), which refuses whichever supervised pass was
+/// (`indexing::Gate`), which refuses whichever supervised pass was
 /// mid-plan with a retryable `Conflict`. That is internal and self-healing —
 /// no block, node, store or checkpoint changed, and the next pass reconciles —
 /// so `/health` has to stay 200 across every admission. It did not: the

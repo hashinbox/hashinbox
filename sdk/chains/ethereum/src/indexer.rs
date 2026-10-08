@@ -1,6 +1,6 @@
 //! The Ethereum indexer: [`indexer`] over [`IndexerParams`].
 
-use indexing::{IndexError, Indexer, SyncConfig, SyncPolicy};
+use indexing::{Budget, Config, IndexError, Indexer};
 
 use crate::{BlockInterpreter, RpcClient, Source};
 
@@ -13,7 +13,7 @@ pub struct IndexerParams<C, R> {
     /// serves every network, so the same value is handed to every chain.
     pub repository: R,
     /// Defaults to [`IndexerParams::SYNC`].
-    pub sync: SyncPolicy,
+    pub sync: Budget,
 }
 
 impl<C, R> IndexerParams<C, R> {
@@ -21,7 +21,7 @@ impl<C, R> IndexerParams<C, R> {
     ///
     /// Ethereum carries no confirmation number at all: the node states where
     /// its own `finalized` block is, and the indexer commits there.
-    pub const SYNC: SyncPolicy = SyncPolicy::new(100);
+    pub const SYNC: Budget = Budget::new(100);
 
     /// Chain-default synchronization.
     #[must_use]
@@ -40,8 +40,8 @@ impl<C, R> IndexerParams<C, R> {
 /// `indexing::Indexer` itself, over this chain's block source and interpreter,
 /// rather than a newtype that forwarded every capability to one: it implements
 /// `indexing::{Indexing, Checkpoint, Pending}` already. It answers no query:
-/// a history page is its store's, joined to the blocks this index holds above
-/// the line by `indexing::PendingJoin`. Store it as
+/// reading history is the application's, completed by the blocks this index
+/// holds above the line (`indexing::Pending`). Store it as
 /// `Arc<dyn indexing::Indexing>` or combine several in an `indexing::Index`.
 ///
 /// A function rather than an inherent constructor, because this crate does
@@ -50,7 +50,7 @@ impl<C, R> IndexerParams<C, R> {
 ///
 /// # Errors
 ///
-/// `InvalidRequest` for an invalid [`SyncPolicy`].
+/// `InvalidRequest` for an invalid [`Budget`].
 pub fn indexer<C, R>(
     params: IndexerParams<C, R>,
 ) -> Result<Indexer<Source<C>, BlockInterpreter, R>, IndexError> {
@@ -59,7 +59,7 @@ pub fn indexer<C, R>(
         Source::new(params.rpc),
         BlockInterpreter::new(&network)?,
         params.repository,
-        SyncConfig::new(&network, params.sync)?,
+        Config::new(&network, params.sync)?,
     ))
 }
 
@@ -83,7 +83,7 @@ mod tests {
     fn construction_rejects_a_zero_batch_without_rpc() {
         let script = Script::node(Vec::new());
         let error = indexer(IndexerParams {
-            sync: SyncPolicy::new(0),
+            sync: Budget::new(0),
             ..IndexerParams::new(script.client(), ())
         })
         .err()

@@ -56,14 +56,14 @@ enum ServiceState {
     Quarantined,
 }
 
-impl From<indexing::NetworkState> for ServiceState {
-    fn from(value: indexing::NetworkState) -> Self {
+impl From<indexing::Condition> for ServiceState {
+    fn from(value: indexing::Condition) -> Self {
         match value {
-            indexing::NetworkState::Paused => Self::Paused,
-            indexing::NetworkState::CatchingUp => Self::CatchingUp,
-            indexing::NetworkState::Ready => Self::Ready,
-            indexing::NetworkState::Retrying => Self::Retrying,
-            indexing::NetworkState::Quarantined => Self::Quarantined,
+            indexing::Condition::Paused => Self::Paused,
+            indexing::Condition::CatchingUp => Self::CatchingUp,
+            indexing::Condition::Ready => Self::Ready,
+            indexing::Condition::Retrying => Self::Retrying,
+            indexing::Condition::Quarantined => Self::Quarantined,
         }
     }
 }
@@ -353,7 +353,7 @@ async fn rescan(
         .units()
         .iter()
         .find(|unit| *unit.network() == network)
-        .map(indexing::SyncUnit::indexer)
+        .map(indexing::Route::indexer)
         .ok_or_else(Error::not_in_service)?;
     let (wallets, control) = (state.wallets.clone(), state.control.clone());
     let purging = state.purging.clone();
@@ -488,7 +488,7 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
 
-    use crate::api::harness::App;
+    use crate::app::App;
 
     const BITCOIN: &str = "/v1/networks/bitcoin/regtest";
 

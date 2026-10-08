@@ -5,9 +5,9 @@
 //! opened repository — so what each one hands back is one type, declared here
 //! once rather than three times: [`ComposedChain`]. [`Connection`] erases the
 //! chain that produced it, and [`Composition`] folds any number of them into
-//! what a process holds: one index, one handle per query an edge reads — a
-//! history page and a balance — one factory map, one unit per configured asset,
-//! one cadence per network.
+//! what a process holds: one index, each network's pending blocks, one factory
+//! map, one unit per configured asset, one cadence per network. Reading
+//! balances and history is the application's own business.
 //!
 //! The two phases never merge. **Every identity check finishes before any
 //! storage is opened**, so a deployment that names the wrong node fails
@@ -19,7 +19,7 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use base::{BoxFuture, Units};
-use indexing::{Balances, History, Index, Indexing, Router, Schedule, Schedules};
+use indexing::{Indexers, Indexing, Network, Pending, Schedule, Schedules};
 use wallets::{SubmissionRegistrar, WalletError, WalletErrorKind, WalletFactory, Wallets};
 
 use crate::Error;
@@ -35,27 +35,9 @@ pub struct ComposedChain<A> {
     /// network's indexer, which is what [`Indexing`] is: [`Composition`] is the
     /// only value here that holds more than one.
     pub index: Arc<dyn Indexing>,
-    /// This network's history reader: the repository's own confirmed pages
-    /// joined to the blocks `index` still holds above its confirmed line
-    /// ([`indexing::PendingJoin`]).
-    ///
-    /// A field rather than a capability of `index`, because it is neither
-    /// half's alone: the page is the repository's query and the pending blocks
-    /// are the index's, and a chain is the place that holds both, so it is the
-    /// place that pairs them. [`Composition`] collects them into the one handle
-    /// a consumer serving several networks holds.
-    pub history: Arc<dyn History>,
-    /// This network's balance fold: the repository's own total for a holding,
-    /// completed by the blocks `index` still holds above its confirmed line
-    /// ([`indexing::PendingJoin`]).
-    ///
-    /// Stated beside `history` and for the same reason. A balance is a query
-    /// over stored rows, and this chain is the one place that holds both the
-    /// rows' owner and the index whose pending blocks finish them, so it is the
-    /// one place that can name what answers it. [`Composition`] collects them
-    /// into the one handle a consumer serving several networks holds — a
-    /// consumer never reaches a query through an index.
-    pub balance: Arc<dyn Balances>,
+    /// The blocks `index` holds above its confirmed line, for an application
+    /// that completes its own stored reads with them.
+    pub pending: Arc<dyn Pending>,
     /// The asset tags and factories of this chain, all in one network.
     pub factories: Vec<(A, Box<dyn WalletFactory>)>,
     /// The unit of every asset this chain declares — its own currency, and
@@ -89,7 +71,7 @@ pub trait Connection<A, R>: Send {
 }
 
 /// Everything a process runs on, built once: every chain's index behind one
-/// [`Index`], every query an edge reads behind one handle of its own, every
+/// [`Indexers`], every query an edge reads behind one handle of its own, every
 /// factory under its asset tag, every declared asset's unit under its identity,
 /// and each network's polling cadence for `indexing::Supervisor`.
 ///
@@ -99,21 +81,9 @@ pub trait Connection<A, R>: Send {
 /// the index.
 pub struct Composition<A: Ord> {
     /// Every configured chain's index, as one.
-    pub index: Arc<Index>,
-    /// Every configured network's history reader, as one: the narrow capability
-    /// a history consumer declares, answered by the reader that owns the
-    /// holding's network.
-    ///
-    /// Router here rather than by `indexing::Index`, because a page is a
-    /// repository's own query and not something to reach through an indexer.
-    pub history: Arc<dyn History>,
-    /// Every configured network's balance fold, as one: the same narrow
-    /// capability, answered by the fold that owns the holding's network.
-    ///
-    /// Router here for the same reason a page is: a balance is a query over a
-    /// repository's rows, and a consumer asks the owner of the network directly
-    /// rather than through the composed index it happens to be driven by.
-    pub balance: Arc<dyn Balances>,
+    pub index: Arc<Indexers>,
+    /// Every configured network's pending blocks, in composition order.
+    pub pending: Vec<(Network, Arc<dyn Pending>)>,
     /// Every configured chain's wallet factories, keyed by asset tag.
     pub wallets: Wallets<A>,
     /// Every configured asset's unit, by identity: what an edge reporting an
@@ -128,7 +98,7 @@ where
     A: Clone + Ord + Send + Sync + 'static,
 {
     /// Cadence of a network no composed chain claimed. Every chain states its
-    /// own, so it stands only for a `Index` extended by other means.
+    /// own, so it stands only for a `Indexers` extended by other means.
     const POLL: Duration = Duration::from_secs(1);
 
     /// Composes every verified chain over the repository `repository` gives
@@ -155,16 +125,14 @@ where
         E: From<WalletError> + From<Error>,
     {
         let mut indexes = Vec::with_capacity(chains.len());
-        let mut readers = Vec::with_capacity(chains.len());
-        let mut folds = Vec::with_capacity(chains.len());
+        let mut pending = Vec::with_capacity(chains.len());
         let mut schedules = Schedules::every(Self::POLL);
         let mut wallets = Wallets::new();
         let mut units = Units::default();
         for chain in chains {
             let ComposedChain {
                 index,
-                history,
-                balance,
+                pending: held,
                 factories,
                 poll,
                 units: declared,
@@ -175,16 +143,14 @@ where
             schedules = schedules.with(index.network(), Schedule::every(poll));
             Self::register::<E>(&mut wallets, factories, &declared)?;
             units.extend(declared);
-            readers.push((index.network().clone(), history));
-            folds.push((index.network().clone(), balance));
+            pending.push((index.network().clone(), held));
             indexes.push(index);
         }
         let failed = |error| E::from(Error::from(error));
-        let index = Index::of(indexes).map_err(failed)?;
+        let index = Indexers::of(indexes).map_err(failed)?;
         Ok(Self {
             index: Arc::new(index),
-            history: Arc::new(Router::new(readers).map_err(failed)?),
-            balance: Arc::new(Router::new(folds).map_err(failed)?),
+            pending,
             wallets,
             units,
             schedules,
@@ -257,8 +223,8 @@ mod tests {
 
     use base::{AssetId, ChainName, Unit};
     use indexing::{
-        Balance, Birthday, BlockRef, Checkpoint, Holder, IndexError, IndexErrorKind, Indexing,
-        Listener, Network, Page, Subject, SyncStatus, TransactionPage, Watch, Watching, memory,
+        Birthday, BlockRef, Checkpoint, Holder, IndexError, Indexing, Listener, Network, Outcome,
+        Sample, Watch, Watching, memory,
     };
 
     use super::*;
@@ -271,11 +237,6 @@ mod tests {
     /// An index of one network that indexes nothing: composition reads its
     /// network and holds it, and nothing here drives it.
     ///
-    /// **It folds no balance**, and that is now expressible: while
-    /// `ComposedChain::index` was a wider indexer trait carrying `Balances`,
-    /// this fixture had to implement one it never answered — a courier, and the
-    /// only proof that nothing read it was an `unreachable!`. A balance reaches
-    /// [`FixtureFold`] and the type system says so.
     struct FixtureIndex(Network);
 
     impl Indexing for FixtureIndex {
@@ -285,7 +246,7 @@ mod tests {
 
         fn listen(&self, _listener: Arc<dyn Listener>) {}
 
-        fn sync<'a>(&'a self) -> BoxFuture<'a, Result<SyncStatus, IndexError>> {
+        fn sync<'a>(&'a self) -> BoxFuture<'a, Result<Outcome, IndexError>> {
             Box::pin(async { unreachable!("a fixture index never advances") })
         }
     }
@@ -299,54 +260,9 @@ mod tests {
         }
     }
 
-    /// One network's history reader, answering a page that names which network
-    /// it came from: what `Histories` routes to, without a repository or a
-    /// pending block in sight.
-    struct FixtureHistory(Network);
-
-    impl History for FixtureHistory {
-        fn history<'a>(
-            &'a self,
-            of: &'a dyn Holder,
-            _page: Page,
-        ) -> BoxFuture<'a, Result<TransactionPage, IndexError>> {
-            assert_eq!(
-                of.address().network,
-                self.0,
-                "a reader is only ever asked about its own network"
-            );
-            Box::pin(async {
-                Ok(TransactionPage {
-                    checkpoint: None,
-                    transactions: Vec::new(),
-                    pending: Vec::new(),
-                    next: None,
-                    completeness: indexing::Completeness::Incomplete,
-                })
-            })
-        }
-    }
-
-    /// One network's balance fold, answering only about its own network: what
-    /// `Folds` routes to, and a separate value from the index so a read that
-    /// went through the indexer instead would panic.
-    struct FixtureFold(Network);
-
-    impl Balances for FixtureFold {
-        fn balance<'a>(&'a self, of: &'a dyn Holder) -> BoxFuture<'a, Result<Balance, IndexError>> {
-            assert_eq!(
-                of.address().network,
-                self.0,
-                "a fold is only ever asked about its own network"
-            );
-            Box::pin(async {
-                Ok(Balance {
-                    amount: indexing::Decimal::zero(),
-                    observed_at: None,
-                    pending: indexing::PendingValue::none(),
-                    completeness: indexing::Completeness::Incomplete,
-                })
-            })
+    impl Pending for FixtureIndex {
+        fn sampled(&self) -> Result<Sample, IndexError> {
+            Ok(Sample::new(Vec::new(), 0))
         }
     }
 
@@ -369,15 +285,6 @@ mod tests {
             _network: &'a Network,
         ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
             Box::pin(async { Ok(Vec::new()) })
-        }
-    }
-
-    impl indexing::Backfilling for FixtureIndex {
-        fn cancel_backfill<'a>(
-            &'a self,
-            _network: &'a Network,
-        ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
-            unreachable!("a fixture index watches nothing")
         }
     }
 
@@ -444,8 +351,7 @@ mod tests {
                 };
                 Ok(ComposedChain {
                     index: Arc::new(FixtureIndex(network(self.chain))),
-                    history: Arc::new(FixtureHistory(network(self.chain))),
-                    balance: Arc::new(FixtureFold(network(self.chain))),
+                    pending: Arc::new(FixtureIndex(network(self.chain))),
                     factories: vec![(self.tag, Box::new(factory) as Box<dyn WalletFactory>)],
                     units,
                     poll: Self::POLL,
@@ -539,15 +445,9 @@ mod tests {
         }
     }
 
-    /// Every chain's own history reader behind one handle, asked by network.
-    ///
-    /// The capability a consumer declares is one `Arc<dyn History>`, and this is
-    /// what satisfies it: each chain built a reader over *its* repository and
-    /// *its* pending blocks, and the route is the holding's own network. Nothing here
-    /// reaches a page through an indexer — `Index` has no history to route — and
-    /// a network no chain claimed is the same refusal every other read gives.
+    /// Every chain's pending blocks, once per network, in composition order.
     #[tokio::test]
-    async fn one_history_reader_per_network_answers_the_one_that_owns_the_holding() {
+    async fn pending_blocks_are_held_once_per_network() {
         let stores = Stores::default();
 
         let composed = Composition::<&'static str>::build::<Handle, Error>(
@@ -558,72 +458,12 @@ mod tests {
         .await
         .expect("two disjoint chains");
 
-        for chain in ["alpha", "beta"] {
-            let of = Subject {
-                address: base::Address::new(network(chain), "owner"),
-                asset: AssetId::native(ChainName::new(chain)),
-            };
-            composed
-                .history
-                .history(&of, Page::first(10))
-                .await
-                .expect("the reader that owns this network answers");
-        }
-
-        let elsewhere = Subject {
-            address: base::Address::new(network("gamma"), "owner"),
-            asset: AssetId::native(ChainName::new("gamma")),
-        };
-        let refused = composed
-            .history
-            .history(&elsewhere, Page::first(10))
-            .await
-            .expect_err("no chain claimed this network");
-        assert_eq!(refused.kind, IndexErrorKind::NetworkMismatch);
-        assert!(!refused.retryable);
-    }
-
-    /// Every chain's own balance fold behind one handle, asked by network.
-    ///
-    /// The same shape a page takes, and for the same reason: a total is stored
-    /// rows completed by one network's pending blocks, so the consumer holds one fold
-    /// per network and asks the owner of the holding. `FixtureIndex::balance`
-    /// panics, which is what proves no read of this handle reached an indexer.
-    #[tokio::test]
-    async fn one_balance_fold_per_network_answers_the_one_that_owns_the_holding() {
-        let stores = Stores::default();
-
-        let composed = Composition::<&'static str>::build::<Handle, Error>(
-            vec![FixtureChain::of("alpha"), FixtureChain::of("beta")],
-            stores.handle(),
-            &registrar(),
-        )
-        .await
-        .expect("two disjoint chains");
-
-        for chain in ["alpha", "beta"] {
-            let of = Subject {
-                address: base::Address::new(network(chain), "owner"),
-                asset: AssetId::native(ChainName::new(chain)),
-            };
-            composed
-                .balance
-                .balance(&of)
-                .await
-                .expect("the fold that owns this network answers");
-        }
-
-        let elsewhere = Subject {
-            address: base::Address::new(network("gamma"), "owner"),
-            asset: AssetId::native(ChainName::new("gamma")),
-        };
-        let refused = composed
-            .balance
-            .balance(&elsewhere)
-            .await
-            .expect_err("no chain claimed this network");
-        assert_eq!(refused.kind, IndexErrorKind::NetworkMismatch);
-        assert!(!refused.retryable);
+        let networks = composed
+            .pending
+            .iter()
+            .map(|(network, _)| network.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(networks, [network("alpha"), network("beta")]);
     }
 
     /// The two ways two chains can contradict each other, and the one way a

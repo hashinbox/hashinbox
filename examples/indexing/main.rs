@@ -1,4 +1,4 @@
-//! Indexing: three chains behind one `indexing::Index`, one
+//! Indexing: three chains behind one `indexing::Indexers`, one
 //! `indexing::Supervisor` driving a task per chain, a `Listener` that is told
 //! what each commit changed, and what the index holds once every network has
 //! reached its tip. No funds move. Needs all three local nodes
@@ -7,7 +7,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use indexing::{
-    Birthday, BlockCommit, Checkpoint as _, Listener, Page, Supervisor, SyncReport, Watching as _,
+    Birthday, BlockCommit, Checkpoint as _, Listener, Report, Supervisor, Watching as _,
     sqlite::{Database, Repository},
 };
 use json_rpc::Client as _;
@@ -69,7 +69,6 @@ async fn main() -> Result<(), AnyError> {
     let registrar: Arc<dyn SubmissionRegistrar> = Arc::new(Submissions::new());
     let Composition {
         index,
-        history,
         wallets,
         schedules,
         ..
@@ -103,15 +102,16 @@ async fn main() -> Result<(), AnyError> {
     //    reads its own watch list on every pass, so a wallet watched while it
     //    runs is picked up without a restart.
     let (stop, stopped) = watch::channel(false);
-    let (monitor, mut readiness) = SyncReport::watching(index.networks());
+    let (monitor, mut readiness) = Report::watching(index.networks());
     let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
     let health = readiness.settled().await.ok_or("synchronization stopped")?;
     if let Some(error) = health.networks().iter().find_map(|row| row.failure.clone()) {
         return Err(error.into());
     }
 
-    // 7. What the composed index holds: one checkpoint per network, the
-    //    addresses it observes there, and each wallet's history.
+    // 7. What the composed index holds: one checkpoint per network and the
+    //    addresses it observes there. Reading each wallet's history is the
+    //    application's own SQL over the same file.
     for network in index.networks() {
         let checkpoint = index.checkpoint(network).await?;
         println!("{}/{}: {checkpoint:?}", network.chain, network.name);
@@ -120,8 +120,7 @@ async fn main() -> Result<(), AnyError> {
         }
     }
     for (id, wallet) in &signers {
-        let page = history.history(wallet.as_ref(), Page::first(10)).await?;
-        println!("{id}: {} transaction(s)", page.transactions.len());
+        println!("{id}: {}", wallet.address().value);
     }
 
     // 8. React, off the sync task.

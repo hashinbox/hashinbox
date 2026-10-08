@@ -11,9 +11,9 @@
 use crypto::SecretBytes;
 
 use indexing::{
-    Balance, BalanceQuery, BalanceStore, BlockHeight, BlockPosition, Completeness,
-    ConfirmedHistory, Decimal, FeeSettlement, IndexError, IndexErrorKind, IndexStore, IndexedBatch,
-    Network, Progress, Purging, Registration, Wallet, WalletRegistry, Watch, WatchProgress,
+    BlockHeight, BlockPosition, Decimal, FeeSettlement, IndexError, IndexErrorKind, IndexStore,
+    IndexedBatch, Network, Progress, Registration, Wallet, WalletRegistry, Watch,
+    WatchProgress,
 };
 
 use super::fixture::Fixture;
@@ -26,7 +26,7 @@ pub struct WalletContract<'a, R> {
 
 impl<'a, R> WalletContract<'a, R>
 where
-    R: WalletRegistry + IndexStore + BalanceStore + ConfirmedHistory + Purging,
+    R: WalletRegistry + IndexStore,
 {
     /// Checks `repository`, which must hold nothing for `network` yet.
     #[must_use]
@@ -34,6 +34,13 @@ where
         Self {
             fixture: Fixture::new(repository, network),
         }
+    }
+
+    /// Reads the store's own rows with `rows` where the scenario checks them.
+    #[must_use]
+    pub fn reading(mut self, rows: super::Rows) -> Self {
+        self.fixture.rows = Some(rows);
+        self
     }
 
     /// An unknown pair is filed archived and unobserved, with its label and
@@ -144,10 +151,6 @@ where
         self.observe("w", "a", 0).await;
         self.commit_payment("a", 1).await;
         self.record("w", 1).await;
-        assert_eq!(
-            self.balance("a").await.completeness,
-            Completeness::CompleteHistory
-        );
 
         self.forget("w", "a", 0).await;
         assert!(self.observed().await.is_empty());
@@ -156,15 +159,19 @@ where
         assert_eq!(archived.birthday(), Some(BlockPosition(0)));
         assert_eq!(archived.label(), Some("label"));
         assert_eq!(Self::key(&archived), Some(vec![4; 32]));
-        let balance = self.balance("a").await;
-        assert_eq!(
-            balance.amount,
-            Decimal::from(5_u64),
+        assert!(
+            self.balance("a")
+                .await
+                .is_none_or(|amount| amount == Decimal::from(5_u64)),
             "folded from the ledger"
         );
-        assert_eq!(balance.completeness, Completeness::Incomplete);
         let native = self.fixture.native();
-        assert_eq!(self.fixture.history("a", &native, 10).await, ["block-1"]);
+        assert!(
+            self.fixture
+                .history("a", &native, 10)
+                .await
+                .is_none_or(|history| history == ["block-1"])
+        );
 
         self.forget("w", "a", 0).await;
         let again = self.wallet("w").await.expect("kept");
@@ -191,20 +198,29 @@ where
         assert_eq!(error.kind, IndexErrorKind::Conflict);
 
         self.commit_payment("a", 2).await;
-        assert_eq!(self.balance("a").await.amount, Decimal::from(10_u64));
+        assert!(
+            self.balance("a")
+                .await
+                .is_none_or(|amount| amount == Decimal::from(10_u64))
+        );
         self.observe("w", "a", 0).await;
-        assert_eq!(
-            self.balance("a").await.amount,
-            Decimal::from(10_u64),
+        assert!(
+            self.balance("a")
+                .await
+                .is_none_or(|amount| amount == Decimal::from(10_u64)),
             "the total is seeded from every fact, archived time included",
         );
         self.commit_payment("a", 3).await;
-        assert_eq!(self.balance("a").await.amount, Decimal::from(15_u64));
+        assert!(
+            self.balance("a")
+                .await
+                .is_none_or(|amount| amount == Decimal::from(15_u64))
+        );
     }
 
-    /// An archived row is observed again by `add` under its own id, and by
-    /// `cancel_backfill`; another id cannot take its pair.
-    pub async fn reactivates_through_add_and_cancel_backfill(&self) {
+    /// An archived row is observed again by `add` under its own id; another id
+    /// cannot take its pair.
+    pub async fn reactivates_through_add(&self) {
         self.register("w", "a", Some("kept"), None).await;
         let error = self
             .fixture
@@ -218,17 +234,6 @@ where
         assert_eq!(
             self.observed().await,
             [WatchProgress::unread(self.watch("w", "a", 2))]
-        );
-        self.forget("w", "a", 2).await;
-        self.fixture
-            .repository
-            .cancel_backfill(vec![self.watch("w", "a", 1)])
-            .await
-            .expect("re-anchoring an archived row observes it");
-        assert_eq!(
-            self.observed().await,
-            [WatchProgress::unread(self.watch("w", "a", 1))],
-            "observed from the birthday the batch states",
         );
         let wallet = self.wallet("w").await.expect("kept");
         assert_eq!(wallet.archived_at(), None);
@@ -247,7 +252,7 @@ where
 
         self.fixture
             .repository
-            .purge_network(&self.fixture.network)
+            .purge(&self.fixture.network)
             .await
             .expect("purged");
 
@@ -267,7 +272,11 @@ where
             [WatchProgress::unread(self.watch("active", "a", 0))],
             "the claim went, the observation stayed",
         );
-        assert_eq!(self.balance("a").await.amount, Decimal::from(0_u64));
+        assert!(
+            self.balance("a")
+                .await
+                .is_none_or(|amount| amount == Decimal::from(0_u64))
+        );
     }
 
     /// A key comes back byte for byte, and no `Debug` of a wallet prints it.
@@ -400,15 +409,9 @@ where
         self.try_record(id, through).await.expect("a claim");
     }
 
-    async fn balance(&self, address: &str) -> Balance {
-        self.fixture
-            .repository
-            .balance(BalanceQuery {
-                address: self.fixture.address(address),
-                asset: self.fixture.native(),
-            })
-            .await
-            .expect("a balance")
+    /// `address`'s settled native total, when the store's rows can be read.
+    async fn balance(&self, address: &str) -> Option<Decimal> {
+        self.fixture.settled(address, &self.fixture.native()).await
     }
 
     /// The public facts of every wallet: id, label, birthday, whether archived.

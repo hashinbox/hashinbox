@@ -9,7 +9,7 @@ mod identity;
 mod indexer;
 mod interpreter;
 mod key;
-mod sender;
+pub mod sender;
 mod source;
 mod wallet;
 

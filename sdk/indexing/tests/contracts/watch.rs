@@ -2,13 +2,11 @@
 //! observe, and with the progress recorded against it.
 //!
 //! Stated entirely in operations and guarantees, so it outlives whichever engine
-//! answers it. A store passes when, and only when, it gives an index six things:
+//! answers it. A store passes when, and only when, it gives an index five things:
 //! an atomic batch write; recognition of an exact repeat that leaves recorded
 //! progress alone; refusal of a redefinition under a name that is taken; one
-//! snapshot pairing each observation with its own coverage; a withdrawal that
-//! archives the row, takes the claim and leaves the facts; and a re-anchor that
-//! moves a birthday and discards the claim earned under it without the row ever
-//! being absent.
+//! snapshot pairing each observation with its own coverage; and a withdrawal
+//! that archives the row, takes the claim and leaves the facts.
 
 use indexing::{
     Address, AssetId, BlockHash, BlockHeight, BlockPosition, BlockRef, BlockWithOutputs,
@@ -250,107 +248,6 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
         );
     }
 
-    /// A re-anchor raises one observation's birthday, discards the claim it
-    /// earned under the old one, and touches no other row.
-    ///
-    /// **The row never stops existing, which is the whole reason the port has
-    /// this operation.** The same end state is reachable by forgetting the
-    /// observation and adding it back, and that route passes through one in which
-    /// the address is watched by nothing — a state no caller asked for and a
-    /// crash can leave behind for good. Repeating the call is therefore also how
-    /// an uncertain one is settled, which the second half checks.
-    pub async fn reanchors_an_observation_and_discards_its_claim(&self) {
-        let native = self.watch("native-wallet", "native", "a", 1);
-        let token = self.watch("token-wallet", "0xtoken", "a", 1);
-        self.add(vec![native.clone(), token.clone()]).await;
-        let recorded = self.record(&[native.clone(), token.clone()]).await;
-        let raised = Watch {
-            start: BlockPosition(20),
-            ..native
-        };
-        let settled = [
-            WatchProgress::unread(raised.clone()),
-            WatchProgress {
-                watch: token,
-                indexed_through: Some(recorded),
-            },
-        ];
-
-        self.cancel_backfill(vec![raised.clone()]).await;
-        assert_eq!(
-            self.stored().await,
-            settled,
-            "the birthday moved, its own claim went, and the other observation \
-             of the same address kept the one it earned",
-        );
-
-        self.cancel_backfill(vec![raised]).await;
-        assert_eq!(
-            self.stored().await,
-            settled,
-            "and a repeat is the same store, which is how a caller that lost the \
-             answer to the first one gets a definite state",
-        );
-    }
-
-    /// A re-anchor states the whole observation, so a row the store has lost
-    /// comes back as the one the caller described.
-    ///
-    /// **This is what makes a cancellation retryable.** The caller that lost the
-    /// answer to a re-anchor cannot tell a store that applied it from one that
-    /// applied nothing, and there is a third case it cannot tell either: a store
-    /// whose row is gone. All three are settled by presenting the same batch
-    /// again, because the call says what must be true afterwards rather than what
-    /// to change.
-    pub async fn reanchors_an_observation_the_store_has_lost(&self) {
-        let watch = self.watch("wallet", "native", "a", 1);
-        let raised = Watch {
-            start: BlockPosition(20),
-            ..watch.clone()
-        };
-        self.add(vec![watch.clone()]).await;
-        drop(self.record(std::slice::from_ref(&watch)).await);
-        self.forget(&watch).await;
-
-        self.cancel_backfill(vec![raised.clone()]).await;
-
-        assert_eq!(
-            self.stored().await,
-            [WatchProgress::unread(raised)],
-            "the observation the batch describes, at its stated birthday, with \
-             nothing inspected for it",
-        );
-    }
-
-    /// A re-anchor does not take a name that is in use, and is refused whole.
-    ///
-    /// The `(address, asset)` pair is the row's other name, so re-anchoring one
-    /// observation onto the pair another holds would hand it the progress the
-    /// other earned — the same reason `add` refuses it. Which name the store
-    /// withdraws by is therefore not free: keyed by the pair it would take it
-    /// silently, and the two stores would answer differently.
-    pub async fn refuses_a_reanchor_onto_a_pair_another_identity_holds(&self) {
-        let mine = self.watch("mine", "native", "a", 1);
-        let theirs = self.watch("theirs", "native", "b", 1);
-        self.add(vec![mine.clone(), theirs.clone()]).await;
-
-        let error = self
-            .repository
-            .cancel_backfill(vec![Watch {
-                address: theirs.address.clone(),
-                ..mine.clone()
-            }])
-            .await
-            .expect_err("a re-anchor onto an address another observation holds");
-
-        assert_eq!(error.kind, IndexErrorKind::Conflict);
-        assert_eq!(
-            self.watches().await,
-            [mine, theirs],
-            "the refused batch retargeted nothing and withdrew nothing",
-        );
-    }
-
     /// One store holds every network, and a read of one never sees another's.
     pub async fn answers_only_its_own_network(&self) {
         let elsewhere = Network::new(
@@ -444,13 +341,6 @@ impl<'a, R: WatchStore + IndexStore> WatchContract<'a, R> {
             .add(watches)
             .await
             .expect("a batch of observations");
-    }
-
-    pub(super) async fn cancel_backfill(&self, watches: Vec<Watch>) {
-        self.repository
-            .cancel_backfill(watches)
-            .await
-            .expect("a batch of re-anchored observations");
     }
 
     pub(super) async fn forget(&self, watch: &Watch) {

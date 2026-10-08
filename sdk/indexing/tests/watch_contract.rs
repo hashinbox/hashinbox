@@ -9,14 +9,43 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures_executor::block_on;
 use indexing::{
     Address, AssetId, Birthday, BlockCommit, BlockHeight, BlockParent, BlockPosition, BlockRef,
-    ChainName, ConfirmedHistory, Decimal, Holder, IndexErrorKind, IndexedOutput, Indexer, Indexing,
-    Listener, MovementId, Network, OutputChanges, OutputId, OutputKey, Status, Subject, SyncConfig,
-    SyncPolicy, Transaction, TransactionRef, ValueMovement, Watching, memory,
+    Budget, ChainName, Config, Decimal, Holder, IndexErrorKind, IndexedOutput, Indexer, Indexing,
+    Listener, MovementId, Network, OutputChanges, OutputId, OutputKey, Repository, Status, Subject,
+    Transaction, TransactionRef, ValueMovement, Watching, memory, sqlite,
     testing::{Chain, Fault, Request, block},
 };
+
+mod rows;
+
+use rows::Rows;
+use tempfile::TempDir;
+
+/// The SQLite store runs on `sqlx`, which needs a Tokio runtime with its
+/// timer rather than a bare executor.
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("test runtime")
+        })
+        .block_on(future)
+}
+
+/// A fresh store on a temporary file, a reader of its rows, and the directory
+/// that holds it: for the scenarios that read back what a pass stored.
+fn store() -> (sqlite::Repository, Rows, TempDir) {
+    let directory = TempDir::new().expect("temporary directory");
+    let database = block_on(sqlite::Database::open(directory.path().join("index.db")))
+        .expect("temporary sqlite database");
+    let rows = Rows::new(database.pool().clone());
+    (sqlite::Repository::new(database), rows, directory)
+}
 
 fn network() -> Network {
     Network::new(ChainName::new("watched"), "testnet")
@@ -117,32 +146,22 @@ fn chain(tip: u64) -> Chain {
     chain
 }
 
-fn service(
-    memory: &memory::Repository,
-    tip: u64,
-) -> Arc<Indexer<Chain, Chain, memory::Repository>> {
+fn service<R: Repository + Clone>(memory: &R, tip: u64) -> Arc<Indexer<Chain, Chain, R>> {
     let chain = chain(tip);
     Arc::new(Indexer::new(
         chain.clone(),
         chain,
         memory.clone(),
-        SyncConfig::new(&network(), SyncPolicy::new(100)).expect("sync config"),
+        Config::new(&network(), Budget::new(100)).expect("sync config"),
     ))
 }
 
-/// What the index wrote: the repository's own confirmed page of `owner`, which
-/// is where a pass's commits are read back. No query goes through the index.
-fn indexed(repository: &memory::Repository, owner: &Address) -> Vec<TransactionRef> {
-    let subject = indexing::Subject {
-        address: owner.clone(),
-        asset: asset(),
-    };
-    let query = indexing::HistoryQuery::new(&subject, indexing::Page::first(50));
-    block_on(repository.history(query))
-        .expect("history")
-        .transactions
+/// What the index wrote: the stored history of `owner`, which is where a
+/// pass's commits are read back. No query goes through the index.
+fn indexed(rows: &Rows, owner: &Address) -> Vec<TransactionRef> {
+    block_on(rows.history(owner, &asset(), 50))
         .into_iter()
-        .map(|entry| entry.id)
+        .map(|id| TransactionRef::new(network(), id))
         .collect()
 }
 
@@ -150,7 +169,7 @@ fn indexed(repository: &memory::Repository, owner: &Address) -> Vec<TransactionR
 /// restart on the same store resumes with both — from the registry alone.
 #[test]
 fn a_watched_wallet_and_a_watched_address_are_indexed_and_survive_a_restart() {
-    let memory = memory::Repository::new();
+    let (memory, rows, _directory) = store();
     let wallet = subject("wallet");
     let observed = subject("observed");
     let index = service(&memory, 3);
@@ -162,7 +181,7 @@ fn a_watched_wallet_and_a_watched_address_are_indexed_and_survive_a_restart() {
 
     for subject in [&wallet, &observed] {
         assert!(
-            !indexed(&memory, subject.address()).is_empty(),
+            !indexed(&rows, subject.address()).is_empty(),
             "{} must be indexed",
             subject.address().value
         );
@@ -191,7 +210,7 @@ fn a_watched_wallet_and_a_watched_address_are_indexed_and_survive_a_restart() {
     block_on(restarted.sync()).expect("restarted pass");
     for subject in [&wallet, &observed] {
         assert_eq!(
-            indexed(&memory, subject.address()).len(),
+            indexed(&rows, subject.address()).len(),
             6,
             "{} keeps being indexed after the restart",
             subject.address().value
@@ -236,7 +255,7 @@ fn owed(index: &dyn Indexing) -> Option<(BlockPosition, BlockPosition, usize)> {
 /// Unwatch removes selection and progress without deleting retained history.
 #[test]
 fn unwatching_stops_inspection_keeps_every_row_and_can_be_undone() {
-    let memory = memory::Repository::new();
+    let (memory, rows, _directory) = store();
     let index = service(&memory, 3);
     let owner = subject("owner");
     block_on(index.sync()).expect("a checkpoint to owe history below");
@@ -246,7 +265,7 @@ fn unwatching_stops_inspection_keeps_every_row_and_can_be_undone() {
         None,
         "the pass settles the range it owed, so nothing is left"
     );
-    let filled = indexed(&memory, owner.address());
+    let filled = indexed(&rows, owner.address());
     assert_eq!(filled.len(), 4, "blocks 0..=3 were read for it");
 
     assert_eq!(
@@ -264,7 +283,7 @@ fn unwatching_stops_inspection_keeps_every_row_and_can_be_undone() {
             .is_empty()
     );
     assert_eq!(
-        indexed(&memory, owner.address()),
+        indexed(&rows, owner.address()),
         filled,
         "nothing indexed was deleted; the rows are simply unclaimed"
     );
@@ -281,7 +300,7 @@ fn unwatching_stops_inspection_keeps_every_row_and_can_be_undone() {
     );
     block_on(restarted.sync()).expect("pass");
     assert_eq!(
-        indexed(&memory, owner.address()),
+        indexed(&rows, owner.address()),
         filled,
         "blocks 4 and 5 were never inspected for an address nothing watched"
     );
@@ -297,59 +316,9 @@ fn unwatching_stops_inspection_keeps_every_row_and_can_be_undone() {
         "the re-watch's whole range is read in the pass that follows it"
     );
     assert_eq!(
-        indexed(&memory, owner.address()).len(),
+        indexed(&rows, owner.address()).len(),
         6,
         "blocks 4 and 5 are there too, and re-reading 0..=3 duplicated nothing"
-    );
-}
-
-/// Cancelling settles every range the network owes, leaves each watch as the one
-/// it would have been created now, keeps every row already indexed, and can be
-/// undone by asking for the range again.
-#[test]
-fn cancelling_a_backfill_settles_its_range_and_leaves_the_watch_at_the_checkpoint() {
-    let memory = memory::Repository::new();
-    let index = service(&memory, 3);
-    let owner = subject("owner");
-    block_on(index.sync()).expect("a checkpoint to owe history below");
-    assert!(
-        block_on(indexing::Backfilling::cancel_backfill(&*index, &network()))
-            .expect("cancel")
-            .is_empty(),
-        "a network that owes nothing is cancelled without touching a watch"
-    );
-    block_on(index.watch("owner", &owner, Birthday::At(BlockPosition(0)))).expect("watch");
-
-    let cancelled =
-        block_on(indexing::Backfilling::cancel_backfill(&*index, &network())).expect("cancel");
-
-    assert_eq!(
-        cancelled
-            .iter()
-            .map(|watch| (watch.id.clone(), watch.start))
-            .collect::<Vec<_>>(),
-        [("owner".to_owned(), BlockPosition(4))],
-        "the watch is left where a `Birthday::Fresh` one added now would begin"
-    );
-    assert_eq!(
-        block_on(index.watched(&network())).expect("rows"),
-        cancelled,
-        "the same id and address, from the raised birthday"
-    );
-    assert_eq!(owed(&*index), None, "the range is no longer asked for");
-    assert!(
-        indexed(&memory, owner.address()).is_empty(),
-        "nothing below the cancelled range was read"
-    );
-
-    // And the range can be asked for again, at the price of reading it.
-    block_on(index.unwatch("owner")).expect("unwatch");
-    block_on(index.watch("owner", &owner, Birthday::At(BlockPosition(0)))).expect("re-watch");
-    assert_eq!(owed(&*index), None);
-    assert_eq!(
-        indexed(&memory, owner.address()).len(),
-        4,
-        "a cancelled range is resumable: the claim was dropped, never the ability"
     );
 }
 
@@ -541,13 +510,13 @@ fn pruned_chain() -> Chain {
 #[test]
 fn fresh_before_first_sync_uses_the_verified_tip_without_requiring_pruned_history() {
     use indexing::Checkpoint;
-    let memory = memory::Repository::new();
+    let (memory, rows, _directory) = store();
     let source = pruned_chain();
     let index = Indexer::new(
         source.clone(),
         source.clone(),
         memory.clone(),
-        SyncConfig::new(&network(), SyncPolicy::new(100)).expect("config"),
+        Config::new(&network(), Budget::new(100)).expect("config"),
     );
     let owner = subject("new");
     let watched = block_on(index.watch("new", &owner, Birthday::Fresh)).expect("watch");
@@ -566,7 +535,7 @@ fn fresh_before_first_sync_uses_the_verified_tip_without_requiring_pruned_histor
     block_on(index.sync()).expect("anchor without pruned history");
     source.replace([pruned(100), pruned(103)]);
     block_on(index.sync()).expect("sparse successor");
-    assert_eq!(indexed(&memory, &owner.address).len(), 1);
+    assert_eq!(indexed(&rows, &owner.address).len(), 1);
     let offline = source.requests();
     let later = block_on(index.watch("later", &subject("later"), Birthday::Fresh))
         .expect("persisted checkpoint needs no RPC");
@@ -597,7 +566,7 @@ fn a_commit_during_fresh_tip_lookup_overrides_the_fallback_birthday() {
         source.clone(),
         source.clone(),
         memory::Repository::new(),
-        SyncConfig::new(&network(), SyncPolicy::new(100)).expect("config"),
+        Config::new(&network(), Budget::new(100)).expect("config"),
     ));
     let registering = index.clone();
     let thread = std::thread::spawn(move || {

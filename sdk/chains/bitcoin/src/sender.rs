@@ -1,14 +1,15 @@
 //! `wallets::Sender`: one batch of transfers as one transaction through the
-//! factory's [`Outbox`], each sender paying its own transfers, change, and
-//! share of the fee.
+//! factory's outbox, each sender paying its own transfers, change, and share
+//! of the fee; and where its inputs come from ([`UtxoSource`], [`Spendable`]).
 
 mod dispatch;
 mod outbox;
 mod recovery;
 mod reservation;
+mod spendable;
 #[cfg(test)]
 pub(crate) mod stub;
-mod utxos;
+mod utxo_source;
 
 use std::{any::Any, sync::Arc};
 
@@ -17,7 +18,8 @@ use wallets::{
 };
 
 pub(crate) use outbox::{Outbox, SendRequest};
-pub(crate) use utxos::UtxoReader;
+pub use spendable::Spendable;
+pub use utxo_source::UtxoSource;
 
 use crate::WalletConfig;
 use crate::native::{Address, Satoshi, transaction};

@@ -139,7 +139,7 @@ mod tests {
         Section {
             rpc: Rpc::endpoint(NODE),
             cadence: Cadence {
-                policy: indexing::SyncPolicy::new(250),
+                policy: indexing::Budget::new(250),
                 ..Cadence::new()
             },
         }

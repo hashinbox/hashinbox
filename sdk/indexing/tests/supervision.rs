@@ -14,18 +14,18 @@ use std::{
 };
 
 use indexing::{
-    BackfillStatus, Birthday, BlockHash, BlockHeight, BlockPosition, BlockRef, BoxFuture,
-    ChainName, Checkpoint, Holder, Index, IndexError, IndexErrorKind, Indexing, Network,
-    NetworkState, SyncHealth, SyncPhase, SyncStatus, Watch, Watching,
+    Backlog, Birthday, BlockHash, BlockHeight, BlockPosition, BlockRef, BoxFuture, ChainName,
+    Checkpoint, Condition, Holder, IndexError, IndexErrorKind, Indexers, Indexing, Network,
+    Outcome, Phase, SyncHealth, Watch, Watching,
 };
-use indexing::{Schedules, Supervisor, SyncControl, SyncMonitor};
+use indexing::{Control, Monitor, Schedules, Supervisor};
 use tokio::sync::watch;
 
 /// What one scripted pass does.
 #[derive(Clone)]
-enum Outcome {
+enum Step {
     Ready,
-    Status(Box<SyncStatus>),
+    Status(Box<Outcome>),
     CatchingUp,
     /// The pass succeeded and its backfill did not: forward indexing reached
     /// the tip, and the historical range the network still owes was refused.
@@ -40,13 +40,13 @@ enum Outcome {
 /// One chain's indexer, scripted pass by pass.
 struct Probe {
     network: Network,
-    script: Mutex<VecDeque<Outcome>>,
-    then: Outcome,
+    script: Mutex<VecDeque<Step>>,
+    then: Step,
     calls: AtomicUsize,
 }
 
 impl Probe {
-    fn new(network: &Network, script: impl IntoIterator<Item = Outcome>, then: Outcome) -> Self {
+    fn new(network: &Network, script: impl IntoIterator<Item = Step>, then: Step) -> Self {
         Self {
             network: network.clone(),
             script: Mutex::new(script.into_iter().collect()),
@@ -91,15 +91,6 @@ impl Watching for Probe {
     }
 }
 
-impl indexing::Backfilling for Probe {
-    fn cancel_backfill<'a>(
-        &'a self,
-        _network: &'a Network,
-    ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
-        Box::pin(async { unreachable!("supervision never cancels a backfill") })
-    }
-}
-
 impl Indexing for Probe {
     fn network(&self) -> &Network {
         &self.network
@@ -107,7 +98,7 @@ impl Indexing for Probe {
 
     fn listen(&self, _listener: Arc<dyn indexing::Listener>) {}
 
-    fn sync<'a>(&'a self) -> BoxFuture<'a, Result<SyncStatus, IndexError>> {
+    fn sync<'a>(&'a self) -> BoxFuture<'a, Result<Outcome, IndexError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let outcome = self
             .script
@@ -118,19 +109,19 @@ impl Indexing for Probe {
         let network = self.network.clone();
         Box::pin(async move {
             let (phase, backfill) = match outcome {
-                Outcome::Status(status) => return Ok(*status),
-                Outcome::Ready => (SyncPhase::Ready, None),
-                Outcome::Wait(gate) => {
+                Step::Status(status) => return Ok(*status),
+                Step::Ready => (Phase::Ready, None),
+                Step::Wait(gate) => {
                     gate.acquire().await.unwrap().forget();
-                    (SyncPhase::Ready, None)
+                    (Phase::Ready, None)
                 }
-                Outcome::CatchingUp => (SyncPhase::CatchingUp, None),
-                Outcome::BackfillFails => (SyncPhase::Ready, Some(refused())),
-                Outcome::Fails(error) => return Err(error),
-                Outcome::Panics => panic!("scripted panic"),
-                Outcome::Parks => std::future::pending().await,
+                Step::CatchingUp => (Phase::CatchingUp, None),
+                Step::BackfillFails => (Phase::Ready, Some(refused())),
+                Step::Fails(error) => return Err(error),
+                Step::Panics => panic!("scripted panic"),
+                Step::Parks => std::future::pending().await,
             };
-            Ok(SyncStatus {
+            Ok(Outcome {
                 network,
                 checkpoint: Some(block()),
                 pending_tip: None,
@@ -146,22 +137,22 @@ impl Indexing for Probe {
 /// Records every transition or failed attempt it observes and publishes the
 /// snapshot a test waits on.
 struct Recorder {
-    events: Mutex<Vec<(String, NetworkState, NetworkState)>>,
-    last: Mutex<std::collections::HashMap<String, NetworkState>>,
-    report: Arc<indexing::SyncReport>,
+    events: Mutex<Vec<(String, Condition, Condition)>>,
+    last: Mutex<std::collections::HashMap<String, Condition>>,
+    report: Arc<indexing::Report>,
 }
 
-impl SyncMonitor for Recorder {
-    fn network_observed(&self, health: &indexing::NetworkHealth) {
+impl Monitor for Recorder {
+    fn network_observed(&self, health: &indexing::Health) {
         let chain = health.status.network.chain.to_string();
         let previous = self
             .last
             .lock()
             .expect("last")
             .insert(chain.clone(), health.state)
-            .unwrap_or(NetworkState::CatchingUp);
+            .unwrap_or(Condition::CatchingUp);
         if previous != health.state
-            || health.state == NetworkState::Retrying
+            || health.state == Condition::Retrying
             || health.failure.is_some()
         {
             self.events
@@ -191,8 +182,8 @@ fn block() -> BlockRef {
 }
 
 /// What one pass reports after a historical read its node refused.
-fn refused() -> BackfillStatus {
-    BackfillStatus {
+fn refused() -> Backlog {
+    Backlog {
         pending: 1,
         resume: BlockPosition(0),
         anchor: BlockPosition(4),
@@ -219,7 +210,7 @@ struct Supervised {
     task: tokio::task::JoinHandle<()>,
     stop: watch::Sender<bool>,
     health: watch::Receiver<SyncHealth>,
-    control: SyncControl,
+    control: Control,
     recorder: Arc<Recorder>,
     probes: Vec<Arc<Probe>>,
 }
@@ -234,8 +225,8 @@ impl Supervised {
             .iter()
             .map(|probe| Arc::clone(probe) as Arc<dyn Indexing>)
             .collect();
-        let composer = Arc::new(Index::of(indexers).expect("disjoint networks compose"));
-        let (report, readiness) = indexing::SyncReport::watching(composer.networks());
+        let composer = Arc::new(Indexers::of(indexers).expect("disjoint networks compose"));
+        let (report, readiness) = indexing::Report::watching(composer.networks());
         let health = readiness.receiver();
         let recorder = Arc::new(Recorder {
             events: Mutex::new(Vec::new()),
@@ -245,7 +236,7 @@ impl Supervised {
         let supervisor = Supervisor::new(
             composer,
             Schedules::every(interval),
-            Arc::clone(&recorder) as Arc<dyn SyncMonitor>,
+            Arc::clone(&recorder) as Arc<dyn Monitor>,
         );
         let control = supervisor.control();
         let (stop, shutdown) = watch::channel(false);
@@ -260,7 +251,7 @@ impl Supervised {
     }
 
     /// Waits for `chain`'s network to reach `state`, or fails the test.
-    async fn reaches(&mut self, chain: &str, state: NetworkState) {
+    async fn reaches(&mut self, chain: &str, state: Condition) {
         let wanted = network(chain);
         let reached = self.health.wait_for(|health| {
             health
@@ -293,7 +284,7 @@ impl Supervised {
         row(&health).expect("the awaited failure")
     }
 
-    fn events(&self) -> Vec<(String, NetworkState, NetworkState)> {
+    fn events(&self) -> Vec<(String, Condition, Condition)> {
         self.recorder.events.lock().expect("events").clone()
     }
 
@@ -319,18 +310,12 @@ impl Supervised {
 
 #[tokio::test]
 async fn one_network_failure_does_not_stop_the_others() {
-    let failing = Arc::new(Probe::new(
-        &network("failing"),
-        [],
-        Outcome::Fails(terminal()),
-    ));
-    let healthy = Arc::new(Probe::new(&network("healthy"), [], Outcome::Ready));
+    let failing = Arc::new(Probe::new(&network("failing"), [], Step::Fails(terminal())));
+    let healthy = Arc::new(Probe::new(&network("healthy"), [], Step::Ready));
     let mut supervised = Supervised::new(vec![Arc::clone(&failing), Arc::clone(&healthy)]);
 
-    supervised
-        .reaches("failing", NetworkState::Quarantined)
-        .await;
-    supervised.reaches("healthy", NetworkState::Ready).await;
+    supervised.reaches("failing", Condition::Quarantined).await;
+    supervised.reaches("healthy", Condition::Ready).await;
 
     let before = healthy.calls();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -352,18 +337,12 @@ async fn one_network_failure_does_not_stop_the_others() {
 
 #[tokio::test]
 async fn a_non_retryable_failure_quarantines_only_its_network() {
-    let failing = Arc::new(Probe::new(
-        &network("failing"),
-        [],
-        Outcome::Fails(terminal()),
-    ));
-    let healthy = Arc::new(Probe::new(&network("healthy"), [], Outcome::Ready));
+    let failing = Arc::new(Probe::new(&network("failing"), [], Step::Fails(terminal())));
+    let healthy = Arc::new(Probe::new(&network("healthy"), [], Step::Ready));
     let mut supervised = Supervised::new(vec![failing, healthy]);
 
-    supervised
-        .reaches("failing", NetworkState::Quarantined)
-        .await;
-    supervised.reaches("healthy", NetworkState::Ready).await;
+    supervised.reaches("failing", Condition::Quarantined).await;
+    supervised.reaches("healthy", Condition::Ready).await;
 
     let quarantined = supervised.health.borrow().clone();
     let reported = quarantined
@@ -385,17 +364,11 @@ async fn a_non_retryable_failure_quarantines_only_its_network() {
 
 #[tokio::test]
 async fn a_quarantined_unit_still_observes_shutdown() {
-    let failing = Arc::new(Probe::new(
-        &network("failing"),
-        [],
-        Outcome::Fails(terminal()),
-    ));
-    let parked = Arc::new(Probe::new(&network("parked"), [], Outcome::Parks));
+    let failing = Arc::new(Probe::new(&network("failing"), [], Step::Fails(terminal())));
+    let parked = Arc::new(Probe::new(&network("parked"), [], Step::Parks));
     let mut supervised = Supervised::new(vec![failing, parked]);
 
-    supervised
-        .reaches("failing", NetworkState::Quarantined)
-        .await;
+    supervised.reaches("failing", Condition::Quarantined).await;
 
     // A unit parked on a quarantine and a unit parked inside an RPC call both
     // have to notice shutdown, or the process hangs instead of exiting.
@@ -404,14 +377,14 @@ async fn a_quarantined_unit_still_observes_shutdown() {
 
 #[tokio::test]
 async fn a_panicking_unit_is_quarantined_not_propagated() {
-    let panicking = Arc::new(Probe::new(&network("panicking"), [], Outcome::Panics));
-    let healthy = Arc::new(Probe::new(&network("healthy"), [], Outcome::Ready));
+    let panicking = Arc::new(Probe::new(&network("panicking"), [], Step::Panics));
+    let healthy = Arc::new(Probe::new(&network("healthy"), [], Step::Ready));
     let mut supervised = Supervised::new(vec![panicking, healthy]);
 
     supervised
-        .reaches("panicking", NetworkState::Quarantined)
+        .reaches("panicking", Condition::Quarantined)
         .await;
-    supervised.reaches("healthy", NetworkState::Ready).await;
+    supervised.reaches("healthy", Condition::Ready).await;
     assert!(
         !supervised.task.is_finished(),
         "a panicked unit task must not take the supervisor with it"
@@ -431,14 +404,14 @@ async fn a_panicking_unit_is_quarantined_not_propagated() {
 async fn resume_clears_quarantine_and_runs_a_pass_at_once() {
     let recovering = Arc::new(Probe::new(
         &network("recovering"),
-        [Outcome::Fails(terminal())],
-        Outcome::Ready,
+        [Step::Fails(terminal())],
+        Step::Ready,
     ));
-    let healthy = Arc::new(Probe::new(&network("healthy"), [], Outcome::Ready));
+    let healthy = Arc::new(Probe::new(&network("healthy"), [], Step::Ready));
     let mut supervised = Supervised::new(vec![recovering, healthy]);
 
     supervised
-        .reaches("recovering", NetworkState::Quarantined)
+        .reaches("recovering", Condition::Quarantined)
         .await;
     assert_eq!(
         supervised
@@ -453,7 +426,7 @@ async fn resume_clears_quarantine_and_runs_a_pass_at_once() {
         .control
         .resume(&network("recovering"))
         .expect("a configured network resumes");
-    supervised.reaches("recovering", NetworkState::Ready).await;
+    supervised.reaches("recovering", Condition::Ready).await;
 
     let events: Vec<_> = supervised
         .events()
@@ -464,9 +437,9 @@ async fn resume_clears_quarantine_and_runs_a_pass_at_once() {
     assert_eq!(
         events,
         [
-            (NetworkState::CatchingUp, NetworkState::Quarantined),
-            (NetworkState::Quarantined, NetworkState::CatchingUp),
-            (NetworkState::CatchingUp, NetworkState::Ready),
+            (Condition::CatchingUp, Condition::Quarantined),
+            (Condition::Quarantined, Condition::CatchingUp),
+            (Condition::CatchingUp, Condition::Ready),
         ],
         "a resume reports the way back, not just the arrival"
     );
@@ -481,26 +454,24 @@ async fn resume_clears_quarantine_and_runs_a_pass_at_once() {
 async fn a_failed_pass_keeps_the_status_of_the_last_one_that_completed() {
     let failing = Arc::new(Probe::new(
         &network("failing"),
-        [Outcome::Ready],
-        Outcome::Fails(terminal()),
+        [Step::Ready],
+        Step::Fails(terminal()),
     ));
     let mut supervised = Supervised::new(vec![failing]);
 
-    supervised
-        .reaches("failing", NetworkState::Quarantined)
-        .await;
+    supervised.reaches("failing", Condition::Quarantined).await;
 
     let row = supervised.health.borrow().networks()[0].clone();
     assert_eq!(row.failure, Some(terminal()));
     assert_eq!(row.attempts, 1);
     assert_eq!(
         row.status,
-        SyncStatus {
+        Outcome {
             network: network("failing"),
             checkpoint: Some(block()),
             pending_tip: None,
             observed_tip: Some(block()),
-            phase: SyncPhase::Ready,
+            phase: Phase::Ready,
             unmatched_spends: Vec::new(),
             backfill: None,
         },
@@ -515,18 +486,18 @@ async fn monitor_fires_on_every_attempt_but_not_on_every_catch_up_batch() {
     let scripted = Arc::new(Probe::new(
         &network("scripted"),
         [
-            Outcome::CatchingUp,
-            Outcome::CatchingUp,
-            Outcome::CatchingUp,
-            Outcome::Ready,
-            Outcome::Fails(retrying.clone()),
-            Outcome::Fails(retrying),
+            Step::CatchingUp,
+            Step::CatchingUp,
+            Step::CatchingUp,
+            Step::Ready,
+            Step::Fails(retrying.clone()),
+            Step::Fails(retrying),
         ],
-        Outcome::Parks,
+        Step::Parks,
     ));
     let mut supervised = Supervised::new(vec![Arc::clone(&scripted)]);
 
-    supervised.reaches("scripted", NetworkState::Retrying).await;
+    supervised.reaches("scripted", Condition::Retrying).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while scripted.calls() < 7 {
             tokio::task::yield_now().await;
@@ -543,9 +514,9 @@ async fn monitor_fires_on_every_attempt_but_not_on_every_catch_up_batch() {
     assert_eq!(
         states,
         [
-            (NetworkState::CatchingUp, NetworkState::Ready),
-            (NetworkState::Ready, NetworkState::Retrying),
-            (NetworkState::Retrying, NetworkState::Retrying),
+            (Condition::CatchingUp, Condition::Ready),
+            (Condition::Ready, Condition::Retrying),
+            (Condition::Retrying, Condition::Retrying),
         ],
         "three catch-up batches are silent; every failed attempt is not"
     );
@@ -567,7 +538,7 @@ async fn monitor_fires_on_every_attempt_but_not_on_every_catch_up_batch() {
 /// full speed with nothing to show for it and nothing saying so.
 #[tokio::test]
 async fn a_failing_backfill_is_reported_and_waited_on_rather_than_retried_at_once() {
-    let stalled = Arc::new(Probe::new(&network("stalled"), [], Outcome::BackfillFails));
+    let stalled = Arc::new(Probe::new(&network("stalled"), [], Step::BackfillFails));
     let mut supervised = Supervised::every(vec![Arc::clone(&stalled)], Duration::from_millis(100));
 
     let failure = supervised.reports_failure("stalled").await;
@@ -585,7 +556,7 @@ async fn a_failing_backfill_is_reported_and_waited_on_rather_than_retried_at_onc
     let row = supervised.health.borrow().networks()[0].clone();
     assert_eq!(
         row.state,
-        NetworkState::Ready,
+        Condition::Ready,
         "forward indexing is healthy, so the network is not quarantined or retrying"
     );
     assert!(row.failure.is_none(), "nothing holds forward indexing back");
@@ -605,15 +576,15 @@ async fn a_failing_backfill_is_reported_and_waited_on_rather_than_retried_at_onc
 /// network has settled, so one such wallet stopped the process serving
 /// anything at all — on any chain — for as long as the node stayed pruned,
 /// which is forever. What the range weakens is the reads that touch it, and
-/// those already say so through `Completeness`.
+/// those already say so through how far behind their rows are.
 #[tokio::test]
 async fn a_backfill_that_can_never_be_served_does_not_hold_readiness_down() {
-    let stalled = Arc::new(Probe::new(&network("stalled"), [], Outcome::BackfillFails));
-    let healthy = Arc::new(Probe::new(&network("healthy"), [], Outcome::Ready));
+    let stalled = Arc::new(Probe::new(&network("stalled"), [], Step::BackfillFails));
+    let healthy = Arc::new(Probe::new(&network("healthy"), [], Step::Ready));
     let mut supervised = Supervised::new(vec![stalled, healthy]);
 
-    supervised.reaches("stalled", NetworkState::Ready).await;
-    supervised.reaches("healthy", NetworkState::Ready).await;
+    supervised.reaches("stalled", Condition::Ready).await;
+    supervised.reaches("healthy", Condition::Ready).await;
 
     let health = supervised.health.borrow().clone();
     assert!(
@@ -644,10 +615,10 @@ async fn a_backfill_that_can_never_be_served_does_not_hold_readiness_down() {
 /// not ready, and never becomes ready by having nothing owed.
 #[tokio::test]
 async fn a_network_that_has_not_reached_its_tip_is_still_not_ready() {
-    let behind = Arc::new(Probe::new(&network("behind"), [], Outcome::CatchingUp));
+    let behind = Arc::new(Probe::new(&network("behind"), [], Step::CatchingUp));
     let mut supervised = Supervised::new(vec![behind]);
 
-    supervised.reaches("behind", NetworkState::CatchingUp).await;
+    supervised.reaches("behind", Condition::CatchingUp).await;
 
     let health = supervised.health.borrow().clone();
     assert!(!health.ready(), "an index behind its tip answers 503");
@@ -683,12 +654,12 @@ async fn an_admission_conflict_is_not_an_outage_and_never_dips_readiness() {
     );
     let racing = Arc::new(Probe::new(
         &network("racing"),
-        [Outcome::Ready, Outcome::Fails(conflict)],
-        Outcome::Parks,
+        [Step::Ready, Step::Fails(conflict)],
+        Step::Parks,
     ));
     let mut supervised = Supervised::new(vec![Arc::clone(&racing)]);
 
-    supervised.reaches("racing", NetworkState::Ready).await;
+    supervised.reaches("racing", Condition::Ready).await;
     // The third pass parks, so the unit is frozen on whatever the conflict
     // left behind and the assertions below race nothing.
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -707,7 +678,7 @@ async fn an_admission_conflict_is_not_an_outage_and_never_dips_readiness() {
     let row = health.networks()[0].clone();
     assert_eq!(
         row.state,
-        NetworkState::Ready,
+        Condition::Ready,
         "the checkpoint is still at the tip, so the network is still ready"
     );
     assert!(
@@ -725,7 +696,7 @@ async fn an_admission_conflict_is_not_an_outage_and_never_dips_readiness() {
             .into_iter()
             .map(|(_, previous, state)| (previous, state))
             .collect::<Vec<_>>(),
-        [(NetworkState::CatchingUp, NetworkState::Ready)],
+        [(Condition::CatchingUp, Condition::Ready)],
         "and it is not a transition, so the monitor never sees one"
     );
     supervised.shut_down().await;
@@ -739,7 +710,7 @@ async fn a_terminal_conflict_is_still_quarantined() {
     let wedged = Arc::new(Probe::new(
         &network("wedged"),
         [],
-        Outcome::Fails(IndexError::new(
+        Step::Fails(IndexError::new(
             IndexErrorKind::Conflict,
             "indexers contain the same network",
             false,
@@ -747,9 +718,7 @@ async fn a_terminal_conflict_is_still_quarantined() {
     ));
     let mut supervised = Supervised::new(vec![Arc::clone(&wedged)]);
 
-    supervised
-        .reaches("wedged", NetworkState::Quarantined)
-        .await;
+    supervised.reaches("wedged", Condition::Quarantined).await;
     let row = supervised.health.borrow().networks()[0].clone();
     assert_eq!(
         row.failure.expect("a quarantined network reports why").kind,
@@ -775,7 +744,7 @@ async fn a_terminal_conflict_is_still_quarantined() {
 /// single-threaded runtime would hang here instead of failing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_closed_shutdown_channel_ends_every_unit() {
-    let parked = Arc::new(Probe::new(&network("parked"), [], Outcome::Parks));
+    let parked = Arc::new(Probe::new(&network("parked"), [], Step::Parks));
     let supervised = Supervised::new(vec![Arc::clone(&parked)]);
     started(&parked).await;
 
@@ -812,17 +781,17 @@ async fn ready_snapshots_advance_without_extra_transition_notifications() {
             parent: None,
             timestamp: None,
         };
-        Outcome::Status(Box::new(SyncStatus {
+        Step::Status(Box::new(Outcome {
             network: network.clone(),
             checkpoint: Some(block(position)),
             pending_tip: Some(block(position + 1)),
             observed_tip: Some(block(position + 1)),
-            phase: SyncPhase::Ready,
+            phase: Phase::Ready,
             unmatched_spends: Vec::new(),
             backfill: None,
         }))
     };
-    let probe = Arc::new(Probe::new(&network, [ready(4), ready(8)], Outcome::Parks));
+    let probe = Arc::new(Probe::new(&network, [ready(4), ready(8)], Step::Parks));
     let supervised = Supervised::new(vec![probe.clone()]);
     tokio::time::timeout(Duration::from_secs(5), async {
         while probe.calls() < 3 {
@@ -858,12 +827,12 @@ async fn ready_snapshots_advance_without_extra_transition_notifications() {
 
 #[tokio::test]
 async fn pause_acknowledges_idle_and_resume_restarts_only_that_network() {
-    let first = Arc::new(Probe::new(&network("first"), [], Outcome::Ready));
-    let second = Arc::new(Probe::new(&network("second"), [], Outcome::Ready));
+    let first = Arc::new(Probe::new(&network("first"), [], Step::Ready));
+    let second = Arc::new(Probe::new(&network("second"), [], Step::Ready));
     let mut running = Supervised::new(vec![first.clone(), second.clone()]);
-    running.reaches("first", NetworkState::Ready).await;
+    running.reaches("first", Condition::Ready).await;
     running.control.pause(&network("first")).await.unwrap();
-    running.reaches("first", NetworkState::Paused).await;
+    running.reaches("first", Condition::Paused).await;
     let calls = first.calls();
     let other = second.calls();
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -875,7 +844,7 @@ async fn pause_acknowledges_idle_and_resume_restarts_only_that_network() {
     .unwrap();
     assert_eq!(first.calls(), calls);
     running.control.resume(&network("first")).unwrap();
-    running.reaches("first", NetworkState::Ready).await;
+    running.reaches("first", Condition::Ready).await;
     assert!(first.calls() > calls);
     running.stop.send(true).unwrap();
     running.task.await.unwrap();
@@ -887,8 +856,8 @@ async fn pause_waits_for_active_pass_without_cancelling_it() {
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let probe = Arc::new(Probe::new(
         &network("first"),
-        [Outcome::Wait(gate.clone())],
-        Outcome::Ready,
+        [Step::Wait(gate.clone())],
+        Step::Ready,
     ));
     let running = Supervised::new(vec![probe.clone()]);
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -920,9 +889,9 @@ async fn pause_waits_for_active_pass_without_cancelling_it() {
 #[tokio::test]
 async fn recovery_discards_reported_progress_before_resume() {
     let network = network("recovered");
-    let probe = Arc::new(Probe::new(&network, [], Outcome::Ready));
+    let probe = Arc::new(Probe::new(&network, [], Step::Ready));
     let mut running = Supervised::new(vec![probe.clone()]);
-    running.reaches("recovered", NetworkState::Ready).await;
+    running.reaches("recovered", Condition::Ready).await;
     assert!(running.control.discard_progress(&network).await.is_err());
     running.control.pause(&network).await.unwrap();
     assert!(
@@ -942,13 +911,13 @@ async fn recovery_discards_reported_progress_before_resume() {
     {
         let health = running.health.borrow();
         let row = &health.networks()[0];
-        assert_eq!(row.state, NetworkState::Paused);
+        assert_eq!(row.state, Condition::Paused);
         assert!(row.status.checkpoint.is_none());
         assert!(row.status.pending_tip.is_none());
         assert!(row.status.backfill.is_none());
     }
     assert_eq!(probe.calls(), calls);
     running.control.resume(&network).unwrap();
-    running.reaches("recovered", NetworkState::Ready).await;
+    running.reaches("recovered", Condition::Ready).await;
     running.shut_down().await;
 }

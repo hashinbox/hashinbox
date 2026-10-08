@@ -4,7 +4,7 @@
 use sqlx::{FromRow, QueryBuilder, SqliteConnection, sqlite::SqliteRow};
 
 use super::{Chunks, column, deleted, network, stored};
-use crate::{HistoryPosition, IndexError, IndexedBatch, Network};
+use crate::{IndexError, IndexedBatch, Network};
 
 /// One `transaction_address` row: `address` took part in the transaction at
 /// `(height, transaction order, transaction id)`, which is the order
@@ -44,31 +44,6 @@ impl FromRow<'_, SqliteRow> for TransactionAddress {
 }
 
 impl TransactionAddress {
-    /// Before every row of `address`: where a page with no cursor starts.
-    pub(in crate::storage::sqlite) fn first(network: &Network, address: &str) -> Self {
-        Self {
-            network: network.clone(),
-            address: address.to_owned(),
-            block_height: -1,
-            transaction_order: -1,
-            transaction_id: String::new(),
-        }
-    }
-
-    /// The row of `address` a history cursor resumes after.
-    pub(in crate::storage::sqlite) fn after(
-        address: &str,
-        cursor: &HistoryPosition,
-    ) -> Result<Self, IndexError> {
-        Ok(Self {
-            network: cursor.transaction.network.clone(),
-            address: address.to_owned(),
-            block_height: stored(cursor.height.0)?,
-            transaction_order: stored(cursor.transaction_order)?,
-            transaction_id: cursor.transaction.id.as_str().to_owned(),
-        })
-    }
-
     /// Every row `batch` writes: one per address that took part in each of
     /// its transactions, block by block.
     pub(in crate::storage::sqlite) fn from_batch(

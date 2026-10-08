@@ -366,7 +366,8 @@ mod tests {
     /// The settled balance of `of` in ether, folded from `interpreted`
     /// exactly as a store folds the rows it wrote from it, under this chain's
     /// own fee rule — both collections, because a store writes both.
-    fn folded(interpreted: &BlockWithOutputs, of: base::Address) -> indexing::Balance {
+    fn folded(interpreted: &BlockWithOutputs, of: base::Address) -> num_bigint::BigInt {
+        use indexing::Net as _;
         let subject = indexing::Subject {
             address: of,
             asset: AssetKind::Native.id(),
@@ -374,18 +375,17 @@ mod tests {
         let settlement = BlockInterpreter::new(&network())
             .expect("the fixture network is Ethereum")
             .settlement();
-        let mut ledger = indexing::Fold::new(&subject);
-        for draft in interpreted.block.transactions() {
-            ledger
-                .apply(draft, settlement)
-                .expect("interpreted amounts are storable");
-        }
+        let mut net = interpreted
+            .block
+            .transactions()
+            .net(&subject, settlement)
+            .expect("interpreted amounts are storable");
         for credit in &interpreted.credits {
-            ledger
-                .apply_credit(credit)
+            net += credit
+                .effect(&subject)
                 .expect("interpreted amounts are storable");
         }
-        ledger.balance(Some(interpreted.block.reference().clone()))
+        net
     }
 
     #[test]
@@ -408,13 +408,12 @@ mod tests {
         let interpreted = inspect(&block, &[canonical_address(TO)]).expect("block must interpret");
 
         let credited = folded(&interpreted, canonical_address(TO));
-        assert_eq!(credited.amount, Decimal::from(5_u64));
-        assert_eq!(credited.completeness, indexing::Completeness::Incomplete);
+        assert_eq!(credited, num_bigint::BigInt::from(5_u64));
         // The sender is charged its gas once: the fee is outside the movements
         // on this chain, and the residual added it back on the credit side so
         // that `NetworkFee` stays the only record of it.
         let sender = folded(&interpreted, canonical_address(FROM));
-        assert_eq!(sender.completeness, indexing::Completeness::Overdrawn);
+        assert!(sender < num_bigint::BigInt::ZERO, "overdrawn");
     }
 
     /// The block, with `withdrawals` replacing whatever the body carried.
@@ -489,11 +488,10 @@ mod tests {
 
         let credited = folded(&interpreted, beneficiary);
         assert_eq!(
-            credited.amount,
-            Decimal::from(2_000_000_000_000_000_042_u64),
+            credited,
+            num_bigint::BigInt::from(2_000_000_000_000_000_042_u64),
             "two ether from the block body plus 42 wei from the transaction"
         );
-        assert_eq!(credited.completeness, indexing::Completeness::Incomplete);
     }
 
     /// The case the old code was silently wrong for, and the one that has no
@@ -521,8 +519,8 @@ mod tests {
         assert_eq!(interpreted.credits[0].id, MovementId("withdrawal:7".into()));
         let credited = folded(&interpreted, beneficiary);
         assert_eq!(
-            credited.amount,
-            Decimal::from(2_000_000_000_000_000_000_u64)
+            credited,
+            num_bigint::BigInt::from(2_000_000_000_000_000_000_u64)
         );
     }
 
@@ -810,13 +808,13 @@ mod tests {
             Some(&canonical_address(BENEFICIARY))
         );
         assert_eq!(
-            folded(&interpreted, canonical_address(BENEFICIARY)).amount,
-            Decimal::from(21_000_u64)
+            folded(&interpreted, canonical_address(BENEFICIARY)),
+            num_bigint::BigInt::from(21_000_u64)
         );
         // The sender pays its gas once: through `NetworkFee`, never twice.
-        assert_eq!(
-            folded(&interpreted, canonical_address(FROM)).completeness,
-            indexing::Completeness::Overdrawn
+        assert!(
+            folded(&interpreted, canonical_address(FROM)) < num_bigint::BigInt::ZERO,
+            "overdrawn"
         );
     }
 

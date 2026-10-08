@@ -159,7 +159,7 @@ export interface paths {
         put?: never;
         /**
          * Generate a wallet, or watch an address, for one configured asset
-         * @description Without `address`, generates a wallet, stores it with its key, then watches it from creation. Keys never leave the server. Retrying creates another wallet. With `address`, stores and observes that address from registration without its key: the wallet is watch-only, and sending from it answers 422. `label` names either. An archived wallet's address is restored instead: the answer is that wallet, under its original ID, with its key and history, observed again from its original birthday; a given `label` replaces its label.
+         * @description Without `address`, generates a wallet, stores it with its key, then watches it from creation. Keys never leave the server. Retrying creates another wallet. With `address`, stores and observes that address from registration without its key: the wallet is watch-only, and sending from it answers 422. `label` names either. `start` is `"fresh"` (the default) or the native position observation begins at; a position older than the network's backfill policy allows answers 400. An archived wallet's address is refused: archiving is final.
          */
         post: operations["create_wallet"];
         delete?: never;
@@ -184,7 +184,7 @@ export interface paths {
         post?: never;
         /**
          * Archive a wallet
-         * @description Marks the wallet archived and stops observing its address. Its history and balance stay readable from what was indexed; sending from it answers 409. Archiving again answers the same wallet. Creating a wallet of its address again restores it.
+         * @description Marks the wallet archived and stops observing its address. Its history and balance stay readable from what was indexed; sending from it answers 409. Archiving again answers the same wallet. Archiving is final: its address cannot be created again.
          */
         delete: operations["archive_wallet"];
         options?: never;
@@ -201,7 +201,7 @@ export interface paths {
         };
         /**
          * Read a wallet's balance in its own asset
-         * @description The confirmed indexed total and pending incoming/outgoing amounts in the asset's display units, with the confirmed and pending heights and history completeness. Chain spending rules still apply. A watch-only address reads the same balance without a key.
+         * @description The confirmed indexed total and pending incoming/outgoing amounts in the asset's display units, with the confirmed and pending heights and how many blocks the address's inspection is behind. Chain spending rules still apply. A watch-only address reads the same balance without a key.
          */
         get: operations["read_wallet_balance"];
         put?: never;
@@ -221,7 +221,7 @@ export interface paths {
         };
         /**
          * Read one page of a wallet's history
-         * @description The wallet's canonical history in the wallet's own asset. `transactions` is confirmed and append-only, so its cursor stays valid however far the checkpoint moves; `pending` carries the transactions above the confirmed line and is populated on the first page only; `completeness` says how much of the history behind the page the index can prove it holds, in the same three words the balance uses.
+         * @description The wallet's canonical history in the wallet's own asset. `transactions` is confirmed and append-only, so its cursor stays valid however far the checkpoint moves; `pending` carries the transactions above the confirmed line and is populated on the first page only; `behind` says how many blocks the address's inspection trails the confirmed line, as the balance does.
          */
         get: operations["read_wallet_transactions"];
         put?: never;
@@ -276,7 +276,7 @@ export interface components {
          *     would otherwise hold `ready` at false for the life of the process while
          *     forward indexing answered every question a client actually asks. The range
          *     is published here, and the reads it weakens say so themselves through their
-         *     own `completeness`.
+         *     own `behind`.
          */
         Backfill: {
             /**
@@ -302,8 +302,10 @@ export interface components {
          * @description A wallet's balance in its asset, on both sides of its chain's confirmed
          *     line.
          *
-         *     `amount` is the confirmed indexed total. Completeness states whether history
-         *     is missing; chain spending rules, such as coinbase maturity, still apply.
+         *     `amount` is the confirmed indexed total, negative when indexed debits
+         *     exceed known credits; `behind` states how far the address's inspection
+         *     trails the confirmed line. Chain spending rules, such as coinbase
+         *     maturity, still apply.
          *     The two pending figures describe blocks above the confirmed line: they are
          *     reported apart rather than netted, because "3.0 arriving" and "1.0
          *     leaving" are different facts to a payments operator, and neither is ever
@@ -312,16 +314,18 @@ export interface components {
          */
         Balance: {
             /**
-             * @description Confirmed indexed amount in exact display units, e.g. `12.5`.
-             *     Completeness and chain spending rules apply separately.
+             * @description Confirmed indexed amount in exact display units, e.g. `12.5`; negative,
+             *     e.g. `-0.5`, when indexed debits exceed known credits. Chain spending
+             *     rules apply separately.
              */
             amount: string;
             /**
-             * @description How much of the history behind `amount` the index can prove it holds.
-             *     `incomplete` while this address still owes a historical range, and
-             *     `overdrawn` when indexed debits exceed known credits.
+             * Format: int64
+             * @description How many blocks this address's inspection is behind the confirmed
+             *     line; 0 when caught up. While it is above 0, `amount` may still change
+             *     as history below the line is read.
              */
-            completeness: components["schemas"]["Completeness"];
+            behind: number;
             /**
              * Format: int64
              * @description Height of the confirmed line for the saved total; null before a
@@ -369,14 +373,6 @@ export interface components {
              */
             position: number;
         };
-        /**
-         * @description How much of the history behind an answer the index can prove it holds.
-         *
-         *     It is a property of the read, not of the wallet, and the balance and the
-         *     history page share the vocabulary.
-         * @enum {string}
-         */
-        Completeness: "complete_history" | "incomplete" | "overdrawn";
         /** @description One configured network, its state, and its nodes. */
         ConfiguredNetwork: {
             network: components["schemas"]["Network"];
@@ -398,6 +394,11 @@ export interface components {
             asset: string;
             /** @description The operator's name for the wallet, 1 to 64 characters. */
             label?: string;
+            /**
+             * @description Where observation begins: `"fresh"` for an address never used before,
+             *     or the native position to inspect from. Absent means `"fresh"`.
+             */
+            start?: components["schemas"]["Start"];
         };
         /** @description A node with its own headers and bounds. */
         DetailedEndpoint: {
@@ -444,6 +445,11 @@ export interface components {
             asset: components["schemas"]["Asset"];
             payer: null | components["schemas"]["Address"];
         };
+        /**
+         * @description The `"fresh"` literal of a `Start`.
+         * @enum {string}
+         */
+        Fresh: "fresh";
         /**
          * @description Why one indexed network is failing: its forward synchronization, or the
          *     historical range it still owes.
@@ -612,6 +618,8 @@ export interface components {
          * @enum {string}
          */
         ServiceState: "unavailable" | "rescanning" | "paused" | "catching_up" | "ready" | "retrying" | "quarantined";
+        /** @description A wallet's birthday on the wire: `"fresh"` or a native position. */
+        Start: components["schemas"]["Fresh"] | number;
         /** @description Where a history transaction stands relative to its chain's confirmed line. */
         Status: {
             /** @description The including block. */
@@ -655,14 +663,16 @@ export interface components {
         };
         /** @description One page of `GET /v1/wallets/{id}/transactions`. */
         TransactionPage: {
-            checkpoint: null | components["schemas"]["Block"];
             /**
-             * @description How much of the history behind this page the index can prove it holds.
-             *     `next_cursor` cannot carry it — that speaks about what follows the page,
-             *     and a backfill inserts rows *before* it — so a caller paging to the end
-             *     mid-backfill reads `incomplete` rather than a complete export.
+             * Format: int64
+             * @description How many blocks this address's inspection is behind the confirmed
+             *     line; 0 when caught up. `next_cursor` cannot carry it — that speaks
+             *     about what follows the page, and a backfill inserts rows *before* it —
+             *     so a caller paging to the end mid-backfill reads a non-zero `behind`
+             *     rather than a complete export.
              */
-            completeness: components["schemas"]["Completeness"];
+            behind: number;
+            checkpoint: null | components["schemas"]["Block"];
             /**
              * @description Opaque cursor of the next page; null when no transaction follows.
              *     Always present.
@@ -1138,7 +1148,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Wallet generated, address watched, or archived wallet restored, and registered for indexing */
+            /** @description Wallet generated or address watched, and registered for indexing */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -1147,7 +1157,7 @@ export interface operations {
                     "application/json": components["schemas"]["Wallet"];
                 };
             };
-            /** @description Malformed body, asset tag, label, or address text */
+            /** @description Malformed body, asset tag, label, address text, or a start the backfill policy refuses */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1174,7 +1184,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description The address is already an active wallet, an archived wallet of it holds another key, or the asset's network is being rescanned */
+            /** @description The address is already an active or archived wallet, an unobserved row of it holds another key, or the asset's network is being rescanned */
             409: {
                 headers: {
                     [name: string]: unknown;

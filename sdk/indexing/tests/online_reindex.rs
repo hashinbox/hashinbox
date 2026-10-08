@@ -1,6 +1,6 @@
 //! The online rescan of one network, on both shipped stores.
 //!
-//! The quiesced flow `indexing::Purging` and `indexing::SyncControl` state:
+//! The quiesced flow `indexing::IndexStore::purge` and `indexing::Control` state:
 //! pause the network, purge it, reset its indexer, resume it — while another
 //! network in the same repository keeps syncing. What it proves is what the
 //! window owes: the network re-derives from its earliest registered birthday,
@@ -8,19 +8,20 @@
 //! authoritative empty answer, and a restart inside the window resumes scanning
 //! without a second purge.
 
+mod rows;
+
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use base::Decimal;
 use indexing::{
-    Address, AssetId, Balance, BalanceQuery, BalanceStore, BlockHeight, BlockPosition, BlockRef,
-    ChainName, Completeness, ConfirmedHistory, ConfirmedHistoryPage, HistoryQuery, Index,
-    IndexError, IndexErrorKind, IndexedOutput, Indexer, Indexing, MovementId, Network,
-    OutputChanges, OutputId, OutputPage, OutputRequest, OutputStore, Page, PurgedRows, Purging,
-    Repository, RescanError, Schedules, Status, Subject, Supervisor, SyncConfig, SyncControl,
-    SyncMonitor, SyncPolicy, SyncReport, Transaction, TransactionRef, ValueMovement, Watch,
-    WatchProgress, memory, sqlite,
+    Address, AssetId, BlockHeight, BlockPosition, BlockRef, Budget, ChainName, Config, Control,
+    IndexError, IndexErrorKind, IndexStore, IndexedBatch, IndexedOutput, OutputKey, Indexer, Indexers, Indexing, Monitor, MovementId,
+    Network, OutputChanges, OutputId, OutputPage, OutputRequest, OutputStore, PurgedRows,
+    Report, Repository, RescanError, Schedules, Status, Subject, Supervisor, Transaction,
+    TransactionRef, ValueMovement, Watch, WatchProgress, memory, sqlite,
     testing::{Chain, block},
 };
+use rows::Rows as Reader;
 use tempfile::TempDir;
 use tokio::{sync::watch, task::JoinHandle};
 
@@ -123,28 +124,24 @@ fn pay(chain: &Chain, height: BlockHeight, order: u64, address: &Address) {
 }
 
 /// What a store must answer for this scenario: the minimum, the purge, and the
-/// three reads whose honesty inside the window is the point.
-trait Store:
-    Repository + Purging + OutputStore + ConfirmedHistory + BalanceStore + Clone + 'static
-{
-}
+/// spendable set whose honesty inside the window is the point.
+trait Store: Repository + OutputStore + Clone + 'static {}
 
-impl<T> Store for T where
-    T: Repository + Purging + OutputStore + ConfirmedHistory + BalanceStore + Clone + 'static
-{
-}
+impl<T> Store for T where T: Repository + OutputStore + Clone + 'static {}
 
 type Unit<R> = Indexer<Chain, Chain, R>;
 
 /// Both networks over one repository, supervised.
 struct Running<R: Store> {
     repository: R,
+    /// The file's own rows, when the store is a file.
+    reader: Option<Reader>,
     reindexed: Arc<Unit<R>>,
     /// The two chains, which record what each block was inspected for: where
     /// a rescan started is invisible from the store.
     reindexed_chain: Chain,
     elsewhere_chain: Chain,
-    control: SyncControl,
+    control: Control,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -152,10 +149,10 @@ struct Running<R: Store> {
 impl<R: Store> Running<R> {
     /// Supervises both networks of `repository`; the rescanned one starts
     /// paused when `paused`, as an application restores a persisted pause.
-    fn start(repository: R, paused: bool) -> Self {
+    fn start(repository: R, reader: Option<Reader>, paused: bool) -> Self {
         let unit = |network: Network| {
             let chain = chain(&network);
-            let config = SyncConfig::new(&network, SyncPolicy::new(100)).expect("sync config");
+            let config = Config::new(&network, Budget::new(100)).expect("sync config");
             let unit = Arc::new(Indexer::new(
                 chain.clone(),
                 chain.clone(),
@@ -167,12 +164,12 @@ impl<R: Store> Running<R> {
         let (rescanned, reindexed_chain) = unit(reindexed());
         let (other, elsewhere_chain) = unit(elsewhere());
         let units: Vec<Arc<dyn Indexing>> = vec![rescanned.clone(), other];
-        let index = Arc::new(Index::of(units).expect("disjoint networks"));
-        let (report, _readiness) = SyncReport::watching(index.networks());
+        let index = Arc::new(Indexers::of(units).expect("disjoint networks"));
+        let (report, _readiness) = Report::watching(index.networks());
         let supervisor = Supervisor::new(
             index,
             Schedules::every(Duration::from_millis(1)),
-            report as Arc<dyn SyncMonitor>,
+            report as Arc<dyn Monitor>,
         );
         let control = supervisor.control();
         if paused {
@@ -181,6 +178,7 @@ impl<R: Store> Running<R> {
         let (stop, shutdown) = watch::channel(false);
         Self {
             repository,
+            reader,
             reindexed: rescanned,
             reindexed_chain,
             elsewhere_chain,
@@ -214,14 +212,16 @@ impl<R: Store> Running<R> {
         self.task.await.expect("the supervisor ends cleanly");
     }
 
-    async fn history(&self, network: &Network, address: &str) -> ConfirmedHistoryPage {
-        let query = HistoryQuery::new(&subject(network, address), Page::first(100));
-        self.repository.history(query).await.expect("history")
+    async fn history(&self, network: &Network, address: &str) -> Option<Vec<String>> {
+        let reader = self.reader.as_ref()?;
+        let of = subject(network, address);
+        Some(reader.history(&of.address, &of.asset, 100).await)
     }
 
-    async fn balance(&self, network: &Network, address: &str) -> Balance {
-        let query = BalanceQuery::new(&subject(network, address));
-        self.repository.balance(query).await.expect("balance")
+    async fn balance(&self, network: &Network, address: &str) -> Option<Decimal> {
+        let reader = self.reader.as_ref()?;
+        let of = subject(network, address);
+        Some(reader.settled(&of.address, &of.asset).await)
     }
 
     async fn outputs(&self, network: &Network, address: &str) -> Result<OutputPage, IndexError> {
@@ -238,13 +238,12 @@ impl<R: Store> Running<R> {
     }
 
     /// Everything a read can see of one network, to compare across the window.
-    async fn rows(&self, network: &Network, address: &str) -> Rows {
-        let history = self.history(network, address).await;
-        Rows {
+    async fn rows(&self, network: &Network, address: &str) -> Snapshot {
+        Snapshot {
             checkpoint: self.repository.checkpoint(network).await.expect("tip"),
             progress: self.repository.all(network).await.expect("observations"),
-            history: ids(&history),
-            amount: self.balance(network, address).await.amount,
+            history: self.history(network, address).await,
+            amount: self.balance(network, address).await,
             outputs: self
                 .outputs(network, address)
                 .await
@@ -256,13 +255,16 @@ impl<R: Store> Running<R> {
     /// The reads inside the window: nothing is served as authoritative.
     async fn assert_window(&self) {
         let network = reindexed();
-        let page = self.history(&network, "early").await;
-        assert!(page.transactions.is_empty());
-        assert_eq!(page.checkpoint, None, "the page claims no line");
-        assert_eq!(page.completeness, Completeness::Incomplete);
-        let balance = self.balance(&network, "early").await;
-        assert_eq!(balance.observed_at, None);
-        assert_eq!(balance.completeness, Completeness::Incomplete);
+        assert_eq!(
+            self.repository.checkpoint(&network).await.expect("tip"),
+            None,
+            "the stored rows claim no line"
+        );
+        assert!(
+            self.history(&network, "early")
+                .await
+                .is_none_or(|history| history.is_empty())
+        );
         let refused = self
             .outputs(&network, "early")
             .await
@@ -297,49 +299,55 @@ impl<R: Store> Running<R> {
     }
 }
 
+/// Everything a read can see of one network; the stored history and total
+/// only where the store is a file whose rows can be read.
 #[derive(Debug, PartialEq)]
-struct Rows {
+struct Snapshot {
     checkpoint: Option<BlockRef>,
     progress: Vec<WatchProgress>,
-    history: Vec<String>,
-    amount: Decimal,
+    history: Option<Vec<String>>,
+    amount: Option<Decimal>,
     outputs: Vec<IndexedOutput>,
 }
 
-fn ids(page: &ConfirmedHistoryPage) -> Vec<String> {
-    page.transactions
-        .iter()
-        .map(|entry| entry.id.id.to_string())
-        .collect()
-}
-
 /// Registers the observations, then indexes both networks to the tip.
-async fn indexed<R: Store>(repository: R) -> Running<R> {
+async fn indexed<R: Store>(repository: R, reader: Option<Reader>) -> Running<R> {
     // One batch per network: a registration batch is one network's.
     for watch in watches() {
         repository.add(vec![watch]).await.expect("registered");
     }
-    let running = Running::start(repository, false);
+    let running = Running::start(repository, reader, false);
     running.settles(&reindexed()).await;
     running.settles(&elsewhere()).await;
     running
 }
 
 /// Pause → purge → reset → resume, with the other network running throughout.
-async fn online_reindex<R: Store>(repository: R) {
-    let running = indexed(repository).await;
+async fn online_reindex<R: Store>(repository: R, reader: Option<Reader>) {
+    let running = indexed(repository, reader).await;
     let early = running.rows(&reindexed(), "early").await;
     let late = running.rows(&reindexed(), "late").await;
     let other = running.rows(&elsewhere(), "other").await;
-    assert_eq!(early.history.len(), 6, "blocks 3 through 8");
-    assert_eq!(late.history.len(), 4, "blocks 5 through 8");
+    assert!(
+        early
+            .history
+            .as_ref()
+            .is_none_or(|history| history.len() == 6),
+        "blocks 3 through 8"
+    );
+    assert!(
+        late.history
+            .as_ref()
+            .is_none_or(|history| history.len() == 4),
+        "blocks 5 through 8"
+    );
     let other_inspections = running.elsewhere_chain.inspections();
 
     running.control.pause(&reindexed()).await.expect("paused");
     let rescan = running.reindexed_chain.inspections().len();
     let removed = running
         .repository
-        .purge_network(&reindexed())
+        .purge(&reindexed())
         .await
         .expect("purged online");
     assert_eq!(removed.history, 10);
@@ -378,8 +386,8 @@ async fn online_reindex<R: Store>(repository: R) {
 
 /// The same window as one operation of the controller: what it leaves
 /// behind is what the steps written out leave.
-async fn rescan_operation<R: Store>(repository: R) {
-    let running = indexed(repository).await;
+async fn rescan_operation<R: Store>(repository: R, reader: Option<Reader>) {
+    let running = indexed(repository, reader).await;
     let early = running.rows(&reindexed(), "early").await;
     let other = running.rows(&elsewhere(), "other").await;
     let other_inspections = running.elsewhere_chain.inspections();
@@ -403,8 +411,8 @@ async fn rescan_operation<R: Store>(repository: R) {
 /// A purge that fails changes nothing and resumes the network; one that
 /// "succeeds" without removing the checkpoint stops the window after it, at
 /// the reset, and leaves the network paused for another rescan to finish.
-async fn a_rescan_reports_where_it_stopped<R: Store>(repository: R) {
-    let running = indexed(repository).await;
+async fn a_rescan_reports_where_it_stopped<R: Store>(repository: R, reader: Option<Reader>) {
+    let running = indexed(repository, reader).await;
     let refused = running
         .control
         .rescan(running.reindexed.as_ref(), &Purge::Fails)
@@ -464,8 +472,22 @@ enum Purge {
     Keeps,
 }
 
-impl Purging for Purge {
-    fn purge_network<'a>(
+impl IndexStore for Purge {
+    fn checkpoint<'a>(
+        &'a self,
+        _network: &'a Network,
+    ) -> base::BoxFuture<'a, Result<Option<BlockRef>, IndexError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn commit<'a>(
+        &'a self,
+        _batch: IndexedBatch,
+    ) -> base::BoxFuture<'a, Result<Vec<OutputKey>, IndexError>> {
+        Box::pin(async { Err(IndexError::new(IndexErrorKind::Store, "purge-only double", false)) })
+    }
+
+    fn purge<'a>(
         &'a self,
         _network: &'a Network,
     ) -> base::BoxFuture<'a, Result<PurgedRows, IndexError>> {
@@ -480,19 +502,23 @@ impl Purging for Purge {
 
 /// A process that stops after the purge and before the resume restarts into
 /// the same honest window and finishes by scanning, not by purging again.
-async fn restart_inside_the_window<R: Store, F: Future<Output = R>>(open: impl Fn() -> F) {
-    let running = indexed(open().await).await;
+async fn restart_inside_the_window<R: Store, F: Future<Output = (R, Option<Reader>)>>(
+    open: impl Fn() -> F,
+) {
+    let (repository, reader) = open().await;
+    let running = indexed(repository, reader).await;
     let early = running.rows(&reindexed(), "early").await;
     let other = running.rows(&elsewhere(), "other").await;
     running.control.pause(&reindexed()).await.expect("paused");
     running
         .repository
-        .purge_network(&reindexed())
+        .purge(&reindexed())
         .await
         .expect("purged online");
     running.shut_down().await;
 
-    let restarted = Running::start(open().await, true);
+    let (repository, reader) = open().await;
+    let restarted = Running::start(repository, reader, true);
     restarted.assert_window().await;
     assert!(
         restarted
@@ -538,11 +564,12 @@ impl File {
         }
     }
 
-    async fn open(&self) -> sqlite::Repository {
+    async fn open(&self) -> (sqlite::Repository, Option<Reader>) {
         let database = sqlite::Database::open(&self.path)
             .await
             .expect("sqlite database");
-        sqlite::Repository::new(database)
+        let reader = Reader::new(database.pool().clone());
+        (sqlite::Repository::new(database), Some(reader))
     }
 }
 
@@ -554,17 +581,17 @@ mod memory_store {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_rescan_operation_rederives_from_the_earliest_birthday() {
-        rescan_operation(memory::Repository::new()).await;
+        rescan_operation(memory::Repository::new(), None).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_rescan_says_whether_the_network_is_paused() {
-        a_rescan_reports_where_it_stopped(memory::Repository::new()).await;
+        a_rescan_reports_where_it_stopped(memory::Repository::new(), None).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pause_purge_reset_resume_rederives_from_the_earliest_birthday() {
-        online_reindex(memory::Repository::new()).await;
+        online_reindex(memory::Repository::new(), None).await;
     }
 
     /// The map outlives the process it stands in for; what is checked is that
@@ -572,7 +599,7 @@ mod memory_store {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_restart_inside_the_window_resumes_without_purging_again() {
         let repository = memory::Repository::new();
-        restart_inside_the_window(|| std::future::ready(repository.clone())).await;
+        restart_inside_the_window(|| std::future::ready((repository.clone(), None))).await;
     }
 }
 
@@ -584,17 +611,23 @@ mod sqlite_store {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_rescan_operation_rederives_from_the_earliest_birthday() {
-        rescan_operation(File::new().open().await).await;
+        let file = File::new();
+        let (repository, reader) = file.open().await;
+        rescan_operation(repository, reader).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_rescan_says_whether_the_network_is_paused() {
-        a_rescan_reports_where_it_stopped(File::new().open().await).await;
+        let file = File::new();
+        let (repository, reader) = file.open().await;
+        a_rescan_reports_where_it_stopped(repository, reader).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pause_purge_reset_resume_rederives_from_the_earliest_birthday() {
-        online_reindex(File::new().open().await).await;
+        let file = File::new();
+        let (repository, reader) = file.open().await;
+        online_reindex(repository, reader).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

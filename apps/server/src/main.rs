@@ -11,6 +11,8 @@
 //! online; both are routes (`api`) over handles composed here.
 
 mod api;
+#[cfg(test)]
+mod app;
 mod asset;
 mod chains;
 mod config;
@@ -29,7 +31,7 @@ use api::networks::{LiveNetwork, Rejected, Verifier};
 use asset::AssetTag;
 use base::Network;
 use config::{AnyError, Config};
-use indexing::{Supervisor, SyncReport};
+use indexing::{Report, Supervisor};
 use models::{RpcEndpoints, Signers};
 use sdk_config::{ChainNodes, Chains, ErrorKind};
 use state::AppState;
@@ -42,7 +44,7 @@ const VERIFICATION: Duration = Duration::from_secs(30);
 
 /// Every way the binary may be invoked; every refusal of an argument prints it.
 pub(crate) const USAGE: &str = "usage: payment-server serve <config.toml> \
-                                [--rescan <chain>/<network> | --cancel-backfill <chain>/<network>] \
+                                [--rescan <chain>/<network>] \
                                 | payment-server migrate <config.toml> | payment-server --openapi";
 
 /// The command line.
@@ -63,7 +65,7 @@ enum Command {
     Serve {
         /// The configuration document.
         config: PathBuf,
-        /// `--rescan <chain>/<network>` or `--cancel-backfill <chain>/<network>`.
+        /// `--rescan <chain>/<network>`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         operation: Vec<OsString>,
     },
@@ -144,7 +146,7 @@ async fn main() -> Result<(), AnyError> {
     let networks = live(&startup.networks, endpoints);
 
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let (report, readiness) = SyncReport::watching(composition.index.networks());
+    let (report, readiness) = Report::watching(composition.index.networks());
     let supervisor = Supervisor::new(
         composition.index.clone(),
         composition.schedules,
@@ -157,8 +159,7 @@ async fn main() -> Result<(), AnyError> {
         pool,
         registry,
         index: composition.index,
-        history: composition.history,
-        balance: composition.balance,
+        pending: composition.pending.into(),
         health: readiness.receiver(),
         networks,
         verify: verifier(startup.networks, Arc::new(config::Environment)),
@@ -333,8 +334,8 @@ mod tests {
     use base::{BoxFuture, ChainName};
     use http_body_util::BodyExt as _;
     use indexing::{
-        Address, AssetId, IndexStore as _, Indexer, Indexing, PendingJoin, SyncConfig, SyncPolicy,
-        WalletRegistry as _, Watch, WatchStore as _, testing,
+        Address, AssetId, Budget, Config, IndexStore as _, Indexer, Indexing, WalletRegistry as _,
+        Watch, WatchStore as _, testing,
     };
     use json_rpc::{Client as _, Request, Secrets, Statistics, Swap};
     use sdk_config::ComposedChain;
@@ -438,16 +439,13 @@ mod tests {
                     .lock()
                     .expect("the lines")
                     .insert(self.line.clone(), line.clone());
-                let config = SyncConfig::new(&self.network, SyncPolicy::new(100))?;
-                let indexer =
-                    Arc::new(Indexer::new(line.clone(), line, repository.clone(), config));
-                let join = Arc::new(PendingJoin::new(repository, indexer.clone()));
+                let config = Config::new(&self.network, Budget::new(100))?;
+                let indexer = Arc::new(Indexer::new(line.clone(), line, repository, config));
                 let tag: AssetTag = self.network.name.parse().expect("a tag");
                 let factory = wallets::testing::Factory::new(self.network.clone());
                 Ok(ComposedChain {
+                    pending: indexer.clone(),
                     index: indexer as Arc<dyn Indexing>,
-                    history: join.clone(),
-                    balance: join,
                     factories: vec![(tag, Box::new(factory) as Box<dyn wallets::WalletFactory>)],
                     units: std::iter::once((
                         (
@@ -602,7 +600,7 @@ mod tests {
             let signers = Signers::load(registry.as_ref(), &wallets, composition.index.networks())
                 .await
                 .expect("loaded");
-            let (report, readiness) = SyncReport::watching(composition.index.networks());
+            let (report, readiness) = Report::watching(composition.index.networks());
             let supervisor =
                 Supervisor::new(composition.index.clone(), composition.schedules, report);
             let state = AppState {
@@ -612,8 +610,7 @@ mod tests {
                 pool,
                 registry,
                 index: composition.index,
-                history: composition.history,
-                balance: composition.balance,
+                pending: composition.pending.into(),
                 health: readiness.receiver(),
                 networks: live(&startup.networks, endpoints),
                 verify: verifier(startup.networks, self.secrets.clone()),

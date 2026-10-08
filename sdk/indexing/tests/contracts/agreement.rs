@@ -1,17 +1,15 @@
 //! Where the two shipped stores used to answer the same call differently.
 //!
-//! Split from `watch.rs` by role, as `reanchor.rs` is: one file per guarantee
-//! under the repository's 500-line cap. Every scenario here is one the stores
-//! once disagreed on — the map-backed one withdrew by the `(asset, address)`
-//! pair while the file deleted by identity, a re-anchor moved an identity onto
-//! another pair in one store and re-dated the other pair's row in the other,
-//! and the same conflicting definition was retryable in one place and terminal
+//! Split from `watch.rs` by role: one file per guarantee under the
+//! repository's 500-line cap. Every scenario here is one the stores once
+//! disagreed on — the map-backed one withdrew by the `(asset, address)` pair
+//! while the file deleted by identity, and the same conflicting definition was retryable in one place and terminal
 //! in another.
 //!
 //! **One rule decides all of them: a row has two names, its identity and its
 //! `(address, asset)` pair, and no call may move one name onto a row the other
-//! name does not also select.** Withdrawal is by identity; a definition or
-//! re-anchor naming a row by only one of the two is refused, and refused for
+//! name does not also select.** Withdrawal is by identity; a definition
+//! naming a row by only one of the two is refused, and refused for
 //! good — the stored row is the caller's own earlier registration, not a race,
 //! so retrying can only be refused again.
 
@@ -72,78 +70,6 @@ impl<R: WatchStore + IndexStore> WatchContract<'_, R> {
             [foreign],
             "the other network's row is untouched",
         );
-    }
-
-    /// A re-anchor of an identity held under another `(address, asset)` pair
-    /// is refused for good, and moves and re-dates nothing.
-    pub async fn refuses_to_move_an_identity_to_another_pair(&self) {
-        let mine = self.watch("mine", "native", "a", 1);
-        self.add(vec![mine.clone()]).await;
-        let recorded = self.record(std::slice::from_ref(&mine)).await;
-        let held = [WatchProgress {
-            watch: mine.clone(),
-            indexed_through: Some(recorded),
-        }];
-
-        for moved in [
-            self.watch("mine", "native", "b", 20),
-            self.watch("mine", "0xtoken", "a", 20),
-        ] {
-            let error = self
-                .repository
-                .cancel_backfill(vec![moved])
-                .await
-                .expect_err("a re-anchor onto a pair the identity does not hold");
-            Self::refused_for_good(&error);
-            assert_eq!(
-                self.stored().await,
-                held,
-                "the held row kept its pair, birthday and progress, and no \
-                 second row appeared",
-            );
-        }
-    }
-
-    /// A re-anchor onto a pair another identity holds is refused for good.
-    pub async fn refuses_a_reanchor_onto_a_taken_pair_for_good(&self) {
-        let mine = self.watch("mine", "native", "a", 1);
-        let theirs = self.watch("theirs", "native", "b", 1);
-        self.add(vec![mine.clone(), theirs.clone()]).await;
-
-        let error = self
-            .repository
-            .cancel_backfill(vec![Watch {
-                address: theirs.address.clone(),
-                ..mine.clone()
-            }])
-            .await
-            .expect_err("a re-anchor onto an address another observation holds");
-
-        Self::refused_for_good(&error);
-        assert_eq!(self.watches().await, [mine, theirs]);
-    }
-
-    /// A re-anchor of an identity another network holds is refused for good,
-    /// and leaves that network's row where it was.
-    pub async fn refuses_a_reanchor_of_another_networks_identity(&self) {
-        let foreign = self.foreign("shared");
-        self.repository
-            .add(vec![foreign.clone()])
-            .await
-            .expect("the other network's observation");
-
-        let error = self
-            .repository
-            .cancel_backfill(vec![Watch {
-                id: foreign.id.clone(),
-                ..self.watch("ignored", "native", "a", 20)
-            }])
-            .await
-            .expect_err("an identity another network holds");
-
-        Self::refused_for_good(&error);
-        assert!(self.stored().await.is_empty(), "nothing was added here");
-        assert_eq!(self.elsewhere_watches().await, [foreign]);
     }
 
     /// Every conflicting definition `add` refuses is refused for good: an

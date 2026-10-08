@@ -471,16 +471,6 @@ mod tests {
         }
     }
 
-    impl indexing::History for InactiveDependencies {
-        fn history<'a>(
-            &'a self,
-            _of: &'a dyn indexing::Holder,
-            _page: indexing::Page,
-        ) -> BoxFuture<'a, Result<indexing::TransactionPage, IndexError>> {
-            Box::pin(async { unreachable!("wallet generation must not read indexed history") })
-        }
-    }
-
     impl indexing::Checkpoint for InactiveDependencies {
         fn checkpoint<'a>(
             &'a self,

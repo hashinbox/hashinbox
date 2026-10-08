@@ -33,6 +33,8 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 zeroize.workspace = true
 
 [dev-dependencies]
+# Exact signed nets of interpreted blocks (`indexing::Net`).
+num-bigint.workspace = true
 futures-executor.workspace = true
 # The reference Ed25519 implementation Solana itself ships: tests assert that
 # `crypto::KeyPair` signs the same bytes. Production signing never links it.

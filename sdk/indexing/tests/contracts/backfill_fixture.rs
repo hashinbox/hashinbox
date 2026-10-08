@@ -4,15 +4,14 @@
 use base::Decimal;
 
 use indexing::{
-    AssetId, BalanceQuery, BalanceStore, BlockCredit, BlockHeight, BlockPosition, BlockRef,
-    BlockWithOutputs, ConfirmedHistory, FeeSettlement, IndexedBatch, IndexedOutput, MovementId,
-    OutputChanges, OutputId, OutputKey, OutputStore, Progress, Repository, Status, Transaction,
-    ValueMovement, Watch,
+    AssetId, BlockCredit, BlockHeight, BlockPosition, BlockRef, BlockWithOutputs, FeeSettlement,
+    IndexedBatch, IndexedOutput, MovementId, OutputChanges, OutputId, OutputKey, OutputStore,
+    Progress, Repository, Status, Transaction, ValueMovement, Watch,
 };
 
 use super::backfill::BackfillContract;
 
-impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillContract<'_, R> {
+impl<R: OutputStore + Repository> BackfillContract<'_, R> {
     /// Commits one batch of `[from, to]` under the current checkpoint, expecting
     /// whatever progress the store actually holds.
     pub(super) async fn filled(&self, from: BlockPosition, to: BlockPosition) {
@@ -163,17 +162,10 @@ impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillCont
         }
     }
 
-    /// The settled balance of `late`, under an account chain's fee rule.
-    pub(super) async fn settled(&self) -> Decimal {
-        self.fixture
-            .repository
-            .balance(BalanceQuery {
-                address: self.fixture.address("late"),
-                asset: self.asset(),
-            })
-            .await
-            .expect("the folded balance")
-            .amount
+    /// The settled balance of `late`, under an account chain's fee rule, when
+    /// the store's rows can be read.
+    pub(super) async fn settled(&self) -> Option<Decimal> {
+        self.fixture.settled("late", &self.asset()).await
     }
 
     pub(super) fn draft(&self, height: u64) -> Transaction {
@@ -213,7 +205,7 @@ impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillCont
         }
     }
 
-    pub(super) async fn history(&self, address: &str) -> Vec<String> {
+    pub(super) async fn history(&self, address: &str) -> Option<Vec<String>> {
         self.fixture.history(address, &self.asset(), 50).await
     }
 

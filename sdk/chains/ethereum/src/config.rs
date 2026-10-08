@@ -17,37 +17,13 @@ use sdk_config::{ComposedChain, Connection};
 use serde::{Deserialize, de};
 use wallets::SubmissionRegistrar;
 
-/// What a store must answer for **this** chain to compose over it.
-///
-/// [`indexing::Repository`] is the minimum any index needs — registration and
-/// committing — and the rest is what this chain's own consumers read: the
-/// balance fold, and the repository's own history query
-/// ([`indexing::ConfirmedHistory`]) that this chain joins to its overlay so
-/// `apps/server` can project a page and its sender can prove a transaction absent.
-/// A trait bound, never a backend: this file names no store implementation. No
-/// [`indexing::OutputStore`]: an account chain produces no UTXO records, and
-/// asking for one would make a store carry a table it can never fill.
-pub trait Store:
-    indexing::Repository
-    + indexing::BalanceStore
-    + indexing::ConfirmedHistory
-    + Clone
-    + Send
-    + Sync
-    + 'static
-{
-}
+/// What a store must answer for **this** chain to compose over it:
+/// [`indexing::Repository`], the minimum any index needs — registration and
+/// committing. A trait bound, never a backend.
+pub trait Store: indexing::Repository + Clone + Send + Sync + 'static {}
 
-impl<R> Store for R where
-    R: indexing::Repository
-        + indexing::BalanceStore
-        + indexing::ConfirmedHistory
-        + Clone
-        + Send
-        + Sync
-        + 'static
-{
-}
+impl<R> Store for R where R: indexing::Repository + Clone + Send + Sync + 'static {}
+
 /// The shell every chain's configuration shares, from `sdk/config`: the nodes
 /// and their repetition, the cadence this chain indexes at, and the
 /// registration hook that lets a document hand this file its own section.
@@ -306,17 +282,9 @@ impl<A> ChainHandle<A> {
             factories.push((token.asset, Box::new(eth.sibling(settings)?)));
         }
         factories.insert(0, (config.asset, Box::new(eth)));
-        // The repository's own confirmed pages and balance fold, each
-        // completed by the blocks this index holds above its confirmed line.
-        // Ethereum's own wallets read neither; `apps/server` does, and a chain
-        // is the place holding both halves of one network's answer: the rows
-        // are the store's, the pending blocks are the index's, and the index
-        // answers no query itself.
-        let reads = Arc::new(indexing::PendingJoin::new(repository, indexer.clone()));
         Ok(ComposedChain {
+            pending: indexer.clone(),
             index: indexer,
-            history: reads.clone(),
-            balance: reads,
             factories,
             units,
             poll: config.cadence.poll,
@@ -646,7 +614,7 @@ mod tests {
 
         let mut config: Config<String> = serde_json::from_value(section(None)).unwrap();
         config.rpc.endpoints.clear();
-        config.cadence.policy = indexing::SyncPolicy::new(0);
+        config.cadence.policy = indexing::Budget::new(0);
         assert_eq!(
             config.validate().unwrap_err().message,
             "invalid database or RPC configuration"

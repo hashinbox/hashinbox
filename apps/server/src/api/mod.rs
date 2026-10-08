@@ -148,7 +148,7 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
 
-    use super::harness::{App, Reply};
+    use crate::app::{App, Reply};
 
     use super::*;
 
@@ -181,7 +181,6 @@ mod tests {
             "AssetList",
             "Backfill",
             "Balance",
-            "Completeness",
             "BatchAccepted",
             "BatchedTransfer",
             "Block",
@@ -660,8 +659,6 @@ mod tests {
         }
     }
 }
-
-mod harness;
 
 /// The body of every error response: `message` is always present, the
 /// submission fields only when they are truthfully known.

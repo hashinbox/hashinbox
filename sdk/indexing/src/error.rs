@@ -1,3 +1,5 @@
+//! **Contract.**
+//!
 //! The two indexing failures and their classification: `SourceError` (a
 //! `BlockSource` could not answer) and `IndexError` / `IndexErrorKind` (every
 //! other indexing failure). `retryable` is what the supervisor acts on, and

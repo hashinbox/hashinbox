@@ -31,14 +31,14 @@ enum IndexState {
     Quarantined,
 }
 
-impl From<indexing::NetworkState> for IndexState {
-    fn from(value: indexing::NetworkState) -> Self {
+impl From<indexing::Condition> for IndexState {
+    fn from(value: indexing::Condition) -> Self {
         match value {
-            indexing::NetworkState::Paused => Self::Paused,
-            indexing::NetworkState::CatchingUp => Self::CatchingUp,
-            indexing::NetworkState::Ready => Self::Ready,
-            indexing::NetworkState::Retrying => Self::Retrying,
-            indexing::NetworkState::Quarantined => Self::Quarantined,
+            indexing::Condition::Paused => Self::Paused,
+            indexing::Condition::CatchingUp => Self::CatchingUp,
+            indexing::Condition::Ready => Self::Ready,
+            indexing::Condition::Retrying => Self::Retrying,
+            indexing::Condition::Quarantined => Self::Quarantined,
         }
     }
 }
@@ -62,7 +62,7 @@ struct IndexFailure {
 
 impl IndexFailure {
     /// Why `indexed`'s forward synchronization is failing, when it is.
-    fn of(indexed: &indexing::NetworkHealth) -> Option<Self> {
+    fn of(indexed: &indexing::Health) -> Option<Self> {
         Self::reported(indexed, indexed.failure.as_ref())
     }
 
@@ -70,7 +70,7 @@ impl IndexFailure {
     /// time it entered its state: both are facts about the network, and a
     /// backfill failure is counted into exactly the same attempts.
     fn reported(
-        indexed: &indexing::NetworkHealth,
+        indexed: &indexing::Health,
         failure: Option<&indexing::IndexError>,
     ) -> Option<Self> {
         failure.map(|failure| Self {
@@ -106,7 +106,7 @@ impl IndexFailure {
 /// would otherwise hold `ready` at false for the life of the process while
 /// forward indexing answered every question a client actually asks. The range
 /// is published here, and the reads it weakens say so themselves through their
-/// own `completeness`.
+/// own `behind`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 struct Backfill {
     /// How many watched addresses still owe history below their registration.
@@ -127,7 +127,7 @@ struct Backfill {
 
 impl Backfill {
     /// What `indexed` still owes, when it owes anything.
-    fn of(indexed: &indexing::NetworkHealth) -> Option<Self> {
+    fn of(indexed: &indexing::Health) -> Option<Self> {
         let status = indexed.status.backfill.as_ref()?;
         Some(Self {
             pending: u64::try_from(status.pending).unwrap_or(u64::MAX),
@@ -308,12 +308,12 @@ async fn read(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadRespo
 
 #[cfg(test)]
 mod tests {
-    use indexing::{BlockPosition, IndexError, IndexErrorKind, NetworkState, SyncHealth};
+    use indexing::{BlockPosition, Condition, IndexError, IndexErrorKind, SyncHealth};
     use serde_json::{Value, json};
 
     use super::*;
     use crate::api::emits_required;
-    use crate::api::harness::App;
+    use crate::app::App;
 
     #[test]
     fn status_rows_require_exactly_what_they_emit() {
@@ -366,7 +366,7 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
 
-        app.publish(App::health(NetworkState::Ready));
+        app.publish(App::health(Condition::Ready));
 
         assert_eq!(
             app.call("GET", "/health", None, false).await.status,
@@ -377,8 +377,8 @@ mod tests {
     #[tokio::test]
     async fn one_quarantined_network_keeps_the_others_ready_and_reports_its_failure() {
         let app = App::ready().await;
-        let mut quarantined = App::health(NetworkState::Ready);
-        quarantined.apply(&App::reported(&App::solana(), NetworkState::Quarantined));
+        let mut quarantined = App::health(Condition::Ready);
+        quarantined.apply(&App::reported(&App::solana(), Condition::Quarantined));
         app.publish(quarantined);
 
         assert_eq!(
@@ -406,7 +406,7 @@ mod tests {
         );
         assert_eq!(networks[1]["checkpoint"]["height"], 8);
 
-        app.publish(App::health(NetworkState::Quarantined));
+        app.publish(App::health(Condition::Quarantined));
         assert_eq!(
             app.call("GET", "/health", None, false).await.status,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -443,7 +443,7 @@ mod tests {
         assert_eq!(networks[0]["checkpoint"]["height"], 8);
         assert_eq!(networks[0]["state"], "catching_up");
         assert_eq!(networks[0]["failure"], Value::Null);
-        app.publish(App::health(NetworkState::Ready));
+        app.publish(App::health(Condition::Ready));
         let status = app.call("GET", "/health", None, true).await.json();
         assert_eq!(status["ready"], true);
     }
@@ -576,9 +576,9 @@ mod tests {
         let networks = [App::bitcoin(), App::solana(), App::ethereum()];
         let mut health = SyncHealth::starting(&networks);
         for each in &networks {
-            let mut row = App::reported(each, NetworkState::Ready);
+            let mut row = App::reported(each, Condition::Ready);
             if *each == App::bitcoin() {
-                row.status.backfill = Some(indexing::BackfillStatus {
+                row.status.backfill = Some(indexing::Backlog {
                     pending: 1,
                     resume: BlockPosition(2),
                     anchor: BlockPosition(8),

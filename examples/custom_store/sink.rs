@@ -20,9 +20,7 @@
 //! implements every port for `Arc<T>` by forwarding.
 //!
 //! Atomicity is expressed the one way a map-backed store can: a write mutates a
-//! copy and installs it, so a refused write leaves every row as it was — and a
-//! re-anchor, which is a withdrawal and a registration in one, is never seen
-//! half done.
+//! copy and installs it, so a refused write leaves every row as it was.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -161,16 +159,6 @@ impl WatchStore for Sink {
             })
         })
     }
-
-    fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
-        Box::pin(async move {
-            Self::one_network(&watches)?;
-            // The withdrawal and the registration are staged together and
-            // installed once, so no reader ever sees the store without the row
-            // and no crash can leave the address unwatched.
-            self.apply(|rows| Self::renewed(rows, &watches))
-        })
-    }
 }
 
 impl Sink {
@@ -240,15 +228,6 @@ impl Sink {
                 Ok(())
             }
         }
-    }
-
-    /// Every observation of the batch at the birthday it now carries, with the
-    /// claim it earned under the old one gone.
-    fn renewed(rows: &mut Rows, watches: &[Watch]) -> Result<(), IndexError> {
-        for watch in watches {
-            Self::withdraw(rows, watch);
-        }
-        Self::accept(rows, watches)
     }
 
     /// Removes one observation, and the progress it earned.

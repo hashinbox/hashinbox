@@ -14,13 +14,14 @@ use std::{
 use futures_executor::block_on;
 use indexing::{
     Address, Birthday, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, BlockSource,
-    BlockWithOutputs, BoxFuture, ChainName, ChainTips, Checkpoint, ConfirmedHistory,
-    ConfirmedHistoryPage, ForwardRange, HistoryQuery, IndexError, IndexErrorKind, IndexStore,
-    IndexedOutput, Indexer, Indexing, NativeBlock, Network, OutputChanges, OutputId, OutputKey,
-    Pending, Purging, Subject, SyncConfig, SyncPhase, SyncPolicy, SyncStatus, TransactionRef,
-    Watching, memory,
+    BlockWithOutputs, BoxFuture, Budget, ChainName, ChainTips, Checkpoint, Checkpointed, Config,
+    ForwardRange, IndexError, IndexErrorKind, IndexStore, IndexedOutput, Indexer, Indexing,
+    NativeBlock, Network, Outcome, OutputChanges, OutputId, OutputKey, Pending, Phase,
+    Subject, TransactionRef, Watching, memory, sqlite,
     testing::{Chain, Fault, Request, block},
 };
+
+mod rows;
 
 #[derive(Clone, Default)]
 struct Repository {
@@ -125,6 +126,30 @@ impl indexing::IndexStore for Repository {
             Ok(unmatched_spends)
         })
     }
+
+    /// The offline rescan: everything indexing owns for the network goes, and
+    /// the observations stay.
+    fn purge<'a>(
+        &'a self,
+        _network: &'a Network,
+    ) -> BoxFuture<'a, Result<indexing::PurgedRows, IndexError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().expect("repository state");
+            let removed = indexing::PurgedRows {
+                checkpoint: u64::from(state.checkpoint.is_some()),
+                history: state.history.len() as u64,
+                movements: 0,
+                outputs: state.outputs.len() as u64,
+                credits: 0,
+            };
+            let watches = std::mem::take(&mut state.watches);
+            *state = RepositoryState {
+                watches,
+                ..RepositoryState::default()
+            };
+            Ok(removed)
+        })
+    }
 }
 
 /// The durable watch list: one map by identity, and the progress each
@@ -173,60 +198,20 @@ impl indexing::WatchStore for Repository {
             Ok(())
         })
     }
-
-    /// The birthday moves and the claim goes, under one lock: no row leaves the
-    /// map, so there is no instant at which the address is watched by nothing.
-    fn cancel_backfill<'a>(
-        &'a self,
-        watches: Vec<indexing::Watch>,
-    ) -> BoxFuture<'a, Result<(), IndexError>> {
-        Box::pin(async move {
-            let mut state = self.state.lock().expect("repository state");
-            for watch in watches {
-                let Some(stored) = state.watches.get_mut(&watch.id) else {
-                    return Err(IndexError::new(
-                        indexing::IndexErrorKind::Conflict,
-                        "a re-anchored observation is not registered",
-                        false,
-                    ));
-                };
-                stored.start = watch.start;
-                state.progress.remove(&watch.id);
-            }
-            Ok(())
-        })
-    }
-}
-
-impl indexing::Purging for Repository {
-    /// The offline rescan: everything indexing owns for the network goes, and
-    /// the observations stay.
-    fn purge_network<'a>(
-        &'a self,
-        _network: &'a Network,
-    ) -> BoxFuture<'a, Result<indexing::PurgedRows, IndexError>> {
-        Box::pin(async move {
-            let mut state = self.state.lock().expect("repository state");
-            let removed = indexing::PurgedRows {
-                checkpoint: u64::from(state.checkpoint.is_some()),
-                history: state.history.len() as u64,
-                movements: 0,
-                outputs: state.outputs.len() as u64,
-                credits: 0,
-            };
-            let watches = std::mem::take(&mut state.watches);
-            *state = RepositoryState {
-                watches,
-                ..RepositoryState::default()
-            };
-            Ok(removed)
-        })
-    }
 }
 
 impl Repository {
     /// Every committed block by height, and the current checkpoint: the whole
     /// durable state, so a test can assert that a reorg changed none of it.
+    /// The confirmed transactions and the checkpoint, read together.
+    fn confirmed(&self) -> Confirmed {
+        let state = self.state.lock().expect("repository state");
+        Confirmed {
+            checkpoint: state.checkpoint.clone(),
+            history: state.history.clone(),
+        }
+    }
+
     fn stored(&self) -> (BTreeMap<BlockHeight, BlockRef>, Option<BlockRef>) {
         let state = self.state.lock().expect("repository state");
         (state.blocks.clone(), state.checkpoint.clone())
@@ -332,40 +317,37 @@ impl indexing::OutputStore for Repository {
     }
 }
 
-impl indexing::BalanceStore for Repository {
-    fn balance<'a>(
-        &'a self,
-        query: indexing::BalanceQuery,
-    ) -> BoxFuture<'a, Result<indexing::Balance, IndexError>> {
-        Box::pin(async move {
-            let state = self.state.lock().expect("repository state");
-            let mut ledger = indexing::Fold::new(&query);
-            for transaction in &state.history {
-                ledger.apply(transaction, indexing::FeeSettlement::Charged)?;
-            }
-            Ok(ledger.balance(state.checkpoint.clone()))
-        })
+/// A checkpoint read beside the rows of a store whose writer is paused
+/// between passes, so it is the line those rows were read at.
+struct Line(Option<BlockRef>);
+
+impl Checkpointed for Line {
+    fn checkpoint(&self) -> Option<&BlockRef> {
+        self.0.as_ref()
     }
 }
 
-impl ConfirmedHistory for Repository {
-    fn history<'a>(
-        &'a self,
-        request: HistoryQuery,
-    ) -> BoxFuture<'a, Result<ConfirmedHistoryPage, IndexError>> {
-        Box::pin(async move {
-            let state = self.state.lock().expect("repository state");
-            Ok(ConfirmedHistoryPage {
-                checkpoint: state.checkpoint.clone(),
-                transactions: state
-                    .history
-                    .iter()
-                    .filter_map(|transaction| request.select(transaction.clone()))
-                    .collect(),
-                next: None,
-                completeness: indexing::Completeness::Incomplete,
-            })
-        })
+/// The test store's confirmed rows and the line they were read at: what a
+/// pending sample is narrowed by.
+struct Confirmed {
+    checkpoint: Option<BlockRef>,
+    history: Vec<indexing::Transaction>,
+}
+
+impl Checkpointed for Confirmed {
+    fn checkpoint(&self) -> Option<&BlockRef> {
+        self.checkpoint.as_ref()
+    }
+}
+
+impl Confirmed {
+    /// `of`'s settled net over these rows, in atomic units.
+    fn settled(&self, of: &Subject) -> num_bigint::BigInt {
+        use indexing::Net as _;
+        indexing::Transactions::new(self.history.clone())
+            .expect("unique transactions")
+            .net(of, indexing::FeeSettlement::Charged)
+            .expect("atomic amounts")
     }
 }
 
@@ -413,7 +395,7 @@ fn withdraw(chain: &Chain, block: &BlockRef, owner: &Address, amount: u64) {
 /// For asserting what the index holds between passes, where nothing commits
 /// and `line` is whatever the scenario last saw. It is not how a read is
 /// composed: a read samples first, reads the store, and narrows by the
-/// checkpoint that answer came with (`indexing::PendingJoin`).
+/// checkpoint that answer came with (`chain_bitcoin::sender::Spendable`).
 fn held(index: &dyn Pending, line: Option<&BlockRef>) -> Vec<BlockWithOutputs> {
     index
         .sampled()
@@ -451,7 +433,7 @@ fn credited(blocks: &[BlockWithOutputs], owner: &Address) -> Vec<base::Decimal> 
 /// through `watch` instead of handing it to the pass. Re-watching the same
 /// address under the same id and start is a no-op, so a repeated pass states
 /// the same selection.
-fn pass(index: &dyn Indexing, selection: &[ForwardRange]) -> Result<SyncStatus, IndexError> {
+fn pass(index: &dyn Indexing, selection: &[ForwardRange]) -> Result<Outcome, IndexError> {
     watch_all(index, selection).expect("watch");
     block_on(index.sync())
 }
@@ -530,12 +512,12 @@ fn replacement_chain() -> Vec<BlockRef> {
     ]
 }
 
-fn config(network: Network) -> SyncConfig {
-    SyncConfig::new(&network, SyncPolicy::new(100)).expect("sync config")
+fn config(network: Network) -> Config {
+    Config::new(&network, Budget::new(100)).expect("sync config")
 }
 
-fn bounded_config(network: Network, batch_size: usize) -> SyncConfig {
-    SyncConfig::new(&network, SyncPolicy::new(batch_size)).expect("bounded sync config")
+fn bounded_config(network: Network, batch_size: usize) -> Config {
+    Config::new(&network, Budget::new(batch_size)).expect("bounded sync config")
 }
 
 #[test]
@@ -582,11 +564,11 @@ fn sparse_sync_uses_actual_blocks_and_resumes_a_bounded_prefix() {
     }];
 
     let first = pass(&service, &filters).expect("first sparse prefix");
-    assert_eq!(first.phase, SyncPhase::CatchingUp);
+    assert_eq!(first.phase, Phase::CatchingUp);
     assert_eq!(first.checkpoint, Some(sparse_chain()[2].clone()));
 
     let second = pass(&service, &filters).expect("second sparse prefix");
-    assert_eq!(second.phase, SyncPhase::Ready);
+    assert_eq!(second.phase, Phase::Ready);
     assert_eq!(second.checkpoint, Some(sparse_chain()[3].clone()));
     assert_eq!(
         chain.inspections(),
@@ -615,7 +597,7 @@ fn sparse_birthday_anchor_consumes_the_only_batch_slot_and_survives_restart() {
         bounded_config(own_network.clone(), 1),
     );
     let status = pass(&initial, &filters).expect("anchor-only prefix");
-    assert_eq!(status.phase, SyncPhase::CatchingUp);
+    assert_eq!(status.phase, Phase::CatchingUp);
     assert_eq!(status.checkpoint, Some(sparse_chain()[1].clone()));
     assert_eq!(chain.fetched(), [BlockHeight(51), BlockHeight(50)]);
     assert_eq!(chain.inspections(), [(BlockHeight(50), Vec::new())]);
@@ -630,10 +612,10 @@ fn sparse_birthday_anchor_consumes_the_only_batch_slot_and_survives_restart() {
         bounded_config(own_network, 1),
     );
     let next = pass(&restarted, &filters).expect("first selected block after restart");
-    assert_eq!(next.phase, SyncPhase::CatchingUp);
+    assert_eq!(next.phase, Phase::CatchingUp);
     assert_eq!(next.checkpoint, Some(sparse_chain()[2].clone()));
     let last = pass(&restarted, &filters).expect("remaining sparse block");
-    assert_eq!(last.phase, SyncPhase::Ready);
+    assert_eq!(last.phase, Phase::Ready);
     assert_eq!(last.checkpoint, Some(sparse_chain()[3].clone()));
     assert_eq!(
         chain.fetched()[fetched..],
@@ -681,7 +663,7 @@ fn mismatched_birthday_anchor_fails_before_effects_and_allows_a_retry() {
 
     chain.replace(sparse_chain());
     let retry = pass(&service, &filters).expect("failed bootstrap releases running guard");
-    assert_eq!(retry.phase, SyncPhase::Ready);
+    assert_eq!(retry.phase, Phase::Ready);
     assert_eq!(retry.checkpoint, Some(sparse_chain()[3].clone()));
 }
 
@@ -703,7 +685,7 @@ fn future_birthday_establishes_only_an_empty_tip_anchor() {
         }],
     )
     .expect("future selection can establish its checkpoint");
-    assert_eq!(status.phase, SyncPhase::Ready);
+    assert_eq!(status.phase, Phase::Ready);
     assert_eq!(status.checkpoint, Some(block(4)));
     assert_eq!(chain.fetched(), [BlockHeight(4)]);
     assert_eq!(chain.inspections(), [(BlockHeight(4), Vec::new())]);
@@ -921,7 +903,7 @@ fn a_reorg_above_the_line_changes_no_stored_byte() {
     chain.replace(replacement_chain());
     let status = pass(&service, &filters).expect("reorg above the line");
 
-    assert_eq!(status.phase, SyncPhase::Ready);
+    assert_eq!(status.phase, Phase::Ready);
     assert_eq!(status.checkpoint, Some(sparse_chain()[1].clone()));
     assert_eq!(status.pending_tip, Some(replacement_chain()[3].clone()));
     assert_eq!(repository.stored(), before);
@@ -991,7 +973,7 @@ fn a_rescanned_network_reindexes_from_its_registered_start() {
     assert_eq!(error.kind, IndexErrorKind::ConfirmedReorg);
     drop(quarantined);
 
-    let removed = block_on(repository.purge_network(&own_network)).expect("offline rescan");
+    let removed = block_on(repository.purge(&own_network)).expect("offline rescan");
 
     assert_eq!(removed.checkpoint, 1);
     assert_eq!(removed.history, 2, "both credited blocks were committed");
@@ -1010,7 +992,7 @@ fn a_rescanned_network_reindexes_from_its_registered_start() {
     );
     let status = pass(&reindexing, &filters).expect("the rescanned network re-indexes");
 
-    assert_eq!(status.phase, SyncPhase::Ready);
+    assert_eq!(status.phase, Phase::Ready);
     assert_eq!(status.checkpoint, Some(replacement_chain()[3].clone()));
     assert_eq!(
         restarted.inspections(),
@@ -1187,7 +1169,7 @@ fn a_canonical_lookup_outage_preserves_the_checkpoint_and_allows_a_retry() {
 
     chain.heal();
     let retry = pass(&service, &filters).unwrap();
-    assert_eq!(retry.phase, SyncPhase::Ready);
+    assert_eq!(retry.phase, Phase::Ready);
     assert_eq!(retry.pending_tip, Some(sparse_chain()[3].clone()));
 }
 
@@ -1356,23 +1338,16 @@ fn confirmed_and_pending_value_are_both_correct_across_a_reorg() {
     let subject = subject(&owner);
     let read = || {
         let sample = service.sampled().expect("a sample");
-        let query = HistoryQuery::new(&subject, indexing::Page::first(10));
-        let page = block_on(repository.history(query)).expect("history");
-        let balance = block_on(indexing::BalanceStore::balance(
-            &repository,
-            indexing::BalanceQuery::new(&subject),
-        ))
-        .expect("balance");
-        assert_eq!(page.checkpoint, balance.observed_at, "one line, both reads");
+        let page = repository.confirmed();
         let above = sample.above(&page);
-        (page, balance, above)
+        (page, above)
     };
 
     pass(&*service, &filters).expect("first pass");
-    let (page, balance, above) = read();
+    let (page, above) = read();
     assert_eq!(page.checkpoint, Some(block(2)));
-    assert_eq!(page.transactions.len(), 1, "the credit at height 1 settled");
-    assert_eq!(balance.amount, base::Decimal::from(5_u64));
+    assert_eq!(page.history.len(), 1, "the credit at height 1 settled");
+    assert_eq!(page.settled(&subject), num_bigint::BigInt::from(5));
     assert_eq!(
         credited(&above, &owner),
         [base::Decimal::from(7_u64)],
@@ -1399,12 +1374,12 @@ fn confirmed_and_pending_value_are_both_correct_across_a_reorg() {
     chain.replace(replacement);
 
     pass(&*service, &filters).expect("second pass");
-    let (page, balance, above) = read();
+    let (page, above) = read();
     assert_eq!(repository.stored(), settled, "nothing durable moved");
-    assert_eq!(page.transactions.len(), 1);
+    assert_eq!(page.history.len(), 1);
     assert_eq!(
-        balance.amount,
-        base::Decimal::from(5_u64),
+        page.settled(&subject),
+        num_bigint::BigInt::from(5),
         "settled is settled"
     );
     assert!(
@@ -1423,15 +1398,15 @@ fn confirmed_and_pending_value_are_both_correct_across_a_reorg() {
 ///
 /// The whole path for an `indexing::BlockCredit` — interpreter, pending blocks,
 /// commit, store fold — which nothing else drives end to end. Each link has its
-/// own test (`wallets`' pending fold, `balance.rs`'s ledger,
-/// `contracts::BalanceContract::folds_a_credit_no_transaction_names`,
+/// own test (`balance.rs`'s ledger,
 /// `BackfillContract::fills_in_a_credit_no_transaction_names`), and what a chain
 /// actually has is an Ethereum withdrawal arriving twelve blocks above the line
 /// — which is the only reason the pending half of this record exists at all.
 ///
-/// The store is `indexing::memory::Repository` rather than the `Repository` above,
-/// and deliberately: that one folds history rows alone, which is exactly the
-/// shape a credit is invisible to, so it could not tell the two halves apart.
+/// The store is `indexing::sqlite::Repository`, read through its own rows,
+/// rather than the `Repository` above, and deliberately: that one keeps
+/// history rows alone, which is exactly the shape a credit is invisible to,
+/// so it could not tell the two halves apart.
 #[test]
 fn a_transactionless_credit_is_pending_above_the_line_and_then_settles() {
     let own_network = network("withdrawals");
@@ -1439,39 +1414,51 @@ fn a_transactionless_credit_is_pending_above_the_line_and_then_settles() {
     let chain = Chain::dense(own_network.clone(), 4).confirming(2);
     withdraw(&chain, &block(1), &beneficiary, 5);
     withdraw(&chain, &block(4), &beneficiary, 7);
-    let memory = memory::Repository::new();
+    // The SQLite store runs on `sqlx`, which needs a Tokio runtime.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let directory = tempfile::TempDir::new().expect("temporary directory");
+    let database = runtime
+        .block_on(sqlite::Database::open(directory.path().join("index.db")))
+        .expect("temporary sqlite database");
+    let rows = rows::Rows::new(database.pool().clone());
+    let store = sqlite::Repository::new(database);
     let service = Arc::new(Indexer::new(
         chain.clone(),
         chain.clone(),
-        memory.clone(),
+        store.clone(),
         config(own_network.clone()),
     ));
     let of = subject(&beneficiary);
-    block_on(service.watch("beneficiary", &of, Birthday::At(BlockPosition(0))))
+    runtime
+        .block_on(service.watch("beneficiary", &of, Birthday::At(BlockPosition(0))))
         .expect("an observation from the beginning");
     let read = || {
         let sample = service.sampled().expect("a sample");
-        let balance = block_on(indexing::BalanceStore::balance(
-            &memory,
-            indexing::BalanceQuery::new(&of),
-        ))
-        .expect("balance");
-        let above = sample.above(&balance);
+        let checkpoint = runtime
+            .block_on(store.checkpoint(&own_network))
+            .expect("the line");
+        let balance = runtime.block_on(rows.settled(&of.address, &of.asset));
+        let above = sample.above(&Line(checkpoint.clone()));
         let arriving = above
             .iter()
             .flat_map(|facts| facts.credits.as_slice())
             .filter(|credit| credit.to == beneficiary)
             .map(|credit| credit.amount.clone())
             .collect::<Vec<_>>();
-        (balance, above, arriving)
+        (checkpoint, balance, above, arriving)
     };
 
-    block_on(Indexing::sync(&*service)).expect("the first pass");
+    runtime
+        .block_on(Indexing::sync(&*service))
+        .expect("the first pass");
 
-    let (balance, above, arriving) = read();
-    assert_eq!(balance.observed_at, Some(block(2)));
+    let (checkpoint, balance, above, arriving) = read();
+    assert_eq!(checkpoint, Some(block(2)));
     assert_eq!(
-        balance.amount,
+        balance,
         base::Decimal::from(5_u64),
         "the credit at height 1 settled, out of a collection no transaction \
          reaches"
@@ -1482,10 +1469,9 @@ fn a_transactionless_credit_is_pending_above_the_line_and_then_settles() {
         "and the one at height 4 is held as on its way rather than withheld \
          for the whole depth of the line"
     );
-    let query = HistoryQuery::new(&of, indexing::Page::first(10));
-    let page = block_on(memory.history(query)).expect("history");
+    let history = runtime.block_on(rows.history(&of.address, &of.asset, 10));
     assert!(
-        page.transactions.is_empty()
+        history.is_empty()
             && above
                 .iter()
                 .all(|held| held.block.transactions().is_empty()),
@@ -1496,11 +1482,13 @@ fn a_transactionless_credit_is_pending_above_the_line_and_then_settles() {
 
     // The chain advances by two, so height 4 falls below the line.
     chain.extend_to(6);
-    block_on(Indexing::sync(&*service)).expect("the pass that confirms height 4");
+    runtime
+        .block_on(Indexing::sync(&*service))
+        .expect("the pass that confirms height 4");
 
-    let (balance, _, arriving) = read();
+    let (_, balance, _, arriving) = read();
     assert_eq!(
-        balance.amount,
+        balance,
         base::Decimal::from(12_u64),
         "the settled total gained exactly the credit that was pending"
     );
@@ -1509,7 +1497,7 @@ fn a_transactionless_credit_is_pending_above_the_line_and_then_settles() {
 
 /// A UTXO chain spends its own change at depth one: the durable table holds
 /// confirmed outputs and the index holds the rest, as facts a consumer folds
-/// over the store's page (`indexing::PendingJoin`).
+/// over the store's page (`chain_bitcoin::sender::Spendable`).
 #[test]
 fn an_output_created_above_the_line_is_held_for_selection_at_depth_one() {
     let own_network = network("change-at-depth-one");
@@ -1741,7 +1729,7 @@ fn fresh_wallet_sync_starts_at_its_earliest_birthday_not_genesis() {
     )
     .expect("sync selected addresses");
 
-    assert_eq!(statuses.phase, SyncPhase::Ready);
+    assert_eq!(statuses.phase, Phase::Ready);
     assert_eq!(statuses.checkpoint, Some(block(4)));
     assert_eq!(
         chain.fetched(),
@@ -1770,7 +1758,7 @@ fn fresh_index_without_wallets_anchors_directly_at_the_tip() {
 
     let statuses = pass(&service, &[]).expect("sync without wallets");
 
-    assert_eq!(statuses.phase, SyncPhase::Ready);
+    assert_eq!(statuses.phase, Phase::Ready);
     assert_eq!(statuses.checkpoint, Some(block(500)));
     assert_eq!(chain.fetched(), vec![BlockHeight(500)]);
     assert_eq!(chain.inspections(), vec![(BlockHeight(500), Vec::new())]);
@@ -1853,7 +1841,7 @@ fn watch_rejects_an_address_from_another_network() {
 /// carries one and no caller needs a reachable node to be told.
 ///
 /// This and `watch_rejects_an_address_from_another_network` are now the *only*
-/// enforcement of the watch selection's invariants: `SyncConfig::validate_filters`
+/// enforcement of the watch selection's invariants: `Config::validate_filters`
 /// re-ran the same three checks on every pass, twice per pass, and is gone
 /// (`docs/findings.md`, `policy.rs:148`). The pass may read the selection
 /// unchecked because nothing can put a bad address in it — a caller's request is
@@ -2069,7 +2057,7 @@ fn the_service_alone_is_a_complete_indexer() {
 
     assert_eq!(indexer.network(), &own_network);
     assert_eq!(status.network, own_network);
-    assert_eq!(status.phase, SyncPhase::Ready);
+    assert_eq!(status.phase, Phase::Ready);
     assert!(observations.0.load(Ordering::SeqCst) > 0);
     let line = block_on(indexer.checkpoint(&own_network)).expect("checkpoint");
     assert_eq!(line, Some(block(2)));
@@ -2174,7 +2162,7 @@ fn a_spend_of_a_pre_birthday_output_is_reported_and_the_pass_completes() {
     }];
 
     let statuses = pass(&service, &filters).expect("the pass must not fail");
-    assert_eq!(statuses.phase, SyncPhase::Ready);
+    assert_eq!(statuses.phase, Phase::Ready);
     assert_eq!(statuses.checkpoint, Some(block(2)));
     assert_eq!(statuses.unmatched_spends, [ghost]);
 }
@@ -2224,7 +2212,7 @@ fn a_pass_that_matches_every_spend_reports_no_unknown_spend() {
     }];
 
     let statuses = pass(&service, &filters).expect("the pass must not fail");
-    assert_eq!(statuses.phase, SyncPhase::Ready);
+    assert_eq!(statuses.phase, Phase::Ready);
     assert!(statuses.unmatched_spends.is_empty());
 }
 
@@ -2354,7 +2342,7 @@ fn offline_reset_reloads_birthdays_and_discards_pending_and_native_cache() {
         "a live repository cannot be reset"
     );
     let watches = block_on(index.watched(&network)).unwrap();
-    block_on(repository.purge_network(&network)).unwrap();
+    block_on(repository.purge(&network)).unwrap();
     block_on(index.reset()).unwrap();
     assert!(held(&index, None).is_empty());
     assert_eq!(block_on(index.watched(&network)).unwrap(), watches);

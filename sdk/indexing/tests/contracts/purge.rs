@@ -3,14 +3,14 @@
 use base::Decimal;
 
 use indexing::{
-    BlockCredit, BlockHeight, BlockPosition, BlockWithOutputs, ConfirmedHistory, FeeSettlement,
-    IndexErrorKind, IndexedBatch, IndexedOutput, MovementId, Network, OutputChanges, OutputStore,
-    Progress, PurgedRows, Purging, Repository, Watch, WatchProgress,
+    BlockCredit, BlockHeight, BlockPosition, BlockWithOutputs, FeeSettlement, IndexErrorKind,
+    IndexedBatch, IndexedOutput, MovementId, Network, OutputChanges, OutputStore, Progress,
+    PurgedRows, Repository, Watch, WatchProgress,
 };
 
 use super::fixture::Fixture;
 
-/// [`Purging::purge_network`] checked against one store holding two networks.
+/// [`IndexStore::purge`] checked against one store holding two networks.
 ///
 /// Two networks, because the only interesting question is what a purge does
 /// *not* touch: the store the quarantined network shares with every other
@@ -22,7 +22,7 @@ pub struct PurgeContract<'a, R> {
     elsewhere: Fixture<'a, R>,
 }
 
-impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract<'a, R> {
+impl<'a, R: OutputStore + Repository> PurgeContract<'a, R> {
     /// Checks `repository`, which must hold nothing for either network yet.
     #[must_use]
     pub const fn new(repository: &'a R, network: Network, elsewhere: Network) -> Self {
@@ -30,6 +30,14 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
             purged: Fixture::new(repository, network),
             elsewhere: Fixture::new(repository, elsewhere),
         }
+    }
+
+    /// Reads the store's own rows with `rows` where the scenario checks them.
+    #[must_use]
+    pub fn reading(mut self, rows: super::Rows) -> Self {
+        self.purged.rows = Some(rows.clone());
+        self.elsewhere.rows = Some(rows);
+        self
     }
 
     /// A purge removes exactly one network's indexing rows and nothing else:
@@ -45,7 +53,7 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
         let removed = self
             .purged
             .repository
-            .purge_network(&self.purged.network)
+            .purge(&self.purged.network)
             .await
             .expect("the named network is purged");
 
@@ -63,7 +71,7 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
         assert_eq!(
             self.purged
                 .repository
-                .purge_network(&self.purged.network)
+                .purge(&self.purged.network)
                 .await
                 .expect("a second purge is not an error"),
             PurgedRows::default(),
@@ -84,7 +92,11 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
             "the next start must find no checkpoint and re-index from the \
              earliest registered start position",
         );
-        assert!(Self::history(&self.purged).await.is_empty());
+        assert!(
+            Self::history(&self.purged)
+                .await
+                .is_none_or(|history| history.is_empty())
+        );
         let refused = OutputStore::list(self.purged.repository, self.purged.request("owner", 100))
             .await
             .expect_err(
@@ -113,7 +125,11 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
                 .expect("tip"),
             Some(self.elsewhere.block(2)),
         );
-        assert_eq!(Self::history(&self.elsewhere).await, ["block-1", "block-2"],);
+        assert!(
+            Self::history(&self.elsewhere)
+                .await
+                .is_none_or(|history| history == ["block-1", "block-2"])
+        );
         assert_eq!(Self::outputs(&self.elsewhere).await.len(), 2);
         assert_eq!(
             self.observations(&self.elsewhere.network).await,
@@ -191,7 +207,7 @@ impl<'a, R: OutputStore + Purging + Repository + ConfirmedHistory> PurgeContract
         }
     }
 
-    async fn history(fixture: &Fixture<'_, R>) -> Vec<String> {
+    async fn history(fixture: &Fixture<'_, R>) -> Option<Vec<String>> {
         fixture.history("owner", &fixture.native(), 100).await
     }
 

@@ -1,9 +1,9 @@
 //! The required-spend contract.
 
 use indexing::{
-    AssetId, BlockHeight, BlockRef, BlockWithOutputs, ConfirmedHistory, FeeSettlement,
-    IndexErrorKind, IndexStore, IndexedBatch, IndexedOutput, Network, OutputChanges, OutputCursor,
-    OutputId, OutputKey, OutputPage, OutputRequest, OutputStore,
+    AssetId, BlockHeight, BlockRef, BlockWithOutputs, FeeSettlement, IndexErrorKind, IndexStore,
+    IndexedBatch, IndexedOutput, Network, OutputChanges, OutputCursor, OutputId, OutputKey,
+    OutputPage, OutputRequest, OutputStore,
 };
 
 use super::fixture::Fixture;
@@ -13,13 +13,20 @@ pub struct SpendContract<'a, R> {
     pub(super) fixture: Fixture<'a, R>,
 }
 
-impl<'a, R: IndexStore + OutputStore + ConfirmedHistory> SpendContract<'a, R> {
+impl<'a, R: IndexStore + OutputStore> SpendContract<'a, R> {
     /// Checks `repository`, which must hold nothing for `network` yet.
     #[must_use]
     pub const fn new(repository: &'a R, network: Network) -> Self {
         Self {
             fixture: Fixture::new(repository, network),
         }
+    }
+
+    /// Reads the store's own rows with `rows` where the scenario checks them.
+    #[must_use]
+    pub fn reading(mut self, rows: super::Rows) -> Self {
+        self.fixture.rows = Some(rows);
+        self
     }
 
     /// Spending an output not yet indexed still prevents its later resurrection.
@@ -43,7 +50,11 @@ impl<'a, R: IndexStore + OutputStore + ConfirmedHistory> SpendContract<'a, R> {
         assert_eq!(outcome.as_slice(), [ghost]);
         assert_eq!(self.tip().await, Some(first));
         assert_eq!(self.outputs("owner").await, [fresh]);
-        assert_eq!(self.history("owner").await, ["block-1"]);
+        assert!(
+            self.history("owner")
+                .await
+                .is_none_or(|history| history == ["block-1"])
+        );
     }
 
     /// The key is address-qualified, so a required spend naming the wrong
@@ -147,7 +158,11 @@ impl<'a, R: IndexStore + OutputStore + ConfirmedHistory> SpendContract<'a, R> {
         let mut live = self.outputs("owner").await;
         live.sort_by_key(|output| output.created_at);
         assert_eq!(live, [funding, later]);
-        assert_eq!(self.history("owner").await, ["block-1", "block-2"]);
+        assert!(
+            self.history("owner")
+                .await
+                .is_none_or(|history| history == ["block-1", "block-2"])
+        );
     }
 
     /// A miss outlives the block that reported it: an output the index learns
@@ -403,7 +418,7 @@ impl<'a, R: IndexStore + OutputStore + ConfirmedHistory> SpendContract<'a, R> {
         self.fixture.outputs(owner, 100).await
     }
 
-    async fn history(&self, owner: &str) -> Vec<String> {
+    async fn history(&self, owner: &str) -> Option<Vec<String>> {
         self.fixture.history(owner, &self.asset(), 100).await
     }
 

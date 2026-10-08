@@ -3,13 +3,12 @@
 
 use crate::config::{AnyError, Config};
 use base::{ChainName, Network};
-use indexing::{IndexStore as _, Purging as _, WatchStore as _};
+use indexing::Purging as _;
 use std::{ffi::OsString, fmt};
 
 /// One explicit operator action over the configured file.
 pub(crate) enum Operation {
     Rescan(Network),
-    CancelBackfill(Network),
 }
 
 impl Operation {
@@ -19,14 +18,9 @@ impl Operation {
         let arguments = arguments.collect::<Vec<_>>();
         match arguments.as_slice() {
             [] => Ok(None),
-            [flag, target] if flag == "--rescan" || flag == "--cancel-backfill" => {
+            [flag, target] if flag == "--rescan" => {
                 let text = target.to_str().ok_or("network argument is not UTF-8")?;
-                let network = Self::network(text)?;
-                Ok(Some(if flag == "--rescan" {
-                    Self::Rescan(network)
-                } else {
-                    Self::CancelBackfill(network)
-                }))
+                Ok(Some(Self::Rescan(Self::network(text)?)))
             }
             _ => Err(crate::USAGE.into()),
         }
@@ -43,7 +37,7 @@ impl Operation {
 
     pub(crate) async fn run(&self, config: &Config) -> Result<(), AnyError> {
         let configured = config.chains()?.networks();
-        let (Self::Rescan(network) | Self::CancelBackfill(network)) = self;
+        let Self::Rescan(network) = self;
         if !configured.contains(network) {
             let listed = configured
                 .iter()
@@ -59,7 +53,7 @@ impl Operation {
         let repository = store.repository();
         match self {
             Self::Rescan(network) => {
-                let removed = repository.purge_network(network).await?;
+                let removed = repository.purge(network).await?;
                 println!(
                     "removed {} checkpoint, {} history, {} movement, \
                      {} block-credit, and {} output rows \
@@ -71,55 +65,15 @@ impl Operation {
                     removed.outputs
                 );
             }
-            Self::CancelBackfill(network) => {
-                let count = Self::cancel(&repository, network).await?;
-                println!(
-                    "cancelled backfill for {count} watches on {self}; \
-                     indexed facts and application keys preserved"
-                );
-            }
         }
         Ok(())
-    }
-
-    /// Re-anchors only genuinely unfinished watches, using the same durable
-    /// progress predicate as the scanner; there is no running pass to coordinate.
-    async fn cancel(
-        repository: &crate::storage::Repository,
-        network: &Network,
-    ) -> Result<usize, AnyError> {
-        let Some(checkpoint) = repository.checkpoint(network).await? else {
-            return Ok(0);
-        };
-        let rows = repository.all(network).await?;
-        let owing = rows
-            .into_iter()
-            .filter(|progress| !progress.caught_up(Some(&checkpoint)))
-            .collect::<Vec<_>>();
-        if owing.is_empty() {
-            return Ok(0);
-        }
-        let birthday = checkpoint
-            .position
-            .checked_successor()
-            .ok_or("checkpoint has no successor")?;
-        let renewed = owing
-            .into_iter()
-            .map(|progress| indexing::Watch {
-                start: birthday,
-                ..progress.watch
-            })
-            .collect::<Vec<_>>();
-        let count = renewed.len();
-        repository.cancel_backfill(renewed).await?;
-        Ok(count)
     }
 }
 
 impl fmt::Display for Operation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Rescan(network) | Self::CancelBackfill(network) => {
+            Self::Rescan(network) => {
                 write!(formatter, "{}/{}", network.chain, network.name)
             }
         }
@@ -337,64 +291,5 @@ mod tests {
             );
         }
         drop(held);
-    }
-    #[tokio::test]
-    async fn cancellation_preserves_other_networks_facts_and_keys() {
-        let directory = tempfile::tempdir().expect("directory");
-        let held = TcpListener::bind("127.0.0.1:0").expect("occupied listener");
-        let config = written(directory.path(), held.local_addr().expect("address").port()).await;
-        let target = Network::new(ChainName::new("solana"), "localnet");
-        let other = Network::new(ChainName::new("bitcoin"), "regtest");
-        let store = config.storage.open().await.expect("store");
-        let repository = store.repository();
-        for network in [&target, &other] {
-            repository
-                .commit(indexed(network))
-                .await
-                .expect("checkpoint");
-            let mut watch = registration(network);
-            watch.start = BlockPosition(0);
-            repository.add(vec![watch]).await.expect("late watch");
-        }
-        let sentinel = store.pool();
-        sqlx::raw_sql(
-            "CREATE TABLE app_sentinel(secret TEXT);
-             INSERT INTO app_sentinel VALUES ('untouched')",
-        )
-        .execute(&sentinel)
-        .await
-        .expect("application row");
-        let before = repository.all(&other).await.expect("other watches");
-        parse(["--cancel-backfill", "solana/localnet"])
-            .expect("command")
-            .expect("operation")
-            .run(&config)
-            .await
-            .expect("cancelled without binding or RPC");
-        assert_eq!(repository.all(&other).await.expect("other"), before);
-        let target_rows = repository.all(&target).await.expect("target");
-        assert_eq!(target_rows[0].watch.start, BlockPosition(2));
-        assert_eq!(
-            Operation::cancel(&repository, &target)
-                .await
-                .expect("idempotent"),
-            0
-        );
-        for network in [&target, &other] {
-            assert_eq!(
-                repository
-                    .checkpoint(network)
-                    .await
-                    .expect("checkpoint")
-                    .expect("retained")
-                    .position,
-                BlockPosition(1)
-            );
-        }
-        let kept: String = sqlx::query_scalar("SELECT secret FROM app_sentinel")
-            .fetch_one(&sentinel)
-            .await
-            .expect("application row");
-        assert_eq!(kept, "untouched");
     }
 }

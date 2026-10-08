@@ -906,7 +906,8 @@ mod tests {
     /// The settled balance of `of` in SOL, folded from `interpreted` exactly
     /// as a store folds the rows it wrote from it, under this chain's own
     /// fee rule.
-    fn folded(interpreted: &BlockWithOutputs, of: base::Address) -> indexing::Balance {
+    fn folded(interpreted: &BlockWithOutputs, of: base::Address) -> num_bigint::BigInt {
+        use indexing::Net as _;
         let subject = indexing::Subject {
             address: of,
             asset: AssetKind::Native.id(),
@@ -914,13 +915,11 @@ mod tests {
         let settlement = BlockInterpreter::new(&network())
             .expect("the fixture network is Solana")
             .settlement();
-        let mut ledger = indexing::Fold::new(&subject);
-        for draft in interpreted.block.transactions() {
-            ledger
-                .apply(draft, settlement)
-                .expect("interpreted amounts are storable");
-        }
-        ledger.balance(Some(interpreted.block.reference().clone()))
+        interpreted
+            .block
+            .transactions()
+            .net(&subject, settlement)
+            .expect("interpreted amounts are storable")
     }
 
     #[test]
@@ -947,21 +946,15 @@ mod tests {
         let interpreted = inspect(vec![value], &[selected(2)]).expect("a residual is data");
 
         let credited = folded(&interpreted, selected(2));
-        assert_eq!(credited.amount, base::Decimal::from(15_u64));
+        assert_eq!(credited, num_bigint::BigInt::from(15_u64));
         // 15 is exactly the account's own post − pre, which is the runtime's
         // answer and the one number the residual exists to preserve.
-        assert_eq!(credited.completeness, indexing::Completeness::Incomplete);
-        assert_eq!(
-            credited.observed_at,
-            Some(interpreted.block.reference().clone())
-        );
 
         // The third account funded the residual and is debited for it; a fold
         // that starts after it was funded goes negative, which is reported
         // rather than clamped silently.
         let funder = folded(&interpreted, selected(3));
-        assert_eq!(funder.completeness, indexing::Completeness::Overdrawn);
-        assert_eq!(funder.amount, base::Decimal::from(0_u64));
+        assert!(funder < num_bigint::BigInt::ZERO, "overdrawn");
     }
 
     #[test]

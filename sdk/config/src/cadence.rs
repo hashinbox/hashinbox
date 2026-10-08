@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use indexing::SyncPolicy;
+use indexing::Budget;
 use serde::Deserialize;
 
 use crate::{Error, ErrorKind};
@@ -21,7 +21,7 @@ use crate::{Error, ErrorKind};
 ///
 /// Both fields are the type their consumer takes. [`Self::poll`] is the
 /// `Duration` [`crate::ComposedChain::poll`] holds, and [`Self::policy`] is
-/// the [`SyncPolicy`] `indexing` validates — neither is re-inflated from a
+/// the [`Budget`] `indexing` validates — neither is re-inflated from a
 /// bare integer at the chain end, which is what this type used to force
 /// because a `packages/*` crate could not name an `sdk/*` type.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -31,7 +31,7 @@ pub struct Cadence {
     pub poll: Duration,
     /// How much one pass may read, and how far below the checkpoint a new
     /// watch may start.
-    pub policy: SyncPolicy,
+    pub policy: Budget,
 }
 
 impl Cadence {
@@ -44,7 +44,7 @@ impl Cadence {
     pub const fn new() -> Self {
         Self {
             poll: Self::default_poll(),
-            policy: SyncPolicy::new(Self::default_batch_size()),
+            policy: Budget::new(Self::default_batch_size()),
         }
     }
 
@@ -73,7 +73,7 @@ impl Cadence {
     }
 
     const fn default_max_backfill_blocks() -> u64 {
-        SyncPolicy::new(Self::default_batch_size()).max_backfill_blocks
+        Budget::new(Self::default_batch_size()).max_backfill_blocks
     }
 }
 
@@ -85,7 +85,7 @@ impl Default for Cadence {
 
 /// What a document writes, in the units an operator writes them in.
 ///
-/// It exists so [`Cadence`] can hold a [`Duration`] and a [`SyncPolicy`]
+/// It exists so [`Cadence`] can hold a [`Duration`] and a [`Budget`]
 /// while a file still says `poll_millis` and `batch_size`. Every default here
 /// calls the same function [`Cadence::new`] calls, so the two cannot drift,
 /// and the schema is closed so a retired key fails loudly.
@@ -107,7 +107,7 @@ impl From<Keys> for Cadence {
     fn from(keys: Keys) -> Self {
         Self {
             poll: keys.poll_millis,
-            policy: SyncPolicy::new(keys.batch_size).with_backfill(keys.max_backfill_blocks),
+            policy: Budget::new(keys.batch_size).with_backfill(keys.max_backfill_blocks),
         }
     }
 }
@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(
             parse(json!({"batch_size": 250})).expect("one key stated"),
             Cadence {
-                policy: SyncPolicy::new(250),
+                policy: Budget::new(250),
                 ..Cadence::new()
             }
         );
@@ -168,7 +168,7 @@ mod tests {
             ),
             (
                 Cadence {
-                    policy: SyncPolicy::new(0),
+                    policy: Budget::new(0),
                     ..Cadence::new()
                 },
                 json!({"batch_size": 0}),

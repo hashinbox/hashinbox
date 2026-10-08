@@ -11,14 +11,14 @@ restarts and reorgs.
 use std::sync::Arc;
 
 use indexing::{
-    Address, AssetId, Birthday, BlockPosition, Index, IndexError, Indexing, Subject, Watching,
+    Address, AssetId, Birthday, BlockPosition, Indexers, IndexError, Indexing, Subject, Watching,
 };
 
 /// `chain` is a chain crate's indexer, such as `chain_bitcoin::indexer`'s,
 /// built over the one repository every network shares.
 async fn run(chain: Arc<dyn Indexing>, deposit: Address) -> Result<(), IndexError> {
     // One indexer per network, all over one repository.
-    let index: Index = Index::of(vec![chain])?;
+    let index: Indexers = Indexers::of(vec![chain])?;
 
     // A watch is an id, an address, an asset and the first block to inspect.
     let asset = AssetId::native(deposit.network.chain.clone());
@@ -38,7 +38,7 @@ A repository implements two ports, and nothing else is required:
 
 | Port | Methods | Holds |
 | --- | --- | --- |
-| `WatchStore` | `add`, `all`, `forget`, `cancel_backfill` | the watches and how far each was inspected |
+| `WatchStore` | `add`, `all`, `forget` | the watches and how far each was inspected |
 | `IndexStore` | `checkpoint`, `commit` | the confirmed line and the one atomic write a pass makes |
 
 Both shipped repositories also implement the optional `WalletRegistry`
@@ -110,51 +110,39 @@ async fn open(path: &std::path::Path) -> Result<Repository> {
 
 ## Reads
 
-`History` and `Balances` are the pending-inclusive reads. `PendingJoin` answers
-both, and the spendable outputs, for one network: the repository's own answer
-joined to the blocks that network's index still holds above its confirmed line.
-`Router` holds one read per network and routes each holding by its address.
+Reading balances and history is the application's own business: the store
+offers no balance or history query. What it offers are narrow ports for the
+SDK's own consumers — `OutputStore` (Bitcoin's coin selection,
+`chain_bitcoin::sender::Spendable`) and `TransactionStore` (Solana's absence
+proof, `chain_solana::sender::IndexPresence`) — and an application completes its own
+stored reads with the blocks an index holds above its confirmed line.
 
 ```rust
-use std::sync::Arc;
+use indexing::{Checkpointed, IndexError, Location, Pending, TransactionRef, TransactionStore};
 
-use indexing::{
-    BalanceStore, Balances, ConfirmedHistory, History, Holder, Page, Pending, PendingJoin,
-};
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-/// `index` is the index that commits into `repository`, for the same network.
-async fn read<R>(repository: R, index: Arc<dyn Pending>, of: &dyn Holder) -> Result<()>
-where
-    R: ConfirmedHistory + BalanceStore,
-{
-    let reads = PendingJoin::new(repository, index);
-
-    let balance = reads.balance(of).await?;
-    let page = reads.history(of, Page::first(25)).await?;
-
-    println!("{} settled, {} arriving", balance.amount, balance.pending.incoming);
-    println!("{} confirmed, {} pending", page.transactions.len(), page.pending.len());
-    for observed in &page.transactions {
-        println!("{}: {:?}", observed.transaction.id.id, observed.status);
-    }
-    Ok(())
+/// Whether `transaction` is indexed, confirmed or above the line.
+async fn landed(
+    store: &dyn TransactionStore,
+    index: &dyn Pending,
+    transaction: &TransactionRef,
+) -> Result<bool, IndexError> {
+    // Sample first, then read the store, then narrow by the store's own line.
+    let sample = index.sampled()?;
+    let located: Location = store.locate(transaction).await?;
+    let pending = sample.above(&located);
+    Ok(located.block.is_some()
+        || pending
+            .iter()
+            .any(|held| held.block.transactions().iter().any(|entry| &entry.id == transaction)))
 }
 ```
 
 - The index answers no query; it hands out a sample of its pending blocks
-  (`Pending`). The join samples them **before** it reads the repository and
-  narrows the sample by the checkpoint the repository's answer came with, so a
-  block committed during the read is counted once.
-- The settled fold nets a self-transfer to nothing; the pending fold reports
-  it as both arriving and leaving. The questions differ: what the total is,
-  and what is moving. Do not unify them.
-- How much of an address's history is indexed is the repository's claim
-  (`Completeness`). The join passes it on unchanged, and a repository's refusal
-  to list outputs it cannot prove unspent reaches the caller as made.
-- `ObservedTransaction` embeds the indexed `Transaction` with its read-time
-  status, keeping the query's movement projection.
+  (`Pending`). Sample them **before** reading the store and narrow the sample
+  by the checkpoint the store's answer came with (`Checkpointed`), so a block
+  committed during the read is counted once.
+- A store refuses to list outputs it cannot prove unspent while an address is
+  still catching up (`Inspection::spendable`).
 
 ## Notes
 
@@ -163,17 +151,15 @@ where
   (each `Transaction::validate`, unique identifiers and native orders, valid
   credits, every transaction naming the inspected block) before it is held as
   pending or committed. `Transaction` carries identity, movements, fee, native
-  order and `Status` (included or failed, with its block). `ObservedTransaction`
-  embeds that same value with its read-time status and the queried asset's
-  movements.
+  order and `Status` (included or failed, with its block).
 - A reorg below the confirmed line stops that network with
   `IndexErrorKind::ConfirmedReorg` and is never repaired automatically, because
-  stored blocks are treated as final. Recover with `Purging::purge_network`
+  stored blocks are treated as final. Recover with `IndexStore::purge`
   while nothing else is running, or online with that network quiesced:
-  block its admissions, then `SyncControl::rescan(indexer, store)` pauses,
+  block its admissions, then `Control::rescan(indexer, store)` pauses,
   purges, resets the indexer, discards reported progress and resumes; it keeps the watches
-  and other networks. Inside the window the store reports `Incomplete` and
-  refuses spendable outputs rather than answering an empty history.
+  and other networks. Inside the window the network has no checkpoint and the
+  store refuses spendable outputs.
 - Hand the same repository to every chain. Each operation names its network, so
   one store isolates them; a store per network or per asset is not supported.
 - A `Listener` is called after the commit, at most once, and cannot refuse it. A
@@ -204,6 +190,6 @@ where
 
 `Supervisor::with_logger` records state transitions. Transactional application
 reactions belong in a custom repository.
-`SyncControl::pause` waits for the active pass; `resume` restarts a paused network.
-`SyncControl::rescan` fails as `RescanError::NotStarted` (nothing purged, network
+`Control::pause` waits for the active pass; `resume` restarts a paused network.
+`Control::rescan` fails as `RescanError::NotStarted` (nothing purged, network
 resumed) or `RescanError::Interrupted` (purged, network left paused; rescan again).

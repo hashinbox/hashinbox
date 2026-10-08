@@ -289,7 +289,7 @@ impl IndexedBatch {
     /// hash = ?` would be unsound anyway — that pair is not monotonic across a
     /// rescan, so it matches again after exactly the purge-then-rescan it would
     /// be introduced to refuse. What rules
-    /// that out is that [`crate::Purging::purge_network`] is contractually
+    /// that out is that [`IndexStore::purge`] is contractually
     /// offline.
     #[must_use]
     pub const fn expected_checkpoint(&self) -> Option<&BlockRef> {
@@ -323,13 +323,14 @@ fn unjustified(message: &str) -> IndexError {
 }
 
 /// Required atomic indexing writes and checkpoint reads, beside [`crate::WatchStore`].
-/// Committed facts are append-only during synchronization; offline removal is the
-/// separate [`crate::Purging`] capability. Balance, history and output reads are optional.
+/// Committed facts are append-only during synchronization; [`Self::purge`] is the
+/// one removal, offline or while the network is quiesced. Balance, history and
+/// output reads are optional.
 ///
 /// Every mutation reads its expected checkpoint and conditional rows inside the
 /// same transaction that writes them. Every optional query reads its answer and
 /// checkpoint in one snapshot. Consumers sample pending blocks before that read,
-/// then narrow them by the returned checkpoint using [`crate::PendingSample::above`];
+/// then narrow them by the returned checkpoint using [`crate::Sample::above`];
 /// splitting the snapshot could omit a block or count it twice.
 pub trait IndexStore: Send + Sync {
     /// The network's current checkpoint, or `None` before its first commit.
@@ -421,6 +422,57 @@ pub trait IndexStore: Send + Sync {
         &'a self,
         batch: IndexedBatch,
     ) -> BoxFuture<'a, Result<Vec<OutputKey>, IndexError>>;
+
+    /// Atomically removes every indexing-owned row of exactly one network —
+    /// its checkpoint, history, movements, block credits, and live outputs —
+    /// and reports how many of each it removed.
+    ///
+    /// The rescan, and the only way back from an
+    /// [`crate::IndexErrorKind::ConfirmedReorg`].
+    ///
+    /// **The observations survive and their progress does not.** What each
+    /// watch observes is application state and is never touched, so the next
+    /// start finds the same list; what was inspected for it is a claim about
+    /// rows this purge just removed, so every
+    /// [`crate::WatchProgress::indexed_through`] of this network is reset to
+    /// `None` in the same transaction. Leaving one behind would let a watch
+    /// claim a range nothing has read since, and neither [`crate::WatchStore`]
+    /// method can undo that afterwards — `add` preserves progress on an exact
+    /// repeat, by contract.
+    ///
+    /// Only this network's rows: every other network in the same store is
+    /// untouched, which is what makes one shared store safe to purge one
+    /// network of.
+    ///
+    /// **Offline, or online by the network's controller.** Online, the caller
+    /// owes the quiesced window: admissions for the network are blocked (the
+    /// application's), its unit is paused (`Control::pause` has returned,
+    /// so no pass is mid-commit), and before resuming it the caller resets that
+    /// network's indexer ([`crate::Indexing::reset`]). `Control::rescan`
+    /// (feature `supervisor`) is that window as one operation, admissions
+    /// aside. The next pass then re-derives every row from the registered
+    /// birthdays.
+    ///
+    /// **Reads need no gate of the controller's: the purged rows answer for
+    /// themselves.** From this purge until the first commit after resume, the
+    /// network has no checkpoint and no observation has progress, and that is
+    /// what a read reports rather than an authoritative empty history: a
+    /// balance or history page has no checkpoint, and an observed address's
+    /// spendable set is refused with a retryable
+    /// [`crate::IndexErrorKind::Conflict`] ([`crate::Inspection`]). Once
+    /// passes commit again, each read is as of the lower checkpoint the rescan
+    /// has reached, under the rule every catch-up reads by. A third-party store
+    /// offering this port owes the same answers.
+    ///
+    /// **Done once per window.** A second purge removes nothing, and a process
+    /// restarted between the purge and the resume needs none: it loads the
+    /// same observations without progress and scans from their birthdays.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::IndexErrorKind::Store`] when the removal itself fails.
+    fn purge<'a>(&'a self, network: &'a Network)
+    -> BoxFuture<'a, Result<crate::PurgedRows, IndexError>>;
 }
 
 /// An index store held behind a reference count is an index store.
@@ -440,6 +492,13 @@ impl<T: IndexStore + ?Sized> IndexStore for std::sync::Arc<T> {
         batch: IndexedBatch,
     ) -> BoxFuture<'a, Result<Vec<OutputKey>, IndexError>> {
         (**self).commit(batch)
+    }
+
+    fn purge<'a>(
+        &'a self,
+        network: &'a Network,
+    ) -> BoxFuture<'a, Result<crate::PurgedRows, IndexError>> {
+        (**self).purge(network)
     }
 }
 

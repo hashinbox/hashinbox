@@ -47,8 +47,9 @@ composes the chain.
 `Composition`; the first failed verification ends it.
 
 `Composition` folds every verified chain's `ComposedChain` into what a process
-holds: one `indexing::Index`, one history and one balance handle routed by
-network, one `wallets::Wallets` map, every declared unit and each network's
+holds: one `indexing::Indexers`, each network's pending blocks
+(`indexing::Pending`) for an application completing its own stored reads, one
+`wallets::Wallets` map, every declared unit and each network's
 `Schedule`. `Connection` is a verified chain with its type erased.
 `Composition::verify_then_build` finishes every identity check before storage
 opens, so a deployment naming the wrong node writes nothing.

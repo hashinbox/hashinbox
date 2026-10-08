@@ -19,12 +19,11 @@ use num_bigint::{BigInt, BigUint};
 use sqlx::{FromRow, QueryBuilder, SqliteConnection, sqlite::SqliteRow};
 
 use super::{
-    Chunks, TransactionAddress, amount, column, deleted, each, failure, fetched, framed, network,
-    raised, store, stored,
+    Chunks, amount, column, deleted, each, failure, framed, network, raised, store, stored,
 };
 use crate::{
-    Address, AssetId, BlockCredit, FeeSettlement, IndexError, IndexedBatch, MovementId, Network,
-    NetworkFee, Transaction, ValueMovement,
+    Address, BlockCredit, FeeSettlement, IndexError, IndexedBatch, Network, NetworkFee,
+    Transaction, ValueMovement,
 };
 
 /// One subject's credits and debits, in atomic units.
@@ -496,112 +495,6 @@ impl Ledger {
     ) -> Result<BigInt, IndexError> {
         let (credits, debits) = Self::total(connection, network, subject).await?;
         Ok(BigInt::from(credits) - BigInt::from(debits))
-    }
-
-    /// One address's movements in one asset between the two places,
-    /// inclusive, in the order a page lists them: rows of a named transaction
-    /// whose kind is a movement.
-    ///
-    /// The fee and the withdrawal are not among them: the first is already
-    /// `"transaction"`'s three columns and would otherwise appear on a page
-    /// twice, and the second belongs to no transaction at all.
-    pub(in crate::storage::sqlite) async fn find_attached(
-        connection: &mut SqliteConnection,
-        network: &Network,
-        (address, asset): (&str, &str),
-        (lower, upper): (&TransactionAddress, &TransactionAddress),
-    ) -> Result<Vec<Self>, IndexError> {
-        let query = framed(Self::ATTACHED, network)
-            .bind(address)
-            .bind(asset)
-            .bind(lower.block_height)
-            .bind(upper.block_height);
-        fetched(connection, query, "failed to read movements").await
-    }
-
-    /// The statement [`Self::find_attached`] runs.
-    pub(in crate::storage::sqlite) const ATTACHED: &str = "SELECT * FROM ledger
-         WHERE chain = ?1 AND network = ?2 AND address = ?3 AND asset = ?4
-           AND block_height >= ?5 AND block_height <= ?6
-           AND transaction_id <> '' AND kind < 5
-         ORDER BY block_height, transaction_id, movement_order, movement_id";
-
-    /// `rows`, grouped by the transaction they belong to and in stored order.
-    ///
-    /// The rows are effects and a [`ValueMovement`] is a fact, so the two rows a
-    /// same-address transfer wrote — its credit and its debit, identical but
-    /// for direction — are folded back into the one movement they describe.
-    pub(in crate::storage::sqlite) fn group_movements(
-        rows: Vec<Self>,
-    ) -> Result<BTreeMap<String, Vec<ValueMovement>>, IndexError> {
-        let mut grouped: BTreeMap<String, Vec<ValueMovement>> = BTreeMap::new();
-        let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
-        for row in rows {
-            let kind = row.movement_kind()?;
-            let key = (row.transaction_id.clone(), row.movement_id.clone());
-            let entry = grouped.entry(key.0.clone()).or_default();
-            if let Some(at) = seen.get(&key) {
-                // The other direction of the same movement: both endpoints are
-                // this address, so the pair describes one self-transfer.
-                let mine = Some(row.endpoint(row.address.clone()));
-                entry[*at] = row.into_movement(kind, mine.clone(), mine)?;
-                continue;
-            }
-            seen.insert(key, entry.len());
-            entry.push(row.into_seen_movement(kind)?);
-        }
-        Ok(grouped)
-    }
-
-    /// The movement kind of a row a page attaches; anything else is a store
-    /// that lies.
-    fn movement_kind(&self) -> Result<MovementKind, IndexError> {
-        let Effect::Movement(kind) = self.effect else {
-            return Err(store("a stored movement has an unknown kind"));
-        };
-        if self.transaction_id.is_empty() {
-            return Err(store("a stored movement names no transaction"));
-        }
-        Ok(kind)
-    }
-
-    /// One endpoint value as an address of this row's network.
-    fn endpoint(&self, value: String) -> Address {
-        Address {
-            network: self.network.clone(),
-            value,
-        }
-    }
-
-    /// The movement as this address saw it: the counterparty is the other
-    /// endpoint, on the side the row's direction names.
-    fn into_seen_movement(self, kind: MovementKind) -> Result<ValueMovement, IndexError> {
-        let mine = Some(self.endpoint(self.address.clone()));
-        let other = self.counterparty.clone().map(|value| self.endpoint(value));
-        match self.direction {
-            Direction::Credit => self.into_movement(kind, other, mine),
-            Direction::Debit => self.into_movement(kind, mine, other),
-        }
-    }
-
-    /// The movement this row records, with the endpoints given.
-    fn into_movement(
-        self,
-        kind: MovementKind,
-        from: Option<Address>,
-        to: Option<Address>,
-    ) -> Result<ValueMovement, IndexError> {
-        ValueMovement::stored(
-            MovementId(self.movement_id),
-            AssetId {
-                chain: self.network.chain,
-                asset: self.asset,
-            },
-            amount(&self.amount)?,
-            kind,
-            from,
-            to,
-        )
     }
 
     /// Removes every row of `network`: `(credits, movements)`, the

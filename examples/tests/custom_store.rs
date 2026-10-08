@@ -11,7 +11,7 @@
 //!
 //! 1. a store that implements only `WatchStore` and `IndexStore` drives a real
 //!    `indexing::Indexer` — it observes, it commits, and it fills in history;
-//! 2. `sync` is bounded: one pass commits at most its `SyncPolicy`'s batch;
+//! 2. `sync` is bounded: one pass commits at most its `Budget`'s batch;
 //! 3. a restart over the same store restores every observation, its birthday and
 //!    its recorded progress, and resumes instead of starting again;
 //! 4. the store answers the consumer's own questions, and no read port.
@@ -23,9 +23,9 @@ use std::sync::Arc;
 
 use indexing::{
     Address, AssetId, Birthday, BlockInterpreter as _, BlockPosition, BlockSource as _,
-    BlockWithOutputs, ChainName, Checkpoint as _, Decimal, FeeSettlement, IndexErrorKind,
-    IndexStore as _, Indexer, Indexing as _, MovementId, Network, Status, Subject, SyncConfig,
-    SyncPolicy, Transaction, TransactionRef, ValueMovement, Watching as _,
+    BlockWithOutputs, Budget, ChainName, Checkpoint as _, Config, Decimal, FeeSettlement,
+    IndexErrorKind, IndexStore as _, Indexer, Indexing as _, MovementId, Network, Status, Subject,
+    Transaction, TransactionRef, ValueMovement, Watching as _,
     testing::{Chain, block},
 };
 use sink::Sink;
@@ -110,7 +110,7 @@ fn index(store: &Arc<Sink>, chain: &Chain) -> Indexer<Chain, Chain, Arc<Sink>> {
         chain.clone(),
         chain.clone(),
         Arc::clone(store),
-        SyncConfig::new(&network(), SyncPolicy::new(BATCH)).expect("a valid policy"),
+        Config::new(&network(), Budget::new(BATCH)).expect("a valid policy"),
     )
 }
 

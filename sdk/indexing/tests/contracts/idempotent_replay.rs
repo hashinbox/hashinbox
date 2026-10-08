@@ -23,13 +23,13 @@
 //! keeps the spend while doing it.
 
 use indexing::{
-    BalanceStore, BlockHeight, BlockPosition, BlockRef, BlockWithOutputs, ConfirmedHistory,
-    FeeSettlement, IndexStore, IndexedBatch, OutputChanges, OutputKey, OutputStore, Repository,
+    BlockHeight, BlockPosition, BlockRef, BlockWithOutputs, FeeSettlement, IndexStore,
+    IndexedBatch, OutputChanges, OutputKey, OutputStore, Repository,
 };
 
 use super::{backfill::BackfillContract, unmatched_spends::SpendContract};
 
-impl<R: IndexStore + OutputStore + ConfirmedHistory> SpendContract<'_, R> {
+impl<R: IndexStore + OutputStore> SpendContract<'_, R> {
     /// An output created and spent inside one batch stays spent when the block
     /// that created it is presented again.
     ///
@@ -117,7 +117,7 @@ impl<R: IndexStore + OutputStore + ConfirmedHistory> SpendContract<'_, R> {
     }
 }
 
-impl<R: BalanceStore + OutputStore + Repository + ConfirmedHistory> BackfillContract<'_, R> {
+impl<R: OutputStore + Repository> BackfillContract<'_, R> {
     /// A historical read that stops short of a spend does not put the spent
     /// output back.
     ///

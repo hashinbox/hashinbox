@@ -94,8 +94,11 @@ balance after chain fees.
   them names a chain crate, `sdk_config` or a storage backend
   (`scripts/check-chains.sh` check 8).
 - `src/models/`: the nouns the endpoints and the tables share (`asset`, `block`,
-  `completeness`, `network`, `wallet`, `endpoint`), each with its own serde/utoipa
-  wire form and, for `wallet` and `endpoint`, its SQL. No axum, no chain crate.
+  `network`, `wallet`, `endpoint`, and the reads `balance`,
+  `history`, `checkpoint`, `observation`), each with its own serde/utoipa wire
+  form and, for the durable ones, its SQL: balance and history are the server's
+  own SQL over indexing's tables, completed by each network's pending blocks.
+  No axum, no chain crate.
 
 ## Notes
 
@@ -140,14 +143,11 @@ balance after chain fees.
 - During a rescan, wallet creation, archiving and sends on that network answer `409`
   (`wallets::Wallets::pause`, which also waits for those already running); reads
   answer from the purged store, marked incomplete. The rescan itself is
-  `indexing::SyncControl::rescan`. A second rescan answers `409` and a node change
+  `indexing::Control::rescan`. A second rescan answers `409` and a node change
   `503` until it finishes.
 - After fixing a quarantine's cause, rescan the network or restart the server.
 - A confirmed reorg requires a rescan: `POST .../rescans`, or with the server stopped
   `payment-server serve ./payments.toml --rescan bitcoin/mainnet`. Both delete only that
   network's indexing facts and preserve watches, birthdays and wallets.
-- To abandon unfinished historical catch-up, stop the server and run
-  `payment-server serve ./payments.toml --cancel-backfill bitcoin/mainnet`. Existing
-  indexed facts remain; unfinished watches begin after the saved checkpoint.
-  Both offline commands validate the exact configured network and never start
-  RPC, supervision, or a listener. Never run them alongside the live server.
+- The offline rescan validates the exact configured network and never starts
+  RPC, supervision, or a listener. Never run it alongside the live server.

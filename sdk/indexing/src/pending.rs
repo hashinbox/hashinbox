@@ -1,3 +1,5 @@
+//! **Organ.**
+//!
 //! The blocks above the confirmed line: fetched, interpreted, not committed.
 
 use std::sync::{
@@ -25,7 +27,7 @@ struct Candidate {
 /// line**, and deliberately no more: a reading of them, never the collection.
 /// Nothing here answers a balance, a history page or a spendable set. Those are
 /// a repository's queries, and a consumer that wants them pending-inclusive
-/// composes the repository's answer with a [`PendingSample`] itself.
+/// composes the repository's answer with a [`Sample`] itself.
 ///
 /// A trait because the composition and the index live in different crates: a
 /// consumer holds this capability rather than the generic
@@ -35,12 +37,12 @@ pub trait Pending: Send + Sync {
     /// Every block held above the confirmed line at this instant.
     ///
     /// Take it **before** reading the repository, and narrow it with the
-    /// answer that read came back with ([`PendingSample::above`]).
+    /// answer that read came back with ([`Sample::above`]).
     ///
     /// # Errors
     ///
     /// [`IndexErrorKind::Store`] when the held list cannot be read.
-    fn sampled(&self) -> Result<PendingSample, IndexError>;
+    fn sampled(&self) -> Result<Sample, IndexError>;
 }
 
 /// One reading of the blocks above the line, and the revision naming it.
@@ -49,14 +51,14 @@ pub trait Pending: Send + Sync {
 /// fold a sample without saying which durable read it completes. A read that
 /// spans more than one page carries [`Self::revision`] in its cursor, so a
 /// later page is folded over the same blocks or refused.
-pub struct PendingSample {
+pub struct Sample {
     /// The blocks, oldest first, in commit order.
     blocks: Vec<BlockWithOutputs>,
     /// Which revision of the held list these blocks are.
     revision: u64,
 }
 
-impl PendingSample {
+impl Sample {
     /// A reading of `blocks`, oldest first, taken from the list `revision`
     /// names.
     ///
@@ -138,15 +140,15 @@ impl PendingSample {
 
 /// A repository's answer, carrying the checkpoint its rows were read at.
 ///
-/// The one thing a [`PendingSample`] may be narrowed by
-/// ([`PendingSample::above`]). A page, a balance and a list of outputs are each
+/// The one thing a [`Sample`] may be narrowed by
+/// ([`Sample::above`]). A page, a balance and a list of outputs are each
 /// read from one snapshot, and the checkpoint of that snapshot is part of the
 /// answer; this is how a consumer hands the two over together, so the line
 /// cannot be separated from the rows it belongs to.
 ///
-/// Implemented by the answers a repository gives: [`crate::ConfirmedHistoryPage`],
-/// [`crate::Balance`] and [`crate::OutputPage`]. A repository with an answer
-/// type of its own implements it for that type, and owes what those three do:
+/// Implemented by the answers a store gives: [`crate::OutputPage`] and
+/// [`crate::Location`]. A consumer with an answer type of its own implements
+/// it for that type, and owes what those do:
 /// the checkpoint is the one the rows came from, not one read before or after.
 ///
 /// Deliberately not implemented for a [`BlockRef`] or an `Option` of one. A
@@ -172,7 +174,7 @@ pub trait Checkpointed {
 /// watched addresses those blocks touch, usually nothing. The native blocks
 /// those facts were read from are not here — they are megabytes, they are the
 /// chain's type rather than this crate's, and only the fetching path ever
-/// wants one again, so [`crate::fetch::NativeBlocks`] keeps its own bounded
+/// wants one again, so [`crate::read::Cache`] keeps its own bounded
 /// cache of them. Neither is the checkpoint a commit of one is conditional on:
 /// what this collection holds is facts, and a reader of it needs no
 /// precondition.
@@ -347,9 +349,9 @@ impl Blocks {
     /// Copied and labelled under one guard, so the revision a reader gets names
     /// the list it got. This is the only reading of the collection that leaves
     /// the index ([`Pending`]).
-    pub(crate) fn sampled(&self) -> Result<PendingSample, IndexError> {
+    pub(crate) fn sampled(&self) -> Result<Sample, IndexError> {
         let entries = self.entries()?;
-        Ok(PendingSample::new(
+        Ok(Sample::new(
             entries
                 .iter()
                 .map(|entry| entry.canonical.clone())

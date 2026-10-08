@@ -2,7 +2,7 @@
 
 Create wallets, import keys and send payments on any chain without naming a
 chain crate. `Wallets` is a map from your own asset tags to the wallet factory
-each chain provides. It depends on `base` only; `sdk_config::Composition`
+each chain provides. Its core depends on `base` and `crypto`; `sdk_config::Composition`
 assembles configured chains into one index and one wallet map.
 
 ## Usage
@@ -37,6 +37,9 @@ async fn run(factory: impl WalletFactory + 'static, key: SecretBytes) -> Result<
 ```
 
 ## Notes
+
+- Feature `submissions` adds `Submissions`, a wallet registrar over `tasks::Tasks`;
+  close and drain it before stopping indexing during shutdown.
 
 - `Wallets` stores no wallet and no key. Register a new wallet's address with
   the index (`watch`) before you store its key: a crash in between then leaves

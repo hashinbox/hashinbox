@@ -1,4 +1,4 @@
-//! Contract coverage for `Index`: assembly over one store, network routing of
+//! Contract coverage for `Indexers`: assembly over one store, network routing of
 //! checkpoints and watches, and the status report it accepts from each child.
 //!
 //! No query is routed, and none can be: a balance, a history page and a
@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use futures_executor::block_on;
 use indexing::{
     Address, Birthday, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, BoxFuture,
-    ChainName, Checkpoint, Holder, Index, IndexError, IndexErrorKind, Indexing, Network, Subject,
-    SyncPhase, SyncStatus, Watch, Watching,
+    ChainName, Checkpoint, Holder, IndexError, IndexErrorKind, Indexers, Indexing, Network,
+    Outcome, Phase, Subject, Watch, Watching,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,7 +22,6 @@ enum Call {
     Watch(Box<Watch>),
     Unwatch(String),
     Watched(Network),
-    Cancel(Network),
     Sync,
 }
 
@@ -68,14 +67,14 @@ impl Indexing for Probe {
 
     fn listen(&self, _listener: Arc<dyn indexing::Listener>) {}
 
-    fn sync<'a>(&'a self) -> BoxFuture<'a, Result<SyncStatus, IndexError>> {
+    fn sync<'a>(&'a self) -> BoxFuture<'a, Result<Outcome, IndexError>> {
         self.record(Call::Sync);
-        let status = SyncStatus {
+        let status = Outcome {
             network: self.network.clone(),
             checkpoint: Some(self.checkpoint.clone()),
             pending_tip: None,
             observed_tip: Some(self.checkpoint.clone()),
-            phase: SyncPhase::Ready,
+            phase: Phase::Ready,
             unmatched_spends: Vec::new(),
             backfill: None,
         };
@@ -127,16 +126,6 @@ impl Watching for Probe {
     }
 }
 
-impl indexing::Backfilling for Probe {
-    fn cancel_backfill<'a>(
-        &'a self,
-        network: &'a Network,
-    ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
-        self.record(Call::Cancel(network.clone()));
-        Box::pin(async { Ok(Vec::new()) })
-    }
-}
-
 /// The native-asset subject of one address.
 fn subject(address: &Address) -> Subject {
     Subject {
@@ -177,7 +166,7 @@ fn block(height: u64) -> BlockRef {
 ///
 /// The two differ only in how many networks they name, which is exactly what
 /// this cannot ask them: a child answers [`Indexing::network`] and one
-/// `SyncStatus`, an `Index` answers `networks()` and a vector of them, and the
+/// `Outcome`, an `Indexers` answers `networks()` and a vector of them, and the
 /// test below states each half where it belongs.
 ///
 /// **No query is in here**, and that is the contract rather than an omission: a
@@ -225,7 +214,7 @@ fn one_chain_and_composer_share_the_read_contract() {
     );
 
     let composed_network = network("composed-chain");
-    let index = Index::of(vec![
+    let index = Indexers::of(vec![
         Arc::new(Probe::new(composed_network.clone(), 7)) as Arc<dyn Indexing>
     ])
     .expect("one chain composes");
@@ -247,7 +236,7 @@ fn routes_each_networked_operation_to_its_indexer() {
     let second_network = network("second-chain");
     let first = Arc::new(Probe::new(first_network.clone(), 4));
     let second = Arc::new(Probe::new(second_network.clone(), 7));
-    let index = Index::of(vec![
+    let index = Indexers::of(vec![
         first.clone() as Arc<dyn Indexing>,
         second.clone() as Arc<dyn Indexing>,
     ])
@@ -266,7 +255,7 @@ fn routes_each_networked_operation_to_its_indexer() {
 
 #[test]
 fn an_empty_index_allows_configuration_but_does_not_report_readiness() {
-    let index = Index::<dyn Indexing>::of(Vec::new()).expect("empty collection");
+    let index = Indexers::<dyn Indexing>::of(Vec::new()).expect("empty collection");
     assert!(index.units().is_empty());
     assert!(index.networks().is_empty());
     assert!(!indexing::SyncHealth::starting(index.networks()).ready());
@@ -275,7 +264,7 @@ fn an_empty_index_allows_configuration_but_does_not_report_readiness() {
 #[test]
 fn rejects_duplicate_networks() {
     let shared_network = network("same-chain");
-    let result = Index::of(vec![
+    let result = Indexers::of(vec![
         Arc::new(Probe::new(shared_network.clone(), 1)) as Arc<dyn Indexing>,
         Arc::new(Probe::new(shared_network, 2)) as Arc<dyn Indexing>,
     ]);
@@ -291,7 +280,7 @@ fn rejects_duplicate_networks() {
 fn rejects_operations_for_an_unconfigured_network() {
     let configured = network("configured-chain");
     let missing = network("missing-chain");
-    let index = Index::of(vec![
+    let index = Indexers::of(vec![
         Arc::new(Probe::new(configured, 1)) as Arc<dyn Indexing>
     ])
     .expect("one network composes");
@@ -320,7 +309,7 @@ fn routes_each_watch_and_combines_statuses_from_every_indexer() {
     let first = Arc::new(Probe::new(first_network.clone(), 4));
     let second = Arc::new(Probe::new(second_network.clone(), 7));
     let idle = Arc::new(Probe::new(idle_network.clone(), 9));
-    let index = Index::of(vec![
+    let index = Indexers::of(vec![
         first.clone() as Arc<dyn Indexing>,
         second.clone() as Arc<dyn Indexing>,
         idle.clone() as Arc<dyn Indexing>,
@@ -379,7 +368,7 @@ fn routes_each_watch_and_combines_statuses_from_every_indexer() {
 fn rejects_a_child_whose_status_is_not_about_its_own_network() {
     struct Reporting {
         network: Network,
-        status: Mutex<Option<SyncStatus>>,
+        status: Mutex<Option<Outcome>>,
     }
 
     impl Checkpoint for Reporting {
@@ -398,7 +387,7 @@ fn rejects_a_child_whose_status_is_not_about_its_own_network() {
 
         fn listen(&self, _listener: Arc<dyn indexing::Listener>) {}
 
-        fn sync<'a>(&'a self) -> BoxFuture<'a, Result<SyncStatus, IndexError>> {
+        fn sync<'a>(&'a self) -> BoxFuture<'a, Result<Outcome, IndexError>> {
             let status = self.status.lock().expect("reported status").take();
             Box::pin(async move { Ok(status.expect("one pass per fixture")) })
         }
@@ -426,37 +415,28 @@ fn rejects_a_child_whose_status_is_not_about_its_own_network() {
         }
     }
 
-    impl indexing::Backfilling for Reporting {
-        fn cancel_backfill<'a>(
-            &'a self,
-            _network: &'a Network,
-        ) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
-            Box::pin(async { unreachable!("this fixture only reports statuses") })
-        }
-    }
-
     let owned = network("owned-chain");
     let foreign = network("foreign-chain");
-    let ready = SyncStatus {
+    let ready = Outcome {
         network: owned.clone(),
         checkpoint: Some(block(3)),
         pending_tip: None,
         observed_tip: Some(block(3)),
-        phase: SyncPhase::Ready,
+        phase: Phase::Ready,
         unmatched_spends: Vec::new(),
         backfill: None,
     };
     for status in [
-        SyncStatus {
+        Outcome {
             network: foreign,
             ..ready.clone()
         },
-        SyncStatus {
+        Outcome {
             checkpoint: None,
             ..ready.clone()
         },
     ] {
-        let index = Index::of(vec![Arc::new(Reporting {
+        let index = Indexers::of(vec![Arc::new(Reporting {
             network: owned.clone(),
             status: Mutex::new(Some(status)),
         }) as Arc<dyn Indexing>])
@@ -473,7 +453,7 @@ fn rejects_a_child_whose_status_is_not_about_its_own_network() {
         );
     }
 
-    let index = Index::of(vec![Arc::new(Reporting {
+    let index = Indexers::of(vec![Arc::new(Reporting {
         network: owned,
         status: Mutex::new(Some(ready)),
     }) as Arc<dyn Indexing>])

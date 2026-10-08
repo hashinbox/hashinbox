@@ -17,37 +17,20 @@ use sdk_config::{ComposedChain, Connection};
 use serde::{Deserialize, de};
 use wallets::SubmissionRegistrar;
 
-/// What a store must answer for **this** chain to compose over it.
-///
-/// [`indexing::Repository`] is the minimum any index needs — registration and
-/// committing — and the rest is what this chain's own consumers read: the
-/// balance fold, and the repository's own history query
-/// ([`indexing::ConfirmedHistory`]) that this chain joins to its overlay so
-/// `apps/server` can project a page and its sender can prove a transaction absent.
-/// A trait bound, never a backend: this file names no store implementation. No
-/// [`indexing::OutputStore`]: an account chain produces no UTXO records, and
-/// asking for one would make a store carry a table it can never fill.
+/// What a store must answer for **this** chain to compose over it:
+/// [`indexing::Repository`], the minimum any index needs, and
+/// [`indexing::TransactionStore`], which the sender's absence proof reads
+/// ([`crate::sender::IndexPresence`]). A trait bound, never a backend.
 pub trait Store:
-    indexing::Repository
-    + indexing::BalanceStore
-    + indexing::ConfirmedHistory
-    + Clone
-    + Send
-    + Sync
-    + 'static
+    indexing::Repository + indexing::TransactionStore + Clone + Send + Sync + 'static
 {
 }
 
 impl<R> Store for R where
-    R: indexing::Repository
-        + indexing::BalanceStore
-        + indexing::ConfirmedHistory
-        + Clone
-        + Send
-        + Sync
-        + 'static
+    R: indexing::Repository + indexing::TransactionStore + Clone + Send + Sync + 'static
 {
 }
+
 /// The shell every chain's configuration shares, from `sdk/config`: the nodes
 /// and their repetition, the cadence this chain indexes at, and the
 /// registration hook that lets a document hand this file its own section.
@@ -303,16 +286,14 @@ impl<A> ChainHandle<A> {
         };
         let indexer = Arc::new(crate::indexer(params)?);
         indexer.checkpoint(&network.canonical()).await?;
-        // The repository's own confirmed pages and balance fold, each
-        // completed by the blocks this index holds above its confirmed line.
-        // Paired here because this is the place that holds both halves — the
-        // rows are the store's, the pending blocks are the index's, and the
-        // index answers no query itself — and handed to whoever reads a page:
-        // the sender's absence proof, and `apps/server` through `ComposedChain`.
-        let reads = Arc::new(indexing::PendingJoin::new(repository, indexer.clone()));
-        let history: Arc<dyn indexing::History> = reads.clone();
+        // The sender's absence proof: the store's confirmed transactions with
+        // this index's pending blocks folded in.
+        let presence = Arc::new(crate::sender::IndexPresence::new(
+            Arc::new(repository),
+            indexer.clone(),
+        ));
         let wallet = WalletConfig::new(&network);
-        let sol = WalletFactory::new(wallet.clone(), &rpc, &indexer, history.clone())?
+        let sol = WalletFactory::new(wallet.clone(), &rpc, &indexer, presence)?
             .with_registrar(registrar.clone());
         let mut factories: Vec<(A, Box<dyn wallets::WalletFactory>)> = Vec::new();
         for token in config.tokens {
@@ -321,9 +302,8 @@ impl<A> ChainHandle<A> {
         }
         factories.insert(0, (config.asset, Box::new(sol)));
         Ok(ComposedChain {
+            pending: indexer.clone(),
             index: indexer,
-            history,
-            balance: reads,
             factories,
             units,
             poll: config.cadence.poll,
@@ -727,7 +707,7 @@ mod tests {
         assert_eq!(config.cadence.poll, Duration::from_millis(17));
 
         config.rpc.endpoints.clear();
-        config.cadence.policy = indexing::SyncPolicy::new(0);
+        config.cadence.policy = indexing::Budget::new(0);
         assert_eq!(
             config.validate().unwrap_err().message,
             "invalid database or RPC configuration"

@@ -13,7 +13,7 @@ use utoipa::IntoParams;
 
 use super::{Error, ErrorBody};
 use crate::{
-    models::{Completeness, Wallet},
+    models::{SettledBalance, Wallet},
     state::AppState,
 };
 
@@ -24,8 +24,10 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 /// A wallet's balance in its asset, on both sides of its chain's confirmed
 /// line.
 ///
-/// `amount` is the confirmed indexed total. Completeness states whether history
-/// is missing; chain spending rules, such as coinbase maturity, still apply.
+/// `amount` is the confirmed indexed total, negative when indexed debits
+/// exceed known credits; `behind` states how far the address's inspection
+/// trails the confirmed line. Chain spending rules, such as coinbase
+/// maturity, still apply.
 /// The two pending figures describe blocks above the confirmed line: they are
 /// reported apart rather than netted, because "3.0 arriving" and "1.0
 /// leaving" are different facts to a payments operator, and neither is ever
@@ -34,8 +36,9 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[schema(as = Balance)]
 struct ReadResponse {
-    /// Confirmed indexed amount in exact display units, e.g. `12.5`.
-    /// Completeness and chain spending rules apply separately.
+    /// Confirmed indexed amount in exact display units, e.g. `12.5`; negative,
+    /// e.g. `-0.5`, when indexed debits exceed known credits. Chain spending
+    /// rules apply separately.
     amount: String,
     /// Incoming value in blocks above the confirmed line. Never negative.
     pending_incoming: String,
@@ -49,10 +52,10 @@ struct ReadResponse {
     /// is pending. Always present.
     #[schema(required)]
     pending_height: Option<u64>,
-    /// How much of the history behind `amount` the index can prove it holds.
-    /// `incomplete` while this address still owes a historical range, and
-    /// `overdrawn` when indexed debits exceed known credits.
-    completeness: Completeness,
+    /// How many blocks this address's inspection is behind the confirmed
+    /// line; 0 when caught up. While it is above 0, `amount` may still change
+    /// as history below the line is read.
+    behind: u64,
 }
 
 #[utoipa::path(
@@ -61,7 +64,8 @@ struct ReadResponse {
     operation_id = "read_wallet_balance",
     summary = "Read a wallet's balance in its own asset",
     description = "The confirmed indexed total and pending incoming/outgoing amounts in the \
-        asset's display units, with the confirmed and pending heights and history completeness. \
+        asset's display units, with the confirmed and pending heights and how many blocks the \
+        address's inspection is behind. \
         Chain spending rules still apply. A watch-only address reads the same balance \
         without a key.",
     params(WalletPath),
@@ -84,19 +88,46 @@ async fn balance(
         .units
         .of(&subject.address.network, &subject.asset)
         .ok_or_else(Error::undeclared)?;
-    // The reader that owns the wallet's network answers in atomic units;
-    // the unit the asset's own chain declared scales them.
-    let balance = state.balance.balance(subject).await?;
+    // The pending blocks are sampled before the rows are read, and narrowed
+    // by the line the rows were read at, so a commit landing in between is
+    // counted once.
+    let pending = state
+        .pending
+        .iter()
+        .find(|(network, _)| *network == subject.address.network)
+        .map(|(_, pending)| pending.clone())
+        .ok_or_else(|| {
+            indexing::IndexError::new(
+                indexing::IndexErrorKind::NetworkMismatch,
+                "index network is not configured",
+                false,
+            )
+        })?;
+    let sample = pending.sampled()?;
+    let unavailable = |_| Error::indexed("the index database is unavailable");
+    // One deferred transaction: every row of the read is one snapshot.
+    let mut read = state.pool.begin().await.map_err(unavailable)?;
+    let settled = SettledBalance::read(&mut read, subject).await?;
+    read.rollback().await.map_err(unavailable)?;
+    let balance = settled.completed(subject, sample);
     // Every indexed amount is exact and atomic; the asset's own decimals,
     // which the index never learns, are applied here.
     let display = |amount| unit.display(amount).map_err(Error::unscalable);
+    // A deficit is shown as such: the magnitude is scaled, the sign kept.
+    let (sign, units) = balance.net.into_parts();
+    let units = base::Decimal::from_atomic(units, 0);
+    let magnitude = display(&units)?;
+    let amount = match sign {
+        num_bigint::Sign::Minus => format!("-{magnitude}"),
+        _ => magnitude.to_string(),
+    };
     Ok(Json(ReadResponse {
-        amount: display(&balance.amount)?.to_string(),
-        pending_incoming: display(&balance.pending.incoming)?.to_string(),
-        pending_outgoing: display(&balance.pending.outgoing)?.to_string(),
+        amount,
+        pending_incoming: display(&balance.incoming)?.to_string(),
+        pending_outgoing: display(&balance.outgoing)?.to_string(),
         observed_height: balance.observed_at.map(|block| block.height.0),
-        pending_height: balance.pending.block.map(|block| block.height.0),
-        completeness: balance.completeness.into(),
+        pending_height: balance.pending.map(|block| block.height.0),
+        behind: balance.behind,
     }))
 }
 
@@ -115,7 +146,7 @@ mod tests {
 
     use super::*;
     use crate::api::emits_required;
-    use crate::api::harness::App;
+    use crate::app::App;
 
     #[test]
     fn the_balance_requires_exactly_what_it_emits() {
@@ -127,7 +158,7 @@ mod tests {
                 pending_outgoing: "0".to_owned(),
                 observed_height: None,
                 pending_height: None,
-                completeness: Completeness::Incomplete,
+                behind: 0,
             },
         );
     }
@@ -151,7 +182,7 @@ mod tests {
                 "pending_outgoing": "0",
                 "observed_height": 8,
                 "pending_height": 9,
-                "completeness": "incomplete"
+                "behind": 0
             }),
             "both halves are the index's own fold, scaled by the asset's decimals, \
              and the fold says how much of the history behind it it can prove"

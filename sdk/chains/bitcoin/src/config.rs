@@ -20,38 +20,19 @@ use wallets::SubmissionRegistrar;
 /// What a store must answer for **this** chain to compose over it.
 ///
 /// [`indexing::Repository`] is the minimum any index needs — registration and
-/// committing — and the rest is what Bitcoin's own consumers read: the balance
-/// fold, the repository's own history query ([`indexing::ConfirmedHistory`])
-/// that this chain joins to its overlay for the page `apps/server` projects, and
-/// the live outputs coin selection spends. Trait bounds, never a backend: this
-/// file names no store implementation. Named here rather than in `wallets`,
-/// because it is this
-/// chain's requirement and not a rule about stores: an account chain needs no
-/// [`indexing::OutputStore`] at all, and a third party's sink that answers none
-/// of these still indexes.
+/// committing — and [`indexing::OutputStore`] is the live outputs coin
+/// selection spends ([`crate::sender::Spendable`]). Trait bounds, never a
+/// backend: this file names no store implementation.
 pub trait Store:
-    indexing::Repository
-    + indexing::BalanceStore
-    + indexing::OutputStore
-    + indexing::ConfirmedHistory
-    + Clone
-    + Send
-    + Sync
-    + 'static
+    indexing::Repository + indexing::OutputStore + Clone + Send + Sync + 'static
 {
 }
 
 impl<R> Store for R where
-    R: indexing::Repository
-        + indexing::BalanceStore
-        + indexing::OutputStore
-        + indexing::ConfirmedHistory
-        + Clone
-        + Send
-        + Sync
-        + 'static
+    R: indexing::Repository + indexing::OutputStore + Clone + Send + Sync + 'static
 {
 }
+
 /// The shell every chain's configuration shares, from `sdk/config`: the nodes
 /// and their repetition, the cadence this chain indexes at, and the
 /// registration hook that lets a document hand this file its own section.
@@ -321,15 +302,15 @@ impl<A> ChainHandle<A> {
         // index holds above its confirmed line. Paired here because this is
         // the place that holds both: the rows are the store's, the pending
         // blocks are the index's, and the index answers no query itself.
-        let reads = Arc::new(indexing::PendingJoin::new(repository, indexer.clone()));
         // The unspent rows with the pending blocks folded in, so change is
         // spendable at depth one. The store itself refuses them while the
         // address's own history is still being read.
-        let factory = WalletFactory::new(wallet, &rpc, reads.clone())?;
+        let spendable =
+            crate::sender::Spendable::new(Arc::new(repository), indexer.clone(), wallet.native);
+        let factory = WalletFactory::new(wallet, &rpc, Arc::new(spendable))?;
         Ok(ComposedChain {
+            pending: indexer.clone(),
             index: indexer,
-            history: reads.clone(),
-            balance: reads,
             factories: vec![(config.asset, Box::new(factory) as Box<_>)],
             units,
             poll: config.cadence.poll,

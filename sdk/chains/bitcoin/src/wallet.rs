@@ -9,7 +9,6 @@ use base::{
 };
 use bitcoin::AddressType as Kind;
 use indexing::Holder;
-use indexing::OutputStore;
 use wallets::{
     AddressParser, Authorship, Dependency, FactoryProfile, FutureResult, Generation, Origin,
     SingleSender, TransactionFactory, Wallet as WalletContract, WalletError, WalletErrorKind,
@@ -21,7 +20,7 @@ use crate::native::{
     rpc::{Client, Submitter},
     transaction::{FeeRate, Preflight, Transfer},
 };
-use crate::sender::{FactorySender, Outbox, SendRequest, UtxoReader};
+use crate::sender::{FactorySender, Outbox, SendRequest, UtxoSource};
 
 /// Which addresses one asset's wallets use and how they price fees.
 ///
@@ -150,15 +149,14 @@ impl AddressParser for WalletConfig {
 pub struct WalletFactory {
     config: WalletConfig,
     outbox: Arc<Outbox>,
-    utxos: Arc<UtxoReader>,
+    source: Arc<dyn UtxoSource>,
 }
 
 impl WalletFactory {
-    /// Builds the send pipeline over `rpc` and coin selection over
-    /// `spendable`, which is the store's live outputs joined to the blocks the
-    /// chain's [`indexing::Indexer`] holds above its confirmed line
-    /// (`indexing::PendingJoin`), so a wallet can spend its own change at depth
-    /// one. No I/O.
+    /// Builds the send pipeline over `rpc` and coin selection over the
+    /// candidate inputs `source` supplies: caller-selected UTXOs (a
+    /// `Vec<Utxo>`), or [`crate::sender::Spendable`] for the store's live
+    /// outputs with the pending blocks folded in. No I/O.
     ///
     /// # Errors
     ///
@@ -167,7 +165,7 @@ impl WalletFactory {
     pub fn new<C>(
         config: WalletConfig,
         rpc: &Client<C>,
-        spendable: Arc<dyn OutputStore>,
+        source: Arc<dyn UtxoSource>,
     ) -> Result<Self, Error>
     where
         C: json_rpc::Client + 'static,
@@ -180,21 +178,20 @@ impl WalletFactory {
         }
         config.validate()?;
         let rpc = Arc::new(rpc.clone());
-        Ok(Self::assemble(config, rpc.clone(), rpc, spendable))
+        Ok(Self::assemble(config, rpc.clone(), rpc, source))
     }
 
     pub(crate) fn assemble(
         config: WalletConfig,
         preflight: Arc<dyn Preflight>,
         submitter: Arc<dyn Submitter>,
-        spendable: Arc<dyn OutputStore>,
+        source: Arc<dyn UtxoSource>,
     ) -> Self {
-        let utxos = Arc::new(UtxoReader::new(config.native, spendable));
-        let outbox = Outbox::new(&config, preflight, submitter, utxos.clone());
+        let outbox = Outbox::new(&config, preflight, submitter, source.clone());
         Self {
             config,
             outbox: Arc::new(outbox),
-            utxos,
+            source,
         }
     }
 
@@ -214,7 +211,7 @@ impl WalletFactory {
             config: self.config.clone(),
             key: Arc::new(key),
             outbox: self.outbox.clone(),
-            utxos: self.utxos.clone(),
+            source: self.source.clone(),
         }))
     }
 
@@ -222,7 +219,7 @@ impl WalletFactory {
         Origin::new(Fingerprint {
             config: self.config.clone(),
             outbox: Dependency::of(&self.outbox),
-            utxos: Dependency::of(&self.utxos),
+            source: Dependency::of(&self.source),
         })
     }
 }
@@ -230,14 +227,14 @@ impl WalletFactory {
 /// What makes two wallets interchangeable: configuration and shared handles.
 ///
 /// The handles are the whole send path: `outbox` is the guarded submission
-/// pipeline, `utxos` the coin selection it reads. Both are allocated once per
+/// pipeline, `source` the candidate inputs it selects from. Both are allocated once per
 /// [`WalletFactory::assemble`], so two factories share them only by sharing
 /// the assembly — which is what interchangeability means here.
 #[derive(PartialEq, Eq)]
 struct Fingerprint {
     config: WalletConfig,
     outbox: Dependency,
-    utxos: Dependency,
+    source: Dependency,
 }
 
 impl wallets::WalletFactory for WalletFactory {
@@ -296,9 +293,8 @@ pub(crate) struct Wallet {
     /// BTC: the one asset a Bitcoin wallet holds, computed once.
     asset: indexing::AssetId,
     pub(crate) outbox: Arc<Outbox>,
-    /// Confirmed outputs with the pending overlay folded in: what this wallet
-    /// may spend, through `outbox`.
-    utxos: Arc<UtxoReader>,
+    /// The candidate inputs this wallet may spend, through `outbox`.
+    source: Arc<dyn UtxoSource>,
 }
 
 impl Wallet {
@@ -310,8 +306,8 @@ impl Wallet {
         address: Address,
         node: &Arc<crate::sender::stub::Node>,
     ) -> Self {
-        let utxos = Arc::new(UtxoReader::new(config.native, node.clone()));
-        let outbox = Outbox::new(&config, node.clone(), node.clone(), utxos.clone());
+        let source: Arc<dyn UtxoSource> = node.clone();
+        let outbox = Outbox::new(&config, node.clone(), node.clone(), source.clone());
         Self {
             canonical: address.canonical(&config.network),
             asset: indexing::AssetId::native(CHAIN_NAME),
@@ -319,7 +315,7 @@ impl Wallet {
             key: Arc::new(key),
             address,
             outbox: Arc::new(outbox),
-            utxos,
+            source,
         }
     }
 
@@ -327,7 +323,7 @@ impl Wallet {
         Fingerprint {
             config: self.config.clone(),
             outbox: Dependency::of(&self.outbox),
-            utxos: Dependency::of(&self.utxos),
+            source: Dependency::of(&self.source),
         }
     }
 
@@ -448,7 +444,7 @@ mod tests {
         WalletFactory {
             config: factory.config.clone(),
             outbox: factory.outbox.clone(),
-            utxos: factory.utxos.clone(),
+            source: factory.source.clone(),
         }
     }
 
@@ -522,7 +518,7 @@ mod tests {
             ..equivalent(&factory)
         });
         candidates.push(WalletFactory {
-            utxos: Arc::new(UtxoReader::new(Network::Regtest, other.clone())),
+            source: other.clone(),
             ..equivalent(&factory)
         });
         for candidate in candidates {

@@ -24,20 +24,22 @@ import { Send } from './send';
 
 const PAGE = 100;
 
-const CLAIMS: Record<Balance['completeness'], { text: string; color: string }> = {
-  complete_history: {
-    text: 'Every movement since the address was first used is here.',
-    color: 'text.secondary',
-  },
-  incomplete: {
-    text: 'History since the watch began; earlier movements may be missing.',
-    color: 'warning.main',
-  },
-  overdrawn: {
-    text: 'More left this address than ever reached it: credits are missing.',
-    color: 'error.main',
-  },
-};
+/** What a balance says about the history behind it. */
+function claimOf(balance: Balance): { text: string; color: string } {
+  if (balance.amount.startsWith('-')) {
+    return {
+      text: 'More left this address than ever reached it: credits are missing.',
+      color: 'error.main',
+    };
+  }
+  if (balance.behind > 0) {
+    return {
+      text: `History is ${balance.behind} block(s) behind; earlier movements may be missing.`,
+      color: 'warning.main',
+    };
+  }
+  return { text: 'History is read up to the confirmed line.', color: 'text.secondary' };
+}
 
 const STATUS: Record<Transaction['status']['kind'], string> = {
   confirmed: 'text.primary',
@@ -111,7 +113,7 @@ export function Wallet({
       .catch(shell.fail);
   };
 
-  const claim = balance ? CLAIMS[balance.completeness] : null;
+  const claim = balance ? claimOf(balance) : null;
   const incoming = balance ? atomic(balance.pending_incoming, decimals) : 0n;
   const outgoing = balance ? atomic(balance.pending_outgoing, decimals) : 0n;
 

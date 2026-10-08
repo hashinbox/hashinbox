@@ -1,15 +1,77 @@
-//! Reading spendable outputs back: `OutputRequest`, `OutputCursor` and
-//! `OutputPage`, which [`crate::OutputStore`] names.
+//! Reading spendable outputs back: the [`OutputStore`] port and the
+//! `OutputRequest`, `OutputCursor` and `OutputPage` it names.
 //!
 //! The outputs themselves — [`crate::IndexedOutput`] and the
 //! [`crate::OutputChanges`] a block applies — are committed facts and stay in
 //! the engine. Only the page a reader asks for is here.
 
-use super::history::require_limit;
+use crate::storage::subject::require_address;
 use crate::{
-    Address, BlockRef, Checkpointed, IndexError, IndexErrorKind, IndexedOutput, Network,
-    holder::require_address,
+    Address, BlockRef, BoxFuture, Checkpointed, IndexError, IndexErrorKind, IndexedOutput, Network,
 };
+
+/// The longest page any output request asks for, and therefore the longest
+/// any store returns.
+const MAX_PAGE: usize = 1_000;
+
+/// One page read with one row to spare, which is how a store knows whether
+/// another page follows without reading twice.
+#[cfg(any(feature = "sqlite", feature = "memory"))]
+pub(crate) struct Probe {
+    limit: usize,
+}
+
+#[cfg(any(feature = "sqlite", feature = "memory"))]
+impl Probe {
+    /// The probe for a page of `limit` rows.
+    pub(crate) const fn new(limit: usize) -> Self {
+        Self { limit }
+    }
+
+    /// How many rows to read: the page, and the one that proves another follows.
+    pub(crate) const fn rows(&self) -> usize {
+        self.limit.saturating_add(1)
+    }
+
+    /// The page out of the rows a store read, and where the next one resumes:
+    /// after the last row returned, and only when the spare row came back.
+    pub(crate) fn page<T, C>(
+        &self,
+        mut rows: Vec<T>,
+        cursor: impl FnOnce(&T) -> C,
+    ) -> (Vec<T>, Option<C>) {
+        let more = rows.len() > self.limit;
+        rows.truncate(self.limit);
+        let next = rows.last().filter(|_| more).map(cursor);
+        (rows, next)
+    }
+}
+
+/// Current live outputs indexed for canonical addresses.
+///
+/// Its SDK consumer is `chain_bitcoin::sender::Spendable`, which folds the
+/// pending blocks over these pages.
+pub trait OutputStore: Send + Sync {
+    /// Lists one checkpoint-consistent page of spendable outputs.
+    ///
+    /// # Errors
+    ///
+    /// A retryable [`IndexErrorKind::Conflict`] while any observation of the
+    /// address is still being inspected below the checkpoint the page would be
+    /// read at, or the address is observed and its network has no checkpoint,
+    /// because a row cannot be proven unspent over blocks nothing has read
+    /// ([`crate::Inspection::spendable`]). The same kind when the checkpoint
+    /// moved under a cursor.
+    fn list<'a>(&'a self, request: OutputRequest) -> BoxFuture<'a, Result<OutputPage, IndexError>>;
+}
+
+/// The forwarding impl, so a store that cannot be cloned is used as
+/// `Arc<MySink>`.
+impl<T: OutputStore + ?Sized> OutputStore for std::sync::Arc<T> {
+    fn list<'a>(&'a self, request: OutputRequest) -> BoxFuture<'a, Result<OutputPage, IndexError>> {
+        (**self).list(request)
+    }
+}
 
 /// Stable position in a snapshot-consistent output listing.
 ///
@@ -22,23 +84,6 @@ pub struct OutputCursor {
     pub checkpoint: Option<BlockRef>,
     /// Backend-owned resume position.
     pub position: Vec<u8>,
-    /// The revision of the pending blocks the page this cursor follows was
-    /// folded over, when whatever answered it folds them.
-    ///
-    /// The durable checkpoint above cannot carry this: a block held above the
-    /// confirmed line does not move the checkpoint, so two pages can name the
-    /// same one and still have been folded over different pending sets. A
-    /// consumer that joins a store's page to a [`crate::PendingSample`] sets it
-    /// on every cursor it issues, from [`crate::PendingSample::revision`], and
-    /// refuses a later page whose value is not the sample it now holds — the
-    /// spendable set is paged by coin selection, so the union of two pages
-    /// folded over different pending blocks could hold an input *and* the
-    /// change that exists only because that input was spent.
-    ///
-    /// `None` on a cursor issued by a store that folds nothing, which is every
-    /// backend: the field is set by whoever did the folding, and a backend
-    /// neither reads it nor returns it.
-    pub revision: Option<u64>,
 }
 
 /// One page request for an address's live outputs.
@@ -79,7 +124,14 @@ impl OutputRequest {
             ));
         }
         require_address(&self.address)?;
-        require_limit(self.limit)
+        if (1..=MAX_PAGE).contains(&self.limit) {
+            return Ok(());
+        }
+        Err(IndexError::new(
+            IndexErrorKind::InvalidRequest,
+            format!("query limit must be between 1 and {MAX_PAGE}"),
+            false,
+        ))
     }
 }
 
@@ -103,7 +155,7 @@ impl Checkpointed for OutputPage {
 }
 
 #[cfg(test)]
-mod tests {
+mod outputs_tests {
     use base::ChainName;
 
     use super::*;

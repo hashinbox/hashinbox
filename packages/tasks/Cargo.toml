@@ -1,0 +1,16 @@
+[package]
+name = "tasks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Owned Tokio tasks with closed admission and graceful draining."
+
+[dependencies]
+tokio = { version = "=1.49.0", default-features = false, features = ["rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "sync"] }
+
+[lints]
+workspace = true

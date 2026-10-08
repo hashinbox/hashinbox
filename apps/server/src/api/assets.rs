@@ -71,7 +71,7 @@ async fn list(State(state): State<Arc<AppState>>) -> Json<ListResponse> {
 mod tests {
     use axum::http::StatusCode;
 
-    use crate::api::harness::App;
+    use crate::app::App;
 
     #[tokio::test]
     async fn assets_are_listed_from_the_registered_factories() {

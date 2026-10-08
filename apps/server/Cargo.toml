@@ -35,6 +35,8 @@ hex.workspace = true
 http-server = { path = "../../packages/http-server" }
 indexing = { path = "../../sdk/indexing" }
 json-rpc = { path = "../../packages/json-rpc" }
+# Exact signed totals for the balance read: amounts are u256-capable text.
+num-bigint.workspace = true
 sdk-config = { path = "../../sdk/config", features = ["toml"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true

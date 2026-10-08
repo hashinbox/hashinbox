@@ -22,10 +22,10 @@ use base::{Signer, TransactionError, TransactionErrorKind};
 use wallets::SendError;
 
 use super::{
+    UtxoSource,
     dispatch::Dispatch,
     recovery::Recovery,
     reservation::{Admission, Reservations},
-    utxos::UtxoReader,
 };
 use crate::native::{
     Address, Error, Network, Satoshi, SignedTransaction, TransactionId,
@@ -44,7 +44,7 @@ pub(crate) struct Outbox {
     fee_target_blocks: u16,
     max_fee_rate: FeeRate,
     preflight: Arc<dyn Preflight>,
-    utxos: Arc<UtxoReader>,
+    source: Arc<dyn UtxoSource>,
     dispatch: Dispatch,
     recovery: Recovery,
     reservations: Reservations,
@@ -114,7 +114,7 @@ impl Outbox {
         config: &WalletConfig,
         preflight: Arc<dyn Preflight>,
         submitter: Arc<dyn Submitter>,
-        utxos: Arc<UtxoReader>,
+        source: Arc<dyn UtxoSource>,
     ) -> Self {
         let dispatch = Dispatch {
             submitter: submitter.clone(),
@@ -125,7 +125,7 @@ impl Outbox {
             fee_target_blocks: config.fee_target_blocks,
             max_fee_rate: config.max_fee_rate,
             preflight,
-            utxos,
+            source,
             recovery: Recovery {
                 submitter,
                 dispatch: dispatch.clone(),
@@ -230,7 +230,7 @@ impl Outbox {
             .fee_rate(self.fee_target_blocks, self.max_fee_rate)
             .await?;
         self.recover(&addresses).await;
-        let read = self.utxos.read(&addresses).await.map_err(|error| {
+        let read = self.source.utxos(&addresses).await.map_err(|error| {
             TransactionError::new(TransactionErrorKind::Unavailable, error.message)
         })?;
         let (unsigned, admission) = self.reservations.admit(&addresses, read, |available| {

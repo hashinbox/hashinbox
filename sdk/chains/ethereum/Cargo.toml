@@ -26,6 +26,8 @@ serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
+# Exact signed nets of interpreted blocks (`indexing::Net`).
+num-bigint.workspace = true
 futures-executor.workspace = true
 # The scripted node double (`json_rpc::testing`): tests only, never a production link.
 json-rpc = { path = "../../../packages/json-rpc", features = ["testing"] }

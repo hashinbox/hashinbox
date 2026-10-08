@@ -7,13 +7,14 @@ Product acceptance lives in [SYSTEM_REQUIREMENTS.md](docs/SYSTEM_REQUIREMENTS.md
 
 | Crate | Path | Purpose | Layer | README |
 |---|---|---|---|---|
+| `tasks` | `packages/tasks` | Owned Tokio tasks, closed admission and graceful draining; no SDK dependencies | packages | [README](packages/tasks/README.md) |
 | `crypto` | `packages/crypto` | Secret key material, secp256k1 and Ed25519 keys, ECDSA/Schnorr/Ed25519 signing, the signing request/result vocabulary, and the in-process key pair every chain signs through | packages | [README](packages/crypto/README.md) |
 | `decimal` | `packages/decimal` | Exact base-10 amounts: canonical positional text, numeric ordering, atomic-unit conversion | packages | [README](packages/decimal/README.md) |
 | `json-rpc` | `packages/json-rpc` | Bounded JSON-RPC transport: one URL per node; retry and failover are decorators | packages | [README](packages/json-rpc/README.md) |
 | `http-server` | `packages/http-server` | Axum server hardening: bearer auth, transport security, limits; application-supplied health routes | packages | [README](packages/http-server/README.md) |
 | `sdk-config` | `sdk/config` | The configuration document and the registry that hands each named section to the chain that registered for it; `Rpc`, `Repetition`, `Cadence` as plain data; `Composition` of every registered chain's factories, index and read handles; TOML behind feature `toml` (off by default). It names no chain crate | config | [README](sdk/config/README.md) |
 | `base` | `sdk/base` | Chain-neutral values and capabilities: address, network, asset, amount, block, sign, broadcast | base | [README](sdk/base/README.md) |
-| `indexing` | `sdk/indexing` | Append-only, chain-neutral sync into history, checkpoint, and outputs, with pending blocks in memory; pending-inclusive balance/history/output reads (`PendingJoin`); optional SQLite/memory repositories and Tokio supervision | indexing | [README](sdk/indexing/README.md) |
+| `indexing` | `sdk/indexing` | Append-only, chain-neutral sync into history, checkpoint, and outputs, with pending blocks in memory; narrow store ports for live outputs and transaction lookup; optional SQLite/memory repositories and Tokio supervision | indexing | [README](sdk/indexing/README.md) |
 | `wallets` | `sdk/wallets` | Wallet factory contract and the `Wallets` registry: wallet capabilities, sends and batches; no reads | wallets | [README](sdk/wallets/README.md) |
 | `chain-bitcoin` | `sdk/chains/bitcoin` | Bitcoin: RPC, blocks, UTXO wallets, send pipeline | chains | [README](sdk/chains/bitcoin/README.md) |
 | `chain-ethereum` | `sdk/chains/ethereum` | Ethereum: RPC, blocks, ETH and ERC-20 wallets, send pipeline | chains | [README](sdk/chains/ethereum/README.md) |
@@ -49,7 +50,7 @@ Product acceptance lives in [SYSTEM_REQUIREMENTS.md](docs/SYSTEM_REQUIREMENTS.md
 server/examples -> chains, config, wallets, indexing, base, packages
 chains          -> config, wallets, indexing, base, packages
 config          -> wallets, indexing, base, json-rpc
-wallets         -> base, crypto
+wallets         -> base, crypto (+ optional tasks/Tokio)
 indexing        -> base, crypto (+ optional sqlx/Tokio)
 base            -> crypto, decimal
 ```
@@ -99,7 +100,7 @@ sequenceDiagram
     Note over R: One atomic transaction
     R-->>I: Committed
     App->>R: Optional balance/history/output query
-    R-->>App: Confirmed result, checkpoint, completeness
+    R-->>App: Confirmed result, checkpoint, blocks behind
 ```
 
 A `Watch` carries no key; the store's `wallet` row may hold a label and key via
@@ -134,13 +135,16 @@ whole-life outputs, watches/progress and network checkpoints. Transactionless cr
 have no invented transaction identity. Watched signed totals are maintained inside
 the commit; queries use exact atomic arithmetic, never SQLite integer sums over
 u256 text.
-Each query reads its rows, checkpoint and completeness from one snapshot.
+Each query reads its rows, checkpoint and how far its inspection is behind from one snapshot.
 
-Confirmed queries go directly to repositories. `indexing::PendingJoin`, under
-`storage/`, supplies pending-inclusive balance/history/output reads: sample
-pending blocks before the repository read, narrow them using that answer's
-checkpoint, and check revisions where needed. A commit must never omit or count a block twice. History preserves
-all stable movements; paging during backfill must not promise a complete export.
+Balance and history reads belong to the application (051): `apps/server` owns
+their SQL over indexing's tables and completes them with each network's pending
+blocks (`indexing::Pending`); Bitcoin's coin selection (`chain_bitcoin::sender::Spendable`)
+and Solana's absence proof (`chain_solana::sender::IndexPresence`) do the same over
+`OutputStore` and `TransactionStore`. Every such read samples pending blocks
+before the store read and narrows them using that answer's checkpoint. A commit
+must never omit or count a block twice. History preserves all stable movements;
+paging during backfill must not promise a complete export.
 
 Network purge removes only that network's indexing facts and derived claims, offline or
 online with that network paused and its admissions blocked; reads stay honest from the
@@ -224,7 +228,7 @@ SDK operations and model stores composed in `main.rs`:
   and a failed check changes nothing.
 - Rescan of one network. `wallets::Wallets::pause` refuses new wallet registrations
   and sends on that network and waits for those running, then
-  `indexing::SyncControl::rescan` pauses, purges (`Purging::purge_network`), resets
+  `indexing::Control::rescan` pauses, purges (`IndexStore::purge`), resets
   the indexer, discards progress and resumes. Other networks keep running; nothing is
   persisted between steps, because a restart after the purge simply scans from the
   birthdays.

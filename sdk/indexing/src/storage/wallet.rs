@@ -50,7 +50,7 @@ impl Registration {
     /// [`IndexErrorKind::InvalidRequest`](crate::IndexErrorKind::InvalidRequest)
     /// for a blank address or an asset of another chain.
     pub fn validate(&self) -> Result<(), IndexError> {
-        crate::holder::require_holding(&self.address, &self.asset)
+        crate::storage::subject::require_holding(&self.address, &self.asset)
     }
 }
 
@@ -171,7 +171,10 @@ impl Wallet {
     /// [`IndexErrorKind::InvalidRequest`](crate::IndexErrorKind::InvalidRequest)
     /// for a blank address or an asset of another chain.
     pub fn validate(&self) -> Result<(), IndexError> {
-        crate::holder::require_holding(&self.registration.address, &self.registration.asset)
+        crate::storage::subject::require_holding(
+            &self.registration.address,
+            &self.registration.asset,
+        )
     }
 }
 

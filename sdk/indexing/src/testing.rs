@@ -22,10 +22,10 @@ use std::{
 };
 
 use crate::{
-    Address, Balances, BlockCredit, BlockHash, BlockHeight, BlockInterpreter, BlockParent,
-    BlockPosition, BlockRef, BlockSource, BlockWithOutputs, BoxFuture, ChainTips, FeeSettlement,
-    History, Index, IndexError, Indexer, Indexing, NativeBlock, Network, OutputChanges,
-    PendingJoin, Router, SourceError, SyncConfig, SyncPolicy, Transaction,
+    Address, BlockCredit, BlockHash, BlockHeight, BlockInterpreter, BlockParent, BlockPosition,
+    BlockRef, BlockSource, BlockWithOutputs, BoxFuture, Budget, ChainTips, Config, FeeSettlement,
+    IndexError, Indexer, Indexers, Indexing, NativeBlock, Network, OutputChanges, Pending,
+    SourceError, Transaction,
 };
 
 /// The block at `height` of a dense chain: position and height equal, the
@@ -452,17 +452,15 @@ impl BlockInterpreter for Chain {
 }
 
 /// Several networks, each a scripted [`Chain`], indexed by real indexers into
-/// the one repository the caller supplies (the memory store, typically), with
-/// history and balance joined to the pending blocks and routed per network the
-/// way an application composes production.
+/// the one repository the caller supplies, each network's pending blocks
+/// handed out beside the index the way an application composes production.
 ///
 /// What a consumer's own tests run on when they need real answers behind a
-/// route or a report: script the chains, [`Index::sync`], then read.
+/// route or a report: script the chains, [`Indexers::sync`], then read.
 pub struct Networks {
     chains: Vec<Chain>,
-    index: Arc<Index>,
-    history: Arc<dyn History>,
-    balance: Arc<dyn Balances>,
+    index: Arc<Indexers>,
+    pending: Vec<(Network, Arc<dyn Pending>)>,
 }
 
 impl Networks {
@@ -476,59 +474,43 @@ impl Networks {
     #[must_use]
     pub fn new<R>(networks: &[Network], tip: u64, depth: u64, repository: R) -> Self
     where
-        R: crate::Repository
-            + crate::ConfirmedHistory
-            + crate::BalanceStore
-            + Clone
-            + Send
-            + Sync
-            + 'static,
+        R: crate::Repository + Clone + Send + Sync + 'static,
     {
         let mut chains = Vec::new();
         let mut indexers: Vec<Arc<dyn Indexing>> = Vec::new();
-        let mut history: Vec<(Network, Arc<dyn History>)> = Vec::new();
-        let mut balance: Vec<(Network, Arc<dyn Balances>)> = Vec::new();
+        let mut pending: Vec<(Network, Arc<dyn Pending>)> = Vec::new();
         for network in networks {
             let chain = Chain::dense(network.clone(), tip).confirming(depth);
             // A short backfill bound, so a too-old start is refusable in tests.
-            let policy = SyncPolicy::new(100).with_backfill(3);
-            let config = SyncConfig::new(network, policy).expect("a valid policy");
+            let policy = Budget::new(100).with_backfill(3);
+            let config = Config::new(network, policy).expect("a valid policy");
             let indexer = Arc::new(Indexer::new(
                 chain.clone(),
                 chain.clone(),
                 repository.clone(),
                 config,
             ));
-            let join = Arc::new(PendingJoin::new(repository.clone(), indexer.clone()));
-            history.push((network.clone(), join.clone()));
-            balance.push((network.clone(), join));
+            pending.push((network.clone(), indexer.clone()));
             indexers.push(indexer);
             chains.push(chain);
         }
         Self {
             chains,
-            index: Arc::new(Index::of(indexers).expect("distinct networks")),
-            history: Arc::new(Router::new(history).expect("one read per network")),
-            balance: Arc::new(Router::new(balance).expect("one read per network")),
+            index: Arc::new(Indexers::of(indexers).expect("distinct networks")),
+            pending,
         }
     }
 
     /// The composed index of every network.
     #[must_use]
-    pub fn index(&self) -> Arc<Index> {
+    pub fn index(&self) -> Arc<Indexers> {
         self.index.clone()
     }
 
-    /// History of any network's holding, pending blocks included.
+    /// Every network's blocks above its confirmed line, in the order given.
     #[must_use]
-    pub fn history(&self) -> Arc<dyn History> {
-        self.history.clone()
-    }
-
-    /// Balance of any network's holding, pending blocks included.
-    #[must_use]
-    pub fn balance(&self) -> Arc<dyn Balances> {
-        self.balance.clone()
+    pub fn pending(&self) -> Vec<(Network, Arc<dyn Pending>)> {
+        self.pending.clone()
     }
 
     /// Every network's scripted chain, in the order given.

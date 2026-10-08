@@ -13,7 +13,6 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
-use super::utxos::Utxos;
 use crate::native::{
     Address, Error, SignedTransaction, TransactionId,
     block::{Outpoint, Utxo},
@@ -98,13 +97,12 @@ impl Reservations {
     pub(crate) fn admit(
         &self,
         addresses: &[Address],
-        read: Utxos,
+        read: Vec<Utxo>,
         select: impl FnOnce(Vec<Utxo>) -> Result<UnsignedTransaction, Error>,
     ) -> Result<(UnsignedTransaction, Admission), Error> {
         let mut state = self.lock();
         state.prune(addresses, &read);
         let available = read
-            .outputs
             .into_iter()
             .filter(|utxo| !state.outpoints.contains_key(&utxo.outpoint))
             .collect();
@@ -258,9 +256,8 @@ impl State {
 
     /// Drops the outputs of settled records that `read` shows spent, and
     /// every settled record left without outputs.
-    fn prune(&mut self, addresses: &[Address], read: &Utxos) {
+    fn prune(&mut self, addresses: &[Address], read: &[Utxo]) {
         let unspent = read
-            .outputs
             .iter()
             .map(|utxo| utxo.outpoint)
             .collect::<BTreeSet<_>>();

@@ -81,32 +81,6 @@ impl WatchStore for Repository {
             commit(write).await
         })
     }
-
-    /// One transaction for the batch, and a **narrowed** write inside it: every
-    /// row at the birthday it now carries, with the claim it earned under the
-    /// old one gone, and nothing else.
-    ///
-    /// **Narrowed rather than restricted.** The port's contract is a
-    /// postcondition — it states what must be true afterwards, and repeating the
-    /// call is how a lost acknowledgement is settled — so refusing a row the
-    /// store does not hold would turn that recovery into an unrecoverable state.
-    /// What is restricted instead is the *column set*: a re-anchor writes
-    /// `birthday` and the recorded claim and nothing else, so the identity the
-    /// row is registered under cannot be rewritten by it.
-    fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
-        Box::pin(async move {
-            let Some(network) = Self::one_network(&watches)? else {
-                return Ok(());
-            };
-            let rows = watches
-                .iter()
-                .map(Wallet::try_from)
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut write = self.database.write().await?;
-            Self::reanchor(&mut write, &network, &rows).await?;
-            commit(write).await
-        })
-    }
 }
 
 impl Repository {
@@ -147,30 +121,6 @@ impl Repository {
                 Some(stored) if stored.archived() && stored.holds(row) => {
                     Wallet::reactivate(transaction, row).await?;
                 }
-                Some(_) => return Err(redefinition()),
-                None => Wallet::insert(transaction, row).await?,
-            }
-        }
-        Ok(())
-    }
-
-    /// Every row of the batch at the birthday it now carries, with the claim
-    /// it earned under the old one gone.
-    async fn reanchor(
-        transaction: &mut SqliteConnection,
-        network: &Network,
-        rows: &[Wallet],
-    ) -> Result<(), IndexError> {
-        for row in rows {
-            match Self::taken(transaction, network, row).await? {
-                // Found by its pair, or by its identity under another pair:
-                // only the first is this row. The second is another subject,
-                // which a re-anchor neither moves nor re-dates. An archived
-                // row is observed again, as the batch describes it.
-                Some(held) if held.holds(row) && held.archived() => {
-                    Wallet::reactivate(transaction, row).await?;
-                }
-                Some(held) if held.holds(row) => Wallet::reanchor(transaction, row, &held).await?,
                 Some(_) => return Err(redefinition()),
                 None => Wallet::insert(transaction, row).await?,
             }

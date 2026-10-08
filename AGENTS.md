@@ -20,7 +20,7 @@ This is for interaction with user.
 - Pre-release: replace obsolete internal APIs/formats directly; no compatibility
   aliases, legacy readers or invented V1/V2 DTOs. External protocol contracts remain.
   SQLite has no migrations: one schema per owner, applied to an empty file; any other
-  version is refused.
+  version is refused. Indexing owns and creates its tables; the server may read them.
 - Leave `old/` and `reference/` alone unless requested. If `.codegraph/` exists, use
   `codegraph explore` before broad source searches; otherwise use `rg`.
 
@@ -34,14 +34,14 @@ separate indexer service, raw-block archive or multi-writer deployment.
 
 | Owner | Responsibility |
 | --- | --- |
-| `apps/server` | The one application, a binary with no library target. Every module is a model, the API, or composition: `main.rs` composes (with `config.rs`, `chains.rs` (the only file naming chains), `storage.rs`, `asset.rs`, `state.rs`, `operator.rs`, `ui.rs`), including startup's node plan, the live transports and the candidate-node verifier; generic mechanics belong to the owning SDK crate or package |
-| `apps/server/src/models/` | The server's nouns, one file each: validated type, its own serde/utoipa wire form, and for durable ones their storage: `Wallet` reads indexing's `wallet` rows through `WalletRegistry`, `RpcEndpoints` is SQL on the one SQLite pool in `models/schema.sql` (created with indexing's on an empty file, no migrations). No axum, routes, `sdk_config` or chain (check 8) |
-| `apps/server/src/api/` | One file per HTTP resource (`wallets`, `balance`, `transactions`, `assets`, `networks`, `health`, `openapi`) with its routes, request/response models and tests; `mod.rs` assembles the router and OpenAPI root and holds the shared `Error`/`ErrorBody`; `harness.rs` is test-only. Handler state is `src/state.rs`; each configured network's live handles are in `networks.rs`; handlers call SDK operations and model stores directly. None of `api/`, `asset.rs`, `state.rs` names a concrete chain, `sdk_config` or storage backend (`scripts/check-chains.sh` check 8) |
+| `apps/server` | The one application, a binary with no library target. Every module is a model, the API, or composition: `main.rs` composes (with `config.rs`, `chains.rs` (the only file naming chains), `storage.rs`, `asset.rs`, `state.rs`, `operator.rs`, `ui.rs`; test-only `app.rs` is the application under test), including startup's node plan, the live transports and the candidate-node verifier; generic mechanics belong to the owning SDK crate or package |
+| `apps/server/src/models/` | The server's nouns, one file each: validated type, its own serde/utoipa wire form, and for durable ones their storage: `Wallet` reads indexing's `wallet` rows through `WalletRegistry`, `RpcEndpoints` is SQL on the one SQLite pool in `models/schema.sql` (created with indexing's on an empty file, no migrations). The server owns its read-query SQL (balance, history) over indexing's tables. No axum, routes, `sdk_config` or chain (check 8) |
+| `apps/server/src/api/` | One file per HTTP resource (`wallets`, `balance`, `transactions`, `assets`, `networks`, `health`, `openapi`) with its routes, request/response models and tests; `mod.rs` assembles the router and OpenAPI root and holds the shared `Error`/`ErrorBody`. Handler state is `src/state.rs`; each configured network's live handles are in `networks.rs`; handlers call SDK operations and model stores directly. None of `api/`, `asset.rs`, `state.rs` names a concrete chain, `sdk_config` or storage backend (`scripts/check-chains.sh` check 8) |
 | `sdk/base` | Small chain-neutral values and signing/broadcast contracts; no chains, RPC, indexing or wallets |
 | `sdk/chains/*` | Native protocol, RPC, addresses, signing, transaction construction/broadcast and indexing translation |
 | `sdk/wallets` | Factory collection, wallet capabilities and batch orchestration; no reads, custody or durable watch ownership; imports only `base` (no `indexing`, either direction) |
 | `sdk/indexing` | Watches, block inspection, continuity, confirmation, pending blocks and atomic commit coordination |
-| `sdk/indexing/src/storage/` | Repository contracts/implementations, balance, history and output queries, and their pending-inclusive reads (`PendingJoin`) |
+| `sdk/indexing/src/storage/` | Repository contracts/implementations (`WatchStore`, `IndexStore`, `OutputStore`, `Purging`) and the `Inspection` read gate; no balance/history query traits (051) |
 | `sdk/indexing/src/supervisor/` | Optional Tokio driver, retry, quarantine and network status |
 | `sdk/config` | Configuration parsing and chain registration without concrete chain dependencies; composition of factories, indexers, and read handles over registered chains (`Composition`) |
 | `packages/*` | Reusable mechanics; never import SDK/application crates |
@@ -81,9 +81,9 @@ These are ownership requirements, including where current code still differs.
 - Pending blocks stay in memory; pending reorgs truncate them without storage rollback.
   Verify saved hashes on restart. A confirmed reorg requires explicit offline recovery
   of that network, preserving registrations, unrelated networks and application data.
-- Balance/history/output queries, pagination, calculations and response models belong
-  to repository ownership under `storage/`, not the indexing engine. Consumers needing
-  pending-inclusive answers compose repository results with pending facts coherently.
+- Balance/history queries, pagination and response models belong to the application
+  (051), not the indexing engine; the live-output port stays in `storage/`. Consumers
+  needing pending-inclusive answers compose stored results with pending facts coherently.
 - Repository queries must report incomplete inspection honestly from their own snapshot;
   do not rely on the indexer to repair an unsafe or misleading repository answer.
 - SQLite and memory stay inside `storage/`, independently feature-gated; memory is a
@@ -146,7 +146,7 @@ These are ownership requirements, including where current code still differs.
 - Verify findings against current source and callers; report useful negative findings too.
   Distinguish observed defects, design proposals and unverified assumptions.
 - Prove fixes with focused behavioral tests. Keep tests deterministic and offline; run
-  shared repository contracts against SQLite and memory. Cover atomic failure/retry,
+  write contracts against SQLite and memory; server read-query suites are SQLite-only. Cover atomic failure/retry,
   birthdays/progress, restart, sparse positions, reorgs, pending reads and network isolation.
 - Use the Linter MCP plugin and its software-design skill; preserve `linter.toml`.
   Check the absolute repository root before/after design changes and inspect rule statuses:

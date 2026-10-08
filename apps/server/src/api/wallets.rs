@@ -337,7 +337,7 @@ mod tests {
 
     use indexing::Watching as _;
 
-    use crate::{api::harness::App, models::Signers};
+    use crate::{app::App, models::Signers};
 
     #[tokio::test]
     async fn a_created_wallet_carries_its_asset_network_and_address() {

@@ -7,7 +7,7 @@ names its chains.
 | Scenario | What it shows |
 | --- | --- |
 | [wallet](wallet/main.rs) | Create a wallet and import a key for each asset. No funds move. |
-| [transfer](transfer/main.rs) | Fund a sender, send, then read balance and history. |
+| [transfer](transfer/main.rs) | Fund a sender, then send once the index has seen the funds. |
 | [indexing](indexing/main.rs) | Run the sync loop and read each network's checkpoint. |
 | [watch_only](watch_only/main.rs) | Observe an address that has no key behind it. |
 | [all_chains](all_chains/main.rs) | The whole system in one file: one index, one wallet map, one send per chain. |

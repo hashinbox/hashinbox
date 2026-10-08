@@ -8,13 +8,10 @@
 use std::{sync::Arc, time::Duration};
 
 use base::{BlockRef, BoxFuture};
-use indexing::History;
-use indexing::{
-    AssetId, BlockCommit, Checkpoint, HistoryPosition, Listener, Network, Page, Subject,
-};
+use indexing::{BlockCommit, Checkpoint, Listener, Network};
 use tokio::sync::watch;
 
-use super::reservation::Reservations;
+use super::{Presence, reservation::Reservations};
 use crate::native::{SignedTransaction, rpc::Submitter};
 
 /// Announces each committed block to this recovery, so a retained submission
@@ -47,7 +44,7 @@ impl Listener for CommitSignal {
 pub(crate) struct Recovery {
     submitter: Arc<dyn Submitter>,
     checkpoint: Arc<dyn Checkpoint>,
-    history: Arc<dyn History>,
+    presence: Arc<dyn Presence>,
     network: Network,
     progress: watch::Receiver<Option<BlockRef>>,
     reservations: Reservations,
@@ -63,7 +60,7 @@ impl Recovery {
     pub(crate) fn new(
         submitter: Arc<dyn Submitter>,
         checkpoint: Arc<dyn Checkpoint>,
-        history: Arc<dyn History>,
+        presence: Arc<dyn Presence>,
         network: Network,
         progress: watch::Receiver<Option<BlockRef>>,
         reservations: Reservations,
@@ -71,7 +68,7 @@ impl Recovery {
         Self {
             submitter,
             checkpoint,
-            history,
+            presence,
             network,
             progress,
             reservations,
@@ -133,39 +130,14 @@ impl Recovery {
         }
     }
 
-    /// Pages through the sender's indexed SOL history at one stable
-    /// checkpoint: the sender pays every fee, so its transaction is there
-    /// even when it moved no SOL.
+    /// Whether the index holds the transaction, read at `checkpoint`: a read
+    /// at any other line proves nothing.
     async fn scan(&self, transaction: &SignedTransaction, checkpoint: &BlockRef) -> Scan {
-        let address = transaction.from.canonical(&self.network);
-        let id = base::TransactionId::from(transaction.id);
-        let subject = Subject {
-            address: address.clone(),
-            asset: AssetId::native(self.network.chain.clone()),
-        };
-        let mut after: Option<HistoryPosition> = None;
-        loop {
-            let page = Page {
-                after: after.clone(),
-                limit: 100,
-            };
-            let page = match self.history.history(&subject, page).await {
-                Ok(page) if page.checkpoint.as_ref() == Some(checkpoint) => page,
-                _ => return Scan::Unstable,
-            };
-            let seen = page
-                .transactions
-                .iter()
-                .chain(&page.pending)
-                .any(|observed| observed.transaction.id.id == id);
-            if seen {
-                return Scan::Present;
-            }
-            match page.next {
-                Some(next) if after.as_ref() != Some(&next) => after = Some(next),
-                Some(_) => return Scan::Unstable,
-                None => break,
-            }
+        let id = transaction.id.canonical(&self.network);
+        match self.presence.landed(&id).await {
+            Ok(landed) if landed.present => return Scan::Present,
+            Ok(landed) if landed.checkpoint.as_ref() == Some(checkpoint) => {}
+            _ => return Scan::Unstable,
         }
         match self.checkpoint.checkpoint(&self.network).await {
             Ok(current) if current.as_ref() == Some(checkpoint) => Scan::Exhausted,

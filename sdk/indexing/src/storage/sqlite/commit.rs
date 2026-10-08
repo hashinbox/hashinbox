@@ -8,7 +8,7 @@ use sqlx::SqliteConnection;
 use super::{Repository, checkpoint, commit, conflict, found, models};
 use crate::{
     BlockRef, BoxFuture, IndexError, IndexStore, IndexedBatch, Network, OutputKey, Progress,
-    PurgedRows, Purging,
+    PurgedRows,
 };
 
 use models::{Block, Ledger, NetworkCheckpoint, Output, Transaction, TransactionAddress, Wallet};
@@ -37,9 +37,7 @@ impl IndexStore for Repository {
             Ok(unknown)
         })
     }
-}
 
-impl Purging for Repository {
     /// Removes every indexing-owned row of one network inside one
     /// transaction, counts each kind, and resets what every observation of it
     /// claimed. SQL predicates bound deletion memory independently of the
@@ -55,7 +53,7 @@ impl Purging for Repository {
     /// registered birthday, while every claim described rows this purge just
     /// removed, and `WatchStore::add` preserves progress on an exact repeat by
     /// contract, so nothing could reset them afterwards.
-    fn purge_network<'a>(
+    fn purge<'a>(
         &'a self,
         network: &'a Network,
     ) -> BoxFuture<'a, Result<PurgedRows, IndexError>> {
@@ -322,7 +320,7 @@ mod commit_test {
             .expect("five blocks are committed");
 
         repository
-            .purge_network(&network())
+            .purge(&network())
             .await
             .expect("the offline rescan");
         assert_eq!(
@@ -360,7 +358,7 @@ mod commit_test {
     /// rescan rebuilds, and the store accepts it.
     ///
     /// The engine is therefore not where this is decided, which is the finding:
-    /// `purge_network` is contractually offline (`BlockStore::purge_network`),
+    /// `purge` is contractually offline (`IndexStore::purge`),
     /// and that -- not a condition -- is what rules the interleaving out.
     #[tokio::test]
     async fn a_rescanned_network_accepts_a_stale_addition() {
@@ -368,7 +366,7 @@ mod commit_test {
         let repository = open(&directory, "stale.db").await;
         index(&repository, 1..=5).await;
         let held = addition(6);
-        repository.purge_network(&network()).await.expect("purge");
+        repository.purge(&network()).await.expect("purge");
         index(&repository, 1..=5).await;
         repository.commit(held).await.expect("the stale addition");
         assert_eq!(
@@ -405,7 +403,7 @@ mod commit_test {
             };
             let purging = {
                 let purger = purger.clone();
-                async move { purger.purge_network(&network()).await }
+                async move { purger.purge(&network()).await }
             };
             let (committed, purged) = if attempt % 2 == 0 {
                 let purging = tokio::spawn(purging);
@@ -514,8 +512,8 @@ mod throughput_test {
     use super::*;
     use crate::{
         Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockWithOutputs,
-        ConfirmedHistory, FeeSettlement, HistoryQuery, IndexedBatch, IndexedOutput, MovementId,
-        OutputChanges, OutputId, OutputKey, Status, Transaction, TransactionRef, ValueMovement,
+        FeeSettlement, IndexedBatch, IndexedOutput, MovementId, OutputChanges, OutputId, OutputKey,
+        Status, Transaction, TransactionRef, TransactionStore, ValueMovement,
     };
 
     /// The measurements drive the store from plain threads, as two processes
@@ -702,17 +700,13 @@ mod throughput_test {
         (worst, (parent, spend))
     }
 
-    /// One history page of `index`'s address, or the refusal.
+    /// One transaction lookup by identity, or the refusal.
     fn page(
-        repository: &impl ConfirmedHistory,
+        repository: &impl TransactionStore,
         index: usize,
-    ) -> Result<crate::ConfirmedHistoryPage, IndexError> {
-        block_on(repository.history(HistoryQuery {
-            address: address(index),
-            asset: asset(),
-            after: None,
-            limit: 100,
-        }))
+    ) -> Result<crate::Location, IndexError> {
+        let transaction = TransactionRef::new(network(), format!("tx-{index}"));
+        block_on(repository.locate(&transaction))
     }
 
     #[test]
@@ -727,7 +721,7 @@ mod throughput_test {
             return;
         }
         let started = Instant::now();
-        let removed = block_on(repository.purge_network(&network())).expect("purge");
+        let removed = block_on(repository.purge(&network())).expect("purge");
         println!(
             "  sqlite {blocks} blocks written in {seconds:.1}s, purged in {:.3}s: {removed:?}",
             started.elapsed().as_secs_f64(),
@@ -768,12 +762,12 @@ mod throughput_test {
         alongside("sqlite-2", &writer, &reader, tip);
     }
 
-    /// Reads history pages on `reader` for as long as `writer` is committing,
-    /// and reports what one page cost while it was.
+    /// Looks transactions up on `reader` for as long as `writer` is committing,
+    /// and reports what one read cost while it was.
     fn alongside<W, R>(name: &str, writer: &W, reader: &R, tip: Tip)
     where
         W: IndexStore + Sync,
-        R: ConfirmedHistory + Sync,
+        R: TransactionStore + Sync,
     {
         let committing = AtomicBool::new(true);
         std::thread::scope(|scope| {

@@ -110,6 +110,6 @@ memory/: 5 → 3 files. The backend stays shipped.
   `ObservationDraftStatus`, `CanonicalStatus` → `Transaction` + `Status`,
   `BlockWithOutputs`.
 
-Counts: engine 24 → 14, storage 11 → 10, sqlite 12 → 8, memory 5 → 3.
+Counts: engine 24 → 13, storage 11 → 10, sqlite 12 → 8, memory 5 → 3.
 Every file is an organ, an action, or a contract — and says which in its
 first line.

@@ -1,8 +1,8 @@
 //! The minimum a store must implement, proven from the outside.
 //!
 //! One type, [`Sink`], implements [`WatchStore`] and [`IndexStore`] and nothing
-//! else: no [`indexing::BalanceStore`], no [`indexing::ConfirmedHistory`], no
-//! [`indexing::OutputStore`], no [`indexing::Purging`]. It is deliberately **not
+//! else: no [`indexing::OutputStore`], no [`indexing::TransactionStore`]. It is
+//! deliberately **not
 //! `Clone`** — it owns a channel that cannot be duplicated — so the only way it
 //! reaches an index is `Arc<Sink>`, through the forwarding impls the ports
 //! carry.
@@ -19,9 +19,9 @@ use std::sync::{
 
 use futures_executor::block_on;
 use indexing::{
-    Address, Birthday, BlockPosition, BlockRef, BoxFuture, ChainName, ForwardRange, IndexError,
-    IndexErrorKind, IndexStore, IndexedBatch, Indexer, Indexing, Network, OutputKey, Subject,
-    SyncConfig, SyncPolicy, Watch, WatchProgress, WatchStore, Watching,
+    Address, Birthday, BlockPosition, BlockRef, BoxFuture, Budget, ChainName, Config, ForwardRange,
+    IndexError, IndexErrorKind, IndexStore, IndexedBatch, Indexer, Indexing, Network, OutputKey,
+    Subject, Watch, WatchProgress, WatchStore, Watching,
     testing::{Chain, block},
 };
 
@@ -127,27 +127,6 @@ impl WatchStore for Sink {
             Ok(())
         })
     }
-
-    /// The minimum a sink owes for a cancelled backfill: the row stays, its
-    /// birthday moves, and the claim it earned under the old one goes.
-    fn cancel_backfill<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
-        Box::pin(async move {
-            let mut held = self.watches.lock().expect("watches");
-            let mut progress = self.progress.lock().expect("progress");
-            for watch in watches {
-                let Some(stored) = held.iter_mut().find(|stored| stored.id == watch.id) else {
-                    return Err(IndexError::new(
-                        IndexErrorKind::Conflict,
-                        "a re-anchored observation is not registered",
-                        false,
-                    ));
-                };
-                stored.start = watch.start;
-                progress.retain(|(id, _)| id != &watch.id);
-            }
-            Ok(())
-        })
-    }
 }
 
 impl IndexStore for Sink {
@@ -211,6 +190,21 @@ impl IndexStore for Sink {
             Ok(Vec::new())
         })
     }
+
+    /// The one removal: the line and every claim go, the observations stay.
+    fn purge<'a>(
+        &'a self,
+        _network: &'a Network,
+    ) -> BoxFuture<'a, Result<indexing::PurgedRows, IndexError>> {
+        Box::pin(async move {
+            let checkpoint = self.checkpoint.lock().expect("checkpoint").take();
+            self.progress.lock().expect("progress").clear();
+            Ok(indexing::PurgedRows {
+                checkpoint: u64::from(checkpoint.is_some()),
+                ..indexing::PurgedRows::default()
+            })
+        })
+    }
 }
 
 fn network() -> Network {
@@ -239,7 +233,7 @@ fn over(sink: &Arc<Sink>, chain: &Chain) -> Indexer<Chain, Chain, Arc<Sink>> {
         chain.clone(),
         chain.clone(),
         Arc::clone(sink),
-        SyncConfig::new(chain.network(), SyncPolicy::new(100)).expect("sync policy"),
+        Config::new(chain.network(), Budget::new(100)).expect("sync policy"),
     )
 }
 

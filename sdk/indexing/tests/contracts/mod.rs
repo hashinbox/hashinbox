@@ -27,23 +27,17 @@
 mod agreement;
 mod backfill;
 mod backfill_fixture;
-mod balance;
-mod balance_totals;
-mod completeness_claims;
 mod fixture;
-mod history;
 mod idempotent_replay;
 mod purge;
-mod reanchor;
 mod rollback;
 mod unmatched_spends;
 mod wallets;
 mod watch;
 
 pub use self::wallets::WalletContract;
+pub use crate::rows::Rows;
 pub use backfill::BackfillContract;
-pub use balance::BalanceContract;
-pub use history::HistoryContract;
 pub use purge::PurgeContract;
 pub use unmatched_spends::SpendContract;
 pub use watch::WatchContract;

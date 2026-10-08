@@ -13,9 +13,10 @@ use crate::{
 };
 
 /// The wallet factories and the keys this process signs with, the one
-/// database pool the models' rows live in, the repository's wallet registry,
-/// the index with the two query readers beside it, every network's indexing
-/// health, and what the network routes maintain.
+/// database pool the models' rows live in (indexing's tables too, which the
+/// balance and history reads query), the repository's wallet registry, the
+/// index with each network's pending blocks beside it, every network's
+/// indexing health, and what the network routes maintain.
 ///
 /// Cheap to clone; the router shares one behind an `Arc`.
 #[derive(Clone)]
@@ -24,19 +25,16 @@ pub(crate) struct AppState {
     pub(crate) units: Arc<base::Units>,
     /// Every key-holding wallet's signer, by wallet id.
     pub(crate) signers: Arc<Signers>,
-    /// The one SQLite pool: the `rpc_endpoints` rows.
+    /// The one SQLite pool: the `rpc_endpoints` rows, and indexing's rows the
+    /// balance and history reads query.
     pub(crate) pool: sqlx::SqlitePool,
     /// The one repository's wallets: every wallet with its label and key,
     /// observed or archived, the rows the index scans.
     pub(crate) registry: Arc<dyn indexing::WalletRegistry>,
-    pub(crate) index: Arc<indexing::Index>,
-    /// The one history read the routes make, for whichever network the wallet
-    /// belongs to: `indexing::PendingJoin` per network, routed by
-    /// `indexing::Router`, since neither the repository nor the index answers
-    /// a page above the confirmed line alone.
-    pub(crate) history: Arc<dyn indexing::History>,
-    /// The one balance read, held for the same reason and in the same way.
-    pub(crate) balance: Arc<dyn indexing::Balances>,
+    pub(crate) index: Arc<indexing::Indexers>,
+    /// Every network's blocks above its confirmed line, which complete the
+    /// stored balance and history reads.
+    pub(crate) pending: Arc<[(base::Network, Arc<dyn indexing::Pending>)]>,
     pub(crate) health: watch::Receiver<indexing::SyncHealth>,
     /// Every configured network in configuration order, served or not; the
     /// source of the health report's RPC counters, which follow a replacement.
@@ -45,7 +43,7 @@ pub(crate) struct AppState {
     /// are named.
     pub(crate) verify: Verifier,
     /// The supervisor's control, which runs a network's online rescan.
-    pub(crate) control: indexing::SyncControl,
+    pub(crate) control: indexing::Control,
     /// The one repository's network purge, the rescan's second step.
     pub(crate) purging: Arc<dyn indexing::Purging>,
 }

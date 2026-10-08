@@ -1,7 +1,7 @@
 //! Contract coverage for the two shipped stores.
 //!
-//! The shared `contracts::{BackfillContract, BalanceContract, HistoryContract,
-//! PurgeContract, SpendContract, WalletContract, WatchContract}` scenarios run
+//! The shared `contracts::{BackfillContract, PurgeContract, SpendContract,
+//! WalletContract, WatchContract}` scenarios run
 //! here, and each one runs **twice**: once against `indexing::memory::Repository`
 //! on maps and once against `indexing::sqlite::Repository` on a fresh file. Two
 //! implementations, one set of scenarios, so they stay a statement about the
@@ -13,6 +13,7 @@
 //! in memory cannot be asked: a reopen, and a coordinate that survives one.
 
 mod contracts;
+mod rows;
 
 use std::path::Path;
 
@@ -20,14 +21,13 @@ use base::Decimal;
 use indexing::{memory, sqlite};
 
 use contracts::{
-    BackfillContract, BalanceContract, HistoryContract, PurgeContract, SpendContract,
-    WalletContract, WatchContract,
+    BackfillContract, PurgeContract, Rows, SpendContract, WalletContract, WatchContract,
 };
 use indexing::{
     Address, AssetId, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef,
-    BlockWithOutputs, ChainName, ConfirmedHistory, HistoryQuery, IndexErrorKind, IndexStore,
-    IndexedOutput, MovementId, Network, OutputChanges, OutputId, OutputRequest, OutputStore,
-    Status, Transaction, TransactionRef, ValueMovement,
+    BlockWithOutputs, ChainName, IndexErrorKind, IndexStore, IndexedOutput, MovementId, Network,
+    OutputChanges, OutputId, OutputRequest, OutputStore, Status, Transaction, TransactionRef,
+    TransactionStore as _, ValueMovement,
 };
 use tempfile::TempDir;
 
@@ -54,8 +54,14 @@ fn network() -> Network {
 }
 
 fn open(path: &Path) -> sqlite::Repository {
+    opened(path).0
+}
+
+/// The repository on `path`, and a reader of the file's own rows.
+fn opened(path: &Path) -> (sqlite::Repository, Rows) {
     let storage = block_on(sqlite::Database::open(path)).expect("temporary sqlite database");
-    sqlite::Repository::new(storage)
+    let rows = Rows::new(storage.pool().clone());
+    (sqlite::Repository::new(storage), rows)
 }
 
 fn block(height: u64, hash: u8, parent: u8) -> BlockRef {
@@ -168,21 +174,9 @@ fn tip(repository: &sqlite::Repository) -> Option<BlockRef> {
     block_on(repository.checkpoint(&network())).expect("checkpoint")
 }
 
-fn history(repository: &sqlite::Repository) -> Vec<String> {
-    block_on(ConfirmedHistory::history(
-        repository,
-        HistoryQuery {
-            address: address("receiver"),
-            asset: indexing::AssetId::native(network().chain.clone()),
-            after: None,
-            limit: 10,
-        },
-    ))
-    .expect("history")
-    .transactions
-    .into_iter()
-    .map(|transaction| transaction.id.id.to_string())
-    .collect()
+fn history(rows: &Rows) -> Vec<String> {
+    let asset = indexing::AssetId::native(network().chain.clone());
+    block_on(rows.history(&address("receiver"), &asset, 10))
 }
 
 fn outputs(repository: &sqlite::Repository) -> Vec<IndexedOutput> {
@@ -229,7 +223,7 @@ fn duplicate_output_identity_is_rejected_before_repository_add() {
 }
 
 #[test]
-fn history_pages_survive_a_moving_checkpoint_and_output_pages_do_not() {
+fn output_pages_do_not_survive_a_moving_checkpoint() {
     let directory = TempDir::new().expect("temporary directory");
     let repository = open(&directory.path().join("index.db"));
     let first = block(1, 1, 0);
@@ -252,17 +246,6 @@ fn history_pages_survive_a_moving_checkpoint_and_output_pages_do_not() {
         )))
         .expect("seed block");
     }
-    let history_page = |after| {
-        block_on(ConfirmedHistory::history(
-            &repository,
-            HistoryQuery {
-                address: address("receiver"),
-                asset: indexing::AssetId::native(network().chain.clone()),
-                after,
-                limit: 1,
-            },
-        ))
-    };
     let output_page = |after| {
         block_on(OutputStore::list(
             &repository,
@@ -274,17 +257,6 @@ fn history_pages_survive_a_moving_checkpoint_and_output_pages_do_not() {
             },
         ))
     };
-
-    let page = history_page(None).expect("first history page");
-    assert_eq!(page.checkpoint, Some(second.clone()));
-    assert_eq!(page.transactions.len(), 1);
-    assert_eq!(page.transactions[0].id, transaction("one"));
-    let history_cursor = page.next.expect("history continuation");
-    let page = history_page(Some(history_cursor.clone())).expect("final history page");
-    assert_eq!(page.checkpoint, Some(second.clone()));
-    assert_eq!(page.transactions.len(), 1);
-    assert_eq!(page.transactions[0].id, transaction("two"));
-    assert_eq!(page.next, None);
 
     let page = output_page(None).expect("first output page");
     assert_eq!(page.checkpoint, Some(second.clone()));
@@ -302,14 +274,6 @@ fn history_pages_survive_a_moving_checkpoint_and_output_pages_do_not() {
         OutputChanges::default(),
     )))
     .expect("advance checkpoint");
-    // Confirmed history is append-only, so a checkpoint that moved can only
-    // have appended above the cursor: the page is the same one.
-    let page = history_page(Some(history_cursor)).expect("an ascending cursor stays valid");
-    assert_eq!(page.transactions.len(), 1);
-    assert_eq!(page.transactions[0].id, transaction("two"));
-    let page = history_page(page.next).expect("the appended row is simply the next page");
-    assert_eq!(page.transactions[0].id, transaction("three"));
-    assert_eq!(page.next, None);
     // The live-output set is not append-only — a spend removes a row — so its
     // cursor is still bound to the checkpoint it was issued at.
     let error = output_page(Some(output_cursor)).expect_err("stale output cursor");
@@ -331,7 +295,7 @@ fn history_pages_survive_a_moving_checkpoint_and_output_pages_do_not() {
 fn restart_and_refusals_preserve_atomic_canonical_state() {
     let directory = TempDir::new().expect("temporary directory");
     let database = directory.path().join("index.db");
-    let repository = open(&database);
+    let (repository, rows) = opened(&database);
     let first = block(1, 1, 0);
     let funding = output("funding");
     assert_eq!(
@@ -367,7 +331,7 @@ fn restart_and_refusals_preserve_atomic_canonical_state() {
     assert_eq!(invalid.kind, IndexErrorKind::Store);
     assert!(!invalid.retryable);
     assert_eq!(tip(&repository), Some(first.clone()));
-    assert_eq!(history(&repository), vec!["funding"]);
+    assert_eq!(history(&rows), vec!["funding"]);
     assert_eq!(outputs(&repository), vec![funding.clone()]);
 
     let stale = block_on(repository.commit(addition(
@@ -379,7 +343,7 @@ fn restart_and_refusals_preserve_atomic_canonical_state() {
     .expect_err("stale checkpoint");
     assert_eq!(stale.kind, IndexErrorKind::Conflict);
     assert_eq!(tip(&repository), Some(first.clone()));
-    assert_eq!(history(&repository), vec!["funding"]);
+    assert_eq!(history(&rows), vec!["funding"]);
 
     block_on(repository.commit(addition(
         second.clone(),
@@ -391,13 +355,13 @@ fn restart_and_refusals_preserve_atomic_canonical_state() {
         },
     )))
     .expect("second block");
-    assert_eq!(history(&repository), vec!["funding", "spend"]);
+    assert_eq!(history(&rows), vec!["funding", "spend"]);
     assert!(outputs(&repository).is_empty());
 
-    drop(repository);
-    let repository = open(&database);
+    drop((repository, rows));
+    let (repository, rows) = opened(&database);
     assert_eq!(tip(&repository), Some(second));
-    assert_eq!(history(&repository), vec!["funding", "spend"]);
+    assert_eq!(history(&rows), vec!["funding", "spend"]);
     assert!(outputs(&repository).is_empty());
 }
 
@@ -428,22 +392,15 @@ fn sparse_coordinates_round_trip_through_restart() {
     let repository = open(&database);
     assert_eq!(tip(&repository), Some(second.clone()));
 
-    let page = block_on(ConfirmedHistory::history(
-        &repository,
-        HistoryQuery {
-            address: address("receiver"),
-            asset: indexing::AssetId::native(network().chain.clone()),
-            after: None,
-            limit: 10,
-        },
-    ))
-    .expect("sparse history");
-    let blocks: Vec<BlockRef> = page
-        .transactions
+    let blocks: Vec<Option<BlockRef>> = ["sparse-first", "sparse-second"]
         .into_iter()
-        .map(|transaction| transaction.block().clone())
+        .map(|id| {
+            block_on(repository.locate(&transaction(id)))
+                .expect("a stored transaction")
+                .block
+        })
         .collect();
-    assert_eq!(blocks, [first, second.clone()]);
+    assert_eq!(blocks, [Some(first), Some(second.clone())]);
 
     drop(repository);
     assert_eq!(tip(&open(&database)), Some(second));
@@ -456,6 +413,25 @@ fn sparse_coordinates_round_trip_through_restart() {
 /// disagreement legible: the two tests differ in one line, so a scenario only a
 /// file satisfies — or only maps do — names both halves at once.
 macro_rules! contract {
+    (read $contract:ident, $($scenario:ident),* $(,)?) => {$(
+        mod $scenario {
+            use super::*;
+
+            #[test]
+            fn memory() {
+                let store = memory::Repository::new();
+                block_on($contract::new(&store, network()).$scenario());
+            }
+
+            #[test]
+            fn sqlite() {
+                let directory = TempDir::new().expect("temporary directory");
+                let (store, rows) =
+                    opened(&directory.path().join(concat!(stringify!($scenario), ".db")));
+                block_on($contract::new(&store, network()).reading(rows).$scenario());
+            }
+        }
+    )*};
     ($contract:ident, $($scenario:ident),* $(,)?) => {$(
         mod $scenario {
             use super::*;
@@ -477,45 +453,7 @@ macro_rules! contract {
 }
 
 contract!(
-    HistoryContract,
-    limit_counts_only_the_query_asset,
-    returns_only_query_asset_movements,
-    requires_the_address_as_endpoint,
-    failed_fee_payment_appears_for_every_asset,
-    successful_fee_payment_appears_for_the_fee_asset_only,
-    cursor_resumes_across_assets,
-    pages_equal_the_selected_history,
-    a_cursor_survives_writes_that_land_after_it,
-    pages_run_in_native_block_order,
-    an_ordinal_is_the_blocks_own_under_every_selection,
-    a_page_claims_a_whole_history_only_once_it_has_been_read,
-    a_page_born_above_the_first_block_claims_no_whole_history,
-    an_overdrawn_fold_does_not_reach_the_page_of_the_same_rows,
-    a_whole_history_is_not_claimed_below_the_line_it_is_read_at,
-    a_sibling_still_catching_up_weakens_every_read_of_the_address,
-    only_what_the_address_owes_below_the_line_weakens_its_reads,
-    a_whole_history_is_not_claimed_before_the_first_commit,
-);
-
-contract!(
-    BalanceContract,
-    folds_the_movements_of_one_holding,
-    never_charges_a_settled_fee_twice,
-    charges_a_fee_to_the_fee_asset_only,
-    reports_an_overdrawn_fold_as_incomplete,
-    folds_a_credit_no_transaction_names,
-    an_unindexed_holding_is_zero,
-    refuses_a_holding_it_cannot_own,
-    an_observed_total_starts_from_the_rows_already_stored,
-    a_repeated_commit_moves_an_observed_total_by_nothing,
-    an_observed_deficit_reads_as_overdrawn,
-    a_watched_total_preserves_deficits_until_credits_arrive,
-    a_movement_named_like_a_fee_still_commits,
-    a_birthday_at_the_first_block_claims_nothing_uninspected,
-);
-
-contract!(
-    BackfillContract,
+    read BackfillContract,
     fills_history_below_the_checkpoint,
     resumes_where_an_interrupted_batch_stopped,
     redoes_a_batch_without_duplicating_it,
@@ -545,42 +483,34 @@ contract!(
     refuses_a_blank_address,
     forgets_an_identity_and_accepts_it_again,
     keeps_the_progress_of_each_observation_apart,
-    reanchors_an_observation_and_discards_its_claim,
-    reanchors_an_observation_the_store_has_lost,
-    refuses_a_reanchor_below_the_stored_birthday,
-    reanchoring_keeps_what_the_observation_already_counted,
-    refuses_a_reanchor_onto_a_pair_another_identity_holds,
     answers_only_its_own_network,
 );
 
 // The scenarios the two stores once answered differently
 // (`contracts/agreement.rs`): withdrawal by identity, and conflicting
-// definitions refused for good by `add` and `cancel_backfill` alike.
+// definitions refused for good by `add`.
 contract!(
     WatchContract,
     forgets_by_identity_and_never_by_pair,
-    refuses_to_move_an_identity_to_another_pair,
-    refuses_a_reanchor_onto_a_taken_pair_for_good,
-    refuses_a_reanchor_of_another_networks_identity,
     refuses_every_conflicting_definition_for_good,
 );
 
 // The application's half of the watch list's table (`contracts/wallets.rs`):
 // filing, restoring and archiving wallets, and what scanning never sees.
 contract!(
-    WalletContract,
+    read WalletContract,
     files_an_unknown_pair_unobserved,
     restores_an_archived_pair_under_its_original_id,
     refuses_every_conflicting_registration_for_good,
     forgetting_archives_and_keeps_the_facts_readable,
     an_archived_row_takes_no_claim_and_no_total,
-    reactivates_through_add_and_cancel_backfill,
+    reactivates_through_add,
     purging_keeps_labels_keys_and_archives,
     a_key_round_trips_and_is_never_printed,
 );
 
 contract!(
-    SpendContract,
+    read SpendContract,
     an_unknown_required_spend_is_reported_not_refused,
     a_required_spend_of_another_owner_is_reported,
     a_matched_spend_reports_nothing,
@@ -617,9 +547,10 @@ mod purge_network_removes_only_its_own_network {
     #[test]
     fn sqlite() {
         let directory = TempDir::new().expect("temporary directory");
-        let store = open(&directory.path().join("purge.db"));
+        let (store, rows) = opened(&directory.path().join("purge.db"));
         block_on(
             PurgeContract::new(&store, network(), elsewhere())
+                .reading(rows)
                 .purge_network_removes_only_its_own_network(),
         );
     }

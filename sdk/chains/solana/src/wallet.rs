@@ -113,11 +113,9 @@ impl AddressParser for WalletConfig {
 /// `wallets::Wallets::register`.
 ///
 /// The indexer is read only to settle an unknown submission outcome: its
-/// checkpoint and its commit announcements. The sender's native history is the
-/// third thing it needs, and it is not the indexer's to give: a page is the
-/// repository's own query joined to that index's pending blocks, so this
-/// factory is handed the one narrow capability it reads — `indexing::History`,
-/// "page a holding's transactions from a position" — and names no store at all.
+/// checkpoint and its commit announcements. Whether a transaction landed is
+/// the third thing it needs, and it is handed in as
+/// [`crate::sender::Presence`], so this factory names no store at all.
 pub struct WalletFactory {
     config: WalletConfig,
     accounts: Arc<dyn Accounts>,
@@ -126,17 +124,13 @@ pub struct WalletFactory {
 
 impl WalletFactory {
     /// Builds balance reads and the send pipeline over `rpc`, and the
-    /// recovery of unknown outcomes over `indexer` and `history`. Submissions
+    /// recovery of unknown outcomes over `indexer` and `presence`. Submissions
     /// run on the current Tokio runtime; supply a supervising registrar with
     /// [`Self::with_registrar`]. No I/O.
     ///
-    /// `history` is the sender's absence proof and nothing else: the recovery
-    /// pages this cluster's indexed SOL history at one stable checkpoint,
-    /// because the sender pays every fee and is therefore on its own
-    /// transaction whatever it moved. It is passed in rather than read off
-    /// `indexer` because confirmed-plus-pending is neither the index's alone nor
-    /// the repository's — `indexing::PendingJoin` is what joins them, and the
-    /// composition that owns both builds it.
+    /// `presence` is the sender's absence proof and nothing else: whether the
+    /// index holds a transaction at one stable checkpoint
+    /// ([`crate::sender::IndexPresence`] over the store and this index).
     ///
     /// # Errors
     ///
@@ -146,7 +140,7 @@ impl WalletFactory {
         config: WalletConfig,
         rpc: &Client<C>,
         indexer: &Arc<Indexer<Source<C>, BlockInterpreter, R>>,
-        history: Arc<dyn indexing::History>,
+        presence: Arc<dyn crate::sender::Presence>,
     ) -> Result<Self, Error>
     where
         C: json_rpc::Client + 'static,
@@ -170,7 +164,7 @@ impl WalletFactory {
         let recovery = Recovery::new(
             rpc.clone(),
             indexer.clone(),
-            history,
+            presence,
             config.network.clone(),
             progress,
             reservations.clone(),

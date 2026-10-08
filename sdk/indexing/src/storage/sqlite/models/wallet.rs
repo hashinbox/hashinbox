@@ -17,8 +17,8 @@ use super::{
 };
 use crate::storage::{wallet, watch::redefinition};
 use crate::{
-    Address, AssetId, BlockPosition, BlockRef, Completeness, Holder, IndexError, IndexErrorKind,
-    Inspection, Network, Registration, Watch, WatchProgress,
+    Address, AssetId, BlockPosition, BlockRef, IndexError, IndexErrorKind, Network, Registration,
+    Watch, WatchProgress,
 };
 
 /// A statement over observed rows: every column but the application's label
@@ -96,12 +96,6 @@ impl Wallet {
     pub(in crate::storage::sqlite) const OBSERVED_BY_ID: &str =
         observed!("WHERE chain = ?1 AND network = ?2 AND id = ?3 AND archived_at IS NULL");
 
-    /// The statement [`Self::get_observed_by_subject`] runs.
-    pub(in crate::storage::sqlite) const OBSERVED_BY_SUBJECT: &str = observed!(
-        "WHERE chain = ?1 AND network = ?2 AND address = ?3 AND asset = ?4
-           AND archived_at IS NULL"
-    );
-
     /// The row `id` names, in whichever network; `RowNotFound` when none.
     pub(in crate::storage::sqlite) async fn get_by_id(
         connection: &mut SqliteConnection,
@@ -161,22 +155,6 @@ impl Wallet {
             .await
     }
 
-    /// The observed row of `(address, asset)` in `network`; `RowNotFound`
-    /// when the holding is not observed — never registered, or archived.
-    pub(in crate::storage::sqlite) async fn get_observed_by_subject(
-        connection: &mut SqliteConnection,
-        network: &Network,
-        (address, asset): (&str, &str),
-    ) -> Result<Self, sqlx::Error> {
-        sqlx::query_as(Self::OBSERVED_BY_SUBJECT)
-            .bind(network.chain.as_str())
-            .bind(&network.name)
-            .bind(address)
-            .bind(asset)
-            .fetch_one(connection)
-            .await
-    }
-
     /// Every row of the file, in id order.
     pub(in crate::storage::sqlite) async fn find_all(
         connection: &mut SqliteConnection,
@@ -197,7 +175,7 @@ impl Wallet {
     /// Every observed row of `address`, whatever its asset, read inside the
     /// caller's own snapshot.
     ///
-    /// What a query of the address's rows is honest with ([`Inspection`]): the
+    /// What a query of the address's rows is honest with ([`crate::Inspection`]): the
     /// rows and the observations they were written for come from one
     /// transaction, so a claim about how far the address has been inspected is
     /// a claim about the very rows returned.
@@ -233,39 +211,6 @@ impl Wallet {
                 statement
             })
             .await
-    }
-
-    /// What the observations of `of`'s address can claim about the history
-    /// behind its rows, at the `checkpoint` of the snapshot `connection` holds.
-    ///
-    /// **Answered once for both reads.** A balance and a history page are two
-    /// projections of one address's stored rows, so what the store can prove
-    /// about the range behind them is one fact, read here inside whichever
-    /// read's own snapshot asked for it. Two copies of this rule could
-    /// disagree, and a caller comparing a complete-looking page against an
-    /// incomplete-looking total would have no way to tell which of them was
-    /// lying.
-    ///
-    /// **Computed, never stored.** A whole-history claim is a conjunction of
-    /// facts the rows already carry and the line this snapshot was read at:
-    /// observation began at the chain's first block, progress has been
-    /// recorded for it, **and** no observation of the address is still behind
-    /// that line. The rule is [`Inspection`]'s and both stores ask it; what is
-    /// this store's own is that the rows it is asked over come from the same
-    /// transaction as the answer they qualify, which is why no index has to
-    /// repair the claim afterwards.
-    pub(in crate::storage::sqlite) async fn completeness(
-        connection: &mut SqliteConnection,
-        network: &Network,
-        of: &(dyn Holder + Sync),
-        checkpoint: Option<&BlockRef>,
-    ) -> Result<Completeness, IndexError> {
-        let observations = Self::find_observed_by_address(connection, network, &of.address().value)
-            .await?
-            .into_iter()
-            .map(WatchProgress::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Inspection::new(&observations, checkpoint).completeness(of))
     }
 
     /// Adds `row` with nothing inspected for it: observed with its total seeded
@@ -372,42 +317,6 @@ impl Wallet {
         .await
         .map(drop)
         .map_err(|error| failure(&error, "failed to archive an observation"))
-    }
-
-    /// Moves `held`, the stored row `row` re-anchors, to `row`'s birthday, and
-    /// discards the claim the old birthday earned.
-    ///
-    /// The one precondition is monotonicity: a birthday below the stored one is
-    /// refused for good — the stored birthday is the caller's own, so a retry
-    /// is refused again — which still holds under repeat, because raising to a
-    /// birthday already stored is a no-op.
-    pub(in crate::storage::sqlite) async fn reanchor(
-        connection: &mut SqliteConnection,
-        row: &Self,
-        held: &Self,
-    ) -> Result<(), IndexError> {
-        if row.birthday < held.birthday {
-            return Err(IndexError::new(
-                IndexErrorKind::Conflict,
-                "a re-anchor must not lower an observation's birthday",
-                false,
-            ));
-        }
-        sqlx::query(
-            "UPDATE wallet SET birthday = ?4, block_position = NULL,
-                 block_height = NULL, block_hash = NULL,
-                 block_parent_position = NULL, block_parent_hash = NULL,
-                 block_timestamp = NULL
-             WHERE chain = ?1 AND network = ?2 AND id = ?3",
-        )
-        .bind(row.network.chain.as_str())
-        .bind(&row.network.name)
-        .bind(&row.id)
-        .bind(row.birthday)
-        .execute(connection)
-        .await
-        .map(drop)
-        .map_err(|error| failure(&error, "failed to re-anchor an observation"))
     }
 
     /// Records that the observation `network` holds under `id` is inspected

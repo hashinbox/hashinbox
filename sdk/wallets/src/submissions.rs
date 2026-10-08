@@ -1,127 +1,42 @@
-use std::sync::{Mutex, MutexGuard, PoisonError};
-
-use tokio::task::{JoinError, JoinSet};
+use tokio::task::JoinError;
 
 use crate::{RegistrationError, RegistrationFuture, SubmissionRegistrar, SubmissionTask};
 
-/// The registrar an application uses unless it needs its own: it owns every
-/// background send task a chain hands over, refuses new ones once
-/// [`Self::close`] is called, and waits for the running ones in
-/// [`Self::drain`] (cargo feature `submissions`).
+/// Wallet submission registration backed by owned Tokio tasks.
 ///
-/// A task is spawned on the Tokio runtime that polls its registration, and it
-/// is owned before the registration is acknowledged, so an acknowledged task
-/// cannot be lost and a refused one was never started.
-///
-/// Dropping this aborts whatever is still running. Call [`Self::drain`] before
-/// the process exits: a send whose chain finishes it in the background must
-/// not be cut off halfway.
+/// Close admission and drain submissions before stopping recovery dependencies so ambiguous
+/// sends can finish recovery. Dropping this aborts remaining work; cancelling a
+/// drain aborts its work. Use one shutdown driver.
 #[derive(Default)]
-pub struct Submissions(Mutex<Tasks>);
-
-/// Everything registered and not yet joined.
-struct Tasks {
-    running: JoinSet<()>,
-    /// Whether a registration is still accepted.
-    open: bool,
-    /// The first registered task that panicked, kept for [`Submissions::drain`].
-    failure: Option<JoinError>,
-}
-
-impl Default for Tasks {
-    fn default() -> Self {
-        Self {
-            running: JoinSet::new(),
-            open: true,
-            failure: None,
-        }
-    }
-}
-
-impl Tasks {
-    /// Joins every task that has already ended, so a long-lived process holds
-    /// the running ones and not every one it ever ran.
-    fn reap(&mut self) {
-        while let Some(ended) = self.running.try_join_next() {
-            if let Err(error) = ended {
-                self.failure.get_or_insert(error);
-            }
-        }
-    }
-}
+pub struct Submissions(tasks::Tasks);
 
 impl Submissions {
-    /// A registrar that accepts work and owns none yet.
+    /// An open registrar with no submissions.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Refuses every later registration. What is already registered keeps
-    /// running until [`Self::drain`] has waited for it.
-    ///
-    /// A shutdown sequence calls this before it drains its request handlers,
-    /// so no handler still in flight hands over work nothing will wait for.
+    /// Refuses new submissions while accepted work continues.
     pub fn close(&self) {
-        self.tasks().open = false;
+        self.0.close();
     }
 
-    /// Whether background submissions have all finished successfully.
-    /// Callers block new submissions separately before replacing RPC or purging an index.
+    /// Closes registration and waits for all accepted submissions.
     ///
     /// # Errors
-    /// Reports a failed background task; maintenance must not discard ambiguous work.
-    pub fn idle(&self) -> Result<bool, crate::WalletError> {
-        let mut tasks = self.tasks();
-        tasks.reap();
-        if tasks.failure.is_some() {
-            return Err(crate::WalletError::new(
-                crate::WalletErrorKind::Unavailable,
-                "a background submission failed; recovery requires attention",
-            ));
-        }
-        Ok(tasks.running.is_empty())
-    }
-
-    /// Closes registration and waits for every registered task.
-    ///
-    /// Every task is waited for even when one of them panicked, because the
-    /// others are sends a node may already have accepted.
-    ///
-    /// # Errors
-    ///
-    /// The first registered task that panicked, whenever it did.
+    /// Returns the first observed task failure after waiting for every task.
     pub async fn drain(&self) -> Result<(), JoinError> {
-        let (mut running, mut failure) = {
-            let mut tasks = self.tasks();
-            tasks.open = false;
-            (std::mem::take(&mut tasks.running), tasks.failure.take())
-        };
-        while let Some(ended) = running.join_next().await {
-            if let Err(error) = ended {
-                failure.get_or_insert(error);
-            }
-        }
-        failure.map_or(Ok(()), Err)
-    }
-
-    /// The tasks, whatever a panicking holder left behind: nothing runs under
-    /// this lock that could leave them half-written.
-    fn tasks(&self) -> MutexGuard<'_, Tasks> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0.drain().await
     }
 }
 
 impl SubmissionRegistrar for Submissions {
     fn register<'a>(&'a self, task: SubmissionTask) -> RegistrationFuture<'a> {
         Box::pin(async move {
-            let mut tasks = self.tasks();
-            if !tasks.open {
-                return Err(RegistrationError::Closed);
-            }
-            tasks.reap();
-            tasks.running.spawn(task.run());
-            Ok(())
+            self.0
+                .spawn(task.run())
+                .map_err(|_| RegistrationError::Closed)
         })
     }
 }
@@ -223,29 +138,5 @@ mod tests {
 
         assert!(failure.is_panic());
         assert_eq!(completed.load(Ordering::Acquire), 1);
-    }
-
-    #[tokio::test]
-    async fn ended_tasks_are_released_as_new_ones_arrive() {
-        let submissions = Submissions::new();
-        let completed = Arc::new(AtomicUsize::new(0));
-        for ended in 1..=8 {
-            submissions
-                .register(counting(&completed))
-                .await
-                .expect("registered");
-            // Let this task end before the next registration looks for it.
-            while completed.load(Ordering::Acquire) < ended {
-                tokio::task::yield_now().await;
-            }
-        }
-
-        assert_eq!(
-            submissions.tasks().running.len(),
-            1,
-            "only the last registration is still held"
-        );
-        submissions.drain().await.expect("no task panicked");
-        assert_eq!(completed.load(Ordering::Acquire), 8);
     }
 }
