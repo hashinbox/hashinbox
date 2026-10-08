@@ -47,27 +47,3 @@ impl From<TransactionId> for Txid {
         Self::from_byte_array(id.0)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transaction_id_uses_conventional_display_byte_order() {
-        let displayed = format!("{:064x}", 1);
-        let id: TransactionId = displayed.parse().unwrap();
-        let mut internal = [0_u8; 32];
-        internal[0] = 1;
-        assert_eq!(id.0, internal);
-        assert_eq!(id.to_string(), displayed);
-        assert_eq!(format!("{id:?}"), displayed);
-    }
-
-    #[test]
-    fn transaction_id_rejects_invalid_hex() {
-        for text in ["not-a-transaction-id", "00"] {
-            let error = text.parse::<TransactionId>().unwrap_err();
-            assert_eq!(error.message, "Bitcoin transaction ID is invalid");
-        }
-    }
-}

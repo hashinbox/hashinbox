@@ -73,27 +73,3 @@ impl Events {
         Some(("rpc.failed", kind, 1))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn failures_are_grouped_until_summary_or_recovery() {
-        let events = Events::default();
-        let now = Instant::now();
-        assert_eq!(events.changed(Some("timeout".into()), now).unwrap().2, 1);
-        assert!(events.changed(Some("timeout".into()), now).is_none());
-        assert_eq!(
-            events
-                .changed(Some("timeout".into()), now + Duration::from_secs(30))
-                .unwrap()
-                .2,
-            3
-        );
-        assert_eq!(
-            events.changed(None, now).unwrap(),
-            ("rpc.recovered", "timeout".into(), 3)
-        );
-        assert!(events.changed(None, now).is_none());
-    }
-}

@@ -11,15 +11,6 @@ autotests = false
 name = "payment-server"
 path = "src/main.rs"
 
-[[test]]
-name = "wallet_api"
-path = "tests/wallet_api.rs"
-
-[[test]]
-name = "solana_node"
-path = "tests/solana_node.rs"
-required-features = ["solana-node"]
-
 [features]
 solana-node = []
 

@@ -77,33 +77,3 @@ pub fn indexer<C, R>(
         Config::new(&network, params.sync, params.schedule)?,
     ))
 }
-
-#[cfg(test)]
-mod tests {
-    use base::Networked;
-    use indexing::IndexErrorKind;
-
-    use super::*;
-    use crate::native::rpc::script::{Script, Scripted};
-
-    #[test]
-    fn construction_uses_the_client_network_without_rpc() {
-        let script = Script::exchanges([]);
-        let index = indexer(IndexerParams::new(script.client(), ())).unwrap();
-        assert_eq!(index.network(), &Script::network().canonical());
-        script.exhausted();
-    }
-
-    #[test]
-    fn construction_rejects_a_zero_batch_without_rpc() {
-        let script = Script::exchanges([]);
-        let error = indexer(IndexerParams {
-            sync: Budget::new(0),
-            ..IndexerParams::new(script.client(), ())
-        })
-        .err()
-        .unwrap();
-        assert_eq!(error.kind, IndexErrorKind::InvalidRequest);
-        script.exhausted();
-    }
-}

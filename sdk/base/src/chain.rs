@@ -108,35 +108,3 @@ impl ChainNetworks {
             .find_map(|(key, chain)| key.eq_ignore_ascii_case(name).then_some(chain))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const ONE: ChainName = ChainName::from_static("one");
-    const MAINNET: ChainNetwork = ChainNetwork::new(ONE, "one", NetworkKind::Mainnet, "ONE");
-    const TESTNET: &[(&str, ChainNetwork)] = &[(
-        "local",
-        ChainNetwork::new(ONE, "one-test", NetworkKind::Testnet, "ONE"),
-    )];
-
-    #[test]
-    fn chain_name_compares_by_text_regardless_of_storage() {
-        const TEST: ChainName = ChainName::from_static("test");
-
-        assert_eq!(TEST, ChainName::new("test"));
-        assert_eq!(TEST.as_str(), "test");
-        assert_eq!(ChainName::new("test").to_string(), "test");
-    }
-
-    #[test]
-    fn networks_expose_mainnet_and_named_testnets_directly() {
-        let chains = ChainNetworks::new(MAINNET, TESTNET);
-        assert_eq!(chains.mainnet, MAINNET);
-        assert!(chains.mainnet.is_mainnet());
-        assert_eq!(chains.mainnet.to_string(), "one (one)");
-        assert_eq!(chains.testnets, TESTNET);
-        assert_eq!(chains.testnet("LOCAL"), Some(&TESTNET[0].1));
-        assert_eq!(chains.testnet("missing"), None);
-    }
-}

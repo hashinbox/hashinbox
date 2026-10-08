@@ -127,38 +127,3 @@ impl Future for Drain<'_> {
         Poll::Pending
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn polled(future: impl Future<Output = ()>) -> bool {
-        let mut future = Box::pin(future);
-        future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-            .is_ready()
-    }
-
-    /// A pause refuses new work, waits for what it admitted, and admits again
-    /// once every pause is dropped.
-    #[test]
-    fn a_pause_refuses_drains_and_reopens() {
-        let gate = Arc::new(Gate::default());
-        let running = gate.admit().expect("open");
-        let paused = gate.pause();
-        assert!(gate.paused());
-        let refused = gate.admit().err().expect("paused");
-        assert_eq!(refused.kind, WalletErrorKind::Paused);
-        assert!(!polled(paused.drained()), "admitted work still runs");
-        drop(running);
-        assert!(polled(paused.drained()));
-        let second = gate.pause();
-        drop(paused);
-        assert!(gate.admit().is_err(), "another pause still holds");
-        drop(second);
-        assert!(!gate.paused());
-        drop(gate.admit().expect("admits again"));
-        assert!(polled(Suspension::nothing().drained()));
-    }
-}

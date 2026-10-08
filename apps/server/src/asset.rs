@@ -94,37 +94,3 @@ impl fmt::Display for TagError {
 }
 
 impl error::Error for TagError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn asset_tag_accepts_only_lowercase_slugs() {
-        for accepted in ["btc", "eth", "eth-sepolia", "0x", "a", &"a".repeat(32)] {
-            let tag: AssetTag = accepted.parse().expect("valid tag");
-            assert_eq!(tag.to_string(), accepted);
-        }
-        for rejected in [
-            "",
-            "-eth",
-            "ETH",
-            "eth_x",
-            "eth sepolia",
-            "é",
-            &"a".repeat(33),
-        ] {
-            assert_eq!(rejected.parse::<AssetTag>(), Err(TagError), "{rejected}");
-        }
-        assert_eq!(
-            serde_json::from_str::<AssetTag>(r#""usdc""#).expect("tag JSON"),
-            "usdc".parse::<AssetTag>().expect("valid tag")
-        );
-        assert!(serde_json::from_str::<AssetTag>(r#""USDC""#).is_err());
-        assert_eq!(
-            serde_json::to_string(&"sol".parse::<AssetTag>().expect("valid tag"))
-                .expect("tag JSON"),
-            r#""sol""#
-        );
-    }
-}

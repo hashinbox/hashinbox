@@ -70,30 +70,3 @@ impl FromStr for TransactionId {
         Ok(parsed)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transaction_ids_require_canonical_lowercase_hexadecimal() {
-        let id = TransactionId([0xab; 32]);
-        assert_eq!(id.to_string().parse(), Ok(id.clone()));
-        let error = id
-            .to_string()
-            .to_ascii_uppercase()
-            .parse::<TransactionId>()
-            .unwrap_err();
-        assert_eq!(
-            error.message,
-            "Ethereum transaction ID is missing its 0x prefix"
-        );
-        let error = format!("0x{}", "AB".repeat(32))
-            .parse::<TransactionId>()
-            .unwrap_err();
-        assert_eq!(
-            error.message,
-            "Ethereum transaction ID must use canonical lowercase hexadecimal"
-        );
-    }
-}

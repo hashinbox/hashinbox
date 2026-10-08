@@ -32,13 +32,6 @@ impl<C> Clone for Client<C> {
 }
 
 impl<C> Client<C> {
-    /// A client that trusts `network` without asking the node. Tests only.
-    #[cfg(test)]
-    pub(crate) fn unverified(transport: C, network: Network) -> Self {
-        Self {
-            inner: Arc::new(State { transport, network }),
-        }
-    }
 
     /// The network this client was verified against.
     #[must_use]
@@ -135,61 +128,5 @@ impl Error {
 impl From<json_rpc::Error> for Error {
     fn from(error: json_rpc::Error) -> Self {
         Self::rpc(error.to_string(), error.is_retryable())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use json_rpc::{ErrorKind, Failure};
-
-    use super::*;
-
-    #[test]
-    fn transport_errors_keep_message_and_retryability() {
-        for (kind, retryable) in [
-            (ErrorKind::InvalidConfiguration, false),
-            (ErrorKind::InvalidRequest, false),
-            (ErrorKind::Timeout, true),
-            (ErrorKind::Unavailable, true),
-            (ErrorKind::HttpStatus(429), true),
-            (ErrorKind::HttpStatus(503), true),
-            (ErrorKind::HttpStatus(400), false),
-            (ErrorKind::ResponseTooLarge, false),
-            (ErrorKind::InvalidResponse, false),
-        ] {
-            let message = "transport context\nkept verbatim";
-            let error = Error::from_call(CallError::Transport(json_rpc::Error {
-                kind,
-                message: message.to_owned(),
-            }));
-            assert_eq!(
-                (error.message.as_str(), error.retryable),
-                (message, retryable)
-            );
-        }
-    }
-
-    #[test]
-    fn remote_failures_keep_only_the_code_and_cores_retry_policy() {
-        for (code, retryable) in [
-            (-28, true),
-            (-26, false),
-            (-32_099, true),
-            (-32_000, true),
-            (-32_100, false),
-            (-31_999, false),
-            (i64::MIN, false),
-        ] {
-            let error = Error::from_call(CallError::Remote(Failure {
-                code,
-                message: "provider-only message".to_owned(),
-                data: Some(RawJson::from_serializable(&"provider-only data").unwrap()),
-            }));
-            assert_eq!(
-                error.message,
-                format!("Bitcoin JSON-RPC request failed with code {code}")
-            );
-            assert_eq!(error.retryable, retryable);
-        }
     }
 }

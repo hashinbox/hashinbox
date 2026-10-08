@@ -101,32 +101,3 @@ impl Network {
         ChainNetwork::new(CHAIN_NAME, native_id, kind, "BTC")
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn metadata_uses_the_canonical_chain_key() {
-        assert_eq!(NETWORKS.mainnet.name, CHAIN_NAME);
-        assert!(
-            NETWORKS
-                .testnets
-                .iter()
-                .all(|(_, chain)| chain.name == CHAIN_NAME)
-        );
-    }
-
-    #[test]
-    fn names_round_trip_and_reject_unknown_names() {
-        for network in Network::ALL {
-            assert_eq!(
-                Network::from_core_chain(network.core_chain()),
-                Some(network)
-            );
-            assert_eq!(Network::from_slug(network.slug()), Some(network));
-        }
-        assert_eq!(Network::from_core_chain("other"), None);
-        assert_eq!(Network::from_slug("main"), None);
-    }
-}

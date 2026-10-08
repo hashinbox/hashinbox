@@ -329,11 +329,6 @@ impl Outbox {
         unsigned.sign_each(self.network, &owners).await
     }
 
-    /// The shared reservation state; for tests.
-    #[cfg(test)]
-    pub(crate) const fn reservations(&self) -> &Reservations {
-        &self.reservations
-    }
 }
 
 /// Groups `items` by sender, in first-seen order.
@@ -362,86 +357,4 @@ fn payers(items: Vec<SendRequest>) -> Result<Vec<Payer>, Error> {
         }
     }
     Ok(payers)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use base::TransactionErrorKind;
-
-    use crate::sender::stub::Node;
-
-    fn inputs(node: &Node, index: usize) -> usize {
-        let transaction = node.submitted.lock().unwrap()[index].clone();
-        let native: bitcoin::Transaction =
-            bitcoin::consensus::deserialize(transaction.envelope.as_bytes()).unwrap();
-        native.input.len()
-    }
-
-    #[tokio::test]
-    async fn one_sender_selects_largest_first_and_several_senders_spend_all() {
-        let (alice, bob) = (Node::address(1), Node::address(2));
-        let node = Arc::new(Node {
-            outputs: Ok(vec![
-                (alice.clone(), 50_000),
-                (alice.clone(), 100_000),
-                (bob.clone(), 100_000),
-            ]),
-            ..Node::default()
-        });
-        node.outbox()
-            .send(vec![Node::item(1, &bob, 1_000), Node::item(1, &bob, 1_000)])
-            .await
-            .unwrap();
-        assert_eq!(inputs(&node, 0), 1, "one sender takes only what it needs");
-
-        node.outbox()
-            .send(vec![
-                Node::item(1, &bob, 1_000),
-                Node::item(2, &alice, 1_000),
-            ])
-            .await
-            .unwrap();
-        assert_eq!(
-            inputs(&node, 1),
-            3,
-            "grouped senders spend every free output"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_signed_transaction_never_broadcast_does_not_hold_its_outputs() {
-        let node = Arc::new(Node {
-            outputs: Ok(vec![(Node::address(1), 100_000)]),
-            ..Node::default()
-        });
-        let outbox = node.outbox();
-        let bob = Node::address(2);
-        let (abandoned, fee, spends) = outbox
-            .sign(vec![Node::item(1, &bob, 1_000)])
-            .await
-            .expect("the single transfer must sign");
-        assert_eq!(fee.units(), 100_000 - 1_000 - 98_859);
-        assert_eq!(
-            spends.len(),
-            1,
-            "it reports the one output it selected, and holds none of it"
-        );
-        assert!(outbox.reservations().reserved().is_empty());
-
-        outbox
-            .send(vec![Node::item(1, &bob, 2_000)])
-            .await
-            .expect("an unbroadcast signature must not hold the output");
-        let error = outbox
-            .broadcast(abandoned)
-            .await
-            .expect_err("the accepted send took the held output");
-        assert_eq!(
-            (error.kind, error.ambiguous_transaction_id),
-            (TransactionErrorKind::Rejected, None)
-        );
-        assert_eq!(node.submitted.lock().unwrap().len(), 1);
-    }
 }

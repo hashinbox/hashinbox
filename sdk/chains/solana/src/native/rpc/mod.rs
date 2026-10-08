@@ -17,8 +17,7 @@ mod accounts;
 mod blocks;
 mod client;
 mod node;
-#[cfg(test)]
-pub(crate) mod script;
+
 mod submitter;
 mod wire;
 

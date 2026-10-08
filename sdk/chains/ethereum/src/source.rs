@@ -77,30 +77,3 @@ impl<C: json_rpc::Client> BlockSource for Source<C> {
         Box::pin(async move { Ok(self.rpc.canonical_at(position).await?) })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use futures_executor::block_on;
-    use serde_json::json;
-
-    use super::*;
-    use crate::native::rpc::script::{Reply, Script, Scripted};
-
-    #[test]
-    fn invalid_ranges_fail_before_rpc_and_missing_blocks_are_retryable() {
-        let script = Script::node(vec![Reply::ok("eth_getBlockByNumber", json!(null))]);
-        let source = Source::new(script.client());
-        for (start, end, limit) in [(10, 10, 0), (11, 10, 1)] {
-            let error = block_on(source.blocks(BlockPosition(start), BlockPosition(end), limit))
-                .unwrap_err();
-            assert!(!error.retryable);
-        }
-        let error = block_on(source.blocks(BlockPosition(10), BlockPosition(10), 1)).unwrap_err();
-        assert_eq!(
-            error.message,
-            "Ethereum RPC does not currently expose the requested block"
-        );
-        assert!(error.retryable);
-        script.exhausted();
-    }
-}

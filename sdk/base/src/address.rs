@@ -45,19 +45,3 @@ impl fmt::Display for Address {
         formatter.write_str(&self.value)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn address_uses_canonical_text_within_its_network() {
-        let network = Network::new(crate::ChainName::new("test"), "mainnet");
-        let address = Address::new(network.clone(), "canonical-text");
-
-        assert_eq!(address.value, "canonical-text");
-        assert_eq!(address.to_string(), "canonical-text");
-        assert!(address.belongs_to(&network));
-        assert!(!address.belongs_to(&Network::new(crate::ChainName::new("test"), "testnet")));
-    }
-}

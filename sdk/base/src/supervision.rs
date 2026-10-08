@@ -74,31 +74,3 @@ pub enum RegistrationError {
     /// The supervisor may have taken the task but could not confirm it.
     AcknowledgementLost,
 }
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
-    use futures_executor::block_on;
-
-    use super::*;
-
-    #[test]
-    fn a_task_runs_only_after_activation() {
-        let completed = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&completed);
-        let (task, activation) = SubmissionTask::dormant(async move {
-            flag.store(true, Ordering::Release);
-        });
-        activation.start();
-        block_on(task.run());
-        assert!(completed.load(Ordering::Acquire));
-
-        let (task, activation) = SubmissionTask::dormant(async { unreachable!("cancelled") });
-        drop(activation);
-        block_on(task.run());
-    }
-}

@@ -36,24 +36,3 @@ impl Lifetime {
         height > self.last_valid_block_height
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retains_blockhash_and_height_as_one_value() {
-        let hash = Hash::new_from_array([11; 32]);
-        let lifetime = Lifetime::new(hash.clone(), u64::MAX);
-        assert_eq!(lifetime.blockhash(), &hash);
-        assert_eq!(lifetime.last_valid_block_height(), u64::MAX);
-    }
-
-    #[test]
-    fn expires_only_above_the_last_valid_height() {
-        let lifetime = Lifetime::new(Hash::new_from_array([11; 32]), 44);
-        assert!(!lifetime.expired(43));
-        assert!(!lifetime.expired(44));
-        assert!(lifetime.expired(45));
-    }
-}

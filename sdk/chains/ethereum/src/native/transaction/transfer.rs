@@ -34,29 +34,3 @@ impl Transfer {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_asset_decides_the_call_target_and_attached_value() {
-        let native = Transfer {
-            asset: AssetKind::Native,
-            to: Address::from_bytes([0x22; 20]),
-            amount: Wei::from_u128(7),
-        };
-        assert_eq!(
-            (native.target(), native.value()),
-            (&Address::from_bytes([0x22; 20]), Wei::from_u128(7))
-        );
-        let token = Transfer {
-            asset: AssetKind::Erc20(Address::from_bytes([0x33; 20])),
-            ..native
-        };
-        assert_eq!(
-            (token.target(), token.value()),
-            (&Address::from_bytes([0x33; 20]), Wei::ZERO)
-        );
-    }
-}

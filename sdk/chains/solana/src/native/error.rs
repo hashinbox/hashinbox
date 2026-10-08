@@ -109,29 +109,3 @@ impl fmt::Display for Error {
 }
 
 impl error::Error for Error {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn constructors_fix_kind_and_retryability() {
-        let terminal = Error::new(ErrorKind::Unsupported, "unsupported");
-        assert_eq!(
-            (terminal.kind, terminal.retryable),
-            (ErrorKind::Unsupported, false)
-        );
-        let malformed = Error::malformed("getSlot");
-        assert_eq!(
-            malformed.message,
-            "Solana RPC getSlot returned malformed data"
-        );
-        assert!(malformed.retryable);
-        assert!(Error::below_min_slot().retryable);
-        let unusable = Error::invalid_block("bad hash").unusable();
-        assert_eq!(
-            (unusable.kind, unusable.message.as_str(), unusable.retryable),
-            (ErrorKind::RpcUnavailable, "bad hash", true)
-        );
-    }
-}

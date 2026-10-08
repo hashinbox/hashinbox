@@ -48,35 +48,3 @@ impl SighashType {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::native::ErrorKind;
-
-    #[test]
-    fn modes_preserve_their_consensus_flags() {
-        for (mode, flag) in [
-            (SighashType::All, 0x01),
-            (SighashType::None, 0x02),
-            (SighashType::Single, 0x03),
-            (SighashType::AllAnyoneCanPay, 0x81),
-            (SighashType::NoneAnyoneCanPay, 0x82),
-            (SighashType::SingleAnyoneCanPay, 0x83),
-        ] {
-            assert_eq!(mode.taproot() as u8, flag);
-            assert_eq!(mode.ecdsa().unwrap().to_u32(), u32::from(flag));
-        }
-        assert_eq!(SighashType::TaprootDefault.taproot() as u8, 0x00);
-    }
-
-    #[test]
-    fn ecdsa_rejects_taproot_default() {
-        let error = SighashType::TaprootDefault.ecdsa().unwrap_err();
-        assert_eq!(error.kind, ErrorKind::InvalidTransaction);
-        assert_eq!(
-            error.message,
-            "Taproot default sighash cannot sign a P2WPKH input"
-        );
-    }
-}

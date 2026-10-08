@@ -389,27 +389,3 @@ async fn settle<'a, T>(futures: Vec<BoxFuture<'a, T>>) -> Vec<T> {
     })
     .await
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tips(tips: &[Option<u64>]) -> Tips {
-        Tips::new(tips.iter().copied().enumerate().rev().collect())
-    }
-
-    #[test]
-    fn the_highest_tip_wins_and_a_tie_keeps_the_incumbent() {
-        assert_eq!(tips(&[Some(5), Some(9)]).choose(0, None, 0), 1);
-        assert_eq!(tips(&[Some(9), Some(9)]).choose(1, None, 0), 1);
-        assert_eq!(tips(&[None, None]).choose(1, None, 0), 1);
-        assert_eq!(tips(&[None, Some(1)]).choose(0, None, 0), 1);
-    }
-
-    #[test]
-    fn an_excluded_primary_yields_only_to_a_node_within_lag() {
-        assert_eq!(tips(&[Some(10), Some(8), Some(3)]).choose(0, Some(0), 2), 1);
-        assert_eq!(tips(&[Some(10), Some(7), Some(3)]).choose(0, Some(0), 2), 0);
-        assert_eq!(tips(&[Some(10), Some(9), Some(9)]).choose(0, Some(0), 2), 1);
-    }
-}

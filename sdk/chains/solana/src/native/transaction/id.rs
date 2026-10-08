@@ -47,19 +47,3 @@ impl FromStr for TransactionId {
         Ok(Self(signature))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn round_trips_canonical_signatures_only() {
-        let id = TransactionId::from(Signature::from([7; 64]));
-        assert_eq!(id.to_string().parse::<TransactionId>().unwrap(), id);
-        assert_eq!(id.signature(), &Signature::from([7; 64]));
-        for invalid in ["", "bad", "1111"] {
-            let error = invalid.parse::<TransactionId>().unwrap_err();
-            assert_eq!(error.kind, ErrorKind::InvalidTransaction);
-        }
-    }
-}

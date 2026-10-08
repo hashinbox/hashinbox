@@ -102,15 +102,6 @@ impl Signers {
         Ok(signers.get(id).cloned())
     }
 
-    /// Every wallet id this process signs for, in id order.
-    #[cfg(test)]
-    pub(crate) fn ids(&self) -> Vec<String> {
-        self.0
-            .read()
-            .map(|signers| signers.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-
     fn poisoned() -> WalletError {
         Self::failure("the signing keys are unavailable")
     }

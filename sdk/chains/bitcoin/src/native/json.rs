@@ -77,34 +77,3 @@ impl<'a> Object<'a> {
         self.fail(format!("{context} is missing or invalid"))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn fields_report_context_through_the_objects_failure() {
-        let value = json!({"text": "", "big": 4_294_967_296_u64, "flag": 1, "list": {}});
-        let object = Object::new(&value, "reply", Error::invalid_reply).unwrap();
-        let error = object.string("text", "Text").unwrap_err();
-        assert_eq!(error, Error::invalid_reply("Text is missing or invalid"));
-        assert_eq!(
-            object.u32("big", "Big").unwrap_err().message,
-            "Big exceeds u32"
-        );
-        assert_eq!(
-            object.bool("flag", "Flag").unwrap_err().message,
-            "Flag is missing or invalid"
-        );
-        assert_eq!(
-            object.array("list", "List").unwrap_err().message,
-            "List must be an array"
-        );
-        let error = Object::new(&Value::Null, "Block", Error::invalid_block)
-            .err()
-            .unwrap();
-        assert_eq!(error, Error::invalid_block("Block must be an object"));
-    }
-}

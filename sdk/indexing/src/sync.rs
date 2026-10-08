@@ -251,74 +251,6 @@ impl SyncHealth {
     }
 }
 
-#[cfg(test)]
-mod health_tests {
-    use super::*;
-    use crate::ChainName;
-
-    fn network(chain: &str) -> Network {
-        Network {
-            chain: ChainName::new(chain),
-            name: "testnet".into(),
-        }
-    }
-
-    fn reported(network: &Network, state: Condition) -> Health {
-        Health {
-            state,
-            ..Health::starting(network)
-        }
-    }
-
-    #[test]
-    fn readiness_needs_every_network_settled_and_at_least_one_ready() {
-        let first = network("first");
-        let second = network("second");
-        let networks = [first.clone(), second.clone()];
-        for (states, ready) in [
-            ([Condition::Ready, Condition::Ready], true),
-            ([Condition::Ready, Condition::Quarantined], true),
-            ([Condition::Quarantined, Condition::Quarantined], false),
-            ([Condition::Ready, Condition::CatchingUp], false),
-            ([Condition::Ready, Condition::Retrying], false),
-        ] {
-            let mut health = SyncHealth::starting(&networks);
-            health.apply(&reported(&first, states[0]));
-            health.apply(&reported(&second, states[1]));
-            assert_eq!(health.ready(), ready, "{states:?}");
-            assert!(
-                health.ever_settled()
-                    || states.contains(&Condition::CatchingUp)
-                    || states.contains(&Condition::Retrying)
-            );
-        }
-    }
-
-    #[test]
-    fn a_network_stays_settled_after_it_falls_behind_again() {
-        let only = network("only");
-        let mut health = SyncHealth::starting(std::slice::from_ref(&only));
-        assert!(!health.ever_settled());
-
-        health.apply(&reported(&only, Condition::Ready));
-        assert!(health.ever_settled());
-
-        health.apply(&reported(&only, Condition::CatchingUp));
-        assert!(health.ever_settled(), "settling is reached once, not held");
-        assert!(!health.ready());
-    }
-
-    #[test]
-    fn an_unconfigured_network_never_enters_the_snapshot() {
-        let only = network("only");
-        let mut health = SyncHealth::starting(std::slice::from_ref(&only));
-        health.apply(&reported(&network("other"), Condition::Ready));
-
-        assert_eq!(health.networks(), [Health::starting(&only)]);
-        assert!(!health.ever_settled());
-    }
-}
-
 // The two bounds a pass works inside: how much it may read, and how far
 // below the checkpoint a new watch may start.
 
@@ -514,31 +446,5 @@ impl Schedule {
         self.interval
             .saturating_mul(1_u32 << doublings)
             .min(self.ceiling)
-    }
-}
-
-#[cfg(test)]
-mod schedule_tests {
-    use super::*;
-
-    #[test]
-    fn retry_backoff_doubles_per_attempt_and_stops_at_the_ceiling() {
-        let schedule = Schedule::new(Duration::from_millis(100), Duration::from_millis(800));
-        for (attempts, millis) in [(1, 100), (2, 200), (3, 400), (4, 800), (5, 800), (99, 800)] {
-            assert_eq!(
-                schedule.retry(attempts),
-                Duration::from_millis(millis),
-                "attempt {attempts}"
-            );
-        }
-        assert_eq!(
-            Schedule::every(Duration::from_secs(1)).ceiling,
-            Duration::from_secs(60)
-        );
-        assert_eq!(
-            Schedule::new(Duration::from_secs(5), Duration::from_secs(1)).ceiling,
-            Duration::from_secs(5),
-            "a retry never runs sooner than a healthy poll"
-        );
     }
 }

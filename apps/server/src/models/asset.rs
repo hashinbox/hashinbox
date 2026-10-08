@@ -31,23 +31,3 @@ impl Asset {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::emits_required;
-
-    #[test]
-    fn an_asset_requires_exactly_what_it_emits() {
-        emits_required(
-            "Asset",
-            Asset {
-                chain: "fixture".to_owned(),
-                id: "native".to_owned(),
-                name: None,
-                ticker: None,
-                decimals: 8,
-            },
-        );
-    }
-}

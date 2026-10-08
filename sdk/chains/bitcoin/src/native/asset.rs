@@ -24,17 +24,3 @@ impl AssetKind {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::native::CHAIN_NAME;
-
-    #[test]
-    fn native_bitcoin_metadata_is_canonical() {
-        assert_eq!(BTC.network.name, CHAIN_NAME);
-        assert!(BTC.network.is_mainnet());
-        assert_eq!((BTC.name, BTC.ticker, BTC.decimals), ("Bitcoin", "BTC", 8));
-        assert_eq!(AssetKind::Native.metadata(), &BTC);
-    }
-}

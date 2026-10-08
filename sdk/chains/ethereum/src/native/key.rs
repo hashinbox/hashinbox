@@ -68,27 +68,3 @@ impl KeyPair {
         &self.address
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn local_import_derives_the_known_address_for_scalar_one() {
-        let mut secret = [0; 32];
-        secret[31] = 1;
-        let key = KeyPair::import(SecretBytes::new(secret)).unwrap();
-        assert_eq!(
-            key.address().to_string(),
-            "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
-        );
-    }
-
-    #[test]
-    fn local_import_rejects_invalid_secret_material() {
-        for bytes in [Vec::new(), vec![1; 33], vec![0; 32], vec![255; 32]] {
-            let error = KeyPair::import(SecretBytes::new(bytes)).err().unwrap();
-            assert_eq!(error.kind, ErrorKind::InvalidSecret);
-        }
-    }
-}

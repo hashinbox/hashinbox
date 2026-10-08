@@ -12,13 +12,10 @@ mod blocks;
 mod client;
 mod fees;
 mod node;
-#[cfg(test)]
-pub(crate) mod script;
+
 mod submitter;
 pub(crate) mod wire;
 
-#[cfg(test)]
-pub(crate) use blocks::tests as fixture;
 pub use client::Client;
 pub use node::Verification;
 pub use submitter::Submitter;

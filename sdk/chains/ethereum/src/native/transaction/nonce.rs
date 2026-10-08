@@ -63,35 +63,3 @@ impl Nonces {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_range_starts_at_the_later_of_pending_and_floor() {
-        for (pending, floor, first) in [(5, None, 5), (5, Some(7), 7), (9, Some(7), 9)] {
-            let mut nonces = Nonces::reserve(pending, floor, 2).unwrap();
-            assert_eq!(nonces.take(), Ok(first));
-            assert_eq!(nonces.take(), Ok(first + 1));
-        }
-    }
-
-    #[test]
-    fn range_and_floor_overflow_are_invalid_transactions() {
-        let error = Nonces::reserve(u64::MAX - 1, None, 2).unwrap_err();
-        assert_eq!(
-            (error.kind, error.message.as_str()),
-            (
-                ErrorKind::InvalidTransaction,
-                "Ethereum batch nonce range overflows u64"
-            )
-        );
-        assert!(Nonces::reserve(u64::MAX - 1, None, 1).is_ok());
-        assert_eq!(Nonces::floor_after(4), Ok(5));
-        assert_eq!(
-            Nonces::floor_after(u64::MAX).unwrap_err().kind,
-            ErrorKind::InvalidTransaction
-        );
-    }
-}

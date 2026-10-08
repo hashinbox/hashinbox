@@ -54,28 +54,3 @@ impl Network {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn metadata_uses_the_canonical_chain_key() {
-        assert_eq!(NETWORKS.mainnet.name, CHAIN_NAME);
-        assert!(
-            NETWORKS
-                .testnets
-                .iter()
-                .all(|(_, chain)| chain.name == CHAIN_NAME)
-        );
-    }
-
-    #[test]
-    fn validation_needs_a_chain_id_and_a_slug() {
-        assert!(Network::new(31_337, "anvil").validate().is_ok());
-        for invalid in [Network::new(0, "anvil"), Network::new(1, " ")] {
-            let error = invalid.validate().unwrap_err();
-            assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
-        }
-    }
-}

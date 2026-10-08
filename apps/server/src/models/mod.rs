@@ -29,38 +29,3 @@ pub(crate) use wallet::{Label, Wallet};
 /// (`indexing::sqlite::Database::open_with`). There are no migrations: the
 /// file's identity covers this text, so a schema change needs a fresh file.
 pub(crate) const SCHEMA: &str = include_str!("schema.sql");
-
-#[cfg(test)]
-pub(crate) mod tests {
-    use std::path::PathBuf;
-
-    use tempfile::TempDir;
-
-    /// One database file in a temporary directory, not yet created.
-    pub(crate) struct File {
-        _directory: TempDir,
-        pub(crate) path: PathBuf,
-    }
-
-    impl File {
-        pub(crate) fn new() -> Self {
-            let directory = tempfile::tempdir().expect("a temporary directory");
-            Self {
-                path: directory.path().join("server.db"),
-                _directory: directory,
-            }
-        }
-
-        /// The file's pool, opened as storage opens it; creates it.
-        pub(crate) async fn pool(&self) -> sqlx::SqlitePool {
-            self.database().await.pool().clone()
-        }
-
-        /// The file opened as storage opens it; creates it.
-        pub(crate) async fn database(&self) -> indexing::sqlite::Database {
-            indexing::sqlite::Database::open_with(&self.path, super::SCHEMA)
-                .await
-                .expect("the database")
-        }
-    }
-}

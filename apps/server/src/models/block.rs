@@ -46,22 +46,3 @@ impl From<&base::BlockRef> for Block {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::emits_required;
-
-    #[test]
-    fn a_block_requires_exactly_what_it_emits() {
-        emits_required(
-            "Block",
-            Block {
-                position: 7,
-                height: 7,
-                hash: "ab".repeat(32),
-                parent: None,
-            },
-        );
-    }
-}

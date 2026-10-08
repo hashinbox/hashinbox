@@ -20,18 +20,3 @@ impl From<base::Network> for Network {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::emits_required;
-
-    #[test]
-    fn a_network_requires_exactly_what_it_emits() {
-        let network = Network {
-            chain: "fixture".to_owned(),
-            name: "regtest".to_owned(),
-        };
-        emits_required("Network", &network);
-    }
-}

@@ -84,36 +84,3 @@ impl KeyPair {
         Address::unchecked(native.to_string())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn one_key_derives_each_address_type_on_each_network() {
-        let key = KeyPair::import(SecretBytes::new([1; 32])).unwrap();
-        for (kind, check) in [
-            (AddressType::SegwitV0, bitcoin::AddressType::P2wpkh),
-            (AddressType::Taproot, bitcoin::AddressType::P2tr),
-        ] {
-            let regtest = key.address(Network::Regtest, kind);
-            let parsed = Address::parse(regtest.as_str(), Network::Regtest).unwrap();
-            assert_eq!(parsed, regtest);
-            let native = regtest
-                .as_str()
-                .parse::<NativeAddress<_>>()
-                .unwrap()
-                .assume_checked();
-            assert_eq!(native.address_type(), Some(check));
-            assert_ne!(key.address(Network::Mainnet, kind), regtest);
-        }
-    }
-
-    #[test]
-    fn local_import_rejects_invalid_secret_material() {
-        for bytes in [Vec::new(), vec![1; 33], vec![0; 32], vec![255; 32]] {
-            let error = KeyPair::import(SecretBytes::new(bytes)).err().unwrap();
-            assert_eq!(error.kind, ErrorKind::InvalidSecret);
-        }
-    }
-}

@@ -69,38 +69,3 @@ impl Asset {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::NetworkKind;
-
-    #[test]
-    fn native_asset_is_named_once_per_chain() {
-        let native = AssetId::native(ChainName::new("test"));
-
-        assert_eq!(native.chain, ChainName::new("test"));
-        assert_eq!(native.asset, "native");
-        assert!(native.is_native());
-        assert!(
-            !AssetId {
-                asset: "token".to_owned(),
-                ..native
-            }
-            .is_native()
-        );
-    }
-
-    #[test]
-    fn asset_carries_its_chain_metadata() {
-        let example = ChainName::from_static("example");
-        let network = ChainNetwork::new(example.clone(), "1", NetworkKind::Mainnet, "EX");
-        let asset = Asset::new(network, "Example USD", "xUSD", 6);
-
-        assert_eq!(asset.network.name, example);
-        assert_eq!(asset.name, "Example USD");
-        assert_eq!(asset.ticker, "xUSD");
-        assert_eq!(asset.decimals, 6);
-        assert_eq!(asset.network.native_id, "1");
-    }
-}

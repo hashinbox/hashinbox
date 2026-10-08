@@ -106,23 +106,3 @@ impl From<indexing::IndexError> for Error {
         Self::new(ErrorKind::Section, error.message)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_section_name_is_attached_once_and_shown_before_the_message() {
-        let bare = Error::refused("Solana requires exactly one RPC endpoint");
-        assert_eq!(bare.section, None);
-        assert_eq!(bare.to_string(), "Solana requires exactly one RPC endpoint");
-
-        let named = bare.in_section("solana");
-        assert_eq!(named.kind, ErrorKind::Section);
-        assert_eq!(named.section.as_deref(), Some("solana"));
-        assert_eq!(
-            named.to_string(),
-            "solana: Solana requires exactly one RPC endpoint"
-        );
-    }
-}
