@@ -4,32 +4,23 @@
 //!
 //! A model names no HTTP framework and no chain. A wallet is indexing's
 //! `wallet` row, read through `indexing::WalletRegistry`; balances and history
-//! are read with the server's own SQL over indexing's tables, which indexing
-//! creates and owns ([`SettledBalance`], [`Page`]); the server's own
-//! table (`rpc_endpoints`) is in `schema.sql` beside this file, in the same
+//! are the repository's own reads (`indexing::sqlite::Repository`); the
+//! server's own table (`rpc_endpoints`) is in `schema.sql` beside this file, in the same
 //! SQLite file as indexing's, so a network purge, which is indexing's, never
 //! touches it. The schema is applied when storage opens ([`SCHEMA`]); a model
 //! assumes it.
 
 mod asset;
-mod balance;
 mod block;
-mod checkpoint;
 mod endpoint;
-mod history;
 mod network;
-mod observation;
 mod signers;
 mod wallet;
 
 pub(crate) use asset::Asset;
-pub(crate) use balance::SettledBalance;
 pub(crate) use block::Block;
-pub(crate) use checkpoint::Checkpoint;
 pub(crate) use endpoint::RpcEndpoints;
-pub(crate) use history::{Entry, Page, Position, Standing};
 pub(crate) use network::Network;
-pub(crate) use observation::Observation;
 pub(crate) use signers::Signers;
 pub(crate) use wallet::{Label, Wallet};
 

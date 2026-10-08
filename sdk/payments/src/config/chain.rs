@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, fmt, future::Future, sync::Arc};
 
 use base::{BoxFuture, Network};
-use json_rpc::{Secrets, Statistics, Swap};
+use json_rpc::{Statistics, Swap};
 use wallets::SubmissionRegistrar;
 
-use crate::{ChainNodes, Composition, Connection, Error, ErrorKind, Rpc};
+use crate::config::{ChainNodes, Composition, Connection, Error, ErrorKind, Rpc};
 
 /// Endpoint statistics grouped by network, in configured endpoint order.
 /// Consumers label endpoints by ordinal; no URL or credential is retained.
@@ -61,7 +61,10 @@ pub trait Chain<A, R>: Send + Sync + 'static {
     ///
     /// Whatever the chain reports when the node serves another network or
     /// lacks what this deployment needs of it.
-    fn verify<'a>(&'a self, transport: &'a crate::Transport) -> BoxFuture<'a, Result<(), Error>>;
+    fn verify<'a>(
+        &'a self,
+        transport: &'a crate::config::Transport,
+    ) -> BoxFuture<'a, Result<(), Error>>;
 
     /// Builds this chain's transport (or uses `transport`), verifies its node
     /// ([`Self::verify`]) and returns what composes it. Nothing is opened and
@@ -72,10 +75,9 @@ pub trait Chain<A, R>: Send + Sync + 'static {
     /// Whatever the chain reports when its node serves another network.
     fn connect<'a>(
         &'a self,
-        secrets: &'a dyn Secrets,
         statistics: &'a mut Vec<Statistics>,
         logger: logging::Logger,
-        transport: Option<crate::Transport>,
+        transport: Option<crate::config::Transport>,
     ) -> BoxFuture<'a, Result<Box<dyn Connection<A, R>>, Error>>;
 }
 
@@ -96,7 +98,7 @@ impl<A, R> Default for Inventory<A, R> {
 
 /// Every configured chain, accepted but holding nothing.
 ///
-/// Built either by a [`Registry`](crate::Registry) from a document or by
+/// Built either by a [`Registry`](crate::config::Registry) from a document or by
 /// [`Self::add`] from values in code: an embedder who writes
 /// `chain_bitcoin::Config { .. }` by hand reaches the same composition as one
 /// who reads a file, and links no parser to do it.
@@ -105,8 +107,8 @@ pub struct Chains<A, R> {
     notices: Vec<String>,
     logger: logging::Logger,
     /// Caller-owned transports, by the network they serve.
-    transports: BTreeMap<Network, crate::Transport>,
-    /// The `rpc` of every chain a [`Registry`](crate::Registry) parsed from a
+    transports: BTreeMap<Network, crate::config::Transport>,
+    /// The `rpc` of every chain a [`Registry`](crate::config::Registry) parsed from a
     /// document, by network.
     endpoints: BTreeMap<Network, Endpoints>,
 }
@@ -147,7 +149,7 @@ impl Endpoints {
                 serde_json::from_value(document.clone()).map_err(|_| {
                     Error::new(
                         ErrorKind::Endpoints,
-                        "an RPC node is a URL or an object of url, headers and bounds",
+                        "an RPC node is a URL or an object of url and bounds",
                     )
                 })
             })
@@ -191,7 +193,7 @@ impl<A: 'static, R: 'static> Chains<A, R> {
     pub fn with_transport_for(
         mut self,
         network: &Network,
-        transport: crate::Transport,
+        transport: crate::config::Transport,
     ) -> Result<Self, Error> {
         if !self.networks().contains(network) {
             return Err(Error::new(
@@ -287,7 +289,7 @@ impl<A: 'static, R: 'static> Chains<A, R> {
     }
 
     /// The endpoint documents every chain parsed from a document connects to,
-    /// as written (`${NAME}` unresolved, credentials included), by network:
+    /// as written (credentials included), by network:
     /// what an application that keeps its nodes elsewhere stores.
     pub fn endpoints(&self) -> impl Iterator<Item = (&Network, &[serde_json::Value])> {
         self.endpoints
@@ -301,16 +303,15 @@ impl<A: 'static, R: 'static> Chains<A, R> {
     fn transport(
         &self,
         network: &Network,
-        secrets: &dyn Secrets,
         logger: &logging::Logger,
-    ) -> Result<(Option<crate::Transport>, Option<Arc<Swap>>), Error> {
+    ) -> Result<(Option<crate::config::Transport>, Option<Arc<Swap>>), Error> {
         if let Some(transport) = self.transports.get(network) {
             return Ok((Some(transport.clone()), None));
         }
         let Some(endpoints) = self.endpoints.get(network) else {
             return Ok((None, None));
         };
-        let (transport, statistics) = endpoints.rpc.logged(secrets, logger)?;
+        let (transport, statistics) = endpoints.rpc.logged(logger)?;
         let swap = Arc::new(Swap::new(transport, statistics));
         Ok((Some(swap.clone()), Some(swap)))
     }
@@ -356,12 +357,9 @@ impl<A: 'static, R: 'static> Chains<A, R> {
     ///
     /// The first chain whose node serves another network, named by its
     /// section.
-    pub async fn connect(
-        self,
-        secrets: &dyn Secrets,
-    ) -> Result<Vec<Box<dyn Connection<A, R>>>, Error> {
+    pub async fn connect(self) -> Result<Vec<Box<dyn Connection<A, R>>>, Error> {
         let mut observed = Inventory::default();
-        self.connect_observed(secrets, &mut observed, None).await
+        self.connect_observed(&mut observed, None).await
     }
 
     /// `chain`'s connection over the transport [`Self::transport`] builds for
@@ -371,16 +369,15 @@ impl<A: 'static, R: 'static> Chains<A, R> {
         &self,
         name: &str,
         chain: &Arc<dyn Chain<A, R>>,
-        secrets: &dyn Secrets,
         endpoints: &mut Vec<Statistics>,
         logger: &logging::Logger,
     ) -> (Result<Box<dyn Connection<A, R>>, Error>, Option<Arc<Swap>>) {
-        let (transport, swap) = match self.transport(&chain.network(), secrets, logger) {
+        let (transport, swap) = match self.transport(&chain.network(), logger) {
             Ok(built) => built,
             Err(error) => return (Err(error.in_section(name)), None),
         };
         let connected = chain
-            .connect(secrets, endpoints, logger.clone(), transport)
+            .connect(endpoints, logger.clone(), transport)
             .await
             .map_err(|error| error.in_section(name));
         (connected, swap)
@@ -392,7 +389,6 @@ impl<A: 'static, R: 'static> Chains<A, R> {
     /// not, is recorded in `observed` with the transport it was composed over.
     async fn connect_observed(
         self,
-        secrets: &dyn Secrets,
         observed: &mut Inventory<A, R>,
         mut skipped: Option<&mut Vec<Error>>,
     ) -> Result<Vec<Box<dyn Connection<A, R>>>, Error> {
@@ -405,7 +401,7 @@ impl<A: 'static, R: 'static> Chains<A, R> {
                 .with("chain", network.chain.to_string())
                 .with("network", network.name.clone());
             let (connected, swap) = self
-                .connect_chain(name, chain, secrets, &mut endpoints, &logger)
+                .connect_chain(name, chain, &mut endpoints, &logger)
                 .await;
             let repeat = self
                 .endpoints
@@ -478,7 +474,6 @@ where
     /// its index and factories.
     pub async fn compose<S, E, O, F>(
         self,
-        secrets: &dyn Secrets,
         open: O,
         repository: impl FnOnce(&S) -> Result<R, E>,
         registrar: &Arc<dyn SubmissionRegistrar>,
@@ -488,7 +483,7 @@ where
         O: FnOnce() -> F,
         F: Future<Output = Result<S, E>>,
     {
-        let verification = async { self.connect(secrets).await.map_err(E::from) };
+        let verification = async { self.connect().await.map_err(E::from) };
         Composition::verify_then_build(verification, open, repository, registrar).await
     }
 
@@ -504,7 +499,6 @@ where
     /// error here: it is in [`Startup::skipped`].
     pub async fn compose_available<S, E, O, F>(
         self,
-        secrets: &dyn Secrets,
         open: O,
         repository: impl FnOnce(&S) -> Result<R, E>,
         registrar: &Arc<dyn SubmissionRegistrar>,
@@ -517,7 +511,7 @@ where
         let mut observed = Inventory::default();
         let mut skipped = Vec::new();
         let verification = async {
-            self.connect_observed(secrets, &mut observed, Some(&mut skipped))
+            self.connect_observed(&mut observed, Some(&mut skipped))
                 .await
                 .map_err(E::from)
         };
@@ -555,17 +549,16 @@ mod tests {
 
         fn verify<'a>(
             &'a self,
-            _transport: &'a crate::Transport,
+            _transport: &'a crate::config::Transport,
         ) -> BoxFuture<'a, Result<(), Error>> {
             Box::pin(async { Ok(()) })
         }
 
         fn connect<'a>(
             &'a self,
-            _secrets: &'a dyn Secrets,
             _statistics: &'a mut Vec<Statistics>,
             _logger: logging::Logger,
-            transport: Option<crate::Transport>,
+            transport: Option<crate::config::Transport>,
         ) -> BoxFuture<'a, Result<Box<dyn Connection<(), ()>>, Error>> {
             Box::pin(async move {
                 let answer = match transport {
@@ -624,7 +617,7 @@ mod tests {
         let mut observed = Inventory::default();
         let mut skipped = Vec::new();
         let connected = chains
-            .connect_observed(&BTreeMap::new(), &mut observed, Some(&mut skipped))
+            .connect_observed(&mut observed, Some(&mut skipped))
             .await
             .expect("every refusal is skipped");
         assert!(connected.is_empty());
@@ -664,7 +657,7 @@ mod tests {
 
         fn verify<'a>(
             &'a self,
-            _transport: &'a crate::Transport,
+            _transport: &'a crate::config::Transport,
         ) -> BoxFuture<'a, Result<(), Error>> {
             Box::pin(async move {
                 if self.refuses {
@@ -676,10 +669,9 @@ mod tests {
 
         fn connect<'a>(
             &'a self,
-            _secrets: &'a dyn Secrets,
             _statistics: &'a mut Vec<Statistics>,
             _logger: logging::Logger,
-            transport: Option<crate::Transport>,
+            transport: Option<crate::config::Transport>,
         ) -> BoxFuture<'a, Result<Box<dyn Connection<(), ()>>, Error>> {
             Box::pin(async move {
                 let transport = transport.ok_or_else(|| Error::refused("no transport"))?;
@@ -697,13 +689,13 @@ mod tests {
             self: Box<Self>,
             _repository: (),
             _registrar: &'a Arc<dyn SubmissionRegistrar>,
-        ) -> BoxFuture<'a, Result<crate::ComposedChain<()>, Error>> {
+        ) -> BoxFuture<'a, Result<crate::config::ComposedChain<()>, Error>> {
             Box::pin(async { Err(Error::refused("not composed here")) })
         }
     }
 
     fn sections(value: serde_json::Value) -> Chains<(), ()> {
-        let mut registry = crate::Registry::new();
+        let mut registry = crate::config::Registry::new();
         registry
             .register::<Section>("one")
             .register::<Section>("two");
@@ -723,9 +715,13 @@ mod tests {
     async fn parsed_networks_connect_over_swaps_of_their_effective_nodes() {
         let chains = sections(serde_json::json!({
             "one": {"network": "one", "rpc": {"endpoints": ["http://127.0.0.1:9"]}},
-            "two": {"network": "two", "rpc": {"endpoints": ["http://${MISSING}.invalid"]}},
+            "two": {"network": "two", "rpc": {"endpoints": ["http://127.0.0.1:9"]}},
         }));
         let stored = BTreeMap::from([
+            (
+                section("two"),
+                vec![serde_json::json!("ws://missing.invalid")],
+            ),
             (
                 section("one"),
                 vec![
@@ -748,14 +744,14 @@ mod tests {
         let mut observed = Inventory::default();
         let mut skipped = Vec::new();
         let connected = chains
-            .connect_observed(&BTreeMap::new(), &mut observed, Some(&mut skipped))
+            .connect_observed(&mut observed, Some(&mut skipped))
             .await
             .expect("every failure is skipped");
         assert_eq!(connected.len(), 1);
         let reasons: Vec<String> = skipped.iter().map(ToString::to_string).collect();
         assert_eq!(
             reasons,
-            ["two: a configured endpoint's environment variable is unavailable"]
+            ["two: JSON-RPC endpoint scheme must be http or https"]
         );
         let one = &observed.networks[0];
         let swap = one.transport().expect("one composed over a swap");
@@ -799,35 +795,20 @@ mod tests {
         let mut observed = Inventory::default();
         let mut skipped = Vec::new();
         chains
-            .connect_observed(&BTreeMap::new(), &mut observed, Some(&mut skipped))
+            .connect_observed(&mut observed, Some(&mut skipped))
             .await
             .expect("skipped, not failed");
         let (one, two) = (&observed.networks[0], &observed.networks[1]);
         let candidate = || vec![json_rpc::Endpoint::new("http://127.0.0.1:10")];
-        let (_, statistics) = one
-            .verify(candidate(), &BTreeMap::new())
-            .await
-            .expect("the chain accepts it");
+        let (_, statistics) = one.verify(candidate()).await.expect("the chain accepts it");
         assert_eq!(statistics.len(), 1);
-        let empty = one
-            .verify(Vec::new(), &BTreeMap::new())
-            .await
-            .err()
-            .expect("none");
+        let empty = one.verify(Vec::new()).await.err().expect("none");
         assert_eq!(empty.kind, ErrorKind::Endpoints);
-        let unset = vec![json_rpc::Endpoint::new("http://${MISSING}.invalid")];
-        let unset = one
-            .verify(unset, &BTreeMap::new())
-            .await
-            .err()
-            .expect("unset");
-        assert_eq!(unset.kind, ErrorKind::Endpoints);
-        assert!(unset.to_string().starts_with("one: "), "{unset}");
-        let refused = two
-            .verify(candidate(), &BTreeMap::new())
-            .await
-            .err()
-            .expect("refused");
+        let unusable = vec![json_rpc::Endpoint::new("ws://missing.invalid")];
+        let unusable = one.verify(unusable).await.err().expect("unusable");
+        assert_eq!(unusable.kind, ErrorKind::Endpoints);
+        assert!(unusable.to_string().starts_with("one: "), "{unusable}");
+        let refused = two.verify(candidate()).await.err().expect("refused");
         assert_eq!(refused.kind, ErrorKind::Unverified);
         assert_eq!(refused.to_string(), "two: the node serves another network");
     }

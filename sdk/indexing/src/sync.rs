@@ -4,7 +4,7 @@
 //! it.
 
 use crate::{BlockPosition, BlockRef, IndexError, IndexErrorKind, Network, OutputKey};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 /// What one pass's backfill phase did, and what it has left to do.
@@ -95,7 +95,7 @@ pub struct Outcome {
 /// remains the result of one pass; this is the network's standing condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Condition {
-    /// The supervisor finished its active pass and is paused by its caller.
+    /// The driver finished its active pass and is paused by its caller.
     Paused,
     /// Behind the observed tip and still applying blocks.
     CatchingUp,
@@ -422,26 +422,39 @@ impl Budget {
     }
 }
 
-/// A network and its validated [`Budget`]: everything a [`crate::Indexer`]
-/// needs besides its source, interpreter, and repository.
+/// A network, its validated [`Budget`] and the [`Schedule`] its chain is
+/// polled at: everything a [`crate::Indexer`] needs besides its source,
+/// interpreter, and repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub(crate) network: crate::Network,
     pub(crate) policy: Budget,
+    pub(crate) schedule: Schedule,
 }
 
 impl Config {
-    /// Binds `policy` to `network`.
+    /// Binds `policy` and `schedule` to `network`.
     ///
     /// # Errors
     ///
     /// [`IndexErrorKind::InvalidRequest`] when [`Budget::validate`] fails.
-    pub fn new(network: &impl crate::Networked, policy: Budget) -> Result<Self, IndexError> {
+    pub fn new(
+        network: &impl crate::Networked,
+        policy: Budget,
+        schedule: Schedule,
+    ) -> Result<Self, IndexError> {
         policy.validate()?;
         Ok(Self {
             network: network.canonical(),
             policy,
+            schedule,
         })
+    }
+
+    /// The rhythm the chain declared for this network.
+    #[must_use]
+    pub const fn schedule(&self) -> Schedule {
+        self.schedule
     }
 
     /// The validated policy this configuration binds.
@@ -451,13 +464,9 @@ impl Config {
     }
 }
 
-// How often a driver polls each network.
-//
-// Outside the `supervisor` feature deliberately: a cadence is configuration a
-// chain declares and an application carries, with no runtime in it at all
-// (`std::time::Duration` and a map). `crate::Supervisor` is one consumer of
-// it; a caller driving `crate::Indexing::sync` from its own loop is another,
-// and neither should have to compile a Tokio task pool to name an interval.
+// How often a driver polls one network: declared by its chain, carried by
+// `Config`, read through `crate::Indexing::schedule`. Outside the driver
+// feature: a caller looping `crate::Indexing::sync` itself reads it too.
 
 /// How often one unit polls, and how far its retry wait may grow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -470,23 +479,13 @@ pub struct Schedule {
     pub ceiling: Duration,
 }
 
-/// Each network's schedule, with one fallback for the networks not named.
-///
-/// One cadence per chain rather than the shortest of them: a Solana unit
-/// polling every 400 ms no longer forces Bitcoin to do the same.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Schedules {
-    fallback: Schedule,
-    networks: BTreeMap<Network, Schedule>,
-}
-
 impl Schedule {
     /// How many polling intervals the retry wait may grow to by default.
     const CEILING_INTERVALS: u32 = 60;
 
     /// Polls every `interval`, capping the retry wait at sixty of them.
     #[must_use]
-    pub fn every(interval: Duration) -> Self {
+    pub const fn every(interval: Duration) -> Self {
         Self {
             interval,
             ceiling: interval.saturating_mul(Self::CEILING_INTERVALS),
@@ -518,42 +517,9 @@ impl Schedule {
     }
 }
 
-impl Schedules {
-    /// Every network polls every `interval` until one is given its own.
-    #[must_use]
-    pub fn every(interval: Duration) -> Self {
-        Self {
-            fallback: Schedule::every(interval),
-            networks: BTreeMap::new(),
-        }
-    }
-
-    /// `network` polls on `schedule` instead of the fallback.
-    #[must_use]
-    pub fn with(mut self, network: &Network, schedule: Schedule) -> Self {
-        self.networks.insert(network.clone(), schedule);
-        self
-    }
-
-    /// The schedule `network` polls on: its own, or the fallback.
-    #[must_use]
-    pub fn of(&self, network: &Network) -> Schedule {
-        self.networks.get(network).copied().unwrap_or(self.fallback)
-    }
-}
-
 #[cfg(test)]
 mod schedule_tests {
-    use crate::ChainName;
-
     use super::*;
-
-    fn network(chain: &str) -> Network {
-        Network {
-            chain: ChainName::new(chain),
-            name: "testnet".into(),
-        }
-    }
 
     #[test]
     fn retry_backoff_doubles_per_attempt_and_stops_at_the_ceiling() {
@@ -574,16 +540,5 @@ mod schedule_tests {
             Duration::from_secs(5),
             "a retry never runs sooner than a healthy poll"
         );
-    }
-
-    #[test]
-    fn each_network_keeps_its_own_cadence_and_unnamed_networks_take_the_fallback() {
-        let fast = network("fast");
-        let slow = network("slow");
-        let schedules = Schedules::every(Duration::from_secs(1))
-            .with(&fast, Schedule::every(Duration::from_millis(400)));
-
-        assert_eq!(schedules.of(&fast).interval, Duration::from_millis(400));
-        assert_eq!(schedules.of(&slow).interval, Duration::from_secs(1));
     }
 }

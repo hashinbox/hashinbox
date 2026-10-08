@@ -2,7 +2,7 @@ use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
 use serde::Deserialize;
 
-use crate::{Error, ErrorKind};
+use crate::config::{Error, ErrorKind};
 
 /// How much the transport repeats a call: `"off"` for no repetition at all,
 /// or an explicit [`RepetitionPolicy`]. Absent from a document, the
@@ -11,7 +11,7 @@ use crate::{Error, ErrorKind};
 ///
 /// Repetition is a property of the endpoint *list*, not of one node
 /// (`a retired design note (023)` section 3.4), so it is a sibling of
-/// [`Rpc::endpoints`](crate::Rpc::endpoints) rather than a URL parameter.
+/// [`Rpc::endpoints`](crate::config::Rpc::endpoints) rather than a URL parameter.
 ///
 /// This is a *value*. [`json_rpc::Retry`] is the *decorator* it configures,
 /// and the two used to share the name `Retry` — one word for a number an
@@ -76,12 +76,15 @@ pub struct RepetitionPolicy {
     /// How many times one call may be sent, including the first.
     pub attempts: NonZeroU32,
     /// The first wait between two attempts; it doubles.
-    #[serde(rename = "backoff_ms", deserialize_with = "crate::millis::deserialize")]
+    #[serde(
+        rename = "backoff_ms",
+        deserialize_with = "crate::config::millis::deserialize"
+    )]
     pub backoff: Duration,
     /// The ceiling that doubling never passes.
     #[serde(
         rename = "max_backoff_ms",
-        deserialize_with = "crate::millis::deserialize"
+        deserialize_with = "crate::config::millis::deserialize"
     )]
     pub max_backoff: Duration,
 }
@@ -119,7 +122,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::Rpc;
+    use crate::config::Rpc;
 
     fn repeat(value: Value) -> Result<Repetition, Error> {
         let rpc: Rpc = serde_json::from_value(

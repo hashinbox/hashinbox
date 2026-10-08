@@ -1,8 +1,8 @@
-//! What the supervisor exists for: one chain's failure is only its own.
+//! What the driver exists for: one chain's failure is only its own.
 //!
 //! Every case drives two units through scripted pass results and asserts on
 //! the events the monitor saw, the health it published, and whether
-//! `Supervisor::run` is still supervising.
+//! `Driver::run` is still supervising.
 
 use std::{
     collections::VecDeque,
@@ -18,7 +18,7 @@ use indexing::{
     Checkpoint, Condition, Holder, IndexError, IndexErrorKind, Indexers, Indexing, Network,
     Outcome, Phase, SyncHealth, Watch, Watching,
 };
-use indexing::{Control, Monitor, Schedules, Supervisor};
+use indexing::{Control, Driver, Monitor, Schedule};
 use tokio::sync::watch;
 
 /// What one scripted pass does.
@@ -43,6 +43,7 @@ struct Probe {
     script: Mutex<VecDeque<Step>>,
     then: Step,
     calls: AtomicUsize,
+    schedule: Schedule,
 }
 
 impl Probe {
@@ -51,6 +52,7 @@ impl Probe {
             network: network.clone(),
             script: Mutex::new(script.into_iter().collect()),
             then,
+            schedule: Schedule::every(Duration::from_millis(1)),
             calls: AtomicUsize::new(0),
         }
     }
@@ -98,6 +100,10 @@ impl Indexing for Probe {
 
     fn listen(&self, _listener: Arc<dyn indexing::Listener>) {}
 
+    fn schedule(&self) -> Schedule {
+        self.schedule
+    }
+
     fn sync<'a>(&'a self) -> BoxFuture<'a, Result<Outcome, IndexError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let outcome = self
@@ -134,12 +140,10 @@ impl Indexing for Probe {
     }
 }
 
-/// Records every transition or failed attempt it observes and publishes the
-/// snapshot a test waits on.
+/// Records every transition or failed attempt it observes.
 struct Recorder {
     events: Mutex<Vec<(String, Condition, Condition)>>,
     last: Mutex<std::collections::HashMap<String, Condition>>,
-    report: Arc<indexing::Report>,
 }
 
 impl Monitor for Recorder {
@@ -160,7 +164,6 @@ impl Monitor for Recorder {
                 .expect("events")
                 .push((chain, previous, health.state));
         }
-        self.report.network_observed(health);
     }
 }
 
@@ -204,7 +207,7 @@ fn terminal() -> IndexError {
     )
 }
 
-/// The whole fixture: two units, the supervisor task driving them, and the
+/// The whole fixture: two units, the driver task driving them, and the
 /// handles a test observes and stops them with.
 struct Supervised {
     task: tokio::task::JoinHandle<()>,
@@ -217,31 +220,21 @@ struct Supervised {
 
 impl Supervised {
     fn new(probes: Vec<Arc<Probe>>) -> Self {
-        Self::every(probes, Duration::from_millis(1))
-    }
-
-    fn every(probes: Vec<Arc<Probe>>, interval: Duration) -> Self {
         let indexers = probes
             .iter()
             .map(|probe| Arc::clone(probe) as Arc<dyn Indexing>)
             .collect();
         let composer = Arc::new(Indexers::of(indexers).expect("disjoint networks compose"));
-        let (report, readiness) = indexing::Report::watching(composer.networks());
-        let health = readiness.receiver();
         let recorder = Arc::new(Recorder {
             events: Mutex::new(Vec::new()),
             last: Mutex::default(),
-            report,
         });
-        let supervisor = Supervisor::new(
-            composer,
-            Schedules::every(interval),
-            Arc::clone(&recorder) as Arc<dyn Monitor>,
-        );
-        let control = supervisor.control();
+        let driver = Driver::new(composer).monitor(Arc::clone(&recorder) as Arc<dyn Monitor>);
+        let health = driver.health();
+        let control = driver.control();
         let (stop, shutdown) = watch::channel(false);
         Self {
-            task: tokio::spawn(supervisor.run(shutdown)),
+            task: tokio::spawn(driver.run(shutdown)),
             stop,
             health,
             control,
@@ -262,7 +255,7 @@ impl Supervised {
         tokio::time::timeout(Duration::from_secs(5), reached)
             .await
             .unwrap_or_else(|_| panic!("{chain} never reached {state:?}"))
-            .expect("the supervisor keeps publishing");
+            .expect("the driver keeps publishing");
     }
 
     /// Waits for `chain`'s network to report a stuck backfill, or fails the
@@ -280,7 +273,7 @@ impl Supervised {
         let health = tokio::time::timeout(Duration::from_secs(5), reported)
             .await
             .unwrap_or_else(|_| panic!("{chain} never reported a failure"))
-            .expect("the supervisor keeps publishing");
+            .expect("the driver keeps publishing");
         row(&health).expect("the awaited failure")
     }
 
@@ -293,18 +286,18 @@ impl Supervised {
         tokio::time::timeout(Duration::from_secs(5), self.task)
             .await
             .expect("shutdown must end every unit task")
-            .expect("the supervisor never panics");
+            .expect("the driver never panics");
     }
 
     /// Drops the shutdown sender without ever sending `true`, which
-    /// `Supervisor::run` documents as a shutdown of its own, and waits for
+    /// `Driver::run` documents as a shutdown of its own, and waits for
     /// supervision to end.
     async fn abandoned(self) {
         drop(self.stop);
         tokio::time::timeout(Duration::from_secs(5), self.task)
             .await
             .expect("a closed shutdown channel must end every unit task")
-            .expect("the supervisor never panics");
+            .expect("the driver never panics");
     }
 }
 
@@ -325,7 +318,7 @@ async fn one_network_failure_does_not_stop_the_others() {
     );
     assert!(
         !supervised.task.is_finished(),
-        "a chain failure must not end the supervisor"
+        "a chain failure must not end the driver"
     );
     supervised.shut_down().await;
     assert_eq!(
@@ -387,7 +380,7 @@ async fn a_panicking_unit_is_quarantined_not_propagated() {
     supervised.reaches("healthy", Condition::Ready).await;
     assert!(
         !supervised.task.is_finished(),
-        "a panicked unit task must not take the supervisor with it"
+        "a panicked unit task must not take the driver with it"
     );
 
     let calls = supervised.probes[0].calls();
@@ -538,8 +531,11 @@ async fn monitor_fires_on_every_attempt_but_not_on_every_catch_up_batch() {
 /// full speed with nothing to show for it and nothing saying so.
 #[tokio::test]
 async fn a_failing_backfill_is_reported_and_waited_on_rather_than_retried_at_once() {
-    let stalled = Arc::new(Probe::new(&network("stalled"), [], Step::BackfillFails));
-    let mut supervised = Supervised::every(vec![Arc::clone(&stalled)], Duration::from_millis(100));
+    let stalled = Arc::new(Probe {
+        schedule: Schedule::every(Duration::from_millis(100)),
+        ..Probe::new(&network("stalled"), [], Step::BackfillFails)
+    });
+    let mut supervised = Supervised::new(vec![Arc::clone(&stalled)]);
 
     let failure = supervised.reports_failure("stalled").await;
     assert_eq!(failure.kind, IndexErrorKind::Source);
@@ -571,7 +567,7 @@ async fn a_failing_backfill_is_reported_and_waited_on_rather_than_retried_at_onc
 /// the node will never serve must not take the API down with it.
 ///
 /// This is what made the omission a live defect rather than a missing
-/// feature. Configured wallets are imported *before* the supervisor starts
+/// feature. Configured wallets are imported *before* the driver starts
 /// (`apps/server/src/main.rs`), and the listener binds only once every
 /// network has settled, so one such wallet stopped the process serving
 /// anything at all — on any chain — for as long as the node stayed pruned,
@@ -733,7 +729,7 @@ async fn a_terminal_conflict_is_still_quarantined() {
 
 /// Closing the shutdown channel ends supervision, whatever its last value was.
 ///
-/// `Supervisor::run` documents the dropped sender as a shutdown, so the value
+/// `Driver::run` documents the dropped sender as a shutdown, so the value
 /// the channel holds at that moment is `false` and no unit may read it as
 /// "carry on". A unit whose pass is still outstanding when the channel closes
 /// is the case that matters: its wait ends at once and there is nothing left to

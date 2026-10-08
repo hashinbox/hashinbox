@@ -5,14 +5,14 @@
 //! local nodes (examples/README.md):
 //! `cargo run -p payment-examples --example watch_only`
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use indexing::{
-    Birthday, Checkpoint as _, Report, Subject, Supervisor, Watching as _,
+    Birthday, Checkpoint as _, Driver, Subject, Watching as _,
     sqlite::{Database, Repository},
 };
 use json_rpc::Client as _;
-use sdk_config::{Composition, Document, Registry};
+use payments::config::{Composition, Document, Registry};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 use wallets::{SecretBytes, SubmissionRegistrar, Submissions};
@@ -42,7 +42,7 @@ async fn main() -> Result<(), AnyError> {
         .as_str()
         .ok_or("[solana] states rpc.endpoints")?;
     let genesis: String = json_rpc::Endpoint::new(url)
-        .connect(&BTreeMap::new())?
+        .connect()?
         .request(json_rpc::Request::once("getGenesisHash", json!([])))
         .await?
         .map_err(json_rpc::CallError::from)?
@@ -60,14 +60,8 @@ async fn main() -> Result<(), AnyError> {
     // 3. Compose. Every node's identity is verified before the store is
     //    opened, then each chain builds its index and factories over it.
     let registrar: Arc<dyn SubmissionRegistrar> = Arc::new(Submissions::new());
-    let Composition {
-        index,
-        wallets,
-        schedules,
-        ..
-    } = chains
+    let Composition { index, wallets, .. } = chains
         .compose(
-            &BTreeMap::new(),
             || async {
                 let file = std::path::absolute(".index-data/watch_only.db")?;
                 tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
@@ -84,7 +78,12 @@ async fn main() -> Result<(), AnyError> {
     for (asset, id, seed) in OBSERVED {
         let asset = asset.to_owned();
         let secret = SecretBytes::new(vec![seed; 32]);
-        let text = wallets.from(&asset, secret).await?.address().value.clone();
+        let text = wallets
+            .from_pk(&asset, secret)
+            .await?
+            .address()
+            .value
+            .clone();
         let subject = Subject {
             address: wallets.parse(&asset, &text)?,
             asset: wallets.asset(&asset)?.id,
@@ -96,8 +95,9 @@ async fn main() -> Result<(), AnyError> {
     // 5. One sync loop serves a watched address exactly like a wallet's. Wait
     //    until every network has reached its node's tip.
     let (stop, stopped) = watch::channel(false);
-    let (monitor, mut readiness) = Report::watching(index.networks());
-    let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
+    let driver = Driver::new(index.clone());
+    let mut readiness = driver.readiness();
+    let sync = tokio::spawn(driver.run(stopped));
     let health = readiness.settled().await.ok_or("synchronization stopped")?;
     if let Some(error) = health.networks().iter().find_map(|row| row.failure.clone()) {
         return Err(error.into());

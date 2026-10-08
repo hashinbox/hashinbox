@@ -110,7 +110,12 @@ fn index(store: &Arc<Sink>, chain: &Chain) -> Indexer<Chain, Chain, Arc<Sink>> {
         chain.clone(),
         chain.clone(),
         Arc::clone(store),
-        Config::new(&network(), Budget::new(BATCH)).expect("a valid policy"),
+        Config::new(
+            &network(),
+            Budget::new(BATCH),
+            indexing::Schedule::every(std::time::Duration::from_millis(1)),
+        )
+        .expect("a valid policy"),
     )
 }
 

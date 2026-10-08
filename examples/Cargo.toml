@@ -16,7 +16,7 @@ base = { path = "../sdk/base" }
 chain-bitcoin = { path = "../sdk/chains/bitcoin" }
 chain-ethereum = { path = "../sdk/chains/ethereum" }
 chain-solana = { path = "../sdk/chains/solana" }
-sdk-config = { path = "../sdk/config", features = ["toml"] }
+payments = { path = "../sdk/payments", features = ["toml"] }
 wallets = { path = "../sdk/wallets", features = ["submissions"] }
 indexing = { path = "../sdk/indexing" }
 json-rpc = { path = "../packages/json-rpc" }

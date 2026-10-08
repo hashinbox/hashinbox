@@ -25,12 +25,12 @@ storage = { path = 'payment.db' }        # optional, this is the default
 [chains.bitcoin]
 network = 'regtest'
 confirmation_depth = 6
-rpc.endpoints = ['http://${BTC_RPC_USER}:${BTC_RPC_PASSWORD}@127.0.0.1:18443']
+rpc.endpoints = ['http://user:password@127.0.0.1:18443']
 
 [chains.ethereum]
 network = 'mainnet'
 chain_id = 1
-rpc.endpoints = ['https://node.invalid/v3/${ETH_RPC_KEY}']
+rpc.endpoints = ['https://node.invalid/v3/KEY']
 
 [chains.solana]
 network = 'mainnet'
@@ -91,13 +91,13 @@ balance after chain fees.
   `balance.rs`, `transactions.rs`, `networks.rs`, `health.rs`, `openapi.rs`);
   `mod.rs` assembles the router and OpenAPI root and holds the shared `Error`.
   `src/state.rs` is the handler state and `src/asset.rs` the asset tag. None of
-  them names a chain crate, `sdk_config` or a storage backend
+  them names a chain crate, `payments::config` or a storage backend
   (`scripts/check-chains.sh` check 8).
 - `src/models/`: the nouns the endpoints and the tables share (`asset`, `block`,
-  `network`, `wallet`, `endpoint`, and the reads `balance`,
-  `history`, `checkpoint`, `observation`), each with its own serde/utoipa wire
-  form and, for the durable ones, its SQL: balance and history are the server's
-  own SQL over indexing's tables, completed by each network's pending blocks.
+  `network`, `wallet`, `endpoint`), each with its own serde/utoipa wire
+  form and, for the durable ones, its SQL. Balance and history are the
+  repository's own reads (`AppState::repository`), completed by each network's
+  pending blocks.
   No axum, no chain crate.
 
 ## Notes
@@ -124,8 +124,9 @@ balance after chain fees.
   rebuilt as a signer; nothing is watched or unwatched, because the index restores
   its watch list from the same rows. A wallet whose asset is no longer configured
   is listed with `asset: null` and its `asset_id`.
-- The API token and RPC credentials use environment references (`${NAME}` in an
-  endpoint URL or header); never log the configuration.
+- The API token comes from `bearer_token_env`. An RPC endpoint is just its URL,
+  like a database URI: userinfo (sent as HTTP Basic) and query/path keys carry
+  credentials; no headers or references. Never log the configuration.
 - The server speaks plain HTTP. A `bind` that is not loopback is refused unless
   `tls_terminated_upstream = true`, which states that a proxy in front of it
   terminates TLS.
@@ -135,7 +136,7 @@ balance after chain fees.
   It answers `200` only when every network is ready or quarantined and at least
   one is ready; otherwise it answers `503` with the same report shape.
 - `rpc_endpoints` holds one JSON list per network, 1 to 16 nodes in failover order.
-  Rows may hold literal credentials; prefer `${NAME}` references. The API
+  Rows hold the URLs as sent, credentials included. The API
   returns only each node's origin. A network skipped at startup is listed
   `unavailable`; replacing its nodes takes effect at the next start.
 - Storage opens before any node is contacted: the stored nodes replace each

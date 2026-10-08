@@ -16,13 +16,13 @@
 //! flow states the order — and [`Composition::verify_then_build`] states it
 //! for a caller that would otherwise have to remember it.
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc};
 
 use base::{BoxFuture, Units};
-use indexing::{Indexers, Indexing, Network, Pending, Schedule, Schedules};
+use indexing::{Indexers, Indexing, Network, Pending};
 use wallets::{SubmissionRegistrar, WalletError, WalletErrorKind, WalletFactory, Wallets};
 
-use crate::Error;
+use crate::config::Error;
 
 /// One chain network's composed parts, as an application registers them.
 ///
@@ -44,9 +44,6 @@ pub struct ComposedChain<A> {
     /// each allowlisted token in the scale its contract was checked against.
     /// A chain's configuration is the authority; no wallet carries it.
     pub units: Units,
-    /// How often this chain alone polls its node. Each chain is supervised on
-    /// its own task, so a fast chain does not set everyone's cadence.
-    pub poll: Duration,
 }
 
 /// A chain whose node identity has been verified; it composes itself over the
@@ -72,8 +69,8 @@ pub trait Connection<A, R>: Send {
 
 /// Everything a process runs on, built once: every chain's index behind one
 /// [`Indexers`], every query an edge reads behind one handle of its own, every
-/// factory under its asset tag, every declared asset's unit under its identity,
-/// and each network's polling cadence for `indexing::Supervisor`.
+/// factory under its asset tag, and every declared asset's unit under its
+/// identity. Each index carries its own chain's poll cadence.
 ///
 /// Nothing above this value names a chain: an asset tag selects a factory and
 /// a network selects an index — or the one handle that answers a query for that
@@ -89,18 +86,12 @@ pub struct Composition<A: Ord> {
     /// Every configured asset's unit, by identity: what an edge reporting an
     /// indexed amount scales it by.
     pub units: Units,
-    /// What each network polls at, for the supervisor that drives `index`.
-    pub schedules: Schedules,
 }
 
 impl<A> Composition<A>
 where
     A: Clone + Ord + Send + Sync + 'static,
 {
-    /// Cadence of a network no composed chain claimed. Every chain states its
-    /// own, so it stands only for a `Indexers` extended by other means.
-    const POLL: Duration = Duration::from_secs(1);
-
     /// Composes every verified chain over the repository `repository` gives
     /// its network, and folds the results together.
     ///
@@ -126,7 +117,6 @@ where
     {
         let mut indexes = Vec::with_capacity(chains.len());
         let mut pending = Vec::with_capacity(chains.len());
-        let mut schedules = Schedules::every(Self::POLL);
         let mut wallets = Wallets::new();
         let mut units = Units::default();
         for chain in chains {
@@ -134,13 +124,11 @@ where
                 index,
                 pending: held,
                 factories,
-                poll,
                 units: declared,
             } = chain
                 .compose(repository.clone(), registrar)
                 .await
                 .map_err(E::from)?;
-            schedules = schedules.with(index.network(), Schedule::every(poll));
             Self::register::<E>(&mut wallets, factories, &declared)?;
             units.extend(declared);
             pending.push((index.network().clone(), held));
@@ -153,7 +141,6 @@ where
             pending,
             wallets,
             units,
-            schedules,
         })
     }
 
@@ -246,6 +233,10 @@ mod tests {
 
         fn listen(&self, _listener: Arc<dyn Listener>) {}
 
+        fn schedule(&self) -> indexing::Schedule {
+            indexing::Schedule::every(std::time::Duration::from_millis(250))
+        }
+
         fn sync<'a>(&'a self) -> BoxFuture<'a, Result<Outcome, IndexError>> {
             Box::pin(async { unreachable!("a fixture index never advances") })
         }
@@ -300,8 +291,6 @@ mod tests {
     }
 
     impl FixtureChain {
-        const POLL: Duration = Duration::from_millis(250);
-
         /// One chain whose single factory is tagged after the chain itself.
         fn of(chain: &'static str) -> Box<dyn Connection<&'static str, Handle>> {
             Box::new(Self {
@@ -354,7 +343,6 @@ mod tests {
                     pending: Arc::new(FixtureIndex(network(self.chain))),
                     factories: vec![(self.tag, Box::new(factory) as Box<dyn WalletFactory>)],
                     units,
-                    poll: Self::POLL,
                 })
             })
         }
@@ -399,7 +387,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_chains_become_one_index_one_map_and_one_cadence_each() {
+    async fn two_chains_become_one_index_and_one_map() {
         let stores = Stores::default();
 
         let composed = Composition::<&'static str>::build::<Handle, Error>(
@@ -428,11 +416,6 @@ mod tests {
                 .map(|asset| asset.tag)
                 .collect::<Vec<_>>(),
             ["alpha", "beta"]
-        );
-        assert_eq!(
-            composed.schedules.of(&network("alpha")).interval,
-            FixtureChain::POLL,
-            "each chain keeps the cadence it composed with"
         );
         for chain in ["alpha", "beta"] {
             assert_eq!(

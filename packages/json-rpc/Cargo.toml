@@ -15,7 +15,6 @@ testing = []
 [dependencies]
 logging = { path = "../logging" }
 jsonrpsee.workspace = true
-http-types = { package = "http", version = "=1.5.0" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true, features = ["time"] }

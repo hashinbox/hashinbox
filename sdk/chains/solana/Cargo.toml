@@ -9,7 +9,7 @@ readme = "README.md"
 [dependencies]
 logging = { path = "../../../packages/logging" }
 base = { path = "../../base" }
-sdk-config = { path = "../../config" }
+payments = { path = "../../payments" }
 crypto = { path = "../../../packages/crypto" }
 indexing = { path = "../../indexing", default-features = false }
 wallets = { path = "../../wallets" }
@@ -42,7 +42,7 @@ solana-keypair = "=3.1.2"
 # The scripted node double (`json_rpc::testing`): tests only, never a production link.
 json-rpc = { path = "../../../packages/json-rpc", features = ["testing"] }
 # The in-memory store (`indexing::memory`): the repository type the registration
-# hook is named over when a test verifies a node through `sdk_config::Chain`.
+# hook is named over when a test verifies a node through `payments::config::Chain`.
 indexing = { path = "../../indexing", default-features = false, features = ["memory"] }
 
 [lints]

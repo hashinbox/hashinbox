@@ -207,7 +207,8 @@ fi
 #    - nothing under src/api (the endpoints and what several of them share),
 #      src/asset.rs (the asset tags they select by) or src/state.rs (the state
 #      they run on) names a chain crate, the configuration reader
-#      (sdk_config), a storage backend (indexing::sqlite, indexing::memory),
+#      (payments::config), a storage backend (indexing::sqlite, indexing::memory;
+#      state.rs alone may hold the concrete SQLite repository, 053),
 #      or the composition root's own chain and storage modules; and nothing
 #      under src/api names the SQL driver (sqlx) -- the state holds the one
 #      pool, and the models are what read and write through it.
@@ -227,7 +228,7 @@ ls apps/*/src/lib.rs >/dev/null 2>&1 && { echo "an application exports a library
 chain_crate="${w}chain_(bitcoin|ethereum|solana)([^A-Za-z0-9_]|\$)|${w}chain_[a-z]+::"
 grep -rnE "$chain_crate" "$app" \
   | grep -vE "^$app/chains\.rs:" && { echo "chain crate outside $app/chains.rs"; status=1; }
-composed="chain_[a-z]+|sdk_config|indexing::(sqlite|memory)|crate::(chains|storage)"
+composed="chain_[a-z]+|payments::config|indexing::(sqlite|memory)|crate::(chains|storage)"
 # Every production line of the given files that names one of PATTERN.
 named() { pattern=$1; shift
   find "$@" -name '*.rs' -type f | sort | PATTERN="$pattern" perl -e "$production_perl"'
@@ -240,11 +241,15 @@ named() { pattern=$1; shift
         print "$file:", $at + 1, ":$lines[$at]\n"; $status = 0; } }
     exit $status;'
 }
-named "$composed" "$app/api" "$app/asset.rs" "$app/state.rs" \
+named "$composed" "$app/api" "$app/asset.rs" \
   && { echo "a route names a chain, the configuration reader or a storage backend"; status=1; }
+# state.rs holds the one concrete repository whose inherent balance and history
+# reads the routes call (053): it may name the shipped SQLite store, nothing else.
+named "chain_[a-z]+|payments::config|indexing::memory|crate::(chains|storage)" "$app/state.rs" \
+  && { echo "the state names a chain, the configuration reader or another backend"; status=1; }
 named "sqlx" "$app/api" \
   && { echo "a route names the SQL driver; read and write through a model"; status=1; }
-named "axum|chain_[a-z]+|sdk_config|crate::(api|chains)" "$app/models" \
+named "axum|chain_[a-z]+|payments::config|crate::(api|chains)" "$app/models" \
   && { echo "a model names the HTTP framework, the routes, the configuration reader or a chain"; status=1; }
 grep -rnE 'enum (Chain|WalletAsset)\b|WalletAsset::' "$app/api" \
   "$app/asset.rs" "$app/state.rs" && { echo "closed asset/chain enum in routes"; status=1; }
@@ -383,7 +388,7 @@ fi
 #     indexing names no `wallets` crate: no `wallets::` path, `use wallets` or
 #     manifest entry. (`wallets` is also indexing's noun for its wallet rows,
 #     so that direction matches the crate's paths, not the word.) Composition
-#     of both lives in `sdk/config`.
+#     of both lives in `payments::config`.
 grep -rnw 'indexing' sdk/wallets/src sdk/wallets/tests sdk/wallets/Cargo.toml \
   && { echo "sdk/wallets names indexing; wallets depends on base only"; status=1; }
 grep -rnE '(^|[^A-Za-z0-9_:])wallets::|\buse[[:space:]]+wallets\b' \

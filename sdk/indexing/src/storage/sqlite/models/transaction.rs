@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 
 use sqlx::{FromRow, QueryBuilder, SqliteConnection, sqlite::SqliteRow};
 
-use super::{Block, Chunks, amount, column, deleted, network, refused, restored, store, stored};
+use super::{
+    Block, Chunks, amount, column, deleted, fetched, framed, network, refused, restored, store,
+    stored,
+};
 use crate::{
     Address, AssetId, IndexError, IndexedBatch, Network, NetworkFee, Status, TransactionRef,
 };
@@ -181,6 +184,31 @@ impl Transaction {
         .bind(id)
         .fetch_one(connection)
         .await
+    }
+
+    /// Up to `limit` of `address`'s transactions after `cursor`
+    /// (`(height, order, id)`), in native block order: the `history_entry`
+    /// view, one row per transaction the address took part in.
+    pub(in crate::storage::sqlite) async fn find_after_by_address(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        address: &str,
+        cursor: &(i64, i64, String),
+        limit: usize,
+    ) -> Result<Vec<Self>, IndexError> {
+        let query = framed(
+            "SELECT * FROM history_entry
+             WHERE chain = ?1 AND network = ?2 AND address = ?3
+               AND (block_height, transaction_order, transaction_id) > (?4, ?5, ?6)
+             ORDER BY block_height, transaction_order, transaction_id LIMIT ?7",
+            network,
+        )
+        .bind(address)
+        .bind(cursor.0)
+        .bind(cursor.1)
+        .bind(cursor.2.as_str())
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX));
+        fetched(connection, query, "failed to read history").await
     }
 
     /// The block that includes this transaction.

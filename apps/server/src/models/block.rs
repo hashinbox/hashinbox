@@ -1,8 +1,6 @@
 //! A block reference as the API publishes it.
 
-use indexing::{IndexError, IndexErrorKind};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row as _, sqlite::SqliteRow};
 
 /// A block reference: where a transaction was included, or a checkpoint.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -47,59 +45,6 @@ impl From<&base::BlockRef> for Block {
             }),
         }
     }
-}
-
-impl Block {
-    /// The block indexing's six `block_*` columns of `row` hold.
-    ///
-    /// # Errors
-    ///
-    /// A terminal `Store` error for a missing column, a negative coordinate or
-    /// a half-written parent.
-    pub(crate) fn stored(row: &SqliteRow) -> Result<base::BlockRef, IndexError> {
-        let column = |name: &str| -> Result<Option<i64>, IndexError> {
-            row.try_get(name)
-                .map_err(|_| stored("a stored block is unreadable"))
-        };
-        let coordinate = |value: Option<i64>| -> Result<Option<u64>, IndexError> {
-            value
-                .map(|value| u64::try_from(value).map_err(|_| stored("a stored block is negative")))
-                .transpose()
-        };
-        let hash = |name: &str| -> Result<Option<Vec<u8>>, IndexError> {
-            row.try_get(name)
-                .map_err(|_| stored("a stored block is unreadable"))
-        };
-        let position = coordinate(column("block_position")?)?
-            .ok_or_else(|| stored("a stored block has no position"))?;
-        let height = coordinate(column("block_height")?)?
-            .ok_or_else(|| stored("a stored block has no height"))?;
-        let parent = match (
-            coordinate(column("block_parent_position")?)?,
-            hash("block_parent_hash")?,
-        ) {
-            (Some(position), Some(hash)) => Some(base::BlockParent {
-                position: base::BlockPosition(position),
-                hash: base::BlockHash(hash),
-            }),
-            (None, None) => None,
-            _ => return Err(stored("a stored block parent is half written")),
-        };
-        Ok(base::BlockRef {
-            position: base::BlockPosition(position),
-            height: base::BlockHeight(height),
-            hash: base::BlockHash(
-                hash("block_hash")?.ok_or_else(|| stored("a stored block has no hash"))?,
-            ),
-            parent,
-            timestamp: coordinate(column("block_timestamp")?)?,
-        })
-    }
-}
-
-/// Indexed data that contradicts the schema: retrying cannot fix it.
-fn stored(message: &str) -> IndexError {
-    IndexError::new(IndexErrorKind::Store, message, false)
 }
 
 #[cfg(test)]

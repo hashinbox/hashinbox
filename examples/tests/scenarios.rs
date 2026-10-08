@@ -8,8 +8,9 @@
 //! scenario until each one configures a section for it, and the scenario list
 //! comes from the `[[example]]` entries of `examples/Cargo.toml`.
 //!
-//! A scenario hands its sections to `sdk_config::Registry`, one
-//! `register::<chain_<name>::Config<_>>("<name>")` line per chain.
+//! A scenario hands its sections to `payments::config::Registry`, one
+//! `register::<chain_<name>::Config<_>>("<name>")` (or the container's
+//! `.with::<chain_<name>::Config<_>>("<name>")`) line per chain.
 //! `custom_store` is the one scenario that registers nothing: it assembles an
 //! index by hand, which is its whole subject. That is asserted as an equality
 //! rather than skipped, so no other scenario can drift into it, and where it
@@ -92,7 +93,11 @@ impl Scenario {
     fn registrations(&self) -> Vec<(&str, &str)> {
         let mut found = Vec::new();
         for line in self.code() {
-            let Some((_, rest)) = line.split_once("register::<chain_") else {
+            // A `Registry` registration, or the container's `.with::<..>(..)`.
+            let Some((_, rest)) = line
+                .split_once("register::<chain_")
+                .or_else(|| line.split_once("with::<chain_"))
+            else {
                 continue;
             };
             let section = rest
@@ -125,7 +130,7 @@ impl Scenario {
         let mut found = Vec::new();
         let mut owner: Option<(&str, usize)> = None;
         for line in self.code() {
-            if line.contains("register::<chain_") {
+            if line.contains("register::<chain_") || line.contains("with::<chain_") {
                 continue;
             }
             owner = Self::signature(line).or(owner);

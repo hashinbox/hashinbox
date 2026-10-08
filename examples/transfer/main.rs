@@ -8,11 +8,11 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use indexing::{
-    Birthday, Report, Supervisor, Watching as _,
+    Birthday, Driver, Watching as _,
     sqlite::{Database, Repository},
 };
 use json_rpc::Client as _;
-use sdk_config::{Composition, Document, Registry};
+use payments::config::{Composition, Document, Registry};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 use wallets::{SubmissionRegistrar, Submissions, Wallet};
@@ -57,14 +57,8 @@ async fn main() -> Result<(), AnyError> {
     //    `submissions` owns the send work a chain finishes in the background.
     let submissions = Arc::new(Submissions::new());
     let registrar: Arc<dyn SubmissionRegistrar> = submissions.clone();
-    let Composition {
-        index,
-        wallets,
-        schedules,
-        ..
-    } = chains
+    let Composition { index, wallets, .. } = chains
         .compose(
-            &BTreeMap::new(),
             || async {
                 let file = std::path::absolute(".index-data/transfer.db")?;
                 tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
@@ -113,8 +107,9 @@ async fn main() -> Result<(), AnyError> {
     // 6. One sync loop over the composed index serves every chain's wallets;
     //    wait until every network has reached its node's tip.
     let (stop, stopped) = watch::channel(false);
-    let (monitor, mut readiness) = Report::watching(index.networks());
-    let sync = tokio::spawn(Supervisor::new(index.clone(), schedules, monitor).run(stopped));
+    let driver = Driver::new(index.clone());
+    let mut readiness = driver.readiness();
+    let sync = tokio::spawn(driver.run(stopped));
     let health = readiness.settled().await.ok_or("synchronization stopped")?;
     if let Some(error) = health.networks().iter().find_map(|row| row.failure.clone()) {
         return Err(error.into());
@@ -156,7 +151,7 @@ async fn call(
     let url = sections[chain]["rpc"]["endpoints"][0]
         .as_str()
         .ok_or("the section states rpc.endpoints")?;
-    let node = json_rpc::Endpoint::new(url).connect(&BTreeMap::new())?;
+    let node = json_rpc::Endpoint::new(url).connect()?;
     let result = node
         .request(json_rpc::Request::once(method, params))
         .await?;

@@ -60,6 +60,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 mod commits;
+mod reads;
 
 /// Every stored row, keyed by the domain values themselves.
 #[derive(Clone, Default)]

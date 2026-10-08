@@ -3,7 +3,7 @@ use std::time::Duration;
 use indexing::Budget;
 use serde::Deserialize;
 
-use crate::{Error, ErrorKind};
+use crate::config::{Error, ErrorKind};
 
 /// The rhythm one chain indexes at: how often it asks its node for a new tip,
 /// and the bounds one synchronization pass runs under.
@@ -20,22 +20,23 @@ use crate::{Error, ErrorKind};
 /// described a rollback journal that no longer exists.
 ///
 /// Both fields are the type their consumer takes. [`Self::poll`] is the
-/// `Duration` [`crate::ComposedChain::poll`] holds, and [`Self::policy`] is
+/// `Duration` a poll schedule (`indexing::Schedule`) holds, and [`Self::policy`] is
 /// the [`Budget`] `indexing` validates — neither is re-inflated from a
 /// bare integer at the chain end, which is what this type used to force
 /// because a `packages/*` crate could not name an `sdk/*` type.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(from = "Keys")]
 pub struct Cadence {
-    /// How long this chain waits between two tip observations.
-    pub poll: Duration,
+    /// The operator's override of how long this chain waits between two tip
+    /// observations. `None`: the rhythm the chain itself declares.
+    pub poll: Option<Duration>,
     /// How much one pass may read, and how far below the checkpoint a new
     /// watch may start.
     pub policy: Budget,
 }
 
 impl Cadence {
-    /// The rhythm every chain starts from: a one-second cadence and a
+    /// The rhythm every chain starts from: the chain's own poll cadence and a
     /// hundred-block pass.
     ///
     /// `serde` fills an absent key by calling the same functions this does, so
@@ -43,7 +44,7 @@ impl Cadence {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            poll: Self::default_poll(),
+            poll: None,
             policy: Budget::new(Self::default_batch_size()),
         }
     }
@@ -55,17 +56,13 @@ impl Cadence {
     /// [`ErrorKind::Cadence`] when the poll interval is zero, or when
     /// `indexing` refuses the policy.
     pub fn validate(&self) -> Result<(), Error> {
-        if self.poll.is_zero() || self.policy.validate().is_err() {
+        if self.poll.is_some_and(|poll| poll.is_zero()) || self.policy.validate().is_err() {
             return Err(Error::new(
                 ErrorKind::Cadence,
                 "index polling and batch values must be positive",
             ));
         }
         Ok(())
-    }
-
-    const fn default_poll() -> Duration {
-        Duration::from_millis(1_000)
     }
 
     const fn default_batch_size() -> usize {
@@ -92,15 +89,21 @@ impl Default for Cadence {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Keys {
-    #[serde(
-        default = "Cadence::default_poll",
-        deserialize_with = "crate::millis::deserialize"
-    )]
-    poll_millis: Duration,
+    #[serde(default, deserialize_with = "override_millis")]
+    poll_millis: Option<Duration>,
     #[serde(default = "Cadence::default_batch_size")]
     batch_size: usize,
     #[serde(default = "Cadence::default_max_backfill_blocks")]
     max_backfill_blocks: u64,
+}
+
+/// A stated `poll_millis` overrides the chain's rhythm; `null` is refused, not
+/// read as absent.
+fn override_millis<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    crate::config::millis::deserialize(deserializer).map(Some)
 }
 
 impl From<Keys> for Cadence {
@@ -140,7 +143,8 @@ mod tests {
             }
         );
         let explicit = parse(json!({"poll_millis": 17, "batch_size": 7})).expect("both stated");
-        assert_eq!(explicit.poll, Duration::from_millis(17));
+        assert_eq!(explicit.poll, Some(Duration::from_millis(17)));
+        assert_eq!(Cadence::new().poll, None, "absent: the chain's own rhythm");
         assert_eq!(explicit.policy.batch_size, 7);
         assert_eq!(
             explicit.policy.max_backfill_blocks,
@@ -161,7 +165,7 @@ mod tests {
         for (coded, written) in [
             (
                 Cadence {
-                    poll: Duration::ZERO,
+                    poll: Some(Duration::ZERO),
                     ..Cadence::new()
                 },
                 json!({"poll_millis": 0}),

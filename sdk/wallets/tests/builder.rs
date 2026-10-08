@@ -415,7 +415,7 @@ fn a_draft_snapshot_resumes_its_own_wallet_and_no_other() {
     let bob = wallets
         .author(
             &COIN_TAG,
-            &block_on(wallets.from(&COIN_TAG, SecretBytes::new([0x07]))).expect("bob"),
+            &block_on(wallets.from_pk(&COIN_TAG, SecretBytes::new([0x07]))).expect("bob"),
         )
         .expect("an asset it spends");
     wallets

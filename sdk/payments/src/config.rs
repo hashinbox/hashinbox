@@ -1,5 +1,3 @@
-#![doc = include_str!("../README.md")]
-
 mod cadence;
 mod chain;
 mod chain_nodes;
@@ -12,6 +10,7 @@ mod repeat;
 mod rpc;
 
 pub use cadence::Cadence;
+pub(crate) use chain::Endpoints;
 pub use chain::{Chain, Chains, RpcStatistics, Startup};
 pub use chain_nodes::ChainNodes;
 pub use composition::{ComposedChain, Composition, Connection};

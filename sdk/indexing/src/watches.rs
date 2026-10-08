@@ -127,7 +127,7 @@ pub trait Watching: Send + Sync {
     /// credits of the address all stay; what stops is future inspection. Rows
     /// nothing claims are the price, and it is the cheaper one: deleting would be
     /// a second removal path beside the offline
-    /// [`IndexStore::purge`] and an irreversible one, for an act
+    /// [`crate::IndexStore::purge`] and an irreversible one, for an act
     /// that is otherwise entirely reversible. The rows stay readable, because
     /// they are keyed by address and asset and by no watch — which is the same reason
     /// they answer for an address this process watched a moment ago. What the

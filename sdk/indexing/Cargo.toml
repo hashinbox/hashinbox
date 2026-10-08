@@ -9,18 +9,18 @@ readme = "README.md"
 [features]
 # `sqlite` is the file store this crate ships, and the one a build gets without
 # asking. It stays a feature rather than becoming
-# unconditional because that is what lets `sdk/config` and the chain
+# unconditional because that is what lets `payments::config` and the chain
 # crates depend on this crate with `default-features = false` and get no store
 # and no async runtime through it.
-default = ["sqlite", "supervisor"]
+default = ["sqlite", "driver"]
 # The embedded SQL store: `indexing::sqlite`, on `sqlx` (bundled SQLite, its
 # pool, and one worker thread per connection). It brings Tokio with it: sqlx
 # runs on the Tokio runtime, so a build with this store has one whether or not
-# it takes `supervisor`. Off, the crate is the traits and the vocabulary.
+# it takes `driver`. Off, the crate is the traits and the vocabulary.
 sqlite = ["dep:sqlx"]
-# The driver: `indexing::Supervisor` and its tasks. Off, the crate carries no
+# The driver: `indexing::Driver` and its tasks. Off, the crate carries no
 # async runtime.
-supervisor = ["dep:tokio", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time"]
+driver = ["dep:tokio", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time"]
 # The in-process store: `indexing::memory`, on no file and no runtime. A second
 # shipped backend rather than a test double — it answers every port `sqlite`
 # does, including the consumer capabilities — for an ephemeral process, an

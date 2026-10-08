@@ -9,7 +9,7 @@ readme = "README.md"
 [features]
 # The default registrar: `wallets::Submissions`, which spawns the send work a
 # chain hands over and drains it. Off, the crate carries no async runtime, which
-# is what the chain crates and `sdk/config` link.
+# is what the chain crates and `payments::config` link.
 submissions = ["dep:tasks", "dep:tokio", "tokio/rt"]
 # The scripted wallet double (`wallets::testing`). Off, the crate carries no
 # test scaffolding; it belongs in a `[dev-dependencies]` entry only, never in

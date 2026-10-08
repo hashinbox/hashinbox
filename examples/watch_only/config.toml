@@ -1,6 +1,6 @@
-# The chains this scenario runs. `sdk_config::Document` reads this file,
-# `sdk_config::Sections` carries each named section without looking inside it,
-# and the `sdk_config::Registry` in main.rs hands each one to the chain
+# The chains this scenario runs. `payments::config::Document` reads this file,
+# `payments::config::Sections` carries each named section without looking inside it,
+# and the `payments::config::Registry` in main.rs hands each one to the chain
 # registered under its name.
 #
 # Every key not stated here is the chain's own default: the asset tag, the

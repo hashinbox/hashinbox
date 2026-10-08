@@ -9,11 +9,11 @@ use wallets::{SendError, WalletErrorKind};
 
 use crate::native::{self, ErrorKind, TransactionId};
 
-/// A value `sdk/config` refused: an unusable endpoint list, contradictory
+/// A value `payments::config` refused: an unusable endpoint list, contradictory
 /// repetition bounds, or a zero cadence bound. Every one of them is this
 /// deployment's configuration.
-impl From<sdk_config::Error> for native::Error {
-    fn from(error: sdk_config::Error) -> Self {
+impl From<payments::config::Error> for native::Error {
+    fn from(error: payments::config::Error) -> Self {
         Self::new(ErrorKind::InvalidConfiguration, error.message)
     }
 }

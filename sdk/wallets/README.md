@@ -2,7 +2,7 @@
 
 Create wallets, import keys and send payments on any chain without naming a
 chain crate. `Wallets` is a map from your own asset tags to the wallet factory
-each chain provides. Its core depends on `base` and `crypto`; `sdk_config::Composition`
+each chain provides. Its core depends on `base` and `crypto`; `payments::config::Composition`
 assembles configured chains into one index and one wallet map.
 
 ## Usage
@@ -19,7 +19,7 @@ async fn run(factory: impl WalletFactory + 'static, key: SecretBytes) -> Result<
     wallets.add("coin", factory)?;
 
     // The map makes wallets and keeps none of them.
-    let treasury = wallets.from(&"coin", key).await?;
+    let treasury = wallets.from_pk(&"coin", key).await?;
     let alice = wallets.create(&"coin").await?;
     let to = wallets.parse(&"coin", &alice.address().value)?;
 

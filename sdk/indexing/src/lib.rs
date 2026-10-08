@@ -10,8 +10,8 @@ mod run;
 mod storage;
 // Private, and re-exported below exactly as `engine::supervisor` was: the
 // module is an implementation detail, its six types are the API.
-#[cfg(feature = "supervisor")]
-mod supervisor;
+#[cfg(feature = "driver")]
+mod driver;
 mod sync;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -31,8 +31,9 @@ pub use block::{MovementId, NetworkFee, Status, Transaction, ValueMovement};
 pub use block::{require_chain, select_addresses};
 // What a store implements: the required ports, the capabilities, their rows.
 pub use storage::{
-    IndexStore, IndexedBatch, Inspection, Location, OutputStore, Progress, PurgedRows,
-    Registration, Repository, TransactionStore, Wallet, WalletRegistry, WatchProgress, WatchStore,
+    Change, IndexStore, IndexedBatch, Inspection, Location, Notifying, OutputStore, Progress,
+    PurgedRows, Registration, Repository, TransactionStore, Wallet, WalletRegistry, WatchProgress,
+    WatchStore,
 };
 // What an application calls: the index, the two facts only it holds, and the
 // hook. The queries and their vocabulary are the repository's, from `storage`.
@@ -40,14 +41,15 @@ pub use error::{IndexError, IndexErrorKind, SourceError};
 pub use indexers::{BlockCommit, Listener};
 pub use indexers::{Checkpoint, Indexer, Indexing};
 pub use pending::{Checkpointed, Pending, Sample};
+pub use storage::{Balance, Entry, History, Page, Position, SettledBalance, Standing};
 pub use storage::{Net, OutputCursor, OutputPage, OutputRequest};
 pub use sync::{Backlog, Outcome, Phase};
 pub use sync::{Condition, Health, SyncHealth};
 pub use watches::{Birthday, ForwardRange, Watch, Watching};
 // What the pass owns: the owners, the router, the policy and the cadence.
 pub use indexers::{Indexers, Route};
+pub use sync::Schedule;
 pub use sync::{Budget, Config};
-pub use sync::{Schedule, Schedules};
 
 pub(crate) use gate::{Gate, Plan};
 
@@ -59,5 +61,5 @@ pub use storage::sqlite;
 #[cfg(feature = "memory")]
 pub use storage::memory;
 
-#[cfg(feature = "supervisor")]
-pub use supervisor::{Control, Monitor, Readiness, Report, RescanError, Supervisor};
+#[cfg(feature = "driver")]
+pub use driver::{Control, Driver, Monitor, Readiness, Report, RescanError};

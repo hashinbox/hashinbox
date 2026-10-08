@@ -69,8 +69,8 @@ async fn create(
 ```
 
 Two repositories ship with the crate: `sqlite::Repository` (feature `sqlite`, on
-by default) and `memory::Repository` (feature `memory`). The `supervisor`
-feature, on by default, adds `Supervisor`, which runs `sync` for you with retry
+by default) and `memory::Repository` (feature `memory`). The `driver`
+feature, on by default, adds `Driver`, which runs `sync` for you with retry
 and per-network quarantine. Balance, history and output queries belong to the
 repository, not to the index. The `testing` feature, off by default and for
 dev-dependencies only, adds `testing::Chain`: one scripted chain double that is
@@ -110,8 +110,10 @@ async fn open(path: &std::path::Path) -> Result<Repository> {
 
 ## Reads
 
-Reading balances and history is the application's own business: the store
-offers no balance or history query. What it offers are narrow ports for the
+Balance and history are not ports: the shipped stores answer them with
+inherent methods (`sqlite::Repository::balance`/`history`, the same on
+`memory::Repository`), each one snapshot that says how far behind its line the
+address's inspection is; a custom store brings its own. The ports are narrow ones for the
 SDK's own consumers — `OutputStore` (Bitcoin's coin selection,
 `chain_bitcoin::sender::Spendable`) and `TransactionStore` (Solana's absence
 proof, `chain_solana::sender::IndexPresence`) — and an application completes its own
@@ -188,7 +190,7 @@ async fn landed(
 
 ## Injected events
 
-`Supervisor::with_logger` records state transitions. Transactional application
+`Driver::with_logger` records state transitions. Transactional application
 reactions belong in a custom repository.
 `Control::pause` waits for the active pass; `resume` restarts a paused network.
 `Control::rescan` fails as `RescanError::NotStarted` (nothing purged, network

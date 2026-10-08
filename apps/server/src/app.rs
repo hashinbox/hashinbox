@@ -2,7 +2,7 @@
 //! router over the wallet double
 //! (`wallets::testing`) and real indexing of scripted chains
 //! (`indexing::testing::Networks`) into a temporary SQLite file, with health
-//! published as plain values, as the supervisor's monitor does.
+//! published as plain values, as the driver's monitor does.
 
 #![cfg(test)]
 
@@ -84,8 +84,8 @@ pub(crate) struct App {
     router: axum::Router,
     chains: indexing::testing::Networks,
     outboxes: Vec<Outbox>,
-    /// The supervisor a rescan pauses, until [`Self::supervised`] runs it.
-    supervisor: Option<indexing::Supervisor>,
+    /// The driver a rescan pauses, until [`Self::supervised`] runs it.
+    driver: Option<indexing::Driver>,
     stop: watch::Sender<bool>,
     /// The database file the endpoints live in.
     _file: File,
@@ -116,12 +116,7 @@ impl App {
             indexing::testing::Networks::new(&Self::networks(), GENESIS_TIP, 1, repository.clone());
         let (wallets, outboxes) = Self::wallets(bitcoin, usdc);
         let (ready, health) = watch::channel(Self::health(state));
-        let (report, _readiness) = indexing::Report::watching(chains.index().networks());
-        let supervisor = indexing::Supervisor::new(
-            chains.index(),
-            indexing::Schedules::every(std::time::Duration::from_secs(3600)),
-            report,
-        );
+        let driver = indexing::Driver::new(chains.index());
         let state = AppState {
             wallets: Arc::new(wallets),
             units: Arc::new(Self::units()),
@@ -135,8 +130,9 @@ impl App {
                 .map(|network| Self::configured(network, true))
                 .into(),
             verify: Self::verifier(),
-            control: supervisor.control(),
-            purging: Arc::new(repository),
+            control: driver.control(),
+            index_store: Arc::new(repository.clone()),
+            repository,
         };
         Self {
             router: Self::route(state.clone()),
@@ -144,7 +140,7 @@ impl App {
             ready: Some(ready),
             chains,
             outboxes,
-            supervisor: Some(supervisor),
+            driver: Some(driver),
             stop: watch::channel(false).0,
             _file: file,
         }
@@ -180,7 +176,7 @@ impl App {
     /// A node nothing in these tests calls.
     fn offline() -> Arc<dyn json_rpc::Client> {
         let node = json_rpc::Endpoint::new("http://node.invalid:8545")
-            .connect(&std::collections::BTreeMap::new())
+            .connect()
             .expect("a node");
         Arc::new(node)
     }
@@ -222,11 +218,11 @@ impl App {
         self
     }
 
-    /// The same app with its supervisor running, so a rescan's pause is
+    /// The same app with its driver running, so a rescan's pause is
     /// acknowledged.
     pub(crate) fn supervised(mut self) -> Self {
-        let supervisor = self.supervisor.take().expect("not yet running");
-        tokio::spawn(supervisor.run(self.stop.subscribe()));
+        let driver = self.driver.take().expect("not yet running");
+        tokio::spawn(driver.run(self.stop.subscribe()));
         self
     }
 
@@ -333,7 +329,7 @@ impl App {
         row
     }
 
-    /// Publishes `health` as the supervisor's monitor would.
+    /// Publishes `health` as the driver's monitor would.
     pub(crate) fn publish(&self, health: SyncHealth) {
         let ready = self.ready.as_ref().expect("health is still published");
         ready.send(health).expect("the routes hold the receiver");

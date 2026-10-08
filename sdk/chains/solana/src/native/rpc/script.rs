@@ -55,8 +55,6 @@ mod tests {
 
     use serde_json::json;
 
-    use std::collections::BTreeMap;
-
     use json_rpc::{Bounds, Endpoint, Http};
 
     use super::*;
@@ -69,7 +67,7 @@ mod tests {
                 max_request_bytes: 1024,
                 max_response_bytes,
             })
-            .connect(&BTreeMap::new())
+            .connect()
             .expect("loopback transport");
         Client::unverified(transport, Script::network())
     }

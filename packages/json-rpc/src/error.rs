@@ -5,8 +5,8 @@ use crate::Failure;
 /// Classification of a transport [`Error`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// An [`crate::Endpoint`] — its URL, a header, a bound or a `${NAME}`
-    /// reference — or an endpoint list is invalid.
+    /// An [`crate::Endpoint`] — its URL or a bound — or an endpoint list is
+    /// invalid.
     InvalidConfiguration,
     /// The request was rejected locally before sending (params, empty batch).
     InvalidRequest,
@@ -27,7 +27,7 @@ pub enum ErrorKind {
 pub struct Error {
     /// What went wrong, for callers to branch on.
     pub kind: ErrorKind,
-    /// Human-readable context; never contains endpoint URLs or header values.
+    /// Human-readable context; never contains endpoint URLs.
     pub message: String,
 }
 

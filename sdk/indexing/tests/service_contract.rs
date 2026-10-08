@@ -16,8 +16,8 @@ use indexing::{
     Address, Birthday, BlockHash, BlockHeight, BlockParent, BlockPosition, BlockRef, BlockSource,
     BlockWithOutputs, BoxFuture, Budget, ChainName, ChainTips, Checkpoint, Checkpointed, Config,
     ForwardRange, IndexError, IndexErrorKind, IndexStore, IndexedOutput, Indexer, Indexing,
-    NativeBlock, Network, Outcome, OutputChanges, OutputId, OutputKey, Pending, Phase,
-    Subject, TransactionRef, Watching, memory, sqlite,
+    NativeBlock, Network, Outcome, OutputChanges, OutputId, OutputKey, Pending, Phase, Subject,
+    TransactionRef, Watching, memory, sqlite,
     testing::{Chain, Fault, Request, block},
 };
 
@@ -513,11 +513,21 @@ fn replacement_chain() -> Vec<BlockRef> {
 }
 
 fn config(network: Network) -> Config {
-    Config::new(&network, Budget::new(100)).expect("sync config")
+    Config::new(
+        &network,
+        Budget::new(100),
+        indexing::Schedule::every(std::time::Duration::from_millis(1)),
+    )
+    .expect("sync config")
 }
 
 fn bounded_config(network: Network, batch_size: usize) -> Config {
-    Config::new(&network, Budget::new(batch_size)).expect("bounded sync config")
+    Config::new(
+        &network,
+        Budget::new(batch_size),
+        indexing::Schedule::every(std::time::Duration::from_millis(1)),
+    )
+    .expect("bounded sync config")
 }
 
 #[test]

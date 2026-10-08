@@ -243,7 +243,7 @@
           "networks"
         ],
         "summary": "Replace a network's RPC nodes",
-        "description": "Verifies the nodes with the chain's own startup check over the new list, stores them, then sends every later call to them; calls already sent finish on the node they reached. A node that fails the check leaves the current nodes in use and stores nothing. The stored list is used on every later start, whatever the configuration file says. Credentials are stored as sent; prefer `${NAME}` references. A network that is unavailable stores the verified nodes and uses them from the next start.",
+        "description": "Verifies the nodes with the chain's own startup check over the new list, stores them, then sends every later call to them; calls already sent finish on the node they reached. A node that fails the check leaves the current nodes in use and stores nothing. The stored list is used on every later start, whatever the configuration file says. Credentials in the URL are stored as sent. A network that is unavailable stores the verified nodes and uses them from the next start.",
         "operationId": "replace_network_rpc",
         "parameters": [
           {
@@ -287,7 +287,7 @@
             }
           },
           "400": {
-            "description": "Malformed node list, a node the chain refuses, or an unset `${NAME}`",
+            "description": "Malformed node list or a node the chain refuses",
             "content": {
               "application/json": {
                 "schema": {
@@ -1316,7 +1316,7 @@
       },
       "DetailedEndpoint": {
         "type": "object",
-        "description": "A node with its own headers and bounds.",
+        "description": "A node with its own bounds.",
         "required": [
           "url"
         ],
@@ -1327,16 +1327,6 @@
               "null"
             ],
             "description": "Per-call limits: `timeout_ms`, `max_request_bytes`,\n`max_response_bytes`; each defaults when absent."
-          },
-          "headers": {
-            "type": "object",
-            "description": "Headers every call carries.",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
           },
           "url": {
             "type": "string",
@@ -1787,14 +1777,14 @@
         "oneOf": [
           {
             "type": "string",
-            "description": "The node's URL, with default bounds and no added header."
+            "description": "The node's URL, with default bounds."
           },
           {
             "$ref": "#/components/schemas/DetailedEndpoint",
-            "description": "The node's URL, headers and bounds."
+            "description": "The node's URL and bounds."
           }
         ],
-        "description": "One RPC node, written as the configuration file's `rpc.endpoints` writes\nit. `${NAME}` anywhere in the URL or a header value stands for the\nserver's environment variable `NAME`."
+        "description": "One RPC node, written as the configuration file's `rpc.endpoints` writes\nit. The URL carries any credentials: userinfo (HTTP Basic) or query keys."
       },
       "RpcNode": {
         "type": "object",
@@ -1805,7 +1795,7 @@
         "properties": {
           "origin": {
             "type": "string",
-            "description": "Scheme, host and port of the node's URL. User information, path,\nquery and headers are never returned: any of them may hold a\ncredential."
+            "description": "Scheme, host and port of the node's URL. User information, path and\nquery are never returned: any of them may hold a\ncredential."
           }
         }
       },

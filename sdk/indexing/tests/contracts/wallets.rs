@@ -12,8 +12,7 @@ use crypto::SecretBytes;
 
 use indexing::{
     BlockHeight, BlockPosition, Decimal, FeeSettlement, IndexError, IndexErrorKind, IndexStore,
-    IndexedBatch, Network, Progress, Registration, Wallet, WalletRegistry, Watch,
-    WatchProgress,
+    IndexedBatch, Network, Progress, Registration, Wallet, WalletRegistry, Watch, WatchProgress,
 };
 
 use super::fixture::Fixture;

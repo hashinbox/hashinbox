@@ -15,10 +15,10 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use base::Decimal;
 use indexing::{
     Address, AssetId, BlockHeight, BlockPosition, BlockRef, Budget, ChainName, Config, Control,
-    IndexError, IndexErrorKind, IndexStore, IndexedBatch, IndexedOutput, OutputKey, Indexer, Indexers, Indexing, Monitor, MovementId,
-    Network, OutputChanges, OutputId, OutputPage, OutputRequest, OutputStore, PurgedRows,
-    Report, Repository, RescanError, Schedules, Status, Subject, Supervisor, Transaction,
-    TransactionRef, ValueMovement, Watch, WatchProgress, memory, sqlite,
+    Driver, IndexError, IndexErrorKind, IndexStore, IndexedBatch, IndexedOutput, Indexer, Indexers,
+    Indexing, MovementId, Network, OutputChanges, OutputId, OutputKey, OutputPage, OutputRequest,
+    OutputStore, PurgedRows, Repository, RescanError, Status, Subject, Transaction, TransactionRef,
+    ValueMovement, Watch, WatchProgress, memory, sqlite,
     testing::{Chain, block},
 };
 use rows::Rows as Reader;
@@ -152,7 +152,12 @@ impl<R: Store> Running<R> {
     fn start(repository: R, reader: Option<Reader>, paused: bool) -> Self {
         let unit = |network: Network| {
             let chain = chain(&network);
-            let config = Config::new(&network, Budget::new(100)).expect("sync config");
+            let config = Config::new(
+                &network,
+                Budget::new(100),
+                indexing::Schedule::every(std::time::Duration::from_millis(1)),
+            )
+            .expect("sync config");
             let unit = Arc::new(Indexer::new(
                 chain.clone(),
                 chain.clone(),
@@ -165,13 +170,8 @@ impl<R: Store> Running<R> {
         let (other, elsewhere_chain) = unit(elsewhere());
         let units: Vec<Arc<dyn Indexing>> = vec![rescanned.clone(), other];
         let index = Arc::new(Indexers::of(units).expect("disjoint networks"));
-        let (report, _readiness) = Report::watching(index.networks());
-        let supervisor = Supervisor::new(
-            index,
-            Schedules::every(Duration::from_millis(1)),
-            report as Arc<dyn Monitor>,
-        );
-        let control = supervisor.control();
+        let driver = Driver::new(index);
+        let control = driver.control();
         if paused {
             control.request_pause(&reindexed()).expect("configured");
         }
@@ -184,7 +184,7 @@ impl<R: Store> Running<R> {
             elsewhere_chain,
             control,
             stop,
-            task: tokio::spawn(supervisor.run(shutdown)),
+            task: tokio::spawn(driver.run(shutdown)),
         }
     }
 
@@ -209,7 +209,7 @@ impl<R: Store> Running<R> {
 
     async fn shut_down(self) {
         self.stop.send_replace(true);
-        self.task.await.expect("the supervisor ends cleanly");
+        self.task.await.expect("the driver ends cleanly");
     }
 
     async fn history(&self, network: &Network, address: &str) -> Option<Vec<String>> {
@@ -484,7 +484,13 @@ impl IndexStore for Purge {
         &'a self,
         _batch: IndexedBatch,
     ) -> base::BoxFuture<'a, Result<Vec<OutputKey>, IndexError>> {
-        Box::pin(async { Err(IndexError::new(IndexErrorKind::Store, "purge-only double", false)) })
+        Box::pin(async {
+            Err(IndexError::new(
+                IndexErrorKind::Store,
+                "purge-only double",
+                false,
+            ))
+        })
     }
 
     fn purge<'a>(

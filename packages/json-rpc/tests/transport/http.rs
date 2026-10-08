@@ -8,35 +8,33 @@ use std::{
     time::Duration,
 };
 
-use std::collections::BTreeMap;
-
 use json_rpc::{Batch, Bounds, Call, Client, Endpoint, ErrorKind, Request};
 use serde_json::{Value, json};
 
 use crate::node;
 
 #[test]
-fn debug_never_exposes_the_endpoint_or_a_header_value() {
+fn debug_never_exposes_userinfo_or_query_values() {
     let endpoint = Endpoint::new("https://user:config-secret@example.invalid/v1?key=config-query")
-        .with_header("authorization", "Bearer config-hidden")
         .with_bounds(Bounds {
             timeout_ms: 1_000,
             ..Bounds::default()
         });
     for debug in [
         format!("{endpoint:?}"),
+        endpoint.to_string(),
         format!(
             "{:?}",
-            endpoint
-                .connect(&BTreeMap::new())
-                .expect("valid endpoint must build")
+            endpoint.connect().expect("valid endpoint must build")
         ),
     ] {
-        assert!(debug.contains("authorization"));
+        assert!(
+            debug.contains("https://***@example.invalid/v1?key=***"),
+            "{debug}"
+        );
         assert!(!debug.contains("config-secret"));
         assert!(!debug.contains("config-query"));
-        assert!(!debug.contains("example.invalid"));
-        assert!(!debug.contains("config-hidden"));
+        assert!(!debug.contains("user"));
     }
 }
 
@@ -211,7 +209,7 @@ async fn an_oversized_response_fails_after_one_execution() {
             max_response_bytes: 64,
             ..Bounds::default()
         })
-        .connect(&BTreeMap::new())
+        .connect()
         .expect("loopback client must build");
     let error = client
         .request(Request::once("oversized", json!([])))

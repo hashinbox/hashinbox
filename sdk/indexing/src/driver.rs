@@ -1,11 +1,11 @@
 //! **Contract.**
 //!
 //! One task per composed unit, so one chain's failure does not stop the others
-//! (cargo feature `supervisor`).
+//! (cargo feature `driver`).
 
 use crate::{
-    Condition, Health, IndexError, IndexErrorKind, Indexers, Indexing, Network, Outcome, Phase,
-    PurgedRows, Schedule, Schedules, SyncHealth,
+    Condition, Health, IndexError, IndexErrorKind, IndexStore, Indexers, Indexing, Network,
+    Outcome, Phase, PurgedRows, Schedule, SyncHealth,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -23,30 +23,55 @@ use tokio::task::{Id, JoinSet};
 ///
 /// `C` is what the composed children answer, defaulting to [`Indexing`]. Driving
 /// a pass needs no read at all, so a composition of stores that answer none is
-/// supervised exactly the same way, as `Supervisor<dyn Indexing>`.
-pub struct Supervisor<C: ?Sized = dyn Indexing> {
+/// supervised exactly the same way, as `Driver<dyn Indexing>`.
+pub struct Driver<C: ?Sized = dyn Indexing> {
     pub(crate) units: Arc<Indexers<C>>,
-    pub(crate) schedules: Schedules,
-    pub(crate) monitor: Arc<dyn Monitor>,
+    /// The built-in [`Report`] first, then every observer added through
+    /// [`Self::monitor`].
+    pub(crate) monitors: Vec<Arc<dyn Monitor>>,
+    pub(crate) readiness: Readiness,
     pub(crate) control: Control,
     pub(crate) logger: logging::Logger,
 }
 
-impl<C: Indexing + ?Sized + 'static> Supervisor<C> {
-    /// Supervises every unit of `units`, polling each on its own schedule and
-    /// reporting every network transition to `monitor`.
+impl<C: Indexing + ?Sized + 'static> Driver<C> {
+    /// Supervises every unit of `units`, polling each on the schedule its
+    /// chain declared ([`Indexing::schedule`]) and reporting every network
+    /// transition to its built-in [`Report`].
     ///
     /// There is no selection argument: each unit reads its own watch list.
     #[must_use]
-    pub fn new(units: Arc<Indexers<C>>, schedules: Schedules, monitor: Arc<dyn Monitor>) -> Self {
-        let control = Control::new(&units);
+    pub fn new(units: Arc<Indexers<C>>) -> Self {
+        let (report, readiness) = Report::watching(units.networks());
+        let control = Control::new(&units, Arc::clone(&report));
         Self {
             units,
-            schedules,
-            monitor,
+            monitors: vec![report],
+            readiness,
             control,
             logger: logging::Logger::default(),
         }
+    }
+
+    /// Adds an observer of every network transition, after the built-in
+    /// [`Report`]: metrics, logging.
+    #[must_use]
+    pub fn monitor(mut self, monitor: Arc<dyn Monitor>) -> Self {
+        self.monitors.push(monitor);
+        self
+    }
+
+    /// The latest network snapshot, for a consumer that polls, such as a
+    /// status route.
+    #[must_use]
+    pub fn health(&self) -> watch::Receiver<SyncHealth> {
+        self.readiness.receiver()
+    }
+
+    /// Waits until every network has settled. Take it before [`Self::run`].
+    #[must_use]
+    pub fn readiness(&self) -> Readiness {
+        Readiness(self.readiness.receiver())
     }
 
     /// Records meaningful indexing transitions using a caller-owned sink.
@@ -57,7 +82,7 @@ impl<C: Indexing + ?Sized + 'static> Supervisor<C> {
     }
 
     /// The handle that clears quarantines. Take it before [`Self::run`]
-    /// consumes the supervisor.
+    /// consumes the driver.
     #[must_use]
     pub fn control(&self) -> Control {
         self.control.clone()
@@ -125,14 +150,14 @@ impl<C: Indexing + ?Sized + 'static> Supervisor<C> {
 /// **Online rescan of one network.** The controller of a network may purge it
 /// while every other network keeps syncing: block the network's admissions
 /// (the application's), then [`Self::rescan`], which runs [`Self::pause`],
-/// [`IndexStore::purge`], [`crate::Indexing::reset`],
+/// [`crate::IndexStore::purge`], [`crate::Indexing::reset`],
 /// [`Self::discard_progress`] and [`Self::resume`] in that order, then reopen
 /// the admissions. The next pass re-derives the network from its registered
 /// birthdays. Reads are not gated here: the purged store answers them honestly
 /// by itself ([`crate::IndexStore::purge`]). A restart after the purge resumes scanning
 /// without purging again.
 ///
-/// Cheap to clone; every clone reaches the same supervisor.
+/// Cheap to clone; every clone reaches the same driver.
 #[derive(Clone)]
 pub struct Control {
     /// Which unit owns each configured network.
@@ -143,10 +168,11 @@ pub struct Control {
     acknowledgements: Arc<Vec<watch::Sender<bool>>>,
     discarded: Arc<Vec<watch::Sender<bool>>>,
     stopped: watch::Sender<bool>,
+    report: Arc<Report>,
 }
 
 impl Control {
-    pub(crate) fn new<C: Indexing + ?Sized>(composer: &Indexers<C>) -> Self {
+    pub(crate) fn new<C: Indexing + ?Sized>(composer: &Indexers<C>, report: Arc<Report>) -> Self {
         let mut owners = BTreeMap::new();
         let mut units = Vec::with_capacity(composer.units().len());
         for (index, unit) in composer.units().iter().enumerate() {
@@ -160,7 +186,14 @@ impl Control {
             discarded: Arc::new((0..units.len()).map(|_| watch::channel(false).0).collect()),
             units: Arc::new(units),
             stopped: watch::channel(false).0,
+            report,
         }
+    }
+
+    /// Reports every network as unreported again, so nothing reads as ready
+    /// ([`Report::reset`]). A shutdown sequence calls this first.
+    pub fn reset_health(&self) {
+        self.report.reset();
     }
 
     /// Clears a pause or quarantine; the next pass runs at once.
@@ -183,7 +216,7 @@ impl Control {
         Ok(())
     }
 
-    /// Requests a pause before starting a supervisor, or without waiting for acknowledgment.
+    /// Requests a pause before starting a driver, or without waiting for acknowledgment.
     ///
     /// # Errors
     /// Refuses an unknown network.
@@ -202,7 +235,7 @@ impl Control {
 
     /// Requests a pause and waits for the active bounded pass to finish.
     /// Does not cancel a commit. Prevent other drivers and concurrent control commands
-    /// at the caller; a pause controls only this supervisor.
+    /// at the caller; a pause controls only this driver.
     ///
     /// # Errors
     /// Unknown network, or shutdown before acknowledgment.
@@ -217,7 +250,7 @@ impl Control {
         if *self.stopped.borrow() {
             return Err(IndexError::new(
                 IndexErrorKind::Conflict,
-                "index supervisor stopped",
+                "index driver stopped",
                 true,
             ));
         }
@@ -228,9 +261,9 @@ impl Control {
         tokio::select! {
             result = acknowledged.wait_for(|paused| *paused) =>
                 result.map(|_| ()).map_err(|_| IndexError::new(
-                IndexErrorKind::Conflict, "index supervisor stopped before pause", true)),
+                IndexErrorKind::Conflict, "index driver stopped before pause", true)),
             _ = stopped.wait_for(|stopped| *stopped) => Err(IndexError::new(
-                IndexErrorKind::Conflict, "index supervisor stopped before pause", true)),
+                IndexErrorKind::Conflict, "index driver stopped before pause", true)),
         }
     }
 
@@ -243,7 +276,7 @@ impl Control {
     /// Returns only after the monitor has observed the empty progress.
     ///
     /// # Errors
-    /// Unknown network, missing pause acknowledgment, or a stopped supervisor.
+    /// Unknown network, missing pause acknowledgment, or a stopped driver.
     pub async fn discard_progress(&self, network: &Network) -> Result<(), IndexError> {
         let unit = *self.networks.get(network).ok_or_else(|| {
             IndexError::new(
@@ -266,9 +299,9 @@ impl Control {
         tokio::select! {
             result = discarded.wait_for(|requested| !*requested) =>
                 result.map(|_| ()).map_err(|_| IndexError::new(
-                    IndexErrorKind::Conflict, "supervisor stopped during recovery", true)),
+                    IndexErrorKind::Conflict, "driver stopped during recovery", true)),
             _ = stopped.wait_for(|stopped| *stopped) => Err(IndexError::new(
-                IndexErrorKind::Conflict, "supervisor stopped during recovery", true)),
+                IndexErrorKind::Conflict, "driver stopped during recovery", true)),
         }
     }
 
@@ -317,7 +350,7 @@ pub trait Monitor: Send + Sync + 'static {
 /// The monitor that keeps one [`SyncHealth`] snapshot current, and publishes
 /// it to the [`Readiness`] a caller waits on.
 ///
-/// Every consumer of a [`Supervisor`](super::Supervisor) needs somewhere for a
+/// Every consumer of a [`Driver`](super::Driver) needs somewhere for a
 /// transition to land and a way to wait until the index has caught up. The
 /// rule itself stays where it was: [`SyncHealth`] owns it.
 ///
@@ -350,7 +383,7 @@ impl Report {
 
     /// Reports every network as unreported again, so nothing reads as ready.
     ///
-    /// A shutdown sequence calls this first: the supervisor is still running
+    /// A shutdown sequence calls this first: the driver is still running
     /// and will publish nothing to say so, and a probe answering "ready" while
     /// the process is stopping admits work that cannot be finished.
     pub fn reset(&self) {
@@ -374,7 +407,7 @@ impl Readiness {
     /// recover on its own; the snapshot returned says which networks are
     /// `Ready` and why the others are not.
     ///
-    /// `None` once the [`Report`] is gone: the supervisor that owned it
+    /// `None` once the [`Report`] is gone: the driver that owned it
     /// has stopped, so waiting any longer would wait for good.
     pub async fn settled(&mut self) -> Option<SyncHealth> {
         let settled = self.0.wait_for(SyncHealth::ever_settled).await.ok()?;
@@ -549,7 +582,7 @@ impl Control {
     /// quiesced window [`IndexStore::purge`] describes, in its order — [`Self::pause`],
     /// [`IndexStore::purge`], [`Indexing::reset`],
     /// [`Self::discard_progress`], [`Self::resume`]. Returns once the network
-    /// is scanning again; the scan itself runs on in the supervisor.
+    /// is scanning again; the scan itself runs on in the driver.
     ///
     /// The window's other half is the caller's: block the network's
     /// admissions (watch registrations and sends) before calling this and
@@ -605,13 +638,13 @@ enum Wake {
 /// One supervised unit: its own loop over one child indexer, its state
 /// machine, and the health of the one network that child owns.
 ///
-/// Nothing here can end the supervisor. A terminal failure parks this unit
+/// Nothing here can end the driver. A terminal failure parks this unit
 /// alive until a resume or shutdown, and the other units keep syncing.
 pub(crate) struct Worker<C: ?Sized> {
     units: Arc<Indexers<C>>,
     index: usize,
     schedule: Schedule,
-    monitor: Arc<dyn Monitor>,
+    monitors: Vec<Arc<dyn Monitor>>,
     control: Control,
     health: Health,
     attempts: u32,
@@ -620,19 +653,19 @@ pub(crate) struct Worker<C: ?Sized> {
 }
 
 impl<C: Indexing + ?Sized + 'static> Worker<C> {
-    /// The unit at `index` of `supervisor`'s composition, not started yet.
-    pub(crate) fn new(supervisor: &Supervisor<C>, index: usize) -> Self {
-        let network = supervisor.units.units()[index].network();
+    /// The unit at `index` of `driver`'s composition, not started yet.
+    pub(crate) fn new(driver: &Driver<C>, index: usize) -> Self {
+        let network = driver.units.units()[index].network();
         Self {
-            units: Arc::clone(&supervisor.units),
+            units: Arc::clone(&driver.units),
             index,
-            schedule: supervisor.schedules.of(network),
-            monitor: Arc::clone(&supervisor.monitor),
-            control: supervisor.control.clone(),
+            schedule: driver.units.units()[index].indexer().schedule(),
+            monitors: driver.monitors.clone(),
+            control: driver.control.clone(),
             health: Health::starting(network),
             attempts: 0,
-            commands: supervisor.control.resumes(index),
-            logger: supervisor
+            commands: driver.control.resumes(index),
+            logger: driver
                 .logger
                 .with("chain", network.chain.to_string())
                 .with("network", network.name.clone())
@@ -641,7 +674,7 @@ impl<C: Indexing + ?Sized + 'static> Worker<C> {
     }
 
     /// Quarantines this unit's network before it starts, reporting `failure`.
-    /// The supervisor uses it to respawn a unit whose task died.
+    /// The driver uses it to respawn a unit whose task died.
     pub(crate) fn quarantine(&mut self, failure: &IndexError) {
         self.attempts = self.attempts.saturating_add(1);
         self.report(Condition::Quarantined, Some(failure));
@@ -653,7 +686,7 @@ impl<C: Indexing + ?Sized + 'static> Worker<C> {
     /// **Every wait answers [`Wake`], and every `Wake::Stop` returns.** The
     /// value the shutdown channel holds is not the whole of shutdown: closing
     /// it is the other half, documented on
-    /// [`Supervisor::run`](super::Supervisor::run), and it leaves the last
+    /// [`Driver::run`](super::Driver::run), and it leaves the last
     /// value at whatever it was — `false`, for a process that drops the sender
     /// rather than setting it. A loop that read only `*shutdown.borrow()` would
     /// see "carry on", find its wait already over, and run again at once for as
@@ -723,7 +756,7 @@ impl<C: Indexing + ?Sized + 'static> Worker<C> {
 
     /// Parks a quarantined unit: it stays alive, holding its last checkpoint,
     /// until an operator resumes it or the process shuts down. It must not
-    /// return, or the supervisor would see its task end before shutdown.
+    /// return, or the driver would see its task end before shutdown.
     async fn park(&mut self, shutdown: &mut watch::Receiver<bool>) -> Wake {
         if self.health.state == Condition::Paused && !self.control.paused(self.index) {
             self.report(Condition::CatchingUp, None);
@@ -903,7 +936,9 @@ impl<C: Indexing + ?Sized + 'static> Worker<C> {
             );
         }
         self.health.clone_from(&next);
-        self.monitor.network_observed(&next);
+        for monitor in &self.monitors {
+            monitor.network_observed(&next);
+        }
     }
 
     fn now() -> u64 {

@@ -1,6 +1,8 @@
 //! The Ethereum indexer: [`indexer`] over [`IndexerParams`].
 
-use indexing::{Budget, Config, IndexError, Indexer};
+use std::time::Duration;
+
+use indexing::{Budget, Config, IndexError, Indexer, Schedule};
 
 use crate::{BlockInterpreter, RpcClient, Source};
 
@@ -14,6 +16,8 @@ pub struct IndexerParams<C, R> {
     pub repository: R,
     /// Defaults to [`IndexerParams::SYNC`].
     pub sync: Budget,
+    /// How often a driver polls this chain. Defaults to [`IndexerParams::POLL`].
+    pub schedule: Schedule,
 }
 
 impl<C, R> IndexerParams<C, R> {
@@ -23,6 +27,9 @@ impl<C, R> IndexerParams<C, R> {
     /// its own `finalized` block is, and the indexer commits there.
     pub const SYNC: Budget = Budget::new(100);
 
+    /// Half of Ethereum's twelve-second slot.
+    pub const POLL: Schedule = Schedule::every(Duration::from_secs(6));
+
     /// Chain-default synchronization.
     #[must_use]
     pub const fn new(rpc: RpcClient<C>, repository: R) -> Self {
@@ -30,6 +37,7 @@ impl<C, R> IndexerParams<C, R> {
             rpc,
             repository,
             sync: Self::SYNC,
+            schedule: Self::POLL,
         }
     }
 }
@@ -59,7 +67,7 @@ pub fn indexer<C, R>(
         Source::new(params.rpc),
         BlockInterpreter::new(&network)?,
         params.repository,
-        Config::new(&network, params.sync)?,
+        Config::new(&network, params.sync, params.schedule)?,
     ))
 }
 

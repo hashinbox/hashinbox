@@ -16,8 +16,8 @@
 use super::{Repository, Tables, conflict};
 use crate::{
     Address, BlockCredit, BlockRef, BoxFuture, FeeSettlement, IndexError, IndexErrorKind,
-    IndexStore, IndexedBatch, Network, OutputChanges, OutputKey, Progress, PurgedRows,
-    Subject, Transaction,
+    IndexStore, IndexedBatch, Network, OutputChanges, OutputKey, Progress, PurgedRows, Subject,
+    Transaction,
 };
 use num_bigint::BigInt;
 use std::collections::BTreeMap;
@@ -52,10 +52,7 @@ impl IndexStore for Repository {
         Box::pin(async move { self.apply(|tables| self.write(&batch, tables)) })
     }
 
-    fn purge<'a>(
-        &'a self,
-        network: &'a Network,
-    ) -> BoxFuture<'a, Result<PurgedRows, IndexError>> {
+    fn purge<'a>(&'a self, network: &'a Network) -> BoxFuture<'a, Result<PurgedRows, IndexError>> {
         Box::pin(async move {
             self.apply(|tables| {
                 let checkpoint = u64::from(tables.checkpoints.remove(network).is_some());

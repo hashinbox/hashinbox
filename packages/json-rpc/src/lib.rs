@@ -17,7 +17,7 @@ use serde_json::Value;
 
 pub use client::{Batch, BoxFuture, Client, Repetition, Request};
 pub use cluster::{Cluster, Limit, Policy};
-pub use endpoint::{Bounds, Endpoint, Secrets};
+pub use endpoint::{Bounds, Endpoint};
 pub use error::{CallError, Error, ErrorKind};
 pub use failover::Failover;
 pub use http::Http;

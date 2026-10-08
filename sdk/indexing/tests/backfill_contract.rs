@@ -64,7 +64,12 @@ fn service<R: Clone>(repository: R, source: Chain, policy: Budget) -> Arc<Index<
         source.clone(),
         source,
         repository,
-        Config::new(&network(), policy).expect("sync config"),
+        Config::new(
+            &network(),
+            policy,
+            indexing::Schedule::every(std::time::Duration::from_millis(1)),
+        )
+        .expect("sync config"),
     ))
 }
 
@@ -584,7 +589,7 @@ fn a_resumed_historical_read_must_follow_what_the_observation_recorded() {
 ///
 /// Forward progress is untouched — that is what every client reads — but the
 /// historical read got nowhere, and a status that did not say so would have
-/// the supervisor reset its attempt count and ask again at once, forever.
+/// the driver reset its attempt count and ask again at once, forever.
 #[test]
 fn a_backfill_the_source_cannot_serve_reports_its_failure() {
     let (repository, _rows, _directory) = store();
@@ -620,7 +625,7 @@ fn a_backfill_the_source_cannot_serve_reports_its_failure() {
 /// every read that the missing range weakens already says so through
 /// how far behind its rows are. Reporting `CatchingUp` for a range that can never close
 /// held `/health/ready` at 503 for the life of the process — and, for a
-/// wallet configured before the supervisor starts, stopped the HTTP listener
+/// wallet configured before the driver starts, stopped the HTTP listener
 /// binding at all. So the phase follows forward progress, and the owed range
 /// is reported beside it rather than by withholding the whole API.
 #[test]

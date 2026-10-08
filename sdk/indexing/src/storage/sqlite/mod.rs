@@ -28,6 +28,7 @@ use std::time::Duration;
 
 mod commit;
 mod models;
+mod reads;
 mod watches;
 
 /// How long a statement waits for another connection's lock before it fails

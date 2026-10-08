@@ -254,7 +254,11 @@ where
     /// [`WalletErrorKind::Unsupported`] for an unregistered asset;
     /// [`WalletErrorKind::InvalidSecret`] when the bytes are not a key of this
     /// chain's curve.
-    pub fn from<'a>(&'a self, asset: &A, secret: SecretBytes) -> FutureResult<'a, Arc<dyn Wallet>> {
+    pub fn from_pk<'a>(
+        &'a self,
+        asset: &A,
+        secret: SecretBytes,
+    ) -> FutureResult<'a, Arc<dyn Wallet>> {
         let factory = self.factory(asset);
         Box::pin(async move { factory?.maker.create(secret).await })
     }
@@ -263,7 +267,7 @@ where
     /// returned and kept by nothing.
     ///
     /// This is the key-first path: make the material, store it wherever the
-    /// application keeps keys, and hand it to [`Wallets::from`] when a wallet
+    /// application keeps keys, and hand it to [`Wallets::from_pk`] when a wallet
     /// is wanted. The wallet the factory built to derive it is dropped;
     /// nothing is registered and no address is watched.
     ///
@@ -330,6 +334,47 @@ where
             let (authorship, transfers) = prepared?;
             authorship.send(transfers).await
         })
+    }
+
+    /// Sends one transfer from `wallet`, resolving its asset from the wallet
+    /// itself: the registered asset of the wallet's network and asset identity
+    /// whose factory made it ([`crate::Origin`]). Otherwise exactly
+    /// [`Self::send_all`] with one item; [`Author`] stays the path for
+    /// batches and queues.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unsupported`] when no registered factory made
+    /// `wallet`; otherwise as [`Self::send_all`].
+    pub fn send<'a>(
+        &'a self,
+        wallet: &Arc<dyn Wallet>,
+        to: Address,
+        amount: crate::Amount,
+    ) -> SendFuture<'a> {
+        let tag = self
+            .factories
+            .iter()
+            .find(|(_, factory)| {
+                factory.asset == *wallet.asset()
+                    && factory.network == wallet.address().network
+                    && factory.maker.validate(wallet.as_ref()).is_ok()
+            })
+            .map(|(tag, _)| tag.clone());
+        let transfer = Transfer {
+            wallet: Arc::clone(wallet),
+            to,
+            amount,
+        };
+        match tag {
+            Some(tag) => self.send_all(&tag, vec![transfer]),
+            None => Box::pin(async {
+                Err(SendError::definite(
+                    WalletErrorKind::Unsupported,
+                    "no registered wallet factory made this wallet",
+                ))
+            }),
+        }
     }
 
     /// `wallet`'s authoring capability in `asset`: the one way to obtain an
@@ -504,7 +549,8 @@ mod tests {
         let (wallets, _) = map();
 
         let created = block_on(wallets.create(&"coin")).expect("create");
-        let imported = block_on(wallets.from(&"coin", SecretBytes::new([0x2a; 32]))).expect("from");
+        let imported =
+            block_on(wallets.from_pk(&"coin", SecretBytes::new([0x2a; 32]))).expect("from");
 
         assert_eq!(created.address().value, "addr-07");
         assert_eq!(imported.address().value, "addr-2a");
@@ -521,7 +567,7 @@ mod tests {
 
         for kind in [
             block_on(wallets.create(&"missing")).err().map(|e| e.kind),
-            block_on(wallets.from(&"missing", SecretBytes::new([1; 32])))
+            block_on(wallets.from_pk(&"missing", SecretBytes::new([1; 32])))
                 .err()
                 .map(|e| e.kind),
             block_on(wallets.secret(&"missing")).err().map(|e| e.kind),
@@ -669,6 +715,26 @@ mod tests {
     }
 
     #[test]
+    fn send_resolves_the_asset_from_the_wallet_and_refuses_a_stranger() {
+        let (wallets, outbox) = map();
+        let wallet = block_on(wallets.create(&"coin")).expect("create");
+        let to = wallets.parse(&"coin", "addr-first").expect("destination");
+
+        let ids = block_on(wallets.send(&wallet, to.clone(), "2".parse().expect("amount")))
+            .expect("sent");
+
+        assert_eq!(ids, [TransactionId::new("batch")]);
+        assert_eq!(
+            batches(&outbox),
+            [vec![("addr-first".to_owned(), "2".to_owned())]]
+        );
+        let (other, _) = map();
+        let refused = block_on(other.send(&wallet, to, "1".parse().expect("amount")))
+            .expect_err("another map's factory did not make it");
+        assert_eq!(refused.source.kind, WalletErrorKind::Unsupported);
+    }
+
+    #[test]
     fn sweep_is_last_for_its_source_and_stays_unresolved_for_the_sender() {
         let (wallets, outbox) = map();
         let wallet = block_on(wallets.create(&"coin")).unwrap();
@@ -777,7 +843,8 @@ mod tests {
         let (mut wallets, outbox) = map();
         assert!(wallets.queues().is_empty(), "nothing is queued until asked");
         wallets.queue(&crate::Policy::default());
-        let wallet = block_on(wallets.from(&"coin", SecretBytes::new([1; 32]))).expect("a wallet");
+        let wallet =
+            block_on(wallets.from_pk(&"coin", SecretBytes::new([1; 32]))).expect("a wallet");
         let to = Address::new(network("mainnet"), "addr-02");
 
         let batch = Transfer {
@@ -809,7 +876,7 @@ mod tests {
             .expect("a second network");
         wallets.queue(&crate::Policy::default());
         let wallet = wallets
-            .from(&"coin", SecretBytes::new([1; 32]))
+            .from_pk(&"coin", SecretBytes::new([1; 32]))
             .await
             .expect("a wallet");
         let author = wallets.author(&"coin", &wallet).expect("an author");

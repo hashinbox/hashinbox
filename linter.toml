@@ -278,7 +278,7 @@ target = "sdk"
 mode = "restrictive"
 directories.allowed = [
     { target = "base", description = "Chain-neutral values and capability traits." },
-    { target = "config", description = "The configuration document, and which chain reads which section." },
+    { target = "payments", description = "The Payments container and its configuration module." },
     { target = "indexing", description = "Chain-neutral indexing contracts and adapters." },
     { target = "wallets", description = "Chain-neutral wallet contracts." },
     { target = "chains", description = "Concrete chain implementations only." },
@@ -451,18 +451,18 @@ target = "sdk/wallets"
 dependencies = ["packages", "base"]
 
 # Every package under sdk/chains is a concrete chain; omitting "chains" forbids peer edges.
-# The configuration reader sits above `wallets` and `indexing` because it
-# composes a registered chain's factories and index (`sdk_config::Composition`), and below `chains` because it names no
+# `payments` (the container and its configuration reader) sits above `wallets` and `indexing` because it
+# composes a registered chain's factories and index (`payments::config::Composition`), and below `chains` because it names no
 # chain crate; registration keeps concrete dependencies at composition.
 [[rules."rust/layers"]]
-name = "config"
-target = "sdk/config"
+name = "payments"
+target = "sdk/payments"
 dependencies = ["packages", "base", "indexing", "wallets"]
 
 [[rules."rust/layers"]]
 name = "chains"
 target = "sdk/chains/*"
-dependencies = ["packages", "base", "indexing", "wallets", "config"]
+dependencies = ["packages", "base", "indexing", "wallets", "payments"]
 
 # The composition root may name every chain; only it may. Its routes and wire
 # models (`apps/server/src/api`) see the abstractions only, which a layer cannot
@@ -476,7 +476,7 @@ dependencies = [
     "base",
     "indexing",
     "wallets",
-    "config",
+    "payments",
     "chains",
 ]
 
@@ -484,7 +484,7 @@ dependencies = [
 [[rules."rust/layers"]]
 name = "examples"
 target = "examples"
-dependencies = ["packages", "base", "indexing", "wallets", "config", "chains"]
+dependencies = ["packages", "base", "indexing", "wallets", "payments", "chains"]
 
 # Read ambient configuration at application configuration or owned benchmark entry points.
 [[rules."rust/environment-variable-access"]]

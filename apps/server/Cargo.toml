@@ -37,7 +37,7 @@ indexing = { path = "../../sdk/indexing" }
 json-rpc = { path = "../../packages/json-rpc" }
 # Exact signed totals for the balance read: amounts are u256-capable text.
 num-bigint.workspace = true
-sdk-config = { path = "../../sdk/config", features = ["toml"] }
+payments = { path = "../../sdk/payments", features = ["toml"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 # The one file's pool (`indexing::sqlite::Database::pool`): the models' own
@@ -58,7 +58,7 @@ alloy-primitives.workspace = true
 bitcoin.workspace = true
 futures-executor.workspace = true
 http-body-util = "=0.1.4"
-# A test chain implements `sdk_config::Chain`, whose `connect` names the logger.
+# A test chain implements `payments::config::Chain`, whose `connect` names the logger.
 logging = { path = "../../packages/logging" }
 # The route tests run on the in-memory store, the scripted chain double and
 # the scripted wallet double; none is ever linked into the binary.

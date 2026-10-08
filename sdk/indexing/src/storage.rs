@@ -28,11 +28,14 @@
 //! network it is about, and rows of one network are invisible to reads of
 //! another.
 
+mod balance;
 mod commit;
 mod effect;
+mod history;
 mod location;
 #[cfg(feature = "memory")]
 pub mod memory;
+mod notifying;
 mod outputs;
 mod purge;
 #[cfg(feature = "sqlite")]
@@ -41,9 +44,12 @@ pub(crate) mod subject;
 mod wallet;
 mod watch;
 
+pub use balance::{Balance, SettledBalance};
 pub use commit::{IndexStore, IndexedBatch, Progress};
 pub use effect::Net;
+pub use history::{Entry, History, Page, Position, Standing};
 pub use location::{Location, TransactionStore};
+pub use notifying::{Change, Notifying};
 #[cfg(any(feature = "sqlite", feature = "memory"))]
 pub(crate) use outputs::Probe;
 pub use outputs::{OutputCursor, OutputPage, OutputRequest, OutputStore};

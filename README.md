@@ -40,7 +40,7 @@ SDK as a library, start with [examples](examples/README.md).
 | [sdk/chains/solana](sdk/chains/solana/README.md) | Solana: RPC, blocks, SOL and SPL wallets, SOL sending |
 | [sdk/wallets](sdk/wallets/README.md) | The wallet map and batch sends across chains |
 | [sdk/indexing](sdk/indexing/README.md) | Watches, block synchronization and the repositories |
-| [sdk/config](sdk/config/README.md) | The configuration document and chain registration |
+| [sdk/payments](sdk/payments/README.md) | The configuration document and chain registration |
 | [packages/crypto](packages/crypto/README.md) | Keys and signing |
 | [packages/decimal](packages/decimal/README.md) | Exact decimal amounts |
 | [packages/json-rpc](packages/json-rpc/README.md) | JSON-RPC client with retry and failover |

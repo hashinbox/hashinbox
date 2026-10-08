@@ -1,15 +1,14 @@
 //! The server's configuration document: HTTP binding, storage, the chain
-//! sections. Secrets come from named
-//! environment variables, never from the file.
+//! sections. An RPC endpoint is its URL, credentials included.
 //!
-//! `sdk_config::Document::read` is the reader — TOML for a `.toml` path, JSON
-//! for anything else — and the chain sections arrive as `sdk_config::Sections`,
+//! `payments::config::Document::read` is the reader — TOML for a `.toml` path, JSON
+//! for anything else — and the chain sections arrive as `payments::config::Sections`,
 //! which this module never looks inside. `crate::chains` says which chain owns
 //! which name; the chain itself says what its section means.
 
 use std::{env, error::Error, net::SocketAddr, path::Path};
 
-use sdk_config::{Chains, Document, Sections};
+use payments::config::{Chains, Document, Sections};
 use serde::Deserialize;
 
 use crate::{
@@ -19,23 +18,6 @@ use crate::{
 };
 
 pub(crate) type AnyError = Box<dyn Error + Send + Sync>;
-
-/// The process environment, as the values an endpoint URL's `${NAME}`
-/// references stand for.
-///
-/// `packages/json-rpc` takes this seam rather than reading the environment
-/// itself: `linter.toml` allows `std::env::var` only here and in `storage.rs`,
-/// and the workspace's `unsafe_code = "forbid"` would make an
-/// environment-reading crate untestable. `storage.rs` takes the same seam as a
-/// lookup closure for the database URL.
-// linter:disable rust/empty-struct -- Stateless: the process environment is the state it reads.
-pub(crate) struct Environment;
-
-impl json_rpc::Secrets for Environment {
-    fn value(&self, name: &str) -> Option<String> {
-        env::var(name).ok()
-    }
-}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -227,7 +209,7 @@ mod tests {
         );
     }
 
-    /// The one caller `sdk_config::Document::read` gained: a deployment's file
+    /// The one caller `payments::config::Document::read` gained: a deployment's file
     /// is TOML, and each chain's section is the same shape as every other's.
     #[tokio::test]
     async fn a_toml_document_configures_the_same_chains_a_json_one_does() {

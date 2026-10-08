@@ -1,0 +1,37 @@
+[package]
+name = "payments"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The payments container: chains composed over one caller-supplied store, driven, with an operational handle; and the configuration document each chain reads its section from."
+readme = "README.md"
+
+[dependencies]
+logging = { path = "../../packages/logging" }
+base = { path = "../base" }
+futures-channel.workspace = true
+# The driver the container runs the index on.
+indexing = { path = "../indexing", default-features = false, features = ["driver"] }
+json-rpc = { path = "../../packages/json-rpc" }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "rt", "sync", "time"] }
+toml = { version = "=0.9.12", optional = true }
+# `Submissions`: the background send work the container drains at shutdown.
+wallets = { path = "../wallets", features = ["submissions"] }
+
+[dev-dependencies]
+# The in-memory store (`indexing::memory`), which stands in for an opened
+# database while a composition is assembled.
+indexing = { path = "../indexing", default-features = false, features = ["driver", "memory", "testing"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+# The scripted wallet factory a composition test registers.
+wallets = { path = "../wallets", features = ["testing"] }
+
+[features]
+default = []
+# The file reader is a convenience; the types above it are the API.
+toml = ["dep:toml"]
+
+[lints]
+workspace = true

@@ -449,7 +449,7 @@ pub trait IndexStore: Send + Sync {
     /// application's), its unit is paused (`Control::pause` has returned,
     /// so no pass is mid-commit), and before resuming it the caller resets that
     /// network's indexer ([`crate::Indexing::reset`]). `Control::rescan`
-    /// (feature `supervisor`) is that window as one operation, admissions
+    /// (feature `driver`) is that window as one operation, admissions
     /// aside. The next pass then re-derives every row from the registered
     /// birthdays.
     ///
@@ -471,8 +471,10 @@ pub trait IndexStore: Send + Sync {
     /// # Errors
     ///
     /// [`crate::IndexErrorKind::Store`] when the removal itself fails.
-    fn purge<'a>(&'a self, network: &'a Network)
-    -> BoxFuture<'a, Result<crate::PurgedRows, IndexError>>;
+    fn purge<'a>(
+        &'a self,
+        network: &'a Network,
+    ) -> BoxFuture<'a, Result<crate::PurgedRows, IndexError>>;
 }
 
 /// An index store held behind a reference count is an index store.

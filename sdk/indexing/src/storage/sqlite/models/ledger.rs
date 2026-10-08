@@ -19,11 +19,11 @@ use num_bigint::{BigInt, BigUint};
 use sqlx::{FromRow, QueryBuilder, SqliteConnection, sqlite::SqliteRow};
 
 use super::{
-    Chunks, amount, column, deleted, each, failure, framed, network, raised, store, stored,
+    Chunks, amount, column, deleted, each, failure, fetched, framed, network, raised, store, stored,
 };
 use crate::{
-    Address, BlockCredit, FeeSettlement, IndexError, IndexedBatch, Network, NetworkFee,
-    Transaction, ValueMovement,
+    Address, BlockCredit, FeeSettlement, Holder, IndexError, IndexedBatch, MovementId, Network,
+    NetworkFee, Transaction, ValueMovement,
 };
 
 /// One subject's credits and debits, in atomic units.
@@ -495,6 +495,67 @@ impl Ledger {
     ) -> Result<BigInt, IndexError> {
         let (credits, debits) = Self::total(connection, network, subject).await?;
         Ok(BigInt::from(credits) - BigInt::from(debits))
+    }
+
+    /// `of`'s movements in its asset between two heights, inclusive, grouped
+    /// by transaction id in stored order. The two rows a same-address
+    /// transfer wrote, a credit and a debit, are folded back into its one
+    /// movement. Fees and transactionless credits are not movements.
+    pub(in crate::storage::sqlite) async fn find_movements(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        of: &dyn Holder,
+        (lower, upper): (i64, i64),
+    ) -> Result<BTreeMap<String, Vec<ValueMovement>>, IndexError> {
+        let address = of.address();
+        let query = framed(
+            "SELECT * FROM ledger
+             WHERE chain = ?1 AND network = ?2 AND address = ?3 AND asset = ?4
+               AND block_height >= ?5 AND block_height <= ?6
+               AND transaction_id <> '' AND kind < 5
+             ORDER BY block_height, transaction_id, movement_order, movement_id",
+            network,
+        )
+        .bind(address.value.as_str())
+        .bind(of.asset().asset.as_str())
+        .bind(lower)
+        .bind(upper);
+        let rows: Vec<Self> = fetched(connection, query, "failed to read movements").await?;
+        let mut grouped: BTreeMap<String, Vec<ValueMovement>> = BTreeMap::new();
+        let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
+        for row in rows {
+            let Effect::Movement(kind) = row.effect else {
+                return Err(store("a stored movement has an unknown kind"));
+            };
+            let mine = Some(address.clone());
+            let other = row
+                .counterparty
+                .map(|value| Address::new(address.network.clone(), value));
+            let key = (row.transaction_id.clone(), row.movement_id.clone());
+            let held = grouped.entry(row.transaction_id).or_default();
+            let (from, to, at) = match (seen.get(&key), row.direction) {
+                // The other direction of the same movement: a self-transfer.
+                (Some(at), _) => (mine.clone(), mine, Some(*at)),
+                (None, Direction::Credit) => (other, mine, None),
+                (None, Direction::Debit) => (mine, other, None),
+            };
+            let value = ValueMovement::stored(
+                MovementId(row.movement_id),
+                of.asset().clone(),
+                amount(&row.amount)?,
+                kind,
+                from,
+                to,
+            )?;
+            match at {
+                Some(at) => held[at] = value,
+                None => {
+                    seen.insert(key, held.len());
+                    held.push(value);
+                }
+            }
+        }
+        Ok(grouped)
     }
 
     /// Removes every row of `network`: `(credits, movements)`, the

@@ -503,9 +503,7 @@ mod tests {
         let serving = tokio::spawn(async move {
             axum::serve(listener, node).await.expect("local response");
         });
-        let client = json_rpc::Endpoint::new(&url)
-            .connect(&std::collections::BTreeMap::new())
-            .expect("client");
+        let client = json_rpc::Endpoint::new(&url).connect().expect("client");
         let statistics = client.statistics();
         assert!(
             client

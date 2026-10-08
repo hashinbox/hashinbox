@@ -14,11 +14,11 @@ use std::{
 use json_rpc::{Endpoint, Http};
 use serde_json::{Value, json};
 
-/// One `Http` over `endpoint`, with no retry, no failover, no added header and
+/// One `Http` over `endpoint`, with no retry, no failover and
 /// the default bounds.
 pub fn http(endpoint: &str) -> Http {
     Endpoint::new(endpoint)
-        .connect(&std::collections::BTreeMap::new())
+        .connect()
         .expect("loopback client must build")
 }
 

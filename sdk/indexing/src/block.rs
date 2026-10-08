@@ -1377,7 +1377,7 @@ pub trait ChainTips: Send + Sync {
 /// Fetches canonical chain data. Concrete RPC methods remain in the chain crate.
 ///
 /// Every error is a [`SourceError`]; its `retryable` flag decides whether the
-/// supervisor tries the pass again or quarantines
+/// driver tries the pass again or quarantines
 /// that one network.
 pub trait BlockSource: ChainTips {
     /// The chain-native block this source fetches.

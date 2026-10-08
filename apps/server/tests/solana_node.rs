@@ -382,9 +382,7 @@ async fn ready(validator: &mut Validator) -> (Network, RpcClient<json_rpc::Http>
                 .parse()
                 .expect("genesis");
             let network = Network::new("solana-stack", genesis);
-            let transport = node
-                .connect(&std::collections::BTreeMap::new())
-                .expect("owned transport");
+            let transport = node.connect().expect("owned transport");
             let rpc = RpcClient::connect(transport, &network)
                 .await
                 .expect("exact genesis and bundled executable Memo-v3");
@@ -493,7 +491,7 @@ async fn native_sol_submission_indexing_and_central_storage() {
     let mut held = BTreeMap::new();
     for (id, seed) in [("source", 7_u8), ("destination", 9)] {
         let wallet = wallets
-            .from(&SOL, SecretBytes::new(vec![seed; 32]))
+            .from_pk(&SOL, SecretBytes::new(vec![seed; 32]))
             .await
             .expect("configured wallet");
         // This in-memory fixture keeps signing handles only after its watch

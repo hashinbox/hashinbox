@@ -53,10 +53,7 @@ impl IndexStore for Repository {
     /// registered birthday, while every claim described rows this purge just
     /// removed, and `WatchStore::add` preserves progress on an exact repeat by
     /// contract, so nothing could reset them afterwards.
-    fn purge<'a>(
-        &'a self,
-        network: &'a Network,
-    ) -> BoxFuture<'a, Result<PurgedRows, IndexError>> {
+    fn purge<'a>(&'a self, network: &'a Network) -> BoxFuture<'a, Result<PurgedRows, IndexError>> {
         Box::pin(async move {
             let network = Self::network(network)?;
             let mut write = self.database.write().await?;

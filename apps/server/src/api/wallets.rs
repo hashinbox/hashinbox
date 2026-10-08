@@ -136,7 +136,7 @@ async fn create(
                 .map_err(Error::by_asset)?;
             let signer = state
                 .wallets
-                .from(&request.asset, SecretBytes::new(material.as_bytes()))
+                .from_pk(&request.asset, SecretBytes::new(material.as_bytes()))
                 .await
                 .map_err(Error::by_asset)?;
             (signer.address().clone(), Some(material), Some(signer))
@@ -185,7 +185,7 @@ async fn create(
         (None, Some(key)) => Some(
             state
                 .wallets
-                .from(&request.asset, SecretBytes::new(key.as_bytes()))
+                .from_pk(&request.asset, SecretBytes::new(key.as_bytes()))
                 .await
                 .map_err(Error::by_asset)?,
         ),

@@ -316,6 +316,34 @@ impl<'a> Inspection<'a> {
             .any(|observed| !observed.caught_up(Some(line)))
     }
 
+    /// How many blocks the address's inspection is behind the line: zero when
+    /// every observation has caught up to it (or there is no line yet),
+    /// otherwise the produced-height gap of the furthest-behind observation,
+    /// at least one.
+    ///
+    /// What a balance or a history page reports instead of refusing. An
+    /// observation with no progress yet is measured from its birthday, read as
+    /// a height; on chains whose positions are not heights (Solana slots) that
+    /// is a lower bound.
+    #[must_use]
+    pub fn behind(&self) -> u64 {
+        let Some(line) = self.checkpoint else {
+            return 0;
+        };
+        self.observations
+            .iter()
+            .filter(|observed| !observed.caught_up(Some(line)))
+            .map(|observed| {
+                let from = observed.indexed_through.as_ref().map_or_else(
+                    || observed.watch.start.0.saturating_sub(1),
+                    |through| through.height.0,
+                );
+                line.height.0.saturating_sub(from).max(1)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Refuses a spendable set while the rows it would be read from are still
     /// arriving.
     ///
@@ -419,5 +447,25 @@ mod tests {
         assert!(observed(10, Some(1500)).caught_up(Some(&line(1500))));
         assert!(observed(1501, None).caught_up(Some(&line(1500))));
         assert!(observed(10, None).caught_up(None));
+    }
+
+    #[test]
+    fn behind_is_the_furthest_observation_gap_and_zero_once_caught_up() {
+        let at = line(10);
+        let caught_up = [observed(0, Some(10)), observed(11, None)];
+        assert_eq!(Inspection::new(&caught_up, Some(&at)).behind(), 0);
+        let catching_up = [observed(0, Some(10)), observed(3, Some(6))];
+        assert_eq!(Inspection::new(&catching_up, Some(&at)).behind(), 4);
+        let unread = [observed(5, None)];
+        assert_eq!(
+            Inspection::new(&unread, Some(&at)).behind(),
+            6,
+            "blocks 5 through 10"
+        );
+        assert_eq!(
+            Inspection::new(&unread, None).behind(),
+            0,
+            "no line to be behind"
+        );
     }
 }

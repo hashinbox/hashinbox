@@ -3,8 +3,8 @@ use std::{error, fmt};
 /// Which configuration rule an [`Error`] broke.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// The endpoint list is empty, one of its URLs is not a usable JSON-RPC
-    /// endpoint, or a `${NAME}` inside one had no value.
+    /// The endpoint list is empty or one of its URLs is not a usable JSON-RPC
+    /// endpoint.
     Endpoints,
     /// The repetition policy's bounds contradict each other.
     Repeat,
@@ -17,14 +17,13 @@ pub enum ErrorKind {
     /// or the chain that owns it refused it.
     Section,
     /// A candidate node list built and parsed, and its node did not prove the
-    /// network its section configures ([`crate::ChainNodes::verify`]).
+    /// network its section configures ([`crate::config::ChainNodes::verify`]).
     Unverified,
 }
 
 /// A configuration value the deployment cannot run on.
 ///
-/// The message never contains an endpoint URL, a header value, or a resolved
-/// secret: an operator reads it from a log, and a bad URL is identified by
+/// The message never contains an endpoint URL or its credentials: an operator reads it from a log, and a bad URL is identified by
 /// what is wrong with it rather than by quoting it back.
 ///
 /// [`Self::section`] names the part of the document at fault when there is
@@ -53,7 +52,7 @@ impl Error {
     }
 
     /// Whatever a chain refused, as this crate reports it. A chain crate calls
-    /// this from its own registration hook; [`Registry`](crate::Registry)
+    /// this from its own registration hook; [`Registry`](crate::config::Registry)
     /// names the section afterwards, because a chain does not know what it was
     /// registered as.
     #[must_use]

@@ -8,10 +8,10 @@ the SDK.
 ## Usage
 
 ```rust,no_run
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use chain_ethereum::{Config, Error, Network, Store};
-use sdk_config::{ComposedChain, Rpc};
+use payments::config::{ComposedChain, Rpc};
 use wallets::SubmissionRegistrar;
 
 /// `repository` is the one store every network is indexed into.
@@ -19,13 +19,12 @@ async fn ethereum<R: Store>(
     repository: R,
     registrar: &Arc<dyn SubmissionRegistrar>,
 ) -> Result<ComposedChain<&'static str>, Error> {
-    let secrets = BTreeMap::from([("RPC_KEY".to_owned(), "secret".to_owned())]);
-    let rpc = Rpc::endpoint("https://node.invalid/v3/${RPC_KEY}");
+    let rpc = Rpc::endpoint("https://node.invalid/v3/KEY");
 
     let config = Config::new(Network::new(1, "mainnet"), rpc, "eth");
 
     // Checks the chain ID, block tracing and every token. Opens and writes nothing.
-    let chain = config.connect(&secrets).await?;
+    let chain = config.connect().await?;
     // The index and one wallet factory per asset tag.
     chain.compose(repository, registrar).await
 }
@@ -39,7 +38,7 @@ are listed in that section:
 [chains.ethereum]
 network = 'mainnet'
 chain_id = 1
-rpc.endpoints = ['https://node.invalid/v3/${RPC_KEY}']
+rpc.endpoints = ['https://node.invalid/v3/KEY']
 tokens = [{ contract = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', asset = 'usdc', decimals = 6 }]
 ```
 

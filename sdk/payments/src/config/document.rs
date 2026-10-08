@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::de::DeserializeOwned;
 
-use crate::{Error, ErrorKind};
+use crate::config::{Error, ErrorKind};
 
 /// A configuration document's text, read once and decoded on demand.
 ///
@@ -108,7 +108,7 @@ mod tests {
     use serde::Deserialize;
 
     use super::*;
-    use crate::{Cadence, Rpc};
+    use crate::config::{Cadence, Rpc};
 
     /// A chain's section is not this crate's to parse — every chain owns its
     /// own keys — so the test states the shape a chain crate declares.
@@ -121,7 +121,7 @@ mod tests {
     }
 
     /// The one node every case here reaches, credentials still unresolved.
-    const NODE: &str = "http://${BTC_RPC_USER}:${BTC_RPC_PASSWORD}@127.0.0.1:18443";
+    const NODE: &str = "http://user:pass@127.0.0.1:18443";
 
     #[cfg(feature = "toml")]
     fn toml_text() -> String {
@@ -174,7 +174,7 @@ mod tests {
         );
 
         let json = br#"{"rpc": {"endpoints":
-            ["http://${BTC_RPC_USER}:${BTC_RPC_PASSWORD}@127.0.0.1:18443"]},
+            ["http://user:pass@127.0.0.1:18443"]},
             "cadence": {"batch_size": 250}}"#;
         assert_eq!(
             Document::json(json)
@@ -187,7 +187,7 @@ mod tests {
 
         // One document, decoded twice: the text is kept, not the value.
         let again: Section = document.parse().expect("the same text");
-        assert_eq!(again.rpc.repeat, crate::Repetition::default());
+        assert_eq!(again.rpc.repeat, crate::config::Repetition::default());
     }
 
     #[cfg(feature = "toml")]
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn json_bytes_decode_without_the_toml_feature() {
         let json = br#"{"rpc": {"endpoints":
-            ["http://${BTC_RPC_USER}:${BTC_RPC_PASSWORD}@127.0.0.1:18443"]},
+            ["http://user:pass@127.0.0.1:18443"]},
             "cadence": {"batch_size": 250}}"#;
         assert_eq!(
             Document::json(json)

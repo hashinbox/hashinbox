@@ -120,7 +120,7 @@ fn coverage(filters: &[ForwardRange]) -> Coverage {
 /// between reading that checkpoint and publishing the address's filter, and a
 /// pass planned before the publication must not commit afterwards. The list
 /// has one owner now, but two concurrent actors still reach it: a running
-/// [`crate::Watching::watch`] and the pass on the supervisor's task.
+/// [`crate::Watching::watch`] and the pass on the driver's task.
 ///
 /// 1. Sync plans ([`Gate::plan`]): it captures filters,
 ///    checkpoint, revision and selection together.

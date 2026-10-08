@@ -1,5 +1,5 @@
 //! A scripted chain double for tests of code that drives an
-//! [`Indexer`](crate::Indexer): one [`Chain`] that is the chain's
+//! [`Indexer`]: one [`Chain`] that is the chain's
 //! [`ChainTips`], [`BlockSource`] and [`BlockInterpreter`] at once.
 //!
 //! The test states the chain's blocks (any positions, any linkage), how far
@@ -456,7 +456,7 @@ impl BlockInterpreter for Chain {
 /// handed out beside the index the way an application composes production.
 ///
 /// What a consumer's own tests run on when they need real answers behind a
-/// route or a report: script the chains, [`Indexers::sync`], then read.
+/// route or a report: script the chains, `sync` each unit, then read.
 pub struct Networks {
     chains: Vec<Chain>,
     index: Arc<Indexers>,
@@ -483,7 +483,9 @@ impl Networks {
             let chain = Chain::dense(network.clone(), tip).confirming(depth);
             // A short backfill bound, so a too-old start is refusable in tests.
             let policy = Budget::new(100).with_backfill(3);
-            let config = Config::new(network, policy).expect("a valid policy");
+            // Hourly, so a driver passes once and then waits rather than streaming.
+            let schedule = crate::Schedule::every(std::time::Duration::from_secs(3600));
+            let config = Config::new(network, policy, schedule).expect("a valid policy");
             let indexer = Arc::new(Indexer::new(
                 chain.clone(),
                 chain.clone(),

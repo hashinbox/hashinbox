@@ -1085,7 +1085,7 @@ dependencies = [
  "indexing",
  "json-rpc",
  "logging",
- "sdk-config",
+ "payments",
  "serde",
  "serde_json",
  "tokio",
@@ -1109,7 +1109,7 @@ dependencies = [
  "json-rpc",
  "logging",
  "num-bigint",
- "sdk-config",
+ "payments",
  "serde",
  "serde_json",
  "tokio",
@@ -1132,7 +1132,7 @@ dependencies = [
  "json-rpc",
  "logging",
  "num-bigint",
- "sdk-config",
+ "payments",
  "serde",
  "serde_json",
  "solana-address 2.2.0",
@@ -2604,7 +2604,6 @@ name = "json-rpc"
 version = "0.1.0"
 dependencies = [
  "futures-executor",
- "http",
  "json-rpc",
  "jsonrpsee",
  "logging",
@@ -2997,7 +2996,7 @@ dependencies = [
  "chain-solana",
  "indexing",
  "json-rpc",
- "sdk-config",
+ "payments",
  "serde_json",
  "tokio",
  "wallets",
@@ -3026,8 +3025,8 @@ dependencies = [
  "json-rpc",
  "logging",
  "num-bigint",
+ "payments",
  "reqwest",
- "sdk-config",
  "serde",
  "serde_json",
  "sha2",
@@ -3041,6 +3040,22 @@ dependencies = [
  "uuid",
  "wallets",
  "zeroize",
+]
+
+[[package]]
+name = "payments"
+version = "0.1.0"
+dependencies = [
+ "base",
+ "futures-channel",
+ "indexing",
+ "json-rpc",
+ "logging",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "wallets",
 ]
 
 [[package]]
@@ -3746,21 +3761,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "sdk-config"
-version = "0.1.0"
-dependencies = [
- "base",
- "indexing",
- "json-rpc",
- "logging",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "wallets",
-]
 
 [[package]]
 name = "sec1"

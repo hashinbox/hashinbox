@@ -12,10 +12,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use utoipa::IntoParams;
 
 use super::{Error, ErrorBody};
-use crate::{
-    models::{SettledBalance, Wallet},
-    state::AppState,
-};
+use crate::{models::Wallet, state::AppState};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(balance))
@@ -104,12 +101,12 @@ async fn balance(
             )
         })?;
     let sample = pending.sampled()?;
-    let unavailable = |_| Error::indexed("the index database is unavailable");
-    // One deferred transaction: every row of the read is one snapshot.
-    let mut read = state.pool.begin().await.map_err(unavailable)?;
-    let settled = SettledBalance::read(&mut read, subject).await?;
-    read.rollback().await.map_err(unavailable)?;
-    let balance = settled.completed(subject, sample);
+    // One snapshot: the repository's own read.
+    let balance = state
+        .repository
+        .balance(subject)
+        .await?
+        .completed(subject, sample);
     // Every indexed amount is exact and atomic; the asset's own decimals,
     // which the index never learns, are applied here.
     let display = |amount| unit.display(amount).map_err(Error::unscalable);

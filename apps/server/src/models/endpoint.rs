@@ -12,20 +12,19 @@ use sqlx::{Error, SqlitePool as Pool};
 const MOST: usize = 16;
 
 /// One configured RPC endpoint: the document a configuration file's
-/// `rpc.endpoints` holds — a URL, or an object with the URL, headers and
-/// bounds — checked as `json_rpc::Endpoint` checks it.
+/// `rpc.endpoints` holds — a URL, or an object with the URL and bounds —
+/// checked as `json_rpc::Endpoint` checks it.
 ///
-/// The document may carry `${NAME}` references and literal credentials in its
-/// URL or headers. It is stored as written and leaves this value only as
+/// The URL may carry credentials (userinfo, query keys, a path key). It is
+/// stored as written and leaves this value only as
 /// [`RpcEndpoints::documents`]; what is shown is [`Self::origin`], which is all
 /// `Display` and `Debug` print.
 #[derive(Clone)]
 pub(crate) struct Endpoint {
     document: Value,
-    /// The node the document describes, `${NAME}` references unresolved.
+    /// The node the document describes.
     endpoint: json_rpc::Endpoint,
-    /// The URL's scheme, host and port, a reference standing for the host
-    /// shown as its name; `unresolved` when the URL does not parse.
+    /// The URL's scheme, host and port; `unresolved` when it does not parse.
     origin: String,
 }
 
@@ -60,7 +59,7 @@ impl TryFrom<Row> for (Network, RpcEndpoints) {
 }
 
 impl Endpoint {
-    /// Checks `document` without resolving a reference or contacting a node.
+    /// Checks `document` without contacting a node.
     ///
     /// # Errors
     ///
@@ -68,7 +67,7 @@ impl Endpoint {
     /// nor an endpoint object, or one `json_rpc::Endpoint::validate` refuses.
     pub(crate) fn new(document: Value) -> Result<Self, String> {
         let endpoint: json_rpc::Endpoint = serde_json::from_value(document.clone())
-            .map_err(|_| "an RPC node is a URL or an object of url, headers and bounds")?;
+            .map_err(|_| "an RPC node is a URL or an object of url and bounds")?;
         endpoint.validate().map_err(|error| error.to_string())?;
         let origin = url::Url::parse(&endpoint.url).map_or_else(
             |_| "unresolved".to_owned(),
@@ -81,8 +80,8 @@ impl Endpoint {
         })
     }
 
-    /// What may be shown of the endpoint: user information, path, query and
-    /// headers are dropped, because any of them may hold a credential.
+    /// What may be shown of the endpoint: user information, path and query
+    /// are dropped, because any of them may hold a credential.
     pub(crate) fn origin(&self) -> &str {
         &self.origin
     }
@@ -251,9 +250,9 @@ mod tests {
     fn only_the_origin_of_each_endpoint_is_shown() {
         let list = RpcEndpoints::new(vec![
             json!("http://user:s3cret@127.0.0.1:18443/wallet/s3cret?apikey=s3cret"),
-            json!({"url": "https://${USER}:${KEY}@node.invalid/v3/${KEY}",
-                   "headers": {"X-Key": "s3cret"}, "bounds": {"timeout_ms": 500}}),
-            json!("https://${HOST}/v1"),
+            json!({"url": "https://user:s3cret@node.invalid/v3/s3cret",
+                   "bounds": {"timeout_ms": 500}}),
+            json!("https://other.invalid/v1"),
         ])
         .expect("three usable endpoints");
         let shown: Vec<&str> = list.endpoints().iter().map(Endpoint::origin).collect();
@@ -262,13 +261,13 @@ mod tests {
             [
                 "http://127.0.0.1:18443",
                 "https://node.invalid",
-                "https://${host}"
+                "https://other.invalid"
             ]
         );
         let first = r#"[Endpoint("http://127.0.0.1:18443"), Endpoint("https://node.invalid"), "#;
         assert_eq!(
             format!("{list:?}"),
-            format!(r#"{first}Endpoint("https://${{host}}")]"#)
+            format!(r#"{first}Endpoint("https://other.invalid")]"#)
         );
         assert_eq!(list.endpoints()[0].to_string(), "http://127.0.0.1:18443");
         assert_eq!(
@@ -290,11 +289,11 @@ mod tests {
             ),
             (
                 vec![json!("http://ok.invalid"), json!(7)],
-                "RPC node 1: an RPC node is a URL or an object of url, headers and bounds",
+                "RPC node 1: an RPC node is a URL or an object of url and bounds",
             ),
             (
                 vec![json!({"url": "http://s3cret.invalid", "extra": "s3cret"})],
-                "RPC node 0: an RPC node is a URL or an object of url, headers and bounds",
+                "RPC node 0: an RPC node is a URL or an object of url and bounds",
             ),
             (
                 vec![json!("ws://s3cret.invalid")],
@@ -327,8 +326,8 @@ mod tests {
             .await
             .expect("kept");
         assert_eq!(origins(&pool).await, ["http://first.invalid"]);
-        let edited = RpcEndpoints::new(vec![json!({"url": "http://edited.invalid/v3/${KEY}",
-            "headers": {"X-Key": "${KEY}"}})])
+        let edited = RpcEndpoints::new(vec![json!({"url": "http://edited.invalid/v3/k3y",
+            "bounds": {"timeout_ms": 500}})])
         .expect("a usable endpoint");
         RpcEndpoints::upsert(&pool, &network(), &edited)
             .await

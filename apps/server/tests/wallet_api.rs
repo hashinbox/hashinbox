@@ -316,30 +316,23 @@ async fn usdc_wallet_is_generated_sent_and_indexed() -> Result<(), Box<dyn std::
 }
 
 async fn start_api(chains: Value) -> Result<RunningApi, Box<dyn std::error::Error>> {
-    start_api_in(chains, &[], Arc::new(TempDir::new()?)).await
+    start_api_in(chains, Arc::new(TempDir::new()?)).await
 }
 
 /// Starts the server on the index file inside `storage`. Passing the same
 /// directory twice restarts the server on the index it already wrote.
 async fn start_api_in(
     chains: Value,
-    secrets: &[(&str, &str)],
     storage: Arc<TempDir>,
 ) -> Result<RunningApi, Box<dyn std::error::Error>> {
     let configured = json!({"path": storage.path().join("payment.db")});
-    let secrets = secrets
-        .iter()
-        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-        .collect::<Vec<_>>();
-    start_server(configured, chains, &secrets, Some(storage)).await
+    start_server(configured, chains, Some(storage)).await
 }
 
-/// Starts the composed server binary on `storage`, with its secrets in the
-/// environment, and waits until it is ready.
+/// Starts the composed server binary on `storage` and waits until it is ready.
 async fn start_server(
     storage: Value,
     chains: Value,
-    secrets: &[(String, String)],
     storage_directory: Option<Arc<TempDir>>,
 ) -> Result<RunningApi, Box<dyn std::error::Error>> {
     let bind = unused_address();
@@ -358,7 +351,6 @@ async fn start_server(
         .arg("serve")
         .arg(config_path)
         .env("SYSTEM_TEST_TOKEN", TOKEN)
-        .envs(secrets.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -379,18 +371,17 @@ async fn start_server(
     Ok(running)
 }
 
-/// One node states its own headers and bounds: Bitcoin Core's credential is
-/// one of its headers.
+/// One node states its own URL and bounds: Bitcoin Core's credential is the
+/// URL's userinfo.
 fn rpc_config(endpoint: &str, bitcoin: bool) -> Value {
-    let headers = if bitcoin {
-        json!({"authorization": "Basic test"})
+    let url = if bitcoin {
+        endpoint.replacen("://", "://user:test@", 1)
     } else {
-        json!({})
+        endpoint.to_owned()
     };
     json!({
         "endpoints": [{
-            "url": endpoint,
-            "headers": headers,
+            "url": url,
             "bounds": {"timeout_ms": 2000, "max_response_bytes": 1048576}
         }]
     })

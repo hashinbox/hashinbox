@@ -20,7 +20,7 @@ async fn start_composed(
     node: &BitcoinNode,
 ) -> Result<RunningApi, Box<dyn std::error::Error>> {
     let storage = json!({"path": directory.path().join("payment.db")});
-    start_server(storage, json!({"bitcoin": bitcoin_index(node)}), &[], None).await
+    start_server(storage, json!({"bitcoin": bitcoin_index(node)}), None).await
 }
 
 async fn get_json(root: &str, path: &str) -> Result<Value, Box<dyn std::error::Error>> {
@@ -364,7 +364,6 @@ async fn an_unverifiable_chain_is_skipped_and_the_others_serve()
     let api = start_server(
         json!({"path": directory.path().join("payment.db")}),
         json!({"bitcoin": bitcoin_index(&node), "ethereum": unreachable}),
-        &[],
         None,
     )
     .await?;

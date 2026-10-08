@@ -2,7 +2,7 @@
 //!
 //! The two indexing failures and their classification: `SourceError` (a
 //! `BlockSource` could not answer) and `IndexError` / `IndexErrorKind` (every
-//! other indexing failure). `retryable` is what the supervisor acts on, and
+//! other indexing failure). `retryable` is what the driver acts on, and
 //! `IndexErrorKind` is what a caller maps to its own vocabulary.
 
 use std::{error::Error, fmt};
@@ -19,7 +19,7 @@ pub struct SourceError {
 
 /// Every indexing failure: a category, a reason, and whether to retry.
 ///
-/// `retryable` is what the [`Supervisor`](crate::Supervisor) acts on: a
+/// `retryable` is what the [`Driver`](crate::Driver) acts on: a
 /// retryable error is retried forever with growing backoff, and anything else
 /// quarantines that one network while the others keep syncing.
 #[derive(Clone, Debug, PartialEq, Eq)]

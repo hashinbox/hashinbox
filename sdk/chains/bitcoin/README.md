@@ -8,10 +8,10 @@ the rest of the SDK.
 ## Usage
 
 ```rust,no_run
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use chain_bitcoin::{AddressType, Config, Error, Network, Store};
-use sdk_config::{ComposedChain, Rpc};
+use payments::config::{ComposedChain, Rpc};
 use wallets::SubmissionRegistrar;
 
 /// `repository` is the one store every network is indexed into.
@@ -19,8 +19,7 @@ async fn bitcoin<R: Store>(
     repository: R,
     registrar: &Arc<dyn SubmissionRegistrar>,
 ) -> Result<ComposedChain<&'static str>, Error> {
-    let secrets = BTreeMap::from([("BTC_RPC_PASSWORD".to_owned(), "bitcoin".to_owned())]);
-    let rpc = Rpc::endpoint("http://bitcoin:${BTC_RPC_PASSWORD}@127.0.0.1:18443");
+    let rpc = Rpc::endpoint("http://bitcoin:bitcoin@127.0.0.1:18443");
 
     let config = Config {
         confirmation_depth: 6,
@@ -29,7 +28,7 @@ async fn bitcoin<R: Store>(
     };
 
     // Checks the node and its network. Opens and writes nothing.
-    let chain = config.connect(&secrets).await?;
+    let chain = config.connect().await?;
     // The index and the wallet factory for the "btc" tag.
     chain.compose(repository, registrar).await
 }

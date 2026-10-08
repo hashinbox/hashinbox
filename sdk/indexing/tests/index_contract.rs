@@ -67,6 +67,10 @@ impl Indexing for Probe {
 
     fn listen(&self, _listener: Arc<dyn indexing::Listener>) {}
 
+    fn schedule(&self) -> indexing::Schedule {
+        indexing::Schedule::every(std::time::Duration::from_millis(1))
+    }
+
     fn sync<'a>(&'a self) -> BoxFuture<'a, Result<Outcome, IndexError>> {
         self.record(Call::Sync);
         let status = Outcome {
@@ -386,6 +390,10 @@ fn rejects_a_child_whose_status_is_not_about_its_own_network() {
         }
 
         fn listen(&self, _listener: Arc<dyn indexing::Listener>) {}
+
+        fn schedule(&self) -> indexing::Schedule {
+            indexing::Schedule::every(std::time::Duration::from_millis(1))
+        }
 
         fn sync<'a>(&'a self) -> BoxFuture<'a, Result<Outcome, IndexError>> {
             let status = self.status.lock().expect("reported status").take();

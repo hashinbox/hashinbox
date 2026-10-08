@@ -76,6 +76,10 @@ pub trait Indexing: Checkpoint + Watching {
     /// a slot; a composer forwards to every unit.
     fn listen(&self, listener: Arc<dyn Listener>);
 
+    /// The rhythm this indexer's chain is polled at, declared by the chain.
+    /// A driver waits this long at the tip and bounds its retry wait by it.
+    fn schedule(&self) -> crate::Schedule;
+
     /// Reloads this index after its network was purged ([`crate::IndexStore::purge`]),
     /// offline or quiesced online: pending blocks and caches are discarded and
     /// the observations reload without progress, so the next pass scans from
@@ -98,7 +102,7 @@ pub trait Indexing: Checkpoint + Watching {
     /// **Bounded.** One pass does the work its [`crate::Budget`] allows and
     /// returns; it is not a loop, and nothing here schedules, retries or waits.
     /// A caller drives it — in its own loop, from a cron, or through the
-    /// optional `crate::Supervisor`, which calls this and owns no second
+    /// optional `crate::Driver`, which calls this and owns no second
     /// implementation of scanning or committing.
     ///
     /// The list is read during the pass rather than passed in, so it is never
@@ -112,7 +116,7 @@ pub trait Indexing: Checkpoint + Watching {
 /// The source and interpreter preserve native chain semantics. The repository
 /// requires only registration and atomic committing; optional queries are called
 /// on the repository directly. One bounded pass runs at a time, while scheduling,
-/// retry, quarantine and shutdown belong to the optional supervisor.
+/// retry, quarantine and shutdown belong to the optional driver.
 pub struct Indexer<S, I, R>
 where
     I: BlockInterpreter,
@@ -193,6 +197,10 @@ where
 
     fn listen(&self, listener: Arc<dyn Listener>) {
         Self::listen(self, listener);
+    }
+
+    fn schedule(&self) -> crate::Schedule {
+        self.config.schedule()
     }
 
     fn reset<'a>(&'a self) -> BoxFuture<'a, Result<(), IndexError>> {
@@ -324,7 +332,7 @@ where
 /// network and this is what knows which unit owns one; a balance and a page are
 /// the repository's own answers, so a consumer serving several networks holds
 /// one reader per network and asks the one that owns the subject
-/// (`sdk_config::Composition`). A composition that routed a balance would have had
+/// (`payments::config::Composition`). A composition that routed a balance would have had
 /// to demand the capability of every child before it could offer it for any.
 pub struct Indexers<C: ?Sized = dyn Indexing> {
     units: Vec<Route<C>>,

@@ -17,9 +17,11 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+use indexing::{Entry, Position, Standing};
+
 use super::{Error, ErrorBody};
 use crate::{
-    models::{Asset, Block, Entry, Network, Page, Position, Standing, Wallet},
+    models::{Asset, Block, Network, Wallet},
     state::AppState,
 };
 
@@ -101,12 +103,12 @@ async fn history(
             )
         })?;
     let sample = pending.sampled()?;
-    let unavailable = |_| Error::indexed("the index database is unavailable");
-    // One deferred transaction: every row of the page is one snapshot.
-    let mut read = state.pool.begin().await.map_err(unavailable)?;
-    let confirmed = Page::read(&mut read, subject, after.as_ref(), query.limit).await?;
-    read.rollback().await.map_err(unavailable)?;
-    let page = confirmed.completed(subject, after.is_none(), sample)?;
+    // One snapshot: the repository's own read.
+    let page = state
+        .repository
+        .history(subject, after.as_ref(), query.limit)
+        .await?
+        .completed(subject, after.is_none(), sample)?;
     // The page is refused whole, before any of it is converted, when it left
     // the queried network (another network's identity would reach a caller as
     // if it were theirs) or is denominated in anything the query did not ask

@@ -167,7 +167,8 @@ mod tests {
     async fn one_pool_serves_indexing_and_every_model_across_a_restart() {
         use crate::models::RpcEndpoints;
         use indexing::{
-            Address, AssetId, BlockPosition, Purging as _, Registration, WalletRegistry as _, Watch,
+            Address, AssetId, BlockPosition, IndexStore as _, Registration, WalletRegistry as _,
+            Watch,
         };
 
         let directory = tempfile::tempdir().expect("temporary directory");

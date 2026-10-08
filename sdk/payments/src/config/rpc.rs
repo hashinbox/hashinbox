@@ -1,9 +1,9 @@
 use std::{fmt, sync::Arc};
 
-use json_rpc::{Endpoint, Failover, Secrets};
+use json_rpc::{Endpoint, Failover};
 use serde::Deserialize;
 
-use crate::{Error, ErrorKind, Repetition};
+use crate::config::{Error, ErrorKind, Repetition};
 
 /// The composed transport a chain's RPC client runs on.
 ///
@@ -13,13 +13,9 @@ pub type Transport = Arc<dyn json_rpc::Client>;
 
 /// One chain's RPC settings: the nodes, and how much the transport repeats.
 ///
-/// Each [`json_rpc::Endpoint`] describes one node on its own — its provider's
-/// URL, its headers and its bounds — so two failover nodes can carry two
-/// different API keys (`a retired design note (023)` section 3.4). A node written as a bare
-/// string is that URL with the default bounds and no added header. A `${NAME}`
-/// anywhere in a URL or a header value stands for a value the process supplies
-/// through [`json_rpc::Secrets`]; no secret is ever written in a configuration
-/// file.
+/// Each [`json_rpc::Endpoint`] is one node's URL, carrying its own
+/// credentials (userinfo, query keys), and its bounds. A node written as a
+/// bare string is that URL with the default bounds.
 ///
 /// The fields are public: a deployment that reads a document deserializes
 /// this, and one that has its URLs in hand writes
@@ -47,7 +43,7 @@ impl Rpc {
     }
 
     /// The common case: one node at `url`, with the transport's default
-    /// repetition, bounds and no added header.
+    /// repetition and bounds.
     #[must_use]
     pub fn endpoint(url: impl Into<String>) -> Self {
         Self::new(vec![Endpoint::new(url)])
@@ -88,22 +84,18 @@ impl Rpc {
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::Endpoints`] when a node is unusable or one of its
-    /// `${NAME}` references has no value in `secrets`.
-    pub fn transport(&self, secrets: &dyn Secrets) -> Result<Transport, Error> {
-        self.monitored(secrets).map(|(transport, _)| transport)
+    /// [`ErrorKind::Endpoints`] when a node is unusable.
+    pub fn transport(&self) -> Result<Transport, Error> {
+        self.monitored().map(|(transport, _)| transport)
     }
 
     /// Builds the transport and exposes each endpoint's statistics in configured order.
     /// Handles contain no endpoint URL or credentials.
     ///
     /// # Errors
-    /// The same endpoint and secret validation failures as [`Self::transport`].
-    pub fn monitored(
-        &self,
-        secrets: &dyn Secrets,
-    ) -> Result<(Transport, Vec<json_rpc::Statistics>), Error> {
-        self.logged(secrets, &logging::Logger::default())
+    /// The same endpoint validation failures as [`Self::transport`].
+    pub fn monitored(&self) -> Result<(Transport, Vec<json_rpc::Statistics>), Error> {
+        self.logged(&logging::Logger::default())
     }
 
     /// Builds each node with an explicitly injected, network-scoped logger.
@@ -113,13 +105,12 @@ impl Rpc {
     /// The same configuration failures as [`Self::transport`].
     pub fn logged(
         &self,
-        secrets: &dyn Secrets,
         logger: &logging::Logger,
     ) -> Result<(Transport, Vec<json_rpc::Statistics>), Error> {
         let mut clients = Vec::with_capacity(self.endpoints.len());
         let mut statistics = Vec::with_capacity(self.endpoints.len());
         for (ordinal, endpoint) in self.endpoints.iter().enumerate() {
-            let client = endpoint.connect(secrets)?.with_logger(
+            let client = endpoint.connect()?.with_logger(
                 logger
                     .with("component", "rpc")
                     .with("node_id", ordinal.to_string()),
@@ -143,19 +134,10 @@ impl fmt::Debug for Rpc {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::{Repetition, RepetitionPolicy};
-
-    fn secrets<const N: usize>(values: [(&str, &str); N]) -> BTreeMap<String, String> {
-        values
-            .into_iter()
-            .map(|(name, value)| (name.to_owned(), value.to_owned()))
-            .collect()
-    }
+    use crate::config::{Repetition, RepetitionPolicy};
 
     fn parse(value: Value) -> Result<Rpc, Error> {
         let config: Rpc = serde_json::from_value(value)
@@ -183,34 +165,18 @@ mod tests {
         json!({"endpoints": endpoints, "repeat": repeat})
     }
 
-    /// The defect this shape fixes: one shared header map could not give two
-    /// failover nodes two different API keys — and a provider that puts its
-    /// key in the URL is now an ordinary endpoint rather than a rejected one.
+    /// Two failover nodes carry two different credentials in their URLs.
     #[test]
     fn every_endpoint_carries_its_own_credential() {
         let config = parse(json!({"endpoints": [
-            "https://primary.invalid/v3/${PRIMARY_KEY}?apikey=${PRIMARY_KEY}",
-            {"url": "https://backup.invalid/v1",
-             "headers": {"X-API-Key": "${BACKUP_KEY}"},
+            "https://primary.invalid/v3/one?apikey=one",
+            {"url": "https://user:two@backup.invalid/v1",
              "bounds": {"timeout_ms": 5000}},
         ]}))
         .expect("both nodes are supported");
         assert_eq!(config.endpoint_count(), 2);
         assert_eq!(config.endpoints[1].bounds.timeout_ms, 5_000);
-        let values = secrets([("PRIMARY_KEY", "one"), ("BACKUP_KEY", "two")]);
-        config.transport(&values).expect("the transport composes");
-
-        let error = config
-            .transport(&secrets([("PRIMARY_KEY", "one")]))
-            .err()
-            .expect("the second endpoint's variable is unset");
-        let message = error.to_string();
-        assert_eq!(
-            message,
-            "a configured endpoint's environment variable is unavailable"
-        );
-        assert!(!message.contains("BACKUP_KEY"));
-        assert!(!message.contains("backup.invalid"));
+        config.transport().expect("the transport composes");
     }
 
     #[test]
@@ -223,10 +189,6 @@ mod tests {
             (
                 json!("http://node.invalid/?apikey=s3cret#section"),
                 "JSON-RPC endpoint must not carry a fragment",
-            ),
-            (
-                json!({"url": "http://node.invalid/", "headers": {"bad header": "s3cret"}}),
-                "JSON-RPC header name is invalid",
             ),
             (
                 json!({"url": "http://node.invalid/", "bounds": {"timeout_ms": 0}}),
@@ -260,7 +222,6 @@ mod tests {
             "https://node.invalid/v3/project?apikey=k3y&auth=token"
         );
         assert_eq!(config.endpoints[0].bounds, json_rpc::Bounds::default());
-        assert!(config.endpoints[0].headers.is_empty());
     }
 
     #[test]
@@ -286,7 +247,7 @@ mod tests {
                 r#"{"endpoints":[{"url":"http://a","timeout_ms":1}]}"#,
                 "unknown field `timeout_ms`",
             ),
-            (r#"{"endpoints":[{"headers":{}}]}"#, "missing field `url`"),
+            (r#"{"endpoints":[{"bounds":{}}]}"#, "missing field `url`"),
             (r#"{"endpoints":null}"#, "invalid type: null"),
             (r#"{"endpoints":"http://a"}"#, "invalid type: string"),
         ] {

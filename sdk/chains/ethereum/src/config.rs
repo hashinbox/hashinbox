@@ -4,16 +4,16 @@
 //! code or deserialized from any `serde` format — [`Config::connect`]s to a
 //! node and verifies its identity, and the verified [`ChainHandle`] then
 //! [`ChainHandle::compose`]s over an opened repository into a
-//! [`sdk_config::ComposedChain`]. No storage is opened on the first step, which is
+//! [`payments::config::ComposedChain`]. No storage is opened on the first step, which is
 //! what lets an application check every chain's identity before it opens
-//! anything. [`sdk_config::Composition`] is what
+//! anything. [`payments::config::Composition`] is what
 //! holds this chain beside the others.
 
 use std::{collections::BTreeSet, str::FromStr, sync::Arc};
 
 use base::{Networked as _, Unit, Units};
 use indexing::Checkpoint as _;
-use sdk_config::{ComposedChain, Connection};
+use payments::config::{ComposedChain, Connection};
 use serde::{Deserialize, de};
 use wallets::SubmissionRegistrar;
 
@@ -24,12 +24,12 @@ pub trait Store: indexing::Repository + Clone + Send + Sync + 'static {}
 
 impl<R> Store for R where R: indexing::Repository + Clone + Send + Sync + 'static {}
 
-/// The shell every chain's configuration shares, from `sdk/config`: the nodes
+/// The shell every chain's configuration shares, from `payments::config`: the nodes
 /// and their repetition, the cadence this chain indexes at, and the
 /// registration hook that lets a document hand this file its own section.
-/// `sdk/config` names no chain type, so this file adds Ethereum's own keys
-/// around the shell and implements [`sdk_config::Chain`] for the result.
-use sdk_config::{Cadence, Rpc, Transport};
+/// `payments::config` names no chain type, so this file adds Ethereum's own keys
+/// around the shell and implements [`payments::config::Chain`] for the result.
+use payments::config::{Cadence, Rpc, Transport};
 
 use crate::{
     IndexerParams, Network, RpcClient, WalletConfig, WalletFactory,
@@ -68,7 +68,7 @@ pub struct Config<A> {
     pub tokens: Vec<Token<A>>,
     /// How often this chain observes a tip, and how much one pass indexes.
     ///
-    /// One key, one shape, on every chain: `sdk/config` owns the document and
+    /// One key, one shape, on every chain: `payments::config` owns the document and
     /// each chain owns its section, so there is no reason left for one chain
     /// to flatten what another nests.
     #[serde(default)]
@@ -151,14 +151,13 @@ impl<A: Ord> Config<A> {
     /// [`Self::validate`]'s refusals, and whatever the node reports when it
     /// serves another chain ID, cannot trace a block, or disagrees with a
     /// configured token.
-    pub async fn connect(self, secrets: &dyn json_rpc::Secrets) -> Result<ChainHandle<A>, Error> {
-        self.connect_monitored(secrets, &mut Vec::new(), logging::Logger::default(), None)
+    pub async fn connect(self) -> Result<ChainHandle<A>, Error> {
+        self.connect_monitored(&mut Vec::new(), logging::Logger::default(), None)
             .await
     }
 
     async fn connect_monitored(
         self,
-        secrets: &dyn json_rpc::Secrets,
         statistics: &mut Vec<json_rpc::Statistics>,
         logger: logging::Logger,
         transport: Option<Transport>,
@@ -167,7 +166,7 @@ impl<A: Ord> Config<A> {
         let transport = match transport {
             Some(transport) => transport,
             None => {
-                let (transport, endpoints) = self.rpc.logged(secrets, &logger)?;
+                let (transport, endpoints) = self.rpc.logged(&logger)?;
                 statistics.extend(endpoints);
                 transport
             }
@@ -270,6 +269,10 @@ impl<A> ChainHandle<A> {
         let network = rpc.network().clone();
         let params = IndexerParams {
             sync: config.cadence.policy,
+            schedule: config
+                .cadence
+                .poll
+                .map_or(IndexerParams::<(), ()>::POLL, indexing::Schedule::every),
             ..IndexerParams::new(rpc.clone(), repository.clone())
         };
         let indexer = Arc::new(crate::indexer(params)?);
@@ -287,25 +290,24 @@ impl<A> ChainHandle<A> {
             index: indexer,
             factories,
             units,
-            poll: config.cadence.poll,
         })
     }
 }
 
 /// [`ChainHandle::compose`] with this chain's type erased, so one vector holds every
-/// configured chain and [`sdk_config::Composition`] folds them without naming any
+/// configured chain and [`payments::config::Composition`] folds them without naming any
 /// of them. An application writes none of this.
 impl<A: Send + 'static, R: Store> Connection<A, R> for ChainHandle<A> {
     fn compose<'a>(
         self: Box<Self>,
         repository: R,
         registrar: &'a Arc<dyn SubmissionRegistrar>,
-    ) -> base::BoxFuture<'a, Result<ComposedChain<A>, sdk_config::Error>> {
+    ) -> base::BoxFuture<'a, Result<ComposedChain<A>, payments::config::Error>> {
         Box::pin(async move {
             (*self)
                 .compose(repository, registrar)
                 .await
-                .map_err(sdk_config::Error::refused)
+                .map_err(payments::config::Error::refused)
         })
     }
 }
@@ -387,13 +389,13 @@ impl<A> Token<A> {
 pub type Limits = FeeLimits<u128>;
 
 /// The registration hook: a document's `"ethereum"` section, parsed by this
-/// crate and handed back as something `sdk/config` can hold beside the other
+/// crate and handed back as something `payments::config` can hold beside the other
 /// chains without naming any of them.
 ///
 /// An application writes none of this, and an embedder who builds a [`Config`]
 /// in code never reaches it: the same three steps run either way, and only one
 /// of them involves a file.
-impl<A, R> sdk_config::Chain<A, R> for Config<A>
+impl<A, R> payments::config::Chain<A, R> for Config<A>
 where
     A: Clone + Ord + Send + Sync + 'static,
     R: Store,
@@ -402,36 +404,35 @@ where
         Config::network(self)
     }
 
-    fn accept(&self) -> Result<Option<String>, sdk_config::Error> {
-        self.validate().map_err(sdk_config::Error::refused)?;
+    fn accept(&self) -> Result<Option<String>, payments::config::Error> {
+        self.validate().map_err(payments::config::Error::refused)?;
         Ok(None)
     }
 
     fn verify<'a>(
         &'a self,
         transport: &'a Transport,
-    ) -> base::BoxFuture<'a, Result<(), sdk_config::Error>> {
+    ) -> base::BoxFuture<'a, Result<(), payments::config::Error>> {
         Box::pin(async move {
             self.verified(transport.clone())
                 .await
                 .map(drop)
-                .map_err(sdk_config::Error::refused)
+                .map_err(payments::config::Error::refused)
         })
     }
 
     fn connect<'a>(
         &'a self,
-        secrets: &'a dyn json_rpc::Secrets,
         statistics: &'a mut Vec<json_rpc::Statistics>,
         logger: logging::Logger,
         transport: Option<Transport>,
-    ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, sdk_config::Error>> {
+    ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, payments::config::Error>> {
         Box::pin(async move {
             let node = self
                 .clone()
-                .connect_monitored(secrets, statistics, logger, transport)
+                .connect_monitored(statistics, logger, transport)
                 .await
-                .map_err(sdk_config::Error::refused)?;
+                .map_err(payments::config::Error::refused)?;
             Ok(Box::new(node) as Box<dyn Connection<A, R>>)
         })
     }
@@ -439,8 +440,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use std::time::Duration;
 
     use futures_executor::block_on;
@@ -481,27 +480,21 @@ mod tests {
     /// node's own settings travel with that node.
     #[test]
     fn ethereum_rpc_and_cadence_fields_reach_separate_runtime_settings() {
-        let secrets = BTreeMap::new();
         let config = parse(section(None)).expect("defaulted bounds");
         assert_eq!(config.rpc.endpoint_count(), 1);
-        config
-            .rpc
-            .transport(&secrets)
-            .expect("the default composes");
+        config.rpc.transport().expect("the default composes");
         assert_eq!(config.cadence.policy.batch_size, 100);
-        assert_eq!(config.cadence.poll, Duration::from_secs(1));
+        assert_eq!(config.cadence.poll, None);
 
         let mut value = section(None);
         value["rpc"] = json!({
             "endpoints": [
                 {
-                    "url": "http://127.0.0.1:9545",
-                    "headers": {"x-fixture": "first"},
+                    "url": "http://127.0.0.1:9545/?key=first",
                     "bounds": {"timeout_ms": 3000}
                 },
                 {
-                    "url": "http://127.0.0.1:8545",
-                    "headers": {"x-fixture": "second"},
+                    "url": "http://127.0.0.1:8545/?key=second",
                     "bounds": {"max_response_bytes": 8192}
                 }
             ],
@@ -512,10 +505,10 @@ mod tests {
         assert_eq!(config.rpc.endpoint_count(), 2);
         config
             .rpc
-            .transport(&secrets)
+            .transport()
             .expect("two endpoints with their own settings compose");
         assert_eq!(config.cadence.policy.batch_size, 7);
-        assert_eq!(config.cadence.poll, Duration::from_millis(17));
+        assert_eq!(config.cadence.poll, Some(Duration::from_millis(17)));
     }
 
     /// The point of the types being the API: a value assembled in Rust and the
@@ -804,11 +797,11 @@ mod tests {
         parse(native_only).expect("native Ethereum keeps ordered RPC failover");
     }
 
-    /// [`sdk_config::Chain::verify`] over a scripted node: the identity check
+    /// [`payments::config::Chain::verify`] over a scripted node: the identity check
     /// `connect` runs, and the one a replacement node list must pass.
-    fn verify(config: &Config<String>, script: &Script) -> Result<(), sdk_config::Error> {
+    fn verify(config: &Config<String>, script: &Script) -> Result<(), payments::config::Error> {
         let transport: Transport = Arc::new(script.clone());
-        let chain: &dyn sdk_config::Chain<String, indexing::memory::Repository> = config;
+        let chain: &dyn payments::config::Chain<String, indexing::memory::Repository> = config;
         block_on(chain.verify(&transport))
     }
 
@@ -863,7 +856,7 @@ mod tests {
 
         let error = verify(&config, &script).expect_err("another chain");
 
-        assert_eq!(error.kind, sdk_config::ErrorKind::Section);
+        assert_eq!(error.kind, payments::config::ErrorKind::Section);
         assert_eq!(
             error.message,
             "Ethereum RPC chain ID 31337 does not match configured chain ID 1"

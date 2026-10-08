@@ -1,10 +1,7 @@
 //! `/v1/networks`: every configured network and its RPC nodes, replacing
 //! those nodes while the server runs, and rescanning one network.
 
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
-};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use axum::{
     Json,
@@ -71,8 +68,8 @@ impl From<indexing::Condition> for ServiceState {
 /// One RPC node as it may be shown.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 struct RpcNode {
-    /// Scheme, host and port of the node's URL. User information, path,
-    /// query and headers are never returned: any of them may hold a
+    /// Scheme, host and port of the node's URL. User information, path and
+    /// query are never returned: any of them may hold a
     /// credential.
     origin: String,
 }
@@ -129,26 +126,22 @@ struct ListResponse {
 }
 
 /// One RPC node, written as the configuration file's `rpc.endpoints` writes
-/// it. `${NAME}` anywhere in the URL or a header value stands for the
-/// server's environment variable `NAME`.
+/// it. The URL carries any credentials: userinfo (HTTP Basic) or query keys.
 #[derive(Clone, Deserialize, utoipa::ToSchema)]
 #[serde(untagged)]
 enum RpcEndpoint {
-    /// The node's URL, with default bounds and no added header.
+    /// The node's URL, with default bounds.
     Url(String),
-    /// The node's URL, headers and bounds.
+    /// The node's URL and bounds.
     Detailed(DetailedEndpoint),
 }
 
-/// A node with its own headers and bounds.
+/// A node with its own bounds.
 #[derive(Clone, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 struct DetailedEndpoint {
     /// `http` or `https` URL naming a host, without a fragment.
     url: String,
-    /// Headers every call carries.
-    #[serde(default)]
-    headers: BTreeMap<String, String>,
     /// Per-call limits: `timeout_ms`, `max_request_bytes`,
     /// `max_response_bytes`; each defaults when absent.
     #[serde(default)]
@@ -164,9 +157,6 @@ impl From<RpcEndpoint> for Value {
             RpcEndpoint::Detailed(detailed) => {
                 let mut document = serde_json::Map::new();
                 document.insert("url".to_owned(), Self::String(detailed.url));
-                let headers = detailed.headers.into_iter();
-                let headers = headers.map(|(name, value)| (name, Self::String(value)));
-                document.insert("headers".to_owned(), Self::Object(headers.collect()));
                 if let Some(bounds) = detailed.bounds {
                     document.insert("bounds".to_owned(), bounds);
                 }
@@ -262,7 +252,7 @@ async fn list(State(state): State<Arc<AppState>>) -> Json<ListResponse> {
         stores them, then sends every later call to them; calls already sent finish on the \
         node they reached. A node that fails the check leaves the current nodes in use and \
         stores nothing. The stored list is used on every later start, whatever the \
-        configuration file says. Credentials are stored as sent; prefer `${NAME}` references. \
+        configuration file says. Credentials in the URL are stored as sent. \
         A network that is unavailable stores the verified nodes and uses them from the next \
         start.",
     params(NetworkPath),
@@ -270,8 +260,8 @@ async fn list(State(state): State<Arc<AppState>>) -> Json<ListResponse> {
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Nodes verified, stored and in use", body = ConfiguredNetwork),
-        (status = 400, description = "Malformed node list, a node the chain refuses, or an \
-            unset `${NAME}`", body = ErrorBody),
+        (status = 400, description = "Malformed node list or a node the chain refuses",
+            body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "Network is not configured", body = ErrorBody),
         (status = 422, description = "The node was unreachable or serves another network; the \
@@ -356,7 +346,7 @@ async fn rescan(
         .map(indexing::Route::indexer)
         .ok_or_else(Error::not_in_service)?;
     let (wallets, control) = (state.wallets.clone(), state.control.clone());
-    let purging = state.purging.clone();
+    let index_store = state.index_store.clone();
     // Its own task: the window must close and reopen whole even if the caller
     // hangs up. New wallets and sends are refused (409) and the running ones
     // drain before indexing pauses; they are admitted again once it resumed.
@@ -364,7 +354,7 @@ async fn rescan(
         let _held = held;
         let paused = wallets.pause(indexer.network());
         paused.drained().await;
-        control.rescan(indexer.as_ref(), purging.as_ref()).await
+        control.rescan(indexer.as_ref(), index_store.as_ref()).await
     })
     .await
     .map_err(|error| Error::indexed(error.to_string()))??;
@@ -405,7 +395,7 @@ pub(crate) type Verified = (Arc<dyn Client>, Vec<Statistics>);
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Rejected {
     /// The chain refuses the section with these nodes, or they build no
-    /// transport (an unset `${NAME}`, say).
+    /// transport (an unusable URL, say).
     Invalid(String),
     /// The node did not prove it serves this network.
     Unverified(String),
@@ -547,8 +537,7 @@ mod tests {
         let app = App::ready().await;
         let body = json!({"endpoints": [
             "http://user:s3cret@new.invalid:9/wallet?apikey=s3cret",
-            {"url": "https://other.invalid/v3/${KEY}", "headers": {"X-Key": "s3cret"},
-             "bounds": {"timeout_ms": 1000}},
+            {"url": "https://other.invalid/v3/s3cret", "bounds": {"timeout_ms": 1000}},
         ]});
         let replaced = app
             .call("PUT", &format!("{BITCOIN}/rpc"), Some(body), true)
@@ -560,7 +549,7 @@ mod tests {
         assert_eq!(origins(&listed.json()["networks"][0]), expected);
         for response in [&replaced, &listed] {
             let text = String::from_utf8_lossy(&response.body);
-            assert!(!text.contains("s3cret") && !text.contains("KEY"), "{text}");
+            assert!(!text.contains("s3cret"), "{text}");
         }
         assert_eq!(app.stored(&App::bitcoin()).await.len(), 2);
     }

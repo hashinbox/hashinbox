@@ -31,9 +31,9 @@ use api::networks::{LiveNetwork, Rejected, Verifier};
 use asset::AssetTag;
 use base::Network;
 use config::{AnyError, Config};
-use indexing::{Report, Supervisor};
+use indexing::Driver;
 use models::{RpcEndpoints, Signers};
-use sdk_config::{ChainNodes, Chains, ErrorKind};
+use payments::config::{ChainNodes, Chains, ErrorKind};
 use state::AppState;
 use storage::Repository;
 use tokio::sync::{oneshot, watch};
@@ -94,7 +94,7 @@ async fn main() -> Result<(), AnyError> {
     // Before the configuration is read, so a typo never reaches a node or a store.
     let operation = operator::Operation::parse(arguments.into_iter())?;
     let config = Config::read(path).await?;
-    // Offline: no chain connects, no supervisor runs, no listener binds.
+    // Offline: no chain connects, no driver runs, no listener binds.
     if let Some(operation) = operation {
         return operation.run(&config).await;
     }
@@ -120,7 +120,6 @@ async fn main() -> Result<(), AnyError> {
     }
     let startup = chains
         .compose_available(
-            &config::Environment,
             || std::future::ready(Ok::<_, AnyError>(store)),
             |store: &storage::Store| Ok::<_, AnyError>(store.repository()),
             &registrar,
@@ -146,12 +145,8 @@ async fn main() -> Result<(), AnyError> {
     let networks = live(&startup.networks, endpoints);
 
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let (report, readiness) = Report::watching(composition.index.networks());
-    let supervisor = Supervisor::new(
-        composition.index.clone(),
-        composition.schedules,
-        report.clone(),
-    );
+    let driver = Driver::new(composition.index.clone());
+    let control = driver.control();
     let state = AppState {
         wallets: wallets.clone(),
         units: Arc::new(composition.units),
@@ -160,13 +155,14 @@ async fn main() -> Result<(), AnyError> {
         registry,
         index: composition.index,
         pending: composition.pending.into(),
-        health: readiness.receiver(),
+        health: driver.health(),
         networks,
-        verify: verifier(startup.networks, Arc::new(config::Environment)),
-        control: supervisor.control(),
-        purging: Arc::new(repository),
+        verify: verifier(startup.networks),
+        control: control.clone(),
+        index_store: Arc::new(repository.clone()),
+        repository,
     };
-    let mut synchronization = Some(tokio::spawn(supervisor.run(shutdown_rx)));
+    let mut synchronization = Some(tokio::spawn(driver.run(shutdown_rx)));
     let router = api::router(state, &server)?.merge(face.routes()?);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let (stop_http, stop_http_rx) = oneshot::channel();
@@ -191,7 +187,7 @@ async fn main() -> Result<(), AnyError> {
     // stage cannot skip the stages that drain the work in flight.
     //
     // 1. Stop reporting ready, so no new work is admitted.
-    report.reset();
+    control.reset_health();
     // 2. Ask HTTP to stop accepting.
     if !http_done {
         let _ = stop_http.send(());
@@ -278,10 +274,7 @@ fn live(
 /// A candidate node list checked by its network's own chain over the
 /// transport it builds, within [`VERIFICATION`].
 // linter:disable rust/single-use-free-function -- The live-maintenance test routes through it too.
-fn verifier(
-    networks: Vec<ChainNodes<AssetTag, Repository>>,
-    secrets: Arc<dyn json_rpc::Secrets>,
-) -> Verifier {
+fn verifier(networks: Vec<ChainNodes<AssetTag, Repository>>) -> Verifier {
     let chains: Arc<BTreeMap<Network, ChainNodes<AssetTag, Repository>>> = Arc::new(
         networks
             .into_iter()
@@ -289,12 +282,12 @@ fn verifier(
             .collect(),
     );
     Arc::new(move |network, endpoints: RpcEndpoints| {
-        let (chains, secrets) = (chains.clone(), secrets.clone());
+        let chains = chains.clone();
         Box::pin(async move {
             let chain = chains
                 .get(&network)
                 .ok_or_else(|| Rejected::Invalid("network is not configured".into()))?;
-            let check = chain.verify(endpoints.nodes(), secrets.as_ref());
+            let check = chain.verify(endpoints.nodes());
             let Ok(verified) = tokio::time::timeout(VERIFICATION, check).await else {
                 return Err(Rejected::Unverified(format!(
                     "the node did not prove its network within {} seconds",
@@ -308,8 +301,8 @@ fn verifier(
 
 /// A chain's refusal of a candidate node list: a node that did not prove its
 /// network is unverified; anything else makes the list invalid.
-impl From<sdk_config::Error> for Rejected {
-    fn from(error: sdk_config::Error) -> Self {
+impl From<payments::config::Error> for Rejected {
+    fn from(error: payments::config::Error) -> Self {
         if error.kind == ErrorKind::Unverified {
             return Self::Unverified(error.to_string());
         }
@@ -337,9 +330,9 @@ mod tests {
         Address, AssetId, Budget, Config, IndexStore as _, Indexer, Indexing, WalletRegistry as _,
         Watch, WatchStore as _, testing,
     };
-    use json_rpc::{Client as _, Request, Secrets, Statistics, Swap};
-    use sdk_config::ComposedChain;
-    use sdk_config::{Registry, Sections};
+    use json_rpc::{Client as _, Request, Statistics, Swap};
+    use payments::config::ComposedChain;
+    use payments::config::{Registry, Sections};
     use serde::Deserialize;
     use serde_json::{Value, json};
     use tempfile::TempDir;
@@ -360,33 +353,33 @@ mod tests {
     struct Fixture {
         network: String,
         line: String,
-        rpc: sdk_config::Rpc,
+        rpc: payments::config::Rpc,
     }
 
-    impl sdk_config::Chain<AssetTag, Repository> for Fixture {
+    impl payments::config::Chain<AssetTag, Repository> for Fixture {
         fn network(&self) -> Network {
             Network::new(ChainName::new("fixture"), self.network.as_str())
         }
 
-        fn accept(&self) -> Result<Option<String>, sdk_config::Error> {
+        fn accept(&self) -> Result<Option<String>, payments::config::Error> {
             self.rpc.validate()?;
             Ok(None)
         }
 
         fn verify<'a>(
             &'a self,
-            transport: &'a sdk_config::Transport,
-        ) -> BoxFuture<'a, Result<(), sdk_config::Error>> {
+            transport: &'a payments::config::Transport,
+        ) -> BoxFuture<'a, Result<(), payments::config::Error>> {
             Box::pin(async move {
                 let named = transport
                     .request(Request::new("network", json!([])))
                     .await
-                    .map_err(sdk_config::Error::refused)?
-                    .map_err(|_| sdk_config::Error::refused("the node refused the call"))?
+                    .map_err(payments::config::Error::refused)?
+                    .map_err(|_| payments::config::Error::refused("the node refused the call"))?
                     .deserialize::<String>()
-                    .map_err(sdk_config::Error::refused)?;
+                    .map_err(payments::config::Error::refused)?;
                 if named != self.network {
-                    return Err(sdk_config::Error::refused(format!(
+                    return Err(payments::config::Error::refused(format!(
                         "the node serves {named}, not {}",
                         self.network
                     )));
@@ -397,25 +390,30 @@ mod tests {
 
         fn connect<'a>(
             &'a self,
-            secrets: &'a dyn Secrets,
             _statistics: &'a mut Vec<Statistics>,
             _logger: logging::Logger,
-            transport: Option<sdk_config::Transport>,
+            transport: Option<payments::config::Transport>,
         ) -> BoxFuture<
             'a,
-            Result<Box<dyn sdk_config::Connection<AssetTag, Repository>>, sdk_config::Error>,
+            Result<
+                Box<dyn payments::config::Connection<AssetTag, Repository>>,
+                payments::config::Error,
+            >,
         > {
             Box::pin(async move {
                 let transport = match transport {
                     Some(transport) => transport,
-                    None => self.rpc.transport(secrets)?,
+                    None => self.rpc.transport()?,
                 };
                 self.verify(&transport).await?;
                 let verified = Verified {
                     network: self.network(),
                     line: self.line.clone(),
                 };
-                Ok(Box::new(verified) as Box<dyn sdk_config::Connection<AssetTag, Repository>>)
+                Ok(Box::new(verified)
+                    as Box<
+                        dyn payments::config::Connection<AssetTag, Repository>,
+                    >)
             })
         }
     }
@@ -427,19 +425,20 @@ mod tests {
         line: String,
     }
 
-    impl sdk_config::Connection<AssetTag, Repository> for Verified {
+    impl payments::config::Connection<AssetTag, Repository> for Verified {
         fn compose<'a>(
             self: Box<Self>,
             repository: Repository,
             _registrar: &'a Arc<dyn SubmissionRegistrar>,
-        ) -> BoxFuture<'a, Result<ComposedChain<AssetTag>, sdk_config::Error>> {
+        ) -> BoxFuture<'a, Result<ComposedChain<AssetTag>, payments::config::Error>> {
             Box::pin(async move {
                 let line = testing::Chain::dense(self.network.clone(), 6);
                 LINES
                     .lock()
                     .expect("the lines")
                     .insert(self.line.clone(), line.clone());
-                let config = Config::new(&self.network, Budget::new(100))?;
+                let schedule = indexing::Schedule::every(Duration::from_millis(1));
+                let config = Config::new(&self.network, Budget::new(100), schedule)?;
                 let indexer = Arc::new(Indexer::new(line.clone(), line, repository, config));
                 let tag: AssetTag = self.network.name.parse().expect("a tag");
                 let factory = wallets::testing::Factory::new(self.network.clone());
@@ -455,7 +454,6 @@ mod tests {
                         base::Unit::native(&COIN),
                     ))
                     .collect(),
-                    poll: Duration::from_millis(1),
                 })
             })
         }
@@ -519,7 +517,6 @@ mod tests {
     struct Bench {
         directory: TempDir,
         path: std::path::PathBuf,
-        secrets: Arc<BTreeMap<String, String>>,
     }
 
     /// A started process: its routes, what its chains hold, and what indexes
@@ -541,7 +538,6 @@ mod tests {
             Self {
                 path: directory.path().join("server.db"),
                 directory,
-                secrets: Arc::new(BTreeMap::from([("KEY".to_owned(), "s3cret".to_owned())])),
             }
         }
 
@@ -561,7 +557,7 @@ mod tests {
         /// Starts as `main` does over `sections`: stored nodes win, every
         /// network whose node proves itself is composed (a scripted chain at
         /// block 6 with one watch from block 3 and one wallet asset), and the
-        /// supervisor runs when `supervised`.
+        /// driver runs when `supervised`.
         async fn start(&self, sections: &Sections, supervised: bool) -> Started {
             let storage: storage::Config =
                 serde_json::from_value(json!({"path": self.path})).expect("storage");
@@ -580,7 +576,6 @@ mod tests {
             let registrar: Arc<dyn SubmissionRegistrar> = Arc::new(wallets::Submissions::new());
             let startup = chains
                 .compose_available(
-                    self.secrets.as_ref(),
                     || std::future::ready(Ok::<_, AnyError>(store)),
                     |store: &storage::Store| Ok::<_, AnyError>(store.repository()),
                     &registrar,
@@ -600,9 +595,7 @@ mod tests {
             let signers = Signers::load(registry.as_ref(), &wallets, composition.index.networks())
                 .await
                 .expect("loaded");
-            let (report, readiness) = Report::watching(composition.index.networks());
-            let supervisor =
-                Supervisor::new(composition.index.clone(), composition.schedules, report);
+            let driver = Driver::new(composition.index.clone());
             let state = AppState {
                 wallets,
                 units: Arc::new(composition.units),
@@ -611,15 +604,16 @@ mod tests {
                 registry,
                 index: composition.index,
                 pending: composition.pending.into(),
-                health: readiness.receiver(),
+                health: driver.health(),
                 networks: live(&startup.networks, endpoints),
-                verify: verifier(startup.networks, self.secrets.clone()),
-                control: supervisor.control(),
-                purging: Arc::new(repository.clone()),
+                verify: verifier(startup.networks),
+                control: driver.control(),
+                index_store: Arc::new(repository.clone()),
+                repository: repository.clone(),
             };
             let stop = supervised.then(|| {
                 let (stop, shutdown) = watch::channel(false);
-                tokio::spawn(supervisor.run(shutdown));
+                tokio::spawn(driver.run(shutdown));
                 stop
             });
             let config = http_server::Config::new(
@@ -875,8 +869,7 @@ mod tests {
             .await;
         let port = node.url.trim_start_matches("http://127.0.0.1:");
         let secret = json!([{
-            "url": format!("http://user:s3cret@127.0.0.1:{port}/v3/${{KEY}}?apikey=s3cret"),
-            "headers": {"X-Key": "s3cret"}
+            "url": format!("http://user:s3cret@127.0.0.1:{port}/v3/s3cret?apikey=s3cret"),
         }]);
         let (status, replaced) = started.replace("one", secret.clone()).await;
         assert_eq!(status, StatusCode::OK, "verified with its credentials");

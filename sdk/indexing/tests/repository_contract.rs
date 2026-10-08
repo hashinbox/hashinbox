@@ -555,3 +555,81 @@ mod purge_network_removes_only_its_own_network {
         );
     }
 }
+
+/// The shipped stores' inherent balance and history reads answer the same
+/// rows identically: an unobserved holding folds its rows exactly, a page
+/// resumes after its cursor, and a fee-less sender page carries the debit.
+mod reads_agree_on_both_stores {
+    use super::*;
+    use indexing::{History, Holder, Sample, Subject};
+
+    fn subject(value: &str) -> Subject {
+        Subject {
+            address: address(value),
+            asset: AssetId {
+                chain: network().chain,
+                asset: "native".into(),
+            },
+        }
+    }
+
+    fn committed(store: &dyn IndexStore) {
+        let first = block(1, 1, 0);
+        block_on(store.commit(addition(first.clone(), None, "a", OutputChanges::default())))
+            .expect("first block");
+        block_on(store.commit(addition(
+            block(2, 2, 1),
+            Some(first),
+            "b",
+            OutputChanges::default(),
+        )))
+        .expect("second block");
+    }
+
+    fn page(page: indexing::Page, of: &dyn Holder, first: bool) -> History {
+        page.completed(of, first, Sample::new(Vec::new(), 0))
+            .expect("a page")
+    }
+
+    fn answers(
+        balance: impl Fn(&Subject) -> indexing::SettledBalance,
+        history: impl Fn(&Subject, Option<&indexing::Position>) -> indexing::Page,
+    ) -> Vec<String> {
+        let receiver = subject("receiver");
+        let sender = subject("sender");
+        let received = balance(&receiver).completed(&receiver, Sample::new(Vec::new(), 0));
+        let sent = balance(&sender).completed(&sender, Sample::new(Vec::new(), 0));
+        assert_eq!(received.net, 2.into());
+        assert_eq!(sent.net, (-2).into());
+        assert_eq!(received.observed_at, Some(block(2, 2, 1)));
+        assert_eq!(received.behind, 0, "nothing observed, nothing outstanding");
+        let one = page(history(&receiver, None), &receiver, true);
+        assert_eq!(one.transactions.len(), 1);
+        let next = one.next.clone().expect("a second page");
+        let two = page(history(&receiver, Some(&next)), &receiver, false);
+        assert!(two.next.is_none());
+        one.transactions
+            .iter()
+            .chain(&two.transactions)
+            .map(|entry| format!("{:?}", entry))
+            .collect()
+    }
+
+    #[test]
+    fn memory_and_sqlite_agree() {
+        let memory = memory::Repository::new();
+        committed(&memory);
+        let in_memory = answers(
+            |of| memory.balance(of).expect("balance"),
+            |of, after| memory.history(of, after, 1).expect("history"),
+        );
+        let directory = TempDir::new().expect("temporary directory");
+        let sqlite = open(&directory.path().join("reads.db"));
+        committed(&sqlite);
+        let on_file = answers(
+            |of| block_on(sqlite.balance(of)).expect("balance"),
+            |of, after| block_on(sqlite.history(of, after, 1)).expect("history"),
+        );
+        assert_eq!(in_memory, on_file);
+    }
+}

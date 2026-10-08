@@ -7,8 +7,6 @@ scripted node.
 ## Usage
 
 ```rust
-use std::collections::BTreeMap;
-
 use json_rpc::{CallError, Client, Endpoint, Failover, Request, Retry};
 use serde_json::json;
 
@@ -18,13 +16,9 @@ async fn block_count(rpc: &dyn Client) -> Result<u64, CallError> {
 }
 
 fn connect() -> Result<impl Client, json_rpc::Error> {
-    // The application supplies secret values; this crate reads no environment.
-    let secrets = BTreeMap::from([("RPC_KEY".to_owned(), "secret".to_owned())]);
-
-    let primary = Endpoint::new("https://node.invalid/v3/${RPC_KEY}").connect(&secrets)?;
-    let backup = Endpoint::new("https://backup.invalid/v1")
-        .with_header("X-API-Key", "${RPC_KEY}")
-        .connect(&secrets)?;
+    // The URL carries everything: userinfo becomes HTTP Basic, query keys stay.
+    let primary = Endpoint::new("https://user:pass@node.invalid/").connect()?;
+    let backup = Endpoint::new("https://backup.invalid/v1?apikey=KEY").connect()?;
 
     // Three attempts; one attempt tries each endpoint in order.
     Ok(Retry::new(Failover::new(vec![primary, backup])?))
@@ -81,19 +75,19 @@ use std::sync::Arc;
 
 use json_rpc::{Client, Endpoint, Swap};
 
-fn repoint(secrets: &dyn json_rpc::Secrets) -> Result<(), json_rpc::Error> {
-    let first = Endpoint::new("http://127.0.0.1:8545").connect(secrets)?;
+fn repoint() -> Result<(), json_rpc::Error> {
+    let first = Endpoint::new("http://127.0.0.1:8545").connect()?;
     let counters = vec![first.statistics()];
     let swap = Arc::new(Swap::new(Arc::new(first), counters));
     let held: Arc<dyn Client> = swap.clone(); // what the chain keeps
 
-    let second = Endpoint::new("http://127.0.0.1:8546").connect(secrets)?;
+    let second = Endpoint::new("http://127.0.0.1:8546").connect()?;
     let counters = vec![second.statistics()];
     swap.replace(Arc::new(second), counters);
     drop(held);
     Ok(())
 }
-# repoint(&std::collections::BTreeMap::new()).expect("valid endpoints");
+# repoint().expect("valid endpoints");
 ```
 
 ## Notes
@@ -113,16 +107,16 @@ fn repoint(secrets: &dyn json_rpc::Secrets) -> Result<(), json_rpc::Error> {
   decorator forwards a broadcast, so wrapping never narrows it to one node.
   When no node succeeds, a transport failure is returned before an error
   object, because that node may have accepted the envelope.
-- Write a secret as a `${NAME}` reference in the URL or a header value, never as
-  literal text. `Endpoint::connect` resolves it, and rejects a value placed in
-  the URL that contains a delimiter such as `/`, `@` or `?`, because it would
-  change which host or path the request reaches.
-- The URL reaches the node as written, path and query included. Provider keys
-  such as `/v3/<key>` or `?apikey=<key>` work without any extra setting.
+- An endpoint is its URL, like a database URI: no separate headers, secrets or
+  references. It reaches the node as written, path and query included, so
+  provider keys such as `/v3/<key>` or `?apikey=<key>` just work; `user:password`
+  userinfo is sent as HTTP Basic authorization.
+- `Endpoint`'s and `Http`'s `Debug`/`Display` show `Endpoint::redacted`:
+  userinfo and query values become `***`. A key in the path is shown.
 
 ## Injected events
 
 Attach a scoped `logging::Logger` with `Http::with_logger`. The endpoint reports
 sanitized failures, repeated-failure counts (at most every 30 seconds), and recovery.
 Retries and failover preserve that node's context without duplicating its events.
-No URL, headers, request parameters or provider error prose reaches the sink.
+No URL, request parameters or provider error prose reaches the sink.

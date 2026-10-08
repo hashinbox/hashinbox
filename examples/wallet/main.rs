@@ -11,7 +11,7 @@ use indexing::{
     sqlite::{Database, Repository},
 };
 use json_rpc::Client as _;
-use sdk_config::{Composition, Document, Registry};
+use payments::config::{Composition, Document, Registry};
 use serde_json::{Value, json};
 use wallets::{SecretBytes, SubmissionRegistrar, Submissions, Wallet};
 
@@ -38,7 +38,7 @@ async fn main() -> Result<(), AnyError> {
         .as_str()
         .ok_or("[solana] states rpc.endpoints")?;
     let genesis: String = json_rpc::Endpoint::new(url)
-        .connect(&BTreeMap::new())?
+        .connect()?
         .request(json_rpc::Request::once("getGenesisHash", json!([])))
         .await?
         .map_err(json_rpc::CallError::from)?
@@ -58,7 +58,6 @@ async fn main() -> Result<(), AnyError> {
     let registrar: Arc<dyn SubmissionRegistrar> = Arc::new(Submissions::new());
     let Composition { index, wallets, .. } = chains
         .compose(
-            &BTreeMap::new(),
             || async {
                 let file = std::path::absolute(".index-data/wallet.db")?;
                 tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
@@ -74,7 +73,7 @@ async fn main() -> Result<(), AnyError> {
     for (asset, created, attached, seed) in WALLETS {
         let asset = asset.to_owned();
         let held = wallets
-            .from(&asset, SecretBytes::new(vec![seed; 32]))
+            .from_pk(&asset, SecretBytes::new(vec![seed; 32]))
             .await?;
         // A wallet is proved to belong to the asset by its factory.
         wallets.accepts(&asset, held.as_ref())?;

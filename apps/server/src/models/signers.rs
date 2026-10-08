@@ -56,7 +56,7 @@ impl Signers {
                 continue;
             };
             let signer = wallets
-                .from(&info.tag, SecretBytes::new(secret.as_bytes()))
+                .from_pk(&info.tag, SecretBytes::new(secret.as_bytes()))
                 .await?;
             if signer.address() != address {
                 return Err(Self::failure("a stored key is not its wallet's address"));

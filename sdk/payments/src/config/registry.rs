@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, de::DeserializeOwned};
 
-use crate::{Chain, Chains, Error, ErrorKind, chain::Endpoints};
+use crate::config::{Chain, Chains, Error, ErrorKind, chain::Endpoints};
 
 /// A document's chain table as it arrives: one named section per chain, none
 /// of them decoded yet.
@@ -156,7 +156,7 @@ mod tests {
     use serde::Deserialize;
 
     use super::*;
-    use crate::Rpc;
+    use crate::config::Rpc;
 
     /// A chain crate's `Config`, in miniature: its own keys around the shared
     /// shell, and the three methods a registration hook states.
@@ -184,18 +184,18 @@ mod tests {
 
         fn verify<'a>(
             &'a self,
-            _transport: &'a crate::Transport,
+            _transport: &'a crate::config::Transport,
         ) -> BoxFuture<'a, Result<(), Error>> {
             Box::pin(async { Err(Error::refused("a fixture chain contacts no node")) })
         }
 
         fn connect<'a>(
             &'a self,
-            _secrets: &'a dyn json_rpc::Secrets,
             _statistics: &'a mut Vec<json_rpc::Statistics>,
             _logger: logging::Logger,
-            _transport: Option<crate::Transport>,
-        ) -> BoxFuture<'a, Result<Box<dyn crate::Connection<&'static str, ()>>, Error>> {
+            _transport: Option<crate::config::Transport>,
+        ) -> BoxFuture<'a, Result<Box<dyn crate::config::Connection<&'static str, ()>>, Error>>
+        {
             Box::pin(async { Err(Error::refused("a fixture chain contacts no node")) })
         }
     }
@@ -291,7 +291,7 @@ mod tests {
         let refused = registry()
             .chains(&sections(good()))
             .expect("one chain")
-            .connect(&BTreeMap::new())
+            .connect()
             .await
             .err()
             .expect("a fixture chain contacts no node");

@@ -4,15 +4,14 @@
 //! **Two ports are required**, and each has a block of its own below, labelled
 //! with which it is: [`WatchStore`] is the durable list of what is observed and
 //! how far each observation got, and [`IndexStore`] is the network's checkpoint
-//! plus the one write a pass makes. Nothing else is required, and nothing else
-//! is implemented here.
+//! plus the one write a pass makes and the one removal (the rescan's purge).
+//! Nothing else is required, and nothing else is implemented here.
 //!
-//! **Three more traits exist and this file implements none of them** —
-//! `indexing::BalanceStore`, `indexing::OutputStore` and `indexing::Purging`:
-//! *consumer* capabilities, for the HTTP balance, Bitcoin's change selection and
-//! the offline rescan. There is no port for a history page at all — querying is
-//! a repository's own API (`indexing::ConfirmedHistory`), and this one does not
-//! offer it. What this consumer needs instead is the last block of this file:
+//! **More traits exist and this file implements none of them** —
+//! `indexing::OutputStore` and `indexing::TransactionStore`: *consumer*
+//! capabilities, for Bitcoin's change selection and Solana's sender recovery.
+//! There is no port for balance or history at all — querying is a repository's
+//! own API, and this one does not offer it. What this consumer needs instead is the last block of this file:
 //! three questions in its own words, asked of the store directly.
 //!
 //! It is deliberately not [`Clone`]. An index clones the handle it was assembled
@@ -30,7 +29,7 @@ use std::{
 use indexing::{
     Address, AssetId, BlockCredit, BlockPosition, BlockRef, BoxFuture, Decimal, IndexError,
     IndexErrorKind, IndexStore, IndexedBatch, Network, OutputChanges, OutputId, OutputKey,
-    Progress, Transaction, Transactions, Watch, WatchProgress, WatchStore,
+    Progress, PurgedRows, Transaction, Transactions, Watch, WatchProgress, WatchStore,
 };
 
 /// One store, serving every network it is handed to; not `Clone`, because the
@@ -267,6 +266,28 @@ impl IndexStore for Sink {
         batch: IndexedBatch,
     ) -> BoxFuture<'a, Result<Vec<OutputKey>, IndexError>> {
         Box::pin(async move { self.apply(|rows| Self::write(rows, &batch)) })
+    }
+
+    /// The one removal: everything this network indexed, and every claim on it.
+    /// The observations stay; they are the application's.
+    fn purge<'a>(&'a self, network: &'a Network) -> BoxFuture<'a, Result<PurgedRows, IndexError>> {
+        Box::pin(async move {
+            self.apply(|rows| {
+                let checkpoint = u64::from(rows.checkpoints.remove(network).is_some());
+                rows.progress.retain(|(bound, _), _| bound != network);
+                let before = rows.live.len();
+                rows.live.retain(|(bound, ..)| bound != network);
+                let outputs = u64::try_from(before - rows.live.len()).unwrap_or(u64::MAX);
+                rows.spent.retain(|(bound, ..)| bound != network);
+                rows.landed.retain(|(bound, _), _| bound != network);
+                rows.counted.retain(|(bound, ..)| bound != network);
+                Ok(PurgedRows {
+                    checkpoint,
+                    outputs,
+                    ..PurgedRows::default()
+                })
+            })
+        })
     }
 }
 

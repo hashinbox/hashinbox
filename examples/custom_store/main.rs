@@ -4,7 +4,7 @@
 //! questions of it.
 //!
 //! It is deliberately the one scenario that does **not** go through
-//! `sdk_config::Chains::compose` and `sdk_config::Composition`. That path also
+//! `payments::config::Chains::compose` and `payments::config::Composition`. That path also
 //! builds wallet factories and asset units, and two of the three factories need
 //! store capabilities this sink does not offer. What it uses instead is the
 //! SDK's own composition — `indexing::Indexers::of(indexers)` over one store —
@@ -13,13 +13,13 @@
 //!
 //! Its chains come from its own `config.toml` like every other scenario's, but
 //! it decodes each section into its chain's own `Config` itself instead of
-//! handing them to `sdk_config::Registry`, because the assembly a registry
+//! handing them to `payments::config::Registry`, because the assembly a registry
 //! performs is exactly what this scenario is showing.
 //!
 //! What it demonstrates, in order: two required ports and no others
 //! (`sink.rs`), one index over one store assembled in the caller's own `main`, a
 //! birthday in the past (`Birthday::At`) beside a fresh one (`Birthday::Fresh`), a
-//! caller-driven bounded `sync` with no supervisor and no runner, a restart that
+//! caller-driven bounded `sync` with no driver and no runner, a restart that
 //! must restore the watch list and its progress from the store alone, and a
 //! query API this consumer chose for itself.
 //!
@@ -28,14 +28,14 @@
 
 mod sink;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use indexing::{
     AssetId, Birthday, BlockPosition, Checkpoint, Indexers, Indexing, Network, Subject, Watch,
     Watching,
 };
 use json_rpc::Client as _;
-use sdk_config::Document;
+use payments::config::Document;
 use serde_json::{Value, json};
 use sink::Sink;
 
@@ -62,7 +62,7 @@ async fn main() -> Result<(), AnyError> {
     // 2. One index over that one store, three chains. The networks are the
     //    ones `config.toml` states — the same one source every other scenario
     //    configures itself from — but assembled here by hand rather than by
-    //    `sdk_config::Registry`, which is this scenario's whole point. No
+    //    `payments::config::Registry`, which is this scenario's whole point. No
     //    wallet map: two of the three factories need store capabilities this
     //    sink does not offer.
     //
@@ -74,7 +74,7 @@ async fn main() -> Result<(), AnyError> {
         .as_str()
         .ok_or("[solana] states rpc.endpoints")?;
     let genesis: String = json_rpc::Endpoint::new(url)
-        .connect(&BTreeMap::new())?
+        .connect()?
         .request(json_rpc::Request::once("getGenesisHash", json!([])))
         .await?
         .map_err(json_rpc::CallError::from)?
@@ -275,7 +275,7 @@ impl Chain {
     async fn bitcoin(sections: &Value) -> Result<Self, AnyError> {
         let config: chain_bitcoin::Config<String> =
             serde_json::from_value(sections["bitcoin"].clone())?;
-        let transport = config.rpc.transport(&BTreeMap::new())?;
+        let transport = config.rpc.transport()?;
         let rpc = chain_bitcoin::RpcClient::connect(transport, &config.network).await?;
         Ok(Self(Box::new(|store| {
             chain_bitcoin::indexer(chain_bitcoin::IndexerParams::new(rpc, store))
@@ -296,7 +296,7 @@ impl Chain {
         let config: chain_ethereum::Config<String> =
             serde_json::from_value(sections["ethereum"].clone())?;
         let network = chain_ethereum::Network::new(config.chain_id, config.network.as_str());
-        let transport = config.rpc.transport(&BTreeMap::new())?;
+        let transport = config.rpc.transport()?;
         let rpc = chain_ethereum::RpcClient::connect(transport, &network).await?;
         Ok(Self(Box::new(|store| {
             chain_ethereum::indexer(chain_ethereum::IndexerParams::new(rpc, store))
@@ -319,7 +319,7 @@ impl Chain {
         let config: chain_solana::Config<String> =
             serde_json::from_value(sections["solana"].clone())?;
         let network = chain_solana::Network::new(config.network.as_str(), config.genesis_hash);
-        let transport = config.rpc.transport(&BTreeMap::new())?;
+        let transport = config.rpc.transport()?;
         let rpc = chain_solana::RpcClient::connect(transport, &network).await?;
         Ok(Self(Box::new(|store| {
             chain_solana::indexer(chain_solana::IndexerParams::new(rpc, store))
@@ -376,7 +376,7 @@ async fn assemble(
 /// This is the whole of the scheduling an embedder needs. `Route::sync` is
 /// bounded by contract — one pass reads at most what each network's `Budget`
 /// allows and returns — so nothing here has to cancel, retry or wait, and no
-/// supervisor is involved. Each unit is asked in turn; this loop stops at the
+/// driver is involved. Each unit is asked in turn; this loop stops at the
 /// first failure, which is the simplest policy and a deliberate choice rather
 /// than a default.
 ///

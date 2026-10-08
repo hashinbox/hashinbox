@@ -1,6 +1,6 @@
 # The chains this scenario runs. Same file, same keys, as every other
 # scenario's — but this is the one scenario that decodes each section itself
-# rather than handing them to `sdk_config::Registry`, because assembling an
+# rather than handing them to `payments::config::Registry`, because assembling an
 # index by hand is what it is showing. Its networks still come from here and
 # nowhere else.
 #

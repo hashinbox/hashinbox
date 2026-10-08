@@ -152,7 +152,12 @@ fn service<R: Repository + Clone>(memory: &R, tip: u64) -> Arc<Indexer<Chain, Ch
         chain.clone(),
         chain,
         memory.clone(),
-        Config::new(&network(), Budget::new(100)).expect("sync config"),
+        Config::new(
+            &network(),
+            Budget::new(100),
+            indexing::Schedule::every(std::time::Duration::from_millis(1)),
+        )
+        .expect("sync config"),
     ))
 }
 
@@ -516,7 +521,12 @@ fn fresh_before_first_sync_uses_the_verified_tip_without_requiring_pruned_histor
         source.clone(),
         source.clone(),
         memory.clone(),
-        Config::new(&network(), Budget::new(100)).expect("config"),
+        Config::new(
+            &network(),
+            Budget::new(100),
+            indexing::Schedule::every(std::time::Duration::from_millis(1)),
+        )
+        .expect("config"),
     );
     let owner = subject("new");
     let watched = block_on(index.watch("new", &owner, Birthday::Fresh)).expect("watch");
@@ -566,7 +576,12 @@ fn a_commit_during_fresh_tip_lookup_overrides_the_fallback_birthday() {
         source.clone(),
         source.clone(),
         memory::Repository::new(),
-        Config::new(&network(), Budget::new(100)).expect("config"),
+        Config::new(
+            &network(),
+            Budget::new(100),
+            indexing::Schedule::every(std::time::Duration::from_millis(1)),
+        )
+        .expect("config"),
     ));
     let registering = index.clone();
     let thread = std::thread::spawn(move || {

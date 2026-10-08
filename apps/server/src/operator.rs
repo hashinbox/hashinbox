@@ -1,9 +1,9 @@
 //! Offline operator actions. Stop the server first; these never connect to RPC,
-//! start the supervisor or bind a listener. Application keys are never purged.
+//! start the driver or bind a listener. Application keys are never purged.
 
 use crate::config::{AnyError, Config};
 use base::{ChainName, Network};
-use indexing::Purging as _;
+use indexing::IndexStore as _;
 use std::{ffi::OsString, fmt};
 
 /// One explicit operator action over the configured file.

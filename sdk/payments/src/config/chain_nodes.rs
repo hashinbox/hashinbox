@@ -4,11 +4,11 @@
 use std::{fmt, sync::Arc};
 
 use base::Network;
-use json_rpc::{Endpoint, Secrets, Statistics, Swap};
+use json_rpc::{Endpoint, Statistics, Swap};
 
-use crate::{Chain, Error, ErrorKind, Repetition, Rpc, Transport};
+use crate::config::{Chain, Error, ErrorKind, Repetition, Rpc, Transport};
 
-/// One network of a [`crate::Startup`], composed or skipped.
+/// One network of a [`crate::config::Startup`], composed or skipped.
 ///
 /// A composed network's chain holds [`Self::transport`], a [`Swap`]: an
 /// application replaces its nodes while it runs by checking candidates with
@@ -65,13 +65,12 @@ impl<A: 'static, R: 'static> ChainNodes<A, R> {
     /// # Errors
     ///
     /// [`ErrorKind::Endpoints`] when the endpoints build no transport (none,
-    /// or an unset `${NAME}`), and [`ErrorKind::Unverified`] with the chain's
+    /// or an unusable URL), and [`ErrorKind::Unverified`] with the chain's
     /// reason when the node does not prove this network. Every error names
     /// the section.
     pub async fn verify(
         &self,
         endpoints: Vec<Endpoint>,
-        secrets: &dyn Secrets,
     ) -> Result<(Transport, Vec<Statistics>), Error> {
         let rpc = Rpc {
             endpoints,
@@ -79,7 +78,7 @@ impl<A: 'static, R: 'static> ChainNodes<A, R> {
         };
         let in_section = |error: Error| error.in_section(&self.section);
         rpc.validate().map_err(in_section)?;
-        let (transport, statistics) = rpc.logged(secrets, &self.logger).map_err(in_section)?;
+        let (transport, statistics) = rpc.logged(&self.logger).map_err(in_section)?;
         self.chain.verify(&transport).await.map_err(|error| {
             Error::new(ErrorKind::Unverified, error.message).in_section(&self.section)
         })?;

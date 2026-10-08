@@ -12,7 +12,7 @@ Product acceptance lives in [SYSTEM_REQUIREMENTS.md](docs/SYSTEM_REQUIREMENTS.md
 | `decimal` | `packages/decimal` | Exact base-10 amounts: canonical positional text, numeric ordering, atomic-unit conversion | packages | [README](packages/decimal/README.md) |
 | `json-rpc` | `packages/json-rpc` | Bounded JSON-RPC transport: one URL per node; retry and failover are decorators | packages | [README](packages/json-rpc/README.md) |
 | `http-server` | `packages/http-server` | Axum server hardening: bearer auth, transport security, limits; application-supplied health routes | packages | [README](packages/http-server/README.md) |
-| `sdk-config` | `sdk/config` | The configuration document and the registry that hands each named section to the chain that registered for it; `Rpc`, `Repetition`, `Cadence` as plain data; `Composition` of every registered chain's factories, index and read handles; TOML behind feature `toml` (off by default). It names no chain crate | config | [README](sdk/config/README.md) |
+| `payments` | `sdk/payments` | The `Payments` container (053) and, as `payments::config`, the configuration document and the registry that hands each named section to the chain that registered for it; `Rpc`, `Repetition`, `Cadence` as plain data; `Composition` of every registered chain's factories, index and read handles; TOML behind feature `toml` (off by default). It names no chain crate | config | [README](sdk/payments/README.md) |
 | `base` | `sdk/base` | Chain-neutral values and capabilities: address, network, asset, amount, block, sign, broadcast | base | [README](sdk/base/README.md) |
 | `indexing` | `sdk/indexing` | Append-only, chain-neutral sync into history, checkpoint, and outputs, with pending blocks in memory; narrow store ports for live outputs and transaction lookup; optional SQLite/memory repositories and Tokio supervision | indexing | [README](sdk/indexing/README.md) |
 | `wallets` | `sdk/wallets` | Wallet factory contract and the `Wallets` registry: wallet capabilities, sends and batches; no reads | wallets | [README](sdk/wallets/README.md) |
@@ -56,7 +56,7 @@ base            -> crypto, decimal
 ```
 
 `wallets` and `indexing` never name each other; `config` composes both
-(`sdk_config::Composition`). `linter.toml` and `scripts/check-chains.sh` (check
+(`payments::config::Composition`). `linter.toml` and `scripts/check-chains.sh` (check
 14) enforce crate and module boundaries.
 Within `indexing/src/storage/`, each directory is one backend with `mod.rs`;
 shared contracts/models are files directly under `storage/`. The engine and
@@ -137,9 +137,11 @@ the commit; queries use exact atomic arithmetic, never SQLite integer sums over
 u256 text.
 Each query reads its rows, checkpoint and how far its inspection is behind from one snapshot.
 
-Balance and history reads belong to the application (051): `apps/server` owns
-their SQL over indexing's tables and completes them with each network's pending
-blocks (`indexing::Pending`); Bitcoin's coin selection (`chain_bitcoin::sender::Spendable`)
+Balance and history reads belong to the repository (053): the shipped SQLite
+and memory stores answer them with inherent `balance`/`history` methods (no
+trait; a custom store brings its own), and the caller completes them with each
+network's pending blocks (`indexing::Pending`, `SettledBalance::completed`,
+`Page::completed`); Bitcoin's coin selection (`chain_bitcoin::sender::Spendable`)
 and Solana's absence proof (`chain_solana::sender::IndexPresence`) do the same over
 `OutputStore` and `TransactionStore`. Every such read samples pending blocks
 before the store read and narrows them using that answer's checkpoint. A commit
@@ -202,7 +204,7 @@ the same chain-owned send pipeline.
 ## Runtime
 
 The application owns cancellation, task admission, readiness and shutdown.
-`Supervisor` drives networks independently: bounded jittered retries for transient
+`Driver` drives networks independently: bounded jittered retries for transient
 failures; quarantine for terminal failures or panics. An SDK caller can resume an
 in-memory quarantine; the server clears one through an online rescan of that network
 or a restart. A confirmed reorg needs a rescan, online or offline.
@@ -213,16 +215,16 @@ memory rather than making RPC calls; transport counters are read from each netwo
 current nodes, without adding an HTTP dependency to wallet/indexing contracts.
 
 Composition is static: the server reads its configuration once, composes every
-chain once over one repository, runs one `Supervisor` over the composed index and
+chain once over one repository, runs one `Driver` over the composed index and
 serves one handler state built at startup. Adding or removing chains, assets or networks is a
 configuration edit and a restart. Two maintenance actions run live, as routes over
 SDK operations and model stores composed in `main.rs`:
 
 - RPC nodes. A network's `rpc.endpoints` in the file only seed the server's
   `rpc_endpoints` table (model `RpcEndpoints`) on first start; once a network has a
-  row, the row is its node list on every start (`sdk_config::Chains::with_endpoints`).
+  row, the row is its node list on every start (`payments::config::Chains::with_endpoints`).
   `Chains::compose_available` composes each section's chain over a `json_rpc::Swap`.
-  An edit is checked by `sdk_config::ChainNodes::verify`, the chain's own
+  An edit is checked by `payments::config::ChainNodes::verify`, the chain's own
   `Chain::verify` over the candidate (a closure the composition root hands the
   routes), stored, then swapped in; calls in flight finish on the node they reached,
   and a failed check changes nothing.

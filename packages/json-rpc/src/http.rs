@@ -7,7 +7,7 @@ use jsonrpsee::{
         params::BatchRequestBuilder,
         traits::ToRpcParams,
     },
-    http_client::{HeaderMap, HttpClient, HttpClientBuilder, transport},
+    http_client::{HttpClient, HttpClientBuilder, transport},
     types::ErrorObjectOwned,
 };
 use serde_json::{Value, value::RawValue};
@@ -21,12 +21,12 @@ use crate::{
 /// and no failover. Compose [`crate::Retry`] and [`crate::Failover`] around it
 /// for those. Cheap to clone; clones share the connection pool.
 ///
-/// `Debug` shows header names only; the `jsonrpsee` client keeps the full URL,
-/// userinfo included, so it is never handed to a formatter.
+/// `Debug` shows the redacted URL only; the `jsonrpsee` client keeps the full
+/// URL, userinfo included, so it is never handed to a formatter.
 #[derive(Clone)]
 pub struct Http {
     client: HttpClient,
-    header_names: Vec<String>,
+    redacted: String,
     statistics: Statistics,
     events: Arc<crate::events::Events>,
 }
@@ -35,28 +35,24 @@ impl fmt::Debug for Http {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Http")
-            .field("header_names", &self.header_names)
+            .field("url", &self.redacted)
             .finish()
     }
 }
 
 impl Http {
-    /// Builds the client once every value is resolved; does no I/O.
-    pub(crate) fn build(target: &str, headers: HeaderMap, bounds: Bounds) -> Result<Self, Error> {
-        let header_names = headers
-            .keys()
-            .map(|name| name.as_str().to_owned())
-            .collect();
+    /// Builds the client; does no I/O. Userinfo in `target` becomes HTTP
+    /// Basic authorization.
+    pub(crate) fn build(target: &str, redacted: String, bounds: Bounds) -> Result<Self, Error> {
         let client = HttpClientBuilder::default()
             .request_timeout(bounds.timeout())
             .max_request_size(bounds.max_request_bytes)
             .max_response_size(bounds.max_response_bytes)
-            .set_headers(headers)
             .build(target)
             .map_err(Error::from_rpc)?;
         Ok(Self {
             client,
-            header_names,
+            redacted,
             statistics: Statistics::default(),
             events: Arc::default(),
         })

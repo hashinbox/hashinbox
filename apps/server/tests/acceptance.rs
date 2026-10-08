@@ -33,7 +33,7 @@ async fn generated_wallet_history_survives_restart() -> Result<(), Box<dyn std::
         })
     };
 
-    let first = start_api_in(chains(), &[], Arc::clone(&storage)).await?;
+    let first = start_api_in(chains(), Arc::clone(&storage)).await?;
     let btc = create_wallet(&first.root, "btc").await?;
     let eth = create_wallet(&first.root, "eth").await?;
     let btc_wallet = wallet_id(&btc);
@@ -58,7 +58,7 @@ async fn generated_wallet_history_survives_restart() -> Result<(), Box<dyn std::
     wait_history(&first.root, eth_wallet, &eth_id).await;
     first.stop().await;
 
-    let second = start_api_in(chains(), &[], storage).await?;
+    let second = start_api_in(chains(), storage).await?;
     assert_eq!(wallet_summary(&second.root, btc_wallet).await?, btc);
     assert_eq!(wallet_summary(&second.root, eth_wallet).await?, eth);
     wait_history(&second.root, btc_wallet, &btc_id).await;
@@ -392,7 +392,7 @@ async fn generated_wallet_survives_restart_and_spends_without_configured_keys()
     let bitcoin = BitcoinNode::start().await;
     let storage = Arc::new(TempDir::new()?);
     let chains = || json!({"bitcoin": bitcoin_index(&bitcoin)});
-    let first = start_api_in(chains(), &[], storage.clone()).await?;
+    let first = start_api_in(chains(), storage.clone()).await?;
     let wallet = create_wallet(&first.root, "btc").await?;
     let id = wallet_id(&wallet).to_owned();
     assert_eq!(wallet["watch_only"], false);
@@ -413,7 +413,7 @@ async fn generated_wallet_survives_restart_and_spends_without_configured_keys()
     bitcoin.mine();
     wait_history(&first.root, &id, &transaction).await;
     first.stop().await;
-    let second = start_api_in(chains(), &[], storage).await?;
+    let second = start_api_in(chains(), storage).await?;
     assert_eq!(wallet_summary(&second.root, &id).await?, wallet);
     let sent = send(&second.root, &id, &bitcoin_destination(9), "all").await?;
     assert!(!sent.is_empty(), "restored key signs and submits");

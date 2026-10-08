@@ -8,10 +8,10 @@ without the rest of the SDK.
 ## Usage
 
 ```rust,no_run
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use chain_solana::{Config, Network, Store};
-use sdk_config::{ComposedChain, Rpc};
+use payments::config::{ComposedChain, Rpc};
 use wallets::SubmissionRegistrar;
 
 /// `repository` is the one store every network is indexed into.
@@ -19,7 +19,6 @@ async fn solana<R: Store>(
     repository: R,
     registrar: &Arc<dyn SubmissionRegistrar>,
 ) -> Result<ComposedChain<&'static str>, Box<dyn std::error::Error>> {
-    let secrets = BTreeMap::<String, String>::new();
     let genesis = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d".parse()?;
 
     let config = Config::new(
@@ -29,7 +28,7 @@ async fn solana<R: Store>(
     );
 
     // Checks the genesis hash and every token mint. Opens and writes nothing.
-    let chain = config.connect(&secrets).await?;
+    let chain = config.connect().await?;
     // The index and one wallet factory per asset tag.
     Ok(chain.compose(repository, registrar).await?)
 }

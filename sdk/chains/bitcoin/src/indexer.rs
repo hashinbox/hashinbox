@@ -1,6 +1,8 @@
 //! The Bitcoin indexer: [`indexer`] over [`IndexerParams`].
 
-use indexing::{Budget, Config, IndexError, Indexer};
+use std::time::Duration;
+
+use indexing::{Budget, Config, IndexError, Indexer, Schedule};
 
 use crate::{BlockInterpreter, RpcClient, Source};
 
@@ -14,6 +16,8 @@ pub struct IndexerParams<C, R> {
     pub repository: R,
     /// Defaults to [`IndexerParams::SYNC`].
     pub sync: Budget,
+    /// How often a driver polls this chain. Defaults to [`IndexerParams::POLL`].
+    pub schedule: Schedule,
     /// How many blocks below the node's tip the confirmed line sits.
     /// Defaults to [`IndexerParams::CONFIRMED_DEPTH`].
     pub confirmed_depth: u64,
@@ -22,6 +26,9 @@ pub struct IndexerParams<C, R> {
 impl<C, R> IndexerParams<C, R> {
     /// Batches of a hundred blocks.
     pub const SYNC: Budget = Budget::new(100);
+
+    /// Ten seconds: a new tip is seen well within Bitcoin's ten-minute block.
+    pub const POLL: Schedule = Schedule::every(Duration::from_secs(10));
 
     /// Blocks held above the confirmed line by default.
     ///
@@ -51,6 +58,7 @@ impl<C, R> IndexerParams<C, R> {
             rpc,
             repository,
             sync: Self::SYNC,
+            schedule: Self::POLL,
             confirmed_depth: Self::CONFIRMED_DEPTH,
         }
     }
@@ -102,7 +110,7 @@ pub fn indexer<C, R>(
         Source::new(params.rpc, depth),
         BlockInterpreter::new(&network)?,
         params.repository,
-        Config::new(&network, params.sync)?,
+        Config::new(&network, params.sync, params.schedule)?,
     ))
 }
 

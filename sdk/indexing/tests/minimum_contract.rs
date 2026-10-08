@@ -233,7 +233,12 @@ fn over(sink: &Arc<Sink>, chain: &Chain) -> Indexer<Chain, Chain, Arc<Sink>> {
         chain.clone(),
         chain.clone(),
         Arc::clone(sink),
-        Config::new(chain.network(), Budget::new(100)).expect("sync policy"),
+        Config::new(
+            chain.network(),
+            Budget::new(100),
+            indexing::Schedule::every(std::time::Duration::from_millis(1)),
+        )
+        .expect("sync policy"),
     )
 }
 
