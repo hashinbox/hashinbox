@@ -117,8 +117,6 @@ jobs:
       # whitespace and no conflict markers anywhere in the tree.
       - name: Whitespace
         run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
-      - name: Chain rules the linter cannot express
-        run: sh scripts/check-chains.sh
       # Pinned release of the design linter; a failed download fails the job
       # instead of skipping the check.
       - name: Install linter

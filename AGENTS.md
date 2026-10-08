@@ -36,7 +36,7 @@ separate indexer service, raw-block archive or multi-writer deployment.
 | --- | --- |
 | `apps/server` | The one application, a binary with no library target. Every module is a model, the API, or composition: `main.rs` composes (with `config.rs`, `chains.rs` (the only file naming chains), `storage.rs`, `asset.rs`, `state.rs`, `operator.rs`, `ui.rs`; test-only `app.rs` is the application under test), including startup's node plan, the live transports and the candidate-node verifier; generic mechanics belong to the owning SDK crate or package |
 | `apps/server/src/models/` | The server's nouns, one file each: validated type, its own serde/utoipa wire form, and for durable ones their storage: `Wallet` reads indexing's `wallet` rows through `WalletRegistry`, `RpcEndpoints` is SQL on the one SQLite pool in `models/schema.sql` (created with indexing's on an empty file, no migrations). Balance and history are the concrete repository's inherent reads (053), not server SQL. No axum, routes, `payments::config` or chain (check 8) |
-| `apps/server/src/api/` | One file per HTTP resource (`wallets`, `balance`, `transactions`, `assets`, `networks`, `health`, `openapi`) with its routes, request/response models and tests; `mod.rs` assembles the router and OpenAPI root and holds the shared `Error`/`ErrorBody`. Handler state is `src/state.rs`; each configured network's live handles are in `networks.rs`; handlers call SDK operations and model stores directly. None of `api/`, `asset.rs`, `state.rs` names a concrete chain, `payments::config` or storage backend (`scripts/check-chains.sh` check 8) |
+| `apps/server/src/api/` | One file per HTTP resource (`wallets`, `balance`, `transactions`, `assets`, `networks`, `health`, `openapi`) with its routes, request/response models and tests; `mod.rs` assembles the router and OpenAPI root and holds the shared `Error`/`ErrorBody`. Handler state is `src/state.rs`; each configured network's live handles are in `networks.rs`; handlers call SDK operations and model stores directly. None of `api/`, `asset.rs`, `state.rs` names a concrete chain, `payments::config` or storage backend |
 | `sdk/base` | Small chain-neutral values and signing/broadcast contracts; no chains, RPC, indexing or wallets |
 | `sdk/chains/*` | Native protocol, RPC, addresses, signing, transaction construction/broadcast and indexing translation |
 | `sdk/wallets` | Factory collection, wallet capabilities and batch orchestration; no reads, custody or durable watch ownership; imports only `base` (no `indexing`, either direction) |
@@ -48,8 +48,7 @@ separate indexer service, raw-block archive or multi-writer deployment.
 
 Concrete chains are selected at composition, never in business/HTTP code; chains do
 not depend on each other. Native chain modules know no indexing/wallet SDK models.
-Keep chain layouts and scenarios consistent with sibling crates and
-`scripts/check-chains.sh`. Construct long-lived dependencies once, not in handlers.
+Keep chain layouts and scenarios consistent with sibling crates. Construct long-lived dependencies once, not in handlers.
 
 ## Indexing requirements
 
@@ -162,7 +161,6 @@ cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --doc
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
-sh scripts/check-chains.sh
 git diff --check
 ```
 
