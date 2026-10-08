@@ -302,6 +302,10 @@ impl FactoryProfile for WalletFactory {
         self.config.asset.id()
     }
 
+    fn key_format(&self) -> base::KeyFormat {
+        base::KeyFormat::Ed25519Seed
+    }
+
     /// Native SOL only. An SPL mint is indexed and its balance reported, and
     /// this integration builds no SPL transfer, so a token factory declares
     /// no authorship at all: its wallets are plain `wallets::Wallet`s with

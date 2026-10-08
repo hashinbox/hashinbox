@@ -114,7 +114,7 @@ export interface paths {
         get?: never;
         /**
          * Replace a network's RPC nodes
-         * @description Verifies the nodes with the chain's own startup check over the new list, stores them, then sends every later call to them; calls already sent finish on the node they reached. A node that fails the check leaves the current nodes in use and stores nothing. The stored list is used on every later start, whatever the configuration file says. Credentials are stored as sent; prefer `${NAME}` references. A network that is unavailable stores the verified nodes and uses them from the next start.
+         * @description Verifies the nodes with the chain's own startup check over the new list, stores them, then sends every later call to them; calls already sent finish on the node they reached. A node that fails the check leaves the current nodes in use and stores nothing. The stored list is used on every later start, whatever the configuration file says. Credentials in the URL are stored as sent. A network that is unavailable stores the verified nodes and uses them from the next start.
          */
         put: operations["replace_network_rpc"];
         post?: never;
@@ -158,8 +158,8 @@ export interface paths {
         get: operations["list_wallets"];
         put?: never;
         /**
-         * Generate a wallet, or watch an address, for one configured asset
-         * @description Without `address`, generates a wallet, stores it with its key, then watches it from creation. Keys never leave the server. Retrying creates another wallet. With `address`, stores and observes that address from registration without its key: the wallet is watch-only, and sending from it answers 422. `label` names either. `start` is `"fresh"` (the default) or the native position observation begins at; a position older than the network's backfill policy allows answers 400. An archived wallet's address is refused: archiving is final.
+         * Generate a wallet, or watch an address, in one configured asset
+         * @description Without `address`, generates a wallet, stores it with its key, then watches it in `asset` from creation. Keys never leave the server. Retrying creates another wallet. With `address`, observes that address in `asset` from registration: a new address becomes a watch-only wallet, and sending from it answers 422; an address that already is a wallet gains `asset`. `label` names either. `start` is `"fresh"` (the default) or the native position observation of `asset` begins at; a position older than the network's backfill policy allows answers 400. An archived wallet's address is refused: archiving is final.
          */
         post: operations["create_wallet"];
         delete?: never;
@@ -177,7 +177,7 @@ export interface paths {
         };
         /**
          * Read one wallet's public metadata
-         * @description The wallet's asset, network, canonical address, watch-only flag, label and archive time, archived or not; never its key.
+         * @description The wallet's network, canonical address, watch-only flag, label, archive time and observed assets, archived or not; never its key.
          */
         get: operations["read_wallet"];
         put?: never;
@@ -200,8 +200,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read a wallet's balance in its own asset
-         * @description The confirmed indexed total and pending incoming/outgoing amounts in the asset's display units, with the confirmed and pending heights and how many blocks the address's inspection is behind. Chain spending rules still apply. A watch-only address reads the same balance without a key.
+         * Read a wallet's balance in one asset
+         * @description The confirmed indexed total and pending incoming/outgoing amounts in the asset's display units, with the confirmed and pending heights and how many blocks the address's inspection is behind. Chain spending rules still apply. A watch-only address reads the same balance without a key. An asset the wallet is not observed in reads what was indexed for its address.
          */
         get: operations["read_wallet_balance"];
         put?: never;
@@ -221,13 +221,13 @@ export interface paths {
         };
         /**
          * Read one page of a wallet's history
-         * @description The wallet's canonical history in the wallet's own asset. `transactions` is confirmed and append-only, so its cursor stays valid however far the checkpoint moves; `pending` carries the transactions above the confirmed line and is populated on the first page only; `behind` says how many blocks the address's inspection trails the confirmed line, as the balance does.
+         * @description The wallet's canonical history in `asset`; a fee is shown where this address was charged it. `transactions` is confirmed and append-only, so its cursor stays valid however far the checkpoint moves; `pending` carries the transactions above the confirmed line and is populated on the first page only; `behind` says how many blocks the address's inspection trails the confirmed line, as the balance does.
          */
         get: operations["read_wallet_transactions"];
         put?: never;
         /**
          * Submit one transfer from a wallet
-         * @description Submits one transfer through the wallet's configured asset. Every asset uses this shared route; no chain-specific transaction route exists. A watch-only wallet answers 422. A 202 response means submitted, not confirmed.
+         * @description Submits one transfer of `asset` from the wallet. Every asset uses this shared route; no chain-specific transaction route exists. A watch-only wallet answers 422. A 202 response means submitted, not confirmed.
          */
         post: operations["send_transfer"];
         delete?: never;
@@ -382,7 +382,9 @@ export interface components {
         };
         /**
          * @description `POST /v1/wallets` body: generate a wallet for one configured asset, or
-         *     watch an existing address of it without its key.
+         *     watch an existing address in it without its key. A wallet is an address:
+         *     watching another asset of an address that already is a wallet adds that
+         *     asset to it.
          */
         CreateWallet: {
             /**
@@ -390,7 +392,7 @@ export interface components {
              *     address without its key. Absent: generate a new wallet.
              */
             address?: string;
-            /** @description The configured asset tag the wallet holds (`GET /v1/assets`). */
+            /** @description The configured asset tag to observe the wallet in (`GET /v1/assets`). */
             asset: string;
             /** @description The operator's name for the wallet, 1 to 64 characters. */
             label?: string;
@@ -400,17 +402,13 @@ export interface components {
              */
             start?: components["schemas"]["Start"];
         };
-        /** @description A node with its own headers and bounds. */
+        /** @description A node with its own bounds. */
         DetailedEndpoint: {
             /**
              * @description Per-call limits: `timeout_ms`, `max_request_bytes`,
              *     `max_response_bytes`; each defaults when absent.
              */
             bounds?: Record<string, never> | null;
-            /** @description Headers every call carries. */
-            headers?: {
-                [key: string]: string;
-            };
             /** @description `http` or `https` URL naming a host, without a fragment. */
             url: string;
         };
@@ -595,15 +593,14 @@ export interface components {
         };
         /**
          * @description One RPC node, written as the configuration file's `rpc.endpoints` writes
-         *     it. `${NAME}` anywhere in the URL or a header value stands for the
-         *     server's environment variable `NAME`.
+         *     it. The URL carries any credentials: userinfo (HTTP Basic) or query keys.
          */
         RpcEndpoint: string | components["schemas"]["DetailedEndpoint"];
         /** @description One RPC node as it may be shown. */
         RpcNode: {
             /**
-             * @description Scheme, host and port of the node's URL. User information, path,
-             *     query and headers are never returned: any of them may hold a
+             * @description Scheme, host and port of the node's URL. User information, path and
+             *     query are never returned: any of them may hold a
              *     credential.
              */
             origin: string;
@@ -697,6 +694,8 @@ export interface components {
         Transfer: {
             /** @description Exact decimal in display units, or `all` for the available balance after fees. */
             amount: string;
+            /** @description A configured asset tag of the wallet's network: the asset sent. */
+            asset: string;
             /** @description Recipient address text, as the wallet's chain writes it. */
             destination: string;
         };
@@ -707,12 +706,15 @@ export interface components {
         };
         /** @description `POST /v1/transactions` body: an ordered batch of one wallet asset. */
         TransferBatch: {
-            /** @description Transfers of one configured asset, in execution order. */
+            /** @description The configured asset tag every transfer sends. */
+            asset: string;
+            /** @description Transfers of `asset`, in execution order. */
             transfers: components["schemas"]["BatchedTransfer"][];
         };
         /**
-         * @description One wallet: its public identity and its lifecycle. Its wire form is what
-         *     every wallet route returns; it never holds the key.
+         * @description One wallet: one address of one network, its lifecycle, and the assets it
+         *     is observed in. Its wire form is what every wallet route returns; it never
+         *     holds the key.
          */
         Wallet: {
             /** @description Canonical address text. */
@@ -724,15 +726,10 @@ export interface components {
              */
             archived_at: number | null;
             /**
-             * @description The configured asset tag this wallet holds and sends; null when no
-             *     configured asset holds it any more. Always present.
+             * @description The assets the index observes the address in, in asset order; empty
+             *     once archived or when this process does not serve its network.
              */
-            asset: string | null;
-            /**
-             * @description The asset's identity within its chain: `native`, or a token
-             *     identifier.
-             */
-            asset_id: string;
+            assets: components["schemas"]["WatchedAsset"][];
             /** @description Wallet ID, a UUIDv7 the API minted. */
             id: string;
             /** @description The operator's label; null when none was given. Always present. */
@@ -746,6 +743,19 @@ export interface components {
         WalletList: {
             /** @description Wallets in ID order. */
             wallets: components["schemas"]["Wallet"][];
+        };
+        /** @description One asset the index observes a wallet's address in. */
+        WatchedAsset: {
+            /**
+             * @description The configured asset tag; null when no configured asset is it any
+             *     more. Always present.
+             */
+            asset: string | null;
+            /**
+             * @description The asset's identity within its chain: `native`, or a token
+             *     identifier.
+             */
+            asset_id: string;
         };
     };
     responses: never;
@@ -960,7 +970,7 @@ export interface operations {
                     "application/json": components["schemas"]["ConfiguredNetwork"];
                 };
             };
-            /** @description Malformed node list, a node the chain refuses, or an unset `${NAME}` */
+            /** @description Malformed node list or a node the chain refuses */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1184,7 +1194,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description The address is already an active or archived wallet, an unobserved row of it holds another key, or the asset's network is being rescanned */
+            /** @description The address is an archived wallet, is already watched in this asset from another start, or the asset's network is being rescanned */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1306,7 +1316,10 @@ export interface operations {
     };
     read_wallet_balance: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description A configured asset tag of the wallet's network (`GET /v1/assets`). */
+                asset: string;
+            };
             header?: never;
             path: {
                 /** @description The wallet ID a create or watch call returned. */
@@ -1325,6 +1338,15 @@ export interface operations {
                     "application/json": components["schemas"]["Balance"];
                 };
             };
+            /** @description Malformed query */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Missing or invalid bearer token */
             401: {
                 headers: {
@@ -1334,7 +1356,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Wallet is unknown */
+            /** @description Wallet is unknown, or the asset is not of its network */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1356,7 +1378,12 @@ export interface operations {
     };
     read_wallet_transactions: {
         parameters: {
-            query?: {
+            query: {
+                /**
+                 * @description A configured asset tag of the wallet's network: the asset whose
+                 *     history is read.
+                 */
+                asset: string;
                 /** @description `next_cursor` of the previous page; absent for the first page. */
                 cursor?: string;
                 /** @description Page size, 1 to 1000. */
@@ -1398,7 +1425,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Wallet is unknown */
+            /** @description Wallet is unknown, or the asset is not of its network */
             404: {
                 headers: {
                     [name: string]: unknown;

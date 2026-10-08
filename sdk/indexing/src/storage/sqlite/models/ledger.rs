@@ -2,15 +2,16 @@
 //!
 //! **A row is an effect, not a fact.** The fact is the transaction, stored once
 //! in `"transaction"`; what is stored per address is what that transaction did
-//! to its subject, with `direction` separate from `kind`.
+//! to its subject, with `direction` separate from `kind`. A network fee is one
+//! of these effects — a debit of the payer, naming its transaction — and is
+//! the only place a fee is stored: history reads it back from here.
 //!
 //! **Transactionless credits are these rows too.** A consensus-layer withdrawal
 //! is one address, one asset, one amount and no transaction to name it, which
-//! is this row with an empty `transaction_id`. A `MovementId` is unique within
-//! its transaction (`Transaction::validate_movements`) and a `BlockCredit`'s
-//! within its block (`BlockCredit::validate_all`), and the empty
-//! `transaction_id` separates the two namespaces, so no credit can ever collide
-//! with a movement.
+//! is this row with a null `transaction_id`. Its id carries an empty
+//! transaction part, which no transaction has
+//! (`Transaction::validate_identity`), so no credit can ever collide with a
+//! movement.
 
 use std::collections::BTreeMap;
 
@@ -19,11 +20,11 @@ use num_bigint::{BigInt, BigUint};
 use sqlx::{FromRow, QueryBuilder, SqliteConnection, sqlite::SqliteRow};
 
 use super::{
-    Chunks, amount, column, deleted, each, failure, fetched, framed, network, raised, store, stored,
+    Block, Chunks, address_id, amount, canonical_id, column, each, failure, fetched, raised, store,
 };
 use crate::{
-    Address, BlockCredit, FeeSettlement, Holder, IndexError, IndexedBatch, MovementId, Network,
-    NetworkFee, Transaction, ValueMovement,
+    Address, AssetId, BlockCredit, BlockRef, FeeSettlement, Holder, IndexError, IndexedBatch,
+    MovementId, Network, NetworkFee, Transaction, ValueMovement,
 };
 
 /// One subject's credits and debits, in atomic units.
@@ -34,30 +35,25 @@ use crate::{
 /// non-negative answer, zero, is a real debit thrown away.
 pub(in crate::storage::sqlite) type Totals = (BigUint, BigUint);
 
-/// What the rows one commit wrote change each `(address, asset)` holding's
+/// What the rows one commit wrote change each `(address id, asset)` holding's
 /// signed net by.
 pub(in crate::storage::sqlite) type Deltas = BTreeMap<(String, String), BigInt>;
 
-/// What one `ledger` row is the only row for: its primary key.
-type LedgerKey<'a> = (
-    &'a Network,
-    &'a str,
-    &'a str,
-    i64,
-    &'a str,
-    &'a str,
-    Direction,
-);
+/// What one transaction did to one address, as history shows it: its
+/// movements, and the fee it was charged.
+pub(in crate::storage::sqlite) type Effects = (Vec<ValueMovement>, Option<NetworkFee>);
 
-/// The empty `transaction_id` of a row no transaction names, and the empty
-/// `movement_id` of a fee row inside its transaction.
+/// The `movement_id` of a fee charged beside the movements.
 ///
-/// `NULL` would be the honest spelling and SQLite forbids it: every primary-key
-/// column of a `WITHOUT ROWID` table is implicitly `NOT NULL`. The empty string
-/// is unreachable from outside: `Transaction::validate_movements` refuses a
-/// movement whose identity is empty, so a fee can never collide with a
-/// movement of its own transaction.
-const UNNAMED: &str = "";
+/// `Transaction::validate_movements` refuses a movement whose identity is
+/// empty, so a fee can never collide with a movement of its own transaction.
+const CHARGED: &str = "";
+
+/// The `movement_id` of a fee the movements already contain (Bitcoin's
+/// inputs minus outputs): recorded so history shows it, never folded into a
+/// balance again. A movement id is the chain's own, and no chain names a
+/// movement this, because a fee row has `kind` 5 and a movement does not.
+const EMBEDDED: &str = "embedded";
 
 /// Which way value crossed the address: `direction`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -131,96 +127,73 @@ impl Effect {
 
 /// One `ledger` row.
 ///
-/// Equality is the whole row: one `(address, asset, block, transaction,
-/// movement, direction)` cannot honestly have two amounts, kinds or
+/// Equality is the whole row: one id — `(block, transaction, movement,
+/// address, asset, direction)` — cannot honestly have two amounts, kinds or
 /// counterparties, so a re-presented effect is verified by comparing rows.
-///
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::storage::sqlite) struct Ledger {
-    network: Network,
-    address: String,
+    id: String,
+    block_id: String,
+    transaction_id: Option<String>,
+    address_id: String,
     asset: String,
-    block_height: i64,
-    transaction_id: String,
     movement_id: String,
-    direction: Direction,
-    block_position: i64,
     movement_order: i64,
+    direction: Direction,
     effect: Effect,
     amount: String,
     counterparty: Option<String>,
 }
 
+/// Where one row sits: its network, its block's id, and its transaction's
+/// native id (`None` for a transactionless credit).
+struct Place<'a> {
+    network: &'a Network,
+    block: &'a BlockRef,
+    transaction: Option<&'a str>,
+}
+
 impl Ledger {
-    /// What `movement`, the `order`th of `entry`, did to `address` in
-    /// `direction`; `counterparty` is the movement's other endpoint.
-    fn movement(
-        address: &Address,
-        entry: &Transaction,
-        movement: (usize, &ValueMovement),
+    /// The row of one effect on `(address, asset)` at `place`, its id derived
+    /// from every part of its key; the caller states its amount and
+    /// counterparty.
+    fn at(
+        place: &Place<'_>,
+        (address, asset): (&str, &str),
+        movement: (&str, i64),
         direction: Direction,
+        effect: Effect,
     ) -> Result<Self, IndexError> {
-        let (order, movement) = movement;
-        let other = match direction {
-            Direction::Credit => movement.from(),
-            Direction::Debit => movement.to(),
-        };
+        let network = place.network;
+        let block_id = Block::try_from(place.block)?.id(network);
+        let hash = hex::encode(&place.block.hash.0);
+        let (movement_id, movement_order) = movement;
+        let tag = direction.tag().to_string();
+        let id = canonical_id(&[
+            network.chain.as_str(),
+            &network.name,
+            &hash,
+            place.transaction.unwrap_or_default(),
+            movement_id,
+            address,
+            asset,
+            &tag,
+        ]);
         Ok(Self {
-            network: address.network.clone(),
-            address: address.value.clone(),
-            asset: movement.asset.asset.clone(),
-            block_height: stored(entry.block().height.0)?,
-            transaction_id: entry.id.id.as_str().to_owned(),
-            movement_id: movement.id.0.clone(),
+            id,
+            block_id,
+            transaction_id: place
+                .transaction
+                .map(|id| canonical_id(&[network.chain.as_str(), &network.name, id])),
+            address_id: address_id(network, address),
+            asset: asset.to_owned(),
+            movement_id: movement_id.to_owned(),
+            movement_order,
             direction,
-            block_position: stored(entry.block().position.0)?,
-            movement_order: i64::try_from(order).unwrap_or(i64::MAX),
-            effect: Effect::Movement(movement.kind()),
-            amount: movement.amount.to_string(),
-            counterparty: other.map(|other| other.value.clone()),
-        })
-    }
-
-    /// The fee `entry` charged its payer, `address`.
-    ///
-    /// One row per transaction per payer, never one per participating address:
-    /// a Bitcoin-style fan-out names a dozen addresses on one transaction, and a
-    /// fee written under each of them would charge the payer once for every
-    /// other participant.
-    fn fee(address: &Address, entry: &Transaction, fee: &NetworkFee) -> Result<Self, IndexError> {
-        Ok(Self {
-            network: address.network.clone(),
-            address: address.value.clone(),
-            asset: fee.asset.asset.clone(),
-            block_height: stored(entry.block().height.0)?,
-            transaction_id: entry.id.id.as_str().to_owned(),
-            movement_id: UNNAMED.to_owned(),
-            direction: Direction::Debit,
-            block_position: stored(entry.block().position.0)?,
-            movement_order: i64::MAX,
-            effect: Effect::Fee,
-            amount: fee.amount.to_string(),
+            effect,
+            amount: String::new(),
             counterparty: None,
         })
-    }
-
-    /// One transactionless credit, in the block at `(height, position)`.
-    fn withdrawal(credit: &BlockCredit, block: (i64, i64)) -> Self {
-        let (height, position) = block;
-        Self {
-            network: credit.to.network.clone(),
-            address: credit.to.value.clone(),
-            asset: credit.asset.asset.clone(),
-            block_height: height,
-            transaction_id: UNNAMED.to_owned(),
-            movement_id: credit.id.0.clone(),
-            direction: Direction::Credit,
-            block_position: position,
-            movement_order: 0,
-            effect: Effect::Withdrawal,
-            amount: credit.amount.to_string(),
-            counterparty: None,
-        }
     }
 
     /// Every effect `entry` has on `address`: a credit where the address
@@ -228,41 +201,96 @@ impl Ledger {
     /// sent itself, and the fee when the chain charges it beside the movements
     /// and this address paid it.
     ///
-    /// **The network fee is a row on a chain that charges it and no row on a
-    /// chain that does not.** Bitcoin's fee is already inside
-    /// `Σ inputs − Σ outputs`, so a `Movements` chain writes nothing and cannot
-    /// be talked into charging twice.
+    /// **The network fee is always a row, and folded only where it is
+    /// charged.** Bitcoin's fee is already inside `Σ inputs − Σ outputs`, so an
+    /// `Embedded` chain's fee row is marked [`EMBEDDED`] and adds nothing to a
+    /// balance: it cannot be talked into charging twice.
     fn effects(
         address: &Address,
         entry: &Transaction,
         settlement: FeeSettlement,
     ) -> Result<Vec<Self>, IndexError> {
+        let place = Place {
+            network: &address.network,
+            block: entry.block(),
+            transaction: Some(entry.id.id.as_str()),
+        };
         let mut effects = Vec::new();
-        for movement in entry.movements.iter().enumerate() {
-            let (_, value) = movement;
-            if value.to().map(|to| &to.value) == Some(&address.value) {
-                effects.push(Self::movement(address, entry, movement, Direction::Credit)?);
-            }
-            if value.from().map(|from| &from.value) == Some(&address.value) {
-                effects.push(Self::movement(address, entry, movement, Direction::Debit)?);
+        for (order, movement) in entry.movements.iter().enumerate() {
+            let order = i64::try_from(order).unwrap_or(i64::MAX);
+            let sides = [
+                (Direction::Credit, movement.to(), movement.from()),
+                (Direction::Debit, movement.from(), movement.to()),
+            ];
+            for (direction, side, other) in sides {
+                if side.map(|side| &side.value) != Some(&address.value) {
+                    continue;
+                }
+                effects.push(Self {
+                    amount: movement.amount.to_string(),
+                    counterparty: other.map(|other| other.value.clone()),
+                    ..Self::at(
+                        &place,
+                        (&address.value, &movement.asset.asset),
+                        (&movement.id.0, order),
+                        direction,
+                        Effect::Movement(movement.kind()),
+                    )?
+                });
             }
         }
-        let charged = entry.fee.as_ref().filter(|fee| {
-            settlement == FeeSettlement::Charged && fee.payer.as_ref() == Some(address)
-        });
-        if let Some(fee) = charged {
-            effects.push(Self::fee(address, entry, fee)?);
+        // One row per transaction per payer, never one per participating
+        // address: a fan-out names a dozen addresses on one transaction, and a
+        // fee written under each of them would charge the payer once for every
+        // other participant.
+        let paid = entry
+            .fee
+            .as_ref()
+            .filter(|fee| fee.payer.as_ref() == Some(address));
+        if let Some(fee) = paid {
+            let marker = match settlement {
+                FeeSettlement::Charged => CHARGED,
+                FeeSettlement::Embedded => EMBEDDED,
+            };
+            effects.push(Self {
+                amount: fee.amount.to_string(),
+                ..Self::at(
+                    &place,
+                    (&address.value, &fee.asset.asset),
+                    (marker, i64::MAX),
+                    Direction::Debit,
+                    Effect::Fee,
+                )?
+            });
         }
         Ok(effects)
     }
 
-    /// The `(address, asset)` holding this row changes.
-    fn subject(&self) -> (&str, &str) {
-        (&self.address, &self.asset)
+    /// One transactionless credit, in `block`.
+    fn withdrawal(credit: &BlockCredit, block: &BlockRef) -> Result<Self, IndexError> {
+        let place = Place {
+            network: &credit.to.network,
+            block,
+            transaction: None,
+        };
+        Ok(Self {
+            amount: credit.amount.to_string(),
+            ..Self::at(
+                &place,
+                (&credit.to.value, &credit.asset.asset),
+                (&credit.id.0, 0),
+                Direction::Credit,
+                Effect::Withdrawal,
+            )?
+        })
     }
 
-    /// The amount in atomic units, unsigned: the fold adds it to its side.
+    /// The amount in atomic units, unsigned, that the fold adds to its side:
+    /// none for a fee the movements already contain.
     fn units(&self) -> Result<BigUint, IndexError> {
+        if self.effect == Effect::Fee && self.movement_id == EMBEDDED {
+            return Ok(BigUint::ZERO);
+        }
         amount(&self.amount)?
             .to_atomic(0)
             .map_err(|_| store("a stored amount is not an atomic integer"))
@@ -287,27 +315,20 @@ impl Ledger {
         })
     }
 
-    /// The primary key: what one row is the only row for.
-    fn key(&self) -> LedgerKey<'_> {
-        (
-            &self.network,
-            &self.address,
-            &self.asset,
-            self.block_height,
-            &self.transaction_id,
-            &self.movement_id,
-            self.direction,
-        )
+    /// The fee this row charged `payer`, as history shows it.
+    fn fee(&self, payer: &Address) -> Result<NetworkFee, IndexError> {
+        Ok(NetworkFee {
+            asset: AssetId {
+                chain: payer.network.chain.clone(),
+                asset: self.asset.clone(),
+            },
+            amount: amount(&self.amount)?,
+            payer: Some(payer.clone()),
+        })
     }
 
     /// Every row `batch` writes, block by block: each transaction's effects on
     /// every address that took part in it, then the block's credits.
-    ///
-    /// The transaction's own place is `(height, transaction id)`, which is a
-    /// function of the block rather than of this batch: a block is reported
-    /// with only the transactions that touched a selected address, so anything
-    /// derived from the *position* of a transaction in that list would differ
-    /// between two selections of the same block.
     pub(in crate::storage::sqlite) fn from_batch(
         batch: &IndexedBatch,
     ) -> Result<Vec<Self>, IndexError> {
@@ -320,14 +341,9 @@ impl Ledger {
             for (address, entry) in participants {
                 rows.extend(Self::effects(&address, entry, batch.settlement())?);
             }
-            let position = stored(canonical.block.reference().position.0)?;
-            let height = stored(canonical.block.reference().height.0)?;
-            rows.extend(
-                canonical
-                    .credits
-                    .iter()
-                    .map(|credit| Self::withdrawal(credit, (height, position))),
-            );
+            for credit in &canonical.credits {
+                rows.push(Self::withdrawal(credit, canonical.block.reference())?);
+            }
         }
         Ok(rows)
     }
@@ -341,44 +357,42 @@ impl Ledger {
     /// counterparty. Refusing those would loop forever, and rewriting them
     /// blindly would hide corruption, so a row that differs is terminal.
     ///
-    /// The rows the file already holds under the batch's keys are read first,
-    /// many keys to a statement, inside the write transaction that holds the
+    /// The rows the file already holds under the batch's ids are read first,
+    /// many to a statement, inside the write transaction that holds the
     /// file's lock, so what is absent here is exactly what the insert writes,
-    /// and only those rows change a watched total. A row the file already
-    /// holds is compared rather than rewritten, because one
-    /// `(address, asset, block, transaction, movement, direction)` cannot
-    /// honestly have two amounts; a key the batch repeats is compared with its
-    /// first occurrence, which is the row the file then holds.
+    /// and only those rows change a watched total. A id the batch repeats is
+    /// compared with its first occurrence, which is the row the file then
+    /// holds.
     pub(in crate::storage::sqlite) async fn insert_missing(
         connection: &mut SqliteConnection,
         rows: &[Self],
     ) -> Result<Deltas, IndexError> {
         let disagreement = || store("a committed movement disagrees with the stored one");
         let held = Self::find_held(connection, rows).await?;
-        let mut known: BTreeMap<_, &Self> = held.iter().map(|row| (row.key(), row)).collect();
+        let mut known: BTreeMap<&str, &Self> =
+            held.iter().map(|row| (row.id.as_str(), row)).collect();
         let mut fresh = Vec::new();
         for row in rows {
-            match known.get(&row.key()) {
+            match known.get(row.id.as_str()) {
                 Some(stored) if *stored == row => {}
                 Some(_) => return Err(disagreement()),
                 None => {
-                    known.insert(row.key(), row);
+                    known.insert(&row.id, row);
                     fresh.push(row);
                 }
             }
         }
         // Every fresh row is absent and unique, so all of them are written; a
         // row the insert still ignored was refused for something other than
-        // its key.
+        // its id.
         let written = Self::insert_many(connection, &fresh).await?;
         if usize::try_from(written).ok() != Some(fresh.len()) {
             return Err(disagreement());
         }
         let mut deltas = Deltas::new();
         for row in fresh {
-            let (address, asset) = row.subject();
             *deltas
-                .entry((address.to_owned(), asset.to_owned()))
+                .entry((row.address_id.clone(), row.asset.clone()))
                 .or_default() += row.delta()?;
         }
         Ok(deltas)
@@ -394,22 +408,19 @@ impl Ledger {
             .execute(connection, |chunk| {
                 let mut statement = QueryBuilder::new(
                     "INSERT OR IGNORE INTO ledger
-                         (chain, network, address, asset, block_height, transaction_id,
-                          movement_id, direction, block_position, movement_order, kind,
-                          amount, counterparty) ",
+                         (id, block_id, transaction_id, address_id, asset, movement_id,
+                          movement_order, direction, kind, amount, counterparty) ",
                 );
                 statement.push_values(chunk, |mut values, row: &&Self| {
                     values
-                        .push_bind(row.network.chain.as_str())
-                        .push_bind(row.network.name.as_str())
-                        .push_bind(row.address.as_str())
+                        .push_bind(row.id.as_str())
+                        .push_bind(row.block_id.as_str())
+                        .push_bind(row.transaction_id.as_deref())
+                        .push_bind(row.address_id.as_str())
                         .push_bind(row.asset.as_str())
-                        .push_bind(row.block_height)
-                        .push_bind(row.transaction_id.as_str())
                         .push_bind(row.movement_id.as_str())
-                        .push_bind(row.direction.tag())
-                        .push_bind(row.block_position)
                         .push_bind(row.movement_order)
+                        .push_bind(row.direction.tag())
                         .push_bind(row.effect.tag())
                         .push_bind(row.amount.as_str())
                         .push_bind(row.counterparty.as_deref());
@@ -419,63 +430,43 @@ impl Ledger {
             .await
     }
 
-    /// The rows the file holds under the keys of `rows`, many keys to a
-    /// statement, in no particular order.
+    /// The rows the file holds under the ids of `rows`, many to a statement,
+    /// in no particular order.
     async fn find_held(
         connection: &mut SqliteConnection,
         rows: &[Self],
     ) -> Result<Vec<Self>, IndexError> {
         Chunks::new(rows, "failed to look up balance movements")
             .fetch(connection, |chunk| {
-                let mut statement = QueryBuilder::new(
-                    "SELECT * FROM ledger
-                     WHERE (chain, network, address, asset, block_height, transaction_id,
-                            movement_id, direction) IN (",
-                );
-                statement.push_values(chunk, |mut key, row: &Self| {
-                    key.push_bind(row.network.chain.as_str())
-                        .push_bind(row.network.name.as_str())
-                        .push_bind(row.address.as_str())
-                        .push_bind(row.asset.as_str())
-                        .push_bind(row.block_height)
-                        .push_bind(row.transaction_id.as_str())
-                        .push_bind(row.movement_id.as_str())
-                        .push_bind(row.direction.tag());
-                });
+                let mut statement = QueryBuilder::new("SELECT * FROM ledger WHERE id IN (");
+                let mut ids = statement.separated(", ");
+                for row in chunk {
+                    ids.push_bind(row.id.as_str());
+                }
                 statement.push(")");
                 statement
             })
             .await
     }
 
-    /// Every credit and debit of one subject, summed.
+    /// Every credit and debit of one holding, summed.
     ///
     /// **One statement, streamed, and no cursor.** The rows are read through a
     /// running statement inside the caller's own transaction, so this costs one
-    /// row at a time whatever the subject's history is, and there is no resume
-    /// position to get wrong. A paginated form keyed its cursor on
-    /// `(height, transaction, movement)` and therefore could not resume inside
-    /// a same-address transfer, whose credit and debit share every one of
-    /// those columns and differ only in `direction` — a page boundary landing
-    /// between them dropped the debit and overstated the subject.
+    /// row at a time whatever the holding's history is.
     ///
     /// The arithmetic stays in Rust rather than becoming `SUM()`: an amount here
     /// is u256-capable canonical text and SQLite's only integer is a signed
     /// 64-bit one.
     pub(in crate::storage::sqlite) async fn total(
         connection: &mut SqliteConnection,
-        network: &Network,
-        (address, asset): (&str, &str),
+        (address_id, asset): (&str, &str),
     ) -> Result<Totals, IndexError> {
         let mut totals = (BigUint::ZERO, BigUint::ZERO);
         let context = "failed to fold balance movements";
-        let query = framed(
-            "SELECT * FROM ledger
-             WHERE chain = ?1 AND network = ?2 AND address = ?3 AND asset = ?4",
-            network,
-        )
-        .bind(address)
-        .bind(asset);
+        let query = sqlx::query("SELECT * FROM ledger WHERE address_id = ?1 AND asset = ?2")
+            .bind(address_id)
+            .bind(asset);
         each(connection, query, context, |row| {
             Self::from_row(row)
                 .map_err(|error| failure(&error, context))?
@@ -485,54 +476,56 @@ impl Ledger {
         Ok(totals)
     }
 
-    /// One subject's signed net, folded from every row: what an unwatched
-    /// holding reads, what an observed one is seeded with, and what a
-    /// persisted total is verified against.
+    /// One holding's signed net, folded from every row: what an unwatched
+    /// holding reads, and what a new observation's total is seeded with.
     pub(in crate::storage::sqlite) async fn net(
         connection: &mut SqliteConnection,
-        network: &Network,
-        subject: (&str, &str),
+        holding: (&str, &str),
     ) -> Result<BigInt, IndexError> {
-        let (credits, debits) = Self::total(connection, network, subject).await?;
+        let (credits, debits) = Self::total(connection, holding).await?;
         Ok(BigInt::from(credits) - BigInt::from(debits))
     }
 
-    /// `of`'s movements in its asset between two heights, inclusive, grouped
-    /// by transaction id in stored order. The two rows a same-address
-    /// transfer wrote, a credit and a debit, are folded back into its one
-    /// movement. Fees and transactionless credits are not movements.
-    pub(in crate::storage::sqlite) async fn find_movements(
+    /// `of`'s movements in its asset and the fees its address paid, between
+    /// two heights, inclusive, by transaction id in stored order. The two rows
+    /// a same-address transfer wrote, a credit and a debit, are folded back
+    /// into its one movement. Transactionless credits are not here.
+    pub(in crate::storage::sqlite) async fn find_effects(
         connection: &mut SqliteConnection,
-        network: &Network,
         of: &dyn Holder,
         (lower, upper): (i64, i64),
-    ) -> Result<BTreeMap<String, Vec<ValueMovement>>, IndexError> {
+    ) -> Result<BTreeMap<String, Effects>, IndexError> {
         let address = of.address();
-        let query = framed(
-            "SELECT * FROM ledger
-             WHERE chain = ?1 AND network = ?2 AND address = ?3 AND asset = ?4
-               AND block_height >= ?5 AND block_height <= ?6
-               AND transaction_id <> '' AND kind < 5
-             ORDER BY block_height, transaction_id, movement_order, movement_id",
-            network,
+        let query = sqlx::query(
+            "SELECT l.* FROM ledger l JOIN block b ON b.id = l.block_id
+             WHERE l.address_id = ?1 AND l.transaction_id IS NOT NULL
+               AND ((l.asset = ?2 AND l.kind < 5) OR l.kind = 5)
+               AND b.height >= ?3 AND b.height <= ?4
+             ORDER BY b.height, l.transaction_id, l.movement_order, l.movement_id",
         )
-        .bind(address.value.as_str())
+        .bind(address_id(&address.network, &address.value))
         .bind(of.asset().asset.as_str())
         .bind(lower)
         .bind(upper);
         let rows: Vec<Self> = fetched(connection, query, "failed to read movements").await?;
-        let mut grouped: BTreeMap<String, Vec<ValueMovement>> = BTreeMap::new();
+        let mut grouped: BTreeMap<String, Effects> = BTreeMap::new();
         let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
         for row in rows {
-            let Effect::Movement(kind) = row.effect else {
-                return Err(store("a stored movement has an unknown kind"));
+            let transaction = row.transaction_id.clone().unwrap_or_default();
+            let held = grouped.entry(transaction.clone()).or_default();
+            let kind = match row.effect {
+                Effect::Movement(kind) => kind,
+                Effect::Fee => {
+                    held.1 = Some(row.fee(address)?);
+                    continue;
+                }
+                Effect::Withdrawal => return Err(store("a stored movement has an unknown kind")),
             };
             let mine = Some(address.clone());
             let other = row
                 .counterparty
                 .map(|value| Address::new(address.network.clone(), value));
-            let key = (row.transaction_id.clone(), row.movement_id.clone());
-            let held = grouped.entry(row.transaction_id).or_default();
+            let key = (transaction, row.movement_id.clone());
             let (from, to, at) = match (seen.get(&key), row.direction) {
                 // The other direction of the same movement: a self-transfer.
                 (Some(at), _) => (mine.clone(), mine, Some(*at)),
@@ -548,51 +541,28 @@ impl Ledger {
                 to,
             )?;
             match at {
-                Some(at) => held[at] = value,
+                Some(at) => held.0[at] = value,
                 None => {
-                    seen.insert(key, held.len());
-                    held.push(value);
+                    seen.insert(key, held.0.len());
+                    held.0.push(value);
                 }
             }
         }
         Ok(grouped)
-    }
-
-    /// Removes every row of `network`: `(credits, movements)`, the
-    /// transactionless rows counted first and apart, because an operator
-    /// counts a withdrawal and a transaction's movement as different facts.
-    pub(in crate::storage::sqlite) async fn purge(
-        connection: &mut SqliteConnection,
-        network: &Network,
-    ) -> Result<(u64, u64), IndexError> {
-        let credits = deleted(
-            connection,
-            network,
-            "DELETE FROM ledger WHERE chain = ?1 AND network = ?2 AND transaction_id = ''",
-        )
-        .await?;
-        let movements = deleted(
-            connection,
-            network,
-            "DELETE FROM ledger WHERE chain = ?1 AND network = ?2",
-        )
-        .await?;
-        Ok((credits, movements))
     }
 }
 
 impl FromRow<'_, SqliteRow> for Ledger {
     fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
         Ok(Self {
-            network: network(row)?,
-            address: column(row, "address")?,
-            asset: column(row, "asset")?,
-            block_height: column(row, "block_height")?,
+            id: column(row, "id")?,
+            block_id: column(row, "block_id")?,
             transaction_id: column(row, "transaction_id")?,
+            address_id: column(row, "address_id")?,
+            asset: column(row, "asset")?,
             movement_id: column(row, "movement_id")?,
-            direction: Direction::from_tag(column(row, "direction")?).map_err(raised)?,
-            block_position: column(row, "block_position")?,
             movement_order: column(row, "movement_order")?,
+            direction: Direction::from_tag(column(row, "direction")?).map_err(raised)?,
             effect: Effect::from_tag(column(row, "kind")?).map_err(raised)?,
             amount: column(row, "amount")?,
             counterparty: column(row, "counterparty")?,

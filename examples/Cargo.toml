@@ -17,7 +17,7 @@ chain-bitcoin = { path = "../sdk/chains/bitcoin" }
 chain-ethereum = { path = "../sdk/chains/ethereum" }
 chain-solana = { path = "../sdk/chains/solana" }
 payments = { path = "../sdk/payments", features = ["toml"] }
-wallets = { path = "../sdk/wallets", features = ["submissions"] }
+wallets = { path = "../sdk/wallets", features = ["submissions", "sqlite"] }
 indexing = { path = "../sdk/indexing" }
 json-rpc = { path = "../packages/json-rpc" }
 serde_json.workspace = true

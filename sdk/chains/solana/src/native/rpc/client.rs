@@ -36,7 +36,6 @@ impl<C> Clone for Client<C> {
 }
 
 impl<C> Client<C> {
-
     /// The network this client was verified against.
     #[must_use]
     pub fn network(&self) -> &Network {

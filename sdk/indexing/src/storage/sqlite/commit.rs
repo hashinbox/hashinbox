@@ -11,7 +11,9 @@ use crate::{
     PurgedRows,
 };
 
-use models::{Block, Ledger, NetworkCheckpoint, Output, Transaction, TransactionAddress, Wallet};
+use models::{
+    Block, Ledger, NetworkCheckpoint, Output, Transaction, TransactionAddress, WalletIndex,
+};
 
 impl IndexStore for Repository {
     fn checkpoint<'a>(
@@ -40,15 +42,14 @@ impl IndexStore for Repository {
 
     /// Removes every indexing-owned row of one network inside one
     /// transaction, counts each kind, and resets what every observation of it
-    /// claimed. SQL predicates bound deletion memory independently of the
-    /// network's row count.
+    /// claimed: one delete of the network's blocks, whose cascades take every
+    /// fact and the checkpoint, and one reset of the observations' totals.
     ///
-    /// One transaction, not one per table: a network left with history but no
-    /// checkpoint is itself a terminal state, so a purge that stopped halfway
-    /// would replace one unrecoverable network with another. Each table goes
-    /// in an order a foreign key is happy with, a child before its parent.
+    /// One transaction: a network left with history but no checkpoint is
+    /// itself a terminal state, so a purge that stopped halfway would replace
+    /// one unrecoverable network with another.
     ///
-    /// The wallet rows survive and their claims do not. The observations are
+    /// The wallet and observation rows survive and their claims do not. The observations are
     /// application state and a purged network re-indexes from the earliest
     /// registered birthday, while every claim described rows this purge just
     /// removed, and `WatchStore::add` preserves progress on an exact repeat by
@@ -57,20 +58,10 @@ impl IndexStore for Repository {
         Box::pin(async move {
             let network = Self::network(network)?;
             let mut write = self.database.write().await?;
-            let (credits, movements) = Ledger::purge(&mut write, &network).await?;
-            let history = TransactionAddress::purge(&mut write, &network).await?;
-            Transaction::purge(&mut write, &network).await?;
-            let outputs = Output::purge(&mut write, &network).await?;
-            let checkpoint = NetworkCheckpoint::purge(&mut write, &network).await?;
-            Wallet::purge(&mut write, &network).await?;
+            let purged = Block::purge(&mut write, &network).await?;
+            WalletIndex::purge(&mut write, &network).await?;
             commit(write).await?;
-            Ok(PurgedRows {
-                credits,
-                movements,
-                history,
-                outputs,
-                checkpoint,
-            })
+            Ok(purged)
         })
     }
 }
@@ -95,11 +86,22 @@ impl Repository {
         if current.as_ref() != batch.expected_checkpoint() {
             return Err(conflict("checkpoint changed before commit"));
         }
+        // Every block a row or claim names is stored first, because every
+        // other table refers to it.
+        let named = batch
+            .blocks()
+            .iter()
+            .map(|canonical| canonical.block.reference())
+            .chain(batch.progress().iter().map(|claim| &claim.indexed_through))
+            .chain(batch.checkpoint())
+            .map(Block::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Block::insert_missing(transaction, network, &named).await?;
         // Every row of each table is gathered for the whole batch first, so a
-        // table is written many rows to a statement; none of the three reads
-        // another, so their order is free.
+        // table is written many rows to a statement; transactions go before
+        // the memberships and ledger rows that refer to them.
         Transaction::insert_missing(transaction, &Transaction::from_batch(batch)?).await?;
-        TransactionAddress::insert_many(transaction, &TransactionAddress::from_batch(batch)?)
+        TransactionAddress::insert_many(transaction, &TransactionAddress::from_batch(batch))
             .await?;
         let deltas = Ledger::insert_missing(transaction, &Ledger::from_batch(batch)?).await?;
         let mut unknown = Vec::new();
@@ -109,10 +111,19 @@ impl Repository {
         // all — which is what stops a replay of the creating block from offering
         // it again, and is the whole reason the batch does not fold.
         for canonical in batch.blocks() {
-            Output::insert_created(transaction, &canonical.outputs.created).await?;
-            unknown.extend(Output::update_spent(transaction, network, &canonical.outputs).await?);
+            let block = Block::try_from(canonical.block.reference())?.id(network);
+            Output::insert_created(transaction, &block, &canonical.outputs.created).await?;
+            unknown.extend(Output::update_spent(transaction, &block, &canonical.outputs).await?);
         }
-        Wallet::update_balances(transaction, network, &deltas).await?;
+        // A watched total moves once per holding, by what the rows written add
+        // up to; a holding nothing observes has none, and its reads fold.
+        for ((address, asset), delta) in &deltas {
+            let address = models::native_part(address);
+            let held = WalletIndex::get_by_holding(transaction, network, (&address, asset)).await;
+            if let Some(held) = found(held, "failed to read a watched balance")? {
+                held.update_balance(transaction, delta).await?;
+            }
+        }
         for claim in batch.progress() {
             Self::advance(transaction, network, claim).await?;
         }
@@ -120,8 +131,7 @@ impl Repository {
             .checkpoint()
             .filter(|line| Some(*line) != current.as_ref())
         {
-            NetworkCheckpoint::upsert(transaction, &NetworkCheckpoint::try_from((network, line))?)
-                .await?;
+            NetworkCheckpoint::upsert(transaction, network, &Block::try_from(line)?).await?;
         }
         Ok(unknown)
     }
@@ -129,7 +139,7 @@ impl Repository {
     /// Records one claim, after comparing what it expected against what is
     /// held.
     ///
-    /// It lives on the observation's own `wallet` row, so withdrawing an
+    /// It lives on the observation's own `wallet_index` row, so withdrawing an
     /// observation takes its claim with it and a claim can never be paired
     /// with the wrong observation. The write is a compare-and-set against the
     /// value the claim's author says it read, deliberately **not** a monotonic
@@ -146,7 +156,9 @@ impl Repository {
         network: &Network,
         claim: &Progress,
     ) -> Result<(), IndexError> {
-        let held = Wallet::get_observed_by_id(transaction, network, &claim.watch_id).await;
+        let held =
+            WalletIndex::get_in_network(transaction, network, &claim.watch_id, &claim.asset.asset)
+                .await;
         let Some(held) = found(held, "failed to read recorded progress")? else {
             return Err(conflict(
                 "indexed progress names an observation this store does not hold",
@@ -156,6 +168,6 @@ impl Repository {
             return Err(conflict("recorded progress changed before this commit"));
         }
         let through = Block::try_from(&claim.indexed_through)?;
-        Wallet::update_progress(transaction, network, &claim.watch_id, &through).await
+        held.update_progress(transaction, &through).await
     }
 }

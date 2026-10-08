@@ -1,7 +1,7 @@
 //! `/v1/networks`: every configured network and its RPC nodes, replacing
 //! those nodes while the server runs, and rescanning one network.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -13,12 +13,11 @@ use serde_json::Value;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use base::BoxFuture;
-use json_rpc::{Client, Statistics, Swap};
+use payments::{NetworkError, NetworkState};
 
 use super::{Error, ErrorBody};
 use crate::{
-    models::{Network, RpcEndpoints},
+    models::{Endpoint, Network, RpcEndpoints},
     state::AppState,
 };
 
@@ -83,34 +82,29 @@ struct ConfiguredNetwork {
     nodes: Vec<RpcNode>,
 }
 
-impl ConfiguredNetwork {
+impl From<NetworkState> for ConfiguredNetwork {
     /// `configured` now: unavailable when nothing of it was composed,
     /// rescanning while its wallets are paused, and otherwise its indexing
     /// state read from the published health.
-    fn new(configured: &LiveNetwork, state: &AppState) -> Self {
-        let network = configured.network();
-        let service = if !configured.served() {
+    fn from(configured: NetworkState) -> Self {
+        let state = if !configured.served {
             ServiceState::Unavailable
-        } else if state.wallets.paused(network) {
+        } else if configured.rescanning {
             ServiceState::Rescanning
         } else {
-            state
-                .health
-                .borrow()
-                .networks()
-                .iter()
-                .find(|row| row.status.network == *network)
-                .map_or(ServiceState::CatchingUp, |row| row.state.into())
+            configured
+                .condition
+                .map_or(ServiceState::CatchingUp, Into::into)
         };
-        let (nodes, _) = configured.current();
         Self {
-            network: network.clone().into(),
-            state: service,
-            nodes: nodes
-                .endpoints()
+            network: configured.network.into(),
+            state,
+            nodes: configured
+                .endpoints
                 .iter()
                 .map(|endpoint| RpcNode {
-                    origin: endpoint.origin().to_owned(),
+                    origin: Endpoint::new(Value::String(endpoint.url.clone()))
+                        .map_or_else(|_| "unresolved".to_owned(), |node| node.origin().to_owned()),
                 })
                 .collect(),
         }
@@ -192,13 +186,21 @@ impl From<NetworkPath> for base::Network {
     }
 }
 
-impl From<Rejected> for Error {
-    fn from(rejected: Rejected) -> Self {
-        match rejected {
-            Rejected::Invalid(message) => Self::invalid_request(message),
-            Rejected::Unverified(message) => Self::unprocessable(format!(
+impl From<NetworkError> for Error {
+    fn from(error: NetworkError) -> Self {
+        match error {
+            NetworkError::NotConfigured => Self::not_found("network is not configured"),
+            NetworkError::Busy => Self::conflict("a change to this network is in progress"),
+            NetworkError::NotInService => Self::not_in_service(),
+            NetworkError::Invalid(message) => Self::invalid_request(message),
+            NetworkError::Unverified(message) => Self::unprocessable(format!(
                 "the node failed verification and the current nodes stay in use: {message}"
             )),
+            NetworkError::Rescan(error) => error.into(),
+            NetworkError::Index(error) => error.into(),
+            error @ (NetworkError::NotStored(_) | NetworkError::Task(_)) => {
+                Self::indexed(error.to_string())
+            }
         }
     }
 }
@@ -236,9 +238,11 @@ impl From<indexing::RescanError> for Error {
 )]
 async fn list(State(state): State<Arc<AppState>>) -> Json<ListResponse> {
     let networks = state
+        .payments
         .networks
-        .iter()
-        .map(|configured| ConfiguredNetwork::new(configured, &state))
+        .list()
+        .into_iter()
+        .map(Into::into)
         .collect();
     Json(ListResponse { networks })
 }
@@ -278,27 +282,27 @@ async fn replace(
 ) -> Result<Json<ConfiguredNetwork>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let network = base::Network::from(path);
-    let configured = LiveNetwork::find(&state.networks, &network)?.clone();
+    state.payments.networks.get(&network)?;
     let documents = request.endpoints.into_iter().map(Value::from).collect();
     let nodes = RpcEndpoints::new(documents).map_err(Error::invalid_request)?;
-    let _held = configured
-        .maintain()
-        .ok_or_else(|| Error::indexed("another change to this network is in progress"))?;
-    let verified = (state.verify)(network.clone(), nodes.clone()).await?;
-    // Stored, then installed, in a task of its own: a caller that hangs up
-    // cannot leave the stored list and the live one apart.
-    let (pool, installed) = (state.pool.clone(), configured.clone());
-    tokio::spawn(async move {
-        let written = RpcEndpoints::upsert(&pool, &network, &nodes).await;
-        if written.is_ok() {
-            installed.install(nodes, verified);
-        }
-        written
-    })
-    .await
-    .map_err(|error| Error::indexed(error.to_string()))?
-    .map_err(|error| Error::indexed(format!("the nodes were not stored: {error}")))?;
-    Ok(Json(ConfiguredNetwork::new(&configured, &state)))
+    // Stored before it is installed: payments runs both in a task of its own.
+    let (pool, stored) = (state.pool.clone(), network.clone());
+    let candidates = nodes.nodes();
+    let persist = async move {
+        RpcEndpoints::upsert(&pool, &stored, &nodes)
+            .await
+            .map_err(|error| error.to_string())
+    };
+    let replaced = state
+        .payments
+        .networks
+        .replace(&network, candidates, persist)
+        .await
+        .map_err(|error| match error {
+            NetworkError::Busy => Error::indexed("another change to this network is in progress"),
+            error => error.into(),
+        })?;
+    Ok(Json(replaced.into()))
 }
 
 #[utoipa::path(
@@ -331,144 +335,7 @@ async fn rescan(
     Path(path): Path<NetworkPath>,
 ) -> Result<(StatusCode, Json<ConfiguredNetwork>), Error> {
     let network = base::Network::from(path);
-    let configured = LiveNetwork::find(&state.networks, &network)?;
-    if !configured.served() {
-        return Err(Error::not_in_service());
-    }
-    let held = configured
-        .maintain()
-        .ok_or_else(|| Error::conflict("a change to this network is in progress"))?;
-    let indexer = state
-        .index
-        .units()
-        .iter()
-        .find(|unit| *unit.network() == network)
-        .map(indexing::Route::indexer)
-        .ok_or_else(Error::not_in_service)?;
-    let (wallets, control) = (state.wallets.clone(), state.control.clone());
-    let index_store = state.index_store.clone();
-    // Its own task: the window must close and reopen whole even if the caller
-    // hangs up. New wallets and sends are refused (409) and the running ones
-    // drain before indexing pauses; they are admitted again once it resumed.
-    tokio::spawn(async move {
-        let _held = held;
-        let paused = wallets.pause(indexer.network());
-        paused.drained().await;
-        control.rescan(indexer.as_ref(), index_store.as_ref()).await
-    })
-    .await
-    .map_err(|error| Error::indexed(error.to_string()))??;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(ConfiguredNetwork::new(configured, &state)),
-    ))
-}
-
-/// One configured network.
-///
-/// Its nodes and its transport's counters change together ([`Self::install`])
-/// and are read together ([`Self::current`]), so ordinal `i` of the nodes is
-/// always counter `i` of the transport.
-pub(crate) struct LiveNetwork {
-    network: base::Network,
-    /// What the composed chain calls through; `None` for a network whose node
-    /// failed verification at startup, so nothing of it was composed.
-    transport: Option<Arc<Swap>>,
-    nodes: Mutex<RpcEndpoints>,
-    /// Held by the one node replacement or rescan running on this network.
-    maintenance: Arc<tokio::sync::Mutex<()>>,
-}
-
-/// Checks candidate nodes as `network`'s with its chain's own startup check,
-/// and answers the transport they build with each node's counters. Built by
-/// the composition root, which alone may name the chains.
-pub(crate) type Verifier = Arc<
-    dyn Fn(base::Network, RpcEndpoints) -> BoxFuture<'static, Result<Verified, Rejected>>
-        + Send
-        + Sync,
->;
-
-/// A verified candidate's transport and its nodes' counters, in order.
-pub(crate) type Verified = (Arc<dyn Client>, Vec<Statistics>);
-
-/// Why a candidate node list was not verified.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Rejected {
-    /// The chain refuses the section with these nodes, or they build no
-    /// transport (an unusable URL, say).
-    Invalid(String),
-    /// The node did not prove it serves this network.
-    Unverified(String),
-}
-
-impl LiveNetwork {
-    pub(crate) fn new(
-        network: base::Network,
-        transport: Option<Arc<Swap>>,
-        nodes: RpcEndpoints,
-    ) -> Self {
-        Self {
-            network,
-            transport,
-            nodes: Mutex::new(nodes),
-            maintenance: Arc::new(tokio::sync::Mutex::new(())),
-        }
-    }
-
-    /// The configured network `network` among `networks`.
-    ///
-    /// # Errors
-    ///
-    /// A 404 when the configuration names no such network.
-    pub(crate) fn find<'a>(
-        networks: &'a [Arc<Self>],
-        network: &base::Network,
-    ) -> Result<&'a Arc<Self>, Error> {
-        networks
-            .iter()
-            .find(|configured| configured.network == *network)
-            .ok_or_else(|| Error::not_found("network is not configured"))
-    }
-
-    pub(crate) const fn network(&self) -> &base::Network {
-        &self.network
-    }
-
-    /// Whether this process composed the network: indexes it and sends on it.
-    pub(crate) const fn served(&self) -> bool {
-        self.transport.is_some()
-    }
-
-    /// The nodes in failover order, and each one's counters while served.
-    pub(crate) fn current(&self) -> (RpcEndpoints, Vec<Statistics>) {
-        let nodes = self.nodes();
-        let statistics = self
-            .transport
-            .as_ref()
-            .map(|transport| transport.statistics())
-            .unwrap_or_default();
-        (nodes.clone(), statistics)
-    }
-
-    /// Later calls reach `transport` and the listing follows; a network not
-    /// served only records `nodes`, used from the next start.
-    pub(crate) fn install(&self, nodes: RpcEndpoints, (transport, statistics): Verified) {
-        let mut current = self.nodes();
-        if let Some(swap) = &self.transport {
-            swap.replace(transport, statistics);
-        }
-        *current = nodes;
-    }
-
-    /// The one change allowed on this network now, or `None` while another
-    /// runs. Dropping it allows the next.
-    pub(crate) fn maintain(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-        self.maintenance.clone().try_lock_owned().ok()
-    }
-
-    // Every critical section is one read or one replacement, so a panic
-    // cannot leave the list torn: recovering the guard is sound.
-    fn nodes(&self) -> MutexGuard<'_, RpcEndpoints> {
-        self.nodes.lock().unwrap_or_else(PoisonError::into_inner)
-    }
+    state.payments.networks.rescan(&network).await?;
+    let rescanned = state.payments.networks.get(&network)?;
+    Ok((StatusCode::ACCEPTED, Json(rescanned.into())))
 }

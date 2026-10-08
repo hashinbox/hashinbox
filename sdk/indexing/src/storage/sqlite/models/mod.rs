@@ -1,5 +1,6 @@
-//! One model per table of `schema.sql` (the `history_entry` view is read by
-//! `apps/server`), and the column rules and statement mechanics they share.
+//! One model per table of `schema/sdk.sql` (the `history_entry` view lends
+//! its rows to [`Transaction`]), and the column rules and statement mechanics
+//! they share.
 //!
 //! A model owns every statement that reads or writes its table: each is an
 //! associated function whose first parameter is the connection or transaction
@@ -17,8 +18,13 @@
 //!
 //! Each model reads itself from a row by column *name* (`sqlx::FromRow`), so
 //! a statement may select its columns in any order and a view may lend its
-//! rows to the models of the tables it joins. A model's refusal of a row it
-//! reads travels inside the decode error and reaches the caller as raised.
+//! rows to the models of the tables it joins. Every block a row names is read
+//! as the joined `block_*` columns into an embedded [`Block`]. A model's
+//! refusal of a row it reads travels inside the decode error and reaches the
+//! caller as raised.
+//!
+//! Every id column holds a canonical `<chain>:<network>:<native>…` string
+//! ([`canonical_id`]), so a join is one column.
 
 mod block;
 mod checkpoint;
@@ -26,7 +32,7 @@ mod ledger;
 mod output;
 mod transaction;
 mod transaction_address;
-mod wallet;
+mod wallet_index;
 
 use std::{future::poll_fn, str::FromStr};
 
@@ -38,14 +44,54 @@ use sqlx::{
 
 pub(super) use block::Block;
 pub(super) use checkpoint::NetworkCheckpoint;
-pub(super) use ledger::{Deltas, Ledger};
+pub(super) use ledger::Ledger;
 pub(super) use output::Output;
 pub(super) use transaction::Transaction;
 pub(super) use transaction_address::TransactionAddress;
-pub(super) use wallet::Wallet;
+pub(super) use wallet_index::WalletIndex;
 
 use super::{IndexError, failure, store};
 use crate::{ChainName, Decimal, Network};
+
+/// The canonical id of `parts`: each part with `\\` and `:` escaped by a
+/// backslash, joined by `:`. Two different part lists never share an id,
+/// whatever text the parts hold.
+pub(super) fn canonical_id(parts: &[&str]) -> String {
+    let mut id = String::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            id.push(':');
+        }
+        id.extend(part.chars().flat_map(|character| {
+            let escape = matches!(character, '\\' | ':').then_some('\\');
+            escape.into_iter().chain([character])
+        }));
+    }
+    id
+}
+
+/// The last part of a [`canonical_id`], unescaped: the native value an
+/// address id names.
+pub(super) fn native_part(id: &str) -> String {
+    let mut part = String::new();
+    let mut escaped = false;
+    for character in id.chars() {
+        match (escaped, character) {
+            (false, '\\') => escaped = true,
+            (false, ':') => part.clear(),
+            _ => {
+                escaped = false;
+                part.push(character);
+            }
+        }
+    }
+    part
+}
+
+/// The canonical id of `address`: `<chain>:<network>:<address>`.
+pub(super) fn address_id(network: &Network, address: &str) -> String {
+    canonical_id(&[network.chain.as_str(), &network.name, address])
+}
 
 /// One statement with its parameters bound, ready to run.
 pub(super) type Bound<'q> = Query<'q, Sqlite, SqliteArguments<'q>>;
@@ -179,20 +225,6 @@ async fn each(
         visit(&row.map_err(|error| failure(&error, context))?)?;
     }
     Ok(())
-}
-
-/// Removes every row of one network that `statement` selects, returning the
-/// count without materializing the rows.
-async fn deleted(
-    connection: &mut SqliteConnection,
-    network: &Network,
-    statement: &'static str,
-) -> Result<u64, IndexError> {
-    framed(statement, network)
-        .execute(connection)
-        .await
-        .map(|done| done.rows_affected())
-        .map_err(|error| failure(&error, "failed to purge a network"))
 }
 
 /// One named column of a row.

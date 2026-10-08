@@ -1,6 +1,6 @@
 # Payment-SDK policy for the Linter MCP server.
 # Derived from linter://configs/rust.toml; preserves the preset's semantic checks and limits.
-# Requirements and ownership: docs/SYSTEM_REQUIREMENTS.md, then ARCHITECTURE.md.
+# Requirements and ownership: AGENTS.md and the owning README.
 # Findings are a review baseline; source is not grandfathered by its current shape.
 
 [files]
@@ -11,7 +11,7 @@ exclude = ["**/.git", "**/target", "**/vendor", "**/generated", "**/node_modules
 target = "."
 mode = "permissive"
 
-files.required = ["Cargo.toml", "Cargo.lock", "linter.toml", "AGENTS.md", "ARCHITECTURE.md", "docs/SYSTEM_REQUIREMENTS.md"]
+files.required = ["Cargo.toml", "Cargo.lock", "linter.toml", "AGENTS.md"]
 
 [[rules.layout]]
 target = ["**/*.md", "**/*.markdown"]
@@ -29,7 +29,7 @@ allow = true
 description = "Recorded architecture failures and their accepted fix plans."
 
 [[rules.layout]]
-target = ["AGENTS.md", "ARCHITECTURE.md", "README.md"]
+target = ["AGENTS.md", "README.md"]
 allow = true
 description = "Repository entry points for agent guidance, architecture, and usage."
 
@@ -300,9 +300,6 @@ files.required = [
     "Cargo.toml",
     "README.md",
     "src/lib.rs",
-    "tests/address_conversion.rs",
-    "tests/transaction_adapter.rs",
-    "tests/vocabulary.rs",
 ]
 
 # Canonical chain src/: one adapter file per SDK contract; native/ holds all
@@ -357,8 +354,6 @@ mode = "restrictive"
 files.required = [
     "Cargo.toml",
     "README.md",
-    "tests/scenarios.rs",
-    "tests/custom_store.rs",
     "wallet/main.rs",
     "wallet/config.toml",
     "transfer/main.rs",

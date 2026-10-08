@@ -4,7 +4,6 @@ use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::networks::LiveNetwork;
 use crate::{
     models::{Block, Network},
     state::AppState,
@@ -226,16 +225,18 @@ struct Rpc {
 impl Rpc {
     /// The counters of the nodes each network uses now, so they follow a
     /// replacement.
-    fn current(networks: &[Arc<LiveNetwork>]) -> Vec<Self> {
+    fn current(networks: Vec<payments::NetworkState>) -> Vec<Self> {
         networks
-            .iter()
+            .into_iter()
             .flat_map(|configured| {
-                let (nodes, statistics) = configured.current();
-                let counted = statistics.into_iter().take(nodes.endpoints().len());
+                let counted = configured
+                    .statistics
+                    .iter()
+                    .take(configured.endpoints.len());
                 counted
                     .enumerate()
                     .map(|(ordinal, statistics)| {
-                        Self::new(configured.network(), ordinal, &statistics)
+                        Self::new(&configured.network, ordinal, statistics)
                     })
                     .collect::<Vec<_>>()
             })
@@ -269,8 +270,9 @@ impl Rpc {
     tag = "health"
 )]
 async fn read(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadResponse>) {
-    let reporting = state.health.has_changed().is_ok();
-    let health = state.health.borrow();
+    let receiver = state.payments.networks.health_receiver();
+    let reporting = receiver.has_changed().is_ok();
+    let health = receiver.borrow();
     let ready = reporting && health.ready();
     let networks = health
         .networks()
@@ -284,8 +286,9 @@ async fn read(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadRespo
             backfill: Backfill::of(indexed),
         })
         .collect();
-    let rpc = Rpc::current(&state.networks);
+    let rpc = Rpc::current(state.payments.networks.list());
     let queues = state
+        .payments
         .wallets
         .queues()
         .iter()

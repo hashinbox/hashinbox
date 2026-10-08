@@ -81,18 +81,17 @@ balance after chain fees.
 
 ## Layout
 
-- `src/main.rs`: composition and startup (stored nodes, `compose_available`, the
-  send queues, wallet restore, supervision, shutdown order) and the candidate-node
-  verifier the network routes call. `src/chains.rs` is the only file that names a
+- `src/main.rs`: composition and startup (stored nodes, the `payments` builder, the
+  send queues, wallet restore) and `Payments::shutdown` after HTTP drains. `src/chains.rs` is the only file that names a
   chain crate; `src/config.rs` reads the file; `src/storage.rs` opens the one
-  SQLite file; `src/operator.rs` runs the offline commands; `src/ui.rs` serves the
+  SQLite file; `src/ui.rs` serves the
   page.
 - `src/api/`: one file per endpoint group (`assets.rs`, `wallets.rs`,
   `balance.rs`, `transactions.rs`, `networks.rs`, `health.rs`, `openapi.rs`);
   `mod.rs` assembles the router and OpenAPI root and holds the shared `Error`.
   `src/state.rs` is the handler state and `src/asset.rs` the asset tag. None of
-  them names a chain crate, `payments::config` or a storage backend
-  (`scripts/check-chains.sh` check 8).
+  them names a chain crate or `payments::config`; `state.rs` alone holds the
+  concrete repository.
 - `src/models/`: the nouns the endpoints and the tables share (`asset`, `block`,
   `network`, `wallet`, `endpoint`), each with its own serde/utoipa wire
   form and, for the durable ones, its SQL. Balance and history are the
@@ -147,8 +146,6 @@ balance after chain fees.
   `indexing::Control::rescan`. A second rescan answers `409` and a node change
   `503` until it finishes.
 - After fixing a quarantine's cause, rescan the network or restart the server.
-- A confirmed reorg requires a rescan: `POST .../rescans`, or with the server stopped
-  `payment-server serve ./payments.toml --rescan bitcoin/mainnet`. Both delete only that
-  network's indexing facts and preserve watches, birthdays and wallets.
-- The offline rescan validates the exact configured network and never starts
-  RPC, supervision, or a listener. Never run it alongside the live server.
+- A confirmed reorg requires a rescan: `POST .../rescans` (`payments.networks.rescan`).
+  It deletes only that network's indexing facts and preserves watches, birthdays and
+  wallets.

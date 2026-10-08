@@ -1,13 +1,18 @@
-//! A wallet as the routes publish it: one row of indexing's `wallet` table,
-//! read through the repository's `indexing::WalletRegistry`, under the
-//! configured asset tag that holds it. The server keeps no wallet table of its
-//! own; the key stays in the row and reaches this process only as a signer
+//! A wallet as the routes publish it: one row of the SDK's `wallet` table —
+//! one address of one network — read through the repository's
+//! `wallets::WalletRepository` (the payments container's slot), with the assets the index observes
+//! of it under
+//! their configured tags. The server keeps no wallet table of its own; the key
+//! stays in the row and reaches this process only as signers
 //! (`models::Signers`).
 
 use std::{fmt, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use wallets::{WalletError, WalletErrorKind};
+
+use indexing::Watching as _;
+use payments::Payments;
 
 use super::{Network, Signers};
 use crate::asset::{AssetTag, Wallets};
@@ -37,19 +42,25 @@ impl From<Label> for String {
     }
 }
 
-/// One wallet: its public identity and its lifecycle. Its wire form is what
-/// every wallet route returns; it never holds the key.
+/// One asset the index observes a wallet's address in.
 #[derive(Serialize, utoipa::ToSchema)]
-pub(crate) struct Wallet {
-    /// Wallet ID, a UUIDv7 the API minted.
-    id: String,
-    /// The configured asset tag this wallet holds and sends; null when no
-    /// configured asset holds it any more. Always present.
+pub(crate) struct WatchedAsset {
+    /// The configured asset tag; null when no configured asset is it any
+    /// more. Always present.
     #[schema(required, value_type = Option<String>, pattern = "^[a-z0-9][a-z0-9-]{0,31}$")]
     asset: Option<AssetTag>,
     /// The asset's identity within its chain: `native`, or a token
     /// identifier.
     asset_id: String,
+}
+
+/// One wallet: one address of one network, its lifecycle, and the assets it
+/// is observed in. Its wire form is what every wallet route returns; it never
+/// holds the key.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct Wallet {
+    /// Wallet ID, a UUIDv7 the API minted.
+    id: String,
     /// The chain and network of the wallet's address.
     network: Network,
     /// Canonical address text.
@@ -63,31 +74,38 @@ pub(crate) struct Wallet {
     /// Always present.
     #[schema(required)]
     archived_at: Option<u64>,
+    /// The assets the index observes the address in, in asset order; empty
+    /// once archived or when this process does not serve its network.
+    assets: Vec<WatchedAsset>,
     #[serde(skip)]
-    subject: indexing::Subject,
+    address_value: base::Address,
 }
 
 impl Wallet {
-    /// `stored` as published, under the configured tag of its asset.
+    /// `stored` as published, with `watched`, the index's watches of it.
     ///
     /// # Errors
     ///
     /// [`WalletErrorKind::Unavailable`] for a stored label this build does
     /// not accept; the label is not quoted.
-    pub(crate) fn from_stored(
-        stored: &indexing::Wallet,
+    fn from_stored(
+        stored: &wallets::StoredWallet,
+        watched: &[indexing::Watch],
         wallets: &Wallets,
     ) -> Result<Self, WalletError> {
-        use indexing::Holder as _;
-        let subject = indexing::Subject {
-            address: stored.address().clone(),
-            asset: stored.asset().clone(),
-        };
-        let asset = wallets
-            .assets()
-            .into_iter()
-            .find(|info| info.network == subject.address.network && info.id == subject.asset)
-            .map(|info| info.tag);
+        let address = stored.address().clone();
+        let configured = wallets.assets();
+        let assets = watched
+            .iter()
+            .filter(|watch| watch.id == stored.id())
+            .map(|watch| WatchedAsset {
+                asset: configured
+                    .iter()
+                    .find(|info| info.network == address.network && info.id == watch.asset)
+                    .map(|info| info.tag.clone()),
+                asset_id: watch.asset.asset.clone(),
+            })
+            .collect();
         let label = stored
             .label()
             .map(|text| Label::try_from(text.to_owned()))
@@ -95,15 +113,20 @@ impl Wallet {
             .map_err(|_| Self::failure("a stored wallet label is not a valid label"))?;
         Ok(Self {
             id: stored.id().to_owned(),
-            asset,
-            asset_id: subject.asset.asset.clone(),
-            network: subject.address.network.clone().into(),
-            address: subject.address.value.clone(),
-            watch_only: stored.secret().is_none(),
+            network: address.network.clone().into(),
+            address: address.value.clone(),
+            watch_only: stored.key().is_none(),
             label,
             archived_at: stored.archived_at(),
-            subject,
+            assets,
+            address_value: address,
         })
+    }
+
+    /// Every watch the index holds on `network`; none when this process does
+    /// not serve it.
+    async fn watched(index: &indexing::Indexers, network: &base::Network) -> Vec<indexing::Watch> {
+        index.watched(network).await.unwrap_or_default()
     }
 
     /// The wallet `id`, archived or not.
@@ -112,17 +135,14 @@ impl Wallet {
     ///
     /// [`WalletErrorKind::NotFound`] when there is none, and
     /// [`WalletErrorKind::Unavailable`] when the read failed.
-    pub(crate) async fn find(
-        registry: &dyn indexing::WalletRegistry,
-        wallets: &Wallets,
-        id: &str,
-    ) -> Result<Self, WalletError> {
-        let stored = registry
+    pub(crate) async fn find(payments: &Payments<AssetTag>, id: &str) -> Result<Self, WalletError> {
+        let (index, wallets) = (&payments.index, &payments.wallets);
+        let stored = Self::registry(payments)?
             .wallet(id)
-            .await
-            .map_err(Self::unavailable)?
+            .await?
             .ok_or_else(Self::unknown)?;
-        Self::from_stored(&stored, wallets)
+        let watched = Self::watched(index, &stored.address().network).await;
+        Self::from_stored(&stored, &watched, wallets)
     }
 
     /// Every wallet, archived ones included, in id order.
@@ -130,14 +150,16 @@ impl Wallet {
     /// # Errors
     ///
     /// [`WalletErrorKind::Unavailable`] when the read failed.
-    pub(crate) async fn all(
-        registry: &dyn indexing::WalletRegistry,
-        wallets: &Wallets,
-    ) -> Result<Vec<Self>, WalletError> {
-        let stored = registry.wallets().await.map_err(Self::unavailable)?;
+    pub(crate) async fn all(payments: &Payments<AssetTag>) -> Result<Vec<Self>, WalletError> {
+        let (index, wallets) = (&payments.index, &payments.wallets);
+        let stored = Self::registry(payments)?.wallets().await?;
+        let mut watched = Vec::new();
+        for network in index.networks() {
+            watched.extend(Self::watched(index, network).await);
+        }
         stored
             .iter()
-            .map(|wallet| Self::from_stored(wallet, wallets))
+            .map(|wallet| Self::from_stored(wallet, &watched, wallets))
             .collect()
     }
 
@@ -145,37 +167,49 @@ impl Wallet {
         self.archived_at.is_some()
     }
 
-    /// The configured tag of this wallet's asset.
+    /// The wallet's address.
+    pub(crate) const fn address(&self) -> &base::Address {
+        &self.address_value
+    }
+
+    /// What the index reads this wallet as in configured asset `tag`.
     ///
     /// # Errors
     ///
-    /// [`WalletErrorKind::NotFound`] when this process serves no asset of
-    /// it: its chain was not composed, or its asset is no longer configured.
-    pub(crate) fn asset(&self) -> Result<&AssetTag, WalletError> {
-        self.asset.as_ref().ok_or_else(Self::unknown)
+    /// [`WalletErrorKind::NotFound`] when `tag` is not an asset of this
+    /// wallet's network this process serves.
+    pub(crate) fn subject(
+        &self,
+        wallets: &Wallets,
+        tag: &AssetTag,
+    ) -> Result<indexing::Subject, WalletError> {
+        let info = wallets
+            .asset(tag)
+            .ok()
+            .filter(|info| info.network == self.address_value.network)
+            .ok_or_else(|| {
+                WalletError::new(
+                    WalletErrorKind::NotFound,
+                    "the asset is not one of this wallet's network",
+                )
+            })?;
+        Ok(indexing::Subject {
+            address: self.address_value.clone(),
+            asset: info.id,
+        })
     }
 
-    /// What the index observes this wallet as.
-    ///
-    /// # Errors
-    ///
-    /// [`WalletErrorKind::NotFound`] when this process serves no asset of it,
-    /// as [`Self::asset`].
-    pub(crate) fn subject(&self) -> Result<&indexing::Subject, WalletError> {
-        self.asset()?;
-        Ok(&self.subject)
-    }
-
-    /// The wallet that signs this one's sends.
+    /// The wallet that signs this one's sends of asset `tag`.
     ///
     /// # Errors
     ///
     /// [`WalletErrorKind::Conflict`] once archived, [`WalletErrorKind::WatchOnly`]
     /// without a key, and [`WalletErrorKind::Unavailable`] when its key was
-    /// not loaded because its chain is not in service.
+    /// not loaded for that asset because its chain is not in service.
     pub(crate) fn signer(
         &self,
         signers: &Signers,
+        tag: &AssetTag,
     ) -> Result<Arc<dyn wallets::Wallet>, WalletError> {
         if self.archived() {
             return Err(WalletError::new(
@@ -190,7 +224,7 @@ impl Wallet {
             ));
         }
         signers
-            .get(&self.id)?
+            .get(&self.id, tag)?
             .ok_or_else(|| Self::failure("the wallet's chain is not in service"))
     }
 
@@ -202,13 +236,18 @@ impl Wallet {
         WalletError::new(WalletErrorKind::Unavailable, message)
     }
 
-    /// A registry failure as the routes answer it; its messages never carry
-    /// a stored value.
-    fn unavailable(error: indexing::IndexError) -> WalletError {
-        WalletError::new(
-            WalletErrorKind::Unavailable,
-            format!("wallet registry: {}", error.message),
-        )
+    /// The wallet rows the payments container was given.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unavailable`] when no wallet repository is attached.
+    pub(crate) fn registry(
+        payments: &Payments<AssetTag>,
+    ) -> Result<&dyn wallets::WalletRepository, WalletError> {
+        payments
+            .registry
+            .as_deref()
+            .ok_or_else(|| Self::failure("no wallet repository is attached"))
     }
 }
 
@@ -217,7 +256,6 @@ impl fmt::Debug for Wallet {
         formatter
             .debug_struct("Wallet")
             .field("id", &self.id)
-            .field("asset", &self.asset)
             .field("address", &self.address)
             .field("watch_only", &self.watch_only)
             .field("archived_at", &self.archived_at)

@@ -45,10 +45,12 @@ pub enum Birthday {
     At(BlockPosition),
 }
 
-/// One observed address as the index holds it.
+/// One observed address as the index holds it: one wallet's address, in one
+/// asset.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Watch {
-    /// The caller's id, unique across the index.
+    /// The wallet's id, unique across the index. One wallet is one address,
+    /// so every watch of it shares this id and differs by asset.
     pub id: String,
     /// The address, and therefore the network.
     pub address: Address,
@@ -101,11 +103,11 @@ pub trait Watching: Send + Sync {
     /// address with no key, which is a watch-only address, rather than a key
     /// nothing observes.
     ///
-    /// Re-watching the same address under the same id is a no-op; a known
-    /// address under another id, another `Birthday::At`, or a known id on another
-    /// address, is `Conflict`. An unwatched (archived) address is watched again
-    /// only under its own id; a [`crate::WalletRegistry`] row filed before
-    /// anything observed it is observed by watching its id.
+    /// `id` names a wallet the wallets side already filed for `subject`'s
+    /// address; this adds its observation in `subject`'s asset. Re-watching
+    /// the same asset under the same id is a no-op; another `Birthday::At` for
+    /// it, a known id on another address, or (in a store that checks it) a
+    /// wallet nobody filed, is `Conflict`.
     ///
     /// # Errors
     ///
@@ -120,8 +122,8 @@ pub trait Watching: Send + Sync {
         start: Birthday,
     ) -> BoxFuture<'a, Result<Watch, IndexError>>;
 
-    /// Stops observing whatever `id` watches, and returns the watch it
-    /// archived.
+    /// Stops observing every asset wallet `id` watches, and returns the
+    /// watches it removed.
     ///
     /// **No indexed row is deleted.** The history, the live outputs and the
     /// credits of the address all stay; what stops is future inspection. Rows
@@ -145,8 +147,8 @@ pub trait Watching: Send + Sync {
     /// address keeps its own, earned under its own birthday.
     ///
     /// **The address may be watched again**, under its own id — the store keeps
-    /// the row archived and reserves its pair for that id — from any
-    /// [`Birthday`], and it then reads its range again rather than inheriting a
+    /// the wallet row — from any [`Birthday`], and it then reads its range again rather than
+    /// inheriting a
     /// settled claim: bounded by the same
     /// [`Budget::max_backfill_blocks`](crate::Budget) the first watch was
     /// bounded by, and idempotent where the rows already exist (verified, not
@@ -163,13 +165,13 @@ pub trait Watching: Send + Sync {
     /// with a retryable `Conflict` — so a chunk mid-inspection for this address
     /// is discarded rather than written after the row is gone.
     ///
-    /// **Idempotent.** An `id` nothing watches is `Ok(None)`, not an error.
+    /// **Idempotent.** An `id` nothing watches is an empty list, not an error.
     ///
     /// # Errors
     ///
     /// The registry's own error, and [`crate::IndexErrorKind::Store`] when the
     /// watch set lock is poisoned.
-    fn unwatch<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<Watch>, IndexError>>;
+    fn unwatch<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>>;
 
     /// Every address this index observes on `network`, in id order.
     ///
@@ -199,11 +201,14 @@ pub trait Watching: Send + Sync {
 // [`Rows::behind`]: a pass fetches and interprets a block once per address
 // however many assets are observed at it.
 
+/// One observation's identity: its wallet's id and its asset.
+pub(crate) type WatchKey = (String, AssetId);
+
 /// Everything one network's watch set holds, under one lock.
 #[derive(Default)]
 pub(crate) struct Rows {
     /// Every observation and its progress, by the observation's own identity.
-    pub(crate) rows: BTreeMap<String, WatchProgress>,
+    pub(crate) rows: BTreeMap<WatchKey, WatchProgress>,
 }
 
 impl Rows {
@@ -253,6 +258,7 @@ impl Rows {
             .filter_map(|row| {
                 Some(Owed {
                     watch_id: row.watch.id.clone(),
+                    asset: row.watch.asset.clone(),
                     address: row.watch.address.clone(),
                     expected: row.indexed_through.clone(),
                     resume: row.next_required()?,
@@ -279,6 +285,7 @@ impl Rows {
                 let next = row.next_required()?;
                 (next <= block.position).then(|| Progress {
                     watch_id: row.watch.id.clone(),
+                    asset: row.watch.asset.clone(),
                     expected: row.indexed_through.clone(),
                     indexed_through: block.clone(),
                 })
@@ -290,7 +297,8 @@ impl Rows {
     /// the rows they name hold an answer a restart will find.
     pub(crate) fn advanced(&mut self, proved: &[Progress]) {
         for claim in proved {
-            if let Some(row) = self.rows.get_mut(&claim.watch_id) {
+            let key = (claim.watch_id.clone(), claim.asset.clone());
+            if let Some(row) = self.rows.get_mut(&key) {
                 row.indexed_through = Some(claim.indexed_through.clone());
             }
         }
@@ -306,9 +314,10 @@ impl Rows {
     /// how the index finds out.
     pub(crate) fn restore(&mut self, stored: Vec<WatchProgress>) {
         for row in stored {
-            match self.rows.get_mut(&row.watch.id) {
+            let key = (row.watch.id.clone(), row.watch.asset.clone());
+            match self.rows.get_mut(&key) {
                 Some(held) => held.indexed_through = row.indexed_through,
-                None => drop(self.rows.insert(row.watch.id.clone(), row)),
+                None => drop(self.rows.insert(key, row)),
             }
         }
     }
@@ -318,9 +327,14 @@ impl Rows {
         self.rows.values().map(|row| row.watch.clone()).collect()
     }
 
-    /// The watch `id` names, whatever its address.
-    pub(crate) fn identified(&self, id: &str) -> Option<crate::Watch> {
-        self.rows.get(id).map(|row| row.watch.clone())
+    /// Every watch of wallet `id`, one per asset.
+    pub(crate) fn identified(&self, id: &str) -> Vec<crate::Watch> {
+        self.rows
+            .values()
+            .map(|row| &row.watch)
+            .filter(|watch| watch.id == id)
+            .cloned()
+            .collect()
     }
 
     /// The observation that already holds `(address, asset)`, if any.
@@ -342,20 +356,17 @@ impl Rows {
     /// from an earlier birthday had to widen the shared range and a restart in
     /// between could read the narrower row back as settled.
     pub(crate) fn attach(&mut self, watch: crate::Watch) {
-        drop(
-            self.rows
-                .insert(watch.id.clone(), WatchProgress::unread(watch)),
-        );
+        let key = (watch.id.clone(), watch.asset.clone());
+        drop(self.rows.insert(key, WatchProgress::unread(watch)));
     }
 
-    /// Forgets the observation `id` names, and the progress it earned with it.
+    /// Forgets the observation `key` names, and the progress it earned with it.
     ///
-    /// By identity, because that is all a row is keyed by and all a withdrawal
-    /// ever knew: the same call settles a watch whose durable removal is
-    /// confirmed and one whose removal is merely uncertain, where no `Watch`
-    /// value may be at hand (`Reconciliation` in [`crate::watches`]).
-    pub(crate) fn detach(&mut self, id: &str) {
-        drop(self.rows.remove(id));
+    /// By identity, because that is all a row is keyed by: the same call
+    /// settles a watch whose durable removal is confirmed and one whose
+    /// removal is merely uncertain (`Reconciliation` in [`crate::watches`]).
+    pub(crate) fn detach(&mut self, key: &WatchKey) {
+        drop(self.rows.remove(key));
     }
 }
 
@@ -366,8 +377,10 @@ impl Rows {
 /// it carries `expected` because the claim it will write has to say what it
 /// believed the store held ([`Progress`]).
 pub(crate) struct Owed {
-    /// The observation's identity, which the claim is written against.
+    /// The observation's wallet, which the claim is written against.
     pub(crate) watch_id: String,
+    /// The observation's asset, the rest of its identity.
+    pub(crate) asset: AssetId,
     /// The address to inspect for it.
     pub(crate) address: Address,
     /// The progress this observation believes the store holds.
@@ -529,7 +542,7 @@ impl Watches {
         // batch port: a caller registering a wallet's native currency and its
         // tokens together passes them in one `add` and gets all or none.
         let mut uncertain = self.uncertain();
-        uncertain.writing(id);
+        uncertain.writing((watch.id.clone(), watch.asset.clone()));
         store.add(vec![watch.clone()]).await?;
         self.with_mut(|set| set.attach(watch.clone()))?;
         permit.complete()?;
@@ -537,8 +550,9 @@ impl Watches {
         Ok(watch)
     }
 
-    /// Takes one watch out: the durable rows first, then the hot set, then the
-    /// revision bump that invalidates any plan captured before it.
+    /// Takes every watch of wallet `id` out: the durable rows first, then the
+    /// hot set, then the revision bump that invalidates any plan captured
+    /// before it.
     ///
     /// The contract is [`crate::Watching::unwatch`]; what is decided here is the
     /// same handshake [`Self::add`] takes, and deliberately not a second one.
@@ -547,24 +561,33 @@ impl Watches {
         store: &dyn WatchStore,
         id: &str,
         persisted: Option<BlockRef>,
-    ) -> Result<Option<Watch>, IndexError> {
+    ) -> Result<Vec<Watch>, IndexError> {
         let permit = self.admission.publication(persisted).await?;
-        let Some(watch) = self.with(|set| set.identified(id))? else {
+        let watches = self.with(|set| set.identified(id))?;
+        if watches.is_empty() {
             // Nothing was watched, so nothing is published: the permit is
             // released without bumping the revision, and no pass is disturbed.
-            return Ok(None);
-        };
+            return Ok(watches);
+        }
         // The store removes the observation and the progress recorded for it in
         // one write, so the pair cannot come apart. A claim left behind by a
         // forgotten observation could be inherited by a re-watch and would then
         // cover a range committed while nothing watched the address.
         let mut uncertain = self.uncertain();
-        uncertain.writing(&watch.id);
-        store.forget(&self.network, &watch).await?;
-        self.with_mut(|set| set.detach(&watch.id))?;
+        for watch in &watches {
+            uncertain.writing((watch.id.clone(), watch.asset.clone()));
+        }
+        for watch in &watches {
+            store.forget(&self.network, watch).await?;
+        }
+        self.with_mut(|set| {
+            for watch in &watches {
+                set.detach(&(watch.id.clone(), watch.asset.clone()));
+            }
+        })?;
         permit.complete()?;
         uncertain.settled();
-        Ok(Some(watch))
+        Ok(watches)
     }
 
     /// A reconciliation obligation for the rows a call is about to write.
@@ -577,13 +600,10 @@ impl Watches {
 
     /// The row this call re-states, or the conflict it collides with.
     ///
-    /// **A second asset at a watched address is not a collision.** The durable
-    /// list is keyed by `(address, asset)` and always was; the hot set used to
-    /// key by address alone and refused the pair here, which is why the
-    /// capability the store supports could not be reached and why a restart
-    /// silently dropped the second row. What is
-    /// refused is a name that is taken: the same identity over another
-    /// observation, or the same `(address, asset)` under another identity.
+    /// **A second asset of a watched wallet is not a collision.** What is
+    /// refused is a name that is taken: the same wallet and asset from another
+    /// birthday, the same wallet id over another address, or the same
+    /// `(address, asset)` under another wallet id.
     ///
     /// Two short reads rather than one held lock: the publication permit
     /// [`Self::add`] holds already excludes every other registration.
@@ -594,16 +614,20 @@ impl Watches {
         start: Birthday,
     ) -> Result<Option<Watch>, IndexError> {
         self.validate(subject)?;
-        let restated = |watch: &Watch| {
-            watch.address == *subject.address()
-                && watch.asset == *subject.asset()
-                && !matches!(start, Birthday::At(position) if position != watch.start)
-        };
-        if let Some(watch) = self.with(|set| set.identified(id))? {
+        let restated =
+            |watch: &Watch| !matches!(start, Birthday::At(position) if position != watch.start);
+        let held = self.with(|set| set.identified(id))?;
+        if held.iter().any(|watch| watch.address != *subject.address()) {
+            return Err(Self::conflict("this wallet id is another address's"));
+        }
+        if let Some(watch) = held
+            .into_iter()
+            .find(|watch| watch.asset == *subject.asset())
+        {
             return if restated(&watch) {
                 Ok(Some(watch))
             } else {
-                Err(Self::conflict("this watch id is already registered"))
+                Err(Self::conflict("this watch is already registered"))
             };
         }
         let taken = self.with(|set| set.holder(subject.address(), subject.asset()))?;
@@ -722,13 +746,13 @@ impl Watches {
 struct Reconciliation<'a> {
     watches: &'a Watches,
     /// The identities whose durable outcome is not yet known.
-    rows: Vec<String>,
+    rows: Vec<WatchKey>,
 }
 
 impl Reconciliation<'_> {
     /// Names one row this call is about to write durably.
-    fn writing(&mut self, id: &str) {
-        self.rows.push(id.to_owned());
+    fn writing(&mut self, key: WatchKey) {
+        self.rows.push(key);
     }
 
     /// The outcome is known, so there is nothing left to reconcile.
@@ -745,8 +769,8 @@ impl Drop for Reconciliation<'_> {
         // A poisoned set is already unusable and reports itself on the next
         // access; there is nothing to do about it from a drop.
         drop(self.watches.with_mut(|set| {
-            for id in &self.rows {
-                set.detach(id);
+            for key in &self.rows {
+                set.detach(key);
             }
         }));
         self.watches.mark_stale();

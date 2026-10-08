@@ -749,6 +749,7 @@ where
                 Scan::after(entry.expected.clone()).follows(first)?;
                 Ok(Progress {
                     watch_id: entry.watch_id.clone(),
+                    asset: entry.asset.clone(),
                     expected: entry.expected.clone(),
                     indexed_through: reached.clone(),
                 })

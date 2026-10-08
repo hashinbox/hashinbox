@@ -15,6 +15,7 @@ use json_rpc::Client as _;
 use payments::config::{Composition, Document, Registry};
 use serde_json::{Value, json};
 use tokio::sync::watch;
+use wallets::WalletRepository as _;
 use wallets::{SubmissionRegistrar, Submissions, Wallet};
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
@@ -57,14 +58,20 @@ async fn main() -> Result<(), AnyError> {
     //    `submissions` owns the send work a chain finishes in the background.
     let submissions = Arc::new(Submissions::new());
     let registrar: Arc<dyn SubmissionRegistrar> = submissions.clone();
+    // The file is opened here so its wallet rows can be filed: a watch
+    // observes a wallet the store already holds.
+    let file = std::path::absolute(".index-data/transfer.db")?;
+    tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
+    let database = Database::open(file).await?;
+    let filed = wallets::storage::sqlite::Repository::new(database.pool().clone());
+    let indexing = Repository::new(database.clone());
     let Composition { index, wallets, .. } = chains
         .compose(
-            || async {
-                let file = std::path::absolute(".index-data/transfer.db")?;
-                tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
-                Ok::<_, AnyError>(Database::open(file).await?)
+            || {
+                let database = database.clone();
+                async move { Ok::<_, AnyError>(database) }
             },
-            |store: &Database| Ok::<_, AnyError>(Repository::new(store.clone())),
+            |_: &Database| Ok::<_, AnyError>(indexing.clone()),
             &registrar,
         )
         .await?;
@@ -76,6 +83,14 @@ async fn main() -> Result<(), AnyError> {
         let asset = asset.to_owned();
         for id in [sender, receiver] {
             let wallet = wallets.create(&asset).await?;
+            filed
+                .register(wallets::Registration {
+                    id: id.to_owned(),
+                    address: wallet.address().clone(),
+                    label: None,
+                    key: None,
+                })
+                .await?;
             index.watch(id, wallet.as_ref(), Birthday::Fresh).await?;
             signers.insert(id, wallet);
         }

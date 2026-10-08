@@ -2412,12 +2412,13 @@ name = "indexing"
 version = "0.1.0"
 dependencies = [
  "base",
- "crypto",
  "futures-channel",
  "futures-executor",
+ "hex",
  "indexing",
  "logging",
  "num-bigint",
+ "serde_json",
  "sqlx",
  "tempfile",
  "tokio",
@@ -5100,6 +5101,7 @@ dependencies = [
  "crypto",
  "futures-executor",
  "serde_json",
+ "sqlx",
  "tasks",
  "tokio",
 ]

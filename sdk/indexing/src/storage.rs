@@ -14,9 +14,8 @@
 //! and history are not ports: the shipped stores answer them with inherent
 //! methods, and a custom store brings its own.
 //!
-//! [`wallet::WalletRegistry`] is one more, on the same table as the watch list:
-//! the application files a wallet's label and key beside its observation and
-//! reads every wallet back, archived ones included. Scanning never reads it.
+//! Wallets are not this crate's: the wallets side files the `wallet` row a
+//! watch names (the schema's foreign key), and indexing code never reads it.
 //!
 //! A repository is not required to be [`Clone`], and none of these traits ask
 //! for it. A sink that is neither cheap to clone nor clonable at all is held as
@@ -41,7 +40,6 @@ mod purge;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 pub(crate) mod subject;
-mod wallet;
 mod watch;
 
 pub use balance::{Balance, SettledBalance};
@@ -54,7 +52,6 @@ pub use notifying::{Change, Notifying};
 pub(crate) use outputs::Probe;
 pub use outputs::{OutputCursor, OutputPage, OutputRequest, OutputStore};
 pub use purge::PurgedRows;
-pub use wallet::{Registration, Wallet, WalletRegistry};
 pub use watch::{Inspection, WatchProgress, WatchStore};
 
 /// The whole of what an index requires of a store.

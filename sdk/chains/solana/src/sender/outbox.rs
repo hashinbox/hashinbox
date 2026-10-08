@@ -458,7 +458,6 @@ impl Outbox {
             .await
             .unwrap_or_else(|_| Err(unavailable("Solana submission task ended without a result")))
     }
-
 }
 
 /// A node or index failure that belongs to no item.

@@ -22,19 +22,23 @@ export function format(value: bigint, decimals: number): string {
   return `${negative ? '−' : ''}${whole}${fraction ? `.${fraction}` : ''}`;
 }
 
+/** The wallet's first observed asset tag: the asset this UI reads and sends. */
+export function assetOf(wallet: Wallet): string {
+  const first = wallet.assets[0];
+  return first ? (first.asset ?? first.asset_id) : '';
+}
+
 export function listingOf(wallet: Wallet, listings: Listing[]): Listing | undefined {
   return listings.find(
     (l) =>
-      l.asset === wallet.asset &&
+      l.asset === assetOf(wallet) &&
       l.network.chain === wallet.network.chain &&
       l.network.name === wallet.network.name,
   );
 }
 
 export function unitOf(wallet: Wallet, listings: Listing[]): string {
-  return (
-    listingOf(wallet, listings)?.metadata.ticker ?? (wallet.asset ?? wallet.asset_id).toUpperCase()
-  );
+  return listingOf(wallet, listings)?.metadata.ticker ?? assetOf(wallet).toUpperCase();
 }
 
 export function decimalsOf(wallet: Wallet, listings: Listing[]): number {

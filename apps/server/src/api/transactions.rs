@@ -21,6 +21,7 @@ use indexing::{Entry, Position, Standing};
 
 use super::{Error, ErrorBody};
 use crate::{
+    asset::AssetTag,
     models::{Asset, Block, Network, Wallet},
     state::AppState,
 };
@@ -36,6 +37,10 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 #[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
 struct HistoryQuery {
+    /// A configured asset tag of the wallet's network: the asset whose
+    /// history is read.
+    #[param(value_type = String, pattern = "^[a-z0-9][a-z0-9-]{0,31}$")]
+    asset: AssetTag,
     /// `next_cursor` of the previous page; absent for the first page.
     cursor: Option<String>,
     /// Page size, 1 to 1000.
@@ -55,7 +60,8 @@ impl HistoryQuery {
     path = "/v1/wallets/{id}/transactions",
     operation_id = "read_wallet_transactions",
     summary = "Read one page of a wallet's history",
-    description = "The wallet's canonical history in the wallet's own asset. `transactions` \
+    description = "The wallet's canonical history in `asset`; a fee is shown where this \
+        address was charged it. `transactions` \
         is confirmed and append-only, so its cursor stays valid however far the checkpoint \
         moves; `pending` carries the transactions above the confirmed line and is populated \
         on the first page only; `behind` says how many blocks the address's inspection trails \
@@ -66,7 +72,8 @@ impl HistoryQuery {
         (status = 200, description = "One history page", body = HistoryResponse),
         (status = 400, description = "Malformed query, cursor, or limit", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Wallet is unknown", body = ErrorBody),
+        (status = 404, description = "Wallet is unknown, or the asset is not of its network",
+            body = ErrorBody),
         (status = 500, description = "The next cursor could not be encoded", body = ErrorBody),
         (status = 503, description = "The index is unavailable", body = ErrorBody)
     ),
@@ -84,13 +91,14 @@ async fn history(
         ));
     }
     let after = query.cursor.as_deref().map(Cursor::decode).transpose()?;
-    let wallet = Wallet::find(state.registry.as_ref(), &state.wallets, &path.id).await?;
-    let subject = wallet.subject()?;
+    let wallet = Wallet::find(&state.payments, &path.id).await?;
+    let subject = &wallet.subject(&state.payments.wallets, &query.asset)?;
     // The pending blocks are sampled before the rows are read, and narrowed
     // by the line the rows were read at, so a commit landing in between is
     // listed once. The page is in atomic units; each asset's declared unit
     // scales it below.
     let pending = state
+        .payments
         .pending
         .iter()
         .find(|(network, _)| *network == subject.address.network)
@@ -105,7 +113,7 @@ async fn history(
     let sample = pending.sampled()?;
     // One snapshot: the repository's own read.
     let page = state
-        .repository
+        .repo
         .history(subject, after.as_ref(), query.limit)
         .await?
         .completed(subject, after.is_none(), sample)?;
@@ -159,6 +167,7 @@ async fn history(
     // chain declared.
     let scaled = |asset: &base::AssetId, amount: &base::Decimal| {
         let unit = state
+            .payments
             .units
             .of(network, asset)
             .ok_or_else(Error::undeclared)?;
@@ -447,6 +456,9 @@ impl Cursor {
 #[schema(as = Transfer)]
 #[serde(deny_unknown_fields)]
 struct SendRequest {
+    /// A configured asset tag of the wallet's network: the asset sent.
+    #[schema(value_type = String, pattern = "^[a-z0-9][a-z0-9-]{0,31}$")]
+    asset: AssetTag,
     /// Recipient address text, as the wallet's chain writes it.
     destination: String,
     /// Exact decimal in display units, or `all` for the available balance after fees.
@@ -466,7 +478,7 @@ struct SendResponse {
     path = "/v1/wallets/{id}/transactions",
     operation_id = "send_transfer",
     summary = "Submit one transfer from a wallet",
-    description = "Submits one transfer through the wallet's configured asset. Every asset \
+    description = "Submits one transfer of `asset` from the wallet. Every asset \
         uses this shared route; no chain-specific transaction route exists. A watch-only wallet \
         answers 422. A 202 response means submitted, not confirmed.",
     params(WalletPath),
@@ -493,17 +505,17 @@ async fn send(
     request: Result<Json<SendRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<SendResponse>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let wallet = Wallet::find(state.registry.as_ref(), &state.wallets, &path.id).await?;
-    wallet.subject()?;
-    // The parse only produces addresses of the wallet's own asset network,
-    // which is why no separate same-network check exists.
+    let wallet = Wallet::find(&state.payments, &path.id).await?;
+    wallet.subject(&state.payments.wallets, &request.asset)?;
+    // The parse only produces addresses of the asset's network, which is the
+    // wallet's, so no separate same-network check exists.
     let amount = amount(&request.amount)?;
-    let destination = destination(&state, &wallet, &request.destination)?;
+    let destination = destination(&state, &request.asset, &request.destination)?;
     // Sending is the asset's capability, not the wallet's: an asset this
     // deployment only receives has no author to hand out, and that one
     // absence is the whole refusal. An archived wallet sends nothing (409).
-    let signer = wallet.signer(&state.signers)?;
-    let author = state.wallets.author(wallet.asset()?, &signer)?;
+    let signer = wallet.signer(&state.signers, &request.asset)?;
+    let author = state.payments.wallets.author(&request.asset, &signer)?;
     // The asset's send queue refuses a send while its network is paused for a
     // rescan (409), and the rescan waits for the sends it admitted.
     let id = author.send(destination, amount).await?;
@@ -532,7 +544,10 @@ struct BatchedTransfer {
 #[schema(as = TransferBatch)]
 #[serde(deny_unknown_fields)]
 struct BatchRequest {
-    /// Transfers of one configured asset, in execution order.
+    /// The configured asset tag every transfer sends.
+    #[schema(value_type = String, pattern = "^[a-z0-9][a-z0-9-]{0,31}$")]
+    asset: AssetTag,
+    /// Transfers of `asset`, in execution order.
     #[schema(min_items = 1, max_items = 50)]
     transfers: Vec<BatchedTransfer>,
 }
@@ -594,31 +609,29 @@ async fn send_batch(
     }
     // Every transfer resolved to the wallet that signs it and a destination
     // parsed by that wallet's own asset; a failure names the transfer's index.
-    let mut tag = None;
+    if request.transfers.is_empty() {
+        return Err(Error::invalid_request("at least one transfer is required"));
+    }
+    let tag = request.asset;
     let mut transfers = Vec::with_capacity(request.transfers.len());
     for (failed_index, item) in request.transfers.into_iter().enumerate() {
         let at = |error: Error| error.at(failed_index);
         let amount = amount(&item.amount).map_err(at)?;
-        let found = Wallet::find(state.registry.as_ref(), &state.wallets, &item.wallet_id)
+        let found = Wallet::find(&state.payments, &item.wallet_id)
             .await
             .map_err(|error| at(error.into()))?;
-        let asset = found.asset().map_err(|error| at(error.into()))?.clone();
-        let wallet = found
-            .signer(&state.signers)
+        found
+            .subject(&state.payments.wallets, &tag)
             .map_err(|error| at(error.into()))?;
-        let to = destination(&state, &found, &item.destination).map_err(at)?;
-        if tag.as_ref().is_some_and(|known| *known != asset) {
-            return Err(Error::invalid_batch(
-                failed_index,
-                "all transfers must use the same wallet asset",
-            ));
-        }
-        tag = Some(asset);
+        let wallet = found
+            .signer(&state.signers, &tag)
+            .map_err(|error| at(error.into()))?;
+        let to = destination(&state, &tag, &item.destination).map_err(at)?;
         transfers.push(::wallets::Transfer { wallet, to, amount });
     }
-    let tag = tag.ok_or_else(|| Error::invalid_request("at least one transfer is required"))?;
     // Paused by a rescan of its network, the queue answers 409, as above.
     let transaction_ids = state
+        .payments
         .wallets
         .send_all(&tag, transfers)
         .await?
@@ -687,10 +700,11 @@ where
 /// # Errors
 ///
 /// A 400 for text the asset's chain refuses.
-fn destination(state: &AppState, wallet: &Wallet, text: &str) -> Result<base::Address, Error> {
+fn destination(state: &AppState, tag: &AssetTag, text: &str) -> Result<base::Address, Error> {
     state
+        .payments
         .wallets
-        .parse(wallet.asset()?, text)
+        .parse(tag, text)
         .map_err(Error::by_asset)
 }
 

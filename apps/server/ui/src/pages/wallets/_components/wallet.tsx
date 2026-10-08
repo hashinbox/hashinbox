@@ -18,7 +18,7 @@ import { Coin } from '@/_components/coin';
 import { Confirm } from '@/_components/confirm';
 import { Copy } from '@/_components/copy';
 import type { Shell } from '@/layout';
-import { atomic, decimalsOf, effect, format, shorten, unitOf } from '@/money';
+import { assetOf, atomic, decimalsOf, effect, format, shorten, unitOf } from '@/money';
 import { mono } from '@/theme';
 import { Send } from './send';
 
@@ -87,10 +87,18 @@ export function Wallet({
 
   const refresh = useCallback(() => {
     const id = { path: { id: wallet.id } };
-    call(client.GET('/v1/wallets/{id}/balance', { params: id }))
+    call(
+      client.GET('/v1/wallets/{id}/balance', {
+        params: { ...id, query: { asset: assetOf(wallet) } },
+      }),
+    )
       .then(setBalance)
       .catch(shell.fail);
-    call(client.GET('/v1/wallets/{id}/transactions', { params: { ...id, query: { limit: PAGE } } }))
+    call(
+      client.GET('/v1/wallets/{id}/transactions', {
+        params: { ...id, query: { asset: assetOf(wallet), limit: PAGE } },
+      }),
+    )
       .then((page) => {
         setRows([...page.pending, ...page.transactions]);
         setPending(page.pending.length);
@@ -98,13 +106,16 @@ export function Wallet({
         setLine(page.checkpoint?.height ?? null);
       })
       .catch(shell.fail);
-  }, [wallet.id, shell.fail]);
+  }, [wallet, shell.fail]);
 
   useEffect(refresh, [refresh]);
 
   const older = () => {
     if (!cursor) return;
-    const params = { path: { id: wallet.id }, query: { limit: PAGE, cursor } };
+    const params = {
+      path: { id: wallet.id },
+      query: { asset: assetOf(wallet), limit: PAGE, cursor },
+    };
     call(client.GET('/v1/wallets/{id}/transactions', { params }))
       .then((page) => {
         setRows((current) => [...current, ...page.transactions]);
@@ -132,9 +143,9 @@ export function Wallet({
       >
         <Box sx={{ minWidth: 0 }}>
           <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center' }}>
-            <Coin symbol={wallet.asset ?? wallet.asset_id} size={26} />
+            <Coin symbol={assetOf(wallet)} size={26} />
             <Typography variant="overline" component="p" sx={{ flexGrow: 1 }}>
-              {wallet.asset ?? wallet.asset_id} · {wallet.network.chain}/{wallet.network.name}
+              {assetOf(wallet)} · {wallet.network.chain}/{wallet.network.name}
               {wallet.watch_only && ' · watch only'}
               {wallet.archived_at != null && ` · archived ${day(wallet.archived_at)}`}
             </Typography>

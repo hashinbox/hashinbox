@@ -1,6 +1,7 @@
-//! The keys this process signs with: every observed, keyed wallet of a served
+//! The keys this process signs with: every active, keyed wallet of a served
 //! network, rebuilt once at startup from the repository's wallet rows
-//! (`indexing::WalletRegistry`), and every wallet created since.
+//! (`wallets::WalletRepository`) for every configured asset of its network
+//! whose factory takes its key format, and every wallet created since.
 
 use std::{
     collections::BTreeMap,
@@ -9,18 +10,19 @@ use std::{
 
 use wallets::{SecretBytes, WalletError, WalletErrorKind};
 
-use crate::asset::Wallets;
+use crate::asset::{AssetTag, Wallets};
 
-/// Every key-holding wallet this process can sign for, by wallet id.
+/// Every key-holding wallet this process can sign for, by wallet id and the
+/// configured asset whose factory built it.
 #[derive(Default)]
-pub(crate) struct Signers(RwLock<BTreeMap<String, Arc<dyn wallets::Wallet>>>);
+pub(crate) struct Signers(RwLock<BTreeMap<(String, AssetTag), Arc<dyn wallets::Wallet>>>);
 
 impl Signers {
-    /// Startup: every observed wallet of a `served` network that holds a key
-    /// and whose asset is configured, rebuilt by that asset's factory. Archived
-    /// wallets sign nothing, and wallets of networks this process does not
-    /// serve wait for a start that serves them. Nothing is watched or
-    /// unwatched here: the index restores its watch list from the same rows.
+    /// Startup: every active wallet of a `served` network that holds a key,
+    /// rebuilt by each configured asset factory of its network that takes its
+    /// key format. Archived wallets sign nothing, and wallets of networks this
+    /// process does not serve wait for a start that serves them. Nothing is
+    /// watched or unwatched here: the index restores its watch list itself.
     ///
     /// # Errors
     ///
@@ -28,45 +30,41 @@ impl Signers {
     /// [`WalletErrorKind::Unavailable`] when a rebuilt key is not its
     /// wallet's address.
     pub(crate) async fn load(
-        registry: &dyn indexing::WalletRegistry,
+        registry: &dyn wallets::WalletRepository,
         wallets: &Wallets,
         served: &[base::Network],
     ) -> Result<Self, WalletError> {
-        use indexing::Holder as _;
-        let stored = registry.wallets().await.map_err(|error| {
-            WalletError::new(
-                WalletErrorKind::Unavailable,
-                format!("wallet registry: {}", error.message),
-            )
-        })?;
+        let stored = registry.wallets().await?;
         let assets = wallets.assets();
         let mut signers = BTreeMap::new();
         for wallet in stored
             .iter()
             .filter(|wallet| wallet.archived_at().is_none())
         {
-            let Some(secret) = wallet.secret() else {
+            let Some(key) = wallet.key() else {
                 continue;
             };
             let address = wallet.address();
+            if !served.contains(&address.network) {
+                continue;
+            }
             let configured = assets
                 .iter()
-                .find(|info| info.network == address.network && info.id == *wallet.asset());
-            let Some(info) = configured.filter(|_| served.contains(&address.network)) else {
-                continue;
-            };
-            let signer = wallets
-                .from_pk(&info.tag, SecretBytes::new(secret.as_bytes()))
-                .await?;
-            if signer.address() != address {
-                return Err(Self::failure("a stored key is not its wallet's address"));
+                .filter(|info| info.network == address.network && info.key_format == key.format);
+            for info in configured {
+                let signer = wallets
+                    .from_pk(&info.tag, SecretBytes::new(key.secret.as_bytes()))
+                    .await?;
+                if signer.address() != address {
+                    return Err(Self::failure("a stored key is not its wallet's address"));
+                }
+                signers.insert((wallet.id().to_owned(), info.tag.clone()), signer);
             }
-            signers.insert(wallet.id().to_owned(), signer);
         }
         Ok(Self(RwLock::new(signers)))
     }
 
-    /// Keeps `signer` as wallet `id`'s.
+    /// Keeps `signer` as wallet `id`'s for asset `tag`.
     ///
     /// # Errors
     ///
@@ -74,32 +72,37 @@ impl Signers {
     pub(crate) fn insert(
         &self,
         id: String,
+        tag: AssetTag,
         signer: Arc<dyn wallets::Wallet>,
     ) -> Result<(), WalletError> {
         let mut signers = self.0.write().map_err(|_| Self::poisoned())?;
-        signers.insert(id, signer);
+        signers.insert((id, tag), signer);
         Ok(())
     }
 
-    /// Forgets wallet `id`'s signer, if this process holds one.
+    /// Forgets every signer of wallet `id` this process holds.
     ///
     /// # Errors
     ///
     /// [`WalletErrorKind::Unavailable`] when the keys' lock is poisoned.
     pub(crate) fn remove(&self, id: &str) -> Result<(), WalletError> {
         let mut signers = self.0.write().map_err(|_| Self::poisoned())?;
-        signers.remove(id);
+        signers.retain(|(held, _), _| held != id);
         Ok(())
     }
 
-    /// Wallet `id`'s signer, if this process holds one.
+    /// Wallet `id`'s signer for asset `tag`, if this process holds one.
     ///
     /// # Errors
     ///
     /// [`WalletErrorKind::Unavailable`] when the keys' lock is poisoned.
-    pub(crate) fn get(&self, id: &str) -> Result<Option<Arc<dyn wallets::Wallet>>, WalletError> {
+    pub(crate) fn get(
+        &self,
+        id: &str,
+        tag: &AssetTag,
+    ) -> Result<Option<Arc<dyn wallets::Wallet>>, WalletError> {
         let signers = self.0.read().map_err(|_| Self::poisoned())?;
-        Ok(signers.get(id).cloned())
+        Ok(signers.get(&(id.to_owned(), tag.clone())).cloned())
     }
 
     fn poisoned() -> WalletError {

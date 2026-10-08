@@ -513,8 +513,8 @@
         "tags": [
           "wallets"
         ],
-        "summary": "Generate a wallet, or watch an address, for one configured asset",
-        "description": "Without `address`, generates a wallet, stores it with its key, then watches it from creation. Keys never leave the server. Retrying creates another wallet. With `address`, stores and observes that address from registration without its key: the wallet is watch-only, and sending from it answers 422. `label` names either. `start` is `\"fresh\"` (the default) or the native position observation begins at; a position older than the network's backfill policy allows answers 400. An archived wallet's address is refused: archiving is final.",
+        "summary": "Generate a wallet, or watch an address, in one configured asset",
+        "description": "Without `address`, generates a wallet, stores it with its key, then watches it in `asset` from creation. Keys never leave the server. Retrying creates another wallet. With `address`, observes that address in `asset` from registration: a new address becomes a watch-only wallet, and sending from it answers 422; an address that already is a wallet gains `asset`. `label` names either. `start` is `\"fresh\"` (the default) or the native position observation of `asset` begins at; a position older than the network's backfill policy allows answers 400. An archived wallet's address is refused: archiving is final.",
         "operationId": "create_wallet",
         "requestBody": {
           "content": {
@@ -568,7 +568,7 @@
             }
           },
           "409": {
-            "description": "The address is already an active or archived wallet, an unobserved row of it holds another key, or the asset's network is being rescanned",
+            "description": "The address is an archived wallet, is already watched in this asset from another start, or the asset's network is being rescanned",
             "content": {
               "application/json": {
                 "schema": {
@@ -601,7 +601,7 @@
           "wallets"
         ],
         "summary": "Read one wallet's public metadata",
-        "description": "The wallet's asset, network, canonical address, watch-only flag, label and archive time, archived or not; never its key.",
+        "description": "The wallet's network, canonical address, watch-only flag, label, archive time and observed assets, archived or not; never its key.",
         "operationId": "read_wallet",
         "parameters": [
           {
@@ -734,8 +734,8 @@
         "tags": [
           "wallets"
         ],
-        "summary": "Read a wallet's balance in its own asset",
-        "description": "The confirmed indexed total and pending incoming/outgoing amounts in the asset's display units, with the confirmed and pending heights and how many blocks the address's inspection is behind. Chain spending rules still apply. A watch-only address reads the same balance without a key.",
+        "summary": "Read a wallet's balance in one asset",
+        "description": "The confirmed indexed total and pending incoming/outgoing amounts in the asset's display units, with the confirmed and pending heights and how many blocks the address's inspection is behind. Chain spending rules still apply. A watch-only address reads the same balance without a key. An asset the wallet is not observed in reads what was indexed for its address.",
         "operationId": "read_wallet_balance",
         "parameters": [
           {
@@ -746,6 +746,16 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "asset",
+            "in": "query",
+            "description": "A configured asset tag of the wallet's network (`GET /v1/assets`).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+            }
           }
         ],
         "responses": {
@@ -755,6 +765,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Balance"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -770,7 +790,7 @@
             }
           },
           "404": {
-            "description": "Wallet is unknown",
+            "description": "Wallet is unknown, or the asset is not of its network",
             "content": {
               "application/json": {
                 "schema": {
@@ -803,7 +823,7 @@
           "transactions"
         ],
         "summary": "Read one page of a wallet's history",
-        "description": "The wallet's canonical history in the wallet's own asset. `transactions` is confirmed and append-only, so its cursor stays valid however far the checkpoint moves; `pending` carries the transactions above the confirmed line and is populated on the first page only; `behind` says how many blocks the address's inspection trails the confirmed line, as the balance does.",
+        "description": "The wallet's canonical history in `asset`; a fee is shown where this address was charged it. `transactions` is confirmed and append-only, so its cursor stays valid however far the checkpoint moves; `pending` carries the transactions above the confirmed line and is populated on the first page only; `behind` says how many blocks the address's inspection trails the confirmed line, as the balance does.",
         "operationId": "read_wallet_transactions",
         "parameters": [
           {
@@ -813,6 +833,16 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "asset",
+            "in": "query",
+            "description": "A configured asset tag of the wallet's network: the asset whose\nhistory is read.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
             }
           },
           {
@@ -869,7 +899,7 @@
             }
           },
           "404": {
-            "description": "Wallet is unknown",
+            "description": "Wallet is unknown, or the asset is not of its network",
             "content": {
               "application/json": {
                 "schema": {
@@ -910,7 +940,7 @@
           "transactions"
         ],
         "summary": "Submit one transfer from a wallet",
-        "description": "Submits one transfer through the wallet's configured asset. Every asset uses this shared route; no chain-specific transaction route exists. A watch-only wallet answers 422. A 202 response means submitted, not confirmed.",
+        "description": "Submits one transfer of `asset` from the wallet. Every asset uses this shared route; no chain-specific transaction route exists. A watch-only wallet answers 422. A 202 response means submitted, not confirmed.",
         "operationId": "send_transfer",
         "parameters": [
           {
@@ -1287,7 +1317,7 @@
       },
       "CreateWallet": {
         "type": "object",
-        "description": "`POST /v1/wallets` body: generate a wallet for one configured asset, or\nwatch an existing address of it without its key.",
+        "description": "`POST /v1/wallets` body: generate a wallet for one configured asset, or\nwatch an existing address in it without its key. A wallet is an address:\nwatching another asset of an address that already is a wallet adds that\nasset to it.",
         "required": [
           "asset"
         ],
@@ -1298,7 +1328,7 @@
           },
           "asset": {
             "type": "string",
-            "description": "The configured asset tag the wallet holds (`GET /v1/assets`).",
+            "description": "The configured asset tag to observe the wallet in (`GET /v1/assets`).",
             "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
           },
           "label": {
@@ -2031,6 +2061,7 @@
         "type": "object",
         "description": "`POST /v1/wallets/{id}/transactions` body: one transfer from the path's wallet.",
         "required": [
+          "asset",
           "destination",
           "amount"
         ],
@@ -2038,6 +2069,11 @@
           "amount": {
             "type": "string",
             "description": "Exact decimal in display units, or `all` for the available balance after fees."
+          },
+          "asset": {
+            "type": "string",
+            "description": "A configured asset tag of the wallet's network: the asset sent.",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
           },
           "destination": {
             "type": "string",
@@ -2063,15 +2099,21 @@
         "type": "object",
         "description": "`POST /v1/transactions` body: an ordered batch of one wallet asset.",
         "required": [
+          "asset",
           "transfers"
         ],
         "properties": {
+          "asset": {
+            "type": "string",
+            "description": "The configured asset tag every transfer sends.",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+          },
           "transfers": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/BatchedTransfer"
             },
-            "description": "Transfers of one configured asset, in execution order.",
+            "description": "Transfers of `asset`, in execution order.",
             "maxItems": 50,
             "minItems": 1
           }
@@ -2080,16 +2122,15 @@
       },
       "Wallet": {
         "type": "object",
-        "description": "One wallet: its public identity and its lifecycle. Its wire form is what\nevery wallet route returns; it never holds the key.",
+        "description": "One wallet: one address of one network, its lifecycle, and the assets it\nis observed in. Its wire form is what every wallet route returns; it never\nholds the key.",
         "required": [
           "id",
-          "asset",
-          "asset_id",
           "network",
           "address",
           "watch_only",
           "label",
-          "archived_at"
+          "archived_at",
+          "assets"
         ],
         "properties": {
           "address": {
@@ -2105,17 +2146,12 @@
             "description": "Unix seconds when the wallet was archived; null while it is active.\nAlways present.",
             "minimum": 0
           },
-          "asset": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The configured asset tag this wallet holds and sends; null when no\nconfigured asset holds it any more. Always present.",
-            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
-          },
-          "asset_id": {
-            "type": "string",
-            "description": "The asset's identity within its chain: `native`, or a token\nidentifier."
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WatchedAsset"
+            },
+            "description": "The assets the index observes the address in, in asset order; empty\nonce archived or when this process does not serve its network."
           },
           "id": {
             "type": "string",
@@ -2151,6 +2187,28 @@
               "$ref": "#/components/schemas/Wallet"
             },
             "description": "Wallets in ID order."
+          }
+        }
+      },
+      "WatchedAsset": {
+        "type": "object",
+        "description": "One asset the index observes a wallet's address in.",
+        "required": [
+          "asset",
+          "asset_id"
+        ],
+        "properties": {
+          "asset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The configured asset tag; null when no configured asset is it any\nmore. Always present.",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+          },
+          "asset_id": {
+            "type": "string",
+            "description": "The asset's identity within its chain: `native`, or a token\nidentifier."
           }
         }
       }

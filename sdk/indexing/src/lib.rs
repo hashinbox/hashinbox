@@ -32,8 +32,7 @@ pub use block::{require_chain, select_addresses};
 // What a store implements: the required ports, the capabilities, their rows.
 pub use storage::{
     Change, IndexStore, IndexedBatch, Inspection, Location, Notifying, OutputStore, Progress,
-    PurgedRows, Registration, Repository, TransactionStore, Wallet, WalletRegistry, WatchProgress,
-    WatchStore,
+    PurgedRows, Repository, TransactionStore, WatchProgress, WatchStore,
 };
 // What an application calls: the index, the two facts only it holds, and the
 // hook. The queries and their vocabulary are the repository's, from `storage`.

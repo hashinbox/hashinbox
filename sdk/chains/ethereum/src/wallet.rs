@@ -251,6 +251,10 @@ impl FactoryProfile for WalletFactory {
         self.config.asset.id()
     }
 
+    fn key_format(&self) -> base::KeyFormat {
+        base::KeyFormat::Secp256k1Scalar
+    }
+
     /// Every asset this chain carries is one it also spends, so every factory
     /// declares one.
     fn authorship(&self) -> Option<Arc<dyn Authorship>> {
@@ -275,7 +279,6 @@ pub(crate) struct Wallet {
 }
 
 impl Wallet {
-
     fn fingerprint(&self) -> Fingerprint {
         Fingerprint {
             config: self.config.clone(),

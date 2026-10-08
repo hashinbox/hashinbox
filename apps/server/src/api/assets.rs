@@ -52,11 +52,12 @@ async fn list(State(state): State<Arc<AppState>>) -> Json<ListResponse> {
     // Startup refuses a factory whose chain declared no unit for its asset,
     // so every registered tag has one and is listed.
     let assets = state
+        .payments
         .wallets
         .assets()
         .into_iter()
         .filter_map(|info| {
-            let unit = state.units.of(&info.network, &info.id)?;
+            let unit = state.payments.units.of(&info.network, &info.id)?;
             Some(Listing {
                 asset: info.tag.to_string(),
                 network: info.network.into(),

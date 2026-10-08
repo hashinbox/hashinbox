@@ -1,6 +1,6 @@
 use std::{any::Any, sync::Arc};
 
-use base::{Address, AssetId, Network};
+use base::{Address, AssetId, KeyFormat, Network};
 use crypto::SecretBytes;
 
 use crate::{Authorship, FutureResult, Wallet, WalletError, WalletErrorKind};
@@ -124,6 +124,7 @@ impl Generation {
 /// Named for the factory, not for registering, because `wallets` already uses
 /// "registration" for a submission's lifetime
 /// ([`crate::RegistrationError`], [`crate::SubmissionRegistrar`]).
+// linter:disable rust/trait-method-count -- what a factory declares, read once.
 pub trait FactoryProfile {
     /// The one network its wallets live in; `(chain, network)` is their index
     /// network.
@@ -136,6 +137,11 @@ pub trait FactoryProfile {
     /// Identity only: how much an amount of it is, and what to call it, is
     /// the asset's own ([`base::Units`]), and no wallet carries it.
     fn asset(&self) -> AssetId;
+
+    /// The exact bytes of the keys it creates and imports
+    /// ([`WalletFactory::create`]'s secret, [`Generation::material`]), which
+    /// is how an application files them.
+    fn key_format(&self) -> KeyFormat;
 
     /// How this factory's wallets spend, or `None` for an asset the system
     /// receives and reports and never spends.
@@ -178,6 +184,10 @@ impl<F: FactoryProfile + ?Sized> FactoryProfile for Box<F> {
 
     fn asset(&self) -> AssetId {
         (**self).asset()
+    }
+
+    fn key_format(&self) -> KeyFormat {
+        (**self).key_format()
     }
 
     fn authorship(&self) -> Option<Arc<dyn Authorship>> {

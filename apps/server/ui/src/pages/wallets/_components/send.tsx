@@ -11,7 +11,7 @@ import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
 import { call, client, type Wallet } from '@/api/client';
 import type { Shell } from '@/layout';
-import { shorten } from '@/money';
+import { assetOf, shorten } from '@/money';
 
 export function Send({
   shell,
@@ -33,7 +33,11 @@ export function Send({
     setBusy(true);
     setNote('');
     const params = { path: { id: wallet.id } };
-    const body = { destination: destination.trim(), amount: everything ? 'all' : amount.trim() };
+    const body = {
+      asset: assetOf(wallet),
+      destination: destination.trim(),
+      amount: everything ? 'all' : amount.trim(),
+    };
     call(client.POST('/v1/wallets/{id}/transactions', { params, body }))
       .then((accepted) => {
         setNote(`submitted as ${shorten(accepted.transaction_id)}`);

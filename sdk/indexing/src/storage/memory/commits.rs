@@ -56,6 +56,7 @@ impl IndexStore for Repository {
         Box::pin(async move {
             self.apply(|tables| {
                 let checkpoint = u64::from(tables.checkpoints.remove(network).is_some());
+                tables.blocks.retain(|(bound, _), _| bound != network);
                 let history = dropped(&mut tables.history, |(bound, ..)| bound != network);
                 let credits = dropped(&mut tables.credits, |(bound, ..)| bound != network);
                 let outputs = dropped(&mut tables.outputs, |(bound, ..)| bound != network);
@@ -95,6 +96,15 @@ impl Repository {
         tables
             .settlements
             .insert(network.clone(), batch.settlement());
+        for canonical in batch.blocks() {
+            Self::fill_block(network, canonical.block.reference(), tables)?;
+        }
+        for line in batch.progress().iter().map(|claim| &claim.indexed_through) {
+            Self::fill_block(network, line, tables)?;
+        }
+        if let Some(line) = batch.checkpoint() {
+            Self::fill_block(network, line, tables)?;
+        }
         let mut unknown = Vec::new();
         // Block by block, creations before spends, in the order the chain built
         // them: an output created and then spent inside one batch leaves a
@@ -126,19 +136,38 @@ impl Repository {
     /// is redoing, so what is refused is a claim whose author was reading a
     /// different value — never one that went down.
     fn advance(network: &Network, claim: &Progress, tables: &mut Tables) -> Result<(), IndexError> {
-        let observed = Self::located(tables, &claim.watch_id)
-            .is_some_and(|(wallet_key, row)| wallet_key.0 == *network && row.archived_at.is_none());
-        if !observed {
+        let key = (claim.watch_id.clone(), claim.asset.clone());
+        let held = tables.cursors.get_mut(&key);
+        let Some(cursor) = held.filter(|cursor| cursor.address.network == *network) else {
             return Err(conflict(
                 "indexed progress names an observation this store does not hold",
             ));
-        }
-        let key = (network.clone(), claim.watch_id.clone());
-        if tables.progress.get(&key) != claim.expected.as_ref() {
+        };
+        if cursor.progress != claim.expected {
             return Err(conflict("recorded progress changed before this commit"));
         }
-        drop(tables.progress.insert(key, claim.indexed_through.clone()));
+        cursor.progress = Some(claim.indexed_through.clone());
         Ok(())
+    }
+
+    /// Insert-if-absent, verify-if-present for one block a fact or claim
+    /// names: one block per position, so another hash there is terminal.
+    fn fill_block(
+        network: &Network,
+        block: &BlockRef,
+        tables: &mut Tables,
+    ) -> Result<(), IndexError> {
+        let key = (network.clone(), block.position);
+        match tables.blocks.get(&key) {
+            Some(held) if held == block => Ok(()),
+            Some(_) => Err(Self::corrupt(
+                "a committed block disagrees with the stored one",
+            )),
+            None => {
+                drop(tables.blocks.insert(key, block.clone()));
+                Ok(())
+            }
+        }
     }
 
     /// Insert-if-absent, verify-if-present: a newly watched address routinely
@@ -264,14 +293,12 @@ impl Repository {
 impl Tables {
     /// A rescan preserves registrations but clears every claim about removed facts.
     pub(super) fn disclaim(&mut self, network: &crate::Network) {
-        self.progress.retain(|(bound, ..), _| bound != network);
         self.settlements.remove(network);
-        for (_, net) in self
-            .balances
-            .iter_mut()
-            .filter(|((bound, ..), _)| bound == network)
-        {
-            *net = BigInt::from(0);
+        for cursor in self.cursors.values_mut() {
+            if cursor.address.network == *network {
+                cursor.progress = None;
+                cursor.balance = BigInt::from(0);
+            }
         }
     }
 }
@@ -305,19 +332,15 @@ impl Repository {
         tables: &mut Tables,
         credit: &crate::BlockCredit,
     ) -> Result<(), IndexError> {
-        let key = (
-            credit.to.network.clone(),
-            credit.asset.clone(),
-            credit.to.value.clone(),
-        );
-        let Some(net) = tables.balances.get_mut(&key) else {
-            return Ok(());
-        };
         let units = credit
             .amount
             .to_atomic(0)
             .map_err(|_| Self::corrupt("a credit is not an atomic integer"))?;
-        *net += BigInt::from(units);
+        for ((_, asset), cursor) in &mut tables.cursors {
+            if cursor.address == credit.to && *asset == credit.asset {
+                cursor.balance += BigInt::from(units.clone());
+            }
+        }
         Ok(())
     }
 
@@ -331,16 +354,15 @@ impl Repository {
             .get(&address.network)
             .copied()
             .unwrap_or(FeeSettlement::Charged);
-        for (key, net) in &mut tables.balances {
-            let (network, asset, owner) = key;
-            if network != &address.network || owner != &address.value {
+        for ((_, asset), cursor) in &mut tables.cursors {
+            if cursor.address != *address {
                 continue;
             }
             let query = Subject {
                 address: address.clone(),
                 asset: asset.clone(),
             };
-            *net += transaction.effect(&query, settlement)?;
+            cursor.balance += transaction.effect(&query, settlement)?;
         }
         Ok(())
     }

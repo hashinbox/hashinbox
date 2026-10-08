@@ -1,17 +1,31 @@
 //! `"transaction"`: one transaction's shared fact, stored once per network
-//! whatever number of addresses took part in it.
+//! whatever number of addresses took part in it. Its fee is the payer's
+//! `ledger` row, not a column here.
 
 use std::collections::BTreeMap;
 
 use sqlx::{FromRow, QueryBuilder, SqliteConnection, sqlite::SqliteRow};
 
 use super::{
-    Block, Chunks, amount, column, deleted, fetched, framed, network, refused, restored, store,
-    stored,
+    Block, Chunks, canonical_id, column, fetched, network, refused, restored, store, stored,
 };
-use crate::{
-    Address, AssetId, IndexError, IndexedBatch, Network, NetworkFee, Status, TransactionRef,
-};
+use crate::{IndexError, IndexedBatch, Network, Status, TransactionRef};
+
+/// The columns every read of a transaction selects: its row, and its block's
+/// network and `block_*` columns.
+macro_rules! joined {
+    ($tail:literal) => {
+        concat!(
+            "SELECT t.transaction_id, t.transaction_order, t.execution_status,
+                    t.failure_reason, b.chain, b.network,
+                    b.position AS block_position, b.height AS block_height,
+                    b.hash AS block_hash, b.parents AS block_parents,
+                    b.timestamp AS block_timestamp
+             FROM \"transaction\" t JOIN block b ON b.id = t.block_id ",
+            $tail
+        )
+    };
+}
 
 /// How the transaction executed: `execution_status` and `failure_reason`.
 #[derive(Debug, PartialEq, Eq)]
@@ -22,8 +36,8 @@ enum Execution {
     Failed(Option<String>),
 }
 
-/// One transaction row: the fact without its movements, which are the
-/// `ledger`'s, and with its fee split into three nullable columns.
+/// One transaction row, with the block it names: the fact without its
+/// movements and fee, which are the `ledger`'s.
 ///
 /// Equality is the whole row, so a re-presented transaction is verified by
 /// comparing the row it would write with the row the file holds: one
@@ -35,9 +49,6 @@ pub(in crate::storage::sqlite) struct Transaction {
     block: Block,
     transaction_order: i64,
     execution: Execution,
-    fee_asset: Option<String>,
-    fee_amount: Option<String>,
-    fee_payer: Option<String>,
 }
 
 impl FromRow<'_, SqliteRow> for Transaction {
@@ -54,17 +65,18 @@ impl FromRow<'_, SqliteRow> for Transaction {
             block: Block::from_row(row)?,
             transaction_order: column(row, "transaction_order")?,
             execution,
-            fee_asset: column(row, "fee_asset")?,
-            fee_amount: column(row, "fee_amount")?,
-            fee_payer: column(row, "fee_payer")?,
         })
     }
 }
 
 impl Transaction {
-    /// What one row is the only row for: its network and identifier.
-    pub(in crate::storage::sqlite) fn key(&self) -> (&Network, &str) {
-        (&self.network, &self.transaction_id)
+    /// The row's id: `<chain>:<network>:<transaction id>`.
+    pub(in crate::storage::sqlite) fn id(&self) -> String {
+        canonical_id(&[
+            self.network.chain.as_str(),
+            &self.network.name,
+            &self.transaction_id,
+        ])
     }
 
     /// The row of every transaction `batch` records, block by block.
@@ -85,11 +97,10 @@ impl Transaction {
     ///
     /// A transaction the file already holds is verified rather than rewritten:
     /// one `(network, transaction)` cannot honestly have two contents, so a
-    /// mismatch is corruption and terminal rather than a benign duplicate. The
-    /// comparison is per transaction rather than per participating address,
-    /// which is one row and one truth. When the insert wrote every row there
-    /// is nothing to compare; otherwise every row is compared with the one the
-    /// file holds, and a row this very insert wrote is that row.
+    /// mismatch is corruption and terminal rather than a benign duplicate.
+    /// When the insert wrote every row there is nothing to compare; otherwise
+    /// every row is compared with the one the file holds, and a row this very
+    /// insert wrote is that row. Its block must already be stored.
     pub(in crate::storage::sqlite) async fn insert_missing(
         connection: &mut SqliteConnection,
         rows: &[Self],
@@ -99,8 +110,8 @@ impl Transaction {
             return Ok(());
         }
         let held = Self::find_held(connection, rows).await?;
-        let held: BTreeMap<_, _> = held.iter().map(|row| (row.key(), row)).collect();
-        if rows.iter().all(|row| held.get(&row.key()) == Some(&row)) {
+        let held: BTreeMap<_, _> = held.iter().map(|row| (row.id(), row)).collect();
+        if rows.iter().all(|row| held.get(&row.id()) == Some(&row)) {
             return Ok(());
         }
         Err(store(
@@ -118,10 +129,8 @@ impl Transaction {
             .execute(connection, |chunk| {
                 let mut statement = QueryBuilder::new(
                     "INSERT OR IGNORE INTO \"transaction\"
-                         (chain, network, transaction_id, block_position, block_height,
-                          block_hash, block_parent_position, block_parent_hash,
-                          block_timestamp, transaction_order, execution_status,
-                          failure_reason, fee_asset, fee_amount, fee_payer) ",
+                         (id, block_id, transaction_id, transaction_order, execution_status,
+                          failure_reason) ",
                 );
                 statement.push_values(chunk, |mut values, row: &Self| {
                     let (status, reason) = match &row.execution {
@@ -129,40 +138,31 @@ impl Transaction {
                         Execution::Failed(reason) => (1, reason.as_deref()),
                     };
                     values
-                        .push_bind(row.network.chain.as_str())
-                        .push_bind(row.network.name.as_str())
-                        .push_bind(row.transaction_id.as_str());
-                    row.block.push(&mut values);
-                    values
+                        .push_bind(row.id())
+                        .push_bind(row.block.id(&row.network))
+                        .push_bind(row.transaction_id.as_str())
                         .push_bind(row.transaction_order)
                         .push_bind(status)
-                        .push_bind(reason)
-                        .push_bind(row.fee_asset.as_deref())
-                        .push_bind(row.fee_amount.as_deref())
-                        .push_bind(row.fee_payer.as_deref());
+                        .push_bind(reason);
                 });
                 statement
             })
             .await
     }
 
-    /// The rows the file holds under the identities of `rows`, many to a
-    /// statement, in no particular order.
+    /// The rows the file holds under the ids of `rows`, many to a statement,
+    /// in no particular order.
     async fn find_held(
         connection: &mut SqliteConnection,
         rows: &[Self],
     ) -> Result<Vec<Self>, IndexError> {
         Chunks::new(rows, "failed to look up transactions")
             .fetch(connection, |chunk| {
-                let mut statement = QueryBuilder::new(
-                    "SELECT * FROM \"transaction\"
-                     WHERE (chain, network, transaction_id) IN (",
-                );
-                statement.push_values(chunk, |mut key, row: &Self| {
-                    key.push_bind(row.network.chain.as_str())
-                        .push_bind(row.network.name.as_str())
-                        .push_bind(row.transaction_id.as_str());
-                });
+                let mut statement = QueryBuilder::new(joined!("WHERE t.id IN ("));
+                let mut ids = statement.separated(", ");
+                for row in chunk {
+                    ids.push_bind(row.id());
+                }
                 statement.push(")");
                 statement
             })
@@ -175,35 +175,29 @@ impl Transaction {
         network: &Network,
         id: &str,
     ) -> Result<Self, sqlx::Error> {
-        sqlx::query_as(
-            "SELECT * FROM \"transaction\"
-             WHERE chain = ?1 AND network = ?2 AND transaction_id = ?3",
-        )
-        .bind(network.chain.as_str())
-        .bind(&network.name)
-        .bind(id)
-        .fetch_one(connection)
-        .await
+        sqlx::query_as(joined!("WHERE t.id = ?1"))
+            .bind(canonical_id(&[network.chain.as_str(), &network.name, id]))
+            .fetch_one(connection)
+            .await
     }
 
-    /// Up to `limit` of `address`'s transactions after `cursor`
-    /// (`(height, order, id)`), in native block order: the `history_entry`
-    /// view, one row per transaction the address took part in.
+    /// Up to `limit` of the transactions of the address `address_id` names
+    /// after `cursor` (`(height, order, transaction id)`), in native block
+    /// order: the `history_entry` view, one row per transaction the address
+    /// took part in.
     pub(in crate::storage::sqlite) async fn find_after_by_address(
         connection: &mut SqliteConnection,
-        network: &Network,
-        address: &str,
+        address_id: &str,
         cursor: &(i64, i64, String),
         limit: usize,
     ) -> Result<Vec<Self>, IndexError> {
-        let query = framed(
+        let query = sqlx::query(
             "SELECT * FROM history_entry
-             WHERE chain = ?1 AND network = ?2 AND address = ?3
-               AND (block_height, transaction_order, transaction_id) > (?4, ?5, ?6)
-             ORDER BY block_height, transaction_order, transaction_id LIMIT ?7",
-            network,
+             WHERE address_id = ?1
+               AND (block_height, transaction_order, transaction_id) > (?2, ?3, ?4)
+             ORDER BY block_height, transaction_order, transaction_id LIMIT ?5",
         )
-        .bind(address)
+        .bind(address_id)
         .bind(cursor.0)
         .bind(cursor.1)
         .bind(cursor.2.as_str())
@@ -215,48 +209,13 @@ impl Transaction {
     pub(in crate::storage::sqlite) fn block(self) -> Result<crate::BlockRef, IndexError> {
         self.block.try_into()
     }
-
-    /// Removes every transaction of `network`; how many rows that was.
-    pub(in crate::storage::sqlite) async fn purge(
-        connection: &mut SqliteConnection,
-        network: &Network,
-    ) -> Result<u64, IndexError> {
-        deleted(
-            connection,
-            network,
-            "DELETE FROM \"transaction\" WHERE chain = ?1 AND network = ?2",
-        )
-        .await
-    }
-
-    /// The three fee columns as the fee they hold.
-    fn fee(&self) -> Result<Option<NetworkFee>, IndexError> {
-        let (Some(asset), Some(fee)) = (&self.fee_asset, &self.fee_amount) else {
-            if self.fee_asset.is_some() || self.fee_amount.is_some() {
-                return Err(store("a stored network fee is half written"));
-            }
-            return Ok(None);
-        };
-        Ok(Some(NetworkFee {
-            asset: AssetId {
-                chain: self.network.chain.clone(),
-                asset: asset.clone(),
-            },
-            amount: amount(fee)?,
-            payer: self.fee_payer.as_ref().map(|value| Address {
-                network: self.network.clone(),
-                value: value.clone(),
-            }),
-        }))
-    }
 }
 
 impl TryFrom<&crate::Transaction> for Transaction {
     type Error = IndexError;
 
-    /// The row `entry` is stored as; its movements are not part of it.
+    /// The row `entry` is stored as; its movements and fee are not part of it.
     fn try_from(entry: &crate::Transaction) -> Result<Self, IndexError> {
-        let fee = entry.fee.as_ref();
         Ok(Self {
             network: entry.id.network.clone(),
             transaction_id: entry.id.id.as_str().to_owned(),
@@ -266,11 +225,6 @@ impl TryFrom<&crate::Transaction> for Transaction {
                 Status::Included { .. } => Execution::Included,
                 Status::Failed { reason, .. } => Execution::Failed(reason.clone()),
             },
-            fee_asset: fee.map(|fee| fee.asset.asset.clone()),
-            fee_amount: fee.map(|fee| fee.amount.to_string()),
-            fee_payer: fee
-                .and_then(|fee| fee.payer.as_ref())
-                .map(|payer| payer.value.clone()),
         })
     }
 }
@@ -278,9 +232,8 @@ impl TryFrom<&crate::Transaction> for Transaction {
 impl TryFrom<Transaction> for crate::Transaction {
     type Error = IndexError;
 
-    /// The transaction this row holds, with no movements attached.
+    /// The transaction this row holds, with no movements and no fee attached.
     fn try_from(row: Transaction) -> Result<Self, IndexError> {
-        let fee = row.fee()?;
         let block = row.block.try_into()?;
         Ok(Self {
             id: TransactionRef {
@@ -288,7 +241,7 @@ impl TryFrom<Transaction> for crate::Transaction {
                 id: row.transaction_id.into(),
             },
             movements: Vec::new(),
-            fee,
+            fee: None,
             order: restored(row.transaction_order)?,
             status: match row.execution {
                 Execution::Included => Status::Included { block },

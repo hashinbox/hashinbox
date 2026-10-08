@@ -5,6 +5,7 @@ mod asset;
 mod block;
 mod chain;
 mod holder;
+mod key_format;
 mod movement;
 mod network;
 mod signer;
@@ -26,6 +27,7 @@ pub use crypto::{
 };
 pub use decimal::{Decimal, Error as DecimalError};
 pub use holder::{Holder, Subject};
+pub use key_format::KeyFormat;
 
 pub use movement::MovementKind;
 pub use network::{Network, NetworkKind, Networked};

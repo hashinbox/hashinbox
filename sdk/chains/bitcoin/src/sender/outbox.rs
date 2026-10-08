@@ -328,7 +328,6 @@ impl Outbox {
             })?;
         unsigned.sign_each(self.network, &owners).await
     }
-
 }
 
 /// Groups `items` by sender, in first-seen order.

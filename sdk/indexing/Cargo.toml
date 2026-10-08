@@ -17,7 +17,7 @@ default = ["sqlite", "driver"]
 # pool, and one worker thread per connection). It brings Tokio with it: sqlx
 # runs on the Tokio runtime, so a build with this store has one whether or not
 # it takes `driver`. Off, the crate is the traits and the vocabulary.
-sqlite = ["dep:sqlx"]
+sqlite = ["dep:sqlx", "dep:serde_json", "dep:hex"]
 # The driver: `indexing::Driver` and its tasks. Off, the crate carries no
 # async runtime.
 driver = ["dep:tokio", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time"]
@@ -34,11 +34,13 @@ testing = []
 [dependencies]
 logging = { path = "../../packages/logging" }
 base = { path = "../base" }
-# `SecretBytes`: the zeroizing key a wallet row may hold (`WalletRegistry`).
-crypto = { path = "../../packages/crypto" }
 futures-channel.workspace = true
 num-bigint.workspace = true
 sqlx = { workspace = true, optional = true }
+# The `block.parents` and `wallet.metadata` JSON columns and hex block ids of
+# the SQL store.
+serde_json = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 tokio = { version = "=1.49.0", default-features = false, optional = true }
 
 [dev-dependencies]

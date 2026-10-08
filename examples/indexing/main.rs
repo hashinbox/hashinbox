@@ -14,6 +14,7 @@ use indexing::{
 use json_rpc::Client as _;
 use payments::{Payments, config::Document};
 use serde_json::{Value, json};
+use wallets::WalletRepository as _;
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -41,7 +42,10 @@ async fn main() -> Result<(), AnyError> {
     //    it per slot, and the instance stays here with its full surface.
     tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
     let file = std::path::absolute(".index-data/indexing.db")?;
-    let repo = Arc::new(Repository::new(Database::open(file).await?));
+    let database = Database::open(file).await?;
+    // The wallet rows live in the same file: filed here, then watched.
+    let filed = wallets::storage::sqlite::Repository::new(database.pool().clone());
+    let repo = Arc::new(Repository::new(database));
 
     // 3. The chains this application links, one line each; then the store,
     //    then run: nodes verified, chains composed, index driven, ready.
@@ -69,7 +73,15 @@ async fn main() -> Result<(), AnyError> {
         ("sol", "sol-alice"),
     ] {
         let wallet = payments.wallets.create(&asset.to_owned()).await?;
-        payments.watch(id, &wallet, Birthday::Fresh).await?;
+        filed
+            .register(wallets::Registration {
+                id: id.to_owned(),
+                address: wallet.address().clone(),
+                label: None,
+                key: None,
+            })
+            .await?;
+        payments.watch(id, wallet.as_ref(), Birthday::Fresh).await?;
         wallets.push((id, wallet));
     }
 

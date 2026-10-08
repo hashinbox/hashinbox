@@ -138,30 +138,30 @@ pub trait WatchStore: Send + Sync {
     /// stored is the same observation, so re-presenting it is how an uncertain
     /// `add` is resolved; it must not reset what has been inspected for it.
     ///
-    /// **A conflicting definition fails the whole batch.** A stored identity
-    /// under another address, asset or birthday, or a stored `(address, asset)`
-    /// pair under another identity, is a different observation wearing a name
-    /// that is taken, and accepting it would silently retarget progress earned
-    /// by the other one.
+    /// **A conflicting definition fails the whole batch.** A stored
+    /// observation of the same wallet and asset under another birthday is a
+    /// different observation wearing a name that is taken, and accepting it
+    /// would silently retarget progress earned by the other one.
     ///
-    /// **An archived row is observed again** when the watch names its own
-    /// identity and pair: from the birthday given, with nothing inspected and
-    /// its total seeded from the facts already stored, in the same
-    /// transaction. That includes a row a [`crate::WalletRegistry`] filed
-    /// unobserved. An archived pair stays reserved for its identity, so
-    /// another identity is refused as above.
+    /// **A watch observes a wallet and never files one.** The shipped SQL
+    /// store's schema requires the `wallet` row the wallets side filed under
+    /// `watch.id`. A new observation starts with nothing
+    /// inspected and its total seeded from the facts already stored, in the
+    /// same transaction — which is how a re-watch after
+    /// [`Self::forget`] resumes.
     ///
     /// # Errors
     ///
     /// [`crate::IndexErrorKind::Conflict`], not retryable, for a conflicting
-    /// definition — including an identity another network of the same store
-    /// holds — [`crate::IndexErrorKind::InvalidRequest`] for a blank address, an asset
+    /// definition, for an `(address, asset)` another id observes, and for a
+    /// wallet the database does not hold,
+    /// [`crate::IndexErrorKind::InvalidRequest`] for a blank address, an asset
     /// of another chain than its address, or a batch spanning more than one
     /// network, and the store's own error.
     fn add<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>>;
 
-    /// Every observation of exactly `network`, with its recorded progress, from
-    /// **one consistent snapshot**.
+    /// Every observation of exactly `network`, with its
+    /// recorded progress, from **one consistent snapshot**.
     ///
     /// The snapshot is the contract, not an implementation note: the index
     /// pairs each watch with its progress and then owns that pairing for the
@@ -181,29 +181,24 @@ pub trait WatchStore: Send + Sync {
         network: &'a Network,
     ) -> BoxFuture<'a, Result<Vec<WatchProgress>, IndexError>>;
 
-    /// Archives `watch`: it leaves [`Self::all`], and the progress and total
-    /// recorded for it go, so nothing inherits either.
+    /// Removes the observation `watch` names: it leaves [`Self::all`], and the
+    /// birthday, progress and total recorded for it go, so nothing inherits
+    /// any of them.
     ///
-    /// **By identity.** The row archived is the one registered under
-    /// `watch.id` in `network`; the `(address, asset)` pair `watch` names is
-    /// not a second key, so a pair another identity holds is never touched by
-    /// this call.
+    /// **By identity**: wallet `watch.id` in `network`, in `watch.asset`.
     ///
-    /// The durable half of [`crate::Watching::unwatch`]. The row itself stays,
-    /// with its birthday and whatever an application filed beside it
-    /// ([`crate::WalletRegistry`]), and its pair stays reserved for its
-    /// identity: [`Self::add`] under the same identity and pair observes it
-    /// again. The history, credits and live outputs of the address are
-    /// untouched, which is what makes the withdrawal reversible.
+    /// The durable half of [`crate::Watching::unwatch`]. [`Self::add`]
+    /// observes it again from the birthday it then states.
+    /// The history, credits and live outputs of the address are untouched,
+    /// which is what makes the withdrawal reversible.
     ///
     /// Progress belongs to the observation and goes with it. Another
     /// observation of the same address keeps its own, which it earned under its
     /// own birthday — progress is per observation now, so there is no shared row
     /// for a withdrawal to orphan.
     ///
-    /// Idempotent: a watch this store does not hold, or holds archived, is not
-    /// an error, because an observation nothing scans is the state the caller
-    /// asked for; an archived row keeps the time it was first archived at.
+    /// Idempotent: a watch this store does not hold is not an error, because
+    /// an observation nothing scans is the state the caller asked for.
     ///
     /// # Errors
     ///
@@ -216,10 +211,11 @@ pub trait WatchStore: Send + Sync {
     ) -> BoxFuture<'a, Result<(), IndexError>>;
 }
 
-/// A definition refused because another observation holds one of its names.
+/// A definition refused because another observation or wallet holds one of
+/// its names.
 ///
-/// An identity under another `(address, asset)` pair or birthday, a pair under
-/// another identity, or an identity another network holds. **Not retryable**:
+/// A wallet and asset under another birthday, an address under another
+/// wallet id, or an id another address or network holds. **Not retryable**:
 /// the stored row is the caller's own earlier registration, not a race, so
 /// presenting the same definition again can only be refused again. Both shipped
 /// stores answer it with this one value so they cannot disagree about it.

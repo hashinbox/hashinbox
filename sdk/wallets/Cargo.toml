@@ -15,12 +15,17 @@ submissions = ["dep:tasks", "dep:tokio", "tokio/rt"]
 # test scaffolding; it belongs in a `[dev-dependencies]` entry only, never in
 # a production link.
 testing = []
+# The application's wallet store on SQLite (`wallets::storage::sqlite`): the
+# `wallet` table of the shared schema, on the pool the file's opener made.
+sqlite = ["dep:sqlx", "dep:serde_json"]
 
 [dependencies]
 tasks = { path = "../../packages/tasks", optional = true }
 base = { path = "../base" }
 crypto = { path = "../../packages/crypto" }
 tokio = { version = "=1.49.0", default-features = false, optional = true }
+sqlx = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 futures-executor.workspace = true

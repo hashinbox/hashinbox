@@ -10,13 +10,13 @@
 -- network agreement across references. Enable foreign_keys on every
 -- connection. Persist confirmed facts only; pending blocks live in memory.
 --
--- Ownership: `wallet` belongs to the wallets crate — identity, keys,
--- application metadata, birthday. `wallet_index` and everything above it
--- belongs to indexing — the observation of a wallet's address per asset: a
--- progress cursor into `block`, the folded balance. Scanning never reads key
--- material; the join below reads identity and birthday only. Unwatch deletes
--- the cursor row (inspection stops, indexed facts stay); a re-watch resumes
--- from the wallet's birthday.
+-- Ownership: `wallet` belongs to the wallets crate — identity (one address of
+-- one network), key material and application metadata. `wallet_index` and
+-- everything above it belongs to indexing — the observation of a wallet's
+-- address per asset: its birthday, a progress cursor into `block`, the folded
+-- balance. Scanning never reads key material; the join below reads identity
+-- only. Unwatch deletes the cursor row (inspection stops, indexed facts stay);
+-- a re-watch states its birthday again and is inspected from there.
 --
 -- Finality is not a table. Each chain states its confirmed line at indexer
 -- construction — Bitcoin a depth constant, Ethereum and Solana ask their
@@ -24,13 +24,15 @@
 --
 -- Reorg recovery is explicit and offline for the affected network: pause it,
 -- then delete the orphan blocks — CASCADE removes their transactions,
--- memberships and ledger rows. Clear BOTH spend references on retained
--- outputs whose spend was orphaned (a boolean could not say when to undo;
--- a retained creation spent in an orphan block is unspent again). Restore the
+-- memberships, ledger rows and outputs. First clear the spend reference on
+-- retained outputs (else the cascade takes them too)
+-- whose spend was orphaned (the reference says when, not who; a retained
+-- creation spent in an orphan block is unspent again). Restore the
 -- affected cursors to the last retained inspected block, or delete the row
 -- when none remains — never advance a lagging wallet to the common ancestor;
 -- its own inspection must prove that. Identities, birthdays, keys, archive
--- state and application metadata stay. Replay replacement blocks from the
+-- state and application metadata stay. A rescan deletes every block of its
+-- network: cascades take the facts, cursors fall back to NULL. Replay replacement blocks from the
 -- restored cursors; replay is idempotent — matching facts are no-ops,
 -- conflicting facts fail. Readers see the repair atomically
 -- (BEGIN IMMEDIATE … COMMIT).
@@ -53,7 +55,7 @@ CREATE INDEX block_height ON block (chain, network, height);
 -- One current canonical inclusion per native transaction identity.
 CREATE TABLE "transaction" (
     id                TEXT    NOT NULL, -- <chain:network:transaction_id>
-    block_id          TEXT    NOT NULL REFERENCES block (id),
+    block_id          TEXT    NOT NULL REFERENCES block (id) ON DELETE CASCADE,
     transaction_id    TEXT    NOT NULL,
     transaction_order INTEGER NOT NULL,
     execution_status  INTEGER NOT NULL,
@@ -75,13 +77,18 @@ CREATE INDEX transaction_address_history
 
 -- Individual movements, not netted totals. Transactionless credits use a NULL
 -- transaction. direction 0 credit, 1 debit; kind 0..4 movement, 5 fee,
--- 6 withdrawal. The id deterministically includes block, transaction (or
+-- 6 withdrawal. A fee is a debit of the charged address in the charged asset,
+-- naming the transaction responsible; history reads fees here. Its
+-- movement_id is '' when the chain charges it beside the movements, or
+-- 'embedded' when the movements already contain it (Bitcoin: inputs minus
+-- outputs) — an embedded fee is shown, never folded into a balance again. The id deterministically includes block, transaction (or
 -- credit namespace), movement, address, asset and direction, and
 -- deduplicates transactionless retries.
 CREATE TABLE ledger (
     id             TEXT    NOT NULL,
-    block_id       TEXT    NOT NULL REFERENCES block (id),
-    transaction_id TEXT    REFERENCES "transaction" (id), -- NULL: a credit.
+    block_id       TEXT    NOT NULL REFERENCES block (id) ON DELETE CASCADE,
+    transaction_id TEXT    REFERENCES "transaction" (id) ON DELETE CASCADE,
+                                     -- NULL: a credit.
     address_id     TEXT    NOT NULL, -- No wallet FK.
     asset          TEXT    NOT NULL,
     movement_id    TEXT    NOT NULL,
@@ -99,11 +106,12 @@ CREATE INDEX ledger_address_asset
     ON ledger (address_id, asset, block_id, movement_order, id);
 CREATE INDEX ledger_transaction ON ledger (transaction_id, movement_order, id);
 
--- Current canonical output state. Spend references make destructive rollback
--- reversible to a retained block. A spend may arrive before its creation: the
--- tombstone holds identity, address and spend references, and a later
--- creation fills the creation fields without clearing the spend. NULL
--- spent_block_id means unspent.
+-- Current canonical output state. The spend reference (to the block that
+-- spent it, not the spender — the spender usually is not a stored
+-- transaction) makes destructive rollback reversible. A spend may arrive
+-- before its creation: the tombstone holds identity, address and the spend
+-- reference, and a later creation fills the creation fields without clearing
+-- the spend. NULL spent_block_id means unspent.
 CREATE TABLE output (
     id                   TEXT    NOT NULL, -- <chain:network:creating_tx:index>
     chain                TEXT    NOT NULL,
@@ -114,14 +122,13 @@ CREATE TABLE output (
     asset                TEXT,
     amount               TEXT,
     evidence             BLOB,
-    created_block_id     TEXT    REFERENCES block (id),
+    created_block_id     TEXT    REFERENCES block (id) ON DELETE CASCADE,
     coinbase             INTEGER,
-    spent_block_id       TEXT    REFERENCES block (id),
-    spent_transaction_id TEXT    REFERENCES "transaction" (id),
+    spent_block_id       TEXT    REFERENCES block (id) ON DELETE CASCADE,
+                                         -- when, not who.
     PRIMARY KEY (id),
     UNIQUE (chain, network, transaction_id, output_index),
     CHECK (output_index >= 0),
-    CHECK ((spent_block_id IS NULL) = (spent_transaction_id IS NULL)),
     CHECK (
         (asset IS NULL AND amount IS NULL AND evidence IS NULL
          AND created_block_id IS NULL AND coinbase IS NULL
@@ -140,37 +147,49 @@ CREATE INDEX output_spend ON output (spent_block_id);
 CREATE TABLE network_checkpoint (
     chain    TEXT NOT NULL,
     network  TEXT NOT NULL,
-    block_id TEXT NOT NULL REFERENCES block (id),
+    block_id TEXT NOT NULL REFERENCES block (id) ON DELETE CASCADE,
     PRIMARY KEY (chain, network)
 ) WITHOUT ROWID;
 
--- The wallets crate's row: identity, key material, application metadata and
--- the birthday every observation of this address resumes from. Scanning
--- never reads the key material.
+-- The wallets crate's row: one address of one network, its key material and
+-- application metadata. key_format names the exact bytes in private_key:
+-- 'secp256k1-scalar' (a 32-byte scalar) or 'ed25519-seed' (a 32-byte seed);
+-- import encodings are normalized before they get here. Scanning never reads
+-- the key material.
 CREATE TABLE wallet (
     id          TEXT    NOT NULL,
     chain       TEXT    NOT NULL,
     network     TEXT    NOT NULL,
     address     TEXT    NOT NULL,
-    key_format  TEXT    NOT NULL,
-    private_key BLOB,                    -- NULL: a watch-only placeholder.
+    key_format  TEXT,                    -- NULL exactly when private_key is.
+    private_key BLOB,                    -- NULL: watch-only.
     metadata    TEXT    NOT NULL DEFAULT '{}',
-    birthday    INTEGER NOT NULL,        -- Inclusive start position.
     archived_at INTEGER,                 -- The application's flag; keys kept.
     PRIMARY KEY (id),
-    UNIQUE (chain, network, address)
+    UNIQUE (chain, network, address),
+    CHECK (key_format IN ('secp256k1-scalar', 'ed25519-seed')),
+    CHECK ((key_format IS NULL) = (private_key IS NULL))
 ) WITHOUT ROWID;
 
--- The lightweight join: a wallet's address observed per asset. block_id is
--- the progress cursor (NULL: not yet inspected); balance is the signed
--- absolute total, folded in the same transaction as the movements — never
--- repaired silently. Unwatch deletes the row; indexed facts stay.
+-- One wallet's address observed in one asset, from its inclusive birthday
+-- position: everything indexing reads, so indexing code never touches
+-- `wallet`. The FK is the database's integrity rule: the wallets side files
+-- the wallet row first. block_id is the progress cursor (NULL: not yet
+-- inspected); balance is the signed absolute total, folded in the same
+-- transaction as the movements — never repaired silently. Unwatch deletes the
+-- row; indexed facts stay. Archiving a wallet is the application's: it
+-- unwatches every asset first.
 CREATE TABLE wallet_index (
-    wallet_id TEXT NOT NULL REFERENCES wallet (id),
-    asset     TEXT NOT NULL,
-    block_id  TEXT REFERENCES block (id),
-    balance   TEXT NOT NULL DEFAULT '0', -- Signed exact atomic total.
-    PRIMARY KEY (wallet_id, asset)
+    wallet_id TEXT    NOT NULL REFERENCES wallet (id),
+    chain     TEXT    NOT NULL,
+    network   TEXT    NOT NULL,
+    address   TEXT    NOT NULL,
+    asset     TEXT    NOT NULL,
+    birthday  INTEGER NOT NULL,          -- Inclusive start position.
+    block_id  TEXT    REFERENCES block (id) ON DELETE SET NULL,
+    balance   TEXT    NOT NULL DEFAULT '0', -- Signed exact atomic total.
+    PRIMARY KEY (wallet_id, asset),
+    UNIQUE (chain, network, address, asset)
 ) WITHOUT ROWID;
 CREATE INDEX wallet_index_block ON wallet_index (block_id);
 
@@ -180,7 +199,7 @@ CREATE VIEW history_entry AS
            t.execution_status, t.failure_reason,
            b.chain, b.network, b.id AS block_id, b.position AS block_position,
            b.height AS block_height, b.hash AS block_hash,
-           b.timestamp AS block_timestamp
+           b.timestamp AS block_timestamp, b.parents AS block_parents
     FROM transaction_address a
     JOIN "transaction" t ON t.id = a.transaction_id
     JOIN block b ON b.id = t.block_id;

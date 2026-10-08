@@ -14,8 +14,8 @@
 //! outlive the rows behind it.
 
 use crate::{
-    BlockRef, BlockWithOutputs, BoxFuture, FeeSettlement, IndexError, IndexErrorKind, Network,
-    OutputKey,
+    AssetId, BlockRef, BlockWithOutputs, BoxFuture, FeeSettlement, IndexError, IndexErrorKind,
+    Network, OutputKey,
 };
 
 /// How far one observation's inspection reached, and what the store must still
@@ -46,8 +46,11 @@ use crate::{
 /// [`IndexStore::commit`] for what recovery actually is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Progress {
-    /// The observation this advances, by its own identity ([`crate::Watch::id`]).
+    /// The wallet of the observation this advances ([`crate::Watch::id`]).
     pub watch_id: String,
+    /// The asset of the observation this advances; with `watch_id`, its
+    /// identity.
+    pub asset: AssetId,
     /// The `indexed_through` the store must still hold, or `None` when the
     /// author believes nothing has been recorded for this observation yet.
     pub expected: Option<BlockRef>,
@@ -203,7 +206,7 @@ impl IndexedBatch {
         for (index, claim) in progress.iter().enumerate() {
             if progress[..index]
                 .iter()
-                .any(|held| held.watch_id == claim.watch_id)
+                .any(|held| held.watch_id == claim.watch_id && held.asset == claim.asset)
             {
                 return Err(IndexError::new(
                     IndexErrorKind::InvalidRequest,

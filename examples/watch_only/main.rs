@@ -15,6 +15,7 @@ use json_rpc::Client as _;
 use payments::config::{Composition, Document, Registry};
 use serde_json::{Value, json};
 use tokio::sync::watch;
+use wallets::WalletRepository as _;
 use wallets::{SecretBytes, SubmissionRegistrar, Submissions};
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
@@ -60,14 +61,20 @@ async fn main() -> Result<(), AnyError> {
     // 3. Compose. Every node's identity is verified before the store is
     //    opened, then each chain builds its index and factories over it.
     let registrar: Arc<dyn SubmissionRegistrar> = Arc::new(Submissions::new());
+    // The file is opened here so its wallet rows can be filed: a watch
+    // observes a wallet the store already holds.
+    let file = std::path::absolute(".index-data/watch_only.db")?;
+    tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
+    let database = Database::open(file).await?;
+    let filed = wallets::storage::sqlite::Repository::new(database.pool().clone());
+    let indexing = Repository::new(database.clone());
     let Composition { index, wallets, .. } = chains
         .compose(
-            || async {
-                let file = std::path::absolute(".index-data/watch_only.db")?;
-                tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
-                Ok::<_, AnyError>(Database::open(file).await?)
+            || {
+                let database = database.clone();
+                async move { Ok::<_, AnyError>(database) }
             },
-            |store: &Database| Ok::<_, AnyError>(Repository::new(store.clone())),
+            |_: &Database| Ok::<_, AnyError>(indexing.clone()),
             &registrar,
         )
         .await?;
@@ -88,6 +95,14 @@ async fn main() -> Result<(), AnyError> {
             address: wallets.parse(&asset, &text)?,
             asset: wallets.asset(&asset)?.id,
         };
+        filed
+            .register(wallets::Registration {
+                id: id.to_owned(),
+                address: subject.address.clone(),
+                label: None,
+                key: None,
+            })
+            .await?;
         index.watch(id, &subject, Birthday::Fresh).await?;
         println!("{id}: watching {}", subject.address.value);
     }

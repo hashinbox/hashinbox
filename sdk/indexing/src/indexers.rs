@@ -289,7 +289,7 @@ where
         })
     }
 
-    fn unwatch<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<Watch>, IndexError>> {
+    fn unwatch<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
         Box::pin(async move {
             self.watches.load(&self.repository).await?;
             let persisted = self.repository.checkpoint(self.network()).await?;
@@ -491,14 +491,15 @@ impl<C: Indexing + ?Sized> Watching for Indexers<C> {
     /// unit in turn and stops at the one that held it. Nothing else can find it:
     /// the caller has an id and not a network, which is exactly how
     /// `apps/server` addresses a wallet.
-    fn unwatch<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Option<Watch>, IndexError>> {
+    fn unwatch<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<Vec<Watch>, IndexError>> {
         Box::pin(async move {
             for unit in &self.units {
-                if let Some(watch) = unit.indexer.unwatch(id).await? {
-                    return Ok(Some(watch));
+                let watches = unit.indexer.unwatch(id).await?;
+                if !watches.is_empty() {
+                    return Ok(watches);
                 }
             }
-            Ok(None)
+            Ok(Vec::new())
         })
     }
 

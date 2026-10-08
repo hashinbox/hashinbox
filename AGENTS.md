@@ -13,14 +13,15 @@ This is for interaction with user.
 
 - Follow explicit user decisions first; current source, manifests and tests establish
   implemented behavior and exact APIs, not proof that every design is correct.
-- Read `docs/SYSTEM_REQUIREMENTS.md`, `ARCHITECTURE.md` and the owning README;
+- Read the owning README and `docs/design/` for the current change;
   the generated `docs/openapi.json` describes HTTP.
   Resolve stale documentation against the code and user requirements; do not preserve
   obsolete architecture because a document describes it. ADRs record history.
 - Pre-release: replace obsolete internal APIs/formats directly; no compatibility
   aliases, legacy readers or invented V1/V2 DTOs. External protocol contracts remain.
-  SQLite has no migrations: one schema per owner, applied to an empty file; any other
-  version is refused. Indexing owns and creates its tables; the server may read them.
+  SQLite has no migrations: one schema (`schema/sdk.sql`, plus the application's
+  `schema/server.sql`), applied by the file's opener to an empty file under a version
+  hash; any other version is refused.
 - Leave `old/` and `reference/` alone unless requested. If `.codegraph/` exists, use
   `codegraph explore` before broad source searches; otherwise use `rg`.
 
@@ -34,12 +35,12 @@ separate indexer service, raw-block archive or multi-writer deployment.
 
 | Owner | Responsibility |
 | --- | --- |
-| `apps/server` | The one application, a binary with no library target. Every module is a model, the API, or composition: `main.rs` composes (with `config.rs`, `chains.rs` (the only file naming chains), `storage.rs`, `asset.rs`, `state.rs`, `operator.rs`, `ui.rs`; test-only `app.rs` is the application under test), including startup's node plan, the live transports and the candidate-node verifier; generic mechanics belong to the owning SDK crate or package |
-| `apps/server/src/models/` | The server's nouns, one file each: validated type, its own serde/utoipa wire form, and for durable ones their storage: `Wallet` reads indexing's `wallet` rows through `WalletRegistry`, `RpcEndpoints` is SQL on the one SQLite pool in `models/schema.sql` (created with indexing's on an empty file, no migrations). Balance and history are the concrete repository's inherent reads (053), not server SQL. No axum, routes, `payments::config` or chain (check 8) |
-| `apps/server/src/api/` | One file per HTTP resource (`wallets`, `balance`, `transactions`, `assets`, `networks`, `health`, `openapi`) with its routes, request/response models and tests; `mod.rs` assembles the router and OpenAPI root and holds the shared `Error`/`ErrorBody`. Handler state is `src/state.rs`; each configured network's live handles are in `networks.rs`; handlers call SDK operations and model stores directly. None of `api/`, `asset.rs`, `state.rs` names a concrete chain, `payments::config` or storage backend |
+| `apps/server` | The one application, a binary with no library target. Every module is a model, the API, or composition: `main.rs` composes (with `config.rs`, `chains.rs` (the only file naming chains), `storage.rs`, `asset.rs`, `state.rs`, `ui.rs`; test-only `app.rs` is the application under test), including startup's node seeding and the `payments` builder; live transports, node verification, rescan and shutdown are `payments`'; generic mechanics belong to the owning SDK crate or package |
+| `apps/server/src/models/` | The server's nouns, one file each: validated type, its own serde/utoipa wire form, and for durable ones their storage: `Wallet` reads the `wallet` rows through `wallets::WalletRepository` (the `payments` slot) and its assets from the index, `RpcEndpoints` is SQL on the one SQLite pool, its table in `schema/server.sql` (created with `schema/sdk.sql` on an empty file, no migrations). Balance and history are the concrete repository's inherent reads (053), not server SQL. No axum, routes, `payments::config` or chain (check 8) |
+| `apps/server/src/api/` | One file per HTTP resource (`wallets`, `balance`, `transactions`, `assets`, `networks`, `health`, `openapi`) with its routes, request/response models and tests; `mod.rs` assembles the router and OpenAPI root and holds the shared `Error`/`ErrorBody`. Handler state is `src/state.rs` (the `Payments` container, signers, the concrete repository, the pool); network routes call `payments.networks`; handlers call SDK operations and model stores directly. None of `api/`, `asset.rs`, `state.rs` names a concrete chain or `payments::config`; none of `api/`, `asset.rs` names a storage backend |
 | `sdk/base` | Small chain-neutral values and signing/broadcast contracts; no chains, RPC, indexing or wallets |
 | `sdk/chains/*` | Native protocol, RPC, addresses, signing, transaction construction/broadcast and indexing translation |
-| `sdk/wallets` | Factory collection, wallet capabilities and batch orchestration; no reads, custody or durable watch ownership; imports only `base` (no `indexing`, either direction) |
+| `sdk/wallets` | Factory collection, wallet capabilities, batch orchestration, and the `wallet` rows (`WalletRepository`; SQLite behind feature `sqlite`): one address per wallet, label, key with its `KeyFormat`, archive flag; no reads or durable watch ownership; imports only `base` (no `indexing`, either direction) |
 | `sdk/indexing` | Watches, block inspection, continuity, confirmation, pending blocks and atomic commit coordination |
 | `sdk/indexing/src/storage/` | Repository contracts/implementations (`WatchStore`, `IndexStore` incl. `purge`, `OutputStore`, `TransactionStore`), the `Notifying` index-port decorator, the `Inspection` read gate, and the shipped stores' inherent `balance`/`history` reads; no balance/history query traits (051, 053) |
 | `sdk/indexing/src/driver.rs` | Optional Tokio driver, retry, quarantine and network status |
@@ -62,9 +63,10 @@ These are ownership requirements, including where current code still differs.
 - Required persistence is `WatchStore` plus `IndexStore`: registrations, restored
   watch progress, checkpoints and atomic commits. Third-party repositories need no
   balance/history/output query API and can write application reactions transactionally.
-- A watch contains public identity, address, asset and inclusive birthday. A `Watch`
-  carries no key; the store's `wallet` row may hold a label and key via `WalletRegistry`;
-  scanning never reads them.
+- A watch is one `wallet_index` row: wallet id, network, address, asset, inclusive
+  birthday, cursor and balance. Indexing code never reads the `wallet` table; the
+  schema's foreign key requires the wallets side to file the wallet row first, and the
+  application unwatches every asset before archiving. A `Watch` carries no key.
   Persist registration before publishing it to live scanning; coordinate additions
   with active passes. Unwatch stops inspection without deleting indexed facts.
 - Track contiguous, hash-verified progress per watch, including inspected empty blocks.
@@ -90,7 +92,6 @@ These are ownership requirements, including where current code still differs.
   Exception: a crate may ship one test double of its own traits behind an off-by-default
   `testing` feature, used only as a dev-dependency (`json_rpc::testing`, `wallets::testing`);
   never hand-roll another copy of it elsewhere.
-  The layout and import rules of `storage/` are in `ARCHITECTURE.md`, "Dependency direction".
 - Persist signed absolute watched balances atomically with unified balance movements;
   transactionless credits have no transaction identity. Preserve spent-output facts so
   historical replay cannot resurrect outputs. Verification must not silently repair

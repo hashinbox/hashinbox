@@ -19,17 +19,13 @@ impl Repository {
         let address = of.address();
         self.read(|tables| {
             let checkpoint = tables.checkpoints.get(&address.network).cloned();
-            let key = (
-                address.network.clone(),
-                of.asset().clone(),
-                address.value.clone(),
-            );
             let subject = crate::Subject {
                 address: address.clone(),
                 asset: of.asset().clone(),
             };
-            let net = match tables.balances.get(&key) {
-                Some(net) => net.clone(),
+            // An unwatched holding has no kept total: its rows are folded.
+            let net = match Self::cursor(tables, address, of.asset()) {
+                Some(cursor) => cursor.balance.clone(),
                 None => Self::recomputed(&subject, tables)?,
             };
             let observations = Self::observing(tables, address);
@@ -66,6 +62,14 @@ impl Repository {
                 .iter()
                 .filter(|(key, _)| Self::owns(&key.0, &key.1, address) && past(key))
                 .filter_map(|(_, transaction)| selected(of, transaction.clone()))
+                // A fee is shown where this address paid it, as SQLite's
+                // ledger holds it.
+                .map(|mut transaction| {
+                    let payer = transaction.fee.as_ref().and_then(|fee| fee.payer.as_ref());
+                    let paid = payer == Some(address);
+                    transaction.fee = transaction.fee.filter(|_| paid);
+                    transaction
+                })
                 .take(limit.saturating_add(1))
                 .collect();
             Ok(Page::new(checkpoint, matches, limit, behind))

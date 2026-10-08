@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use base::{Address, Network};
-use base::{AssetId, Decimal};
+use base::{AssetId, Decimal, KeyFormat};
 
 use crate::{
     Admission, Author, Authorship, FutureResult, Limit, Policy, Queue, SecretBytes, SendError,
@@ -20,6 +20,8 @@ pub struct AssetInfo<A> {
     /// The identity of the asset its wallets hold. What an amount of it is
     /// worth reading is the asset's own ([`base::Units`]), not this map's.
     pub id: AssetId,
+    /// The exact bytes of the keys its factory creates and imports.
+    pub key_format: KeyFormat,
 }
 
 /// Maximum authored transfer occurrences accepted by one batch.
@@ -31,6 +33,7 @@ pub const MAX_TRANSFERS: usize = 50;
 struct Factory {
     network: Network,
     asset: AssetId,
+    key_format: KeyFormat,
     maker: Arc<dyn WalletFactory>,
     /// Absent for an asset this system receives and reports and never spends;
     /// that absence is the whole refusal.
@@ -131,6 +134,7 @@ where
         let registered = Factory {
             network: factory.network().clone(),
             asset: factory.asset(),
+            key_format: factory.key_format(),
             authorship: factory.authorship(),
             queue: None,
             maker: Arc::new(factory),
@@ -415,6 +419,7 @@ where
                 tag: tag.clone(),
                 network: factory.network.clone(),
                 id: factory.asset.clone(),
+                key_format: factory.key_format,
             })
             .collect()
     }
@@ -430,6 +435,7 @@ where
             tag: asset.clone(),
             network: factory.network,
             id: factory.asset,
+            key_format: factory.key_format,
         })
     }
 

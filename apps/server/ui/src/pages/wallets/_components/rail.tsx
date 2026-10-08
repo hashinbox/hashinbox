@@ -21,6 +21,7 @@ import { useState, type SubmitEvent } from 'react';
 import { call, client, type Wallet } from '@/api/client';
 import { Coin } from '@/_components/coin';
 import type { Shell } from '@/layout';
+import { assetOf } from '@/money';
 import { mono } from '@/theme';
 
 interface Props {
@@ -47,13 +48,13 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, archived, on
   const needle = query.trim().toLowerCase();
   const shown = wallets.filter(
     (w) =>
-      (asset === null || (w.asset ?? w.asset_id) === asset) &&
+      (asset === null || assetOf(w) === asset) &&
       (needle === '' ||
         w.address.toLowerCase().includes(needle) ||
         w.id.includes(needle) ||
         (w.label?.toLowerCase().includes(needle) ?? false)),
   );
-  const assets = [...new Set(wallets.map((w) => w.asset ?? w.asset_id))].sort();
+  const assets = [...new Set(wallets.map((w) => assetOf(w)))].sort();
 
   return (
     <Box
@@ -137,7 +138,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, archived, on
             onClick={() => onSelect(w.id)}
             sx={{ gap: 1.5, py: 1.25, px: 1 }}
           >
-            <Coin symbol={w.asset ?? w.asset_id} />
+            <Coin symbol={assetOf(w)} />
             <Box sx={{ minWidth: 0, flexGrow: 1 }}>
               {w.label != null ? (
                 <Typography noWrap sx={{ fontSize: 13 }}>
@@ -150,7 +151,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, archived, on
               )}
               <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary' }}>
                 {w.label != null && `${middle(w.address)} · `}
-                {(w.asset ?? w.asset_id).toUpperCase()} · {w.network.chain}/{w.network.name}
+                {assetOf(w).toUpperCase()} · {w.network.chain}/{w.network.name}
                 {w.watch_only && ' · watch only'}
                 {w.archived_at != null && ' · archived'}
               </Typography>

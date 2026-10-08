@@ -316,6 +316,10 @@ impl FactoryProfile for Factory {
         self.asset.clone()
     }
 
+    fn key_format(&self) -> base::KeyFormat {
+        base::KeyFormat::Secp256k1Scalar
+    }
+
     fn authorship(&self) -> Option<Arc<dyn Authorship>> {
         self.spends
             .then(|| Arc::new(self.outbox.clone()) as Arc<dyn Authorship>)

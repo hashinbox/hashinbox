@@ -39,7 +39,7 @@ utoipa = { version = "=5.5.0", features = ["axum_extras"] }
 utoipa-axum = "=0.2.0"
 url = "=2.5.8"
 uuid.workspace = true
-wallets = { path = "../../sdk/wallets", features = ["submissions"] }
+wallets = { path = "../../sdk/wallets", features = ["submissions", "sqlite"] }
 zeroize.workspace = true
 
 [dev-dependencies]

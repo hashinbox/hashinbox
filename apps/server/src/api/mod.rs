@@ -111,10 +111,9 @@ pub(crate) fn openapi() -> utoipa::openapi::OpenApi {
 /// Returns the [`http_server::ConfigError`] of an invalid `config` (for
 /// example a non-loopback bind without TLS termination).
 pub(crate) fn router(
-    state: AppState,
+    state: Arc<AppState>,
     config: &http_server::Config,
 ) -> Result<Router, http_server::ConfigError> {
-    let state = Arc::new(state);
     let (protected, mut contract) = protected_routes().split_for_parts();
     let (public, public_contract) = public_routes().split_for_parts();
     contract.merge(public_contract);
@@ -230,13 +229,6 @@ impl Error {
     /// plain-text rejection.
     pub(crate) fn invalid_query(_error: QueryRejection) -> Self {
         Self::invalid_request("query parameters must match the documented schema")
-    }
-
-    pub(crate) fn invalid_batch(failed_index: usize, message: impl Into<String>) -> Self {
-        Self {
-            failed_index: Some(failed_index),
-            ..Self::invalid_request(message)
-        }
     }
 
     pub(crate) fn invalid_response(message: impl Into<String>) -> Self {

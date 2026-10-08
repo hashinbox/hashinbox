@@ -2,7 +2,7 @@
 //! not ports: a custom store brings its own. Each read is one snapshot, and
 //! reports how far behind its own line the address's inspection is.
 
-use super::models::{Ledger, Transaction, Wallet};
+use super::models::{Ledger, Transaction, WalletIndex, address_id, canonical_id};
 use super::{Repository, release};
 use crate::storage::history::charges;
 use crate::{Holder, IndexError, Inspection, Page, Position, SettledBalance, WatchProgress};
@@ -24,22 +24,23 @@ impl Repository {
         let address = of.address();
         let network = Self::network(&address.network)?;
         let (mut read, checkpoint) = self.database.snapshot(&network).await?;
-        let wallets = Wallet::find_observed_by_address(&mut read, &network, &address.value).await?;
-        let kept = wallets
+        let observed =
+            WalletIndex::find_active_by_address(&mut read, &network, &address.value).await?;
+        let kept = observed
             .iter()
-            .find(|wallet| wallet.subject().1 == of.asset().asset)
-            .map(Wallet::balance)
-            .transpose()?
-            .flatten();
+            .find(|row| row.asset() == of.asset().asset)
+            .map(WalletIndex::balance)
+            .transpose()?;
         let net = match kept {
             Some(net) => net,
+            // An unwatched holding keeps no total: its rows are folded.
             None => {
-                let subject = (address.value.as_str(), of.asset().asset.as_str());
-                Ledger::net(&mut read, &network, subject).await?
+                let holding = address_id(&network, &address.value);
+                Ledger::net(&mut read, (&holding, &of.asset().asset)).await?
             }
         };
         release(read).await?;
-        let observations = wallets
+        let observations = observed
             .into_iter()
             .map(WatchProgress::try_from)
             .collect::<Result<Vec<_>, _>>()?;
@@ -62,7 +63,7 @@ impl Repository {
         let address = of.address();
         let network = Self::network(&address.network)?;
         let (mut read, checkpoint) = self.database.snapshot(&network).await?;
-        let observations = Wallet::find_observed_by_address(&mut read, &network, &address.value)
+        let observations = WalletIndex::find_active_by_address(&mut read, &network, &address.value)
             .await?
             .into_iter()
             .map(WatchProgress::try_from)
@@ -81,8 +82,7 @@ impl Repository {
         loop {
             let entries = Transaction::find_after_by_address(
                 &mut read,
-                &network,
-                &address.value,
+                &address_id(&network, &address.value),
                 &cursor,
                 chunk,
             )
@@ -98,16 +98,19 @@ impl Repository {
                 i64::try_from(first.block().height.0).unwrap_or(i64::MAX),
                 i64::try_from(last.block().height.0).unwrap_or(i64::MAX),
             );
-            let mut movements = Ledger::find_movements(&mut read, &network, of, span).await?;
+            let mut effects = Ledger::find_effects(&mut read, of, span).await?;
             for mut transaction in entries {
                 cursor = (
                     i64::try_from(transaction.block().height.0).unwrap_or(i64::MAX),
                     i64::try_from(transaction.order).unwrap_or(i64::MAX),
                     transaction.id.id.as_str().to_owned(),
                 );
-                transaction.movements = movements
-                    .remove(transaction.id.id.as_str())
-                    .unwrap_or_default();
+                let id = canonical_id(&[
+                    network.chain.as_str(),
+                    &network.name,
+                    transaction.id.id.as_str(),
+                ]);
+                (transaction.movements, transaction.fee) = effects.remove(&id).unwrap_or_default();
                 let kept = !transaction.movements.is_empty() || charges(of, &transaction);
                 matches.extend(kept.then_some(transaction));
             }

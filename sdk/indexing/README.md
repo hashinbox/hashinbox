@@ -41,32 +41,14 @@ A repository implements two ports, and nothing else is required:
 | `WatchStore` | `add`, `all`, `forget` | the watches and how far each was inspected |
 | `IndexStore` | `checkpoint`, `commit` | the confirmed line and the one atomic write a pass makes |
 
-Both shipped repositories also implement the optional `WalletRegistry`
-(`register`, `wallet`, `wallets`) on the same `wallet` table: an application files a
-wallet's label and key beside its watch and reads every wallet back. A `Watch`
-carries no key, and scanning never reads label or key. `register` files an unknown
-address archived and unobserved; `index.watch` on its id then observes it.
-`forget` (the durable half of `unwatch`) archives a row: its progress and total go,
-its birthday, label, key and indexed facts stay, and the address stays reserved for
-that id, so registering it again restores the original wallet, to be watched from
-its original birthday. A purge resets progress and keeps every wallet.
-
-```rust
-use indexing::{Birthday, Indexing, Registration, WalletRegistry};
-
-async fn create(
-    store: &dyn WalletRegistry,
-    index: &dyn Indexing,
-    registration: Registration,
-) -> Result<(), indexing::IndexError> {
-    // Filed first, archived and unobserved: the key is durable before anything
-    // is scanned. An archived address answers its original wallet instead.
-    let wallet = store.register(registration).await?;
-    let birthday = wallet.birthday().map_or(Birthday::Fresh, Birthday::At);
-    index.watch(wallet.id(), &wallet, birthday).await?;
-    Ok(())
-}
-```
+A `Watch` is one wallet's address observed in one asset from a birthday — one
+`wallet_index` row carrying everything indexing reads. Wallets themselves (address,
+label, key) are the `wallets` crate's (`WalletRepository`); the shared schema's
+foreign key requires a wallet row filed before its watch, and indexing code never
+reads that table. A `Watch` carries no key. `forget` (the durable half of `unwatch`)
+deletes the observation: its birthday, progress and total go, every indexed fact
+stays, and watching again reads the range from the birthday then given. A purge
+resets progress and totals and keeps every watch.
 
 Two repositories ship with the crate: `sqlite::Repository` (feature `sqlite`, on
 by default) and `memory::Repository` (feature `memory`). The `driver`

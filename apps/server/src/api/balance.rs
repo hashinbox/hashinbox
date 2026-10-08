@@ -1,10 +1,10 @@
-//! `GET /v1/wallets/{id}/balance`: a wallet's balance in its own asset.
+//! `GET /v1/wallets/{id}/balance`: a wallet's balance in one asset.
 
 use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State, rejection::QueryRejection},
 };
 use serde::{Deserialize, Serialize};
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -12,7 +12,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use utoipa::IntoParams;
 
 use super::{Error, ErrorBody};
-use crate::{models::Wallet, state::AppState};
+use crate::{asset::AssetTag, models::Wallet, state::AppState};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(balance))
@@ -59,18 +59,21 @@ struct ReadResponse {
     get,
     path = "/v1/wallets/{id}/balance",
     operation_id = "read_wallet_balance",
-    summary = "Read a wallet's balance in its own asset",
+    summary = "Read a wallet's balance in one asset",
     description = "The confirmed indexed total and pending incoming/outgoing amounts in the \
         asset's display units, with the confirmed and pending heights and how many blocks the \
         address's inspection is behind. \
         Chain spending rules still apply. A watch-only address reads the same balance \
-        without a key.",
-    params(WalletPath),
+        without a key. An asset the wallet is not observed in reads what was indexed for its \
+        address.",
+    params(WalletPath, AssetQuery),
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The wallet's balance", body = ReadResponse),
+        (status = 400, description = "Malformed query", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Wallet is unknown", body = ErrorBody),
+        (status = 404, description = "Wallet is unknown, or the asset is not of its network",
+            body = ErrorBody),
         (status = 503, description = "The index is unavailable", body = ErrorBody)
     ),
     tag = "wallets"
@@ -78,10 +81,13 @@ struct ReadResponse {
 async fn balance(
     State(state): State<Arc<AppState>>,
     Path(path): Path<WalletPath>,
+    query: Result<Query<AssetQuery>, QueryRejection>,
 ) -> Result<Json<ReadResponse>, Error> {
-    let wallet = Wallet::find(state.registry.as_ref(), &state.wallets, &path.id).await?;
-    let subject = wallet.subject()?;
+    let Query(query) = query.map_err(Error::invalid_query)?;
+    let wallet = Wallet::find(&state.payments, &path.id).await?;
+    let subject = &wallet.subject(&state.payments.wallets, &query.asset)?;
     let unit = state
+        .payments
         .units
         .of(&subject.address.network, &subject.asset)
         .ok_or_else(Error::undeclared)?;
@@ -89,6 +95,7 @@ async fn balance(
     // by the line the rows were read at, so a commit landing in between is
     // counted once.
     let pending = state
+        .payments
         .pending
         .iter()
         .find(|(network, _)| *network == subject.address.network)
@@ -103,7 +110,7 @@ async fn balance(
     let sample = pending.sampled()?;
     // One snapshot: the repository's own read.
     let balance = state
-        .repository
+        .repo
         .balance(subject)
         .await?
         .completed(subject, sample);
@@ -134,4 +141,14 @@ async fn balance(
 struct WalletPath {
     /// The wallet ID a create or watch call returned.
     id: String,
+}
+
+/// The asset a balance is read in.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
+#[into_params(parameter_in = Query)]
+#[serde(deny_unknown_fields)]
+struct AssetQuery {
+    /// A configured asset tag of the wallet's network (`GET /v1/assets`).
+    #[param(value_type = String, pattern = "^[a-z0-9][a-z0-9-]{0,31}$")]
+    asset: AssetTag,
 }

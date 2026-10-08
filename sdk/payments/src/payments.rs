@@ -9,12 +9,11 @@ use futures_channel::mpsc::UnboundedReceiver;
 use indexing::{
     Birthday, Change, Driver, Holder, IndexError, IndexErrorKind, IndexStore, IndexedBatch,
     Indexers, Location, Notifying, OutputKey, OutputPage, OutputRequest, OutputStore, Pending,
-    PurgedRows, TransactionRef, TransactionStore, WalletRegistry, Watch, WatchProgress, WatchStore,
-    Watching as _,
+    PurgedRows, TransactionRef, TransactionStore, Watch, WatchProgress, WatchStore, Watching,
 };
 use serde::de::DeserializeOwned;
 use tokio::{sync::watch, task::JoinHandle};
-use wallets::{SubmissionRegistrar, Submissions, Wallet, Wallets};
+use wallets::{SubmissionRegistrar, Submissions, WalletRepository, Wallets};
 
 use crate::{
     Networks,
@@ -157,7 +156,7 @@ pub struct Builder<A: Ord> {
     index_override: bool,
     outputs: Option<Arc<dyn OutputStore>>,
     transactions: Option<Arc<dyn TransactionStore>>,
-    registry_slot: Option<Arc<dyn WalletRegistry>>,
+    registry_slot: Option<Arc<dyn WalletRepository>>,
 }
 
 /// Every configured chain composed, its index driven, its operational handle.
@@ -175,7 +174,7 @@ pub struct Payments<A: Ord> {
     pub networks: Networks<A>,
     /// The wallet registry slot, when one was attached; the engine never
     /// calls it.
-    pub registry: Option<Arc<dyn WalletRegistry>>,
+    pub registry: Option<Arc<dyn WalletRepository>>,
     /// Lines each accepted chain asked an operator to read.
     pub notices: Vec<String>,
     /// Why each section whose node failed verification was skipped.
@@ -219,7 +218,8 @@ where
         Builder::with_sections(None)
     }
 
-    /// Registers `wallet` for indexing as `id` from `birthday`.
+    /// Observes wallet `id` — filed first in the wallet repository — at
+    /// `holder`'s address in its asset, from `birthday`.
     ///
     /// # Errors
     ///
@@ -227,10 +227,9 @@ where
     pub async fn watch(
         &self,
         id: &str,
-        wallet: &Arc<dyn Wallet>,
+        holder: &dyn Holder,
         birthday: Birthday,
     ) -> Result<Watch, IndexError> {
-        let holder: &dyn Holder = wallet.as_ref();
         self.index.watch(id, holder, birthday).await
     }
 
@@ -341,9 +340,10 @@ where
         self
     }
 
-    /// The optional wallet registry slot, held for the application.
+    /// The optional wallet repository slot (the `wallet` rows), held for the
+    /// application; the engine never calls it.
     #[must_use]
-    pub fn with_wallet_registry<S: WalletRegistry + 'static>(mut self, store: Arc<S>) -> Self {
+    pub fn with_wallet_registry<S: WalletRepository + 'static>(mut self, store: Arc<S>) -> Self {
         self.registry_slot = Some(store);
         self
     }
@@ -425,6 +425,16 @@ where
             )
             .await?;
         let composition = startup.composition;
+        // Every network's watch list is loaded from its `wallet_index` rows
+        // now, so a store that cannot answer fails the start rather than the
+        // first pass.
+        for network in composition.index.networks() {
+            composition
+                .index
+                .watched(network)
+                .await
+                .map_err(|error| StartError::Compose(error.message))?;
+        }
         let driver = Driver::new(composition.index.clone()).with_logger(self.logger);
         let mut readiness = driver.readiness();
         let networks = Networks::new(

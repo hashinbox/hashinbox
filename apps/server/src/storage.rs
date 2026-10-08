@@ -1,8 +1,8 @@
-//! The one SQLite file: opened once as one pool, its indexing schema handed
-//! to every chain as one [`Repository`] — which also holds every wallet
-//! (`indexing::WalletRegistry`) — and the server's own table
-//! (`models/schema.sql`) created beside it, in the same file and under the
-//! same identity, for the models (`crate::models`).
+//! The one SQLite file: opened once as one pool with the SDK schema
+//! (`schema/sdk.sql`) and the server's own table (`schema/server.sql`) under
+//! one identity. Its indexing rows are handed to every chain as one
+//! [`Repository`]; its `wallet` rows are `wallets::WalletRepository`'s; the
+//! models (`crate::models`) use the pool.
 
 use std::{path, path::PathBuf};
 
@@ -48,7 +48,8 @@ impl Config {
         let database = indexing::sqlite::Database::open_with(path, crate::models::SCHEMA).await?;
         Ok(Store {
             pool: database.pool().clone(),
-            repository: indexing::sqlite::Repository::new(database),
+            wallets: wallets::storage::sqlite::Repository::new(database.pool().clone()),
+            indexing: indexing::sqlite::Repository::new(database),
         })
     }
 
@@ -65,17 +66,24 @@ impl Config {
     }
 }
 
-/// The opened database file, shared by every network and every model.
+/// The opened database file, shared by every network and every model, with
+/// each owner's repository over it, built once.
 pub(crate) struct Store {
     pool: sqlx::SqlitePool,
-    repository: Repository,
+    indexing: Repository,
+    wallets: wallets::storage::sqlite::Repository,
 }
 
 impl Store {
-    /// The repository over this file. One value serves every network: each
-    /// operation names the network it is about.
-    pub(crate) fn repository(&self) -> Repository {
-        self.repository.clone()
+    /// Indexing's repository over this file. One value serves every network:
+    /// each operation names the network it is about.
+    pub(crate) fn indexing(&self) -> Repository {
+        self.indexing.clone()
+    }
+
+    /// The wallets side's repository over this file: the `wallet` rows.
+    pub(crate) fn wallets(&self) -> wallets::storage::sqlite::Repository {
+        self.wallets.clone()
     }
 
     /// The file's one pool, for the models' stores.

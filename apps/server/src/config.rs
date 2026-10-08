@@ -8,14 +8,13 @@
 
 use std::{env, error::Error, net::SocketAddr, path::Path};
 
-use payments::config::{Chains, Document, Sections};
+use payments::{
+    Builder, Payments,
+    config::{Document, Sections},
+};
 use serde::Deserialize;
 
-use crate::{
-    asset::AssetTag,
-    chains,
-    storage::{self, Repository},
-};
+use crate::{asset::AssetTag, chains, storage};
 
 pub(crate) type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -31,7 +30,7 @@ pub(crate) struct Config {
     tls_terminated_upstream: bool,
     #[serde(default)]
     pub(crate) storage: storage::Config,
-    /// One section per chain, still raw: `crate::chains::registry` decides
+    /// One section per chain, still raw: `crate::chains::register` decides
     /// which chain parses which, and this module never looks inside one.
     #[serde(default)]
     pub(crate) chains: Sections,
@@ -55,16 +54,16 @@ impl Config {
         Ok(config)
     }
 
-    /// Every configured chain, each section parsed and accepted by the chain
-    /// that owns it. Nothing is contacted and nothing is opened.
+    /// The payments container over every configured chain section, each
+    /// owned by the chain `crate::chains` registers for its name. Nothing is
+    /// contacted and nothing is opened.
     ///
     /// # Errors
     ///
-    /// A section no chain is registered for, one that does not decode, or one
-    /// its own chain refuses — every message naming the section at fault.
-    pub(crate) fn chains(&self) -> Result<Chains<AssetTag, Repository>, AnyError> {
-        let chains = chains::registry().chains(&self.chains)?;
-        Ok(chains)
+    /// The sections do not re-encode as one document.
+    pub(crate) fn payments(&self) -> Result<Builder<AssetTag>, AnyError> {
+        let document = serde_json::to_vec(&self.chains.clone().into_values())?;
+        Ok(chains::register(Payments::from_json(&document)?))
     }
 
     fn validate(&self) -> Result<(), AnyError> {
@@ -76,7 +75,8 @@ impl Config {
             return Err("bearer-token environment name must not be empty".into());
         }
         self.storage.validate()?;
-        self.chains()?;
+        // Every section parsed and accepted by the chain that owns it.
+        self.payments()?.endpoints()?;
         Ok(())
     }
 

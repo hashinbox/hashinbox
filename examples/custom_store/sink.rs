@@ -11,7 +11,8 @@
 //! `indexing::OutputStore` and `indexing::TransactionStore`: *consumer*
 //! capabilities, for Bitcoin's change selection and Solana's sender recovery.
 //! There is no port for balance or history at all — querying is a repository's
-//! own API, and this one does not offer it. What this consumer needs instead is the last block of this file:
+//! own API, and this one does not offer it. What this consumer needs instead is the last block of
+//! this file:
 //! three questions in its own words, asked of the store directly.
 //!
 //! It is deliberately not [`Clone`]. An index clones the handle it was assembled
@@ -43,12 +44,14 @@ pub struct Sink {
 #[derive(Clone, Default)]
 struct Rows {
     checkpoints: BTreeMap<Network, BlockRef>,
-    /// Identities are unique store-wide, as a SQL store's unique index on the id.
-    ids: BTreeMap<String, Network>,
+    /// Wallet ids are unique store-wide, each naming one address of one
+    /// network; a wallet may be watched in several assets.
+    ids: BTreeMap<String, (Network, String)>,
     watches: BTreeMap<(Network, AssetId, String), Watch>,
-    /// How far each observation has been inspected, by its own identity: a claim
-    /// is earned under that observation's own birthday and belongs to nothing else.
-    progress: BTreeMap<(Network, String), BlockRef>,
+    /// How far each observation has been inspected, by its own identity — its
+    /// wallet and asset: a claim is earned under that observation's own
+    /// birthday and belongs to nothing else.
+    progress: BTreeMap<(Network, String, AssetId), BlockRef>,
     live: BTreeSet<(Network, String, OutputId)>,
     /// Every outpoint a required spend named, so no historical write puts one back.
     spent: BTreeSet<(Network, String, OutputId)>,
@@ -171,8 +174,12 @@ impl Sink {
     }
 
     /// Where one observation's progress is filed.
-    fn filed(watch: &Watch) -> (Network, String) {
-        (watch.address.network.clone(), watch.id.clone())
+    fn filed(watch: &Watch) -> (Network, String, AssetId) {
+        (
+            watch.address.network.clone(),
+            watch.id.clone(),
+            watch.asset.clone(),
+        )
     }
 
     /// Refuses a batch this store cannot write as one change.
@@ -213,19 +220,24 @@ impl Sink {
     /// earned, so it is refused.
     fn register(rows: &mut Rows, watch: &Watch) -> Result<(), IndexError> {
         let (network, address) = Self::at(&watch.address);
-        let key = (network.clone(), watch.asset.clone(), address);
+        let key = (network.clone(), watch.asset.clone(), address.clone());
+        let place = (network, address);
         match (rows.watches.get(&key), rows.ids.get(&watch.id)) {
             (Some(stored), _) if stored == watch => Ok(()),
-            (Some(_), _) | (None, Some(_)) => Err(IndexError::new(
+            (None, None) => {
+                rows.ids.insert(watch.id.clone(), place);
+                rows.watches.insert(key, watch.clone());
+                Ok(())
+            }
+            (None, Some(held)) if *held == place => {
+                rows.watches.insert(key, watch.clone());
+                Ok(())
+            }
+            _ => Err(IndexError::new(
                 IndexErrorKind::Conflict,
                 "this identity or this address is already observed",
                 false,
             )),
-            (None, None) => {
-                rows.ids.insert(watch.id.clone(), network);
-                rows.watches.insert(key, watch.clone());
-                Ok(())
-            }
         }
     }
 
@@ -237,7 +249,8 @@ impl Sink {
     fn withdraw(rows: &mut Rows, watch: &Watch) {
         let (network, address) = Self::at(&watch.address);
         let key = (network, watch.asset.clone(), address);
-        if rows.watches.remove(&key).is_some() {
+        rows.watches.remove(&key);
+        if !rows.watches.values().any(|held| held.id == watch.id) {
             rows.ids.remove(&watch.id);
         }
         rows.progress.remove(&Self::filed(watch));
@@ -274,7 +287,7 @@ impl IndexStore for Sink {
         Box::pin(async move {
             self.apply(|rows| {
                 let checkpoint = u64::from(rows.checkpoints.remove(network).is_some());
-                rows.progress.retain(|(bound, _), _| bound != network);
+                rows.progress.retain(|(bound, ..), _| bound != network);
                 let before = rows.live.len();
                 rows.live.retain(|(bound, ..)| bound != network);
                 let outputs = u64::try_from(before - rows.live.len()).unwrap_or(u64::MAX);
@@ -319,10 +332,10 @@ impl Sink {
     /// can settle less than the write it is redoing, so what is refused is a claim
     /// whose author was reading a different value.
     fn advance(rows: &mut Rows, network: &Network, claim: &Progress) -> Result<(), IndexError> {
-        if rows.ids.get(&claim.watch_id) != Some(network) {
+        if rows.ids.get(&claim.watch_id).map(|(held, _)| held) != Some(network) {
             return Err(moved("this batch names an observation nothing here holds"));
         }
-        let key = (network.clone(), claim.watch_id.clone());
+        let key = (network.clone(), claim.watch_id.clone(), claim.asset.clone());
         if rows.progress.get(&key) != claim.expected.as_ref() {
             return Err(moved("recorded progress changed before this batch"));
         }

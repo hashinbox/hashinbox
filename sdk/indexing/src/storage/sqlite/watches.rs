@@ -1,21 +1,16 @@
 //! The durable watch list: what to observe, and how far it has been observed.
 //!
-//! **One table, one row per wallet.** What to observe and how far it has
-//! been inspected used to be two tables joined on every read, which bought a
-//! foreign key, a cascade and one extra read per recorded claim. They are one
-//! row now, so [`WatchStore::all`]'s "one consistent snapshot" is a single
-//! statement with nothing to pair — a watch cannot be handed another watch's
-//! progress when there is no second row to fetch it from. Reads go through
-//! the observed rows only; withdrawing a watch archives its row rather than
-//! deleting it (`WalletRegistry`, in `wallets.rs`, is the application's half of
-//! the same table).
+//! **One row per observation**, in `wallet_index`: a wallet's address in one
+//! asset, its address, birthday, progress and total — never the `wallet`
+//! table, whose rows the wallets side files first (the foreign key is the
+//! database's rule). [`WatchStore::all`]'s "one consistent snapshot" is a
+//! single statement, so a watch cannot be handed another watch's progress.
+//! Withdrawing a watch deletes its row; every indexed fact stays.
 //!
 //! `add` is one `BEGIN IMMEDIATE` transaction for the whole batch, so a wallet
 //! registered for its native asset and a token either gets both rows or
-//! neither. Uniqueness is still the schema's — `(chain, network, asset,
-//! address)` is the primary key and `id` carries a unique index over the file —
-//! but a *repeat* has to be recognised rather than refused, so the rows a batch
-//! touches are read inside that transaction and compared.
+//! neither. A *repeat* has to be recognised rather than refused, so the rows a
+//! batch touches are read inside that transaction and compared.
 
 use sqlx::SqliteConnection;
 
@@ -23,7 +18,7 @@ use super::{Repository, commit, found, models};
 use crate::storage::watch::redefinition;
 use crate::{BoxFuture, IndexError, IndexErrorKind, Network, Watch, WatchProgress, WatchStore};
 
-use models::Wallet;
+use models::{Ledger, WalletIndex};
 
 impl WatchStore for Repository {
     /// One transaction for the batch: every watch is read, compared and
@@ -34,12 +29,10 @@ impl WatchStore for Repository {
             let Some(network) = Self::one_network(&watches)? else {
                 return Ok(());
             };
-            let rows = watches
-                .iter()
-                .map(Wallet::try_from)
-                .collect::<Result<Vec<_>, _>>()?;
             let mut write = self.database.write().await?;
-            Self::register(&mut write, &network, &rows).await?;
+            for watch in &watches {
+                Self::register(&mut write, &network, watch).await?;
+            }
             commit(write).await
         })
     }
@@ -52,7 +45,7 @@ impl WatchStore for Repository {
         Box::pin(async move {
             let network = Self::network(network)?;
             let mut connection = self.database.connection().await?;
-            Wallet::find_observed(&mut connection, &network)
+            WalletIndex::find_active(&mut connection, &network)
                 .await?
                 .into_iter()
                 .map(WatchProgress::try_from)
@@ -60,8 +53,8 @@ impl WatchStore for Repository {
         })
     }
 
-    /// One update: the row is archived, and its progress and total go with
-    /// it; the row and every indexed fact of its holding stay.
+    /// One delete: the observation, its progress and its total go; every
+    /// indexed fact of its address stays.
     fn forget<'a>(
         &'a self,
         network: &'a Network,
@@ -77,7 +70,7 @@ impl WatchStore for Repository {
             }
             let network = Self::network(network)?;
             let mut write = self.database.write().await?;
-            Wallet::archive(&mut write, &network, &watch.id).await?;
+            WalletIndex::delete(&mut write, &network, &watch.id, &watch.asset.asset).await?;
             commit(write).await
         })
     }
@@ -107,47 +100,26 @@ impl Repository {
         Self::network(&network).map(Some)
     }
 
-    /// Insert-if-absent, verify-if-present, for the whole batch: an observed
-    /// row is accepted only as an exact repeat, and an archived row of the
-    /// same identity and holding is observed again from the birthday given.
+    /// Insert-if-absent, verify-if-present, for one watch: an observation
+    /// already held is accepted only as an exact repeat; a new one is seeded
+    /// with its holding's total from the facts already stored, and the
+    /// database refuses it when no wallet is filed under its id or its
+    /// `(address, asset)` is another id's.
     async fn register(
         transaction: &mut SqliteConnection,
         network: &Network,
-        rows: &[Wallet],
+        watch: &Watch,
     ) -> Result<(), IndexError> {
-        for row in rows {
-            match Self::taken(transaction, network, row).await? {
-                Some(stored) if stored.repeats(row) => {}
-                Some(stored) if stored.archived() && stored.holds(row) => {
-                    Wallet::reactivate(transaction, row).await?;
-                }
-                Some(_) => return Err(redefinition()),
-                None => Wallet::insert(transaction, row).await?,
-            }
+        let observed = WalletIndex::get(transaction, &watch.id, &watch.asset.asset).await;
+        if let Some(observed) = found(observed, "failed to read an observation")? {
+            return if WatchProgress::try_from(observed)?.watch == *watch {
+                Ok(())
+            } else {
+                Err(redefinition())
+            };
         }
-        Ok(())
-    }
-
-    /// The row `row` would replace, addressed by either of the table's two
-    /// uniqueness constraints.
-    ///
-    /// Both are read, because a batch entry can collide on either: the
-    /// `(asset, address)` pair it names, or the identity it claims. Archived
-    /// rows included, because a registration is compared with every row that
-    /// holds its names.
-    async fn taken(
-        transaction: &mut SqliteConnection,
-        network: &Network,
-        row: &Wallet,
-    ) -> Result<Option<Wallet>, IndexError> {
-        let context = "failed to read an observation";
-        let held = Wallet::get_by_subject(transaction, network, row.subject()).await;
-        if let Some(held) = found(held, context)? {
-            return Ok(Some(held));
-        }
-        found(
-            Wallet::get_in_network(transaction, network, row.id()).await,
-            context,
-        )
+        let holding = models::address_id(network, &watch.address.value);
+        let balance = Ledger::net(transaction, (&holding, &watch.asset.asset)).await?;
+        WalletIndex::insert(transaction, watch, &balance).await
     }
 }

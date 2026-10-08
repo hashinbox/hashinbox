@@ -5,6 +5,7 @@ mod factory;
 mod pause;
 mod queue;
 mod sender;
+pub mod storage;
 #[cfg(feature = "submissions")]
 mod submissions;
 // Its own unit tests use the double too, without a dev-dependency on itself.
@@ -22,6 +23,7 @@ pub use factory::{AddressParser, Dependency, FactoryProfile, Generation, Origin,
 pub use pause::{Admission, Suspension};
 pub use queue::{Backoff, Limit, Pause, Policy, Queue, Stats};
 pub use sender::{Amount, Authorship, SendError, SendFuture, Sender, Transfer};
+pub use storage::{PrivateKey, Registration, StoredWallet, WalletRepository};
 #[cfg(feature = "submissions")]
 pub use submissions::Submissions;
 pub use wallet::{Author, FutureResult, SingleSender, TransactionFactory, Wallet};

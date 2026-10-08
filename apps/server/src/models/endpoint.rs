@@ -1,8 +1,8 @@
 //! Every network's RPC endpoints, in the server's `rpc_endpoints` table of the
-//! one database file: seeded from the configuration file once, the primary
-//! source after that.
+//! one database file: the primary source; the configuration file is the
+//! fallback for a network with no row.
 
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use base::{ChainName, Network};
 use serde_json::Value;
@@ -32,6 +32,11 @@ pub(crate) struct Endpoint {
 /// to [`MOST`] of them. The store's operations are this row's.
 #[derive(Clone)]
 pub(crate) struct RpcEndpoints(Vec<Endpoint>);
+
+/// Every network's endpoints: the stored rows, and the configuration file's
+/// for a network the database holds none of. The database is the source of
+/// truth; the file is the fallback, never an override.
+pub(crate) struct NetworkEndpoints(BTreeMap<Network, RpcEndpoints>);
 
 /// One `rpc_endpoints` row as the file holds it, before it is checked.
 #[derive(sqlx::FromRow)]
@@ -132,51 +137,12 @@ impl RpcEndpoints {
             .collect()
     }
 
-    /// The endpoints, in failover order.
-    pub(crate) fn endpoints(&self) -> &[Endpoint] {
-        &self.0
-    }
-
     /// The nodes the documents describe, in failover order, for a transport.
     pub(crate) fn nodes(&self) -> Vec<json_rpc::Endpoint> {
         self.0
             .iter()
             .map(|endpoint| endpoint.endpoint.clone())
             .collect()
-    }
-
-    /// The stored endpoints of every network, one row each.
-    ///
-    /// # Errors
-    ///
-    /// The read, or a row that no longer checks; the refusal never quotes it.
-    pub(crate) async fn find_all(pool: &Pool) -> Result<Vec<(Network, Self)>, Error> {
-        let rows: Vec<Row> = sqlx::query_as("SELECT chain, network, nodes FROM rpc_endpoints")
-            .fetch_all(pool)
-            .await?;
-        rows.into_iter()
-            .map(|row| {
-                row.try_into()
-                    .map_err(|reason: String| Error::Decode(reason.into()))
-            })
-            .collect()
-    }
-
-    /// Stores `endpoints` for `network` unless it already has a row: the
-    /// configuration file's endpoints are the bootstrap, never an override.
-    pub(crate) async fn insert_missing(
-        pool: &Pool,
-        network: &Network,
-        endpoints: &Self,
-    ) -> Result<(), Error> {
-        Self::write(
-            pool,
-            "INSERT INTO rpc_endpoints (chain, network, nodes) VALUES (?1, ?2, ?3)
-             ON CONFLICT (chain, network) DO NOTHING",
-            network,
-            endpoints,
-        )
-        .await
     }
 
     /// Makes `endpoints` the stored ones of `network`.
@@ -217,5 +183,55 @@ impl RpcEndpoints {
 impl fmt::Debug for RpcEndpoints {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_list().entries(&self.0).finish()
+    }
+}
+
+impl NetworkEndpoints {
+    /// The stored endpoints of every network, one row each.
+    ///
+    /// # Errors
+    ///
+    /// The read, or a row that no longer checks; the refusal never quotes it.
+    pub(crate) async fn find_all(pool: &Pool) -> Result<Self, Error> {
+        let rows: Vec<Row> = sqlx::query_as("SELECT chain, network, nodes FROM rpc_endpoints")
+            .fetch_all(pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                row.try_into()
+                    .map_err(|reason: String| Error::Decode(reason.into()))
+            })
+            .collect::<Result<_, _>>()
+            .map(Self)
+    }
+
+    /// These endpoints, plus `configured`'s for every network not already
+    /// held.
+    ///
+    /// # Errors
+    ///
+    /// A configured list that does not check, naming its network and never
+    /// quoting it.
+    pub(crate) fn or_configured(
+        mut self,
+        configured: BTreeMap<Network, Vec<Value>>,
+    ) -> Result<Self, String> {
+        for (network, documents) in configured {
+            if self.0.contains_key(&network) {
+                continue;
+            }
+            let endpoints = RpcEndpoints::new(documents)
+                .map_err(|reason| format!("{}/{}: {reason}", network.chain, network.name))?;
+            self.0.insert(network, endpoints);
+        }
+        Ok(self)
+    }
+
+    /// Every network's documents, in failover order, for composition.
+    pub(crate) fn documents(&self) -> BTreeMap<Network, Vec<Value>> {
+        self.0
+            .iter()
+            .map(|(network, endpoints)| (network.clone(), endpoints.documents()))
+            .collect()
     }
 }

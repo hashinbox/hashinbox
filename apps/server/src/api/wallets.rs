@@ -11,7 +11,7 @@ use axum::{
     },
     http::StatusCode,
 };
-use indexing::{Birthday, BlockPosition, Holder as _, Watching as _};
+use indexing::{Birthday, BlockPosition, Watching as _};
 use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -31,12 +31,14 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 }
 
 /// `POST /v1/wallets` body: generate a wallet for one configured asset, or
-/// watch an existing address of it without its key.
+/// watch an existing address in it without its key. A wallet is an address:
+/// watching another asset of an address that already is a wallet adds that
+/// asset to it.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[schema(as = CreateWallet)]
 #[serde(deny_unknown_fields)]
 struct CreateRequest {
-    /// The configured asset tag the wallet holds (`GET /v1/assets`).
+    /// The configured asset tag to observe the wallet in (`GET /v1/assets`).
     #[schema(value_type = String, pattern = "^[a-z0-9][a-z0-9-]{0,31}$")]
     asset: AssetTag,
     /// Address text in any form the asset's chain accepts. Present: watch this
@@ -77,14 +79,15 @@ enum Fresh {
     post,
     path = "/v1/wallets",
     operation_id = "create_wallet",
-    summary = "Generate a wallet, or watch an address, for one configured asset",
+    summary = "Generate a wallet, or watch an address, in one configured asset",
     description = "Without `address`, generates a wallet, stores it with its key, then \
-        watches it from creation. Keys never leave the server. Retrying creates another \
-        wallet. With `address`, stores and observes that address from registration without \
-        its key: the wallet is watch-only, and sending from it answers 422. `label` names \
-        either. `start` is `\"fresh\"` (the default) or the native position observation begins \
-        at; a position older than the network's backfill policy allows answers 400. An \
-        archived wallet's address is refused: archiving is final.",
+        watches it in `asset` from creation. Keys never leave the server. Retrying creates \
+        another wallet. With `address`, observes that address in `asset` from registration: \
+        a new address becomes a watch-only wallet, and sending from it answers 422; an \
+        address that already is a wallet gains `asset`. `label` names either. `start` is \
+        `\"fresh\"` (the default) or the native position observation of `asset` begins at; \
+        a position older than the network's backfill policy allows answers 400. An archived \
+        wallet's address is refused: archiving is final.",
     request_body = CreateRequest,
     security(("bearerAuth" = [])),
     responses(
@@ -94,9 +97,8 @@ enum Fresh {
             start the backfill policy refuses", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "Asset is not configured", body = ErrorBody),
-        (status = 409, description = "The address is already an active or archived wallet, \
-            an unobserved row of it holds another key, or the asset's network is being \
-            rescanned",
+        (status = 409, description = "The address is an archived wallet, is already watched \
+            in this asset from another start, or the asset's network is being rescanned",
             body = ErrorBody),
         (status = 503, description = "Wallet generation or registration is unavailable",
             body = ErrorBody)
@@ -110,19 +112,21 @@ async fn create(
     let Json(request) = request.map_err(Error::invalid_json)?;
     // No wallet is created on a network while it is being rescanned.
     let _admitted = state
+        .payments
         .wallets
         .admit(&request.asset)
         .map_err(Error::by_asset)?;
-    let asset = state
+    let info = state
+        .payments
         .wallets
         .asset(&request.asset)
-        .map_err(Error::by_asset)?
-        .id;
+        .map_err(Error::by_asset)?;
     // A watched address is the asset's own parse of the text; a generated
     // wallet is a new key of the asset and the wallet it builds.
-    let (address, secret, generated) = match &request.address {
+    let (address, key, generated) = match &request.address {
         Some(text) => {
             let address = state
+                .payments
                 .wallets
                 .parse(&request.asset, text)
                 .map_err(Error::by_asset)?;
@@ -130,71 +134,88 @@ async fn create(
         }
         None => {
             let material = state
+                .payments
                 .wallets
                 .secret(&request.asset)
                 .await
                 .map_err(Error::by_asset)?;
             let signer = state
+                .payments
                 .wallets
                 .from_pk(&request.asset, SecretBytes::new(material.as_bytes()))
                 .await
                 .map_err(Error::by_asset)?;
-            (signer.address().clone(), Some(material), Some(signer))
+            let key = wallets::PrivateKey {
+                format: info.key_format,
+                secret: material,
+            };
+            (signer.address().clone(), Some(key), Some(signer))
         }
     };
-    // Archiving is final: a wallet that was observed and archived is never
-    // observed again, so the store is asked before it would answer that
-    // wallet back. A row never observed is an interrupted creation's, and is
-    // taken over below.
-    let archived = state.registry.wallets().await?.into_iter().any(|wallet| {
-        wallet.archived_at().is_some()
-            && wallet.birthday().is_some()
-            && wallet.address() == &address
-            && wallet.asset() == &asset
-    });
-    if archived {
+    // Archiving is final: an archived wallet's address is never observed
+    // again. An active wallet of the address is the one this adds an asset
+    // to; otherwise a new one is filed.
+    let registry = Wallet::registry(&state.payments)?;
+    let held = registry
+        .wallets()
+        .await?
+        .into_iter()
+        .find(|wallet| wallet.address() == &address);
+    if held
+        .as_ref()
+        .is_some_and(|wallet| wallet.archived_at().is_some())
+    {
         return Err(Error::conflict("the address belongs to an archived wallet"));
     }
+    let id = held.map_or_else(
+        || uuid::Uuid::now_v7().to_string(),
+        |wallet| wallet.id().to_owned(),
+    );
     // Filed before anything observes it, so the key is durable first: an
-    // interrupted creation leaves an archived, never-observed row and no
-    // watched address without its key.
-    let filed = state
-        .registry
-        .register(indexing::Registration {
-            id: uuid::Uuid::now_v7().to_string(),
-            address,
-            asset,
+    // interrupted creation leaves an unobserved wallet, never a watched
+    // address without its key.
+    let filed = registry
+        .register(wallets::Registration {
+            id,
+            address: address.clone(),
             label: request.label.map(String::from),
-            secret,
+            key,
         })
         .await?;
     // The same rule, for a wallet archived since the question above.
-    if filed.archived_at().is_some() && filed.birthday().is_some() {
+    if filed.archived_at().is_some() {
         return Err(Error::conflict("the address belongs to an archived wallet"));
     }
-    // The index's admission and backfill policy run before the row is
-    // observed; a refusal leaves it archived.
+    // The index's admission and backfill policy run before the asset is
+    // observed; a refusal leaves the wallet filed and unobserved in it.
     let birthday = match request.start {
         None | Some(Start::Fresh(Fresh::Fresh)) => Birthday::Fresh,
         Some(Start::At(position)) => Birthday::At(BlockPosition(position)),
     };
-    state.index.watch(filed.id(), &filed, birthday).await?;
-    // The signer: the one just generated, or an interrupted creation's key.
-    let signer = match (generated, filed.secret()) {
+    let subject = indexing::Subject {
+        address,
+        asset: info.id,
+    };
+    state.payments.watch(filed.id(), &subject, birthday).await?;
+    // The signer: the one just generated, or one from the stored key.
+    let signer = match (generated, filed.key()) {
         (Some(signer), _) => Some(signer),
-        (None, Some(key)) => Some(
+        (None, Some(key)) if key.format == info.key_format => Some(
             state
+                .payments
                 .wallets
-                .from_pk(&request.asset, SecretBytes::new(key.as_bytes()))
+                .from_pk(&request.asset, SecretBytes::new(key.secret.as_bytes()))
                 .await
                 .map_err(Error::by_asset)?,
         ),
-        (None, None) => None,
+        (None, _) => None,
     };
     if let Some(signer) = signer {
-        state.signers.insert(filed.id().to_owned(), signer)?;
+        state
+            .signers
+            .insert(filed.id().to_owned(), request.asset.clone(), signer)?;
     }
-    let wallet = Wallet::find(state.registry.as_ref(), &state.wallets, filed.id()).await?;
+    let wallet = Wallet::find(&state.payments, filed.id()).await?;
     Ok((StatusCode::CREATED, Json(wallet)))
 }
 
@@ -239,7 +260,7 @@ async fn list(
     query: Result<Query<ListQuery>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
     let Query(query) = query.map_err(Error::invalid_query)?;
-    let wallets = Wallet::all(state.registry.as_ref(), &state.wallets)
+    let wallets = Wallet::all(&state.payments)
         .await?
         .into_iter()
         .filter(|wallet| query.archived || !wallet.archived())
@@ -260,8 +281,8 @@ struct WalletPath {
     path = "/v1/wallets/{id}",
     operation_id = "read_wallet",
     summary = "Read one wallet's public metadata",
-    description = "The wallet's asset, network, canonical address, watch-only flag, label and \
-        archive time, archived or not; never its key.",
+    description = "The wallet's network, canonical address, watch-only flag, label, archive \
+        time and observed assets, archived or not; never its key.",
     params(WalletPath),
     security(("bearerAuth" = [])),
     responses(
@@ -275,9 +296,7 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<WalletPath>,
 ) -> Result<Json<Wallet>, Error> {
-    Ok(Json(
-        Wallet::find(state.registry.as_ref(), &state.wallets, &path.id).await?,
-    ))
+    Ok(Json(Wallet::find(&state.payments, &path.id).await?))
 }
 
 #[utoipa::path(
@@ -305,26 +324,29 @@ async fn archive(
     State(state): State<Arc<AppState>>,
     Path(path): Path<WalletPath>,
 ) -> Result<Json<Wallet>, Error> {
-    let found = Wallet::find(state.registry.as_ref(), &state.wallets, &path.id).await?;
-    // A watch is not removed on a network while it is being rescanned.
-    let _admitted = match found.asset().map(|tag| state.wallets.admit(tag)) {
-        Ok(Ok(admitted)) => Some(admitted),
-        Ok(Err(error)) if error.kind != wallets::WalletErrorKind::Unsupported => {
+    let found = Wallet::find(&state.payments, &path.id).await?;
+    // A watch is not removed on a network while it is being rescanned; the
+    // pause is per network, so any configured asset of it admits.
+    let tag = state
+        .payments
+        .wallets
+        .assets()
+        .into_iter()
+        .find(|info| info.network == found.address().network)
+        .map(|info| info.tag);
+    let _admitted = match tag.map(|tag| state.payments.wallets.admit(&tag)) {
+        Some(Ok(admitted)) => Some(admitted),
+        Some(Err(error)) if error.kind != wallets::WalletErrorKind::Unsupported => {
             return Err(error.into());
         }
         _ => None,
     };
-    // The index archives the row under its publication permit, so no pass
-    // commits for the wallet afterwards. A wallet of a network this process
-    // does not serve has no index to unwatch it: the store archives it.
-    state.index.unwatch(&path.id).await?;
-    let stored = state.registry.wallet(&path.id).await?;
-    if let Some(watch) = stored.and_then(|wallet| wallet.watch()) {
-        let network = watch.address.network.clone();
-        state.registry.forget(&network, &watch).await?;
-    }
+    // The index removes every watch of the wallet under its publication
+    // permit, so no pass commits for it afterwards; then the wallet row is
+    // archived, which also keeps a network this process does not serve from
+    // scanning it.
+    state.payments.index.unwatch(&path.id).await?;
+    Wallet::registry(&state.payments)?.archive(&path.id).await?;
     state.signers.remove(&path.id)?;
-    Ok(Json(
-        Wallet::find(state.registry.as_ref(), &state.wallets, &path.id).await?,
-    ))
+    Ok(Json(Wallet::find(&state.payments, &path.id).await?))
 }

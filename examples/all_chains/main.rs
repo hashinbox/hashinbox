@@ -19,6 +19,7 @@ use json_rpc::Client as _;
 use payments::config::{Composition, Document, Registry};
 use serde_json::{Value, json};
 use tokio::sync::watch;
+use wallets::WalletRepository as _;
 use wallets::{SecretBytes, SubmissionRegistrar, Submissions, Wallet};
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
@@ -70,6 +71,13 @@ async fn main() -> Result<(), AnyError> {
     //    `submissions` owns the send work a chain finishes in the background.
     let submissions = Arc::new(Submissions::new());
     let registrar: Arc<dyn SubmissionRegistrar> = submissions.clone();
+    // The file is opened here so its wallet rows can be filed: a watch
+    // observes a wallet the store already holds.
+    let file = std::path::absolute(".index-data/all_chains.db")?;
+    tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
+    let database = Database::open(file).await?;
+    let filed = wallets::storage::sqlite::Repository::new(database.pool().clone());
+    let indexing = Repository::new(database.clone());
     let Composition {
         index,
         wallets,
@@ -77,12 +85,11 @@ async fn main() -> Result<(), AnyError> {
         ..
     } = chains
         .compose(
-            || async {
-                let file = std::path::absolute(".index-data/all_chains.db")?;
-                tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
-                Ok::<_, AnyError>(Database::open(file).await?)
+            || {
+                let database = database.clone();
+                async move { Ok::<_, AnyError>(database) }
             },
-            |store: &Database| Ok::<_, AnyError>(Repository::new(store.clone())),
+            |_: &Database| Ok::<_, AnyError>(indexing.clone()),
             &registrar,
         )
         .await?;
@@ -104,6 +111,14 @@ async fn main() -> Result<(), AnyError> {
             let secret = SecretBytes::new(vec![seed; 32]);
             let birthday = Birthday::Fresh;
             let wallet = wallets.from_pk(&asset, secret).await?;
+            filed
+                .register(wallets::Registration {
+                    id: id.to_owned(),
+                    address: wallet.address().clone(),
+                    label: None,
+                    key: None,
+                })
+                .await?;
             index.watch(id, wallet.as_ref(), birthday).await?;
             signers.insert(id, wallet);
         }
@@ -115,6 +130,14 @@ async fn main() -> Result<(), AnyError> {
         address: wallets.parse(&ether, WATCHED)?,
         asset: wallets.asset(&ether)?.id,
     };
+    filed
+        .register(wallets::Registration {
+            id: "eth-watched".to_owned(),
+            address: watched.address.clone(),
+            label: None,
+            key: None,
+        })
+        .await?;
     index
         .watch("eth-watched", &watched, Birthday::Fresh)
         .await?;
