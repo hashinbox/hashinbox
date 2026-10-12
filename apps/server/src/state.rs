@@ -6,17 +6,15 @@ use std::sync::Arc;
 
 use payments::Payments;
 
-use crate::{asset::AssetTag, models::Signers};
+use crate::asset::AssetTag;
 
-/// The payments container, the keys this process signs with, the one
+/// The payments container (with the keys this process signs with), the one
 /// repository (whose balance, history and wallet reads the routes call), and
 /// the one database pool the models' rows live in.
 pub(crate) struct AppState {
     /// Every chain composed and driven: wallet factories, index, pending
     /// blocks and the networks' operational handle.
     pub(crate) payments: Payments<AssetTag>,
-    /// Every key-holding wallet's signer, by wallet id.
-    pub(crate) signers: Arc<Signers>,
     /// The one repository: balance and history reads, and every wallet row.
     pub(crate) repo: Arc<indexing::sqlite::Repository>,
     /// The one SQLite pool: the `rpc_endpoints` rows.

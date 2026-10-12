@@ -34,6 +34,10 @@ pub enum WalletErrorKind {
     /// The entry is a watched address without a key: it has history, but no
     /// balance read or send.
     WatchOnly,
+    /// A Solana transaction was rebroadcast until its blockhash expired
+    /// without being seen landed. It may still have landed: check history
+    /// for the error's `ambiguous_transaction_id`; never treat it as dropped.
+    OutcomeUnknown,
     /// The asset's network is paused ([`crate::Wallets::pause`]), for example
     /// while it is rescanned: nothing new starts on it until it resumes.
     Paused,

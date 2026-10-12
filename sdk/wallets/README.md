@@ -41,7 +41,9 @@ async fn run(factory: impl WalletFactory + 'static, key: SecretBytes) -> Result<
 - Feature `submissions` adds `Submissions`, a wallet registrar over `tasks::Tasks`;
   close and drain it before stopping indexing during shutdown.
 
-- `Wallets` stores no wallet and no key. Register a new wallet's address with
+- `Wallets` persists no wallet and no key. It holds live signers in memory:
+  `load_signers` rebuilds them from a `WalletRepository` for served networks,
+  `insert_signer`/`remove_signers`/`signer` manage them. Register a new wallet's address with
   the index (`watch`) before you store its key: a crash in between then leaves
   an address that is watched without a key, never a key whose deposits nobody
   observes.

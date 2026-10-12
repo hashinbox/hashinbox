@@ -54,6 +54,32 @@ impl Block {
         ])
     }
 
+    /// The block's native position, as stored.
+    pub(in crate::storage::sqlite) const fn position(&self) -> i64 {
+        self.position
+    }
+
+    /// The highest stored block of `network` below `position`;
+    /// `RowNotFound` when none.
+    pub(in crate::storage::sqlite) async fn get_below(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        position: i64,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT position AS block_position, height AS block_height,
+                    hash AS block_hash, parents AS block_parents,
+                    timestamp AS block_timestamp
+             FROM block WHERE chain = ?1 AND network = ?2 AND position < ?3
+             ORDER BY position DESC LIMIT 1",
+        )
+        .bind(network.chain.as_str())
+        .bind(network.name.as_str())
+        .bind(position)
+        .fetch_one(connection)
+        .await
+    }
+
     /// Insert-if-absent, verify-if-present, for every block of `blocks`, many
     /// to a statement.
     ///

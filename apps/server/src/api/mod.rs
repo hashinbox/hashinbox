@@ -310,6 +310,7 @@ impl From<::wallets::WalletError> for Error {
             }
             ::wallets::WalletErrorKind::Unavailable
             | ::wallets::WalletErrorKind::SourceBusy
+            | ::wallets::WalletErrorKind::OutcomeUnknown
             | ::wallets::WalletErrorKind::Generation => Failure::Unavailable,
             // This server pauses a network only to rescan it.
             ::wallets::WalletErrorKind::Paused => return Self::rescanning(),

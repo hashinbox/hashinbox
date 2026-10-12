@@ -21,6 +21,7 @@ wallets = { path = "../sdk/wallets", features = ["submissions", "sqlite"] }
 indexing = { path = "../sdk/indexing" }
 json-rpc = { path = "../packages/json-rpc" }
 serde_json.workspace = true
+sqlx.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]

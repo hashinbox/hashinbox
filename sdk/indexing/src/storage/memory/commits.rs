@@ -13,11 +13,11 @@
 //! nothing about how a row is written, which is what collapsed two write paths
 //! into this one.
 
-use super::{Repository, Tables, conflict};
+use super::{Movement, Repository, Tables, conflict};
+use crate::storage::LedgerEntry;
 use crate::{
-    Address, BlockCredit, BlockRef, BoxFuture, FeeSettlement, IndexError, IndexErrorKind,
-    IndexStore, IndexedBatch, Network, OutputChanges, OutputKey, Progress, PurgedRows, Subject,
-    Transaction,
+    Address, AssetId, BlockPosition, BlockRef, BoxFuture, IndexError, IndexErrorKind, IndexStore,
+    IndexedBatch, Network, OutputChanges, OutputKey, Progress, PurgedRows,
 };
 use num_bigint::BigInt;
 use std::collections::BTreeMap;
@@ -58,11 +58,13 @@ impl IndexStore for Repository {
                 let checkpoint = u64::from(tables.checkpoints.remove(network).is_some());
                 tables.blocks.retain(|(bound, _), _| bound != network);
                 let history = dropped(&mut tables.history, |(bound, ..)| bound != network);
-                let credits = dropped(&mut tables.credits, |(bound, ..)| bound != network);
-                let outputs = dropped(&mut tables.outputs, |(bound, ..)| bound != network);
-                // Re-indexing this network forward sees every spend again, in
-                // order, so the recorded spends go with the rows they guard.
-                tables.spent.retain(|(bound, ..)| bound != network);
+                let (credits, movements) = tables.entries_of(network);
+                // SQLite counts every `output` row: live, spent and tombstone.
+                let outputs = dropped(&mut tables.outputs, |(bound, ..)| bound != network)
+                    .saturating_add(dropped(&mut tables.spent, |(bound, ..)| bound != network));
+                tables
+                    .ledger
+                    .retain(|(address, _), _| address.network != *network);
                 // Watch progress claims rows this purge just removed, so it
                 // goes with them; the observations themselves are application
                 // state and stay. Not counted: it is index state, not a row a
@@ -71,9 +73,7 @@ impl IndexStore for Repository {
                 Ok(PurgedRows {
                     checkpoint,
                     history,
-                    // Movements live inside their history entry here too, so
-                    // they are removed with it and counted as history.
-                    movements: 0,
+                    movements,
                     outputs,
                     credits,
                 })
@@ -93,9 +93,6 @@ impl Repository {
         if tables.checkpoints.get(network).as_ref() != batch.expected_checkpoint().as_ref() {
             return Err(conflict("checkpoint changed before commit"));
         }
-        tables
-            .settlements
-            .insert(network.clone(), batch.settlement());
         for canonical in batch.blocks() {
             Self::fill_block(network, canonical.block.reference(), tables)?;
         }
@@ -112,17 +109,15 @@ impl Repository {
         // created it cannot offer it again.
         for canonical in batch.blocks() {
             self.fill_history(canonical.block.transactions(), tables)?;
-            self.fill_credits(
-                network,
-                &canonical.credits,
-                canonical.block.reference(),
-                tables,
-            )?;
             unknown.extend(self.fill_outputs(network, &canonical.outputs, tables)?);
         }
+        let lost = Self::append(Self::changes(batch, tables)?, tables)?;
         for claim in batch.progress() {
             Self::advance(network, claim, tables)?;
         }
+        // After the claims, so a watch whose own changes this batch rewrote
+        // keeps the progress it just proved.
+        Self::rewind(network, &lost, tables);
         if let Some(line) = batch.checkpoint() {
             drop(tables.checkpoints.insert(network.clone(), line.clone()));
         }
@@ -170,17 +165,20 @@ impl Repository {
         }
     }
 
-    /// Insert-if-absent, verify-if-present: a newly watched address routinely
-    /// already has rows in its own past, from every time it was somebody else's
-    /// counterparty, and a row that differs is corruption rather than a
-    /// duplicate.
+    /// Insert-if-absent, verify-if-present, for every address watched at the
+    /// transaction's block: a row that differs is corruption rather than a
+    /// duplicate. A counterparty nobody watches gets no row.
     fn fill_history(
         &self,
         transactions: &crate::Transactions<crate::Transaction>,
         tables: &mut Tables,
     ) -> Result<(), IndexError> {
         for transaction in transactions {
+            let position = transaction.block().position;
             for address in transaction.addresses() {
+                if !tables.takes_part(&address, position) {
+                    continue;
+                }
                 self.fill_row(&address, transaction, tables)?;
             }
         }
@@ -201,38 +199,10 @@ impl Repository {
                 "a committed transaction disagrees with the stored one",
             )),
             None => {
-                Self::accrue_transaction(tables, address, transaction)?;
                 drop(tables.history.insert(key, transaction.clone()));
                 Ok(())
             }
         }
-    }
-
-    /// The block's transactionless credits, under the same rule as its rows:
-    /// one already present is verified, one that differs is corruption.
-    fn fill_credits(
-        &self,
-        network: &Network,
-        credits: &[BlockCredit],
-        block: &BlockRef,
-        tables: &mut Tables,
-    ) -> Result<(), IndexError> {
-        for credit in credits {
-            let key = Self::credit_key(network, credit, block.height);
-            match tables.credits.get(&key) {
-                Some((position, stored)) if *position == block.position && stored == credit => {}
-                Some(_) => {
-                    return Err(Self::corrupt(
-                        "a committed block credit disagrees with the stored one",
-                    ));
-                }
-                None => {
-                    Self::accrue_credit(tables, credit)?;
-                    drop(tables.credits.insert(key, (block.position, credit.clone())));
-                }
-            }
-        }
-        Ok(())
     }
 
     /// The batch's folded output changes, with one cancellation the fold itself
@@ -256,7 +226,9 @@ impl Repository {
             // A creation whose spending is already known is filled in without
             // becoming spendable, which is the one thing discovering a creation
             // later must never do.
-            if tables.spent.contains(&key) {
+            if let Some(asset) = tables.spent.get_mut(&key) {
+                // SQLite's upsert fills the tombstone's creation in, asset too.
+                *asset = Some(output.asset.clone());
                 continue;
             }
             drop(tables.outputs.insert(key, output.clone()));
@@ -266,15 +238,19 @@ impl Repository {
         let mut unknown = Vec::new();
         for (spent, required) in required.chain(tracked) {
             let key = Self::output_key(network, spent);
-            let held = tables.outputs.remove(&key).is_some();
-            if !required {
+            let held = tables.outputs.remove(&key).map(|output| output.asset);
+            if !required && held.is_none() {
                 continue;
             }
             // The spend outlives the block that reported it whether or not it
             // matched: a later batch may still discover the creation below the
             // checkpoint, and no batch will ever carry this spend again.
-            tables.spent.insert(key);
-            if !held {
+            let matched = held.is_some();
+            let recorded = tables.spent.entry(key).or_insert(None);
+            if recorded.is_none() {
+                *recorded = held;
+            }
+            if required && !matched {
                 unknown.push(spent.clone());
             }
         }
@@ -288,82 +264,232 @@ impl Repository {
     }
 }
 
-// Watched totals, seeded from retained facts and changed only by novel writes.
+// Running totals: each holding's changes, appended in chain order.
 
 impl Tables {
+    /// Whether `address` is watched in `asset` at `position`: only such a
+    /// holding gets changes and credits.
+    pub(super) fn holds(
+        &self,
+        address: &Address,
+        asset: &AssetId,
+        position: BlockPosition,
+    ) -> bool {
+        self.cursors.iter().any(|((_, held), cursor)| {
+            cursor.address == *address && held == asset && position >= cursor.birthday
+        })
+    }
+
+    /// Whether `address` is watched in any asset at `position`: only such an
+    /// address gets history rows.
+    pub(super) fn takes_part(&self, address: &Address, position: BlockPosition) -> bool {
+        self.cursors
+            .values()
+            .any(|cursor| cursor.address == *address && position >= cursor.birthday)
+    }
+
+    /// Deletes the facts indexed for `address` in `asset`: its entries and
+    /// outputs (spent ones too), and — when `last`, no other asset of it
+    /// watched — its history rows and spend-first tombstones.
+    pub(super) fn unindex(&mut self, address: &Address, asset: &AssetId, last: bool) {
+        let network = &address.network;
+        let mine = |bound: &Network, held: &String| bound == network && *held == address.value;
+        self.ledger.remove(&(address.clone(), asset.clone()));
+        self.outputs
+            .retain(|(bound, held, _), output| !mine(bound, held) || output.asset != *asset);
+        self.spent.retain(|(bound, held, _), spent| {
+            !mine(bound, held) || spent.as_ref().map_or(!last, |spent| spent != asset)
+        });
+        if last {
+            self.history
+                .retain(|(bound, held, ..), _| !mine(bound, held));
+        }
+    }
+
+    /// How many of `network`'s entries are credits (no transaction) and
+    /// movements: what a purge removes, counted as SQLite counts its rows.
+    fn entries_of(&self, network: &Network) -> (u64, u64) {
+        let entries = self
+            .ledger
+            .iter()
+            .filter(|((address, _), _)| address.network == *network)
+            .flat_map(|(_, movements)| movements);
+        let (credits, movements): (Vec<_>, Vec<_>) =
+            entries.partition(|movement| movement.entry.transaction.is_none());
+        let count = |rows: Vec<_>| u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        (count(credits), count(movements))
+    }
+
     /// A rescan preserves registrations but clears every claim about removed facts.
     pub(super) fn disclaim(&mut self, network: &crate::Network) {
-        self.settlements.remove(network);
         for cursor in self.cursors.values_mut() {
             if cursor.address.network == *network {
                 cursor.progress = None;
-                cursor.balance = BigInt::from(0);
             }
         }
     }
 }
 
-impl Repository {
-    pub(super) fn recomputed(query: &Subject, tables: &Tables) -> Result<BigInt, IndexError> {
-        let mut net = BigInt::ZERO;
-        let settlement = tables
-            .settlements
-            .get(&query.address.network)
-            .copied()
-            .unwrap_or(FeeSettlement::Charged);
-        let rows = tables
-            .history
-            .iter()
-            .filter(|((network, address, ..), _)| Self::owns(network, address, &query.address));
-        for (_, transaction) in rows {
-            net += transaction.effect(query, settlement)?;
-        }
-        let credited = tables
-            .credits
-            .iter()
-            .filter(|((network, address, ..), _)| Self::owns(network, address, &query.address));
-        for (_, (_, credit)) in credited {
-            net += credit.effect(query)?;
-        }
-        Ok(net)
-    }
+/// Where one entry sits in its holding's chain order, owned.
+type Place = (BlockPosition, i64, String);
 
-    pub(super) fn accrue_credit(
-        tables: &mut Tables,
-        credit: &crate::BlockCredit,
-    ) -> Result<(), IndexError> {
-        let units = credit
-            .amount
-            .to_atomic(0)
-            .map_err(|_| Self::corrupt("a credit is not an atomic integer"))?;
-        for ((_, asset), cursor) in &mut tables.cursors {
-            if cursor.address == credit.to && *asset == credit.asset {
-                cursor.balance += BigInt::from(units.clone());
+/// One batch's entries, by holding, then by place.
+type Changes = BTreeMap<(Address, AssetId), BTreeMap<Place, LedgerEntry>>;
+
+impl Movement {
+    /// Where this movement sits in its holding's chain order.
+    fn place(&self) -> (BlockPosition, i64, &str) {
+        self.entry.place()
+    }
+}
+
+impl Repository {
+    /// Every entry one batch makes ([`LedgerEntry::of_block`]) to a holding
+    /// watched at its block, never a counterparty's. One id cannot honestly
+    /// carry two entries.
+    fn changes(batch: &IndexedBatch, tables: &Tables) -> Result<Changes, IndexError> {
+        let mut changes = Changes::new();
+        for canonical in batch.blocks() {
+            let entries = LedgerEntry::of_block(canonical, batch.settlement())?;
+            let watched = entries
+                .into_iter()
+                .filter(|entry| tables.holds(&entry.address, &entry.asset, entry.position));
+            for entry in watched {
+                let holding = (entry.address.clone(), entry.asset.clone());
+                let held = changes.entry(holding).or_default();
+                let place = (entry.position, entry.movement_order, entry.id.clone());
+                if held.get(&place).is_some_and(|other| *other != entry) {
+                    return Err(Self::corrupt(
+                        "a committed movement disagrees with the stored one",
+                    ));
+                }
+                held.insert(place, entry);
             }
         }
-        Ok(())
+        Ok(changes)
     }
 
-    pub(super) fn accrue_transaction(
+    /// Appends one batch's entries to their holdings, forward-only, with
+    /// their running totals, exactly as SQLite's `Ledger::insert_missing`;
+    /// answers, per holding, the lowest position it lost: deleted from a
+    /// rewound list and not carried by this batch.
+    ///
+    /// An entry already held must be the same entry. When a holding's
+    /// first new entry sits at or before its tail, its list is cut from
+    /// that block on and every entry of the batch from there is appended
+    /// again, so a total is only ever its predecessor's plus its own change.
+    fn append(
+        changes: Changes,
         tables: &mut Tables,
-        address: &Address,
-        transaction: &Transaction,
-    ) -> Result<(), IndexError> {
-        let settlement = tables
-            .settlements
-            .get(&address.network)
-            .copied()
-            .unwrap_or(FeeSettlement::Charged);
-        for ((_, asset), cursor) in &mut tables.cursors {
-            if cursor.address != *address {
+    ) -> Result<BTreeMap<(Address, AssetId), BlockPosition>, IndexError> {
+        let mut lost = BTreeMap::new();
+        for (holding, batch) in changes {
+            let movements = tables.ledger.entry(holding.clone()).or_default();
+            let Some(first) = Self::first_fresh(movements, &batch)? else {
+                continue;
+            };
+            let first_place = (first.0, first.1, first.2.as_str());
+            let rewound = movements
+                .last()
+                .is_some_and(|tail| tail.place() >= first_place);
+            let gone = rewound
+                .then(|| Self::cut(movements, &batch, first.0))
+                .flatten();
+            if let Some(position) = gone {
+                lost.insert(holding, position);
+            }
+            let mut total = movements
+                .last()
+                .map_or_else(BigInt::default, |last| last.total.clone());
+            // Rewound: everything from the cut block; else: from the first
+            // new entry on.
+            let written = batch
+                .into_iter()
+                .filter(|(place, _)| (rewound && place.0 >= first.0) || *place >= first);
+            for (_, entry) in written {
+                total += entry.counted();
+                movements.push(Movement {
+                    entry,
+                    total: total.clone(),
+                });
+            }
+        }
+        Ok(lost)
+    }
+
+    /// Removes `movements` from `position` on; the lowest position among the
+    /// removed that `batch` does not carry again.
+    fn cut(
+        movements: &mut Vec<Movement>,
+        batch: &BTreeMap<Place, LedgerEntry>,
+        position: BlockPosition,
+    ) -> Option<BlockPosition> {
+        let cut = movements.partition_point(|movement| movement.entry.position < position);
+        let carried =
+            |movement: &Movement| batch.values().any(|entry| entry.id == movement.entry.id);
+        movements
+            .drain(cut..)
+            .filter(|movement| !carried(movement))
+            .map(|movement| movement.entry.position)
+            .min()
+    }
+
+    /// The first place of `batch` `movements` does not hold, after checking
+    /// that every entry it does hold is the same entry.
+    fn first_fresh(
+        movements: &[Movement],
+        batch: &BTreeMap<Place, LedgerEntry>,
+    ) -> Result<Option<Place>, IndexError> {
+        let mut first = None;
+        for (place, entry) in batch {
+            let key = (place.0, place.1, place.2.as_str());
+            let held = movements
+                .binary_search_by(|movement| movement.place().cmp(&key))
+                .ok()
+                .and_then(|at| movements.get(at));
+            let Some(held) = held else {
+                first = first.or_else(|| Some(place.clone()));
+                continue;
+            };
+            if held.entry != *entry {
+                return Err(Self::corrupt(
+                    "a committed movement disagrees with the stored one",
+                ));
+            }
+        }
+        Ok(first)
+    }
+
+    /// Moves the observation of a holding that lost changes it was inspected
+    /// through back below them: to the highest stored block below the loss
+    /// at or above its birthday, else to none.
+    fn rewind(
+        network: &Network,
+        lost: &BTreeMap<(Address, AssetId), BlockPosition>,
+        tables: &mut Tables,
+    ) {
+        for ((address, asset), position) in lost {
+            let below = tables
+                .blocks
+                .range((network.clone(), BlockPosition(0))..(network.clone(), *position))
+                .next_back()
+                .map(|(_, block)| block.clone());
+            let cursor = tables
+                .cursors
+                .iter_mut()
+                .find(|((_, held), cursor)| cursor.address == *address && held == asset)
+                .map(|(_, cursor)| cursor);
+            let Some(cursor) = cursor else {
+                continue;
+            };
+            if cursor
+                .progress
+                .as_ref()
+                .is_none_or(|progress| progress.position < *position)
+            {
                 continue;
             }
-            let query = Subject {
-                address: address.clone(),
-                asset: asset.clone(),
-            };
-            cursor.balance += transaction.effect(&query, settlement)?;
+            cursor.progress = below.filter(|block| block.position >= cursor.birthday);
         }
-        Ok(())
     }
 }

@@ -1,8 +1,10 @@
 # 055 — Implementing the relational schema
 
-Status: proposal. Implements the schema agreed in conversation
+Status: implemented. The schema agreed in conversation
 (`schema/sdk.sql`, `schema/server.sql`) on top of 048–054. Replaces
 `sdk/indexing/src/storage/sqlite/schema.sql` and its models.
+
+Superseded on the balance question by 057 (running totals in the ledger).
 
 ## What changes, in one breath
 
@@ -122,15 +124,3 @@ suites run against both stores as today.
 - Purge: network rows gone, other networks and wallet rows intact
   (the existing isolation scenario).
 - Restart: checkpoint + cursor hashes verified against block rows.
-
-## Rollout
-
-1. Root `schema/sdk.sql` + `schema/server.sql` (done); delete old schema
-   files; `schema.rs` loads and fingerprints the new texts; fixtures
-   regenerate. Gates.
-2. SQLite models rework to the new tables; ports adjusted as above;
-   contract suites updated. Gates.
-3. Memory store + contract suites. Gates.
-4. payments startup loading; examples adjusted. Gates.
-5. Phase 2 (separate change): `WalletRepository` into `sdk/wallets`,
-   `WalletRegistry` out of indexing. Gates.

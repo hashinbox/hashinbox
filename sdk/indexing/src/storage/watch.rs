@@ -189,8 +189,9 @@ pub trait WatchStore: Send + Sync {
     ///
     /// The durable half of [`crate::Watching::unwatch`]. [`Self::add`]
     /// observes it again from the birthday it then states.
-    /// The history, credits and live outputs of the address are untouched,
-    /// which is what makes the withdrawal reversible.
+    /// The watch's indexed facts go with it, atomically: its ledger rows and
+    /// outputs, and its history when no other asset of the address is
+    /// watched. Other watches' facts stay.
     ///
     /// Progress belongs to the observation and goes with it. Another
     /// observation of the same address keeps its own, which it earned under its
@@ -209,23 +210,6 @@ pub trait WatchStore: Send + Sync {
         network: &'a Network,
         watch: &'a Watch,
     ) -> BoxFuture<'a, Result<(), IndexError>>;
-}
-
-/// A definition refused because another observation or wallet holds one of
-/// its names.
-///
-/// A wallet and asset under another birthday, an address under another
-/// wallet id, or an id another address or network holds. **Not retryable**:
-/// the stored row is the caller's own earlier registration, not a race, so
-/// presenting the same definition again can only be refused again. Both shipped
-/// stores answer it with this one value so they cannot disagree about it.
-#[cfg(any(feature = "sqlite", feature = "memory"))]
-pub(crate) fn redefinition() -> IndexError {
-    IndexError::new(
-        crate::IndexErrorKind::Conflict,
-        "an address is already registered for this identity or network",
-        false,
-    )
 }
 
 /// A watch store held behind a reference count is a watch store.

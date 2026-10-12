@@ -146,8 +146,7 @@ impl Sample {
 /// answer; this is how a consumer hands the two over together, so the line
 /// cannot be separated from the rows it belongs to.
 ///
-/// Implemented by the answers a store gives: [`crate::OutputPage`] and
-/// [`crate::Location`]. A consumer with an answer type of its own implements
+/// Implemented by the answers a store gives: [`crate::OutputPage`]. A consumer with an answer type of its own implements
 /// it for that type, and owes what those do:
 /// the checkpoint is the one the rows came from, not one read before or after.
 ///

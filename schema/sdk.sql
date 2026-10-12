@@ -13,10 +13,16 @@
 -- Ownership: `wallet` belongs to the wallets crate — identity (one address of
 -- one network), key material and application metadata. `wallet_index` and
 -- everything above it belongs to indexing — the observation of a wallet's
--- address per asset: its birthday, a progress cursor into `block`, the folded
--- balance. Scanning never reads key material; the join below reads identity
--- only. Unwatch deletes the cursor row (inspection stops, indexed facts stay);
--- a re-watch states its birthday again and is inspected from there.
+-- address per asset: its birthday and a progress cursor into `block`.
+-- Scanning never reads key material; the join below reads identity only.
+-- Facts are written only for what is watched: ledger rows for a watched
+-- (address, asset) from its birthday, memberships and transactions for an
+-- address watched in some asset — never for an unwatched counterparty.
+-- Unwatch deletes, in one transaction, the cursor row and the watch's facts:
+-- its ledger rows and outputs, and when no other asset of the address stays
+-- watched its memberships, tombstones and every transaction no membership
+-- names any more. A re-watch states its birthday again and is inspected from
+-- there.
 --
 -- Finality is not a table. Each chain states its confirmed line at indexer
 -- construction — Bitcoin a depth constant, Ethereum and Solana ask their
@@ -36,6 +42,18 @@
 -- restored cursors; replay is idempotent — matching facts are no-ops,
 -- conflicting facts fail. Readers see the repair atomically
 -- (BEGIN IMMEDIATE … COMMIT).
+--
+-- Balances are running totals in `ledger`: a holding's (address, asset)
+-- balance is the `total` of its latest retained row in chain order
+-- (block_position, movement_order, id); none means zero. Per-holding history
+-- is forward-only: a row is only ever appended after the holding's tail.
+-- When a holding would get a row at or before its tail (a backfill, a new
+-- watch's birthday), its own rows from
+-- that block position forward are deleted and written again in order; totals
+-- are never rewritten in place. A watch whose inspected rows were deleted that
+-- way has its cursor moved back below them, in the same transaction, so its
+-- own inspection writes them again. Repair deletes a suffix, which leaves every
+-- retained total correct.
 
 CREATE TABLE block (
     id        TEXT    NOT NULL, -- <chain:network:hash>
@@ -75,14 +93,19 @@ CREATE TABLE transaction_address (
 CREATE INDEX transaction_address_history
     ON transaction_address (address_id, transaction_id);
 
--- Individual movements, not netted totals. Transactionless credits use a NULL
--- transaction. direction 0 credit, 1 debit; kind 0..4 movement, 5 fee,
--- 6 withdrawal. A fee is a debit of the charged address in the charged asset,
+-- Individual movements, each with the running total after it. Transactionless
+-- credits use a NULL transaction. The sign of diff is the direction (negative:
+-- value left the address). movement_order is the in-block order: 2 x the
+-- movement's index in its transaction, plus 1 for the debit side, so a
+-- self-transfer's credit sorts before its debit; a fee is i64::MAX (last), a
+-- withdrawal 0; ties break on id. kind 0..4 movement, 5 fee, 6 withdrawal.
+-- A fee is a debit of the charged address in the charged asset,
 -- naming the transaction responsible; history reads fees here. Its
 -- movement_id is '' when the chain charges it beside the movements, or
 -- 'embedded' when the movements already contain it (Bitcoin: inputs minus
--- outputs) — an embedded fee is shown, never folded into a balance again. The id deterministically includes block, transaction (or
--- credit namespace), movement, address, asset and direction, and
+-- outputs) — an embedded fee is shown, its diff the negative fee, and adds
+-- nothing to total. The id deterministically includes block, transaction (or
+-- credit namespace), movement, address, asset and side, and
 -- deduplicates transactionless retries.
 CREATE TABLE ledger (
     id             TEXT    NOT NULL,
@@ -92,18 +115,18 @@ CREATE TABLE ledger (
     address_id     TEXT    NOT NULL, -- No wallet FK.
     asset          TEXT    NOT NULL,
     movement_id    TEXT    NOT NULL,
+    block_position INTEGER NOT NULL, -- The block's position, for chain order.
     movement_order INTEGER NOT NULL,
-    direction      INTEGER NOT NULL,
     kind           INTEGER NOT NULL,
-    amount         TEXT    NOT NULL, -- Exact nonnegative atomic integer.
+    diff           TEXT    NOT NULL, -- Signed exact atomic change.
+    total          TEXT    NOT NULL, -- Signed running total after this row.
     counterparty   TEXT,
     PRIMARY KEY (id),
-    CHECK (direction IN (0, 1)),
     CHECK (kind BETWEEN 0 AND 6),
     CHECK (movement_order >= 0)
 ) WITHOUT ROWID;
 CREATE INDEX ledger_address_asset
-    ON ledger (address_id, asset, block_id, movement_order, id);
+    ON ledger (address_id, asset, block_position, movement_order, id);
 CREATE INDEX ledger_transaction ON ledger (transaction_id, movement_order, id);
 
 -- Current canonical output state. The spend reference (to the block that
@@ -175,9 +198,8 @@ CREATE TABLE wallet (
 -- position: everything indexing reads, so indexing code never touches
 -- `wallet`. The FK is the database's integrity rule: the wallets side files
 -- the wallet row first. block_id is the progress cursor (NULL: not yet
--- inspected); balance is the signed absolute total, folded in the same
--- transaction as the movements — never repaired silently. Unwatch deletes the
--- row; indexed facts stay. Archiving a wallet is the application's: it
+-- inspected). The balance is the ledger's (see above). Unwatch deletes the
+-- row and the watch's facts (see above). Archiving a wallet is the application's: it
 -- unwatches every asset first.
 CREATE TABLE wallet_index (
     wallet_id TEXT    NOT NULL REFERENCES wallet (id),
@@ -187,7 +209,6 @@ CREATE TABLE wallet_index (
     asset     TEXT    NOT NULL,
     birthday  INTEGER NOT NULL,          -- Inclusive start position.
     block_id  TEXT    REFERENCES block (id) ON DELETE SET NULL,
-    balance   TEXT    NOT NULL DEFAULT '0', -- Signed exact atomic total.
     PRIMARY KEY (wallet_id, asset),
     UNIQUE (chain, network, address, asset)
 ) WITHOUT ROWID;

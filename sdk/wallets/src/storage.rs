@@ -119,10 +119,10 @@ pub trait WalletRepository: Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`WalletErrorKind::Conflict`] for an address another id holds, an id
+    /// [`Conflict`](crate::WalletErrorKind::Conflict) for an address another id holds, an id
     /// held for another address, or a key that is not the one the row holds;
-    /// [`WalletErrorKind::InvalidAddress`] for a blank address;
-    /// [`WalletErrorKind::Unavailable`] when the store fails.
+    /// [`InvalidAddress`](crate::WalletErrorKind::InvalidAddress) for a blank address;
+    /// [`Unavailable`](crate::WalletErrorKind::Unavailable) when the store fails.
     fn register(&self, registration: Registration) -> FutureResult<'_, StoredWallet>;
 
     /// The wallet `id` names, active or archived.

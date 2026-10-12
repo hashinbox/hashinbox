@@ -23,8 +23,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use sqlx::{FromRow, QueryBuilder, SqliteConnection, sqlite::SqliteRow};
 
 use super::{
-    Chunks, address_id, amount, canonical_id, column, fetched, native_part, network, refused,
-    restored, store,
+    Chunks, address_id, amount, canonical_id, column, failure, fetched, native_part, network,
+    refused, restored, store,
 };
 use crate::{
     Address, AssetId, BlockHeight, IndexError, IndexedOutput, Network, OutputChanges, OutputId,
@@ -114,6 +114,26 @@ impl Output {
 
     /// Up to `limit` of `address`'s live outputs after the output id `after`,
     /// in id order: created, and not spent.
+    /// Deletes `address_id`'s outputs in `asset`, and its spend-first
+    /// tombstones (which carry no asset) when `tombstones`.
+    pub(in crate::storage::sqlite) async fn delete_by_holding(
+        connection: &mut SqliteConnection,
+        (address_id, asset): (&str, &str),
+        tombstones: bool,
+    ) -> Result<(), IndexError> {
+        sqlx::query(
+            "DELETE FROM output WHERE address_id = ?1
+               AND (asset = ?2 OR (asset IS NULL AND ?3))",
+        )
+        .bind(address_id)
+        .bind(asset)
+        .bind(tombstones)
+        .execute(connection)
+        .await
+        .map(drop)
+        .map_err(|error| failure(&error, "failed to delete outputs"))
+    }
+
     pub(in crate::storage::sqlite) async fn find_live(
         connection: &mut SqliteConnection,
         address: &Address,

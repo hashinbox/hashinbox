@@ -308,10 +308,6 @@ impl Chain {
     /// states — which `main` has already filled in from the node, because a
     /// `--reset` cluster has no hash a checked-in file could name.
     ///
-    /// `WalletFactory::new` here takes a `chain_solana::sender::Presence`
-    /// beside the index, so this chain's wallets need a store that can look a
-    /// transaction up (`indexing::TransactionStore`); the index does not.
-    ///
     /// # Errors
     ///
     /// The node serves another cluster.

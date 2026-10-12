@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
+};
 
 use base::{Address, Network};
 use base::{AssetId, Decimal, KeyFormat};
@@ -6,7 +9,7 @@ use base::{AssetId, Decimal, KeyFormat};
 use crate::{
     Admission, Author, Authorship, FutureResult, Limit, Policy, Queue, SecretBytes, SendError,
     SendFuture, Stats, Suspension, Transfer, Wallet, WalletError, WalletErrorKind, WalletFactory,
-    pause::Gate,
+    WalletRepository, pause::Gate,
 };
 
 /// What one registered asset key is: its network and the identity of the
@@ -46,17 +49,23 @@ struct Factory {
 /// One asset's authorship with the transfers it accepted.
 type Prepared = (Arc<dyn Authorship>, Vec<Transfer>);
 
+/// Every key-holding wallet this process signs with, by wallet id and the
+/// asset whose factory built it; shared by every clone of the collection.
+type Signers<A> = Arc<RwLock<BTreeMap<(String, A), Arc<dyn Wallet>>>>;
+
 /// The wallet factories of every configured asset, keyed by asset tag.
 ///
-/// It unifies factories and stores nothing else: it makes wallets, hands them
-/// to the caller, and answers what each asset is. Who holds a wallet is the
-/// caller's question, what is observed is the index's, and where
-/// a key lives is the application's.
+/// It unifies factories and holds the live signers: it makes wallets, keeps
+/// the ones restored ([`Self::load_signers`]) or handed to it
+/// ([`Self::insert_signer`]), and answers what each asset is. What is observed
+/// is the index's, and where a key lives is the application's.
 #[derive(Clone)]
 pub struct Wallets<A: Ord> {
     factories: BTreeMap<A, Factory>,
     /// One pause per network an asset is registered on ([`Self::pause`]).
     gates: BTreeMap<Network, Arc<Gate>>,
+    /// The live signers ([`Self::signer`]).
+    signers: Signers<A>,
 }
 
 impl<A: Ord> Default for Wallets<A> {
@@ -64,6 +73,7 @@ impl<A: Ord> Default for Wallets<A> {
         Self {
             factories: BTreeMap::new(),
             gates: BTreeMap::new(),
+            signers: Arc::default(),
         }
     }
 }
@@ -437,6 +447,100 @@ where
             id: factory.asset,
             key_format: factory.key_format,
         })
+    }
+
+    /// Restores the live signers: every active wallet of a `served` network
+    /// that holds a key, rebuilt by each registered asset factory of its
+    /// network that takes its key format, replacing any held before.
+    /// Archived wallets sign nothing, and wallets of networks not served wait
+    /// for a load that serves them. Nothing is watched or unwatched here.
+    ///
+    /// # Errors
+    ///
+    /// The repository's read, a factory's refusal of a stored key, and
+    /// [`WalletErrorKind::Unavailable`] when a rebuilt key is not its
+    /// wallet's address or the signers' lock is poisoned.
+    pub async fn load_signers(
+        &self,
+        repository: &dyn WalletRepository,
+        served: &[Network],
+    ) -> Result<(), WalletError> {
+        let stored = repository.wallets().await?;
+        let assets = self.assets();
+        let mut signers = BTreeMap::new();
+        for wallet in stored
+            .iter()
+            .filter(|wallet| wallet.archived_at().is_none())
+        {
+            let Some(key) = wallet.key() else {
+                continue;
+            };
+            let address = wallet.address();
+            if !served.contains(&address.network) {
+                continue;
+            }
+            let configured = assets
+                .iter()
+                .filter(|info| info.network == address.network && info.key_format == key.format);
+            for info in configured {
+                let signer = self
+                    .from_pk(&info.tag, SecretBytes::new(key.secret.as_bytes()))
+                    .await?;
+                if signer.address() != address {
+                    return Err(WalletError::new(
+                        WalletErrorKind::Unavailable,
+                        "a stored key is not its wallet's address",
+                    ));
+                }
+                signers.insert((wallet.id().to_owned(), info.tag.clone()), signer);
+            }
+        }
+        *self.signers.write().map_err(|_| Self::poisoned())? = signers;
+        Ok(())
+    }
+
+    /// Keeps `signer` as wallet `id`'s for `asset`.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unavailable`] when the signers' lock is poisoned.
+    pub fn insert_signer(
+        &self,
+        id: String,
+        asset: A,
+        signer: Arc<dyn Wallet>,
+    ) -> Result<(), WalletError> {
+        let mut signers = self.signers.write().map_err(|_| Self::poisoned())?;
+        signers.insert((id, asset), signer);
+        Ok(())
+    }
+
+    /// Forgets every signer of wallet `id`.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unavailable`] when the signers' lock is poisoned.
+    pub fn remove_signers(&self, id: &str) -> Result<(), WalletError> {
+        let mut signers = self.signers.write().map_err(|_| Self::poisoned())?;
+        signers.retain(|(held, _), _| held != id);
+        Ok(())
+    }
+
+    /// Wallet `id`'s signer for `asset`, if one is held.
+    ///
+    /// # Errors
+    ///
+    /// [`WalletErrorKind::Unavailable`] when the signers' lock is poisoned.
+    pub fn signer(&self, id: &str, asset: &A) -> Result<Option<Arc<dyn Wallet>>, WalletError> {
+        let signers = self.signers.read().map_err(|_| Self::poisoned())?;
+        Ok(signers.get(&(id.to_owned(), asset.clone())).cloned())
+    }
+
+    fn poisoned() -> WalletError {
+        WalletError::new(
+            WalletErrorKind::Unavailable,
+            "the signing keys are unavailable",
+        )
     }
 
     fn prepared(&self, asset: &A, transfers: Vec<Transfer>) -> Result<Prepared, SendError> {

@@ -1,6 +1,6 @@
-//! The one SQLite file: opened once as one pool with the SDK schema
-//! (`schema/sdk.sql`) and the server's own table (`schema/server.sql`) under
-//! one identity. Its indexing rows are handed to every chain as one
+//! The one SQLite file, opened once as one pool. `migrate` executes the
+//! schema (`schema/sdk.sql`, `schema/server.sql`, `schema/queue.sql`) on it;
+//! there are no migrations and opening checks no version. Its indexing rows are handed to every chain as one
 //! [`Repository`]; its `wallet` rows are `wallets::WalletRepository`'s; the
 //! models (`crate::models`) use the pool.
 
@@ -40,12 +40,25 @@ impl Config {
         self.resolved_path().map(drop)
     }
 
-    /// Opens the configured file as one pool: an empty file is given
-    /// indexing's schema and the server's (`crate::models::SCHEMA`), a file
-    /// holding exactly those is opened as it is, and any other is refused.
+    /// Opens the configured file and executes every schema on it: the SDK's,
+    /// the server's (`crate::models::SCHEMA`) and the task queue's. For a new
+    /// file; there are no migrations.
+    pub(crate) async fn migrate(&self) -> Result<(), AnyError> {
+        let store = self.open().await?;
+        for schema in [
+            include_str!("../../../schema/sdk.sql"),
+            crate::models::SCHEMA,
+            include_str!("../../../schema/queue.sql"),
+        ] {
+            sqlx::raw_sql(schema).execute(&store.pool).await?;
+        }
+        Ok(())
+    }
+
+    /// Opens the configured file as one pool; applies no schema.
     pub(crate) async fn open(&self) -> Result<Store, AnyError> {
         let path = self.resolved_path()?;
-        let database = indexing::sqlite::Database::open_with(path, crate::models::SCHEMA).await?;
+        let database = indexing::sqlite::Database::open(path).await?;
         Ok(Store {
             pool: database.pool().clone(),
             wallets: wallets::storage::sqlite::Repository::new(database.pool().clone()),

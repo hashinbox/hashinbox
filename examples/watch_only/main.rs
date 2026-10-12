@@ -66,6 +66,9 @@ async fn main() -> Result<(), AnyError> {
     let file = std::path::absolute(".index-data/watch_only.db")?;
     tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
     let database = Database::open(file).await?;
+    sqlx::raw_sql(include_str!("../../schema/sdk.sql"))
+        .execute(database.pool())
+        .await?;
     let filed = wallets::storage::sqlite::Repository::new(database.pool().clone());
     let indexing = Repository::new(database.clone());
     let Composition { index, wallets, .. } = chains

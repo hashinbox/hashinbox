@@ -68,7 +68,13 @@ impl Watch {
     /// [`IndexErrorKind::InvalidRequest`](crate::IndexErrorKind::InvalidRequest)
     /// for a blank address or an asset of another chain.
     pub fn validate(&self) -> Result<(), IndexError> {
-        crate::storage::subject::require_holding(&self.address, &self.asset)
+        if self.address.is_empty() {
+            return Err(IndexError::invalid_request("invalid address"));
+        }
+        if self.asset.chain != self.address.network.chain {
+            return Err(IndexError::invalid_request("asset of another chain"));
+        }
+        Ok(())
     }
 }
 
@@ -618,7 +624,7 @@ impl Watches {
             |watch: &Watch| !matches!(start, Birthday::At(position) if position != watch.start);
         let held = self.with(|set| set.identified(id))?;
         if held.iter().any(|watch| watch.address != *subject.address()) {
-            return Err(Self::conflict("this wallet id is another address's"));
+            return Err(IndexError::conflict("this wallet id is another address's"));
         }
         if let Some(watch) = held
             .into_iter()
@@ -627,12 +633,12 @@ impl Watches {
             return if restated(&watch) {
                 Ok(Some(watch))
             } else {
-                Err(Self::conflict("this watch is already registered"))
+                Err(IndexError::conflict("this watch is already registered"))
             };
         }
         let taken = self.with(|set| set.holder(subject.address(), subject.asset()))?;
         if let Some(holder) = taken {
-            return Err(Self::conflict(if holder.id == id {
+            return Err(IndexError::conflict(if holder.id == id {
                 "this watch id is already registered"
             } else {
                 "this address is already watched for this asset"
@@ -679,10 +685,6 @@ impl Watches {
             ));
         }
         Ok(())
-    }
-
-    fn conflict(message: &'static str) -> IndexError {
-        IndexError::new(IndexErrorKind::Conflict, message, false)
     }
 
     /// Reads the hot set under the lock; [`Self::with_mut`] changes it.

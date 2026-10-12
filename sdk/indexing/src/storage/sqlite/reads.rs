@@ -2,7 +2,7 @@
 //! not ports: a custom store brings its own. Each read is one snapshot, and
 //! reports how far behind its own line the address's inspection is.
 
-use super::models::{Ledger, Transaction, WalletIndex, address_id, canonical_id};
+use super::models::{Ledger, Transaction, WalletIndex, address_id};
 use super::{Repository, release};
 use crate::storage::history::charges;
 use crate::{Holder, IndexError, Inspection, Page, Position, SettledBalance, WatchProgress};
@@ -11,9 +11,8 @@ use crate::{Holder, IndexError, Inspection, Page, Position, SettledBalance, Watc
 const MIN_CHUNK: usize = 8;
 
 impl Repository {
-    /// `of`'s settled balance: the total kept for an observed holding, or
-    /// every `ledger` row of it folded in Rust (amounts are u256-capable text,
-    /// never summed by SQLite), with how far behind the line the address's
+    /// `of`'s settled balance: the running total of its holding's latest
+    /// `ledger` row, watched or not, with how far behind the line the address's
     /// inspection is. Complete it with the pending blocks
     /// ([`SettledBalance::completed`]).
     ///
@@ -26,19 +25,8 @@ impl Repository {
         let (mut read, checkpoint) = self.database.snapshot(&network).await?;
         let observed =
             WalletIndex::find_active_by_address(&mut read, &network, &address.value).await?;
-        let kept = observed
-            .iter()
-            .find(|row| row.asset() == of.asset().asset)
-            .map(WalletIndex::balance)
-            .transpose()?;
-        let net = match kept {
-            Some(net) => net,
-            // An unwatched holding keeps no total: its rows are folded.
-            None => {
-                let holding = address_id(&network, &address.value);
-                Ledger::net(&mut read, (&holding, &of.asset().asset)).await?
-            }
-        };
+        let holding = address_id(&network, &address.value);
+        let net = Ledger::balance(&mut read, (&holding, &of.asset().asset)).await?;
         release(read).await?;
         let observations = observed
             .into_iter()
@@ -105,12 +93,9 @@ impl Repository {
                     i64::try_from(transaction.order).unwrap_or(i64::MAX),
                     transaction.id.id.as_str().to_owned(),
                 );
-                let id = canonical_id(&[
-                    network.chain.as_str(),
-                    &network.name,
-                    transaction.id.id.as_str(),
-                ]);
-                (transaction.movements, transaction.fee) = effects.remove(&id).unwrap_or_default();
+                (transaction.movements, transaction.fee) = effects
+                    .remove(transaction.id.id.as_str())
+                    .unwrap_or_default();
                 let kept = !transaction.movements.is_empty() || charges(of, &transaction);
                 matches.extend(kept.then_some(transaction));
             }

@@ -23,7 +23,7 @@ mod ui;
 use std::{path::PathBuf, sync::Arc};
 
 use config::{AnyError, Config};
-use models::{NetworkEndpoints, Signers, Wallet};
+use models::NetworkEndpoints;
 use state::AppState;
 use wallets::Policy;
 
@@ -50,7 +50,7 @@ enum Command {
         /// The configuration document.
         config: PathBuf,
     },
-    /// Open the configured database file, applying the schema to an empty one.
+    /// Execute the schema on the configured (new) database file.
     Migrate {
         /// The configuration document.
         config: PathBuf,
@@ -67,7 +67,7 @@ async fn main() -> Result<(), AnyError> {
         }
         None => return Err(USAGE.into()),
         Some(Command::Migrate { config }) => {
-            Config::read(config).await?.storage.open().await?;
+            Config::read(config).await?.storage.migrate().await?;
             return Ok(());
         }
         Some(Command::Serve { config }) => config,
@@ -91,7 +91,6 @@ async fn main() -> Result<(), AnyError> {
         .with_endpoints(endpoints.documents())
         .with_store(repo.clone())
         .with_output_store(repo.clone())
-        .with_transaction_store(repo.clone())
         .with_wallet_registry(Arc::new(store.wallets()))
         .start()
         .await?;
@@ -107,18 +106,8 @@ async fn main() -> Result<(), AnyError> {
         pause: Arc::new(|delay| Box::pin(tokio::time::sleep(delay))),
         ..Policy::default()
     });
-    // Before serving: every observed, keyed wallet of a served network is
-    // rebuilt as a signer. The index restores its watches from the same rows.
-    let signers = Signers::load(
-        Wallet::registry(&payments)?,
-        &payments.wallets,
-        payments.index.networks(),
-    )
-    .await?;
-
     let state = Arc::new(AppState {
         payments,
-        signers: Arc::new(signers),
         repo,
         pool,
     });

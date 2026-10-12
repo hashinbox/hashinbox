@@ -18,18 +18,11 @@ use serde::{Deserialize, de};
 use wallets::SubmissionRegistrar;
 
 /// What a store must answer for **this** chain to compose over it:
-/// [`indexing::Repository`], the minimum any index needs, and
-/// [`indexing::TransactionStore`], which the sender's absence proof reads
-/// ([`crate::sender::IndexPresence`]). A trait bound, never a backend.
-pub trait Store:
-    indexing::Repository + indexing::TransactionStore + Clone + Send + Sync + 'static
-{
-}
+/// [`indexing::Repository`], the minimum any index needs. A trait bound,
+/// never a backend.
+pub trait Store: indexing::Repository + Clone + Send + Sync + 'static {}
 
-impl<R> Store for R where
-    R: indexing::Repository + indexing::TransactionStore + Clone + Send + Sync + 'static
-{
-}
+impl<R> Store for R where R: indexing::Repository + Clone + Send + Sync + 'static {}
 
 /// The shell every chain's configuration shares, from `payments::config`: the nodes
 /// and their repetition, the cadence this chain indexes at, and the
@@ -289,15 +282,8 @@ impl<A> ChainHandle<A> {
         };
         let indexer = Arc::new(crate::indexer(params)?);
         indexer.checkpoint(&network.canonical()).await?;
-        // The sender's absence proof: the store's confirmed transactions with
-        // this index's pending blocks folded in.
-        let presence = Arc::new(crate::sender::IndexPresence::new(
-            Arc::new(repository),
-            indexer.clone(),
-        ));
         let wallet = WalletConfig::new(&network);
-        let sol = WalletFactory::new(wallet.clone(), &rpc, &indexer, presence)?
-            .with_registrar(registrar.clone());
+        let sol = WalletFactory::new(wallet.clone(), &rpc)?.with_registrar(registrar.clone());
         let mut factories: Vec<(A, Box<dyn wallets::WalletFactory>)> = Vec::new();
         for token in config.tokens {
             let settings = wallet.clone().with_token(token.mint, token.decimals);

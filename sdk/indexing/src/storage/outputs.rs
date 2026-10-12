@@ -5,7 +5,6 @@
 //! [`crate::OutputChanges`] a block applies — are committed facts and stay in
 //! the engine. Only the page a reader asks for is here.
 
-use crate::storage::subject::require_address;
 use crate::{
     Address, BlockRef, BoxFuture, Checkpointed, IndexError, IndexErrorKind, IndexedOutput, Network,
 };
@@ -123,7 +122,9 @@ impl OutputRequest {
                 false,
             ));
         }
-        require_address(&self.address)?;
+        if self.address.is_empty() {
+            return Err(IndexError::invalid_request("invalid address"));
+        }
         if (1..=MAX_PAGE).contains(&self.limit) {
             return Ok(());
         }

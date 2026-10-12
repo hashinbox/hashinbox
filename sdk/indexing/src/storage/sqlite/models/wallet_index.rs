@@ -1,13 +1,15 @@
 //! `wallet_index`: what the index observes — one wallet's address in one
-//! asset, from its birthday — with how far it is inspected and its persisted
-//! total. The row carries its own network and address, so nothing here reads
-//! the `wallet` table; every read joins the cursor's block.
+//! asset, from its birthday — with how far it is inspected. Its balance is
+//! the ledger's tail (`Ledger::balance`). The row carries its own network
+//! and address, so nothing here reads the `wallet` table; every read joins
+//! the cursor's block.
 
-use num_bigint::BigInt;
+use std::collections::BTreeMap;
+
 use sqlx::{FromRow, SqliteConnection, sqlite::SqliteRow};
 
-use super::{Block, column, failure, fetched, network, restored, store};
-use crate::storage::watch::redefinition;
+use super::{Block, address_id, column, failure, fetched, network, restored};
+use crate::storage::sqlite::found;
 use crate::{
     Address, AssetId, BlockPosition, BlockRef, IndexError, IndexErrorKind, Network, Watch,
     WatchProgress,
@@ -18,7 +20,7 @@ use crate::{
 macro_rules! joined {
     ($tail:literal) => {
         concat!(
-            "SELECT i.wallet_id, i.asset, i.birthday, i.balance, i.chain, i.network,
+            "SELECT i.wallet_id, i.asset, i.birthday, i.chain, i.network,
                     i.address, b.position AS block_position, b.height AS block_height,
                     b.hash AS block_hash, b.parents AS block_parents,
                     b.timestamp AS block_timestamp
@@ -36,7 +38,6 @@ pub(in crate::storage::sqlite) struct WalletIndex {
     asset: String,
     birthday: i64,
     indexed: Option<Block>,
-    balance: String,
 }
 
 impl FromRow<'_, SqliteRow> for WalletIndex {
@@ -48,12 +49,57 @@ impl FromRow<'_, SqliteRow> for WalletIndex {
             asset: column(row, "asset")?,
             birthday: column(row, "birthday")?,
             indexed: Block::optional(row)?,
-            balance: column(row, "balance")?,
         })
     }
 }
 
+/// What one network watches, as a commit filters its rows by: each watched
+/// `(address id, asset)` holding and its birthday position. Only a watched
+/// holding gets ledger rows, only from its birthday; only an address watched
+/// in some asset at that position gets memberships and transactions.
+pub(in crate::storage::sqlite) struct Birthdays {
+    birthdays: BTreeMap<(String, String), i64>,
+}
+
+impl Birthdays {
+    /// Whether `(address_id, asset)` is watched at `position`.
+    pub(in crate::storage::sqlite) fn holds(
+        &self,
+        (address_id, asset): (&str, &str),
+        position: i64,
+    ) -> bool {
+        self.birthdays
+            .get(&(address_id.to_owned(), asset.to_owned()))
+            .is_some_and(|birthday| position >= *birthday)
+    }
+
+    /// Whether `address_id` is watched in any asset at `position`.
+    pub(in crate::storage::sqlite) fn takes_part(&self, address_id: &str, position: i64) -> bool {
+        self.birthdays
+            .iter()
+            .any(|((held, _), birthday)| held == address_id && position >= *birthday)
+    }
+}
+
 impl WalletIndex {
+    /// Every holding `network` watches, with its birthday.
+    pub(in crate::storage::sqlite) async fn find_watched(
+        connection: &mut SqliteConnection,
+        network: &Network,
+    ) -> Result<Birthdays, IndexError> {
+        let rows = Self::find_active(connection, network).await?;
+        let birthdays = rows
+            .into_iter()
+            .map(|row| {
+                (
+                    (address_id(&row.network, &row.address), row.asset),
+                    row.birthday,
+                )
+            })
+            .collect();
+        Ok(Birthdays { birthdays })
+    }
+
     /// Every observation of `network`: the scan list.
     pub(in crate::storage::sqlite) async fn find_active(
         connection: &mut SqliteConnection,
@@ -138,12 +184,10 @@ impl WalletIndex {
         .await
     }
 
-    /// Adds `watch`'s observation with nothing inspected and `balance` as its
-    /// total.
+    /// Adds `watch`'s observation with nothing inspected.
     pub(in crate::storage::sqlite) async fn insert(
         connection: &mut SqliteConnection,
         watch: &Watch,
-        balance: &BigInt,
     ) -> Result<(), IndexError> {
         let birthday = i64::try_from(watch.start.0).map_err(|_| {
             // No chain has such a block, so the only way to ask for one is to
@@ -156,8 +200,8 @@ impl WalletIndex {
         })?;
         sqlx::query(
             "INSERT INTO wallet_index
-                 (wallet_id, chain, network, address, asset, birthday, balance)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (wallet_id, chain, network, address, asset, birthday)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .bind(&watch.id)
         .bind(watch.address.network.chain.as_str())
@@ -165,7 +209,6 @@ impl WalletIndex {
         .bind(&watch.address.value)
         .bind(&watch.asset.asset)
         .bind(birthday)
-        .bind(balance.to_string())
         .execute(connection)
         .await
         .map(drop)
@@ -180,7 +223,9 @@ impl WalletIndex {
             .as_database_error()
             .map(sqlx::error::DatabaseError::kind);
         match kind {
-            Some(sqlx::error::ErrorKind::UniqueViolation) => redefinition(),
+            Some(sqlx::error::ErrorKind::UniqueViolation) => {
+                IndexError::conflict("address already registered")
+            }
             Some(sqlx::error::ErrorKind::ForeignKeyViolation) => IndexError::new(
                 IndexErrorKind::Conflict,
                 "no wallet is filed under this watch's id",
@@ -229,31 +274,43 @@ impl WalletIndex {
             .map_err(|error| failure(&error, "failed to record indexed progress"))
     }
 
-    /// Adds `delta` to this observation's persisted total.
-    pub(in crate::storage::sqlite) async fn update_balance(
+    /// Moves this observation's progress below `lost`, a position whose rows
+    /// its holding no longer has, when it was inspected through there: to the
+    /// highest stored block below it at or above the birthday, else to none.
+    /// Its own inspection then writes those rows again, in order.
+    pub(in crate::storage::sqlite) async fn rewind(
         &self,
         connection: &mut SqliteConnection,
-        delta: &BigInt,
+        lost: i64,
     ) -> Result<(), IndexError> {
-        let total = self.balance()? + delta;
-        sqlx::query("UPDATE wallet_index SET balance = ?3 WHERE wallet_id = ?1 AND asset = ?2")
+        if self
+            .indexed
+            .as_ref()
+            .is_none_or(|block| block.position() < lost)
+        {
+            return Ok(());
+        }
+        let below = Block::get_below(connection, &self.network, lost).await;
+        let below = found(below, "failed to read a block")?
+            .filter(|block| block.position() >= self.birthday);
+        sqlx::query("UPDATE wallet_index SET block_id = ?3 WHERE wallet_id = ?1 AND asset = ?2")
             .bind(&self.wallet_id)
             .bind(&self.asset)
-            .bind(total.to_string())
+            .bind(below.map(|block| block.id(&self.network)))
             .execute(connection)
             .await
             .map(drop)
-            .map_err(|error| failure(&error, "failed to write a watched balance"))
+            .map_err(|error| failure(&error, "failed to rewind indexed progress"))
     }
 
-    /// Resets the total of every observation of `network`, whose rows a purge
-    /// is removing; the block delete already reset their progress.
+    /// Resets the progress of every observation of `network`, whose rows a
+    /// purge is removing.
     pub(in crate::storage::sqlite) async fn purge(
         connection: &mut SqliteConnection,
         network: &Network,
     ) -> Result<(), IndexError> {
         sqlx::query(
-            "UPDATE wallet_index SET balance = '0', block_id = NULL
+            "UPDATE wallet_index SET block_id = NULL
              WHERE chain = ?1 AND network = ?2",
         )
         .bind(network.chain.as_str())
@@ -264,21 +321,9 @@ impl WalletIndex {
         .map_err(|error| failure(&error, "failed to reset a purged network's claims"))
     }
 
-    /// The asset this row observes.
-    pub(in crate::storage::sqlite) fn asset(&self) -> &str {
-        &self.asset
-    }
-
     /// How far this row is inspected; `None` when nothing has been recorded.
     pub(in crate::storage::sqlite) fn progress(&self) -> Result<Option<BlockRef>, IndexError> {
         self.indexed.clone().map(BlockRef::try_from).transpose()
-    }
-
-    /// The persisted total.
-    pub(in crate::storage::sqlite) fn balance(&self) -> Result<BigInt, IndexError> {
-        self.balance
-            .parse()
-            .map_err(|_| store("a stored balance is not an atomic integer"))
     }
 }
 

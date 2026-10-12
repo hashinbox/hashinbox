@@ -1,8 +1,7 @@
 //! The `wallet` table on the application's SQLite pool (feature `sqlite`).
 //!
 //! The table is declared in the one shared schema (`schema/sdk.sql`), which
-//! the file's opener (`indexing::sqlite::Database`) applies once to an empty
-//! file under its version hash; this store runs statements on that pool and
+//! the caller executes on a new file (the server: `migrate`); this store runs statements on that pool and
 //! creates nothing. Every statement is the `Wallet` row model's, below.
 
 use base::{Address, ChainName, KeyFormat, Network};

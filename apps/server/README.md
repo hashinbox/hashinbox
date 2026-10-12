@@ -103,12 +103,12 @@ balance after chain fees.
 
 - Generated keys persist directly in SQLite; no encryption or passphrase.
   Keys never appear in API responses, logs or Debug.
-- One SQLite file, one `sqlx` pool (`indexing::sqlite::Database::open_with`).
+- One SQLite file, one `sqlx` pool (`indexing::sqlite::Database::open`).
   Wallets are indexing's `wallet` rows, read and filed through
   `indexing::WalletRegistry`; the server's own table, `rpc_endpoints`, is
-  [`src/models/schema.sql`](src/models/schema.sql), created with indexing's when the
-  file is new. No migrations: the file's identity fingerprints both schemas, so a
-  change refuses the old file ("delete the database file"). Index rescans keep every
+  [`src/models/schema.sql`](src/models/schema.sql), executed with `schema/sdk.sql` and
+  `schema/queue.sql` by `payment-server migrate` on a new file; `serve` only opens it.
+  No migrations and no version check. Index rescans keep every
   wallet, label and key.
 - `POST /v1/wallets`: admit, generate a key or parse the address, file the row
   archived and unobserved (`register`, so the key is durable first), then

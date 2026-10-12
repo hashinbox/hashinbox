@@ -4,8 +4,7 @@
 //! [`Repository`] is the second store this crate ships, and it is a store
 //! rather than a test double: it answers the two required ports,
 //! [`WatchStore`](crate::WatchStore) and [`IndexStore`](crate::IndexStore), and
-//! every narrow port — [`OutputStore`](crate::OutputStore),
-//! [`TransactionStore`](crate::TransactionStore) — and the purge exactly
+//! the narrow port [`OutputStore`](crate::OutputStore) — and the purge exactly
 //! as
 //! `sqlite::Repository` does (a code span, not a link: `sqlite` may be off),
 //! and passes the same contract scenarios unmodified.
@@ -22,16 +21,14 @@
 //! party has to write — that is two methods, and `examples/custom_store/` is
 //! the reference for it.
 //!
-//! The tables, the checkpoint read, history, outputs and the balance fold are
-//! here; the one commit is in `commits.rs`, the watch list in
-//! `observations.rs` and the application's wallet registry in `wallets.rs`.
+//! The tables, the checkpoint read, history and outputs are here; the one
+//! commit is in `commits.rs`.
 //!
-//! Two collections reach the balance fold, not one. The history rows carry
-//! every change a transaction made, and `credits` carries the changes no
-//! transaction made — a consensus-layer withdrawal is value that arrived with
-//! no transaction, no receipt and no trace entry, so a fold that read only the first would be
-//! short by every one of
-//! them and would say nothing about it.
+//! Balances are running totals, as SQLite's `ledger` keeps them: one
+//! `Movement` list per holding, in chain order, its last element's total
+//! the balance. A list is only ever appended to; a change that would land at
+//! or before its tail deletes the list from that block on, and the batch's
+//! changes are appended again in order (`schema/sdk.sql`).
 //!
 //! This store is deliberately unlike a file-backed one: ordinary maps keyed by
 //! domain values, no physical keyspace, no compare-and-swap engine. What it
@@ -48,15 +45,13 @@
 //! a copy and installs it, so a rejected change leaves every row as it was.
 
 use crate::storage::Probe;
-use crate::storage::watch::redefinition;
 use crate::{
-    Address, AssetId, BlockCredit, BlockHeight, BlockPosition, BlockRef, BoxFuture, FeeSettlement,
-    IndexError, IndexErrorKind, IndexedOutput, Inspection, Location, MovementId, Network,
-    OutputCursor, OutputId, OutputKey, OutputPage, OutputRequest, OutputStore, Transaction,
-    TransactionRef, TransactionStore, Watch, WatchProgress, WatchStore,
+    Address, AssetId, BlockHeight, BlockPosition, BlockRef, BoxFuture, IndexError, IndexErrorKind,
+    IndexedOutput, Inspection, Network, OutputCursor, OutputId, OutputKey, OutputPage,
+    OutputRequest, OutputStore, Transaction, TransactionRef, Watch, WatchProgress, WatchStore,
 };
 use num_bigint::BigInt;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 mod commits;
@@ -75,8 +70,6 @@ struct Tables {
     /// `sqlite`'s keyset page reads, rather than a sort this store would have to
     /// perform.
     history: HistoryRows,
-    credits:
-        BTreeMap<(Network, String, BlockHeight, MovementId), (crate::BlockPosition, BlockCredit)>,
     outputs: BTreeMap<(Network, String, OutputId), IndexedOutput>,
     /// Every outpoint a required spend has named, matched or not, so no
     /// historical write can put one of them back.
@@ -94,18 +87,28 @@ struct Tables {
     /// A **tracked** spend is not here, for the reason it is reported to nobody:
     /// no address claimed the outpoint, and the backfill of the address that
     /// eventually does claim it inspects this very spend again. One entry per
-    /// unwatched outpoint spent in every block would grow with the chain.
-    spent: BTreeSet<(Network, String, OutputId)>,
+    /// unwatched outpoint spent in every block would grow with the chain. A
+    /// tracked spend of a held output is here, as SQLite keeps that row spent.
+    ///
+    /// The value is the creation's asset, `None` for a spend-first tombstone
+    /// (SQLite's `asset IS NULL`), so unwatch deletes by `(address, asset)`.
+    spent: BTreeMap<(Network, String, OutputId), Option<AssetId>>,
     /// Every observation, by wallet id and asset: SQLite's `wallet_index`
     /// rows — the birthday, how far it has been inspected, and the persisted
     /// total.
     cursors: BTreeMap<(String, AssetId), Cursor>,
-    /// Where each network's chain settles its network fee, as the batches that
-    /// wrote these rows stated it. One entry per network, because it is a
-    /// property of the chain rather than of a block: a store that keeps
-    /// transactions rather than effects has to remember the rule the effects
-    /// would have carried.
-    settlements: BTreeMap<Network, FeeSettlement>,
+    /// Every holding's entries with their running totals, in chain order
+    /// `(position, movement_order, id)`, exactly SQLite's `ledger` rows. The
+    /// holding's address leads with its network.
+    ledger: BTreeMap<(Address, AssetId), Vec<Movement>>,
+}
+
+/// One entry to a holding, and the running total after it: SQLite's
+/// `ledger` row.
+#[derive(Clone)]
+struct Movement {
+    entry: crate::storage::LedgerEntry,
+    total: BigInt,
 }
 
 /// One observation as SQLite's `wallet_index` row holds it.
@@ -114,7 +117,6 @@ struct Cursor {
     address: Address,
     birthday: BlockPosition,
     progress: Option<BlockRef>,
-    balance: BigInt,
 }
 
 /// Every store port, on maps held for as long as the process runs.
@@ -194,27 +196,6 @@ impl Repository {
     }
 }
 
-impl TransactionStore for Repository {
-    fn locate<'a>(
-        &'a self,
-        transaction: &'a TransactionRef,
-    ) -> BoxFuture<'a, Result<Location, IndexError>> {
-        Box::pin(async move {
-            self.read(|tables| {
-                let block = tables
-                    .history
-                    .values()
-                    .find(|held| &held.id == transaction)
-                    .map(|held| held.block().clone());
-                Ok(Location {
-                    checkpoint: tables.checkpoints.get(&transaction.network).cloned(),
-                    block,
-                })
-            })
-        })
-    }
-}
-
 impl Repository {
     /// Whether a row keyed by `(network, address)` belongs to this query.
     fn owns(network: &Network, address: &str, requested: &Address) -> bool {
@@ -283,23 +264,6 @@ fn poisoned() -> IndexError {
     )
 }
 
-impl Repository {
-    /// Where one credit is filed: the address it credits, the height it was
-    /// made at, and its own identity — the key both write paths share.
-    fn credit_key(
-        network: &Network,
-        credit: &BlockCredit,
-        height: BlockHeight,
-    ) -> (Network, String, BlockHeight, MovementId) {
-        (
-            network.clone(),
-            credit.to.value.clone(),
-            height,
-            credit.id.clone(),
-        )
-    }
-}
-
 // The in-memory store's watch list: what it was told to observe, and how far
 // each observation has been inspected. One `apply` for the whole batch, which
 // is how a map-backed store expresses atomicity: the staged copy is installed
@@ -338,11 +302,20 @@ impl WatchStore for Repository {
                     false,
                 ));
             }
+            // The observation and its indexed facts go together; other
+            // watches' facts stay.
             self.apply(|tables| {
                 let key = (watch.id.clone(), watch.asset.clone());
-                tables
-                    .cursors
-                    .retain(|held, cursor| *held != key || cursor.address.network != *network);
+                let Some(cursor) = tables.cursors.get(&key) else {
+                    return Ok(());
+                };
+                if cursor.address.network != *network {
+                    return Ok(());
+                }
+                let address = cursor.address.clone();
+                tables.cursors.remove(&key);
+                let last = !tables.cursors.values().any(|held| held.address == address);
+                tables.unindex(&address, &watch.asset, last);
                 Ok(())
             })
         })
@@ -411,32 +384,31 @@ impl Repository {
     /// Insert-if-absent, verify-if-present, for one watch of the batch: an
     /// exact repeat is accepted; the same wallet and asset otherwise, or the
     /// same `(address, asset)` under another id, is refused; a new
-    /// observation starts with nothing inspected and its total seeded from the
-    /// rows already stored.
+    /// observation starts with nothing inspected and deletes its holding's
+    /// changes from its birthday on, which its own inspection appends again in
+    /// order.
     fn register(tables: &mut Tables, watch: &Watch) -> Result<(), IndexError> {
         let key = (watch.id.clone(), watch.asset.clone());
         if let Some(cursor) = tables.cursors.get(&key) {
             return if cursor.address == watch.address && cursor.birthday == watch.start {
                 Ok(())
             } else {
-                Err(redefinition())
+                Err(IndexError::conflict("address already registered"))
             };
         }
         if Self::cursor(tables, &watch.address, &watch.asset).is_some() {
-            return Err(redefinition());
+            return Err(IndexError::conflict("address already registered"));
         }
-        let subject = crate::Subject {
-            address: watch.address.clone(),
-            asset: watch.asset.clone(),
-        };
-        let balance = Self::recomputed(&subject, tables)?;
+        let holding = (watch.address.clone(), watch.asset.clone());
+        if let Some(movements) = tables.ledger.get_mut(&holding) {
+            movements.retain(|movement| movement.entry.position < watch.start);
+        }
         tables.cursors.insert(
             key,
             Cursor {
                 address: watch.address.clone(),
                 birthday: watch.start,
                 progress: None,
-                balance,
             },
         );
         Ok(())

@@ -56,8 +56,8 @@ pub trait Checkpoint: Send + Sync {
 /// That is the whole point of the split: a third party whose sink answers no
 /// query at all still gets an index it can observe wallets with and drive
 /// (`tests/minimum_contract.rs`), and a consumer that does read a query asks
-/// the store that answers it ([`crate::OutputStore`],
-/// [`crate::TransactionStore`], or its own SQL) rather than reaching for it
+/// the store that answers it ([`crate::OutputStore`]
+/// or its own SQL) rather than reaching for it
 /// through the thing doing the indexing. What an index adds to such an answer
 /// is a sample of the blocks it holds above the line ([`crate::Pending`]), and
 /// composing the two is the consumer's. There is no wider indexer trait above

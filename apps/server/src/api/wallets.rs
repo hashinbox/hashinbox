@@ -211,9 +211,11 @@ async fn create(
         (None, _) => None,
     };
     if let Some(signer) = signer {
-        state
-            .signers
-            .insert(filed.id().to_owned(), request.asset.clone(), signer)?;
+        state.payments.wallets.insert_signer(
+            filed.id().to_owned(),
+            request.asset.clone(),
+            signer,
+        )?;
     }
     let wallet = Wallet::find(&state.payments, filed.id()).await?;
     Ok((StatusCode::CREATED, Json(wallet)))
@@ -347,6 +349,6 @@ async fn archive(
     // scanning it.
     state.payments.index.unwatch(&path.id).await?;
     Wallet::registry(&state.payments)?.archive(&path.id).await?;
-    state.signers.remove(&path.id)?;
+    state.payments.wallets.remove_signers(&path.id)?;
     Ok(Json(Wallet::find(&state.payments, &path.id).await?))
 }

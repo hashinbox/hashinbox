@@ -1,12 +1,9 @@
 //! `wallets::Sender`: one batch of native SOL transfers through the
 //! factory's outbox, one transaction per transfer, submitted in order and
-//! stopped at the first failure; and how an unknown outcome learns whether
-//! it landed ([`Presence`], [`IndexPresence`]).
+//! stopped at the first failure.
 
 mod dispatch;
 mod outbox;
-mod presence;
-mod recovery;
 mod registration;
 mod reservation;
 
@@ -17,8 +14,6 @@ use wallets::{
 };
 
 pub(crate) use outbox::{Outbox, SendRequest};
-pub use presence::{IndexPresence, Landing, Presence};
-pub(crate) use recovery::{CommitSignal, Recovery};
 pub(crate) use registration::Spawner;
 pub(crate) use reservation::Reservations;
 

@@ -38,8 +38,7 @@ pub(crate) struct Admission {
 }
 
 /// Senders whose signed transactions are being submitted. Dropping it
-/// releases them; [`Settlement::retain`] keeps one reserved until recovery
-/// settles its unknown outcome.
+/// releases them.
 pub(crate) struct Settlement {
     reservations: Reservations,
     payers: BTreeSet<Address>,
@@ -96,11 +95,6 @@ impl Reservations {
         })
     }
 
-    /// Frees `payer` once recovery settled its unknown outcome.
-    pub(crate) fn release(&self, payer: &Address) {
-        self.lock().submitting.remove(payer);
-    }
-
     /// Holds `prepared` for a later broadcast.
     pub(crate) fn hold(&self, prepared: PreparedTransaction) {
         let mut state = self.lock();
@@ -155,18 +149,6 @@ impl Admission {
         Settlement {
             reservations: self.reservations.clone(),
             payers,
-        }
-    }
-}
-
-impl Settlement {
-    /// Keeps `payer` reserved past this settlement and releases every other
-    /// sender, which no attempt reached.
-    pub(crate) fn retain(mut self, payer: &Address) {
-        let released = std::mem::take(&mut self.payers);
-        let mut state = self.reservations.lock();
-        for address in released.iter().filter(|candidate| *candidate != payer) {
-            state.submitting.remove(address);
         }
     }
 }

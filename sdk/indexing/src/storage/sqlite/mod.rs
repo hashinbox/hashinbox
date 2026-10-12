@@ -12,9 +12,8 @@
 
 use crate::storage::Probe;
 use crate::{
-    BlockRef, BoxFuture, IndexError, IndexErrorKind, IndexedOutput, Inspection, Location, Network,
-    Networked, OutputCursor, OutputPage, OutputRequest, OutputStore, TransactionRef,
-    TransactionStore, WatchProgress,
+    BlockRef, BoxFuture, IndexError, IndexErrorKind, IndexedOutput, Inspection, Network, Networked,
+    OutputCursor, OutputPage, OutputRequest, OutputStore, WatchProgress,
 };
 use models::{Output, WalletIndex};
 use sqlx::pool::PoolConnection;
@@ -27,7 +26,6 @@ use std::time::Duration;
 mod commit;
 mod models;
 mod reads;
-mod schema;
 mod watches;
 
 /// How long a statement waits for another connection's lock before it fails
@@ -60,36 +58,16 @@ pub struct Repository {
 }
 
 impl Database {
-    /// Opens or creates the SQLite file at `path` holding the indexing schema
-    /// alone. Requires a Tokio runtime.
-    ///
-    /// An empty file is given the schema and stamped with this store's
-    /// identity; a file stamped by this very schema is opened as it is. There
-    /// are no migrations: any other file is refused, and a schema change needs
-    /// a fresh file.
+    /// Opens or creates the SQLite file at `path` as a pool. Requires a Tokio
+    /// runtime. Applies no schema and checks no version: executing
+    /// `schema/sdk.sql` on a new file is the caller's job.
     ///
     /// # Errors
     ///
-    /// A non-retryable `Store` error when the path is not absolute, when the
-    /// file refuses write-ahead logging, or when it belongs to another
-    /// application or schema version (the message says to delete the database
-    /// file); otherwise the SQLite failure, classified.
+    /// A non-retryable `Store` error when the path is not absolute; otherwise
+    /// the SQLite failure, classified.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, IndexError> {
-        Self::connect(path.as_ref(), None, Self::ceiling()).await
-    }
-
-    /// [`Database::open`] for an application that keeps tables of its own in
-    /// the same file: `schema` is applied beside the indexing schema when the
-    /// file is created, and the file's identity covers both, so a file created
-    /// with another `schema` (or with none) is refused. Requires a Tokio
-    /// runtime.
-    ///
-    /// # Errors
-    ///
-    /// As [`Database::open`]; a `schema` that does not apply fails the open
-    /// and leaves the file empty.
-    pub async fn open_with(path: impl AsRef<Path>, schema: &str) -> Result<Self, IndexError> {
-        Self::connect(path.as_ref(), Some(schema), Self::ceiling()).await
+        Self::connect(path.as_ref(), Self::ceiling()).await
     }
 
     /// The file's pool, for an application's statements against its own
@@ -111,8 +89,7 @@ impl Database {
         u32::try_from(parallelism.clamp(2, 16)).unwrap_or(2)
     }
 
-    /// Opens `path` as a pool of at most `ceiling` connections and checks the
-    /// file's identity.
+    /// Opens `path` as a pool of at most `ceiling` connections.
     ///
     /// Every connection gets the busy timeout, `synchronous = FULL`,
     /// `fullfsync` (what makes `FULL` reach the disk on macOS), foreign keys,
@@ -123,7 +100,7 @@ impl Database {
     /// temporary file created and deleted inside the commit. No connection is
     /// closed for idleness or age: an embedded file connection does not go
     /// stale.
-    async fn connect(path: &Path, owner: Option<&str>, ceiling: u32) -> Result<Self, IndexError> {
+    async fn connect(path: &Path, ceiling: u32) -> Result<Self, IndexError> {
         if !path.is_absolute() {
             return Err(store(
                 "sqlite path must be absolute; resolve application paths at composition",
@@ -150,7 +127,6 @@ impl Database {
             .connect_with(options)
             .await
             .map_err(|error| failure(&error, "sqlite open failed"))?;
-        schema::Identity::new(owner).establish(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -325,28 +301,6 @@ fn store(message: impl Into<String>) -> IndexError {
 /// was written, so the caller re-reads and tries again.
 fn conflict(message: impl Into<String>) -> IndexError {
     IndexError::new(IndexErrorKind::Conflict, message, true)
-}
-
-// One transaction looked up by identity, with the checkpoint of the same
-// snapshot.
-
-impl TransactionStore for Repository {
-    fn locate<'a>(
-        &'a self,
-        transaction: &'a TransactionRef,
-    ) -> BoxFuture<'a, Result<Location, IndexError>> {
-        Box::pin(async move {
-            let network = Self::network(&transaction.network)?;
-            let (mut read, checkpoint) = self.database.snapshot(&network).await?;
-            let held =
-                models::Transaction::get_by_id(&mut read, &network, transaction.id.as_str()).await;
-            let block = found(held, "failed to read a transaction")?
-                .map(models::Transaction::block)
-                .transpose()?;
-            release(read).await?;
-            Ok(Location { checkpoint, block })
-        })
-    }
 }
 
 // Pages of one address's live outputs, read from one snapshot together with

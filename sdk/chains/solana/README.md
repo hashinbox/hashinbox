@@ -58,10 +58,12 @@ tokens = [{ mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', asset = 'usdc
 - The genesis hash is configured and verified, never discovered. `connect`
   refuses a node that reports another hash, so a wrong URL cannot index a
   different cluster into the same store.
-- A signed transaction expires with its blockhash. When a submission's outcome
-  is unknown, the sender stays reserved until the node or the index shows the
-  transaction, or the blockhash expires unseen; a second send from that sender
-  fails with `SourceBusy` instead of waiting.
+- A signed transaction expires with its blockhash. A send rebroadcasts the same
+  signed bytes to every configured node until a node sees it land or the
+  blockhash expires; it is never rebuilt or re-signed. Not seen landed before
+  expiry fails as `WalletErrorKind::OutcomeUnknown` with the transaction ID: it
+  may still have landed, so check history. The sender is reserved until then; a
+  second send from it fails with `SourceBusy` instead of waiting.
 - SPL tokens are received and reported, not sent. `Wallets::author` and
   `Wallets::send_all` refuse a token's asset tag.
 - Token-2022 mints are refused at `connect`, because their confidential

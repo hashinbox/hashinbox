@@ -1,7 +1,7 @@
 //! The durable watch list: what to observe, and how far it has been observed.
 //!
 //! **One row per observation**, in `wallet_index`: a wallet's address in one
-//! asset, its address, birthday, progress and total — never the `wallet`
+//! asset, its address, birthday and progress — never the `wallet`
 //! table, whose rows the wallets side files first (the foreign key is the
 //! database's rule). [`WatchStore::all`]'s "one consistent snapshot" is a
 //! single statement, so a watch cannot be handed another watch's progress.
@@ -15,10 +15,9 @@
 use sqlx::SqliteConnection;
 
 use super::{Repository, commit, found, models};
-use crate::storage::watch::redefinition;
 use crate::{BoxFuture, IndexError, IndexErrorKind, Network, Watch, WatchProgress, WatchStore};
 
-use models::{Ledger, WalletIndex};
+use models::{Ledger, Output, Transaction, TransactionAddress, WalletIndex};
 
 impl WatchStore for Repository {
     /// One transaction for the batch: every watch is read, compared and
@@ -53,8 +52,11 @@ impl WatchStore for Repository {
         })
     }
 
-    /// One delete: the observation, its progress and its total go; every
-    /// indexed fact of its address stays.
+    /// One transaction: the observation, its progress and its indexed facts
+    /// go — its ledger rows and outputs, and, when no other asset of the
+    /// address is still watched, its memberships, its spend-first tombstones
+    /// and every transaction no membership names any more. Other watches'
+    /// facts stay.
     fn forget<'a>(
         &'a self,
         network: &'a Network,
@@ -70,7 +72,7 @@ impl WatchStore for Repository {
             }
             let network = Self::network(network)?;
             let mut write = self.database.write().await?;
-            WalletIndex::delete(&mut write, &network, &watch.id, &watch.asset.asset).await?;
+            Self::unregister(&mut write, &network, watch).await?;
             commit(write).await
         })
     }
@@ -100,10 +102,36 @@ impl Repository {
         Self::network(&network).map(Some)
     }
 
+    /// Deletes `watch`'s observation and the facts indexed for it.
+    async fn unregister(
+        transaction: &mut SqliteConnection,
+        network: &Network,
+        watch: &Watch,
+    ) -> Result<(), IndexError> {
+        let asset = watch.asset.asset.as_str();
+        let held = WalletIndex::get_in_network(transaction, network, &watch.id, asset).await;
+        if found(held, "failed to read an observation")?.is_none() {
+            return Ok(());
+        }
+        WalletIndex::delete(transaction, network, &watch.id, asset).await?;
+        let holding = models::address_id(network, &watch.address.value);
+        Ledger::delete_from(transaction, (&holding, asset), i64::MIN).await?;
+        let others =
+            WalletIndex::find_active_by_address(transaction, network, &watch.address.value).await?;
+        let last = others.is_empty();
+        Output::delete_by_holding(transaction, (&holding, asset), last).await?;
+        if last {
+            let named = TransactionAddress::delete_by_address(transaction, &holding).await?;
+            Transaction::delete_unreferenced(transaction, &named).await?;
+        }
+        Ok(())
+    }
+
     /// Insert-if-absent, verify-if-present, for one watch: an observation
-    /// already held is accepted only as an exact repeat; a new one is seeded
-    /// with its holding's total from the facts already stored, and the
-    /// database refuses it when no wallet is filed under its id or its
+    /// already held is accepted only as an exact repeat; a new one deletes its
+    /// holding's ledger rows from its birthday on, which its own inspection
+    /// writes again in order (history is forward-only), and the database
+    /// refuses it when no wallet is filed under its id or its
     /// `(address, asset)` is another id's.
     async fn register(
         transaction: &mut SqliteConnection,
@@ -115,11 +143,12 @@ impl Repository {
             return if WatchProgress::try_from(observed)?.watch == *watch {
                 Ok(())
             } else {
-                Err(redefinition())
+                Err(IndexError::conflict("address already registered"))
             };
         }
+        let birthday = i64::try_from(watch.start.0).unwrap_or(i64::MAX);
         let holding = models::address_id(network, &watch.address.value);
-        let balance = Ledger::net(transaction, (&holding, &watch.asset.asset)).await?;
-        WalletIndex::insert(transaction, watch, &balance).await
+        Ledger::delete_from(transaction, (&holding, &watch.asset.asset), birthday).await?;
+        WalletIndex::insert(transaction, watch).await
     }
 }

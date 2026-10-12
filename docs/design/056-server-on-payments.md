@@ -1,5 +1,7 @@
 # 056 — The server on payments: the trim map
 
+Status: implemented (commit 071c859).
+
 ## Schema amendment (from the review question)
 
 The spender is usually not a stored transaction: a spending transaction gets

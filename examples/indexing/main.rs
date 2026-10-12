@@ -43,6 +43,9 @@ async fn main() -> Result<(), AnyError> {
     tokio::task::spawn_blocking(|| std::fs::create_dir_all(".index-data")).await??;
     let file = std::path::absolute(".index-data/indexing.db")?;
     let database = Database::open(file).await?;
+    sqlx::raw_sql(include_str!("../../schema/sdk.sql"))
+        .execute(database.pool())
+        .await?;
     // The wallet rows live in the same file: filed here, then watched.
     let filed = wallets::storage::sqlite::Repository::new(database.pool().clone());
     let repo = Arc::new(Repository::new(database));
@@ -55,7 +58,6 @@ async fn main() -> Result<(), AnyError> {
         .with::<chain_solana::Config<String>>("solana")
         .with_store(repo.clone())
         .with_output_store(repo.clone())
-        .with_transaction_store(repo.clone())
         .start()
         .await?;
     if let Some(skipped) = payments.skipped.first() {

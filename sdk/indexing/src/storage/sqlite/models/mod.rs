@@ -34,7 +34,7 @@ mod transaction;
 mod transaction_address;
 mod wallet_index;
 
-use std::{future::poll_fn, str::FromStr};
+use std::str::FromStr;
 
 use sqlx::{
     FromRow, QueryBuilder, Row as _, Sqlite, SqliteConnection,
@@ -48,27 +48,12 @@ pub(super) use ledger::Ledger;
 pub(super) use output::Output;
 pub(super) use transaction::Transaction;
 pub(super) use transaction_address::TransactionAddress;
-pub(super) use wallet_index::WalletIndex;
+pub(super) use wallet_index::{Birthdays, WalletIndex};
 
 use super::{IndexError, failure, store};
 use crate::{ChainName, Decimal, Network};
 
-/// The canonical id of `parts`: each part with `\\` and `:` escaped by a
-/// backslash, joined by `:`. Two different part lists never share an id,
-/// whatever text the parts hold.
-pub(super) fn canonical_id(parts: &[&str]) -> String {
-    let mut id = String::new();
-    for (index, part) in parts.iter().enumerate() {
-        if index > 0 {
-            id.push(':');
-        }
-        id.extend(part.chars().flat_map(|character| {
-            let escape = matches!(character, '\\' | ':').then_some('\\');
-            escape.into_iter().chain([character])
-        }));
-    }
-    id
-}
+pub(super) use crate::storage::canonical_id;
 
 /// The last part of a [`canonical_id`], unescaped: the native value an
 /// address id names.
@@ -100,7 +85,7 @@ pub(super) type Bound<'q> = Query<'q, Sqlite, SqliteArguments<'q>>;
 ///
 /// Every round trip to a connection's worker thread costs microseconds, so a
 /// commit writes its rows many to a statement. The widest table, `ledger`,
-/// binds 13 values a row, which keeps 64 rows far below SQLite's limit on
+/// binds 12 values a row, which keeps 64 rows far below SQLite's limit on
 /// bound parameters.
 const WIDEST: usize = 64;
 
@@ -210,21 +195,6 @@ where
         .iter()
         .map(|row| M::from_row(row).map_err(|error| failure(&error, context)))
         .collect()
-}
-
-/// Runs `query` and hands every row it selects to `visit`, one at a time,
-/// so a read costs one row of memory whatever it walks.
-async fn each(
-    connection: &mut SqliteConnection,
-    query: Bound<'_>,
-    context: &str,
-    mut visit: impl FnMut(&SqliteRow) -> Result<(), IndexError> + Send,
-) -> Result<(), IndexError> {
-    let mut rows = query.fetch(connection);
-    while let Some(row) = poll_fn(|task| rows.as_mut().poll_next(task)).await {
-        visit(&row.map_err(|error| failure(&error, context))?)?;
-    }
-    Ok(())
 }
 
 /// One named column of a row.

@@ -1,5 +1,17 @@
 #![doc = include_str!("../README.md")]
 
+mod handle;
+#[cfg(feature = "runner")]
+mod runner;
+pub mod storage;
+mod task;
+
+pub use handle::Handle;
+#[cfg(feature = "runner")]
+pub use runner::{Ack, Delivery, Executor, Runner, now};
+pub use storage::{Store, StoreError, StoreFuture};
+pub use task::{Claimed, Id, NewTask, Outcome, Policy, Settlement, Status, TaskResult};
+
 use std::{
     fmt,
     future::Future,

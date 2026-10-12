@@ -8,8 +8,8 @@ use base::{BoxFuture, Network, Units};
 use futures_channel::mpsc::UnboundedReceiver;
 use indexing::{
     Birthday, Change, Driver, Holder, IndexError, IndexErrorKind, IndexStore, IndexedBatch,
-    Indexers, Location, Notifying, OutputKey, OutputPage, OutputRequest, OutputStore, Pending,
-    PurgedRows, TransactionRef, TransactionStore, Watch, WatchProgress, WatchStore, Watching,
+    Indexers, Notifying, OutputKey, OutputPage, OutputRequest, OutputStore, Pending, PurgedRows,
+    Watch, WatchProgress, WatchStore, Watching,
 };
 use serde::de::DeserializeOwned;
 use tokio::{sync::watch, task::JoinHandle};
@@ -32,7 +32,6 @@ pub struct Split {
     watches: Arc<dyn WatchStore>,
     index: Arc<dyn IndexStore>,
     outputs: Option<Arc<dyn OutputStore>>,
-    transactions: Option<Arc<dyn TransactionStore>>,
 }
 
 /// Why an optional slot was asked for and never attached.
@@ -94,18 +93,6 @@ impl OutputStore for Split {
     }
 }
 
-impl TransactionStore for Split {
-    fn locate<'a>(
-        &'a self,
-        transaction: &'a TransactionRef,
-    ) -> BoxFuture<'a, Result<Location, IndexError>> {
-        match &self.transactions {
-            Some(transactions) => transactions.locate(transaction),
-            None => Box::pin(async { Err(unattached("with_transaction_store")) }),
-        }
-    }
-}
-
 /// Why [`Builder::start`] (or a builder step) refused.
 #[derive(Debug)]
 pub enum StartError {
@@ -155,13 +142,13 @@ pub struct Builder<A: Ord> {
     index: Option<Arc<dyn IndexStore>>,
     index_override: bool,
     outputs: Option<Arc<dyn OutputStore>>,
-    transactions: Option<Arc<dyn TransactionStore>>,
     registry_slot: Option<Arc<dyn WalletRepository>>,
 }
 
 /// Every configured chain composed, its index driven, its operational handle.
 pub struct Payments<A: Ord> {
-    /// Every configured asset's wallet factory, keyed by asset tag.
+    /// Every configured asset's wallet factory, keyed by asset tag, holding
+    /// the signers [`Builder::start`] restored from the wallet registry.
     pub wallets: Wallets<A>,
     /// Every composed network's index.
     pub index: Arc<Indexers>,
@@ -172,8 +159,8 @@ pub struct Payments<A: Ord> {
     pub units: Units,
     /// The operational handle: nodes, pause, resume, rescan, health.
     pub networks: Networks<A>,
-    /// The wallet registry slot, when one was attached; the engine never
-    /// calls it.
+    /// The wallet registry slot, when one was attached; [`Builder::start`]
+    /// reads it once to restore the signers, and nothing else calls it.
     pub registry: Option<Arc<dyn WalletRepository>>,
     /// Lines each accepted chain asked an operator to read.
     pub notices: Vec<String>,
@@ -274,7 +261,6 @@ where
             index: None,
             index_override: false,
             outputs: None,
-            transactions: None,
             registry_slot: None,
         }
     }
@@ -333,13 +319,6 @@ where
         self
     }
 
-    /// The optional transaction slot (Solana's sender recovery).
-    #[must_use]
-    pub fn with_transaction_store<S: TransactionStore + 'static>(mut self, store: Arc<S>) -> Self {
-        self.transactions = Some(store);
-        self
-    }
-
     /// The optional wallet repository slot (the `wallet` rows), held for the
     /// application; the engine never calls it.
     #[must_use]
@@ -381,10 +360,14 @@ where
     /// Verifies every node, composes each chain whose node passed over the
     /// attached slots, drives the index, and returns once every network
     /// settled. A chain whose node fails is skipped ([`Payments::skipped`]).
+    /// With a wallet registry ([`Self::with_wallet_registry`]) it first
+    /// restores the signers of the served networks
+    /// ([`wallets::Wallets::load_signers`]); without one no signer is loaded.
     ///
     /// # Errors
     ///
-    /// A refused section, no [`Self::with_store`], a composition failure, or
+    /// A refused section, no [`Self::with_store`], a composition or signer
+    /// restore failure, or
     /// the driver stopping before readiness.
     pub async fn start(mut self) -> Result<Payments<A>, StartError> {
         let mut chains = self.chains()?.with_logger(self.logger.clone());
@@ -413,7 +396,6 @@ where
             watches,
             index: index.clone(),
             outputs: self.outputs,
-            transactions: self.transactions,
         };
         let submissions = Arc::new(Submissions::new());
         let registrar: Arc<dyn SubmissionRegistrar> = submissions.clone();
@@ -445,6 +427,14 @@ where
             index,
             &driver,
         );
+        // Before syncing: every keyed wallet of a served network is rebuilt as
+        // a signer. Without a wallet registry slot no signer is loaded.
+        if let Some(registry) = &self.registry_slot {
+            composition
+                .wallets
+                .load_signers(registry.as_ref(), composition.index.networks())
+                .await?;
+        }
         let (stop, stopped) = watch::channel(false);
         let sync = tokio::spawn(driver.run(stopped));
         readiness.settled().await.ok_or(StartError::Stopped)?;

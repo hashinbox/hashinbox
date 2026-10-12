@@ -514,7 +514,7 @@ async fn send(
     // Sending is the asset's capability, not the wallet's: an asset this
     // deployment only receives has no author to hand out, and that one
     // absence is the whole refusal. An archived wallet sends nothing (409).
-    let signer = wallet.signer(&state.signers, &request.asset)?;
+    let signer = wallet.signer(&state.payments.wallets, &request.asset)?;
     let author = state.payments.wallets.author(&request.asset, &signer)?;
     // The asset's send queue refuses a send while its network is paused for a
     // rescan (409), and the rescan waits for the sends it admitted.
@@ -624,7 +624,7 @@ async fn send_batch(
             .subject(&state.payments.wallets, &tag)
             .map_err(|error| at(error.into()))?;
         let wallet = found
-            .signer(&state.signers, &tag)
+            .signer(&state.payments.wallets, &tag)
             .map_err(|error| at(error.into()))?;
         let to = destination(&state, &tag, &item.destination).map_err(at)?;
         transfers.push(::wallets::Transfer { wallet, to, amount });

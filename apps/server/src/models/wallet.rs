@@ -4,7 +4,7 @@
 //! of it under
 //! their configured tags. The server keeps no wallet table of its own; the key
 //! stays in the row and reaches this process only as signers
-//! (`models::Signers`).
+//! (`wallets::Wallets::signer`).
 
 use std::{fmt, sync::Arc};
 
@@ -14,7 +14,7 @@ use wallets::{WalletError, WalletErrorKind};
 use indexing::Watching as _;
 use payments::Payments;
 
-use super::{Network, Signers};
+use super::Network;
 use crate::asset::{AssetTag, Wallets};
 
 /// An operator's name for a wallet: 1 to 64 characters, no control
@@ -208,7 +208,7 @@ impl Wallet {
     /// not loaded for that asset because its chain is not in service.
     pub(crate) fn signer(
         &self,
-        signers: &Signers,
+        wallets: &Wallets,
         tag: &AssetTag,
     ) -> Result<Arc<dyn wallets::Wallet>, WalletError> {
         if self.archived() {
@@ -223,8 +223,8 @@ impl Wallet {
                 "a watch-only address has no key to read a balance or send",
             ));
         }
-        signers
-            .get(&self.id, tag)?
+        wallets
+            .signer(&self.id, tag)?
             .ok_or_else(|| Self::failure("the wallet's chain is not in service"))
     }
 

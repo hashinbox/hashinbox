@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use sqlx::{FromRow, QueryBuilder, SqliteConnection, sqlite::SqliteRow};
 
 use super::{
-    Block, Chunks, canonical_id, column, fetched, network, refused, restored, store, stored,
+    Birthdays, Block, Chunks, address_id, canonical_id, column, fetched, network, refused,
+    restored, store, stored,
 };
 use crate::{IndexError, IndexedBatch, Network, Status, TransactionRef};
 
@@ -79,17 +80,49 @@ impl Transaction {
         ])
     }
 
-    /// The row of every transaction `batch` records, block by block.
+    /// The row of every transaction `batch` records that a watched address
+    /// took part in, block by block: no transaction without a membership.
     pub(in crate::storage::sqlite) fn from_batch(
         batch: &IndexedBatch,
+        watched: &Birthdays,
     ) -> Result<Vec<Self>, IndexError> {
         let mut rows = Vec::new();
         for canonical in batch.blocks() {
-            for entry in canonical.block.transactions() {
+            let position = stored(canonical.block.reference().position.0)?;
+            let member = |entry: &&crate::Transaction| {
+                entry.addresses().iter().any(|address| {
+                    watched.takes_part(&address_id(&address.network, &address.value), position)
+                })
+            };
+            for entry in canonical.block.transactions().iter().filter(member) {
                 rows.push(Self::try_from(entry)?);
             }
         }
         Ok(rows)
+    }
+
+    /// Deletes each of `ids` no membership names any more; its ledger rows go
+    /// by cascade.
+    pub(in crate::storage::sqlite) async fn delete_unreferenced(
+        connection: &mut SqliteConnection,
+        ids: &[String],
+    ) -> Result<(), IndexError> {
+        Chunks::new(ids, "failed to delete transactions")
+            .execute(connection, |chunk| {
+                let mut statement = QueryBuilder::new(
+                    "DELETE FROM \"transaction\" WHERE NOT EXISTS
+                         (SELECT 1 FROM transaction_address a WHERE a.transaction_id = id)
+                     AND id IN (",
+                );
+                let mut separated = statement.separated(", ");
+                for id in chunk {
+                    separated.push_bind(id.as_str());
+                }
+                statement.push(")");
+                statement
+            })
+            .await
+            .map(drop)
     }
 
     /// Writes the shared fact of every transaction of one batch, many to a
@@ -169,18 +202,6 @@ impl Transaction {
             .await
     }
 
-    /// The row of `id` in `network`.
-    pub(in crate::storage::sqlite) async fn get_by_id(
-        connection: &mut SqliteConnection,
-        network: &Network,
-        id: &str,
-    ) -> Result<Self, sqlx::Error> {
-        sqlx::query_as(joined!("WHERE t.id = ?1"))
-            .bind(canonical_id(&[network.chain.as_str(), &network.name, id]))
-            .fetch_one(connection)
-            .await
-    }
-
     /// Up to `limit` of the transactions of the address `address_id` names
     /// after `cursor` (`(height, order, transaction id)`), in native block
     /// order: the `history_entry` view, one row per transaction the address
@@ -203,11 +224,6 @@ impl Transaction {
         .bind(cursor.2.as_str())
         .bind(i64::try_from(limit).unwrap_or(i64::MAX));
         fetched(connection, query, "failed to read history").await
-    }
-
-    /// The block that includes this transaction.
-    pub(in crate::storage::sqlite) fn block(self) -> Result<crate::BlockRef, IndexError> {
-        self.block.try_into()
     }
 }
 

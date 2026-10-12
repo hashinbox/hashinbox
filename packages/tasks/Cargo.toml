@@ -4,13 +4,28 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-description = "Owned Tokio tasks with closed admission and graceful draining."
+description = "Owned Tokio tasks and durable task queues with stored results."
+
+[features]
+# The in-process queue store (`tasks::memory`), on no file and no runtime.
+memory = []
+# The queue store on SQLite (`tasks::sqlite`): a caller pool whose file already
+# holds `schema/queue.sql`.
+sqlite = ["dep:sqlx"]
+# The Tokio runner (`tasks::Runner`) and `Handle::wait`.
+runner = ["dep:logging", "tokio/time", "tokio/macros"]
 
 [dependencies]
 tokio = { version = "=1.49.0", default-features = false, features = ["rt"] }
+uuid.workspace = true
+sqlx = { workspace = true, optional = true }
+logging = { path = "../logging", optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "sync"] }
+tasks = { path = ".", features = ["memory", "sqlite", "runner"] }
+tempfile = "=3.27.0"
+sqlx.workspace = true
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
 
 [lints]
 workspace = true

@@ -53,12 +53,6 @@ impl<C, R> IndexerParams<C, R> {
 /// holds above the line (`indexing::Pending`). Store it as
 /// `Arc<dyn indexing::Indexing>` or combine several in an `indexing::Index`.
 ///
-/// The commit announcements this chain's submission recovery waits on are not
-/// allocated here. They are one `indexing::Listener` that
-/// [`crate::WalletFactory::new`] registers on the indexer it is handed, so an
-/// indexing-only caller pays for no channel at all
-/// (`crate::sender::CommitSignal`).
-///
 /// A function rather than an inherent constructor, because this crate does
 /// not own [`Indexer`]; [`IndexerParams`] stays what it is, the argument,
 /// rather than becoming a factory for its own product.

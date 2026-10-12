@@ -1,15 +1,14 @@
 //! [`Outbox`]: every native SOL send of one factory's wallets, in five
-//! stages: reserve → prepare → sign → submit → settle.
+//! stages: reserve → prepare → sign → submit → release.
 //!
 //! - **reserve** the senders (`SourceBusy` when one is taken),
 //! - **prepare**: bracket every account at one slot, take a blockhash
 //!   lifetime, price each message, and check the batch's funds,
 //! - **sign** each message with its sender's signer and simulate it,
 //! - **submit** through a registered [`SubmissionTask`]: re-check the
-//!   lifetime, then send each exact envelope in order, up to three times,
-//! - **settle**: accepted or definitely failed senders are released; an
-//!   unknown outcome keeps its sender reserved until recovery proves the
-//!   transaction present or absent.
+//!   lifetime, then rebroadcast each exact envelope in order until it lands
+//!   or its blockhash expires (then the outcome is unknown),
+//! - **release** every sender once submission ends.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -17,8 +16,7 @@ use base::{Signer, TransactionError, transaction::Envelope};
 use wallets::{SendError, SubmissionRegistrar, SubmissionTask, WalletError, WalletErrorKind};
 
 use super::{
-    dispatch::{Dispatch, Outcome},
-    recovery::Settler,
+    dispatch::Dispatch,
     reservation::{Admission, PreparedTransaction, Reservations},
 };
 use crate::native::{
@@ -36,7 +34,6 @@ pub(crate) struct Outbox {
     preflight: Arc<dyn Preflight>,
     submitter: Arc<dyn Submitter>,
     registrar: Arc<dyn SubmissionRegistrar>,
-    recovery: Arc<dyn Settler>,
     reservations: Reservations,
     memo: Arc<MemoFactory>,
 }
@@ -106,7 +103,6 @@ impl Outbox {
         preflight: Arc<dyn Preflight>,
         submitter: Arc<dyn Submitter>,
         registrar: Arc<dyn SubmissionRegistrar>,
-        recovery: Arc<dyn Settler>,
         reservations: Reservations,
     ) -> Self {
         Self {
@@ -114,7 +110,6 @@ impl Outbox {
             preflight,
             submitter,
             registrar,
-            recovery,
             reservations,
             memo: Arc::new(Memo::generate),
         }
@@ -207,7 +202,6 @@ impl Outbox {
             preflight: self.preflight.clone(),
             submitter: self.submitter.clone(),
             registrar,
-            recovery: self.recovery.clone(),
             reservations: self.reservations.clone(),
             memo: self.memo.clone(),
         }
@@ -437,17 +431,10 @@ impl Outbox {
         dispatch.live(0, first, Vec::new(), "registration").await?;
         let settlement = admission.settlement();
         let (result_send, result_wait) = tokio::sync::oneshot::channel();
-        let recovery = self.recovery.clone();
         let (task, activation) = SubmissionTask::dormant(async move {
-            match dispatch.run(transactions, settlement).await {
-                Outcome::Complete(result) => {
-                    let _ = result_send.send(result);
-                }
-                Outcome::Unknown { error, transaction } => {
-                    let _ = result_send.send(Err(error));
-                    recovery.settle(*transaction).await;
-                }
-            }
+            let result = dispatch.run(transactions).await;
+            drop(settlement);
+            let _ = result_send.send(result);
         });
         self.registrar
             .register(task)

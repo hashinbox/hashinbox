@@ -7,9 +7,9 @@
 //! plus the one write a pass makes and the one removal (the rescan's purge).
 //! Nothing else is required, and nothing else is implemented here.
 //!
-//! **More traits exist and this file implements none of them** —
-//! `indexing::OutputStore` and `indexing::TransactionStore`: *consumer*
-//! capabilities, for Bitcoin's change selection and Solana's sender recovery.
+//! **One more trait exists and this file does not implement it** —
+//! `indexing::OutputStore`: a *consumer* capability, for Bitcoin's change
+//! selection.
 //! There is no port for balance or history at all — querying is a repository's
 //! own API, and this one does not offer it. What this consumer needs instead is the last block of
 //! this file:

@@ -9,8 +9,8 @@
 //! are [`Repository`], and they are the whole of what a third party writing its
 //! own index sink has to implement: registration and committing.
 //!
-//! **The rest are narrow ports a consumer may need**: [`OutputStore`] (Bitcoin's
-//! coin selection) and [`TransactionStore`] (Solana's absence proof). Balance
+//! **The rest are narrow port a consumer may need**: [`OutputStore`] (Bitcoin's
+//! coin selection). Balance
 //! and history are not ports: the shipped stores answer them with inherent
 //! methods, and a custom store brings its own.
 //!
@@ -31,7 +31,8 @@ mod balance;
 mod commit;
 mod effect;
 mod history;
-mod location;
+#[cfg(any(feature = "sqlite", feature = "memory"))]
+mod ledger;
 #[cfg(feature = "memory")]
 pub mod memory;
 mod notifying;
@@ -39,14 +40,16 @@ mod outputs;
 mod purge;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
-pub(crate) mod subject;
 mod watch;
 
 pub use balance::{Balance, SettledBalance};
 pub use commit::{IndexStore, IndexedBatch, Progress};
 pub use effect::Net;
 pub use history::{Entry, History, Page, Position, Standing};
-pub use location::{Location, TransactionStore};
+#[cfg(any(feature = "sqlite", feature = "memory"))]
+pub(crate) use ledger::LedgerEntry;
+#[cfg(feature = "sqlite")]
+pub(crate) use ledger::{Kind, canonical_id};
 pub use notifying::{Change, Notifying};
 #[cfg(any(feature = "sqlite", feature = "memory"))]
 pub(crate) use outputs::Probe;

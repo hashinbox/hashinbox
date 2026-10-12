@@ -45,11 +45,12 @@ where
 ```
 
 - Store slots: `with_store` (the required `WatchStore + IndexStore`),
-  `with_output_store`, `with_transaction_store`, `with_wallet_registry`; each
+  `with_output_store`, `with_wallet_registry`; each
   is a view of the caller's instance. An optional slot left empty answers its
   one consumer with an error naming the missing call. `with_index_store`
   replaces the container's notifying index view, and `changes()` then answers
-  `None`.
+  `None`. With `with_wallet_registry`, `start()` restores every served
+  network's signers into `payments.wallets`; without it none are loaded.
 - `Payments::builder().chain(config)` takes a chain's `Config` built in code;
   `from_json`/`from_toml` (feature `toml`) plus `.with::<C>(name)` parse it.
 - `payments.networks`: `list`, `replace(network, endpoints, persist)` (verify,

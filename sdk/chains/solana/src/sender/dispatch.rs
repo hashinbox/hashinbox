@@ -1,13 +1,16 @@
 //! The submit stage as it runs inside a registered [`super::SubmissionTask`]:
-//! the exact signed bytes, in order, while their blockhash is live, each
-//! sent up to three times.
+//! the exact signed bytes, in order, each rebroadcast to every configured
+//! node until it lands or its blockhash expires.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use wallets::{SendError, WalletError, WalletErrorKind};
 
-use super::reservation::{PreparedTransaction, Settlement};
-use crate::native::{SignedTransaction, rpc::Submitter};
+use super::reservation::PreparedTransaction;
+use crate::native::rpc::Submitter;
+
+/// Pause between rebroadcasts of the same bytes.
+const REBROADCAST: Duration = Duration::from_secs(1);
 
 /// The dispatch half of submit: exact bytes, in order, while they are live.
 /// Every read and send is at the transaction's simulated floor, never at the
@@ -16,48 +19,32 @@ pub(super) struct Dispatch {
     pub(super) submitter: Arc<dyn Submitter>,
 }
 
-pub(super) enum Outcome {
-    Complete(Result<Vec<base::TransactionId>, SendError>),
-    Unknown {
-        error: SendError,
-        transaction: Box<SignedTransaction>,
-    },
-}
-
 impl Dispatch {
-    /// Sends each transaction in order and stops at the first that did not
-    /// land. An unknown outcome keeps its sender reserved; every other
-    /// sender is released when `settlement` drops.
+    /// Sends each transaction in order and stops at the first that was not
+    /// seen landed. That one fails as [`WalletErrorKind::OutcomeUnknown`]: it
+    /// may still have landed, so the error carries its ID.
     pub(super) async fn run(
         &self,
         transactions: Vec<PreparedTransaction>,
-        settlement: Settlement,
-    ) -> Outcome {
+    ) -> Result<Vec<base::TransactionId>, SendError> {
         let mut accepted = Vec::with_capacity(transactions.len());
         for (index, prepared) in transactions.into_iter().enumerate() {
-            if index > 0
-                && let Err(error) = self
-                    .live(index, &prepared, accepted.clone(), "dispatch")
-                    .await
-            {
-                return Outcome::Complete(Err(error));
+            if index > 0 {
+                self.live(index, &prepared, accepted.clone(), "dispatch")
+                    .await?;
             }
-            if !self.submit(&prepared).await {
-                let transaction = prepared.transaction;
-                settlement.retain(&transaction.from);
+            if !self.land(&prepared).await {
                 let mut source = WalletError::new(
-                    WalletErrorKind::Unavailable,
-                    "Solana submission outcome is unknown",
+                    WalletErrorKind::OutcomeUnknown,
+                    "Solana transaction was not seen landed before its blockhash expired; \
+                     check history",
                 );
-                source.ambiguous_transaction_id = Some(transaction.id.into());
-                return Outcome::Unknown {
-                    error: SendError::item(index, accepted, source),
-                    transaction: Box::new(transaction),
-                };
+                source.ambiguous_transaction_id = Some(prepared.transaction.id.into());
+                return Err(SendError::item(index, accepted, source));
             }
             accepted.push(prepared.transaction.id.into());
         }
-        Outcome::Complete(Ok(accepted))
+        Ok(accepted)
     }
 
     /// Fails definitely unless the chain is still below the transaction's
@@ -89,33 +76,23 @@ impl Dispatch {
         Ok(())
     }
 
-    /// Up to three identical attempts; `true` once the node accepted or has
-    /// seen the transaction. Replays stop once the status read fails or the
-    /// lifetime ends.
-    async fn submit(&self, prepared: &PreparedTransaction) -> bool {
+    /// Rebroadcasts the same bytes until a node has seen them land (`true`)
+    /// or the blockhash expired or the height is unreadable (`false`).
+    async fn land(&self, prepared: &PreparedTransaction) -> bool {
         let PreparedTransaction {
             transaction,
             floor_slot,
         } = prepared;
-        for attempt in 0..3 {
-            if self
-                .submitter
-                .broadcast(transaction, *floor_slot)
-                .await
-                .is_ok()
-            {
+        loop {
+            let _ = self.submitter.broadcast(transaction, *floor_slot).await;
+            if let Ok(true) = self.submitter.known(&transaction.id, *floor_slot).await {
                 return true;
-            }
-            match self.submitter.known(&transaction.id, *floor_slot).await {
-                Ok(true) => return true,
-                Ok(false) if attempt < 2 => {}
-                _ => return false,
             }
             match self.submitter.height(*floor_slot).await {
                 Ok(height) if !transaction.lifetime.expired(height) => {}
                 _ => return false,
             }
+            tokio::time::sleep(REBROADCAST).await;
         }
-        false
     }
 }

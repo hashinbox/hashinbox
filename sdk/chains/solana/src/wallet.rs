@@ -7,21 +7,19 @@ use base::{
     Broadcaster, Decimal, Networked, SecretBytes, SignFuture, SignRequest, Signer, Submission,
     TransactionError, TransactionFuture, TransactionSnapshot,
 };
-use indexing::{Holder, Indexer};
+use indexing::Holder;
 use wallets::{
     AddressParser, Authorship, Dependency, FactoryProfile, FutureResult, Generation, Origin,
     SingleSender, TransactionFactory, Wallet as WalletContract, WalletError, WalletErrorKind,
 };
 
+use crate::TransferBuilder;
 use crate::native::{
     Address, AssetKind, CHAIN_NAME, Error, ErrorKind, KeyPair, Network, SOL,
     rpc::{Accounts, Client},
 };
 use crate::sender::native_transfer;
-use crate::sender::{
-    CommitSignal, FactorySender, Outbox, Recovery, Reservations, SendRequest, Spawner,
-};
-use crate::{BlockInterpreter, Source, TransferBuilder};
+use crate::sender::{FactorySender, Outbox, Reservations, SendRequest, Spawner};
 
 /// Which asset one factory's wallets hold on which cluster.
 ///
@@ -108,14 +106,8 @@ impl AddressParser for WalletConfig {
     }
 }
 
-/// Makes Solana wallets of one [`WalletConfig`] over one RPC client and the
-/// cluster's indexer: `wallets::WalletFactory`, registered with
-/// `wallets::Wallets::register`.
-///
-/// The indexer is read only to settle an unknown submission outcome: its
-/// checkpoint and its commit announcements. Whether a transaction landed is
-/// the third thing it needs, and it is handed in as
-/// [`crate::sender::Presence`], so this factory names no store at all.
+/// Makes Solana wallets of one [`WalletConfig`] over one RPC client:
+/// `wallets::WalletFactory`, registered with `wallets::Wallets::register`.
 pub struct WalletFactory {
     config: WalletConfig,
     accounts: Arc<dyn Accounts>,
@@ -123,59 +115,32 @@ pub struct WalletFactory {
 }
 
 impl WalletFactory {
-    /// Builds balance reads and the send pipeline over `rpc`, and the
-    /// recovery of unknown outcomes over `indexer` and `presence`. Submissions
+    /// Builds balance reads and the send pipeline over `rpc`. Submissions
     /// run on the current Tokio runtime; supply a supervising registrar with
     /// [`Self::with_registrar`]. No I/O.
     ///
-    /// `presence` is the sender's absence proof and nothing else: whether the
-    /// index holds a transaction at one stable checkpoint
-    /// ([`crate::sender::IndexPresence`] over the store and this index).
-    ///
     /// # Errors
     ///
-    /// [`ErrorKind::InvalidConfiguration`] when `config`, `rpc`, and
-    /// `indexer` name different networks.
-    pub fn new<C, R>(
-        config: WalletConfig,
-        rpc: &Client<C>,
-        indexer: &Arc<Indexer<Source<C>, BlockInterpreter, R>>,
-        presence: Arc<dyn crate::sender::Presence>,
-    ) -> Result<Self, Error>
+    /// [`ErrorKind::InvalidConfiguration`] when `config` and `rpc` name
+    /// different networks.
+    pub fn new<C>(config: WalletConfig, rpc: &Client<C>) -> Result<Self, Error>
     where
         C: json_rpc::Client + 'static,
-        Indexer<Source<C>, BlockInterpreter, R>: indexing::Checkpoint + 'static,
     {
-        if config.network != rpc.network().canonical() || indexer.network() != &config.network {
+        if config.network != rpc.network().canonical() {
             return Err(Error::new(
                 ErrorKind::InvalidConfiguration,
-                "Solana wallet configuration, RPC client, and indexer must share one network",
+                "Solana wallet configuration and RPC client must share one network",
             ));
         }
         config.validate()?;
         let rpc = Arc::new(rpc.clone());
-        let reservations = Reservations::default();
-        // The commit announcements recovery waits on are allocated here, by
-        // their only consumer, and registered as one of the indexer's
-        // listeners: an indexing-only caller never pays for this channel, and
-        // a caller's own listener is announced beside it.
-        let (announce, progress) = CommitSignal::channel();
-        indexer.listen(announce);
-        let recovery = Recovery::new(
-            rpc.clone(),
-            indexer.clone(),
-            presence,
-            config.network.clone(),
-            progress,
-            reservations.clone(),
-        );
         let outbox = Outbox::new(
             rpc.clone(),
             rpc.clone(),
             rpc.clone(),
             Arc::new(Spawner),
-            Arc::new(recovery),
-            reservations,
+            Reservations::default(),
         );
         Ok(Self {
             config,

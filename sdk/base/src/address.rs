@@ -33,6 +33,12 @@ impl Address {
         }
     }
 
+    /// Whether the text is blank or whitespace only.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.value.trim().is_empty()
+    }
+
     /// Whether this address is canonical in `network`.
     #[must_use]
     pub fn belongs_to(&self, network: &Network) -> bool {

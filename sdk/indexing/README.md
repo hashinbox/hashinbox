@@ -46,8 +46,9 @@ A `Watch` is one wallet's address observed in one asset from a birthday — one
 label, key) are the `wallets` crate's (`WalletRepository`); the shared schema's
 foreign key requires a wallet row filed before its watch, and indexing code never
 reads that table. A `Watch` carries no key. `forget` (the durable half of `unwatch`)
-deletes the observation: its birthday, progress and total go, every indexed fact
-stays, and watching again reads the range from the birthday then given. A purge
+deletes the observation and, atomically, its indexed facts (ledger rows, outputs,
+memberships, transactions nothing else names); facts are only written for watched
+(address, asset) pairs, and watching again reads the range from the birthday then given. A purge
 resets progress and totals and keeps every watch.
 
 Two repositories ship with the crate: `sqlite::Repository` (feature `sqlite`, on
@@ -61,31 +62,22 @@ a `BlockSource`, `ChainTips` and `BlockInterpreter` at once.
 ## SQLite
 
 `sqlite::Database::open` is async, on `sqlx` and Tokio. It takes an absolute
-path. An empty file is given the indexing schema and stamped with this store's
-identity; a file with that exact identity opens as it is. There are no
-migrations: any other file is refused, and the message says to delete it.
-
-An application that keeps its own tables in the same file passes its schema
-to `open_with`. The text is applied beside indexing's when the file is created
-and is part of the identity, so changing it also needs a fresh file. Read and
-write those tables through `Database::pool`. Indexing's tables belong to the
-repository.
+path and only opens a pool: it applies no schema and checks no version.
+Executing `schema/sdk.sql` (at the repository root) on a new file is the
+caller's job, together with any tables of the application's own. There are no
+migrations. Read and write the application's tables through `Database::pool`;
+indexing's tables belong to the repository.
 
 ```rust
 use indexing::sqlite::{Database, Repository};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// The application's own table, created with indexing's in a new file.
-const NOTES: &str = "CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT NOT NULL);";
-
-async fn open(path: &std::path::Path) -> Result<Repository> {
-    let database = Database::open_with(path, NOTES).await?;
-    sqlx::query("INSERT INTO notes (id, body) VALUES (?1, ?2) ON CONFLICT (id) DO NOTHING")
-        .bind("first")
-        .bind("opened")
-        .execute(database.pool())
-        .await?;
+/// Opens a new file and executes `schema`: `schema/sdk.sql`, plus the
+/// application's own tables.
+async fn create(path: &std::path::Path, schema: &str) -> Result<Repository> {
+    let database = Database::open(path).await?;
+    sqlx::raw_sql(schema).execute(database.pool()).await?;
     Ok(Repository::new(database))
 }
 ```
@@ -95,31 +87,10 @@ async fn open(path: &std::path::Path) -> Result<Repository> {
 Balance and history are not ports: the shipped stores answer them with
 inherent methods (`sqlite::Repository::balance`/`history`, the same on
 `memory::Repository`), each one snapshot that says how far behind its line the
-address's inspection is; a custom store brings its own. The ports are narrow ones for the
-SDK's own consumers — `OutputStore` (Bitcoin's coin selection,
-`chain_bitcoin::sender::Spendable`) and `TransactionStore` (Solana's absence
-proof, `chain_solana::sender::IndexPresence`) — and an application completes its own
+address's inspection is; a custom store brings its own. The one narrow port is for the
+SDK's own consumer — `OutputStore` (Bitcoin's coin selection,
+`chain_bitcoin::sender::Spendable`) — and an application completes its own
 stored reads with the blocks an index holds above its confirmed line.
-
-```rust
-use indexing::{Checkpointed, IndexError, Location, Pending, TransactionRef, TransactionStore};
-
-/// Whether `transaction` is indexed, confirmed or above the line.
-async fn landed(
-    store: &dyn TransactionStore,
-    index: &dyn Pending,
-    transaction: &TransactionRef,
-) -> Result<bool, IndexError> {
-    // Sample first, then read the store, then narrow by the store's own line.
-    let sample = index.sampled()?;
-    let located: Location = store.locate(transaction).await?;
-    let pending = sample.above(&located);
-    Ok(located.block.is_some()
-        || pending
-            .iter()
-            .any(|held| held.block.transactions().iter().any(|entry| &entry.id == transaction)))
-}
-```
 
 - The index answers no query; it hands out a sample of its pending blocks
   (`Pending`). Sample them **before** reading the store and narrow the sample
@@ -162,10 +133,10 @@ async fn landed(
   checkpoint, it claims no whole history for that address and refuses to list
   its spendable outputs. `Inspection` is the rule both shipped repositories ask.
   The index never sees a query's answer, so it cannot correct one.
-- Shipped repositories keep exact signed totals for watched holdings, updated
-  atomically from newly inserted facts. Registration seeds retained history;
-  replay adds nothing, and unresolved deficits remain `Overdrawn`. Unwatched and
-  archived holdings are computed from retained facts.
+- Shipped repositories keep exact signed running totals on ledger rows of watched
+  holdings, written atomically with them; the balance is the latest row's total.
+  History is forward-only per holding; replay adds nothing, and unresolved
+  deficits remain `Overdrawn`.
 - The SQLite repository needs a Tokio runtime with its timer. Each pooled
   connection does its SQLite work on a worker thread of its own, never on the
   async executor.

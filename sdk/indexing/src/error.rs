@@ -109,6 +109,18 @@ impl IndexError {
         Self::new(IndexErrorKind::Disconnected, message, true)
     }
 
+    /// A request no store can serve; retrying cannot fix it.
+    #[must_use]
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(IndexErrorKind::InvalidRequest, message, false)
+    }
+
+    /// A request contradicting stored state; retrying cannot fix it.
+    #[must_use]
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(IndexErrorKind::Conflict, message, false)
+    }
+
     pub(crate) fn retryable_conflict(message: impl Into<String>) -> Self {
         Self::new(IndexErrorKind::Conflict, message, true)
     }

@@ -43,7 +43,8 @@ impl IndexStore for Repository {
     /// Removes every indexing-owned row of one network inside one
     /// transaction, counts each kind, and resets what every observation of it
     /// claimed: one delete of the network's blocks, whose cascades take every
-    /// fact and the checkpoint, and one reset of the observations' totals.
+    /// fact, total and the checkpoint, and one reset of the observations'
+    /// progress.
     ///
     /// One transaction: a network left with history but no checkpoint is
     /// itself a terminal state, so a purge that stopped halfway would replace
@@ -67,11 +68,11 @@ impl IndexStore for Repository {
 }
 
 impl Repository {
-    /// Writes one batch's transactions, credits, output changes, balances and
-    /// progress, and the line it leaves behind — or nothing at all.
+    /// Writes one batch's transactions, credits, output changes, ledger rows
+    /// with their running totals and progress, and the line it leaves behind —
+    /// or nothing at all.
     ///
-    /// Each table is written many rows to a statement; a watched total moves
-    /// once per holding, by what the batch's written effects add up to.
+    /// Each table is written many rows to a statement.
     ///
     /// The checkpoint is read here, inside the write transaction, rather than by
     /// the caller before it: that is the whole compare-and-set. Whether the line
@@ -100,10 +101,16 @@ impl Repository {
         // Every row of each table is gathered for the whole batch first, so a
         // table is written many rows to a statement; transactions go before
         // the memberships and ledger rows that refer to them.
-        Transaction::insert_missing(transaction, &Transaction::from_batch(batch)?).await?;
-        TransactionAddress::insert_many(transaction, &TransactionAddress::from_batch(batch))
-            .await?;
-        let deltas = Ledger::insert_missing(transaction, &Ledger::from_batch(batch)?).await?;
+        // Rows only for what is watched, read inside this transaction: a
+        // counterparty nobody watches gets no ledger row, membership or
+        // transaction.
+        let watched = WalletIndex::find_watched(transaction, network).await?;
+        let entries = Transaction::from_batch(batch, &watched)?;
+        Transaction::insert_missing(transaction, &entries).await?;
+        let members = TransactionAddress::from_batch(batch, &watched)?;
+        TransactionAddress::insert_many(transaction, &members).await?;
+        let lost =
+            Ledger::insert_missing(transaction, Ledger::from_batch(batch, &watched)?).await?;
         let mut unknown = Vec::new();
         // Block by block, creations before spends, in the order the chain built
         // them. An output created in one block of this batch and spent in a
@@ -115,17 +122,18 @@ impl Repository {
             Output::insert_created(transaction, &block, &canonical.outputs.created).await?;
             unknown.extend(Output::update_spent(transaction, &block, &canonical.outputs).await?);
         }
-        // A watched total moves once per holding, by what the rows written add
-        // up to; a holding nothing observes has none, and its reads fold.
-        for ((address, asset), delta) in &deltas {
-            let address = models::native_part(address);
-            let held = WalletIndex::get_by_holding(transaction, network, (&address, asset)).await;
-            if let Some(held) = found(held, "failed to read a watched balance")? {
-                held.update_balance(transaction, delta).await?;
-            }
-        }
         for claim in batch.progress() {
             Self::advance(transaction, network, claim).await?;
+        }
+        // After the claims, so a watch whose own rows this batch rewrote keeps
+        // the progress it just proved: a holding that lost rows it was
+        // inspected through goes back below them, and inspects them again.
+        for ((address, asset), position) in &lost {
+            let address = models::native_part(address);
+            let held = WalletIndex::get_by_holding(transaction, network, (&address, asset)).await;
+            if let Some(held) = found(held, "failed to read a watch")? {
+                held.rewind(transaction, *position).await?;
+            }
         }
         if let Some(line) = batch
             .checkpoint()
