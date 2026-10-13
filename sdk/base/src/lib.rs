@@ -18,7 +18,7 @@ pub use decimal::{Decimal, Error as DecimalError};
 pub use network::{Network, Networked};
 pub use transaction::{
     Broadcaster, Builder, Error as TransactionError, ErrorKind as TransactionErrorKind, Future,
-    Id as TransactionId, Reason,
+    Id as TransactionId, Reason, Transacted,
 };
 pub use wallet::{
     Error as WalletError, ErrorKind as WalletErrorKind, Factories as WalletFactories,

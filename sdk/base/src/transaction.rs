@@ -110,6 +110,12 @@ impl crate::Networked for Id {
     }
 }
 
+/// Anything that belongs to one transaction.
+pub trait Transacted {
+    /// The transaction id.
+    fn txid(&self) -> &Id;
+}
+
 impl Id {
     /// Takes the canonical text of `network`'s chain as the id's identity.
     ///
