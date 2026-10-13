@@ -1,49 +1,37 @@
-use std::{error::Error as StdError, fmt, future::Future, pin::Pin};
+use std::{error::Error as StdError, fmt, pin::Pin};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Address, AssetId, Decimal, Network};
-
-#[path = "transaction_claim.rs"]
-mod claim;
-
-pub use claim::Claim;
+use crate::{Address, Decimal, Network};
 
 /// The future transaction capabilities return: boxed so the traits stay `dyn`-safe.
-pub type TransactionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type Future<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-/// Chain-neutral classification of a build, sign, or broadcast failure.
-///
-/// `wallets::Error` folds `Unavailable`, `Unknown`, and `Timeout` into its
-/// retryable `Unavailable`; every other kind is a definite transaction failure.
+/// The transaction failures a caller branches on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// A destination is not a valid address of this network.
-    InvalidAddress,
-    /// The amount is negative, too precise, or out of range.
-    InvalidAmount,
-    /// A [`Snapshot`] cannot be restored.
-    InvalidSnapshot,
-    /// The transaction is malformed or violates a chain rule.
-    InvalidTransaction,
-    /// The configuration or request is not supported.
+    /// A definite failure: an invalid address, amount or transaction,
+    /// insufficient funds, no acceptable fee, a signer or node mismatch.
+    Failed,
+    /// The builder or configuration does not support this transfer; a
+    /// builder refusing one more transfer this way ends its transaction.
     Unsupported,
-    /// The balance cannot cover the transfers plus the fee.
-    InsufficientFunds,
-    /// No acceptable fee: unavailable or above the configured ceiling.
-    Fee,
-    /// The signer failed.
-    Signing,
-    /// The node is unreachable or returned something unusable.
+    /// The node is unreachable, timed out, or the submission outcome is
+    /// unknown; retrying may succeed.
     Unavailable,
-    /// The node serves a different chain or network than configured.
-    Divergent,
-    /// The node definitively rejected the transaction.
+    /// The node definitively rejected the transaction; see [`Error::reason`].
     Rejected,
-    /// The submission outcome is unknown; see [`Error::ambiguous_transaction_id`].
-    Unknown,
-    /// The operation did not finish in time.
-    Timeout,
+    /// The transaction can no longer land (Solana: its blockhash expired)
+    /// and was not seen; its outcome is unknown.
+    Expired,
+}
+
+impl ErrorKind {
+    /// Whether retrying the same operation may succeed.
+    #[must_use]
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::Unavailable)
+    }
 }
 
 /// A failed transaction build, sign, or broadcast.
@@ -53,29 +41,48 @@ pub struct Error {
     pub kind: ErrorKind,
     /// Human-readable detail.
     pub message: String,
-    /// Canonical local identifier for reconciling an unknown submission outcome.
-    pub ambiguous_transaction_id: Option<Id>,
+    /// Why the network refused the transaction, as the chain mapped it; set
+    /// on `Rejected` and `Expired`.
+    pub reason: Option<Reason>,
+}
+
+/// Why a transaction was refused or reverted, as each chain maps its own
+/// errors; stored as JSON.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
+    /// The sender cannot cover the amount and fee.
+    InsufficientFunds,
+    /// The sequence is taken: an Ethereum nonce too low or used, Bitcoin
+    /// inputs already spent.
+    NonceUsed,
+    /// The fee is below what the network accepts.
+    FeeTooLow,
+    /// The transaction can no longer land (Solana: its blockhash expired).
+    Expired,
+    /// Malformed, or a bad signature.
+    Invalid,
+    /// Executed and failed (an Ethereum revert, a Solana instruction error).
+    Reverted,
+    /// Anything else, in the chain's own words.
+    Other(String),
 }
 
 impl Error {
-    /// Builds an error with no ambiguous transaction.
+    /// Builds an error of `kind`.
     #[must_use]
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
-            ambiguous_transaction_id: None,
+            reason: None,
         }
     }
 
-    /// Marks an unknown submission outcome with its locally derived identity.
-    ///
-    /// Only the concrete chain transaction layer that derived `transaction_id`
-    /// from the exact locally signed envelope may attach it. Higher layers must
-    /// preserve the typed value and must not derive it from node output.
+    /// Records why the network refused it.
     #[must_use]
-    pub fn with_ambiguous_transaction_id(mut self, transaction_id: Id) -> Self {
-        self.ambiguous_transaction_id = Some(transaction_id);
+    pub fn with_reason(mut self, reason: Reason) -> Self {
+        self.reason = Some(reason);
         self
     }
 }
@@ -88,57 +95,16 @@ impl fmt::Display for Error {
 
 impl StdError for Error {}
 
-/// Canonical, chain-native textual transaction identifier.
-///
-/// The concrete chain validates and constructs this value. Keeping its native
-/// text form makes it identical to the identifier emitted by indexing while
-/// preserving each protocol's canonical formatting rules.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Id(String);
-
-impl Id {
-    /// Wraps text the chain already validated as canonical.
-    #[must_use]
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// The canonical text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for Id {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for Id {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-
-impl fmt::Display for Id {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
 /// Network-qualified transaction identity.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Ref {
+pub struct Id {
     /// The complete chain/network namespace in which `id` is canonical.
     pub network: Network,
     /// The chain-native transaction id.
-    pub id: Id,
+    pub id: String,
 }
 
-impl Ref {
+impl Id {
     /// Takes the canonical text of `network`'s chain as the id's identity.
     ///
     /// Text, not anything printable, for the reason [`crate::Address::new`]
@@ -147,7 +113,7 @@ impl Ref {
     pub fn new(network: Network, id: impl Into<String>) -> Self {
         Self {
             network,
-            id: Id::new(id),
+            id: id.into(),
         }
     }
 
@@ -158,313 +124,40 @@ impl Ref {
     }
 }
 
-/// Exact signed wire bytes; `Debug` redacts them.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Envelope(Vec<u8>);
-
-impl Envelope {
-    /// Wraps signed wire bytes.
-    #[must_use]
-    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
-        Self(bytes.into())
-    }
-
-    /// The bytes to submit.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for Envelope {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Envelope")
-            .field("bytes", &"[REDACTED]")
-            .field("length", &self.0.len())
-            .finish()
-    }
-}
-
-/// Versioned JSON of an unsigned transaction under construction.
-///
-/// A chain's builder writes it inside [`Draft`] and can restore itself from
-/// it; `kind` names the chain's format.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Snapshot {
-    version: u16,
-    kind: String,
-    value: serde_json::Value,
-}
-
-impl Snapshot {
-    /// The envelope version this crate writes.
-    pub const VERSION: u16 = 1;
-
-    /// Wraps a chain-owned `value` of format `kind`.
-    #[must_use]
-    pub fn new(kind: impl Into<String>, value: serde_json::Value) -> Self {
-        Self {
-            version: Self::VERSION,
-            kind: kind.into(),
-            value,
-        }
-    }
-
-    /// The envelope version it was written with.
-    #[must_use]
-    pub const fn version(&self) -> u16 {
-        self.version
-    }
-
-    /// The chain-owned format name.
-    #[must_use]
-    pub fn kind(&self) -> &str {
-        &self.kind
-    }
-
-    /// The chain-owned body.
-    #[must_use]
-    pub const fn value(&self) -> &serde_json::Value {
-        &self.value
-    }
-}
-
-/// One requested payment of a [`Draft`]: where it goes and how much.
-///
-/// One word for one concept: the chains' `native::Transfer` and
-/// `wallets::Transfer` are the same request in native and in wallet terms, and
-/// the recipient is `to` in all three. `destination` survives only on the HTTP
-/// wire, where `apps/server` names it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Transfer {
-    /// Canonical recipient address, in the source's network.
-    pub to: Address,
-    /// Display units of the draft's asset.
-    pub amount: Decimal,
-}
-
-/// What a transaction will do, before any node is asked: no RPC, no key, no
-/// fee and no identity yet.
-///
-/// It carries the intent in typed form *and* the chain's own durable
-/// encoding, so inspecting intent never means parsing a chain format, and
-/// persisting `snapshot` still restores the builder.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Draft {
-    /// The wallet the transfers are paid from.
-    pub source: Address,
-    /// The requested payments, in the order they were added.
-    pub transfers: Vec<Transfer>,
-    /// The asset `transfers` move; the fee asset may differ (a token
-    /// transfer pays its fee in the chain's own currency).
-    pub asset: AssetId,
-    /// The chain's own durable encoding; persist it and
-    /// `wallets::TransactionFactory::resume` rebuilds this builder.
-    pub snapshot: Snapshot,
-}
-
-/// Chain-independent transaction construction used by wallet consumers.
-///
-/// Add transfers, optionally read the [`draft`](Self::draft) to see what will
-/// be paid, then [`prepare`](Self::prepare) the signed bytes and read
-/// [`SignedTransaction::fee`] to see what it costs; broadcasting is a separate
-/// [`Broadcaster`] step.
-///
-/// Three methods, and inspection lives inside the two values they return
-/// rather than in a fourth: a caller who dislikes the fee simply drops the
-/// builder, and nothing has left the process.
-pub trait TransactionBuilder: Send {
-    /// Adds one transfer of `amount` (display units) `to` a recipient.
+/// Ordered transfers of one asset from one wallet, signed into one or more
+/// transactions. The asset is fixed when the wallet creates the builder; it
+/// knows nothing of broadcasting: save the signed bytes, then hand each to a
+/// [`Broadcaster`].
+pub trait Builder: Send {
+    /// Queues a transfer of `amount` (display units) `to` a recipient;
+    /// checks the address and amount now, without I/O.
     ///
     /// # Errors
     ///
-    /// Invalid address or amount; `Unsupported` if the chain allows no more transfers.
+    /// `Failed` for an invalid address or amount; `Unsupported` for a
+    /// transfer this builder cannot add.
     fn transfer(&mut self, to: Address, amount: Decimal) -> Result<(), Error>;
 
-    /// What this transaction would do, with its durable [`Snapshot`] inside.
+    /// Fetches its own chain inputs (coins, nonces or blockhash), estimates
+    /// fees and signs every queued transfer, in order: the exact signed
+    /// bytes of one or more transactions, each built on the ones before it.
+    /// Nothing leaves the process.
     ///
     /// # Errors
     ///
-    /// The builder is not yet complete or valid.
-    fn draft(&self) -> Result<Draft, Error>;
-
-    /// Selects inputs or nonce, estimates the fee, and signs.
-    ///
-    /// # Errors
-    ///
-    /// Any build, fee, funds, or signing failure.
-    fn prepare<'a>(&'a mut self) -> TransactionFuture<'a, Result<SignedTransaction, Error>>;
+    /// `Failed` for no transfers; any build, fee, funds, or signing failure.
+    fn sign(&mut self) -> Future<'_, Result<Vec<Vec<u8>>, Error>>;
 }
 
-/// Exact signed transaction ready for submission.
-///
-/// This is durable data, not a live RPC handle. Persisting it before the
-/// external effect allows a retry to broadcast the exact same signed bytes
-/// without rebuilding or signing again.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct SignedTransaction {
-    version: u16,
-    kind: String,
-    id: Id,
-    envelope: Envelope,
-    #[serde(
-        serialize_with = "SignedTransaction::write_fee",
-        deserialize_with = "SignedTransaction::read_fee"
-    )]
-    fee: Decimal,
-    /// Deliberately outside the durable form: see [`Self::claim`].
-    #[serde(skip)]
-    claim: Option<Claim>,
-}
-
-impl SignedTransaction {
-    /// The envelope version this crate writes.
-    pub const VERSION: u16 = 1;
-
-    /// Pairs the locally derived `id` with its exact signed `envelope` and
-    /// the `fee` those bytes pay.
-    #[must_use]
-    pub fn new(kind: impl Into<String>, id: Id, envelope: Envelope, fee: Decimal) -> Self {
-        Self {
-            version: Self::VERSION,
-            kind: kind.into(),
-            id,
-            envelope,
-            fee,
-            claim: None,
-        }
-    }
-
-    /// Records what the outbox held to produce these exact bytes.
-    ///
-    /// Only the send pipeline that did the holding may attach one; nothing
-    /// else can tell the truth about it.
-    #[must_use]
-    pub fn with_claim(mut self, claim: Claim) -> Self {
-        self.claim = Some(claim);
-        self
-    }
-
-    /// Canonical base-10 text, the one spelling every amount is stored as.
-    fn write_fee<S: serde::Serializer>(fee: &Decimal, writer: S) -> Result<S::Ok, S::Error> {
-        writer.collect_str(fee)
-    }
-
-    fn read_fee<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Decimal, D::Error> {
-        let text = String::deserialize(reader)?;
-        text.parse().map_err(serde::de::Error::custom)
-    }
-
-    /// The envelope version it was written with.
-    #[must_use]
-    pub const fn version(&self) -> u16 {
-        self.version
-    }
-
-    /// The chain-owned format name.
-    #[must_use]
-    pub fn kind(&self) -> &str {
-        &self.kind
-    }
-
-    /// The transaction id, derived locally from the signed bytes.
-    #[must_use]
-    pub const fn id(&self) -> &Id {
-        &self.id
-    }
-
-    /// The exact bytes to submit.
-    #[must_use]
-    pub const fn envelope(&self) -> &Envelope {
-        &self.envelope
-    }
-
-    /// The network fee these exact bytes pay, in the fee asset's atomic
-    /// units.
-    ///
-    /// The fee asset is the chain's own currency, which is not always the
-    /// asset being moved: a token transfer pays its fee in BTC, ETH, or SOL.
-    /// It lives on the value rather than in a wrapper so the durable record
-    /// is complete: persist a signed transaction and a retry still knows
-    /// what it costs.
-    #[must_use]
-    pub const fn fee(&self) -> &Decimal {
-        &self.fee
-    }
-
-    /// What signing these bytes took, so a caller holding two of them can
-    /// ask [`Claim::collides_with`] whether both can still be broadcast.
-    ///
-    /// Unlike [`Self::fee`] this is **not** part of the durable form, and is
-    /// `None` on a value read back from storage. A claim describes the
-    /// resources one live process holds, none of which survive a restart, so
-    /// a stored one could only answer the collision question with a lie. A
-    /// chain that needs it again reconstructs it from the envelope it owns.
-    #[must_use]
-    pub fn claim(&self) -> Option<&Claim> {
-        self.claim.as_ref()
-    }
-}
-
-/// Two values are the same signed transaction when they carry the same
-/// bytes. A [`Claim`] reports on the process that signed them and is not
-/// part of their identity, so a persisted transaction still equals the one
-/// it was written from.
-impl PartialEq for SignedTransaction {
-    fn eq(&self, other: &Self) -> bool {
-        (
-            self.version,
-            &self.kind,
-            &self.id,
-            &self.envelope,
-            &self.fee,
-        ) == (
-            other.version,
-            &other.kind,
-            &other.id,
-            &other.envelope,
-            &other.fee,
-        )
-    }
-}
-
-impl Eq for SignedTransaction {}
-
-impl fmt::Debug for SignedTransaction {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SignedTransaction")
-            .field("version", &self.version)
-            .field("kind", &self.kind)
-            .field("id", &self.id)
-            .field("envelope", &self.envelope)
-            .field("fee", &self.fee)
-            .field("claim", &self.claim)
-            .finish()
-    }
-}
-
-/// The only external effect in transaction submission.
+/// The only external effect in transaction submission: the exact signed
+/// bytes to every configured node.
 pub trait Broadcaster: Send + Sync {
-    /// Submits the exact signed bytes.
+    /// Submits the exact signed bytes to every configured node.
     ///
     /// # Errors
     ///
-    /// `Rejected` is definite; `Unavailable`, `Unknown`, and `Timeout` may
-    /// carry [`Error::ambiguous_transaction_id`] when the outcome is unknown.
-    fn broadcast<'a>(
-        &'a self,
-        transaction: &'a SignedTransaction,
-    ) -> TransactionFuture<'a, Result<Submission, Error>>;
-}
-
-/// A transaction accepted for submission by at least one node.
-///
-/// Confirmation is observed through indexing and history; wallet code never
-/// polls a node waiting for finality.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Submission {
-    /// The accepted transaction's id.
-    pub id: Id,
+    /// `Rejected` is definite (the node refused); `Expired` means the bytes
+    /// can no longer land and were not seen; `Unavailable`, `Unknown` and
+    /// `Timeout` are transient: retry with the same bytes.
+    fn broadcast<'a>(&'a self, bytes: &'a [u8]) -> Future<'a, Result<(), Error>>;
 }

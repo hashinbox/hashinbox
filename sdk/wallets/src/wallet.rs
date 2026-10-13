@@ -1,85 +1,27 @@
-use std::any::Any;
+use base::{Address, Asset, BoxFuture, Builder, TransactionError};
+use crypto::{Curve, SecretBytes};
 
-use base::{Address, Holder};
-use base::{BoxFuture, Broadcaster, Signer, TransactionBuilder, TransactionId};
+/// The future every wallet capability returns: [`BoxFuture`] of an
+/// [`anyhow::Result`] whose handled cases are [`crate::Error`], so the
+/// traits stay `dyn`-safe.
+pub type FutureResult<'a, T> = BoxFuture<'a, anyhow::Result<T>>;
 
-use crate::{Amount, WalletError};
+/// One address with its key, its chain's builders and its broadcaster, all
+/// injected by the factory that made it: what each chain implements. It
+/// transacts every asset of its network that the factory knows, one asset
+/// per builder.
+pub trait Wallet: Send + Sync {
+    /// The wallet's address.
+    fn address(&self) -> &Address;
 
-/// The future every wallet capability returns: [`BoxFuture`] of this crate's
-/// [`WalletError`], so the traits stay `dyn`-safe.
-pub type FutureResult<'a, T> = BoxFuture<'a, Result<T, WalletError>>;
+    /// A new transaction builder sending `asset` from this wallet: add
+    /// transfers, then [`Builder::sign`].
+    ///
+    /// # Errors
+    ///
+    /// `Unsupported` for an asset this wallet does not send.
+    fn transaction(&self, asset: &Asset) -> Result<Box<dyn Builder + '_>, TransactionError>;
 
-/// Build/restore/broadcast access to a wallet's transactions.
-///
-/// A supertrait of [`Author`], not of [`Wallet`]: an asset this system
-/// receives and reports but never spends has no builder to reach.
-pub trait TransactionFactory: Send + Sync {
-    /// A new builder signing with this wallet.
-    fn transaction(&self) -> Box<dyn TransactionBuilder>;
-
-    /// Rebuilds a builder from a draft's snapshot, reinjecting this wallet's
-    /// signer and RPC. Rejects a snapshot of another wallet, network, or
-    /// asset.
-    fn resume(
-        &self,
-        snapshot: &base::TransactionSnapshot,
-    ) -> Result<Box<dyn TransactionBuilder>, base::TransactionError>;
-
-    /// Submits transactions this wallet prepared.
-    fn broadcaster(&self) -> &dyn Broadcaster;
+    /// The key's curve and bytes, which is how a store files it.
+    fn private_key(&self) -> (Curve, SecretBytes);
 }
-
-/// Submits one transfer through the concrete wallet's send pipeline.
-///
-/// `destination` is an [`Address`] of the wallet's own network, which
-/// [`crate::Wallets::parse`] is the way to obtain: it only ever produces
-/// addresses of that asset's network.
-pub trait SingleSender: Send + Sync {
-    /// Sends an exact amount or all available funds and returns the transaction id.
-    fn send<'a>(&'a self, destination: Address, amount: Amount) -> FutureResult<'a, TransactionId>;
-}
-
-/// What every wallet is, whatever its asset: an address holding one asset,
-/// and a key that signs.
-///
-/// It is an [`base::Holder`], so `index.watch(&id, &*wallet, start)` and
-/// every index read take the wallet itself — balance and history need no key
-/// and no send pipeline, which is why a watch-only address answers them the
-/// same way.
-///
-/// Spending is **not** here. A wallet whose asset this system also spends is
-/// an [`Author`], and [`crate::Wallets::author`] is the only way to obtain
-/// one. A holder of `Arc<dyn Wallet>` therefore cannot author a payment at
-/// all — the attempt does not compile:
-///
-/// ```compile_fail,E0599
-/// use std::sync::Arc;
-///
-/// fn draft(wallet: &Arc<dyn wallets::Wallet>) {
-///     wallet.transaction();
-/// }
-/// ```
-///
-/// ```compile_fail,E0599
-/// use std::sync::Arc;
-///
-/// async fn pay(wallet: &Arc<dyn wallets::Wallet>, to: base::Address, amount: base::Decimal) {
-///     wallet.send(to, amount).await.expect("no such capability");
-/// }
-/// ```
-pub trait Wallet: Holder + Signer + Send + Sync + Any {}
-
-impl<T: Holder + Signer + Send + Sync + Any> Wallet for T {}
-
-/// A [`Wallet`] whose asset this system also spends: it sends one transfer
-/// ([`SingleSender`]) and builds, restores and broadcasts its own
-/// transactions ([`TransactionFactory`]), reachable from the trait object
-/// without downcasting to a concrete chain wallet.
-///
-/// Only [`crate::Wallets::author`] hands one out, and only for an asset whose
-/// factory declared a [`crate::Authorship`]. An asset the system receives and
-/// reports — an SPL holding, say — declares none, so no value of this type
-/// can exist for it and no chain needs a runtime gate saying so.
-pub trait Author: Wallet + SingleSender + TransactionFactory {}
-
-impl<T: Wallet + SingleSender + TransactionFactory> Author for T {}

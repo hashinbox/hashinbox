@@ -1,30 +1,14 @@
 #![doc = include_str!("../README.md")]
 
 mod error;
+mod factories;
 mod factory;
-mod pause;
-mod queue;
-mod sender;
 pub mod storage;
-#[cfg(feature = "submissions")]
-mod submissions;
-// Its own unit tests use the double too, without a dev-dependency on itself.
-#[cfg(any(test, feature = "testing"))]
-pub mod testing;
 mod wallet;
-mod wallets;
 
-pub use base::{
-    Activation, RegistrationError, RegistrationFuture, SubmissionRegistrar, SubmissionTask,
-};
 pub use crypto::SecretBytes;
-pub use error::{WalletError, WalletErrorKind};
-pub use factory::{AddressParser, Dependency, FactoryProfile, Generation, Origin, WalletFactory};
-pub use pause::{Admission, Suspension};
-pub use queue::{Backoff, Limit, Pause, Policy, Queue, Stats};
-pub use sender::{Amount, Authorship, SendError, SendFuture, Sender, Transfer};
-pub use storage::{PrivateKey, Registration, StoredWallet, WalletRepository};
-#[cfg(feature = "submissions")]
-pub use submissions::Submissions;
-pub use wallet::{Author, FutureResult, SingleSender, TransactionFactory, Wallet};
-pub use wallets::{AssetInfo, MAX_TRANSFERS, Wallets};
+pub use error::{Error, ErrorKind};
+pub use factories::{Factories, FactoryBroadcaster};
+pub use factory::Factory;
+pub use storage::WalletsStore;
+pub use wallet::{FutureResult, Wallet};

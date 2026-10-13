@@ -3,29 +3,13 @@ name = "wallets"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Chain-neutral wallet contracts and the Wallets registry: factories, wallet capabilities, and batch sends."
+description = "Chain-neutral wallet contracts and the Factories and Wallets collections: factories, keys, live wallets and the wallet rows contract."
 readme = "README.md"
 
-[features]
-# The default registrar: `wallets::Submissions`, which spawns the send work a
-# chain hands over and drains it. Off, the crate carries no async runtime, which
-# is what the chain crates and `payments::config` link.
-submissions = ["dep:tasks", "dep:tokio", "tokio/rt"]
-# The scripted wallet double (`wallets::testing`). Off, the crate carries no
-# test scaffolding; it belongs in a `[dev-dependencies]` entry only, never in
-# a production link.
-testing = []
-# The application's wallet store on SQLite (`wallets::storage::sqlite`): the
-# `wallet` table of the shared schema, on the pool the file's opener made.
-sqlite = ["dep:sqlx", "dep:serde_json"]
-
 [dependencies]
-tasks = { path = "../../packages/tasks", optional = true }
+anyhow.workspace = true
 base = { path = "../base" }
 crypto = { path = "../../packages/crypto" }
-tokio = { version = "=1.49.0", default-features = false, optional = true }
-sqlx = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 futures-executor.workspace = true

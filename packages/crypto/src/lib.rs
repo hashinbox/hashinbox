@@ -1,16 +1,73 @@
 #![doc = include_str!("../README.md")]
 
+mod curve;
+mod ed25519;
 mod error;
-mod key;
-mod key_pair;
+mod secp256k1_ecdsa;
+mod secp256k1_schnorr;
 mod secret;
-mod secret_key;
-mod signature;
-mod signing;
 
-pub use error::{Error, ErrorKind, SignerError, SignerErrorKind};
-pub use key::{Curve, PublicKey, PublicKeyFormat, ScalarTweak};
-pub use key_pair::KeyPair;
+pub use curve::Curve;
+pub use ed25519::Ed25519;
+pub use error::{Error, ErrorKind};
+pub use secp256k1_ecdsa::Secp256k1Ecdsa;
+pub use secp256k1_schnorr::Secp256k1Schnorr;
 pub use secret::SecretBytes;
-pub use signature::{Signature, SignatureEncoding, SignatureScheme};
-pub use signing::{Digest, SignRequest, SignablePayload, SignedPayload};
+
+/// What every key does regardless of its scheme: create, import, export, sign.
+pub trait PrivateKey: Sized {
+    /// A new key from the operating-system random source.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Random`] when the operating system random source is
+    /// unavailable.
+    fn generate() -> Result<Self, Error>;
+
+    /// Imports exactly 32 secret bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidKey`] for another length or an invalid scalar.
+    fn from_bytes(bytes: &[u8]) -> Result<Self, Error>;
+
+    /// The 32 secret bytes [`Self::from_bytes`] imports.
+    fn to_bytes(&self) -> SecretBytes;
+
+    /// The scheme's wire signature of `message`. Each type defines `message`:
+    /// a 32-byte digest for secp256k1 (the caller hashes by its protocol's
+    /// rules), the exact message for Ed25519.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Signing`] for a wrong digest length or a failed primitive.
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error>;
+}
+
+/// Bytes in a secret key on either curve.
+const KEY_LENGTH: usize = 32;
+
+/// 32 bytes from the operating-system random source, zeroized on drop.
+fn random_bytes() -> Result<zeroize::Zeroizing<[u8; KEY_LENGTH]>, Error> {
+    let mut bytes = zeroize::Zeroizing::new([0_u8; KEY_LENGTH]);
+    rand_core::RngCore::try_fill_bytes(&mut rand_core::OsRng, bytes.as_mut_slice()).map_err(
+        |_| {
+            Error::new(
+                ErrorKind::Random,
+                "operating-system randomness is unavailable",
+            )
+        },
+    )?;
+    Ok(bytes)
+}
+
+/// The 32-byte digest a secp256k1 scheme signs.
+fn digest(message: &[u8]) -> Result<[u8; 32], Error> {
+    message
+        .try_into()
+        .map_err(|_| Error::new(ErrorKind::Signing, "secp256k1 signs a 32-byte digest"))
+}
+
+fn invalid_key() -> Error {
+    Error::new(ErrorKind::InvalidKey, "secret key must be 32 valid bytes")
+}

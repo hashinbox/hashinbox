@@ -3,15 +3,16 @@ name = "crypto"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Secret key material with zeroization, secp256k1 and Ed25519 public keys, and ECDSA/Schnorr/Ed25519 signing."
+description = "Zeroized secp256k1 and Ed25519 keys with ECDSA, BIP-340 Schnorr and Ed25519 signing."
 readme = "README.md"
 
 [dependencies]
-ed25519-dalek = "=2.2.0"
-getrandom = "=0.3.4"
+ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
+hex.workspace = true
 k256.workspace = true
-serde = { workspace = true, features = ["alloc", "derive"] }
 sha2.workspace = true
+rand_core = { version = "=0.6.4", features = ["getrandom"] }
+serde = { workspace = true, features = ["alloc", "derive"] }
 zeroize.workspace = true
 
 [lints]
