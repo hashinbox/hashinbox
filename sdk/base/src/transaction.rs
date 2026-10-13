@@ -324,6 +324,12 @@ pub enum Leg {
     },
 }
 
+impl crate::Networked for Leg {
+    fn network(&self) -> &crate::Network {
+        &self.address().network
+    }
+}
+
 impl Addressed for Leg {
     fn address(&self) -> &Address {
         match self {

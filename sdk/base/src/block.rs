@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use anyhow::Context as _;
+
 use crate::{
     Address, Addressed, Asset, Decimal, Future, Network, Networked, transaction::Transactions,
 };
@@ -144,6 +146,12 @@ impl Blocks {
         self.blocks.last().map(|block| &block.header)
     }
 
+    /// Whether it holds the block of `header`.
+    #[must_use]
+    pub fn contains(&self, header: &Header) -> bool {
+        self.blocks.iter().any(|block| &block.header == header)
+    }
+
     /// Drops every block at or above `position`.
     pub fn truncate(&mut self, position: u64) {
         self.blocks.retain(|block| block.header.position < position);
@@ -198,6 +206,12 @@ pub struct Reward {
     pub amount: Decimal,
 }
 
+impl Networked for Reward {
+    fn network(&self) -> &Network {
+        &self.address.network
+    }
+}
+
 impl Addressed for Reward {
     fn address(&self) -> &Address {
         &self.address
@@ -229,34 +243,127 @@ pub trait Chained: Networked + Send + Sync {
     ///
     /// When the node cannot answer or the block cannot be read.
     fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>>;
-}
 
-/// Where indexed blocks are kept.
-pub trait Store: Send + Sync {
-    /// Keeps `blocks`, as the chain parsed them, in one atomic write. Against its own indexes, read in that write, the
-    /// store keeps only the legs and rewards of the indexed addresses each
-    /// block applies to (birthday at or below it, indexed up to its parent),
-    /// and moves those indexes to it, empty blocks included. A repeat is a
-    /// no-op.
+    /// Blocks `start..=end`, linked, skipped positions omitted. Defaults to
+    /// [`Chained::block`] one at a time; a chain may fetch them together.
     ///
     /// # Errors
     ///
-    /// When the store cannot write.
+    /// When a block cannot be read, or one does not link to the one before
+    /// it (the chain changed mid-fetch; retry).
+    fn blocks(&self, start: u64, end: u64) -> Future<'_, anyhow::Result<Blocks>> {
+        Box::pin(async move {
+            let network = self.network();
+            let mut run = Blocks::new(network.clone());
+            for position in start..=end {
+                let block = self
+                    .block(position)
+                    .await
+                    .with_context(|| format!("block {position}"))?;
+                if let Some(block) = block
+                    && !run.push(block)
+                {
+                    anyhow::bail!("{network:?}: block {position} does not link; retry");
+                }
+            }
+            Ok(run)
+        })
+    }
+}
+
+/// Wakes the [`Indexer`](crate::Indexer) run: on a new block (a websocket
+/// subscription), a timer, or anything else.
+pub trait Notified: Send + Sync {
+    /// Resolves at the next wake; `false` stops the run.
+    fn notified(&self) -> Future<'_, bool>;
+}
+
+/// Wakes every period; never stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timer(pub std::time::Duration);
+
+impl Notified for Timer {
+    fn notified(&self) -> Future<'_, bool> {
+        Box::pin(async move {
+            tokio::time::sleep(self.0).await;
+            true
+        })
+    }
+}
+
+/// Where indexed blocks are kept: every block the [`Indexer`](crate::Indexer)
+/// fetched, with the facts of indexed addresses, for every network.
+///
+/// # Model
+///
+/// - A block is *live* until [`Store::delete`] archives it. Archived blocks
+///   stay (an `archived_at` mark), but their facts leave every read: balances,
+///   history, unspent outputs.
+/// - The live blocks of a network are one linked run: each names the one
+///   below it as its parent. At most one live block per position.
+/// - Each indexed address carries `indexed_at` ([`crate::WalletIndex`]): its
+///   facts are kept for every live block from its birthday through that block,
+///   with no gaps. Progress is per address, so a new address backfills
+///   without disturbing the others.
+/// - Blocks are kept up to the produced tip, not only the confirmed one. A
+///   confirmed balance is a read over live blocks at or below
+///   [`Tips::confirmed`]; a pending balance reads them all. The store records
+///   no confirmation itself.
+/// - The store never detects a reorg. The indexer compares the last live
+///   block with the chain and calls [`Store::delete`]; the store only refuses
+///   blocks that do not link onto what it holds.
+pub trait Store: Send + Sync {
+    /// Keeps `blocks` (one network, linked, as the chain parsed them, every
+    /// address unfiltered), in one atomic write that:
+    ///
+    /// 1. Refuses the whole write when a block conflicts with what is kept: a
+    ///    live block at its position with another hash, or a first new block
+    ///    above the last live one whose parent is not that block.
+    /// 2. Adds blocks it does not hold; blocks it holds are not added again.
+    /// 3. For each block, reads its indexes inside this write and keeps the
+    ///    transactions, legs, outputs and rewards of the addresses the block
+    ///    applies to: birthday at or below it, and `indexed_at` at its parent
+    ///    (or unset, when the block is the birthday or the first one at or
+    ///    above it). Other addresses' facts are dropped.
+    /// 4. Marks outputs spent by those legs as spent in that block.
+    /// 5. Moves `indexed_at` of those addresses to the block, empty blocks
+    ///    included, so progress stays contiguous.
+    ///
+    /// Indexes added while a step runs are either read by this write or left
+    /// for the next step; none is skipped. A repeat of the same blocks applies
+    /// to no address and is a no-op, so a retry after an uncertain failure is
+    /// harmless.
+    ///
+    /// # Errors
+    ///
+    /// When a block conflicts (nothing is written), or the store cannot
+    /// write.
     fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>>;
 
-    /// The last kept block of `network`; `None` before the first.
+    /// The last live block of `network`; `None` before the first, or when
+    /// every block is archived.
     ///
     /// # Errors
     ///
     /// When the store cannot read.
     fn find_last<'a>(&'a self, network: &'a Network) -> Future<'a, anyhow::Result<Option<Header>>>;
 
-    /// Forgets everything kept for `network`.
+    /// Archives every live block of `network` at or above `from`, in one
+    /// atomic write that:
+    ///
+    /// 1. Sets `archived_at` on those blocks; nothing is hard-deleted. Their
+    ///    transactions, legs, outputs and rewards leave every read.
+    /// 2. Unmarks outputs spent in them: those outputs are unspent again.
+    /// 3. Rewinds `indexed_at` of every address at or above `from` to the
+    ///    live block below `from` (unset when none is), so those addresses
+    ///    re-index the new branch.
+    ///
+    /// Other networks, wallets and indexes stay. Archiving nothing is a no-op.
     ///
     /// # Errors
     ///
     /// When the store cannot write.
-    fn delete<'a>(&'a self, network: &'a Network) -> Future<'a, anyhow::Result<()>>;
+    fn delete<'a>(&'a self, network: &'a Network, from: u64) -> Future<'a, anyhow::Result<()>>;
 }
 
 /// Tells listeners about each block a [`Store`] kept.

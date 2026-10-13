@@ -400,6 +400,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "ark-ff"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -767,12 +773,13 @@ dependencies = [
 name = "base"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "crypto",
  "decimal",
- "futures-channel",
- "futures-executor",
+ "logging",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1077,6 +1084,7 @@ dependencies = [
 name = "chain-bitcoin"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base",
  "bitcoin",
  "crypto",
@@ -1089,7 +1097,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "wallets",
 ]
 
 [[package]]
@@ -1101,6 +1108,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
  "alloy-sol-types",
+ "anyhow",
  "base",
  "crypto",
  "futures-executor",
@@ -1113,13 +1121,13 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "wallets",
 ]
 
 [[package]]
 name = "chain-solana"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base",
  "base64",
  "bincode",
@@ -1145,7 +1153,6 @@ dependencies = [
  "solana-transaction",
  "spl-memo-interface",
  "tokio",
- "wallets",
  "zeroize",
 ]
 
@@ -1352,8 +1359,9 @@ name = "crypto"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
- "getrandom 0.3.4",
+ "hex",
  "k256",
+ "rand_core 0.6.4",
  "serde",
  "sha2",
  "zeroize",
@@ -2413,14 +2421,8 @@ version = "0.1.0"
 dependencies = [
  "base",
  "futures-channel",
- "futures-executor",
- "hex",
- "indexing",
  "logging",
  "num-bigint",
- "serde_json",
- "sqlx",
- "tempfile",
  "tokio",
 ]
 
@@ -2988,29 +2990,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
-name = "payment-examples"
-version = "0.1.0"
-dependencies = [
- "base",
- "chain-bitcoin",
- "chain-ethereum",
- "chain-solana",
- "indexing",
- "json-rpc",
- "payments",
- "serde_json",
- "sqlx",
- "tokio",
- "wallets",
-]
-
-[[package]]
 name = "payment-server"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-primitives",
+ "anyhow",
  "axum",
  "base",
  "base64",
@@ -3019,6 +3005,7 @@ dependencies = [
  "chain-ethereum",
  "chain-solana",
  "clap",
+ "crypto",
  "futures-executor",
  "hex",
  "http-body-util",
@@ -3033,14 +3020,13 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "tasks",
  "tempfile",
  "tokio",
  "tower 0.5.2",
  "url",
  "utoipa",
  "utoipa-axum",
- "uuid",
- "wallets",
  "zeroize",
 ]
 
@@ -3048,6 +3034,7 @@ dependencies = [
 name = "payments"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base",
  "futures-channel",
  "indexing",
@@ -3057,7 +3044,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml",
- "wallets",
 ]
 
 [[package]]
@@ -4600,9 +4586,7 @@ name = "tasks"
 version = "0.1.0"
 dependencies = [
  "logging",
- "sqlx",
- "tasks",
- "tempfile",
+ "serde_json",
  "tokio",
  "uuid",
 ]
@@ -5097,19 +5081,6 @@ checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
 dependencies = [
  "same-file",
  "winapi-util",
-]
-
-[[package]]
-name = "wallets"
-version = "0.1.0"
-dependencies = [
- "base",
- "crypto",
- "futures-executor",
- "serde_json",
- "sqlx",
- "tasks",
- "tokio",
 ]
 
 [[package]]

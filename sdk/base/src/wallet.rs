@@ -309,6 +309,18 @@ pub trait IndexStore: Send + Sync {
     /// When the store cannot read.
     fn find_all<'a>(&'a self, network: &'a Network) -> Future<'a, Result<Vec<Index>>>;
 
+    /// The lowest [`Index::next`] of `network` at or below `through`; with
+    /// `None`, the lowest of all. `None` when no index qualifies.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot read.
+    fn find_next<'a>(
+        &'a self,
+        network: &'a Network,
+        through: Option<u64>,
+    ) -> Future<'a, Result<Option<u64>>>;
+
     /// Forgets the index of `address`.
     ///
     /// # Errors

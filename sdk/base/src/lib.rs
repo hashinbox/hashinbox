@@ -4,6 +4,7 @@ mod address;
 mod asset;
 mod block;
 mod chain;
+mod indexer;
 mod network;
 mod output;
 /// Signed transactions, their identity, building, and broadcast.
@@ -13,11 +14,12 @@ mod wallet;
 pub use address::{Address, Addressed};
 pub use asset::{Asset, AssetInfo, Assets};
 pub use block::{
-    Block, Blocks, Chained, Hash as BlockHash, Header as BlockHeader, Notify as BlockNotify,
-    Parent as BlockParent, Reward, Store as BlockStore, Tips,
+    Block, Blocks, Chained, Hash as BlockHash, Header as BlockHeader, Notified,
+    Notify as BlockNotify, Parent as BlockParent, Reward, Store as BlockStore, Timer, Tips,
 };
 pub use chain::Chain;
 pub use decimal::{Decimal, Error as DecimalError};
+pub use indexer::{Birthday, DEFAULT_BATCH, Handle, Handles, Indexer, Next};
 
 pub use network::{Network, Networked};
 pub use output::{Coin, Output, Store as OutputStore};

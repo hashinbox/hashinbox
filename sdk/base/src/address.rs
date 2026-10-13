@@ -29,8 +29,8 @@ impl Networked for Address {
     }
 }
 
-/// Anything that has one address.
-pub trait Addressed {
+/// Anything that has one address, and so its network.
+pub trait Addressed: Networked {
     /// The address.
     fn address(&self) -> &Address;
 }
