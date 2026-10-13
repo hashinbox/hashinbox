@@ -13,7 +13,7 @@ mod wallet;
 pub use address::{Address, Addressed};
 pub use asset::{Asset, AssetInfo, Assets};
 pub use block::{
-    Block, Chained, Hash as BlockHash, Header as BlockHeader, Notify as BlockNotify,
+    Block, Blocks, Chained, Hash as BlockHash, Header as BlockHeader, Notify as BlockNotify,
     Parent as BlockParent, Reward, Store as BlockStore, Tips,
 };
 pub use chain::Chain;

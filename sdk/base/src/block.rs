@@ -106,6 +106,84 @@ impl Networked for Block {
     }
 }
 
+/// A linked run of blocks of one network, ascending: each follows the one
+/// before it ([`Header::follows`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Blocks {
+    network: Network,
+    blocks: Vec<Block>,
+}
+
+impl Blocks {
+    /// No blocks yet, of `network`.
+    #[must_use]
+    pub const fn new(network: Network) -> Self {
+        Self {
+            network,
+            blocks: Vec::new(),
+        }
+    }
+
+    /// Appends `block`; `false` (and nothing appended) when it is of another
+    /// network or does not follow the last.
+    #[must_use]
+    pub fn push(&mut self, block: Block) -> bool {
+        let linked = match self.blocks.last() {
+            Some(last) => block.follows(last),
+            None => block.network == self.network,
+        };
+        if linked {
+            self.blocks.push(block);
+        }
+        linked
+    }
+
+    /// The last block's header.
+    #[must_use]
+    pub fn last(&self) -> Option<&Header> {
+        self.blocks.last().map(|block| &block.header)
+    }
+
+    /// Drops every block at or above `position`.
+    pub fn truncate(&mut self, position: u64) {
+        self.blocks.retain(|block| block.header.position < position);
+    }
+
+    /// Removes and returns every block at or below `position`, in order.
+    #[must_use]
+    pub fn split(&mut self, position: u64) -> Self {
+        let at = self
+            .blocks
+            .partition_point(|block| block.header.position <= position);
+        let rest = self.blocks.split_off(at);
+        let taken = std::mem::replace(&mut self.blocks, rest);
+        Self {
+            network: self.network.clone(),
+            blocks: taken,
+        }
+    }
+
+    /// Every address a leg or reward of any block names.
+    #[must_use]
+    pub fn addresses(&self) -> BTreeSet<&Address> {
+        self.blocks.iter().flat_map(Block::addresses).collect()
+    }
+}
+
+impl Networked for Blocks {
+    fn network(&self) -> &Network {
+        &self.network
+    }
+}
+
+impl std::ops::Deref for Blocks {
+    type Target = [Block];
+
+    fn deref(&self) -> &[Block] {
+        &self.blocks
+    }
+}
+
 /// Value the block itself moved, with no transaction (withdrawal, staking or
 /// block reward). Signed: Solana rent can debit.
 #[derive(Clone, Debug, PartialEq, Eq)]
