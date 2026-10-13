@@ -7,6 +7,8 @@ description = "Chain-neutral values and capabilities: canonical addresses, netwo
 readme = "README.md"
 
 [dependencies]
+anyhow.workspace = true
+crypto = { path = "../../packages/crypto" }
 decimal = { path = "../../packages/decimal" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

@@ -7,6 +7,7 @@ mod chain;
 mod network;
 /// Signed transactions, their identity, building, and broadcast.
 pub mod transaction;
+mod wallet;
 
 pub use address::Address;
 pub use asset::{Asset, AssetInfo, Assets};
@@ -18,6 +19,10 @@ pub use network::Network;
 pub use transaction::{
     Broadcaster, Builder, Error as TransactionError, ErrorKind as TransactionErrorKind, Future,
     Id as TransactionId, Reason,
+};
+pub use wallet::{
+    Error as WalletError, ErrorKind as WalletErrorKind, Factories as WalletFactories,
+    Factory as WalletFactory, FactoryBroadcaster as WalletFactoryBroadcaster, Wallet,
 };
 
 use std::pin::Pin;
