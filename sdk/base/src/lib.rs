@@ -9,13 +9,13 @@ mod network;
 pub mod transaction;
 mod wallet;
 
-pub use address::Address;
+pub use address::{Address, Addressed};
 pub use asset::{Asset, AssetInfo, Assets};
 pub use block::{Block, Hash as BlockHash, Header as BlockHeader, Parent as BlockParent};
 pub use chain::Chain;
 pub use decimal::{Decimal, Error as DecimalError};
 
-pub use network::Network;
+pub use network::{Network, Networked};
 pub use transaction::{
     Broadcaster, Builder, Error as TransactionError, ErrorKind as TransactionErrorKind, Future,
     Id as TransactionId, Reason,

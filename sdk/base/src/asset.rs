@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, btree_map};
 
-use crate::{Decimal, DecimalError, Network};
+use crate::{Decimal, DecimalError, Network, Networked};
 
 /// One asset on one network; the chain's own currency is [`Asset::native`].
 ///
@@ -111,5 +111,17 @@ impl IntoIterator for Assets {
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_values()
+    }
+}
+
+impl Networked for Asset {
+    fn network(&self) -> &Network {
+        &self.network
+    }
+}
+
+impl Networked for AssetInfo {
+    fn network(&self) -> &Network {
+        &self.asset.network
     }
 }

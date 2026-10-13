@@ -31,3 +31,9 @@ impl From<&Network> for Network {
         network.clone()
     }
 }
+
+/// Anything that lives on exactly one network.
+pub trait Networked {
+    /// The network.
+    fn network(&self) -> &Network;
+}

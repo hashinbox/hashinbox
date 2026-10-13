@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::Network;
+use crate::{Network, Networked};
 
 /// A chain-neutral address: canonical text inside one network.
 ///
@@ -15,6 +15,24 @@ pub struct Address {
     pub network: Network,
     /// The canonical text.
     pub value: String,
+}
+
+impl fmt::Display for Address {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.value)
+    }
+}
+
+impl Networked for Address {
+    fn network(&self) -> &Network {
+        &self.network
+    }
+}
+
+/// Anything that has one address.
+pub trait Addressed {
+    /// The address.
+    fn address(&self) -> &Address;
 }
 
 impl Address {
@@ -43,11 +61,5 @@ impl Address {
     #[must_use]
     pub fn belongs_to(&self, network: &Network) -> bool {
         &self.network == network
-    }
-}
-
-impl fmt::Display for Address {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.value)
     }
 }

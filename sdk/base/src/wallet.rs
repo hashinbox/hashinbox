@@ -7,16 +7,15 @@ use std::{collections::BTreeMap, error, fmt, sync::Arc};
 use anyhow::Result;
 use crypto::{Curve, SecretBytes};
 
-use crate::{Address, Asset, Broadcaster, Builder, Future, Network, TransactionError};
+use crate::{
+    Address, Addressed, Asset, Broadcaster, Builder, Future, Network, Networked, TransactionError,
+};
 
 /// One address with its key, its chain's builders and its broadcaster, all
 /// injected by the factory that made it: what each chain implements. It
 /// transacts every asset of its network that the factory knows, one asset
 /// per builder.
-pub trait Wallet: Send + Sync {
-    /// The wallet's address.
-    fn address(&self) -> &Address;
-
+pub trait Wallet: Addressed + Networked + Send + Sync {
     /// A new transaction builder sending `asset` from this wallet: add
     /// transfers, then [`Builder::sign`].
     ///
@@ -89,6 +88,12 @@ pub struct FactoryBroadcaster {
     pub factory: Arc<dyn Factory>,
     /// Sends exact signed bytes to the network's nodes.
     pub broadcaster: Arc<dyn Broadcaster>,
+}
+
+impl crate::Networked for FactoryBroadcaster {
+    fn network(&self) -> &Network {
+        &self.network
+    }
 }
 
 /// The wallet factory and broadcaster of every configured network: they make

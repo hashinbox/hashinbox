@@ -1,4 +1,4 @@
-use crate::Network;
+use crate::{Network, Networked};
 
 /// Canonical block identity in the chain's native byte order.
 ///
@@ -68,12 +68,6 @@ impl<T> Block<T> {
         }
     }
 
-    /// The network the block was read from.
-    #[must_use]
-    pub const fn network(&self) -> &Network {
-        &self.network
-    }
-
     /// The block's identity and parent link.
     #[must_use]
     pub const fn header(&self) -> &Header {
@@ -91,5 +85,12 @@ impl<T> Block<T> {
     #[must_use]
     pub fn into_parts(self) -> (Network, Header, Vec<T>) {
         (self.network, self.header, self.transactions)
+    }
+}
+
+impl<T> Networked for Block<T> {
+    /// The network the block was read from.
+    fn network(&self) -> &Network {
+        &self.network
     }
 }

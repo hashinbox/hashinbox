@@ -104,6 +104,12 @@ pub struct Id {
     pub id: String,
 }
 
+impl crate::Networked for Id {
+    fn network(&self) -> &Network {
+        &self.network
+    }
+}
+
 impl Id {
     /// Takes the canonical text of `network`'s chain as the id's identity.
     ///
