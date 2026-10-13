@@ -8,7 +8,8 @@ use anyhow::Result;
 use crypto::{Curve, SecretBytes};
 
 use crate::{
-    Address, Addressed, Asset, Broadcaster, Builder, Future, Network, Networked, TransactionError,
+    Address, Addressed, Asset, BlockHeader, Broadcaster, Builder, Future, Network, Networked,
+    TransactionError,
 };
 
 /// One address with its key, its chain's builders and its broadcaster, all
@@ -224,3 +225,94 @@ impl fmt::Display for Error {
 }
 
 impl error::Error for Error {}
+
+/// Where keyed wallets are kept.
+pub trait Store: Send + Sync {
+    /// Keeps `wallet`'s address and key.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot write.
+    fn insert<'a>(&'a self, wallet: &'a dyn Wallet) -> Future<'a, Result<()>>;
+
+    /// Every kept wallet, restored through `factories`.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot read or a key does not restore.
+    fn find_all<'a>(&'a self, factories: &'a Factories)
+    -> Future<'a, Result<Vec<Arc<dyn Wallet>>>>;
+
+    /// Forgets the wallet of `address`.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot write.
+    fn delete<'a>(&'a self, address: &'a Address) -> Future<'a, Result<()>>;
+}
+
+/// How far one address has been indexed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Index {
+    /// The indexed address; keyed or watch-only.
+    pub address: Address,
+    /// The first position to scan.
+    pub birthday: u64,
+    /// Scanned through this block; `None` before the first.
+    pub indexed_at: Option<BlockHeader>,
+}
+
+impl Index {
+    /// The first position still to scan; `None` past the last representable one.
+    #[must_use]
+    pub fn next(&self) -> Option<u64> {
+        self.indexed_at
+            .as_ref()
+            .map_or(Some(self.birthday), |header| header.position.checked_add(1))
+    }
+
+    /// Whether it is scanned through `last`, the network's last kept block.
+    #[must_use]
+    pub fn caught_up(&self, last: Option<&BlockHeader>) -> bool {
+        match (self.next(), last) {
+            (None, _) | (Some(_), None) => true,
+            (Some(next), Some(last)) => next > last.position,
+        }
+    }
+}
+
+impl Addressed for Index {
+    fn address(&self) -> &Address {
+        &self.address
+    }
+}
+
+impl Networked for Index {
+    fn network(&self) -> &Network {
+        &self.address.network
+    }
+}
+
+/// Where indexes are kept.
+pub trait IndexStore: Send + Sync {
+    /// Keeps `index`.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot write.
+    fn insert<'a>(&'a self, index: &'a Index) -> Future<'a, Result<()>>;
+
+    /// Every index of `network`.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot read.
+    fn find_all<'a>(&'a self, network: &'a Network) -> Future<'a, Result<Vec<Index>>>;
+
+    /// Forgets the index of `address`.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot write.
+    fn delete<'a>(&'a self, address: &'a Address) -> Future<'a, Result<()>>;
+}

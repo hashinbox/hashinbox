@@ -1,4 +1,8 @@
-use crate::{Network, Networked};
+use std::collections::BTreeSet;
+
+use crate::{
+    Address, Addressed, Asset, Decimal, Future, Network, Networked, transaction::Transactions,
+};
 
 /// Canonical block identity in the chain's native byte order.
 ///
@@ -44,53 +48,142 @@ pub struct Header {
     pub timestamp: Option<u64>,
 }
 
-/// One block of one network: its identity and its transactions in block order.
+impl Header {
+    /// Whether this block directly follows `previous`: its position is above
+    /// (positions may be sparse), its height is one more, and its parent is
+    /// exactly `previous`.
+    #[must_use]
+    pub fn follows(&self, previous: &Self) -> bool {
+        previous.height.checked_add(1) == Some(self.height)
+            && self.position > previous.position
+            && self.parent.as_ref().is_some_and(|parent| {
+                parent.position == previous.position && parent.hash == previous.hash
+            })
+    }
+}
+
+/// One block of one network: its transactions and its rewards.
 ///
-/// The network is stated by whoever builds the block and is never derived
-/// from the header or the transactions: a [`Header`] is the same bytes
-/// on every network that shares a history, so nothing inside it can say which
-/// one was read.
+/// The network is stated by whoever builds the block: a [`Header`] is the
+/// same bytes on every network that shares a history.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Block<T> {
-    network: Network,
-    header: Header,
-    transactions: Vec<T>,
+pub struct Block {
+    /// The network it was read from.
+    pub network: Network,
+    /// Its identity and parent link.
+    pub header: Header,
+    /// Its mined transactions, in block order.
+    pub transactions: Transactions,
+    /// Value the block itself credited or debited.
+    pub rewards: Vec<Reward>,
 }
 
-impl<T> Block<T> {
-    /// Places a block identity and its transactions in `network`.
+impl Block {
+    /// Whether this block directly follows `previous` ([`Header::follows`]).
     #[must_use]
-    pub fn new(network: impl Into<Network>, header: Header, transactions: Vec<T>) -> Self {
-        Self {
-            network: network.into(),
-            header,
-            transactions,
-        }
+    pub fn follows(&self, previous: &Self) -> bool {
+        self.network == previous.network && self.header.follows(&previous.header)
     }
 
-    /// The block's identity and parent link.
+    /// Every address a leg or reward names.
     #[must_use]
-    pub const fn header(&self) -> &Header {
-        &self.header
+    pub fn addresses(&self) -> BTreeSet<&Address> {
+        let mut addresses = self.transactions.addresses();
+        addresses.extend(self.rewards.iter().map(Addressed::address));
+        addresses
     }
 
-    /// The block's transactions in block order.
+    /// Whether it changed nothing.
     #[must_use]
-    pub fn transactions(&self) -> &[T] {
-        &self.transactions
-    }
-
-    /// Takes the block apart, for a stage that rebuilds it over another
-    /// transaction type.
-    #[must_use]
-    pub fn into_parts(self) -> (Network, Header, Vec<T>) {
-        (self.network, self.header, self.transactions)
+    pub fn is_empty(&self) -> bool {
+        self.transactions.is_empty() && self.rewards.is_empty()
     }
 }
 
-impl<T> Networked for Block<T> {
-    /// The network the block was read from.
+impl Networked for Block {
     fn network(&self) -> &Network {
         &self.network
     }
+}
+
+/// Value the block itself moved, with no transaction (withdrawal, staking or
+/// block reward). Signed: Solana rent can debit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reward {
+    /// Its position in the block's reward list (Ethereum: the withdrawal index).
+    pub index: u64,
+    /// The address credited or debited.
+    pub address: Address,
+    /// The asset.
+    pub asset: Asset,
+    /// Signed atomic amount.
+    pub amount: Decimal,
+}
+
+impl Addressed for Reward {
+    fn address(&self) -> &Address {
+        &self.address
+    }
+}
+
+/// The newest produced and newest final positions of a chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tips {
+    /// The newest produced block.
+    pub produced: u64,
+    /// The newest block the chain will not take back, by its own finality rule.
+    pub confirmed: u64,
+}
+
+/// A chain that can be read block by block.
+pub trait Chained: Networked + Send + Sync {
+    /// The newest produced and newest final positions.
+    ///
+    /// # Errors
+    ///
+    /// When the node cannot answer.
+    fn tips(&self) -> Future<'_, anyhow::Result<Tips>>;
+
+    /// The block at `position`, fully interpreted; `None` where no block was
+    /// produced (a skipped Solana slot).
+    ///
+    /// # Errors
+    ///
+    /// When the node cannot answer or the block cannot be read.
+    fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>>;
+}
+
+/// Where indexed blocks are kept.
+pub trait Store: Send + Sync {
+    /// Keeps `blocks` (one network, ascending, as the chain parsed them), in
+    /// one atomic write. Against its own indexes, read in that write, the
+    /// store keeps only the legs and rewards of the indexed addresses each
+    /// block applies to (birthday at or below it, indexed up to its parent),
+    /// and moves those indexes to it, empty blocks included. A repeat is a
+    /// no-op.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot write.
+    fn insert<'a>(&'a self, blocks: &'a [Block]) -> Future<'a, anyhow::Result<()>>;
+
+    /// The last kept block of `network`; `None` before the first.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot read.
+    fn get_last<'a>(&'a self, network: &'a Network) -> Future<'a, anyhow::Result<Option<Header>>>;
+
+    /// Forgets everything kept for `network`.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot write.
+    fn delete<'a>(&'a self, network: &'a Network) -> Future<'a, anyhow::Result<()>>;
+}
+
+/// Tells listeners about each block a [`Store`] kept.
+pub trait Notify: Send + Sync {
+    /// Calls `listener` after each kept block.
+    fn subscribe(&self, listener: Box<dyn Fn(&Header) + Send + Sync>);
 }
