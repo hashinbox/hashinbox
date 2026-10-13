@@ -233,8 +233,7 @@ pub trait Chained: Networked + Send + Sync {
 
 /// Where indexed blocks are kept.
 pub trait Store: Send + Sync {
-    /// Keeps `blocks` (one network, ascending, as the chain parsed them), in
-    /// one atomic write. Against its own indexes, read in that write, the
+    /// Keeps `blocks`, as the chain parsed them, in one atomic write. Against its own indexes, read in that write, the
     /// store keeps only the legs and rewards of the indexed addresses each
     /// block applies to (birthday at or below it, indexed up to its parent),
     /// and moves those indexes to it, empty blocks included. A repeat is a
@@ -243,14 +242,14 @@ pub trait Store: Send + Sync {
     /// # Errors
     ///
     /// When the store cannot write.
-    fn insert<'a>(&'a self, blocks: &'a [Block]) -> Future<'a, anyhow::Result<()>>;
+    fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>>;
 
     /// The last kept block of `network`; `None` before the first.
     ///
     /// # Errors
     ///
     /// When the store cannot read.
-    fn get_last<'a>(&'a self, network: &'a Network) -> Future<'a, anyhow::Result<Option<Header>>>;
+    fn find_last<'a>(&'a self, network: &'a Network) -> Future<'a, anyhow::Result<Option<Header>>>;
 
     /// Forgets everything kept for `network`.
     ///
