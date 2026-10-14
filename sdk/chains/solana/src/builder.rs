@@ -1,238 +1,85 @@
-//! [`TransferBuilder`]: the `base::TransactionBuilder` of a Solana wallet,
-//! with its snapshot encoding.
+//! [`Builder`]: SOL or SPL token transfers of a Solana wallet.
 
 use base::{
-    Decimal, Draft, TransactionBuilder, TransactionError, TransactionErrorKind, TransactionFuture,
-    TransactionSnapshot, Transfer,
+    Addressed as _, Asset, Decimal, Future, Output, Outputs, TransactionError, Transactions,
 };
-use serde::Deserialize;
-use wallets::SendError;
 
-use crate::error::send_failure;
-use crate::native::{Address, AssetKind, CHAIN_NAME, Lamport, SOL, TransactionId};
-use crate::wallet::Wallet;
+use crate::{
+    Address, Client, KeyPair, Token,
+    transaction::{Transaction, messages},
+};
 
-/// Builds one native SOL transfer from one Solana wallet: set it, snapshot
-/// it, prepare (reserve the sender, read accounts and a blockhash, check
-/// funds, sign, simulate) it. The prepared transaction must be broadcast by a
-/// wallet of the same factory within its blockhash lifetime (about a minute).
-///
-/// SOL is the only asset this chain authors, and the only one whose factory
-/// declares a `wallets::Authorship`. A token wallet is never a
-/// `wallets::Author`, so it reaches no builder at all and this file has no
-/// asset to refuse: every draft and snapshot below is native by
-/// construction.
-pub struct TransferBuilder {
-    wallet: Wallet,
-    transfer: Option<(Address, Decimal)>,
+/// Pays every transfer of one asset (SOL, or the `token`) from one key: as
+/// many per transaction as fit a packet, all on one recent blockhash. A
+/// signed transaction lands only until its blockhash expires (about a
+/// minute); then it fails to broadcast as `Expired`.
+pub(crate) struct Builder<'a> {
+    pub(crate) key: &'a KeyPair,
+    pub(crate) rpc: &'a Client,
+    pub(crate) asset: Asset,
+    pub(crate) token: Option<Token>,
+    pub(crate) outputs: Outputs<Address>,
 }
 
-impl TransferBuilder {
-    /// Snapshot kind of an unsigned transfer.
-    pub const SNAPSHOT_KIND: &str = "solana.transfer";
-    /// Kind of a prepared (signed) transaction.
-    pub const PREPARED_KIND: &str = "solana.signed";
-
-    pub(crate) fn new(wallet: &Wallet) -> Self {
-        Self {
-            wallet: wallet.clone(),
-            transfer: None,
-        }
-    }
-
-    /// Rebuilds a builder from a snapshot this wallet produced.
-    pub(crate) fn restore(
-        wallet: &Wallet,
-        snapshot: &TransactionSnapshot,
-    ) -> Result<Self, TransactionError> {
-        let mut builder = Self::new(wallet);
-        builder.transfer = Some(builder.decode_snapshot(snapshot)?);
-        builder.validate()?;
-        Ok(builder)
-    }
-
-    /// The transaction ID of a prepared SDK transaction of this chain.
-    pub(crate) fn decode(
-        prepared: &base::SignedTransaction,
-    ) -> Result<TransactionId, TransactionError> {
-        if prepared.version() != base::SignedTransaction::VERSION
-            || prepared.kind() != Self::PREPARED_KIND
-        {
-            return Err(TransactionError::new(
-                TransactionErrorKind::InvalidTransaction,
-                "prepared transaction is not a Solana signed envelope",
+impl base::Builder for Builder<'_> {
+    /// Refuses an on-curve recipient other than the sender only, and anything
+    /// but a positive `u64` of atomic units.
+    fn transfer(&mut self, to: base::Address, amount: Decimal) -> Result<(), TransactionError> {
+        let address =
+            Address::parse(&to.value, self.rpc.network()).map_err(TransactionError::failed)?;
+        if *address.address() != to {
+            return Err(TransactionError::failed(
+                "not a canonical address of this Solana network",
             ));
         }
-        Ok(prepared.id().as_str().parse()?)
-    }
-
-    fn from(&self) -> &Address {
-        self.wallet.key.address()
-    }
-
-    /// Refuses a wallet whose configuration is unusable, before any snapshot
-    /// is written or any send is prepared — the same check at the same three
-    /// points as bitcoin's and ethereum's builders.
-    fn validate(&self) -> Result<(), TransactionError> {
-        self.wallet.config.validate().map_err(|error| {
-            TransactionError::new(TransactionErrorKind::InvalidSnapshot, error.message)
-        })
-    }
-
-    fn configured(&self) -> Result<&(Address, Decimal), TransactionError> {
-        self.transfer.as_ref().ok_or_else(|| {
-            TransactionError::new(
-                TransactionErrorKind::InvalidTransaction,
-                "transfer is not configured",
-            )
-        })
-    }
-
-    /// The chain-owned durable encoding of this builder, inside its
-    /// [`Draft`].
-    fn snapshot(&self) -> Result<TransactionSnapshot, TransactionError> {
-        self.validate()?;
-        let (destination, amount) = self.configured()?;
-        let network = &self.wallet.config.network;
-        Ok(TransactionSnapshot::new(
-            Self::SNAPSHOT_KIND,
-            serde_json::json!({
-                "network": {
-                    "chain": network.chain.as_str(),
-                    "name": network.name.as_str(),
-                },
-                "source": self.from().to_string(),
-                "to": destination.to_string(),
-                "amount": amount.to_string(),
-                "asset": {"kind": "native", "ticker": SOL.ticker, "decimals": SOL.decimals},
-            }),
-        ))
-    }
-
-    fn decode_snapshot(
-        &self,
-        snapshot: &TransactionSnapshot,
-    ) -> Result<(Address, Decimal), TransactionError> {
-        if snapshot.version() != TransactionSnapshot::VERSION
-            || snapshot.kind() != Self::SNAPSHOT_KIND
-        {
-            return Err(invalid("snapshot is not a supported Solana transfer"));
-        }
-        let body: SnapshotBody = serde_json::from_value(snapshot.value().clone())
-            .map_err(|error| invalid(format!("invalid Solana snapshot: {error}")))?;
-        let network = &self.wallet.config.network;
-        if body.network.chain != CHAIN_NAME.as_str()
-            || body.network.name != network.name
-            || body.source != self.from().to_string()
-            || !body.asset.is_sol()
-        {
-            return Err(invalid(
-                "Solana snapshot does not belong to this wallet, network, or asset",
+        if !address.as_native().is_on_curve() || address == *self.key.native_address() {
+            return Err(TransactionError::failed(
+                "Solana recipient must be an on-curve address other than the sender",
             ));
         }
-        let destination = body
-            .to
-            .parse::<Address>()
-            .map_err(|error| invalid(error.message))?;
-        let amount = body.amount.parse::<Decimal>().map_err(invalid)?;
-        Lamport::from_decimal(&amount, self.wallet.config.decimals)
-            .map_err(|error| invalid(error.message))?;
-        Ok((destination, amount))
-    }
-}
-
-impl TransactionBuilder for TransferBuilder {
-    fn transfer(
-        &mut self,
-        destination: base::Address,
-        amount: Decimal,
-    ) -> Result<(), TransactionError> {
-        if self.transfer.is_some() {
-            return Err(TransactionError::new(
-                TransactionErrorKind::Unsupported,
-                "Solana transaction builder supports exactly one transfer",
+        if amount.to_atomic_u64(0).ok().is_none_or(|units| units == 0) {
+            return Err(TransactionError::failed(
+                "Solana amount must be a positive 64-bit number of atomic units",
             ));
         }
-        let destination = Address::try_from(&destination)?;
-        Lamport::from_decimal(&amount, self.wallet.config.decimals).map_err(|error| {
-            TransactionError::new(TransactionErrorKind::InvalidAmount, error.message)
-        })?;
-        self.transfer = Some((destination, amount));
+        self.outputs.push(Output {
+            address,
+            asset: self.asset.clone(),
+            amount,
+        });
         Ok(())
     }
 
-    fn draft(&self) -> Result<Draft, TransactionError> {
-        let network = &self.wallet.config.network;
-        let (destination, amount) = self.configured()?;
-        Ok(Draft {
-            source: self.from().canonical(network),
-            transfers: vec![Transfer {
-                to: destination.canonical(network),
-                amount: amount.clone(),
-            }],
-            asset: AssetKind::Native.id(),
-            snapshot: self.snapshot()?,
-        })
-    }
-
-    fn prepare<'a>(
-        &'a mut self,
-    ) -> TransactionFuture<'a, Result<base::SignedTransaction, TransactionError>> {
+    fn sign<'b>(self: Box<Self>) -> Future<'b, Result<Transactions, TransactionError>>
+    where
+        Self: 'b,
+    {
         Box::pin(async move {
-            self.validate()?;
-            let (destination, amount) = self.configured()?.clone();
-            let request = self
-                .wallet
-                .request(destination, &amount)
-                .map_err(|error| send_failure(SendError::item(0, Vec::new(), error)))?;
-            let (signed, fee) = self.wallet.outbox.sign(request).await?;
-            let claim = base::Claim::new([signed
-                .from
-                .canonical(&self.wallet.config.network)
-                .to_string()]);
-            Ok(base::SignedTransaction::new(
-                Self::PREPARED_KIND,
-                signed.id.into(),
-                signed.envelope,
-                fee.atomic(),
-            )
-            .with_claim(claim))
+            if self.outputs.is_empty() {
+                return Err(TransactionError::failed("no transfers to sign"));
+            }
+            let from = self.key.native_address();
+            let blockhash = self
+                .rpc
+                .blockhash()
+                .await
+                .map_err(TransactionError::unavailable)?;
+            let messages = messages(from, self.token.as_ref(), &self.outputs, &blockhash)
+                .map_err(TransactionError::failed)?;
+            let mut signed = Vec::with_capacity(messages.len());
+            for (message, paid) in messages {
+                let fee = self
+                    .rpc
+                    .fee(&message)
+                    .await
+                    .map_err(TransactionError::unavailable)?;
+                let mut transaction = Transaction::pending(message, from, &self.outputs[paid], fee);
+                transaction
+                    .sign(self.key)
+                    .map_err(TransactionError::failed)?;
+                signed.push(transaction.into());
+            }
+            Ok(Transactions(signed))
         })
-    }
-}
-
-/// An unusable snapshot; the message says why.
-fn invalid(error: impl std::fmt::Display) -> TransactionError {
-    TransactionError::new(TransactionErrorKind::InvalidSnapshot, error.to_string())
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SnapshotBody {
-    network: NetworkBody,
-    source: String,
-    to: String,
-    amount: String,
-    asset: Asset,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NetworkBody {
-    chain: String,
-    name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Asset {
-    kind: String,
-    ticker: String,
-    decimals: u32,
-}
-
-impl Asset {
-    fn is_sol(&self) -> bool {
-        self.kind == "native" && self.ticker == SOL.ticker && self.decimals == SOL.decimals
     }
 }

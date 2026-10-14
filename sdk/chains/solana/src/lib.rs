@@ -1,25 +1,22 @@
 #![doc = include_str!("../README.md")]
 
-pub mod native;
-
+mod address;
 mod builder;
+mod chain;
 mod config;
-mod error;
-mod identity;
-mod indexer;
-mod interpreter;
 mod key;
-pub mod sender;
-mod source;
+mod network;
+mod rpc;
+mod spl;
+mod transaction;
 mod wallet;
 
-pub use builder::TransferBuilder;
-pub use config::{ChainHandle, Config, Store};
-pub use indexer::{IndexerParams, indexer};
-pub use interpreter::BlockInterpreter;
-pub use native::{
-    Address, AssetKind, CHAIN_NAME, Error, ErrorKind, GenesisHash, KeyPair, Lamport, NETWORKS,
-    Network, SOL, rpc::Client as RpcClient,
-};
-pub use source::Source;
-pub use wallet::{WalletConfig, WalletFactory};
+pub use address::Address;
+pub use chain::Chain;
+pub use config::{Config, Token};
+pub use key::KeyPair;
+pub use network::{CHAIN_NAME, GenesisHash, Network, SOL_DECIMALS, SOL_NAME, SOL_TICKER};
+pub use rpc::Client;
+pub use spl::Tokens;
+pub use transaction::Transaction;
+pub use wallet::Factory;

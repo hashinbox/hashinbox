@@ -3,22 +3,18 @@ name = "chain-solana"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Solana support for the payment SDK: indexing source and interpreter, SOL wallets, and the send pipeline."
+description = "Solana for the payment SDK: blocks as base legs, Ed25519 wallets, SOL and SPL transfers, broadcast."
 readme = "README.md"
 
 [dependencies]
-logging = { path = "../../../packages/logging" }
+anyhow.workspace = true
 base = { path = "../../base" }
-payments = { path = "../../payments" }
 crypto = { path = "../../../packages/crypto" }
-indexing = { path = "../../indexing", default-features = false }
-wallets = { path = "../../wallets" }
 json-rpc = { path = "../../../packages/json-rpc" }
 base64 = "=0.22.1"
 bincode = "=1.3.3"
 bs58 = "=0.5.1"
 getrandom = "=0.3.4"
-hex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 solana-address = { version = "=2.2.0", features = ["std", "decode", "curve25519"] }
@@ -29,21 +25,14 @@ solana-signature = { version = "=3.3.0", features = ["verify"] }
 solana-system-interface = { version = "=3.0.0", features = ["bincode"] }
 solana-transaction = { version = "=3.1.0", features = ["bincode", "verify"] }
 spl-memo-interface = "=2.0.0"
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
-zeroize.workspace = true
 
 [dev-dependencies]
-# Exact signed nets of interpreted blocks (`indexing::Net`).
-num-bigint.workspace = true
 futures-executor.workspace = true
 # The reference Ed25519 implementation Solana itself ships: tests assert that
-# `crypto::KeyPair` signs the same bytes. Production signing never links it.
+# `crypto::Ed25519` signs the same bytes. Production signing never links it.
 solana-keypair = "=3.1.2"
-# The scripted node double (`json_rpc::testing`): tests only, never a production link.
+# The scripted node double (`json_rpc::testing`): tests only.
 json-rpc = { path = "../../../packages/json-rpc", features = ["testing"] }
-# The in-memory store (`indexing::memory`): the repository type the registration
-# hook is named over when a test verifies a node through `payments::config::Chain`.
-indexing = { path = "../../indexing", default-features = false, features = ["memory"] }
 
 [lints]
 workspace = true

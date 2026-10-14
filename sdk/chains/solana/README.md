@@ -1,79 +1,75 @@
 # chain-solana
 
-Solana for the payment SDK: it indexes finalized blocks into history and
-balances for SOL and SPL tokens, and builds, signs and submits native SOL
-transfers. The `native` module is the protocol code alone and can be used
-without the rest of the SDK.
+Solana for the payment SDK: reads blocks as `base` blocks with every leg of
+SOL and the allowlisted SPL tokens, and builds, signs and broadcasts SOL and
+token transfers.
 
 ## Usage
 
 ```rust,no_run
-use std::sync::Arc;
+use base::{Asset, Broadcaster as _, Chained as _, WalletFactory as _};
+use chain_solana::{Config, Network};
+use json_rpc::Endpoint;
 
-use chain_solana::{Config, Network, Store};
-use payments::config::{ComposedChain, Rpc};
-use wallets::SubmissionRegistrar;
-
-/// `repository` is the one store every network is indexed into.
-async fn solana<R: Store>(
-    repository: R,
-    registrar: &Arc<dyn SubmissionRegistrar>,
-) -> Result<ComposedChain<&'static str>, Box<dyn std::error::Error>> {
+async fn solana() -> anyhow::Result<()> {
     let genesis = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d".parse()?;
-
     let config = Config::new(
-        Network::new("mainnet", genesis),
-        Rpc::endpoint("http://127.0.0.1:8899"),
-        "sol",
+        Network::new(genesis, "mainnet-beta"),
+        vec![Endpoint::new("http://127.0.0.1:8899")],
     );
+    // Checks the genesis hash, the Memo-v3 program and every mint's decimals.
+    let rpc = config.connect().await?;
 
-    // Checks the genesis hash and every token mint. Opens and writes nothing.
-    let chain = config.connect().await?;
-    // The index and one wallet factory per asset tag.
-    Ok(chain.compose(repository, registrar).await?)
+    // Reading: what `base::Indexer` consumes.
+    let chain = config.chain(&rpc);
+    let tips = chain.tips().await?;
+    let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
+
+    // Sending: sign, keep the bytes, then broadcast them to every node.
+    let factory = config.factory(&rpc);
+    let wallet = factory.from_pk(factory.generate().await?).await?;
+    let sol = Asset::native((&config.native()).into());
+    let mut builder = wallet.transaction(&sol)?;
+    builder.transfer(factory.parse_address("...")?, 10_000_u64.into())?;
+    for transaction in builder.sign().await? {
+        rpc.broadcast(&transaction).await?;
+    }
+    Ok(())
 }
 ```
 
-An application that reads a configuration file registers the chain instead:
-`registry.register::<chain_solana::Config<Tag>>("solana")`. SPL tokens are
-listed in that section:
+A configuration document carries the same fields:
 
 ```toml
-[chains.solana]
-network = 'mainnet'
+network = 'mainnet-beta'
 genesis_hash = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d'
-rpc.endpoints = ['http://127.0.0.1:8899']
-tokens = [{ mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', asset = 'usdc', decimals = 6 }]
+endpoints = ['http://127.0.0.1:8899']
+tokens = [{ mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals = 6 }]
 ```
 
 ## Notes
 
-- Configure one or more RPC endpoints. No request is ever retried or repeated
-  by the transport, whatever `repeat` says. A read reaches one node and
-  carries the previous read's slot as its floor, so a node behind it fails the
-  send before anything is submitted. A submission is broadcast to every
-  configured node, each exactly once; the first acceptance answers, and a
-  failure on every node where one node did not answer stays an unknown
-  outcome. Set each endpoint's timeout with that in mind.
-- The genesis hash is configured and verified, never discovered. `connect`
-  refuses a node that reports another hash, so a wrong URL cannot index a
-  different cluster into the same store.
-- A signed transaction expires with its blockhash. A send rebroadcasts the same
-  signed bytes to every configured node until a node sees it land or the
-  blockhash expires; it is never rebuilt or re-signed. Not seen landed before
-  expiry fails as `WalletErrorKind::OutcomeUnknown` with the transaction ID: it
-  may still have landed, so check history. The sender is reserved until then; a
-  second send from it fails with `SourceBusy` instead of waiting.
-- SPL tokens are received and reported, not sent. `Wallets::author` and
-  `Wallets::send_all` refuse a token's asset tag.
-- Token-2022 mints are refused at `connect`, because their confidential
-  transfers need not report an amount and would index as zero.
-- The node must serve the Memo-v3 program, and `connect` refuses one that does
-  not. Each transfer carries a memo with a random token, so two transfers of the
-  same amount to the same address are distinct transactions.
-
-A native send accepts `wallets::Amount::All` as its source's final batch item.
-The outbox resolves the bracketed balance after earlier transfers and fees,
-rebuilds the final message with the same memo and lifetime, and verifies its
-fee before signing and simulation. A zero remainder is refused. SPL assets
-remain read-only; sweep does not provide token transaction authorship.
+- Position is the slot; a skipped slot holds no block. `Header.height` is the
+  block height. Blocks are read at `confirmed` commitment; `Tips.produced` is
+  the newest confirmed slot, `Tips.confirmed` the newest rooted (`finalized`)
+  one.
+- `blocks` lists the produced slots with one `getBlocks`, then fetches them in
+  JSON-RPC batches of ten `getBlock` calls. Only standard Solana methods are
+  used.
+- Legs come from each transaction's pre/post balances: lamports for every
+  account, and units of each allowlisted mint netted per token-account owner.
+  A decrease is `Spent`, an increase `Received`; the fee is a `Fee` leg of the
+  fee payer, kept out of its `Spent`. A failed transaction keeps only its fee
+  and is `Reverted`. Block rewards (rent, staking, fees) are signed rewards.
+  Mints and burns appear as balance changes, not `Minted`/`Burned` legs.
+- A builder sends one asset: SOL, or one configured token (`TransferChecked`,
+  creating the recipient's associated token account when missing; the sender
+  pays its rent, which the pending legs do not show); any other asset is
+  `Unsupported`. It packs as many transfers as fit a packet into each
+  transaction, all on one recent blockhash, each with a random Memo-v3 so two
+  equal transfers stay distinct. Recipients must be on-curve addresses.
+- `broadcast` sends the exact bytes once to every node, with preflight. A
+  signed transaction lands only until its blockhash expires (about a minute);
+  after that `broadcast` fails as `Expired`. Resending until then is the
+  caller's job. A refusal as "already been processed" is acceptance.
+- Token-2022 mints are refused at `connect`.
