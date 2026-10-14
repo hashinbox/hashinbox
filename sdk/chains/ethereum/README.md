@@ -1,73 +1,74 @@
 # chain-ethereum
 
-Ethereum for the payment SDK: it indexes blocks into history and balances, and
-builds, signs and submits ETH and ERC-20 transfers as EIP-1559 transactions. The
-`native` module is the protocol code alone and can be used without the rest of
-the SDK.
+Ethereum for the payment SDK: reads blocks as `base` blocks with every leg of
+ether and the allowlisted ERC-20 tokens, and builds, signs and broadcasts ETH
+and token transfers as EIP-1559 transactions.
 
 ## Usage
 
 ```rust,no_run
-use std::sync::Arc;
+use base::{Asset, Broadcaster as _, Chained as _, WalletFactory as _};
+use chain_ethereum::{Config, Network};
+use json_rpc::Endpoint;
 
-use chain_ethereum::{Config, Error, Network, Store};
-use payments::config::{ComposedChain, Rpc};
-use wallets::SubmissionRegistrar;
+async fn ethereum() -> anyhow::Result<()> {
+    let config = Config::new(
+        Network::new(1, "mainnet"),
+        vec![Endpoint::new("https://node.invalid/v3/KEY")],
+    );
+    // Checks the chain ID and every token's decimals.
+    let rpc = config.connect().await?;
 
-/// `repository` is the one store every network is indexed into.
-async fn ethereum<R: Store>(
-    repository: R,
-    registrar: &Arc<dyn SubmissionRegistrar>,
-) -> Result<ComposedChain<&'static str>, Error> {
-    let rpc = Rpc::endpoint("https://node.invalid/v3/KEY");
+    // Reading: what `base::Indexer` consumes.
+    let chain = config.chain(&rpc);
+    let tips = chain.tips().await?;
+    let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
 
-    let config = Config::new(Network::new(1, "mainnet"), rpc, "eth");
-
-    // Checks the chain ID, block tracing and every token. Opens and writes nothing.
-    let chain = config.connect().await?;
-    // The index and one wallet factory per asset tag.
-    chain.compose(repository, registrar).await
+    // Sending: sign, keep the bytes, then broadcast them to every node.
+    let factory = config.factory(&rpc);
+    let wallet = factory.from_pk(factory.generate().await?).await?;
+    let ether = Asset::native((&config.native()).into());
+    let mut builder = wallet.transaction(&ether)?;
+    builder.transfer(factory.parse_address("0x...")?, 10_000_u64.into())?;
+    for transaction in builder.sign().await? {
+        rpc.broadcast(&transaction).await?;
+    }
+    Ok(())
 }
 ```
 
-An application that reads a configuration file registers the chain instead:
-`registry.register::<chain_ethereum::Config<Tag>>("ethereum")`. ERC-20 tokens
-are listed in that section:
+A configuration document carries the same fields:
 
 ```toml
-[chains.ethereum]
 network = 'mainnet'
 chain_id = 1
-rpc.endpoints = ['https://node.invalid/v3/KEY']
-tokens = [{ contract = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', asset = 'usdc', decimals = 6 }]
+endpoints = ['https://node.invalid/v3/KEY']
+tokens = [{ contract = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', decimals = 6 }]
 ```
 
 ## Notes
 
-- The node must serve `debug_traceBlockByHash` with `prestateTracer` in
-  `diffMode`, and `connect` refuses one that does not. Ether moved by a contract
-  appears in no transaction field and no log, so without the trace a wallet paid
-  through a contract would have a wrong balance.
-- Finality is the node's own `finalized` block, so there is no confirmation
-  depth to configure and the key is rejected. Confirmed history appears only
-  after a block is finalized, and a node that reports no finalized block indexes
-  nothing.
-- A batch takes consecutive nonces per sender and is checked and signed in full
-  before the first broadcast. If a broadcast fails midway, the transactions
-  before it are already accepted and the ones after it are not sent.
-- ETH and ERC-20 wallets of one address must share one send pipeline, or they
-  reuse a nonce. `Config` does this for you; when building factories by hand,
-  create the token factory with `WalletFactory::sibling`.
-- A transaction signed through `TransferBuilder` but not broadcast reserves
-  nothing. A later send may take its nonce, and its broadcast then fails.
-- A configuration with tokens accepts exactly one RPC endpoint.
-
-A send accepts `wallets::Amount::All` as its source's final batch item. A native
-sweep reserves all earlier transfers and maximum EIP-1559 fees before resolving
-the remainder. Actual execution can refund fees, so the account may retain a
-residue. A one-wei positive candidate obtains the node's checked fee quote; the
-configured total-fee ceiling remains a limit rather than a required reserve.
-Contracts that reject this probe are refused without a fallback. The resolved
-transfer is preflighted again and refused if its execution exceeds the quoted fee
-budget. ERC-20 sweeps transfer the remaining token units
-while native ETH independently funds gas. Incoming batch transfers are not funding.
+- Position and height are the block number. A block is confirmed once it is at
+  or below the node's `finalized` block; a node that serves none yet (syncing,
+  a development chain) fails `tips`.
+- `blocks` is two JSON-RPC batches for the whole range: the blocks, then each
+  block's `eth_getBlockReceipts` (or, on a node without it, one
+  `eth_getTransactionReceipt` per transaction). Only standard `eth_*`
+  methods are used.
+- Legs: ether `value` and allowlisted ERC-20 `Transfer` logs are a `Spent` and
+  a `Received` leg (a token mint is `Minted`, a burn `Burned`); the fee
+  (`gasUsed * effectiveGasPrice`) is a `Fee` leg of the sender. A reverted
+  transaction keeps only its fee. Withdrawals are rewards.
+- Ether a contract moves inside a transaction (internal transfers, such as a
+  swap paying out ether) appears in no transaction field or log, so it is not
+  indexed: a wallet paid that way shows too low a balance. Only tracing
+  (`debug_*`, `trace_*`, not standard RPC) could see it; this crate does not
+  use it. ERC-20 tokens are unaffected: every transfer emits a log.
+- A builder sends one asset: ether, or one configured token (`transfer(to,
+  amount)` calldata to the contract, no ether); any other asset is
+  `Unsupported`. A batch is one transaction per transfer, gas estimated per
+  transfer, with the node's pending nonce and the next ones, all signed before
+  anything is broadcast. A signed transaction's `Fee` leg is its worst case,
+  `gas limit * max fee`.
+- A broadcast refused as "already known" or "nonce too low" is acceptance when
+  the node holds that exact hash.

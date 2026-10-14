@@ -3,37 +3,27 @@ name = "chain-ethereum"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Ethereum support for the payment SDK: indexing source and interpreter, ETH and ERC-20 wallets, and the send pipeline."
+description = "Ethereum for the payment SDK: a block-by-block chain, ETH and ERC-20 wallets, and a broadcaster."
 readme = "README.md"
 
 [dependencies]
-logging = { path = "../../../packages/logging" }
+anyhow.workspace = true
 base = { path = "../../base" }
-payments = { path = "../../payments" }
 crypto = { path = "../../../packages/crypto" }
-wallets = { path = "../../wallets" }
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
-alloy-primitives.workspace = true
+alloy-primitives = { workspace = true, features = ["serde"] }
 alloy-sol-types.workspace = true
 alloy-rpc-types-eth = { version = "1.8", default-features = false, features = ["serde", "std"] }
-futures-util = { version = "=0.3.33", default-features = false, features = ["std"] }
-indexing = { path = "../../indexing", default-features = false }
 num-bigint.workspace = true
 json-rpc = { path = "../../../packages/json-rpc" }
 serde_json = { workspace = true, features = ["raw_value"] }
 serde = { workspace = true, features = ["derive"] }
-tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
-# Exact signed nets of interpreted blocks (`indexing::Net`).
-num-bigint.workspace = true
 futures-executor.workspace = true
 # The scripted node double (`json_rpc::testing`): tests only, never a production link.
 json-rpc = { path = "../../../packages/json-rpc", features = ["testing"] }
-# The in-memory store (`indexing::memory`): the repository type the registration
-# hook is named over when a test verifies a node through `payments::config::Chain`.
-indexing = { path = "../../indexing", default-features = false, features = ["memory"] }
 
 [lints]
 workspace = true

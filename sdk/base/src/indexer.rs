@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use anyhow::{Context as _, ensure};
 
 use crate::{
-    Addressed, BlockHeader, BlockStore, Chained, Network, Networked, Notified, WalletIndex,
+    Addressed, Asset, BlockHeader, BlockStore, Chained, Network, Networked, Notified, WalletIndex,
     WalletIndexStore,
 };
 
@@ -104,16 +104,23 @@ impl Indexer {
         self
     }
 
-    /// Indexes `address` from `birthday`; [`Indexer::next`] backfills it.
+    /// Indexes `asset` of `address` from `birthday`; [`Indexer::next`]
+    /// backfills it.
     ///
     /// # Errors
     ///
-    /// When `address` is of another network, or the chain or store fails.
-    pub async fn watch(&self, address: &dyn Addressed, birthday: Birthday) -> anyhow::Result<()> {
+    /// When `address` or `asset` is of another network, or the chain or
+    /// store fails.
+    pub async fn watch(
+        &self,
+        address: &dyn Addressed,
+        asset: &Asset,
+        birthday: Birthday,
+    ) -> anyhow::Result<()> {
         let address = address.address();
         ensure!(
-            address.network == *self.network(),
-            "{:?} is not of {:?}",
+            address.network == *self.network() && asset.network() == self.network(),
+            "{:?} or {asset:?} is not of {:?}",
             address.network,
             self.network()
         );
@@ -123,6 +130,7 @@ impl Indexer {
         };
         let index = WalletIndex {
             address: address.clone(),
+            asset: asset.clone(),
             birthday,
             indexed_at: None,
         };
@@ -313,13 +321,21 @@ impl Indexers {
             .with_context(|| format!("{network:?} has no indexer"))
     }
 
-    /// Indexes `address` from `birthday`, on its network's indexer.
+    /// Indexes `asset` of `address` from `birthday`, on its network's
+    /// indexer.
     ///
     /// # Errors
     ///
     /// When its network has no indexer, or [`Indexer::watch`] fails.
-    pub async fn watch(&self, address: &dyn Addressed, birthday: Birthday) -> anyhow::Result<()> {
-        self.get(address.network())?.watch(address, birthday).await
+    pub async fn watch(
+        &self,
+        address: &dyn Addressed,
+        asset: &Asset,
+        birthday: Birthday,
+    ) -> anyhow::Result<()> {
+        self.get(address.network())?
+            .watch(address, asset, birthday)
+            .await
     }
 
     /// Every network's stats.

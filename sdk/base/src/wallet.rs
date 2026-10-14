@@ -251,11 +251,15 @@ pub trait Store: Send + Sync {
     fn delete<'a>(&'a self, address: &'a Address) -> Future<'a, Result<()>>;
 }
 
-/// How far one address has been indexed.
+/// How far one asset of one address has been indexed. Progress is per
+/// asset, so an asset added later backfills from its own birthday without
+/// disturbing the address's other assets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Index {
     /// The indexed address; keyed or watch-only.
     pub address: Address,
+    /// The indexed asset, of the address's network.
+    pub asset: Asset,
     /// The first position to scan.
     pub birthday: u64,
     /// Scanned through this block; `None` before the first.
@@ -321,10 +325,10 @@ pub trait IndexStore: Send + Sync {
         through: Option<u64>,
     ) -> Future<'a, Result<Option<u64>>>;
 
-    /// Forgets the index of `address`.
+    /// Forgets the index of `asset` of `address`.
     ///
     /// # Errors
     ///
     /// When the store cannot write.
-    fn delete<'a>(&'a self, address: &'a Address) -> Future<'a, Result<()>>;
+    fn delete<'a>(&'a self, address: &'a Address, asset: &'a Asset) -> Future<'a, Result<()>>;
 }

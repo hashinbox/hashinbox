@@ -300,7 +300,7 @@ impl Notified for Timer {
 }
 
 /// Where indexed blocks are kept: every block the [`Indexer`](crate::Indexer)
-/// fetched, with the facts of indexed addresses, for every network.
+/// fetched, with the facts of indexed address assets, for every network.
 ///
 /// # Model
 ///
@@ -309,10 +309,11 @@ impl Notified for Timer {
 ///   history, unspent outputs.
 /// - The live blocks of a network are one linked run: each names the one
 ///   below it as its parent. At most one live block per position.
-/// - Each indexed address carries `indexed_at` ([`crate::WalletIndex`]): its
-///   facts are kept for every live block from its birthday through that block,
-///   with no gaps. Progress is per address, so a new address backfills
-///   without disturbing the others.
+/// - Each index, one asset of one address, carries `indexed_at`
+///   ([`crate::WalletIndex`]): the address's facts in that asset are kept for
+///   every live block from its birthday through that block, with no gaps.
+///   Progress is per address and asset, so a new address or a newly
+///   configured token backfills without disturbing the others.
 /// - Blocks are kept up to the produced tip, not only the confirmed one. A
 ///   confirmed balance is a read over live blocks at or below
 ///   [`Tips::confirmed`]; a pending balance reads them all. The store records
@@ -329,12 +330,13 @@ pub trait Store: Send + Sync {
     ///    above the last live one whose parent is not that block.
     /// 2. Adds blocks it does not hold; blocks it holds are not added again.
     /// 3. For each block, reads its indexes inside this write and keeps the
-    ///    transactions, legs, outputs and rewards of the addresses the block
-    ///    applies to: birthday at or below it, and `indexed_at` at its parent
-    ///    (or unset, when the block is the birthday or the first one at or
-    ///    above it). Other addresses' facts are dropped.
+    ///    legs, outputs and rewards whose (address, asset) is an index the
+    ///    block applies to: birthday at or below it, and `indexed_at` at its
+    ///    parent (or unset, when the block is the birthday or the first one at
+    ///    or above it); a transaction is kept once, when any of its legs is.
+    ///    Other facts are dropped.
     /// 4. Marks outputs spent by those legs as spent in that block.
-    /// 5. Moves `indexed_at` of those addresses to the block, empty blocks
+    /// 5. Moves `indexed_at` of those indexes to the block, empty blocks
     ///    included, so progress stays contiguous.
     ///
     /// Indexes added while a step runs are either read by this write or left
@@ -362,9 +364,9 @@ pub trait Store: Send + Sync {
     /// 1. Sets `archived_at` on those blocks; nothing is hard-deleted. Their
     ///    transactions, legs, outputs and rewards leave every read.
     /// 2. Unmarks outputs spent in them: those outputs are unspent again.
-    /// 3. Rewinds `indexed_at` of every address at or above `from` to the
-    ///    live block below `from` (unset when none is), so those addresses
-    ///    re-index the new branch.
+    /// 3. Rewinds `indexed_at` of every index at or above `from` to the live
+    ///    block below `from` (unset when none is), so those indexes re-index
+    ///    the new branch.
     ///
     /// Other networks, wallets and indexes stay. Archiving nothing is a no-op.
     ///
