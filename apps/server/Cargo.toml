@@ -24,7 +24,6 @@ chain-ethereum = { path = "../../sdk/chains/ethereum" }
 chain-solana = { path = "../../sdk/chains/solana" }
 hex.workspace = true
 http-server = { path = "../../packages/http-server" }
-indexing = { path = "../../sdk/indexing" }
 json-rpc = { path = "../../packages/json-rpc" }
 # Exact signed totals for the balance read: amounts are u256-capable text.
 num-bigint.workspace = true

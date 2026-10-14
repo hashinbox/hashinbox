@@ -2399,17 +2399,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "indexing"
-version = "0.1.0"
-dependencies = [
- "base",
- "futures-channel",
- "logging",
- "num-bigint",
- "tokio",
-]
-
-[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2993,7 +2982,6 @@ dependencies = [
  "hex",
  "http-body-util",
  "http-server",
- "indexing",
  "json-rpc",
  "logging",
  "num-bigint",
@@ -3020,7 +3008,6 @@ dependencies = [
  "anyhow",
  "base",
  "futures-channel",
- "indexing",
  "json-rpc",
  "logging",
  "serde",

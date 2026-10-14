@@ -35,18 +35,6 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - name: Doc tests
         run: cargo test --locked --workspace --doc
-      # A workspace build unifies features, so a `#[cfg(feature = ...)]` that
-      # names a type another module uses unconditionally still compiles there.
-      # These are the combinations nothing else exercises: the indexing traits
-      # with no store and no driver, each optional half on its own, and each of
-      # the two shipped stores without the other, since neither may drag it.
-      - name: Indexing feature matrix
-        run: |
-          for features in "" sqlite memory driver \
-                          sqlite,memory sqlite,driver memory,driver \
-                          sqlite,memory,driver; do
-            cargo check --locked -p indexing --no-default-features --features "$features"
-          done
           # The contract scenarios are integration-test code now, so the store
           # they are held against has to be on for `--all-targets` to build.
           cargo check --locked -p indexing --no-default-features \

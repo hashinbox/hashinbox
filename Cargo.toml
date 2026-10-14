@@ -7,7 +7,6 @@ members = [
     "sdk/chains/ethereum",
     "sdk/chains/solana",
     "sdk/payments",
-    "sdk/indexing",
     "sdk/wallets",
     "packages/decimal",
     "packages/crypto",
@@ -43,7 +42,7 @@ jsonrpsee = { version = "=0.24.10", default-features = false, features = ["http-
 serde = { version = "1", default-features = false }
 serde_json = "1"
 sha2 = "=0.10.9"
-# The embedded SQL store (`indexing::sqlite`) and the server's one table: bundled
+# The server's SQL store: bundled
 # SQLite on Tokio, runtime-checked queries and `FromRow`, no macros reading a
 # database at build time. 0.8 because 0.9 needs a newer Rust than the MSRV.
 sqlx = { version = "=0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "derive"] }

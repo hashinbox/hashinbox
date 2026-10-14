@@ -11,7 +11,6 @@ logging = { path = "../../packages/logging" }
 base = { path = "../base" }
 futures-channel.workspace = true
 # The driver the container runs the index on.
-indexing = { path = "../indexing", default-features = false, features = ["driver"] }
 json-rpc = { path = "../../packages/json-rpc" }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json.workspace = true
