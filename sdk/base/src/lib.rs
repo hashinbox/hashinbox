@@ -5,8 +5,8 @@ mod asset;
 mod block;
 mod chain;
 mod indexer;
+mod inout;
 mod network;
-mod output;
 /// Signed transactions, their identity, building, and broadcast.
 pub mod transaction;
 mod wallet;
@@ -21,8 +21,8 @@ pub use chain::Chain;
 pub use decimal::{Decimal, Error as DecimalError};
 pub use indexer::{Birthday, DEFAULT_BATCH, Handle, Handles, Indexer, Indexers, Next, Stats};
 
+pub use inout::{Coin, Input, Inputs, Output, Outputs, Store as InputStore};
 pub use network::{Network, Networked};
-pub use output::{Coin, Output, Store as OutputStore};
 pub use transaction::{
     Broadcaster, Builder, Enveloped, Error as TransactionError, ErrorKind as TransactionErrorKind,
     Future, Id as TransactionId, Leg, Reason, State as TransactionState, Store as TransactionStore,

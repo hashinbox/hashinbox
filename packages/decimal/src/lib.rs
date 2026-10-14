@@ -16,11 +16,10 @@ use num_bigint::{BigInt, BigUint, Sign};
 /// [`str::parse`](str::parse). No binary floating point is involved anywhere,
 /// so money stays exact regardless of magnitude or fractional digits.
 ///
-/// Arithmetic is deliberately narrow. This type carries amounts between a
-/// chain, storage, and an HTTP boundary, and the one operation a ledger
-/// cannot express without it is the total of many amounts of one asset
-/// ([`Decimal::total`]). It never subtracts, divides, or rounds: a balance
-/// that needs a difference reports its two sides instead.
+/// Arithmetic is exact: `+`, `-`, `*` (and their assigning forms, by value
+/// or by reference) never round, and [`Decimal::checked_div`] refuses zero.
+/// A difference may be negative; [`Decimal::validate_amount`] checks a
+/// monetary amount.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Decimal(pub(crate) BigDecimal);
 
@@ -124,12 +123,6 @@ impl Decimal {
     }
 
     /// The exact total of `amounts`.
-    ///
-    /// Addition is exact and loses no precision at any scale, and a total of
-    /// non-negative amounts is non-negative, so this is the one arithmetic a
-    /// ledger fold needs. It is deliberately not `Add`: a total is a fold over
-    /// a set of amounts of one asset, not a general operator on two values of
-    /// unrelated ones.
     #[must_use]
     pub fn total<'a>(amounts: impl IntoIterator<Item = &'a Self>) -> Self {
         Self::canonical(
@@ -148,10 +141,101 @@ impl Decimal {
         }
         Self(normalized)
     }
+
+    /// `self / divisor`, rounded to 100 significant digits when it does not
+    /// terminate; `None`
+    /// for a zero divisor.
+    #[must_use]
+    pub fn checked_div(&self, divisor: &Self) -> Option<Self> {
+        if divisor.is_zero() {
+            return None;
+        }
+        Some(Self::canonical(&self.0 / &divisor.0))
+    }
+}
+
+/// `Decimal op Decimal` for every owned/borrowed pairing, and `op=`.
+macro_rules! arithmetic {
+    ($op:ident, $method:ident, $assign:ident, $assign_method:ident) => {
+        impl std::ops::$op<&Decimal> for &Decimal {
+            type Output = Decimal;
+
+            fn $method(self, other: &Decimal) -> Decimal {
+                Decimal::canonical(std::ops::$op::$method(&self.0, &other.0))
+            }
+        }
+
+        impl std::ops::$op for Decimal {
+            type Output = Self;
+
+            fn $method(self, other: Self) -> Self {
+                std::ops::$op::$method(&self, &other)
+            }
+        }
+
+        impl std::ops::$op<&Decimal> for Decimal {
+            type Output = Self;
+
+            fn $method(self, other: &Self) -> Self {
+                std::ops::$op::$method(&self, other)
+            }
+        }
+
+        impl std::ops::$assign<&Decimal> for Decimal {
+            fn $assign_method(&mut self, other: &Self) {
+                *self = std::ops::$op::$method(&*self, other);
+            }
+        }
+
+        impl std::ops::$assign for Decimal {
+            fn $assign_method(&mut self, other: Self) {
+                *self = std::ops::$op::$method(&*self, &other);
+            }
+        }
+    };
+}
+
+arithmetic!(Add, add, AddAssign, add_assign);
+arithmetic!(Sub, sub, SubAssign, sub_assign);
+arithmetic!(Mul, mul, MulAssign, mul_assign);
+
+impl std::iter::Sum for Decimal {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::zero(), |sum, value| sum + value)
+    }
+}
+
+impl<'a> std::iter::Sum<&'a Decimal> for Decimal {
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        Self::total(iter)
+    }
 }
 
 impl From<u64> for Decimal {
     fn from(value: u64) -> Self {
         Self::canonical(BigDecimal::from(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Decimal;
+
+    fn value(text: &str) -> Decimal {
+        text.parse().expect("decimal")
+    }
+
+    #[test]
+    fn arithmetic_is_exact_and_canonical() {
+        assert_eq!(value("1.10") + value("2.9"), value("4"));
+        assert_eq!(value("1") - value("1.5"), value("-0.5"));
+        assert_eq!(value("1.5") * value("2"), value("3"));
+        assert_eq!(value("1").checked_div(&value("4")), Some(value("0.25")));
+        assert_eq!(value("1").checked_div(&Decimal::zero()), None);
+        let mut sum = Decimal::zero();
+        sum += value("0.1");
+        sum -= value("0.3");
+        assert_eq!(sum, value("-0.2"));
+        assert_eq!([value("1"), value("2")].iter().sum::<Decimal>(), value("3"));
     }
 }

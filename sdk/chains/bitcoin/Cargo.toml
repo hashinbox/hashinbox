@@ -3,30 +3,22 @@ name = "chain-bitcoin"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Bitcoin support for the payment SDK: indexing source and interpreter, UTXO wallets, and the send pipeline."
+description = "Bitcoin for the payment SDK: blocks as base legs, UTXO wallets, building, signing and broadcast."
 readme = "README.md"
 
 [dependencies]
-logging = { path = "../../../packages/logging" }
+anyhow.workspace = true
 base = { path = "../../base" }
-payments = { path = "../../payments" }
 crypto = { path = "../../../packages/crypto" }
-wallets = { path = "../../wallets" }
 bitcoin.workspace = true
-futures-util = { version = "=0.3.33", default-features = false, features = ["std"] }
-indexing = { path = "../../indexing", default-features = false }
 json-rpc = { path = "../../../packages/json-rpc" }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-futures-executor.workspace = true
 # The scripted node double (`json_rpc::testing`): tests only, never a production link.
 json-rpc = { path = "../../../packages/json-rpc", features = ["testing"] }
-# The in-memory store (`indexing::memory`): the repository type the registration
-# hook is named over when a test verifies a node through `payments::config::Chain`.
-indexing = { path = "../../indexing", default-features = false, features = ["memory"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

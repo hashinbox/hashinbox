@@ -1,394 +1,150 @@
-//! What this chain needs to run, and how it assembles itself from it.
-//!
-//! The three steps are the same on every chain: a [`Config`] value — built in
-//! code or deserialized from any `serde` format — [`Config::connect`]s to a
-//! node and verifies its identity, and the verified [`ChainHandle`] then
-//! [`ChainHandle::compose`]s over an opened repository into a
-//! [`payments::config::ComposedChain`]. No storage is opened on the first step, which is
-//! what lets an application check every chain's identity before it opens
-//! anything. [`payments::config::Composition`] is what
-//! holds this chain beside the others.
+//! [`Config`]: one Bitcoin network's settings, and the pieces built from them.
 
-use std::{str::FromStr, sync::Arc};
+use std::sync::Arc;
 
-use base::{Networked as _, Unit, Units};
-use indexing::Checkpoint as _;
-use payments::config::{ComposedChain, Connection};
+use anyhow::{Context as _, ensure};
+use base::{Asset, AssetInfo, InputStore};
+use json_rpc::{BoxFuture, CallError, Client as _, Cluster, Endpoint, Http, Policy, Request};
 use serde::Deserialize;
-use wallets::SubmissionRegistrar;
+use serde_json::json;
 
-/// What a store must answer for **this** chain to compose over it.
-///
-/// [`indexing::Repository`] is the minimum any index needs — registration and
-/// committing — and [`indexing::OutputStore`] is the live outputs coin
-/// selection spends ([`crate::sender::Spendable`]). Trait bounds, never a
-/// backend: this file names no store implementation.
-pub trait Store:
-    indexing::Repository + indexing::OutputStore + Clone + Send + Sync + 'static
-{
-}
+use crate::{AddressType, Chain, Factory};
+use crate::{BTC_DECIMALS, BTC_NAME, BTC_TICKER, Network};
+use crate::{FeeRate, rpc::Client};
 
-impl<R> Store for R where
-    R: indexing::Repository + indexing::OutputStore + Clone + Send + Sync + 'static
-{
-}
-
-/// The shell every chain's configuration shares, from `payments::config`: the nodes
-/// and their repetition, the cadence this chain indexes at, and the
-/// registration hook that lets a document hand this file its own section.
-/// `payments::config` names no chain type, so this file adds Bitcoin's own keys
-/// around the shell and implements [`payments::config::Chain`] for the result.
-use payments::config::{Cadence, Rpc, Transport};
-
-use crate::{
-    IndexerParams, Network, RpcClient, WalletConfig, WalletFactory,
-    native::{AddressType, AssetKind, BTC, Error, ErrorKind, transaction::FeeRate},
-};
-
-/// Everything one Bitcoin network needs. Fields are public; [`Config::new`]
-/// fills the chain defaults, and `serde` fills an absent key by calling the
-/// same functions, so a value built in code and a value read from a document
-/// cannot drift.
-///
-/// `A` is the asset tag the application keys its wallet factories by; the
-/// chain never interprets it.
-#[derive(Clone, Deserialize)]
-#[serde(
-    deny_unknown_fields,
-    bound = "A: serde::de::DeserializeOwned + FromStr + Ord"
-)]
-pub struct Config<A> {
-    /// The network this deployment indexes.
+/// Everything one Bitcoin network needs.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// The network.
     pub network: Network,
-    /// The node, or the ordered failover list, and how much a call repeats.
-    pub rpc: Rpc,
-    /// The asset tag of this network's BTC wallets.
-    #[serde(default = "Config::<A>::default_asset")]
-    pub asset: A,
-    /// Which addresses this deployment's wallets derive. The default is
-    /// P2WPKH; `taproot` derives P2TR key-path addresses instead.
+    /// Its Bitcoin Core nodes: reads go to one, submissions to all.
+    pub endpoints: Vec<Endpoint>,
+    /// Blocks a block needs on top of it, itself included, to be final;
+    /// 1 to 1000, default 6. Bitcoin has no finality of its own.
+    #[serde(default = "Config::default_confirmation_depth")]
+    pub confirmation_depth: u64,
+    /// P2WPKH (default) or `taproot`.
     #[serde(default)]
     pub address_type: AddressType,
-    /// The ceilings this deployment prices and builds transactions under.
-    #[serde(default)]
-    pub limits: Limits,
-    /// How many blocks below the node's tip this deployment calls
-    /// irreversible.
-    ///
-    /// Bitcoin has no finality, so this number *is* the safety policy, and it
-    /// is a trade. A smaller depth makes history and spendable balance appear
-    /// sooner; a reorg deeper than it quarantines this network instead of
-    /// repairing itself, and only an offline rescan brings it back. The
-    /// default is six — the industry's settlement depth, about an hour, and
-    /// deeper than any Bitcoin mainnet reorg since the March 2013 consensus
-    /// bug. A hundred reproduces the old rollback journal's safety envelope
-    /// exactly, at roughly sixteen hours of latency.
-    #[serde(default = "Config::<A>::default_confirmation_depth")]
-    pub confirmation_depth: u64,
-    /// How often this chain observes a tip, and how much one pass indexes.
-    ///
-    /// One key, one shape, on every chain: `payments::config` owns the document and
-    /// each chain owns its section, so there is no reason left for one chain
-    /// to flatten what another nests.
-    #[serde(default)]
-    pub cadence: Cadence,
+    /// Confirmation target of the node's fee estimate, in blocks; default 6.
+    #[serde(default = "Config::default_fee_target_blocks")]
+    pub fee_target_blocks: u16,
+    /// The lowest fee rate sent, in satoshis per 1,000 virtual bytes; also
+    /// the rate when the node cannot estimate. Default 1,000 (Core's minimum
+    /// relay rate).
+    #[serde(default = "Config::default_fee_floor")]
+    pub fee_floor: u64,
 }
 
-impl<A: Ord> Config<A> {
-    /// The three values with no sensible default; everything else takes the
-    /// chain's own.
+impl Config {
+    /// The defaults around the two required values.
     #[must_use]
-    pub fn new(network: Network, rpc: Rpc, asset: A) -> Self {
+    pub fn new(network: Network, endpoints: Vec<Endpoint>) -> Self {
         Self {
             network,
-            rpc,
-            asset,
-            address_type: AddressType::default(),
-            limits: Limits::default(),
+            endpoints,
             confirmation_depth: Self::default_confirmation_depth(),
-            cadence: Cadence::new(),
+            address_type: AddressType::default(),
+            fee_target_blocks: Self::default_fee_target_blocks(),
+            fee_floor: Self::default_fee_floor(),
         }
-    }
-
-    /// The chain-neutral identity of the configured network, without
-    /// connecting: no node is contacted and no storage is opened.
-    #[must_use]
-    pub fn network(&self) -> base::Network {
-        self.network.canonical()
-    }
-
-    /// Rejects the value on its own: no node, no storage, no file.
-    ///
-    /// Everything an in-code builder can get wrong is checked here rather than
-    /// inside a `Deserialize` implementation, so both ways in reach the same
-    /// refusal.
-    ///
-    /// # Errors
-    ///
-    /// [`ErrorKind::InvalidConfiguration`] for an unusable endpoint list, a
-    /// retry policy whose first wait exceeds its own cap, a zero
-    /// synchronization bound, a confirmation depth outside
-    /// `1..=`[`IndexerParams::DEPTH_LIMIT`], or fee ceilings this chain
-    /// cannot price under.
-    pub fn validate(&self) -> Result<(), Error> {
-        self.rpc.validate()?;
-        self.cadence.validate()?;
-        let limit = IndexerParams::<(), ()>::DEPTH_LIMIT;
-        if self.confirmation_depth == 0 || self.confirmation_depth > limit {
-            return Err(Error::new(
-                ErrorKind::InvalidConfiguration,
-                format!("Bitcoin confirmation depth must be between 1 and {limit}"),
-            ));
-        }
-        self.wallet().validate()?;
-        Ok(())
-    }
-
-    /// Validates the value, then verifies the node's network. Nothing is
-    /// opened and nothing is written.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::validate`]'s refusals, and whatever `RpcClient::connect`
-    /// reports when the node serves another network.
-    pub async fn connect(self) -> Result<ChainHandle<A>, Error> {
-        self.connect_monitored(&mut Vec::new(), logging::Logger::default(), None)
-            .await
-    }
-
-    async fn connect_monitored(
-        self,
-        statistics: &mut Vec<json_rpc::Statistics>,
-        logger: logging::Logger,
-        transport: Option<Transport>,
-    ) -> Result<ChainHandle<A>, Error> {
-        self.validate()?;
-        let transport = match transport {
-            Some(transport) => transport,
-            None => {
-                let (transport, endpoints) = self.rpc.logged(&logger)?;
-                statistics.extend(endpoints);
-                transport
-            }
-        };
-        let rpc = self.verified(transport).await?;
-        Ok(ChainHandle { config: self, rpc })
-    }
-
-    /// The node identity checks [`Self::connect`] runs over `transport`: the
-    /// node serves this configuration's network.
-    async fn verified(&self, transport: Transport) -> Result<RpcClient<Transport>, Error> {
-        RpcClient::connect(transport, &self.network).await
     }
 
     const fn default_confirmation_depth() -> u64 {
-        IndexerParams::<(), ()>::CONFIRMED_DEPTH
+        6
     }
-}
 
-impl<A> Config<A> {
-    /// The unit of every asset this chain declares. Bitcoin has one asset,
-    /// and [`BTC`] states what an amount of it is; nothing here is
-    /// configurable, and no wallet carries it.
+    const fn default_fee_target_blocks() -> u16 {
+        6
+    }
+
+    const fn default_fee_floor() -> u64 {
+        1_000
+    }
+
+    /// Rejects the value on its own, without I/O.
+    ///
+    /// # Errors
+    ///
+    /// For no or invalid endpoints, a depth outside `1..=1000`, a zero fee
+    /// target or a zero fee floor.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        ensure!(!self.endpoints.is_empty(), "Bitcoin needs an endpoint");
+        for endpoint in &self.endpoints {
+            endpoint.validate()?;
+        }
+        ensure!(
+            (1..=1_000).contains(&self.confirmation_depth),
+            "Bitcoin confirmation depth must be between 1 and 1000"
+        );
+        ensure!(
+            self.fee_target_blocks > 0,
+            "Bitcoin fee target must be positive"
+        );
+        ensure!(self.fee_floor > 0, "Bitcoin fee floor must be positive");
+        Ok(())
+    }
+
+    /// Validates, connects to every endpoint and verifies the node.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::validate`]'s refusals, or a node of another network.
+    pub async fn connect(&self) -> anyhow::Result<Client> {
+        self.validate()?;
+        let nodes = self
+            .endpoints
+            .iter()
+            .map(Endpoint::connect)
+            .collect::<Result<Vec<_>, _>>()?;
+        let cluster = Cluster::new(nodes, height, Policy::default())
+            .await
+            .context("Bitcoin endpoints")?;
+        let client = Client::new(Arc::new(cluster), self.network);
+        client.verify().await?;
+        Ok(client)
+    }
+
+    /// The chain read through `rpc`.
+    ///
+    /// # Errors
+    ///
+    /// For an invalid confirmation depth.
+    pub fn chain(&self, rpc: &Client) -> anyhow::Result<Chain> {
+        Chain::new(rpc.clone(), self.confirmation_depth)
+    }
+
+    /// The wallet factory: coins from `inputs`, fees from `rpc`.
     #[must_use]
-    pub fn units(&self) -> Units {
-        let network = self.network.canonical();
-        Units::from_iter([((network, AssetKind::Native.id()), Unit::native(&BTC))])
+    pub fn factory(&self, rpc: &Client, inputs: Arc<dyn InputStore>) -> Factory {
+        Factory {
+            rpc: rpc.clone(),
+            inputs,
+            address_type: self.address_type,
+            fee_target_blocks: self.fee_target_blocks,
+            fee_floor: FeeRate::from_sat_per_kvb(self.fee_floor),
+        }
     }
 
-    /// The wallet configuration this deployment's factory is built from: the
-    /// network, the address type, and the fee ceilings. One function, so
-    /// [`Config::validate`] refuses exactly what [`ChainHandle::compose`] would
-    /// build.
-    fn wallet(&self) -> WalletConfig {
-        WalletConfig::new(&self.network)
-            .with_address_type(self.address_type)
-            .with_fee_target_blocks(self.limits.fee_target_blocks)
-            .with_max_fee_rate(FeeRate::from_sat_per_kvb(self.limits.max_fee_rate))
-    }
-}
-
-/// The ceilings one Bitcoin deployment prices and builds transactions under.
-///
-/// Both are safety bounds an operator chooses beside `confirmation_depth`:
-/// how far ahead the node is asked to price a confirmation, and the fee rate
-/// above which this deployment refuses to build or submit anything at all.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Limits {
-    /// Confirmation target of the node's fee estimate, in blocks.
-    pub fee_target_blocks: u16,
-    /// Largest accepted fee rate, in satoshis per kilo-virtual-byte — Core's
-    /// own `maxfeerate` unit. Above [`FeeRate::CORE_LIMIT`] no node would
-    /// accept the submission, so the value is refused.
-    pub max_fee_rate: u64,
-}
-
-impl Default for Limits {
-    /// The chain's own documented ceilings: a
-    /// [`WalletConfig::FEE_TARGET_BLOCKS`]-block estimate and Core's default
-    /// fee ceiling [`FeeRate::DEFAULT_MAXIMUM`].
-    fn default() -> Self {
-        Self {
-            fee_target_blocks: WalletConfig::FEE_TARGET_BLOCKS,
-            max_fee_rate: FeeRate::DEFAULT_MAXIMUM.sat_per_kvb(),
+    /// BTC on this network.
+    #[must_use]
+    pub fn asset(&self) -> AssetInfo {
+        AssetInfo {
+            asset: Asset::native(self.network.into()),
+            decimals: BTC_DECIMALS,
+            name: Some(BTC_NAME.to_owned()),
+            ticker: Some(BTC_TICKER.to_owned()),
         }
     }
 }
 
-impl<A: FromStr> Config<A> {
-    /// This chain's own tag text, in the application's tag type, for a section
-    /// that names no asset.
-    ///
-    /// # Panics
-    ///
-    /// When `A` cannot represent `"btc"`. Such an application states `asset`
-    /// explicitly.
-    fn default_asset() -> A {
-        A::from_str("btc")
-            .unwrap_or_else(|_| panic!("the default Bitcoin asset tag must be a tag of this type"))
-    }
-}
-
-/// A checked configuration and the client connected under it, to a node
-/// whose network identity has been verified. It builds this chain's parts
-/// once storage is open.
-pub struct ChainHandle<A> {
-    config: Config<A>,
-    rpc: RpcClient<Transport>,
-}
-
-impl<A> ChainHandle<A> {
-    /// The chain-neutral identity of the network the node serves, which is
-    /// the repository [`Self::compose`] needs.
-    #[must_use]
-    pub fn network(&self) -> base::Network {
-        self.config.network.canonical()
-    }
-
-    /// Everything the application registers for this chain: the index, already
-    /// mirroring its watch list to `repository`, the wallet factories under
-    /// their asset tags, and the cadence this chain polls at.
-    ///
-    /// Bitcoin finishes every send before its call returns, so `registrar` is
-    /// unused here; it is an argument on every chain so an application passes
-    /// it uniformly.
-    ///
-    /// # Errors
-    ///
-    /// [`ErrorKind::InvalidConfiguration`] when the index or the wallet
-    /// factory refuses the configured values, and whatever the repository
-    /// reports when its stored network disagrees with this one.
-    pub async fn compose<R>(
-        self,
-        repository: R,
-        _registrar: &Arc<dyn SubmissionRegistrar>,
-    ) -> Result<ComposedChain<A>, Error>
-    where
-        R: Store,
-    {
-        let Self { config, rpc } = self;
-        let units = config.units();
-        let params = IndexerParams {
-            sync: config.cadence.policy,
-            schedule: config
-                .cadence
-                .poll
-                .map_or(IndexerParams::<(), ()>::POLL, indexing::Schedule::every),
-            confirmed_depth: config.confirmation_depth,
-            ..IndexerParams::new(rpc.clone(), repository.clone())
-        };
-        let indexer = Arc::new(crate::indexer(params)?);
-        indexer.checkpoint(&config.network.canonical()).await?;
-        let wallet = config.wallet();
-        // The repository's own answers, each completed by the blocks this
-        // index holds above its confirmed line. Paired here because this is
-        // the place that holds both: the rows are the store's, the pending
-        // blocks are the index's, and the index answers no query itself.
-        // The unspent rows with the pending blocks folded in, so change is
-        // spendable at depth one. The store itself refuses them while the
-        // address's own history is still being read.
-        let spendable =
-            crate::sender::Spendable::new(Arc::new(repository), indexer.clone(), wallet.native);
-        let factory = WalletFactory::new(wallet, &rpc, Arc::new(spendable))?;
-        Ok(ComposedChain {
-            pending: indexer.clone(),
-            index: indexer,
-            factories: vec![(config.asset, Box::new(factory) as Box<_>)],
-            units,
-        })
-    }
-}
-
-/// [`ChainHandle::compose`] with this chain's type erased, so one vector holds every
-/// configured chain and [`payments::config::Composition`] folds them without naming any
-/// of them. An application writes none of this.
-impl<A: Send + 'static, R: Store> Connection<A, R> for ChainHandle<A> {
-    fn compose<'a>(
-        self: Box<Self>,
-        repository: R,
-        registrar: &'a Arc<dyn SubmissionRegistrar>,
-    ) -> base::BoxFuture<'a, Result<ComposedChain<A>, payments::config::Error>> {
-        Box::pin(async move {
-            (*self)
-                .compose(repository, registrar)
-                .await
-                .map_err(payments::config::Error::refused)
-        })
-    }
-}
-
-/// The registration hook: a document's `"bitcoin"` section, parsed by this
-/// crate and handed back as something `payments::config` can hold beside the other
-/// chains without naming any of them.
-///
-/// An application writes none of this, and an embedder who builds a [`Config`]
-/// in code never reaches it: the same three steps run either way, and only one
-/// of them involves a file.
-impl<A, R> payments::config::Chain<A, R> for Config<A>
-where
-    A: Clone + Ord + Send + Sync + 'static,
-    R: Store,
-{
-    fn network(&self) -> base::Network {
-        Config::network(self)
-    }
-
-    fn accept(&self) -> Result<Option<String>, payments::config::Error> {
-        self.validate().map_err(payments::config::Error::refused)?;
-        Ok(Some(format!(
-            "bitcoin/{}: committing {} blocks below the node tip; a reorg deeper \
-             than that quarantines this network and needs an offline rescan",
-            self.network().name,
-            self.confirmation_depth,
-        )))
-    }
-
-    fn verify<'a>(
-        &'a self,
-        transport: &'a Transport,
-    ) -> base::BoxFuture<'a, Result<(), payments::config::Error>> {
-        Box::pin(async move {
-            self.verified(transport.clone())
-                .await
-                .map(drop)
-                .map_err(payments::config::Error::refused)
-        })
-    }
-
-    fn connect<'a>(
-        &'a self,
-        statistics: &'a mut Vec<json_rpc::Statistics>,
-        logger: logging::Logger,
-        transport: Option<Transport>,
-    ) -> base::BoxFuture<'a, Result<Box<dyn Connection<A, R>>, payments::config::Error>> {
-        Box::pin(async move {
-            let node = self
-                .clone()
-                .connect_monitored(statistics, logger, transport)
-                .await
-                .map_err(payments::config::Error::refused)?;
-            Ok(Box::new(node) as Box<dyn Connection<A, R>>)
-        })
-    }
+/// A node's tip, which picks the cluster's primary.
+fn height(node: &Http) -> BoxFuture<'_, Result<u64, CallError>> {
+    Box::pin(async move {
+        let reply = node
+            .request(Request::new("getblockcount", json!([])))
+            .await??;
+        Ok(reply.deserialize()?)
+    })
 }

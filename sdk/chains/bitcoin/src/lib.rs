@@ -1,25 +1,22 @@
 #![doc = include_str!("../README.md")]
 
-pub mod native;
-
+mod address;
 mod builder;
+mod chain;
 mod config;
-mod error;
-mod identity;
-mod indexer;
-mod interpreter;
+mod fee;
 mod key;
-pub mod sender;
-mod source;
+mod network;
+mod rpc;
+mod transaction;
 mod wallet;
 
-pub use builder::TransferBuilder;
-pub use config::{ChainHandle, Config, Limits, Store};
-pub use indexer::{IndexerParams, indexer};
-pub use interpreter::BlockInterpreter;
-pub use native::{
-    Address, AddressType, BTC, CHAIN_NAME, Error, ErrorKind, KeyPair, NETWORKS, Network, Satoshi,
-    rpc::Client as RpcClient, transaction::FeeRate,
-};
-pub use source::Source;
-pub use wallet::{WalletConfig, WalletFactory};
+pub use address::{Address, AddressType};
+pub use chain::Chain;
+pub use config::Config;
+pub use fee::FeeRate;
+pub use key::KeyPair;
+pub use network::{BTC_DECIMALS, BTC_NAME, BTC_TICKER, CHAIN_NAME, Network};
+pub use rpc::Client;
+pub use transaction::Transaction;
+pub use wallet::Factory;

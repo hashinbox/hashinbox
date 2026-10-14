@@ -29,6 +29,14 @@ impl Networked for Address {
     }
 }
 
+/// An address is its own address, so generic code over [`Addressed`] takes
+/// a plain [`Address`] too.
+impl Addressed for Address {
+    fn address(&self) -> &Address {
+        self
+    }
+}
+
 /// Anything that has one address, and so its network.
 pub trait Addressed: Networked {
     /// The address.

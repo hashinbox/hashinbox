@@ -79,6 +79,19 @@ impl Error {
         }
     }
 
+    /// A definite failure, described by `error` (with its causes).
+    #[must_use]
+    pub fn failed(error: impl fmt::Display) -> Self {
+        Self::new(ErrorKind::Failed, format!("{error:#}"))
+    }
+
+    /// A transient failure, described by `error` (with its causes); retrying
+    /// may succeed.
+    #[must_use]
+    pub fn unavailable(error: impl fmt::Display) -> Self {
+        Self::new(ErrorKind::Unavailable, format!("{error:#}"))
+    }
+
     /// Records why the network refused it.
     #[must_use]
     pub fn with_reason(mut self, reason: Reason) -> Self {
@@ -159,7 +172,7 @@ pub trait Builder: Send {
     /// # Errors
     ///
     /// `Failed` for no transfers; any build, fee, funds, or signing failure.
-    fn sign<'a>(self: Box<Self>) -> Future<'a, Result<Vec<Transaction>, Error>>
+    fn sign<'a>(self: Box<Self>) -> Future<'a, Result<Transactions, Error>>
     where
         Self: 'a;
 }
@@ -217,11 +230,28 @@ impl Transactions {
     pub fn addresses(&self) -> BTreeSet<&Address> {
         self.legs().map(|(_, _, leg)| leg.address()).collect()
     }
+}
 
-    /// Whether there are none.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+impl From<Vec<Transaction>> for Transactions {
+    fn from(transactions: Vec<Transaction>) -> Self {
+        Self(transactions)
+    }
+}
+
+impl std::ops::Deref for Transactions {
+    type Target = [Transaction];
+
+    fn deref(&self) -> &[Transaction] {
+        &self.0
+    }
+}
+
+impl IntoIterator for Transactions {
+    type Item = Transaction;
+    type IntoIter = std::vec::IntoIter<Transaction>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 
@@ -283,6 +313,8 @@ pub enum Leg {
         asset: Asset,
         /// Atomic amount.
         amount: Decimal,
+        /// The UTXO it creates, on UTXO chains.
+        coin: Option<Coin>,
     },
     /// Value left `address`.
     Spent {
