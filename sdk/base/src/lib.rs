@@ -19,7 +19,7 @@ pub use block::{
 };
 pub use chain::Chain;
 pub use decimal::{Decimal, Error as DecimalError};
-pub use indexer::{Birthday, DEFAULT_BATCH, Handle, Handles, Indexer, Next};
+pub use indexer::{Birthday, DEFAULT_BATCH, Handle, Handles, Indexer, Indexers, Next, Stats};
 
 pub use network::{Network, Networked};
 pub use output::{Coin, Output, Store as OutputStore};
