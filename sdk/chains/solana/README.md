@@ -80,6 +80,11 @@ tokens = [{ mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals = 6 
   `Unsupported`. It packs as many transfers as fit a packet into each
   transaction, all on one recent blockhash, each with a random Memo-v3 so two
   equal transfers stay distinct. Recipients must be on-curve addresses.
+- The factory's one fee estimator (`WalletFactory::fees`) caches a blockhash
+  and the price of a signature for `fee_ttl_ms` (default 5 s); builders sign
+  on them, a message's fee being its signatures at that price. An estimate is
+  one signature per source plus, for a token, a token account's rent (the
+  recipient may lack one); the `Fee` leg is the signature part only.
 - `broadcast` sends the exact bytes once to every node, with preflight. A
   signed transaction lands only until its blockhash expires (about a minute);
   after that `broadcast` fails as `Expired`. Resending until then is the

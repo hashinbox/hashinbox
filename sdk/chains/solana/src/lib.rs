@@ -4,6 +4,7 @@ mod address;
 mod builder;
 mod chain;
 mod config;
+mod fee;
 mod key;
 mod network;
 mod rpc;

@@ -10,7 +10,8 @@ use json_rpc::{Cluster, Endpoint, Policy, Retry};
 use serde::{Deserialize, Deserializer, de};
 
 use crate::{
-    Chain, Client, Factory, GenesisHash, Network, SOL_DECIMALS, SOL_NAME, SOL_TICKER, Tokens, rpc,
+    Chain, Client, Factory, GenesisHash, Network, SOL_DECIMALS, SOL_NAME, SOL_TICKER, Tokens,
+    fee::Estimator, rpc,
 };
 
 /// Everything one Solana cluster needs; built in code with [`Config::new`]
@@ -27,6 +28,10 @@ pub struct Config {
     /// Allowlisted SPL tokens: the only tokens indexed and sent.
     #[serde(default)]
     pub tokens: Vec<Token>,
+    /// How long a fetched blockhash and fee price sends, in milliseconds;
+    /// default 5,000.
+    #[serde(default = "Config::default_fee_ttl_ms")]
+    pub fee_ttl_ms: u64,
     /// How often the indexer wakes, in milliseconds; default 1,000.
     #[serde(default = "Config::default_interval_ms")]
     pub interval_ms: u64,
@@ -52,8 +57,13 @@ impl Config {
             genesis_hash: network.genesis_hash,
             endpoints,
             tokens: Vec::new(),
+            fee_ttl_ms: Self::default_fee_ttl_ms(),
             interval_ms: Self::default_interval_ms(),
         }
+    }
+
+    const fn default_fee_ttl_ms() -> u64 {
+        5_000
     }
 
     const fn default_interval_ms() -> u64 {
@@ -128,12 +138,19 @@ impl Config {
         Chain::new(rpc.clone(), self.mints())
     }
 
-    /// The wallet factory: blockhashes and fees from `rpc`.
+    /// The wallet factory: blockhashes and fees from `rpc`, cached by its
+    /// one estimator.
     #[must_use]
     pub fn factory(&self, rpc: &Client) -> Factory {
+        let fees = Estimator::new(
+            rpc.clone(),
+            self.mints(),
+            Duration::from_millis(self.fee_ttl_ms),
+        );
         Factory {
             rpc: rpc.clone(),
             tokens: self.mints(),
+            fees: Arc::new(fees),
         }
     }
 

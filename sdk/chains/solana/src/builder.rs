@@ -1,5 +1,7 @@
 //! [`Builder`]: SOL or SPL token transfers on Solana.
 
+use std::sync::Arc;
+
 use base::{
     Addressed as _, Asset, Future, Output, Outputs, Signer, TransactionError, Transactions,
     Transfer,
@@ -7,6 +9,7 @@ use base::{
 
 use crate::{
     Address, Client, KeyPair, Token,
+    fee::Estimator,
     transaction::{Transaction, messages},
 };
 
@@ -17,6 +20,8 @@ use crate::{
 /// minute); then it fails to broadcast as `Expired`.
 pub(crate) struct Builder {
     pub(crate) rpc: Client,
+    /// The factory's estimator: its cached blockhash and signature price.
+    pub(crate) fees: Arc<Estimator>,
     pub(crate) asset: Asset,
     pub(crate) token: Option<Token>,
     pub(crate) default: Option<Signer>,
@@ -95,22 +100,14 @@ impl base::Builder for Builder {
                     outputs.push(output.clone());
                 }
             }
-            let blockhash = self
-                .rpc
-                .blockhash()
-                .await
-                .map_err(TransactionError::unavailable)?;
+            let prices = self.fees.prices().await?;
             let mut signed = Vec::new();
             for (key, outputs) in &senders {
                 let from = key.native_address();
-                let messages = messages(from, self.token.as_ref(), outputs, &blockhash)
+                let messages = messages(from, self.token.as_ref(), outputs, &prices.blockhash)
                     .map_err(TransactionError::failed)?;
                 for (message, paid) in messages {
-                    let fee = self
-                        .rpc
-                        .fee(&message)
-                        .await
-                        .map_err(TransactionError::unavailable)?;
+                    let fee = prices.fee(&message)?;
                     let mut transaction = Transaction::pending(message, from, &outputs[paid], fee);
                     transaction.sign(key).map_err(TransactionError::failed)?;
                     signed.push(transaction.into());

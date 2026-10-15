@@ -3,8 +3,10 @@
 mod address;
 mod asset;
 mod block;
+mod cache;
 mod chain;
 mod config;
+mod fee;
 mod indexer;
 mod inout;
 mod network;
@@ -19,9 +21,11 @@ pub use block::{
     Notified, Notify as BlockNotify, Notifying, Parent as BlockParent, Reward, Store as BlockStore,
     Timer, Tips,
 };
+pub use cache::Cache;
 pub use chain::Chain;
 pub use config::{Config, Service, Storage};
 pub use decimal::{Decimal, Error as DecimalError};
+pub use fee::Estimator as FeeEstimator;
 pub use indexer::{Birthday, DEFAULT_BATCH, Handle, Handles, Indexer, Indexers, Next, Stats};
 
 pub use inout::{Coin, Input, Inputs, Output, Outputs, Store as InputStore};

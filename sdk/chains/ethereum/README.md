@@ -78,9 +78,13 @@ tokens = [{ contract = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', decimals = 
   use it. ERC-20 tokens are unaffected: every transfer emits a log.
 - A builder sends one asset: ether, or one configured token (`transfer(to,
   amount)` calldata to the contract, no ether); any other asset is
-  `Unsupported`. A batch is one transaction per transfer, gas estimated per
-  transfer, with the node's pending nonce and the next ones, all signed before
-  anything is broadcast. A signed transaction's `Fee` leg is its worst case,
-  `gas limit * max fee`.
+  `Unsupported`. A batch is one transaction per transfer, with the node's
+  pending nonce and the next ones, all signed before anything is broadcast.
+  Gas and fees come from the factory's one fee estimator
+  (`WalletFactory::fees`): EIP-1559 fees cached for `fee_ttl_ms` (default
+  12 s); 21 000 gas for ether (an EOA recipient); for a token, one
+  `eth_estimateGas` of `transfer(0xfefe…fe, 1)` from its first sender, plus
+  the margin, kept for the factory's life. A signed transaction's `Fee` leg
+  is its worst case, `gas limit * max fee`, which is what an estimate sums.
 - A broadcast refused as "already known" or "nonce too low" is acceptance when
   the node holds that exact hash.

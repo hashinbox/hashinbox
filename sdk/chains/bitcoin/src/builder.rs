@@ -9,18 +9,22 @@ use base::{
 
 use crate::Address;
 use crate::{
-    FeeRate, KeyPair, fee::vsize, rpc::Client, transaction::Transaction as NativeTransaction,
+    KeyPair,
+    fee::{Fees, vsize},
+    rpc::Client,
+    transaction::Transaction as NativeTransaction,
 };
 
-/// Pays every transfer in one transaction: the node's fee rate (never below
-/// the floor), the pooled coins of every sender largest first, each input
+/// Pays every transfer in one transaction: the estimator's cached fee rate,
+/// the pooled coins of every sender largest first, each input
 /// signed by its own key, change back to the default source, else the first
-/// sender.
+/// sender, only when it is worth its own output (above dust after paying for
+/// itself); a smaller leftover is fee.
 pub(crate) struct Builder {
     pub(crate) rpc: Client,
     pub(crate) inputs: Arc<dyn InputStore>,
-    pub(crate) fee_target_blocks: u16,
-    pub(crate) fee_floor: FeeRate,
+    /// The factory's estimator, whose cached rate prices the fee.
+    pub(crate) fees: Arc<Fees>,
     pub(crate) default: Option<Signer>,
     pub(crate) outputs: Outputs<Address>,
     /// Each output's own source, in output order.
@@ -116,47 +120,41 @@ impl base::Builder for Builder {
                 return Err(TransactionError::failed("no transfers to sign"));
             }
             let (keys, owner) = self.keys()?;
-            let estimate = self
-                .rpc
-                .fee_rate(self.fee_target_blocks)
-                .await
-                .map_err(TransactionError::unavailable)?;
-            let rate = estimate.map_or(self.fee_floor, |rate| rate.max(self.fee_floor));
+            let rate = self.fees.rate().await?;
             let inputs = self.coins(&keys).await?;
             let own = owner.script_pubkey();
-            // Priced with a change output, whether or not one is made.
-            let scripts: Vec<_> = self
+            let paid: Vec<_> = self
                 .outputs
                 .iter()
                 .map(|output| output.address.script_pubkey())
-                .chain([own.clone()])
                 .collect();
-            let fee = |kept: &Inputs<Address>| {
+            let fee = |kept: &Inputs<Address>, change: bool| {
                 let spent: Vec<_> = kept
                     .iter()
                     .map(|input| input.address.script_pubkey())
                     .collect();
+                let outputs = paid.iter().chain(change.then_some(&own));
                 Decimal::from(rate.fee(vsize(
                     spent.iter().map(AsRef::as_ref),
-                    scripts.iter().map(AsRef::as_ref),
+                    outputs.map(AsRef::as_ref),
                 )))
             };
             let requested = self.outputs.total();
             let chosen = inputs
                 .largest_first()
-                .filter(|kept, _| kept.total() < &requested + &fee(kept));
-            let needed = requested + fee(&chosen);
-            if chosen.total() < needed {
+                .filter(|kept, _| kept.total() < &requested + &fee(kept, false));
+            if chosen.total() < &requested + &fee(&chosen, false) {
                 return Err(TransactionError::failed(
                     "insufficient funds for the transfers and fee",
                 )
                 .with_reason(Reason::InsufficientFunds));
             }
-            let left = chosen.total() - needed;
-            let change = (left >= Decimal::from(own.minimal_non_dust().to_sat())).then(|| Output {
+            let dust = Decimal::from(own.minimal_non_dust().to_sat());
+            let with_change = &requested + &fee(&chosen, true);
+            let change = (chosen.total() >= &with_change + &dust).then(|| Output {
                 address: owner.clone(),
                 asset: Asset::native(self.rpc.network().into()),
-                amount: left,
+                amount: chosen.total() - &with_change,
             });
             let mut transaction = NativeTransaction::from_inputs(
                 &chosen,

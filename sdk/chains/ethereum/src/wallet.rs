@@ -9,16 +9,16 @@ use base::{
 use crypto::{Curve, SecretBytes};
 
 use crate::builder::Builder;
-use crate::{FeeLimits, KeyPair, Tokens, rpc::Client};
+use crate::{KeyPair, Tokens, fee::Estimator, rpc::Client};
 
 /// Makes the wallets of one Ethereum network. Their builders send ether and
-/// the allowlisted tokens under the fee limits, with nonces and fees from
-/// the node.
+/// the allowlisted tokens under the fee limits, with nonces from the node and
+/// fees from the factory's one estimator.
 #[derive(Clone)]
 pub struct Factory {
     pub(crate) rpc: Client,
-    pub(crate) limits: FeeLimits,
     pub(crate) tokens: Tokens,
+    pub(crate) fees: Arc<Estimator>,
 }
 
 impl base::WalletFactory for Factory {
@@ -54,7 +54,7 @@ impl base::WalletFactory for Factory {
         let builder = |contract| -> Box<dyn base::Builder> {
             Box::new(Builder {
                 rpc: self.rpc.clone(),
-                limits: self.limits,
+                fees: Arc::clone(&self.fees),
                 asset: asset.clone(),
                 contract,
                 default: None,
@@ -75,6 +75,10 @@ impl base::WalletFactory for Factory {
             ));
         };
         Ok(builder(Some(token)))
+    }
+
+    fn fees(&self) -> Arc<dyn base::FeeEstimator> {
+        self.fees.clone()
     }
 }
 

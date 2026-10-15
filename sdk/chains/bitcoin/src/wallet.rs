@@ -10,17 +10,16 @@ use crypto::{Curve, SecretBytes};
 
 use crate::AddressType;
 use crate::builder::Builder;
-use crate::{FeeRate, KeyPair, Network as Native, rpc::Client};
+use crate::{KeyPair, Network as Native, fee::Fees, rpc::Client};
 
 /// Makes the wallets of one Bitcoin network and address type. Their builders
-/// spend the store's inputs and price fees from the node.
+/// spend the store's inputs and price fees with the factory's one estimator.
 #[derive(Clone)]
 pub struct Factory {
     pub(crate) rpc: Client,
     pub(crate) inputs: Arc<dyn InputStore>,
     pub(crate) address_type: AddressType,
-    pub(crate) fee_target_blocks: u16,
-    pub(crate) fee_floor: FeeRate,
+    pub(crate) fees: Arc<Fees>,
 }
 
 impl Factory {
@@ -70,12 +69,15 @@ impl base::WalletFactory for Factory {
         Ok(Box::new(Builder {
             rpc: self.rpc.clone(),
             inputs: Arc::clone(&self.inputs),
-            fee_target_blocks: self.fee_target_blocks,
-            fee_floor: self.fee_floor,
+            fees: Arc::clone(&self.fees),
             default: None,
             outputs: base::Outputs::default(),
             sources: Vec::new(),
         }))
+    }
+
+    fn fees(&self) -> Arc<dyn base::FeeEstimator> {
+        self.fees.clone()
     }
 }
 

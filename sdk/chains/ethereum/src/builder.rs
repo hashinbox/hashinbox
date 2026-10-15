@@ -1,12 +1,15 @@
 //! [`Builder`]: one EIP-1559 transaction per Ethereum transfer.
 
+use std::sync::Arc;
+
 use base::{
     Addressed as _, Asset, Future, Output, Outputs, Signer, TransactionError, Transactions,
     Transfer,
 };
 
 use crate::{
-    Address, Client, FeeLimits, KeyPair,
+    Address, Client, KeyPair,
+    fee::Estimator,
     transaction::{Transaction, request},
 };
 
@@ -16,7 +19,8 @@ use crate::{
 /// sender's batch lands in order or not past its first gap.
 pub(crate) struct Builder {
     pub(crate) rpc: Client,
-    pub(crate) limits: FeeLimits,
+    /// The factory's estimator: its cached fees and gas price every transfer.
+    pub(crate) fees: Arc<Estimator>,
     pub(crate) asset: Asset,
     pub(crate) contract: Option<alloy_primitives::Address>,
     pub(crate) default: Option<Signer>,
@@ -92,15 +96,7 @@ impl base::Builder for Builder {
                 };
                 order.push(index);
             }
-            let (base_fee, priority_fee) = self
-                .rpc
-                .fees()
-                .await
-                .map_err(TransactionError::unavailable)?;
-            let fees = self
-                .limits
-                .fees(base_fee, priority_fee)
-                .map_err(TransactionError::failed)?;
+            let fees = self.fees.fees().await?;
             let mut signed = Vec::with_capacity(self.outputs.len());
             for (output, index) in self.outputs.iter().zip(order) {
                 let (key, nonce) = senders
@@ -109,16 +105,13 @@ impl base::Builder for Builder {
                 let from = key.native_address();
                 let mut native =
                     request(output, self.contract).map_err(TransactionError::failed)?;
-                let gas = self.rpc.estimate(from, &native).await?;
                 native.chain_id = network.chain_id;
                 native.nonce = *nonce;
-                native.gas_limit = self
-                    .limits
-                    .gas_limit(gas)
-                    .map_err(TransactionError::failed)?;
+                native.gas_limit = self.fees.gas(self.contract, from).await?;
                 native.max_fee_per_gas = fees.max_fee_per_gas;
                 native.max_priority_fee_per_gas = fees.max_priority_fee_per_gas;
-                self.limits
+                self.fees
+                    .limits
                     .total(native.gas_limit, fees)
                     .map_err(TransactionError::failed)?;
                 let mut transaction = Transaction::pending(native, from, output);

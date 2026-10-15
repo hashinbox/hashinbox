@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Asset, AssetInfo, Future, Indexer, InputStore, Service, Storage, Timer,
+    Asset, AssetInfo, Cache, Future, Indexer, InputStore, Service, Storage, Timer,
     WalletFactoryBroadcaster,
 };
 use json_rpc::{BoxFuture, CallError, Client as _, Cluster, Endpoint, Http, Policy, Request};
@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::{AddressType, Chain, Factory};
 use crate::{BTC_DECIMALS, BTC_NAME, BTC_TICKER, Network};
-use crate::{FeeRate, rpc::Client};
+use crate::{FeeRate, fee::Fees, rpc::Client};
 
 /// Everything one Bitcoin network needs.
 #[derive(Clone, Debug, Deserialize)]
@@ -38,6 +38,10 @@ pub struct Config {
     /// relay rate).
     #[serde(default = "Config::default_fee_floor")]
     pub fee_floor: u64,
+    /// How long a fetched fee rate prices sends, in milliseconds; default
+    /// 60,000.
+    #[serde(default = "Config::default_fee_ttl_ms")]
+    pub fee_ttl_ms: u64,
     /// How often the indexer wakes, in milliseconds; default 30,000.
     #[serde(default = "Config::default_interval_ms")]
     pub interval_ms: u64,
@@ -54,6 +58,7 @@ impl Config {
             address_type: AddressType::default(),
             fee_target_blocks: Self::default_fee_target_blocks(),
             fee_floor: Self::default_fee_floor(),
+            fee_ttl_ms: Self::default_fee_ttl_ms(),
             interval_ms: Self::default_interval_ms(),
         }
     }
@@ -68,6 +73,10 @@ impl Config {
 
     const fn default_fee_target_blocks() -> u16 {
         6
+    }
+
+    const fn default_fee_ttl_ms() -> u64 {
+        60_000
     }
 
     const fn default_fee_floor() -> u64 {
@@ -137,15 +146,23 @@ impl Config {
         Chain::new(rpc.clone(), self.confirmation_depth)
     }
 
-    /// The wallet factory: coins from `inputs`, fees from `rpc`.
+    /// The wallet factory: coins from `inputs`, fee rates from `rpc`,
+    /// cached by its one estimator.
     #[must_use]
     pub fn factory(&self, rpc: &Client, inputs: Arc<dyn InputStore>) -> Factory {
+        let fees = Fees {
+            network: self.network.into(),
+            rpc: rpc.clone(),
+            inputs: Arc::clone(&inputs),
+            target_blocks: self.fee_target_blocks,
+            floor: FeeRate::from_sat_per_kvb(self.fee_floor),
+            rate: Cache::new(Duration::from_millis(self.fee_ttl_ms)),
+        };
         Factory {
             rpc: rpc.clone(),
             inputs,
             address_type: self.address_type,
-            fee_target_blocks: self.fee_target_blocks,
-            fee_floor: FeeRate::from_sat_per_kvb(self.fee_floor),
+            fees: Arc::new(fees),
         }
     }
 

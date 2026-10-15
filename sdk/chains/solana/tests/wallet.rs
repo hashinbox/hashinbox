@@ -373,9 +373,7 @@ fn two_sources_sign_one_transaction_each() {
     builder
         .send(Transfer::new(recipient(), Decimal::from(200)).from(&two))
         .unwrap();
-    let [blockhash, fee] = signing_replies();
-    let [_, again] = signing_replies();
-    script.push([blockhash, fee, again]);
+    script.push(signing_replies());
     let signed = block_on(builder.sign()).unwrap();
     script.exhausted();
     assert_eq!(signed.len(), 2, "one per sender");
@@ -416,4 +414,73 @@ fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
         TransactionErrorKind::Failed
     );
     script.exhausted();
+}
+
+fn token() -> Asset {
+    Asset {
+        network: network(),
+        id: MINT.to_owned(),
+    }
+}
+
+#[test]
+fn an_estimate_sums_signatures_and_a_token_accounts_rent() {
+    let script = Script::new(signing_replies());
+    script.push([
+        Reply::ok("getMinimumBalanceForRentExemption", json!(2_039_280)).expecting(json!([165])),
+    ]);
+    let fees = config().factory(&client(script.clone())).fees();
+    let one = wallet(&script).address().clone();
+    let two = recipient();
+
+    let single = block_on(fees.estimate(&[(one.clone(), Asset::native(network()))])).unwrap();
+    assert_eq!(single, Decimal::from(5_000));
+
+    let several = [
+        (one.clone(), Asset::native(network())),
+        (one, token()),
+        (two, token()),
+    ];
+    let total = block_on(fees.estimate(&several)).unwrap();
+    assert_eq!(total, Decimal::from(3 * 5_000 + 2 * 2_039_280));
+    script.exhausted();
+}
+
+#[test]
+fn prices_refresh_once_per_time_to_live() {
+    let source = [(recipient(), Asset::native(network()))];
+    let script = Script::new(signing_replies());
+    let fees = config().factory(&client(script.clone())).fees();
+    block_on(fees.estimate(&source)).unwrap();
+    block_on(fees.estimate(&source)).unwrap();
+    script.exhausted();
+
+    let mut config = config();
+    config.fee_ttl_ms = 0;
+    let script = Script::new(signing_replies());
+    script.push(signing_replies());
+    let fees = config.factory(&client(script.clone())).fees();
+    block_on(fees.estimate(&source)).unwrap();
+    block_on(fees.estimate(&source)).unwrap();
+    script.exhausted();
+}
+
+#[test]
+fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
+    let script = Script::new(signing_replies());
+    let factory = config().factory(&client(script.clone()));
+    let wallet = block_on(factory.from_pk(SecretBytes::new(SEED))).unwrap();
+    let source = [(wallet.address().clone(), Asset::native(network()))];
+    let fee = block_on(factory.fees().estimate(&source)).unwrap();
+    let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
+    builder
+        .send((recipient(), Decimal::from(1_000_000) - fee.clone()))
+        .unwrap();
+    let signed = block_on(builder.sign()).unwrap();
+    script.exhausted();
+    let paid = signed.legs().find_map(|(_, _, leg)| match leg {
+        Leg::Fee { amount, .. } => Some(amount.clone()),
+        _ => None,
+    });
+    assert_eq!(paid, Some(fee), "the estimator's cached prices, no refresh");
 }

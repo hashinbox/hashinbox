@@ -1,9 +1,16 @@
 //! [`FeeLimits`]: ceilings on what a node's quotes may make a transaction
 //! cost, and the EIP-1559 [`Fees`] built under them.
 
-use alloy_primitives::U256;
+use std::{collections::BTreeMap, time::Duration};
+
+use alloy_consensus::TxEip1559;
+use alloy_primitives::{Bytes, TxKind, U256};
 use anyhow::{Context as _, ensure};
+use base::{Addressed as _, Asset, Cache, Decimal, TransactionError, TransactionErrorKind};
+use num_bigint::BigUint;
 use serde::Deserialize;
+
+use crate::{Address, Client, Tokens, erc20};
 
 /// A basis point of 10 000.
 const BASIS_POINTS: u64 = 10_000;
@@ -124,5 +131,138 @@ impl FeeLimits {
             "Ethereum worst-case fee exceeds the configured ceiling"
         );
         Ok(total)
+    }
+}
+
+/// Gas of a native ether transfer to an account without code.
+const TRANSFER_GAS: u64 = 21_000;
+
+/// The recipient a token's gas is estimated against: an address that holds
+/// no token, so the estimate includes creating the recipient's balance slot.
+const PLACEHOLDER: alloy_primitives::Address = alloy_primitives::Address::repeat_byte(0xfe);
+
+/// Ethereum's `base::FeeEstimator`: EIP-1559 fees cached for their time to
+/// live, and each token's transfer gas limit cached for the factory's
+/// lifetime; every builder of the factory signs with them.
+pub(crate) struct Estimator {
+    pub(crate) network: base::Network,
+    pub(crate) rpc: Client,
+    pub(crate) limits: FeeLimits,
+    pub(crate) tokens: Tokens,
+    pub(crate) fees: Cache<Fees>,
+    /// Each allowlisted token's gas limit, margin included.
+    pub(crate) gas: BTreeMap<alloy_primitives::Address, Cache<u64>>,
+}
+
+impl Estimator {
+    /// `rpc`'s fees under `limits`, cached `ttl`, and the gas of `tokens`.
+    pub(crate) fn new(rpc: Client, limits: FeeLimits, tokens: Tokens, ttl: Duration) -> Self {
+        let gas = tokens
+            .iter()
+            .map(|contract| (contract, Cache::new(Duration::MAX)))
+            .collect();
+        Self {
+            network: rpc.network().into(),
+            rpc,
+            limits,
+            tokens,
+            fees: Cache::new(ttl),
+            gas,
+        }
+    }
+
+    /// The cached fees, refreshed from the node when stale.
+    pub(crate) async fn fees(&self) -> Result<Fees, TransactionError> {
+        self.fees
+            .get(|| async {
+                let (base, priority) = self
+                    .rpc
+                    .fees()
+                    .await
+                    .map_err(TransactionError::unavailable)?;
+                self.limits
+                    .fees(base, priority)
+                    .map_err(TransactionError::failed)
+            })
+            .await
+    }
+
+    /// The gas limit of sending ether (`None`) or the `contract` token:
+    /// 21 000, or the token's `transfer(placeholder, 1)` estimate from
+    /// `from` (the first sender to ask) plus the margin, kept from then on.
+    pub(crate) async fn gas(
+        &self,
+        contract: Option<alloy_primitives::Address>,
+        from: &Address,
+    ) -> Result<u64, TransactionError> {
+        let Some(contract) = contract else {
+            return Ok(TRANSFER_GAS);
+        };
+        let cache = self.gas.get(&contract).ok_or_else(|| {
+            TransactionError::new(
+                TransactionErrorKind::Unsupported,
+                "not an allowlisted Ethereum token",
+            )
+        })?;
+        cache
+            .get(|| async {
+                let request = TxEip1559 {
+                    to: TxKind::Call(contract),
+                    input: Bytes::from(erc20::transfer(PLACEHOLDER, U256::from(1))),
+                    ..TxEip1559::default()
+                };
+                let gas = self.rpc.estimate(from, &request).await?;
+                self.limits.gas_limit(gas).map_err(TransactionError::failed)
+            })
+            .await
+    }
+
+    /// The contract of `asset`: `None` for ether.
+    fn contract(&self, asset: &Asset) -> anyhow::Result<Option<alloy_primitives::Address>> {
+        if *asset == Asset::native(self.network.clone()) {
+            return Ok(None);
+        }
+        Some(asset)
+            .filter(|asset| asset.network == self.network)
+            .and_then(|asset| self.tokens.get(asset))
+            .map(Some)
+            .context("not ether or an allowlisted token of this Ethereum network")
+    }
+}
+
+impl base::Networked for Estimator {
+    fn network(&self) -> &base::Network {
+        &self.network
+    }
+}
+
+impl base::FeeEstimator for Estimator {
+    /// Σ per source `gas limit × max fee per gas`, each source its own
+    /// transaction: exactly the fee leg a builder signs.
+    fn estimate<'a>(
+        &'a self,
+        sources: &'a [(base::Address, Asset)],
+    ) -> base::Future<'a, anyhow::Result<Decimal>> {
+        Box::pin(async move {
+            let mut total = U256::ZERO;
+            for (address, asset) in sources {
+                let contract = self.contract(asset)?;
+                let native = self.rpc.network();
+                let from = Address::parse(&address.value, native)?;
+                ensure!(
+                    *from.address() == *address,
+                    "not a canonical address of this Ethereum network"
+                );
+                let fees = self.fees().await?;
+                let gas = self.gas(contract, &from).await?;
+                total = total
+                    .checked_add(self.limits.total(gas, fees)?)
+                    .context("Ethereum fee estimate overflows")?;
+            }
+            Ok(Decimal::from_atomic(
+                BigUint::from_bytes_be(&total.to_be_bytes::<32>()),
+                0,
+            ))
+        })
     }
 }

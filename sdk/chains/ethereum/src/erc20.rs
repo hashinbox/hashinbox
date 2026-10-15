@@ -68,6 +68,11 @@ impl Tokens {
         self.0.contains(contract)
     }
 
+    /// Every allowlisted contract.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Address> + '_ {
+        self.0.iter().copied()
+    }
+
     /// The contract of `asset`, when it is an allowlisted token; the asset's
     /// network is the caller's to check.
     #[must_use]

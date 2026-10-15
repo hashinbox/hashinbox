@@ -99,8 +99,6 @@ fn a_batch_signs_consecutive_nonces_in_order() {
         Reply::ok("eth_getTransactionCount", json!("0x7")).expecting(json!([KEY_ONE, "pending"])),
         Reply::ok("eth_maxPriorityFeePerGas", json!("0x3b9aca00")),
         Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x2"})),
-        Reply::ok("eth_estimateGas", json!("0x5208")),
-        Reply::ok("eth_estimateGas", json!("0x5208")),
     ]);
     let signed = block_on(builder.sign()).unwrap();
     script.exhausted();
@@ -114,11 +112,11 @@ fn a_batch_signs_consecutive_nonces_in_order() {
         assert_eq!(transaction.state, TransactionState::Pending);
         let envelope = TxEnvelope::decode_2718_exact(&transaction.bytes).unwrap();
         assert_eq!(envelope.nonce(), nonce);
-        assert_eq!(envelope.gas_limit(), 25_200, "21000 plus the 20% margin");
+        assert_eq!(envelope.gas_limit(), 21_000, "a plain ether transfer");
         assert_eq!(envelope.value(), alloy_primitives::U256::from(value));
         assert_eq!(envelope.chain_id(), Some(1));
         let from = base::Address::new(network(), KEY_ONE);
-        let worst = (2 * 2 + 1_000_000_000_u64) * 25_200;
+        let worst = (2 * 2 + 1_000_000_000_u64) * 21_000;
         assert_eq!(
             transaction.legs,
             vec![
@@ -166,11 +164,10 @@ fn a_token_batch_calls_the_contract_with_consecutive_nonces() {
             "to": TOKEN,
             "value": "0x0",
             "data": hex::encode_prefixed(transferCall {
-                recipient: to.value.parse().unwrap(),
-                amount: alloy_primitives::U256::from(5),
+                recipient: alloy_primitives::Address::repeat_byte(0xfe),
+                amount: alloy_primitives::U256::from(1),
             }.abi_encode()),
         }])),
-        Reply::ok("eth_estimateGas", json!("0xc350")),
     ]);
     let signed = block_on(builder.sign()).unwrap();
     script.exhausted();
@@ -331,8 +328,6 @@ fn two_sources_sign_one_transaction_each_with_their_own_nonces() {
         Reply::ok("eth_getTransactionCount", json!("0x2")).expecting(json!([KEY_TWO, "pending"])),
         Reply::ok("eth_maxPriorityFeePerGas", json!("0x3b9aca00")),
         Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x2"})),
-        Reply::ok("eth_estimateGas", json!("0x5208")),
-        Reply::ok("eth_estimateGas", json!("0x5208")),
     ]);
     let signed = block_on(builder.sign()).unwrap();
     script.exhausted();
@@ -370,4 +365,84 @@ fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
     let error = block_on(builder.sign()).unwrap_err();
     assert_eq!(error.kind, TransactionErrorKind::Failed);
     script.exhausted();
+}
+
+fn token() -> Asset {
+    Asset {
+        network: network(),
+        id: TOKEN.to_owned(),
+    }
+}
+
+/// The fee replies one refresh reads: a 1 gwei tip on a base fee of 2 wei.
+fn fee_replies() -> [Reply; 2] {
+    [
+        Reply::ok("eth_maxPriorityFeePerGas", json!("0x3b9aca00")),
+        Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x2"})),
+    ]
+}
+
+#[test]
+fn an_estimate_sums_one_transaction_per_source() {
+    let script = Script::new(fee_replies());
+    script.push([Reply::ok("eth_estimateGas", json!("0xc350"))]);
+    let fees = factory(&script).fees();
+    let one = base::Address::new(network(), KEY_ONE);
+    let two = base::Address::new(network(), KEY_TWO);
+    let max_fee = 2 * 2 + 1_000_000_000_u64;
+
+    let single = block_on(fees.estimate(&[(one.clone(), Asset::native(network()))])).unwrap();
+    assert_eq!(single, atomic(max_fee * 21_000));
+
+    let several = [
+        (one.clone(), Asset::native(network())),
+        (one, token()),
+        (two, token()),
+    ];
+    let total = block_on(fees.estimate(&several)).unwrap();
+    assert_eq!(total, atomic(max_fee * (21_000 + 2 * 60_000)));
+    script.exhausted();
+}
+
+#[test]
+fn fees_refresh_once_per_time_to_live() {
+    let script = Script::new(fee_replies());
+    let source = [(
+        base::Address::new(network(), KEY_ONE),
+        Asset::native(network()),
+    )];
+    let fees = factory(&script).fees();
+    block_on(fees.estimate(&source)).unwrap();
+    block_on(fees.estimate(&source)).unwrap();
+    script.exhausted();
+
+    let mut config = config();
+    config.fee_ttl_ms = 0;
+    let script = Script::new(fee_replies());
+    script.push(fee_replies());
+    let fees = config.factory(&connect(Arc::new(script.clone()))).fees();
+    block_on(fees.estimate(&source)).unwrap();
+    block_on(fees.estimate(&source)).unwrap();
+    script.exhausted();
+}
+
+#[test]
+fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
+    let script = Script::new(fee_replies());
+    let factory = factory(&script);
+    let wallet = block_on(factory.from_pk(key_one())).unwrap();
+    let source = [(wallet.address().clone(), Asset::native(network()))];
+    let fee = block_on(factory.fees().estimate(&source)).unwrap();
+    let balance = atomic(10_u64.pow(18));
+    let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
+    let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
+    builder.send((to, balance - fee.clone())).unwrap();
+    script.push([Reply::ok("eth_getTransactionCount", json!("0x0"))]);
+    let signed = block_on(builder.sign()).unwrap();
+    script.exhausted();
+    let paid = signed.legs().find_map(|(_, _, leg)| match leg {
+        Leg::Fee { amount, .. } => Some(amount.clone()),
+        _ => None,
+    });
+    assert_eq!(paid, Some(fee), "the estimator's cached fees, no refresh");
 }

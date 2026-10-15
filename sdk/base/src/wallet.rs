@@ -8,8 +8,8 @@ use anyhow::Result;
 use crypto::{Curve, SecretBytes};
 
 use crate::{
-    Address, Addressed, Asset, BlockHeader, Broadcaster, Builder, Future, Network, Networked,
-    TransactionError,
+    Address, Addressed, Asset, BlockHeader, Broadcaster, Builder, FeeEstimator, Future, Network,
+    Networked, TransactionError,
 };
 
 /// One address with its key, its chain's builders and its broadcaster, all
@@ -71,6 +71,10 @@ pub trait Factory: Send + Sync {
     ///
     /// `Unsupported` for an asset this network's wallets do not send.
     fn transaction(&self, asset: &Asset) -> Result<Box<dyn Builder>, TransactionError>;
+
+    /// The network's fee estimator: the one instance every builder this
+    /// factory (and its wallets) makes prices its transactions with.
+    fn fees(&self) -> Arc<dyn FeeEstimator>;
 }
 
 /// A boxed factory is a factory, so a composition root can hold the
@@ -90,6 +94,10 @@ impl<F: Factory + ?Sized> Factory for Box<F> {
 
     fn transaction(&self, asset: &Asset) -> Result<Box<dyn Builder>, TransactionError> {
         (**self).transaction(asset)
+    }
+
+    fn fees(&self) -> Arc<dyn FeeEstimator> {
+        (**self).fees()
     }
 }
 

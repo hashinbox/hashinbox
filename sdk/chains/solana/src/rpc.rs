@@ -173,6 +173,16 @@ impl Client {
         fee.value.context("Solana node did not price the message")
     }
 
+    /// The lamports an account of `bytes` must hold to be rent-exempt.
+    ///
+    /// # Errors
+    ///
+    /// A node failure.
+    pub(crate) async fn rent(&self, bytes: u64) -> anyhow::Result<u64> {
+        self.call("getMinimumBalanceForRentExemption", json!([bytes]))
+            .await
+    }
+
     /// The decimals of the SPL Token mint `mint`.
     ///
     /// # Errors

@@ -11,7 +11,8 @@ use json_rpc::{Cluster, Endpoint, Policy, Retry};
 use serde::{Deserialize, Deserializer, de};
 
 use crate::{
-    Chain, Client, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Factory, FeeLimits, Network, Tokens, rpc,
+    Chain, Client, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Factory, FeeLimits, Network, Tokens,
+    fee::Estimator, rpc,
 };
 
 /// Everything one Ethereum network needs; built in code with
@@ -31,6 +32,9 @@ pub struct Config {
     /// Ceilings on the fees a transaction is built under.
     #[serde(default)]
     pub limits: FeeLimits,
+    /// How long fetched fees price sends, in milliseconds; default 12,000.
+    #[serde(default = "Config::default_fee_ttl_ms")]
+    pub fee_ttl_ms: u64,
     /// How often the indexer wakes, in milliseconds; default 12,000.
     #[serde(default = "Config::default_interval_ms")]
     pub interval_ms: u64,
@@ -58,8 +62,13 @@ impl Config {
             endpoints,
             tokens: Vec::new(),
             limits: FeeLimits::default(),
+            fee_ttl_ms: Self::default_fee_ttl_ms(),
             interval_ms: Self::default_interval_ms(),
         }
+    }
+
+    const fn default_fee_ttl_ms() -> u64 {
+        12_000
     }
 
     const fn default_interval_ms() -> u64 {
@@ -139,13 +148,20 @@ impl Config {
         Chain::new(rpc.clone(), self.contracts())
     }
 
-    /// The wallet factory: nonces and fees from `rpc`.
+    /// The wallet factory: nonces from `rpc`, fees and gas from `rpc`
+    /// cached by its one estimator.
     #[must_use]
     pub fn factory(&self, rpc: &Client) -> Factory {
+        let fees = Estimator::new(
+            rpc.clone(),
+            self.limits,
+            self.contracts(),
+            Duration::from_millis(self.fee_ttl_ms),
+        );
         Factory {
             rpc: rpc.clone(),
-            limits: self.limits,
             tokens: self.contracts(),
+            fees: Arc::new(fees),
         }
     }
 

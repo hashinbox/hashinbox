@@ -447,3 +447,93 @@ async fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
     let error = builder.sign().await.expect_err("mismatch");
     assert_eq!(error.kind, TransactionErrorKind::Failed);
 }
+
+fn rate_reply() -> Reply {
+    Reply::ok("estimatesmartfee", json!({"feerate": 0.00002}))
+}
+
+#[tokio::test]
+async fn an_estimate_prices_every_source_in_one_transaction() {
+    let segwit = address_of(1).await;
+    let taproot = factory(&Script::default(), AddressType::Taproot, Vec::new())
+        .from_pk(SecretBytes::new([3; 32]))
+        .await
+        .expect("key")
+        .address()
+        .clone();
+    let script = Script::new([rate_reply()]);
+    let coins = vec![
+        funded_at(&segwit, 30_000, 1),
+        funded_at(&taproot, 30_000, 2),
+    ];
+    let fees = factory(&script, AddressType::SegwitV0, coins).fees();
+    let btc = Asset::native(network());
+
+    // 2 sat/vB: 122 vB for one P2WPKH input and a 34-byte output.
+    let one = fees.estimate(&[(segwit.clone(), btc.clone())]).await;
+    assert_eq!(one.expect("priced"), 244_u64.into());
+    // One transaction of 180 vB, not the sum of two.
+    let both = fees
+        .estimate(&[(segwit, btc.clone()), (taproot, btc)])
+        .await;
+    assert_eq!(both.expect("priced"), 360_u64.into());
+    script.exhausted();
+}
+
+#[tokio::test]
+async fn the_fee_rate_refreshes_once_per_time_to_live() {
+    let owner = address_of(1).await;
+    let source = [(owner.clone(), Asset::native(network()))];
+    let script = Script::new([rate_reply()]);
+    let fees = factory(&script, AddressType::SegwitV0, vec![funded(&owner, 1_000)]).fees();
+    fees.estimate(&source).await.expect("priced");
+    fees.estimate(&source).await.expect("priced");
+    script.exhausted();
+
+    let script = Script::new([rate_reply(), rate_reply()]);
+    let rpc = Client::new(Arc::new(script.clone()), Network::Regtest);
+    let mut config = Config::new(Network::Regtest, Vec::new());
+    config.fee_ttl_ms = 0;
+    let fees = config
+        .factory(&rpc, Arc::new(Store(vec![funded(&owner, 1_000)])))
+        .fees();
+    fees.estimate(&source).await.expect("priced");
+    fees.estimate(&source).await.expect("priced");
+    script.exhausted();
+}
+
+#[tokio::test]
+async fn a_sweep_of_balance_less_estimate_pays_the_estimate_without_change() {
+    let script = Script::new([rate_reply()]);
+    let owner = address_of(1).await;
+    let factory = factory(
+        &script,
+        AddressType::SegwitV0,
+        vec![funded(&owner, 100_000)],
+    );
+    let wallet = factory
+        .from_pk(SecretBytes::new([1; 32]))
+        .await
+        .expect("key");
+    let fee = factory
+        .fees()
+        .estimate(&[(owner, Asset::native(network()))])
+        .await
+        .expect("priced");
+    let mut builder = wallet.transaction(&Asset::native(network())).expect("BTC");
+    builder
+        .send((
+            address_of(2).await,
+            base::Decimal::from(100_000_u64) - fee.clone(),
+        ))
+        .expect("valid");
+    let signed = builder.sign().await.expect("signed");
+    script.exhausted();
+    let native: Transaction = consensus::deserialize(&signed[0].bytes).expect("decodes");
+    assert_eq!(native.output.len(), 1, "no change");
+    let paid = signed.legs().find_map(|(_, _, leg)| match leg {
+        Leg::Fee { amount, .. } => Some(amount.clone()),
+        _ => None,
+    });
+    assert_eq!(paid, Some(fee));
+}
