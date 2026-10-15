@@ -86,3 +86,27 @@ impl Client for Swap {
         Box::pin(async move { transport.broadcast(request).await })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::testing::{Reply, Script};
+
+    #[tokio::test]
+    async fn a_replacement_redirects_existing_holders() {
+        let old = Script::new([Reply::ok("m", json!(1))]);
+        let swap = Arc::new(Swap::new(Arc::new(old.clone()), Vec::new()));
+        let holder: Arc<dyn Client> = swap.clone();
+        let reply = holder.request(Request::new("m", json!([]))).await;
+        assert_eq!(reply.unwrap().unwrap().deserialize::<u64>().unwrap(), 1);
+
+        let next = Script::new([Reply::ok("m", json!(2))]);
+        swap.replace(Arc::new(next.clone()), Vec::new());
+        let reply = holder.request(Request::new("m", json!([]))).await;
+        assert_eq!(reply.unwrap().unwrap().deserialize::<u64>().unwrap(), 2);
+        old.exhausted();
+        next.exhausted();
+    }
+}

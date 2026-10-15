@@ -4,6 +4,7 @@ mod address;
 mod asset;
 mod block;
 mod chain;
+mod config;
 mod indexer;
 mod inout;
 mod network;
@@ -14,19 +15,22 @@ mod wallet;
 pub use address::{Address, Addressed};
 pub use asset::{Asset, AssetInfo, Assets};
 pub use block::{
-    Block, Blocks, Chained, Hash as BlockHash, Header as BlockHeader, Notified,
-    Notify as BlockNotify, Parent as BlockParent, Reward, Store as BlockStore, Timer, Tips,
+    Block, Blocks, Chained, Hash as BlockHash, Header as BlockHeader, Listener as BlockListener,
+    Notified, Notify as BlockNotify, Notifying, Parent as BlockParent, Reward, Store as BlockStore,
+    Timer, Tips,
 };
 pub use chain::Chain;
+pub use config::{Config, Service, Storage};
 pub use decimal::{Decimal, Error as DecimalError};
 pub use indexer::{Birthday, DEFAULT_BATCH, Handle, Handles, Indexer, Indexers, Next, Stats};
 
 pub use inout::{Coin, Input, Inputs, Output, Outputs, Store as InputStore};
 pub use network::{Network, Networked};
 pub use transaction::{
-    Broadcaster, Builder, Enveloped, Error as TransactionError, ErrorKind as TransactionErrorKind,
-    Future, Id as TransactionId, Leg, Reason, State as TransactionState, Store as TransactionStore,
-    Transacted, Transaction, Transactions,
+    Broadcaster, Builder, BuilderExt, Enveloped, Error as TransactionError,
+    ErrorKind as TransactionErrorKind, Future, Id as TransactionId, Leg, Reason, Signer,
+    State as TransactionState, Store as TransactionStore, Transacted, Transaction, Transactions,
+    Transfer,
 };
 pub use wallet::{
     Error as WalletError, ErrorKind as WalletErrorKind, Factories as WalletFactories,

@@ -1,4 +1,7 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use anyhow::Context as _;
 use tokio::sync::mpsc;
@@ -379,5 +382,67 @@ pub trait Store: Send + Sync {
 /// Tells listeners about each block a [`Store`] kept.
 pub trait Notify: Send + Sync {
     /// Calls `listener` after each kept block.
-    fn subscribe(&self, listener: Box<dyn Fn(&Header) + Send + Sync>);
+    fn subscribe(&self, listener: Box<Listener>);
+}
+
+/// A [`Notify`] listener: called with each block's header after its write.
+pub type Listener = dyn Fn(&Header) + Send + Sync;
+
+/// A [`Store`] that tells its listeners about every block of each accepted
+/// insert, after the write commits and outside every lock. A repeated insert
+/// is heard again: listeners are hints, never transactional, and cannot veto.
+pub struct Notifying<S> {
+    inner: S,
+    listeners: Mutex<Vec<Arc<Listener>>>,
+}
+
+impl<S: Store> Notifying<S> {
+    /// Wraps `inner`, with no listeners yet.
+    pub const fn new(inner: S) -> Self {
+        Self {
+            inner,
+            listeners: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The wrapped store.
+    pub const fn inner(&self) -> &S {
+        &self.inner
+    }
+}
+
+impl<S: Store> Store for Notifying<S> {
+    fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            self.inner.insert(blocks).await?;
+            let listeners = self
+                .listeners
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            for block in blocks.iter() {
+                listeners
+                    .iter()
+                    .for_each(|listener| listener(&block.header));
+            }
+            Ok(())
+        })
+    }
+
+    fn find_last<'a>(&'a self, network: &'a Network) -> Future<'a, anyhow::Result<Option<Header>>> {
+        self.inner.find_last(network)
+    }
+
+    fn delete<'a>(&'a self, network: &'a Network, from: u64) -> Future<'a, anyhow::Result<()>> {
+        self.inner.delete(network, from)
+    }
+}
+
+impl<S: Store> Notify for Notifying<S> {
+    fn subscribe(&self, listener: Box<Listener>) {
+        self.listeners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Arc::from(listener));
+    }
 }

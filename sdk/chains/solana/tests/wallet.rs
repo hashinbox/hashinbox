@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use base::{
-    Asset, Broadcaster as _, Decimal, Leg, TransactionErrorKind, TransactionState, Wallet,
-    WalletError, WalletErrorKind, WalletFactory as _,
+    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, Signer, TransactionErrorKind,
+    TransactionState, Transfer, Wallet, WalletError, WalletErrorKind, WalletFactory as _,
 };
 use chain_solana::{Client, Config};
 use crypto::SecretBytes;
@@ -97,8 +97,8 @@ fn sol_transfers_sign_into_one_verifying_transaction_with_its_legs() {
     let wallet = wallet(&script);
     let sol = Asset::native(network());
     let mut builder = wallet.transaction(&sol).unwrap();
-    builder.transfer(recipient(), Decimal::from(100)).unwrap();
-    builder.transfer(recipient(), Decimal::from(200)).unwrap();
+    builder.send((recipient(), Decimal::from(100))).unwrap();
+    builder.send((recipient(), Decimal::from(200))).unwrap();
 
     let signed = block_on(builder.sign()).unwrap();
 
@@ -167,7 +167,7 @@ fn a_token_transfer_creates_the_recipient_account_and_transfers_checked() {
         id: MINT.to_owned(),
     };
     let mut builder = wallet.transaction(&usdc).unwrap();
-    builder.transfer(recipient(), Decimal::from(20)).unwrap();
+    builder.send((recipient(), Decimal::from(20))).unwrap();
 
     let signed = block_on(builder.sign()).unwrap();
 
@@ -248,20 +248,20 @@ fn builders_refuse_what_they_cannot_send() {
     let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
     let refused = |result: Result<(), base::TransactionError>| result.unwrap_err().kind;
     assert_eq!(
-        refused(builder.transfer(recipient(), Decimal::zero())),
+        refused(builder.send((recipient(), Decimal::zero()))),
         TransactionErrorKind::Failed
     );
     assert_eq!(
-        refused(builder.transfer(recipient(), "0.5".parse().unwrap())),
+        refused(builder.send((recipient(), "0.5".parse().unwrap()))),
         TransactionErrorKind::Failed
     );
     assert_eq!(
-        refused(builder.transfer(wallet.address().clone(), Decimal::from(1))),
+        refused(builder.send((wallet.address().clone(), Decimal::from(1)))),
         TransactionErrorKind::Failed
     );
     let off_curve = base::Address::new(network(), associated(&wallet.address().value).to_string());
     assert_eq!(
-        refused(builder.transfer(off_curve, Decimal::from(1))),
+        refused(builder.send((off_curve, Decimal::from(1)))),
         TransactionErrorKind::Failed
     );
     assert_eq!(
@@ -273,7 +273,7 @@ fn builders_refuse_what_they_cannot_send() {
 fn signed(script: &Script) -> base::Transaction {
     let wallet = wallet(script);
     let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
-    builder.transfer(recipient(), Decimal::from(100)).unwrap();
+    builder.send((recipient(), Decimal::from(100))).unwrap();
     block_on(builder.sign()).unwrap().0.remove(0)
 }
 
@@ -358,4 +358,62 @@ fn associated(owner: &str) -> solana_address::Address {
     )
     .unwrap()
     .0
+}
+
+#[test]
+fn two_sources_sign_one_transaction_each() {
+    let script = Script::new([]);
+    let factory = config().factory(&client(script.clone()));
+    let one = block_on(factory.from_pk(SecretBytes::new(SEED))).unwrap();
+    let two = block_on(factory.from_pk(SecretBytes::new([9; 32]))).unwrap();
+    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
+    builder
+        .send(Transfer::new(recipient(), Decimal::from(100)).from(&one))
+        .unwrap();
+    builder
+        .send(Transfer::new(recipient(), Decimal::from(200)).from(&two))
+        .unwrap();
+    let [blockhash, fee] = signing_replies();
+    let [_, again] = signing_replies();
+    script.push([blockhash, fee, again]);
+    let signed = block_on(builder.sign()).unwrap();
+    script.exhausted();
+    assert_eq!(signed.len(), 2, "one per sender");
+    for (transaction, sender) in signed.iter().zip([&one, &two]) {
+        let decoded: Transaction = bincode::deserialize(&transaction.bytes).unwrap();
+        decoded.verify().unwrap();
+        assert_eq!(
+            decoded.message.account_keys[0].to_string(),
+            sender.address().value,
+            "paid and signed by its sender"
+        );
+    }
+}
+
+#[test]
+fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
+    let script = Script::new([]);
+    let factory = config().factory(&client(script.clone()));
+    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
+    builder.send((recipient(), Decimal::from(100))).unwrap();
+    assert_eq!(
+        block_on(builder.sign()).unwrap_err().kind,
+        TransactionErrorKind::Failed
+    );
+
+    let wallet = wallet(&script);
+    let wrong = Signer::new(
+        wallet.address().clone(),
+        crypto::Curve::Ed25519,
+        SecretBytes::new([9; 32]),
+    );
+    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
+    builder
+        .send(Transfer::new(recipient(), Decimal::from(100)).from(wrong))
+        .unwrap();
+    assert_eq!(
+        block_on(builder.sign()).unwrap_err().kind,
+        TransactionErrorKind::Failed
+    );
+    script.exhausted();
 }

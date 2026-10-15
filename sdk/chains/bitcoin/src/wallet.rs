@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use base::{
-    Address, Addressed, Asset, Future, InputStore, Network, Networked, TransactionError,
+    Address, Addressed, Asset, Future, InputStore, Network, Networked, Signer, TransactionError,
     TransactionErrorKind, WalletError, WalletErrorKind,
 };
 use crypto::{Curve, SecretBytes};
@@ -58,6 +58,25 @@ impl base::WalletFactory for Factory {
     fn parse_address(&self, text: &str) -> anyhow::Result<Address> {
         Ok(self.address(text)?.into())
     }
+
+    /// BTC only.
+    fn transaction(&self, asset: &Asset) -> Result<Box<dyn base::Builder>, TransactionError> {
+        if *asset != Asset::native(self.native().into()) {
+            return Err(TransactionError::new(
+                TransactionErrorKind::Unsupported,
+                "a Bitcoin wallet sends BTC only",
+            ));
+        }
+        Ok(Box::new(Builder {
+            rpc: self.rpc.clone(),
+            inputs: Arc::clone(&self.inputs),
+            fee_target_blocks: self.fee_target_blocks,
+            fee_floor: self.fee_floor,
+            default: None,
+            outputs: base::Outputs::default(),
+            sources: Vec::new(),
+        }))
+    }
 }
 
 /// One Bitcoin key and its address.
@@ -79,22 +98,10 @@ impl Networked for Wallet {
 }
 
 impl base::Wallet for Wallet {
-    /// BTC only.
-    fn transaction(&self, asset: &Asset) -> Result<Box<dyn base::Builder + '_>, TransactionError> {
-        if *asset != Asset::native(self.network().clone()) {
-            return Err(TransactionError::new(
-                TransactionErrorKind::Unsupported,
-                "a Bitcoin wallet sends BTC only",
-            ));
-        }
-        Ok(Box::new(Builder {
-            key: &self.key,
-            rpc: &self.factory.rpc,
-            inputs: &*self.factory.inputs,
-            fee_target_blocks: self.factory.fee_target_blocks,
-            fee_floor: self.factory.fee_floor,
-            outputs: base::Outputs::default(),
-        }))
+    fn transaction(&self, asset: &Asset) -> Result<Box<dyn base::Builder>, TransactionError> {
+        let mut builder = base::WalletFactory::transaction(&self.factory, asset)?;
+        builder.with_default_source(Signer::from(self));
+        Ok(builder)
     }
 
     fn private_key(&self) -> (Curve, SecretBytes) {

@@ -7,15 +7,19 @@ and token transfers as EIP-1559 transactions.
 ## Usage
 
 ```rust,no_run
-use base::{Asset, Broadcaster as _, Chained as _, WalletFactory as _};
+use base::{Asset, Broadcaster as _, BuilderExt as _, Chained as _, Config as _, Storage, WalletFactory as _};
 use chain_ethereum::{Config, Network};
 use json_rpc::Endpoint;
 
-async fn ethereum() -> anyhow::Result<()> {
+async fn ethereum(storage: Storage) -> anyhow::Result<()> {
     let config = Config::new(
         Network::new(1, "mainnet"),
         vec![Endpoint::new("https://node.invalid/v3/KEY")],
     );
+    // The one entry point a container uses: indexer, factory, broadcaster,
+    // and assets over the application's stores.
+    let _service = config.build(&storage, config.client().await?).await?;
+
     // Checks the chain ID and every token's decimals.
     let rpc = config.connect().await?;
 
@@ -29,10 +33,11 @@ async fn ethereum() -> anyhow::Result<()> {
     let wallet = factory.from_pk(factory.generate().await?).await?;
     let ether = Asset::native((&config.native()).into());
     let mut builder = wallet.transaction(&ether)?;
-    builder.transfer(factory.parse_address("0x...")?, 10_000_u64.into())?;
+    builder.send((factory.parse_address("0x...")?, 10_000_u64.into()))?;
     for transaction in builder.sign().await? {
         rpc.broadcast(&transaction).await?;
     }
+
     Ok(())
 }
 ```
@@ -48,6 +53,13 @@ tokens = [{ contract = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', decimals = 
 
 ## Notes
 
+- `Config` implements `base::Config`: `build(&storage, client)` validates,
+  verifies the node and returns the `base::Service`. The indexer wakes every
+  `interval_ms` milliseconds (default 12,000).
+- `client()` is the chain's own cluster over `endpoints`; `build(&storage,
+  client)` verifies once that `client` serves the network and builds every
+  part over it. Pass a `json_rpc::Swap` and keep it to change nodes live.
+  Endpoints are needed only by `client()`.
 - Position and height are the block number. A block is confirmed once it is at
   or below the node's `finalized` block; a node that serves none yet (syncing,
   a development chain) fails `tips`.

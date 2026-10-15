@@ -1,5 +1,6 @@
 use anyhow::Context as _;
-use crypto::{Ed25519, PrivateKey as _, SecretBytes};
+use base::{Signer, TransactionError};
+use crypto::{Curve, Ed25519, PrivateKey as _, SecretBytes};
 
 use crate::{Address, Network};
 
@@ -28,6 +29,20 @@ impl KeyPair {
     pub fn import(secret: &SecretBytes, network: &Network) -> anyhow::Result<Self> {
         let key = Ed25519::from_bytes(secret.as_bytes()).context("invalid Solana key")?;
         Ok(Self::new(key, network))
+    }
+
+    /// The key of `signer`, deriving its address on `network`.
+    pub(crate) fn from_signer(
+        signer: &Signer,
+        network: &Network,
+    ) -> Result<Self, TransactionError> {
+        if signer.curve != Curve::Ed25519 {
+            return Err(TransactionError::failed("a Solana key is Ed25519"));
+        }
+        Self::import(signer.secret(), network)
+            .ok()
+            .filter(|key| base::Addressed::address(key) == &signer.address)
+            .ok_or_else(|| TransactionError::failed("the key does not sign for its address"))
     }
 
     fn new(key: Ed25519, network: &Network) -> Self {

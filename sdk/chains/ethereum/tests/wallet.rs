@@ -8,8 +8,8 @@ use alloy_eips::Decodable2718 as _;
 use alloy_primitives::{hex, keccak256};
 use alloy_sol_types::{SolCall as _, sol};
 use base::{
-    Asset, Broadcaster as _, Decimal, Leg, Reason, TransactionErrorKind, TransactionState,
-    WalletFactory as _,
+    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, Reason, Signer, TransactionErrorKind,
+    TransactionState, Transfer, WalletFactory as _,
 };
 use chain_ethereum::{Client, Config, Factory, Network, Token};
 use crypto::SecretBytes;
@@ -92,9 +92,9 @@ fn a_batch_signs_consecutive_nonces_in_order() {
     let wallet = block_on(factory.from_pk(key_one())).unwrap();
     let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
     let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
-    builder.transfer(to.clone(), atomic(1000)).unwrap();
-    builder.transfer(to.clone(), atomic(2000)).unwrap();
-    assert!(builder.transfer(to.clone(), atomic(0)).is_err());
+    builder.send((to.clone(), atomic(1000))).unwrap();
+    builder.send((to.clone(), atomic(2000))).unwrap();
+    assert!(builder.send((to.clone(), atomic(0))).is_err());
     script.push([
         Reply::ok("eth_getTransactionCount", json!("0x7")).expecting(json!([KEY_ONE, "pending"])),
         Reply::ok("eth_maxPriorityFeePerGas", json!("0x3b9aca00")),
@@ -155,8 +155,8 @@ fn a_token_batch_calls_the_contract_with_consecutive_nonces() {
     };
     let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
     let mut builder = wallet.transaction(&token).unwrap();
-    builder.transfer(to.clone(), atomic(5)).unwrap();
-    builder.transfer(to.clone(), atomic(6)).unwrap();
+    builder.send((to.clone(), atomic(5))).unwrap();
+    builder.send((to.clone(), atomic(6))).unwrap();
     script.push([
         Reply::ok("eth_getTransactionCount", json!("0x3")),
         Reply::ok("eth_maxPriorityFeePerGas", json!("0x1")),
@@ -233,7 +233,7 @@ fn a_reverting_transfer_fails_before_signing() {
     };
     let mut builder = wallet.transaction(&token).unwrap();
     builder
-        .transfer(base::Address::new(network(), TOKEN), atomic(5))
+        .send((base::Address::new(network(), TOKEN), atomic(5)))
         .unwrap();
     script.push([
         Reply::ok("eth_getTransactionCount", json!("0x0")),
@@ -300,5 +300,74 @@ fn a_refusal_of_held_bytes_is_acceptance() {
     )]);
     let unknown = block_on(broadcaster.broadcast(&bytes)).unwrap_err();
     assert_eq!(unknown.kind, TransactionErrorKind::Unavailable);
+    script.exhausted();
+}
+
+/// The well-known address of secret key 2.
+const KEY_TWO: &str = "0x2b5ad5c4795c026514f8317c7a215e218dccd6cf";
+
+fn key_two() -> SecretBytes {
+    let mut bytes = [0_u8; 32];
+    bytes[31] = 2;
+    SecretBytes::new(bytes.to_vec())
+}
+
+#[test]
+fn two_sources_sign_one_transaction_each_with_their_own_nonces() {
+    let script = Script::new([]);
+    let factory = factory(&script);
+    let one = block_on(factory.from_pk(key_one())).unwrap();
+    let two = block_on(factory.from_pk(key_two())).unwrap();
+    let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
+    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
+    builder
+        .send(Transfer::new(to.clone(), atomic(1000)).from(&one))
+        .unwrap();
+    builder
+        .send(Transfer::new(to.clone(), atomic(2000)).from(&two))
+        .unwrap();
+    script.push([
+        Reply::ok("eth_getTransactionCount", json!("0x7")).expecting(json!([KEY_ONE, "pending"])),
+        Reply::ok("eth_getTransactionCount", json!("0x2")).expecting(json!([KEY_TWO, "pending"])),
+        Reply::ok("eth_maxPriorityFeePerGas", json!("0x3b9aca00")),
+        Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x2"})),
+        Reply::ok("eth_estimateGas", json!("0x5208")),
+        Reply::ok("eth_estimateGas", json!("0x5208")),
+    ]);
+    let signed = block_on(builder.sign()).unwrap();
+    script.exhausted();
+    assert_eq!(signed.len(), 2);
+    for (transaction, (nonce, payer)) in signed.iter().zip([(7, KEY_ONE), (2, KEY_TWO)]) {
+        let envelope = TxEnvelope::decode_2718_exact(&transaction.bytes).unwrap();
+        assert_eq!(envelope.nonce(), nonce);
+        let fee = transaction.legs.iter().find_map(|leg| match leg {
+            Leg::Fee { address, .. } => Some(address.value.as_str()),
+            _ => None,
+        });
+        assert_eq!(fee, Some(payer));
+    }
+}
+
+#[test]
+fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
+    let script = Script::new([]);
+    let factory = factory(&script);
+    let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
+    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
+    builder.send((to.clone(), atomic(1000))).unwrap();
+    let error = block_on(builder.sign()).unwrap_err();
+    assert_eq!(error.kind, TransactionErrorKind::Failed);
+
+    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
+    let wrong = Signer::new(
+        base::Address::new(network(), KEY_ONE),
+        crypto::Curve::Secp256k1,
+        key_two(),
+    );
+    builder
+        .send(Transfer::new(to, atomic(1000)).from(wrong))
+        .unwrap();
+    let error = block_on(builder.sign()).unwrap_err();
+    assert_eq!(error.kind, TransactionErrorKind::Failed);
     script.exhausted();
 }

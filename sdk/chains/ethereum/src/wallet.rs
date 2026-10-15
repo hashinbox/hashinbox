@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use base::{
-    Address, Addressed, Asset, Future, Network, Networked, TransactionError, TransactionErrorKind,
-    WalletError, WalletErrorKind,
+    Address, Addressed, Asset, Future, Network, Networked, Signer, TransactionError,
+    TransactionErrorKind, WalletError, WalletErrorKind,
 };
 use crypto::{Curve, SecretBytes};
 
@@ -47,6 +47,35 @@ impl base::WalletFactory for Factory {
         })?;
         Ok(address.into())
     }
+
+    /// Ether, or one allowlisted token.
+    fn transaction(&self, asset: &Asset) -> Result<Box<dyn base::Builder>, TransactionError> {
+        let network: Network = self.rpc.network().into();
+        let builder = |contract| -> Box<dyn base::Builder> {
+            Box::new(Builder {
+                rpc: self.rpc.clone(),
+                limits: self.limits,
+                asset: asset.clone(),
+                contract,
+                default: None,
+                outputs: base::Outputs::default(),
+                sources: Vec::new(),
+            })
+        };
+        if *asset == Asset::native(network.clone()) {
+            return Ok(builder(None));
+        }
+        let token = Some(asset)
+            .filter(|asset| asset.network == network)
+            .and_then(|asset| self.tokens.get(asset));
+        let Some(token) = token else {
+            return Err(TransactionError::new(
+                TransactionErrorKind::Unsupported,
+                "this Ethereum wallet sends ether and the configured tokens only",
+            ));
+        };
+        Ok(builder(Some(token)))
+    }
 }
 
 /// One Ethereum key and its address.
@@ -68,31 +97,10 @@ impl Networked for Wallet {
 }
 
 impl base::Wallet for Wallet {
-    /// Ether, or one allowlisted token.
-    fn transaction(&self, asset: &Asset) -> Result<Box<dyn base::Builder + '_>, TransactionError> {
-        let builder = |contract| -> Box<dyn base::Builder + '_> {
-            Box::new(Builder {
-                key: &self.key,
-                rpc: &self.factory.rpc,
-                limits: self.factory.limits,
-                asset: asset.clone(),
-                contract,
-                outputs: base::Outputs::default(),
-            })
-        };
-        if *asset == Asset::native(self.network().clone()) {
-            return Ok(builder(None));
-        }
-        let token = Some(asset)
-            .filter(|asset| asset.network == *self.network())
-            .and_then(|asset| self.factory.tokens.get(asset));
-        let Some(token) = token else {
-            return Err(TransactionError::new(
-                TransactionErrorKind::Unsupported,
-                "this Ethereum wallet sends ether and the configured tokens only",
-            ));
-        };
-        Ok(builder(Some(token)))
+    fn transaction(&self, asset: &Asset) -> Result<Box<dyn base::Builder>, TransactionError> {
+        let mut builder = base::WalletFactory::transaction(&self.factory, asset)?;
+        builder.with_default_source(Signer::from(self));
+        Ok(builder)
     }
 
     fn private_key(&self) -> (Curve, SecretBytes) {

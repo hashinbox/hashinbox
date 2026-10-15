@@ -27,15 +27,14 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    /// Pending and unsigned: spends `inputs` (all of `owner`) and pays
-    /// `outputs`, in order; version 2, no lock time, replaceable.
+    /// Pending and unsigned: spends `inputs` (each paying its own address)
+    /// and pays `outputs`, in order; version 2, no lock time, replaceable.
     ///
     /// # Errors
     ///
     /// For a stored txid or amount that is not Bitcoin's.
     pub fn from_inputs<'a>(
-        inputs: &Inputs,
-        owner: &Address,
+        inputs: &Inputs<Address>,
         outputs: impl IntoIterator<Item = &'a Output<Address>>,
         network: Network,
     ) -> anyhow::Result<Self> {
@@ -51,7 +50,7 @@ impl Transaction {
             });
             spent.push(TxOut {
                 value: Amount::from_sat(coin.amount.to_atomic_u64(0)?),
-                script_pubkey: owner.script_pubkey(),
+                script_pubkey: coin.address.script_pubkey(),
             });
         }
         let output = outputs
@@ -147,21 +146,24 @@ impl Transaction {
         }
     }
 
-    /// Signs every input with `key` (`SIGHASH_ALL`) and refreshes the bytes.
-    /// The id and legs stay: a SegWit txid excludes witnesses.
+    /// Signs every input with the one of `keys` that owns it (`SIGHASH_ALL`;
+    /// P2WPKH or P2TR by its script) and refreshes the bytes. The id and
+    /// legs stay: a SegWit txid excludes witnesses.
     ///
     /// # Errors
     ///
-    /// For an input `key` does not own, or a failed signature.
-    pub fn sign(&mut self, key: &KeyPair) -> anyhow::Result<()> {
-        let own = key.native_address().script_pubkey();
+    /// For an input no key owns, or a failed signature.
+    pub fn sign(&mut self, keys: &[KeyPair]) -> anyhow::Result<()> {
         let mut cache = SighashCache::new(&self.native);
         let mut witnesses = Vec::with_capacity(self.spent.len());
         for (index, output) in self.spent.iter().enumerate() {
-            if output.script_pubkey != own {
-                bail!("Bitcoin input {index} does not belong to the signing key");
-            }
-            let witness = if own.is_p2wpkh() {
+            let Some(key) = keys
+                .iter()
+                .find(|key| key.native_address().script_pubkey() == output.script_pubkey)
+            else {
+                bail!("Bitcoin input {index} belongs to no signing key");
+            };
+            let witness = if output.script_pubkey.is_p2wpkh() {
                 let sighash = cache.p2wpkh_signature_hash(
                     index,
                     &output.script_pubkey,

@@ -17,13 +17,14 @@ use crate::{
 /// transacts every asset of its network that the factory knows, one asset
 /// per builder.
 pub trait Wallet: Addressed + Networked + Send + Sync {
-    /// A new transaction builder sending `asset` from this wallet: add
-    /// transfers, then [`Builder::sign`].
+    /// A new transaction builder sending `asset`, with this wallet as its
+    /// default source: the factory's builder plus
+    /// [`Builder::with_default_source`]. Add transfers, then [`Builder::sign`].
     ///
     /// # Errors
     ///
     /// `Unsupported` for an asset this wallet does not send.
-    fn transaction(&self, asset: &Asset) -> Result<Box<dyn Builder + '_>, TransactionError>;
+    fn transaction(&self, asset: &Asset) -> Result<Box<dyn Builder>, TransactionError>;
 
     /// The key's curve and bytes, which is how a store files it.
     fn private_key(&self) -> (Curve, SecretBytes);
@@ -62,6 +63,14 @@ pub trait Factory: Send + Sync {
     /// [`ErrorKind::InvalidAddress`] when `text` is not an
     /// address of this network.
     fn parse_address(&self, text: &str) -> anyhow::Result<Address>;
+
+    /// A new transaction builder sending `asset`, with no default source:
+    /// every transfer names its own `from`, or a default is set.
+    ///
+    /// # Errors
+    ///
+    /// `Unsupported` for an asset this network's wallets do not send.
+    fn transaction(&self, asset: &Asset) -> Result<Box<dyn Builder>, TransactionError>;
 }
 
 /// A boxed factory is a factory, so a composition root can hold the
@@ -77,6 +86,10 @@ impl<F: Factory + ?Sized> Factory for Box<F> {
 
     fn parse_address(&self, text: &str) -> anyhow::Result<Address> {
         (**self).parse_address(text)
+    }
+
+    fn transaction(&self, asset: &Asset) -> Result<Box<dyn Builder>, TransactionError> {
+        (**self).transaction(asset)
     }
 }
 

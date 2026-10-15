@@ -1,9 +1,12 @@
 //! [`Config`]: one Bitcoin network's settings, and the pieces built from them.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context as _, ensure};
-use base::{Asset, AssetInfo, InputStore};
+use base::{
+    Asset, AssetInfo, Future, Indexer, InputStore, Service, Storage, Timer,
+    WalletFactoryBroadcaster,
+};
 use json_rpc::{BoxFuture, CallError, Client as _, Cluster, Endpoint, Http, Policy, Request};
 use serde::Deserialize;
 use serde_json::json;
@@ -35,6 +38,9 @@ pub struct Config {
     /// relay rate).
     #[serde(default = "Config::default_fee_floor")]
     pub fee_floor: u64,
+    /// How often the indexer wakes, in milliseconds; default 30,000.
+    #[serde(default = "Config::default_interval_ms")]
+    pub interval_ms: u64,
 }
 
 impl Config {
@@ -48,7 +54,12 @@ impl Config {
             address_type: AddressType::default(),
             fee_target_blocks: Self::default_fee_target_blocks(),
             fee_floor: Self::default_fee_floor(),
+            interval_ms: Self::default_interval_ms(),
         }
+    }
+
+    const fn default_interval_ms() -> u64 {
+        30_000
     }
 
     const fn default_confirmation_depth() -> u64 {
@@ -67,10 +78,9 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// For no or invalid endpoints, a depth outside `1..=1000`, a zero fee
-    /// target or a zero fee floor.
+    /// For invalid endpoints, a depth outside `1..=1000`, a zero fee
+    /// target, fee floor or interval.
     pub fn validate(&self) -> anyhow::Result<()> {
-        ensure!(!self.endpoints.is_empty(), "Bitcoin needs an endpoint");
         for endpoint in &self.endpoints {
             endpoint.validate()?;
         }
@@ -83,6 +93,7 @@ impl Config {
             "Bitcoin fee target must be positive"
         );
         ensure!(self.fee_floor > 0, "Bitcoin fee floor must be positive");
+        ensure!(self.interval_ms > 0, "Bitcoin interval must be positive");
         Ok(())
     }
 
@@ -92,7 +103,12 @@ impl Config {
     ///
     /// [`Self::validate`]'s refusals, or a node of another network.
     pub async fn connect(&self) -> anyhow::Result<Client> {
-        self.validate()?;
+        self.open(self.cluster().await?).await
+    }
+
+    /// A cluster of the configured endpoints.
+    async fn cluster(&self) -> anyhow::Result<Arc<dyn json_rpc::Client>> {
+        ensure!(!self.endpoints.is_empty(), "Bitcoin needs an endpoint");
         let nodes = self
             .endpoints
             .iter()
@@ -101,7 +117,13 @@ impl Config {
         let cluster = Cluster::new(nodes, height, Policy::default())
             .await
             .context("Bitcoin endpoints")?;
-        let client = Client::new(Arc::new(cluster), self.network);
+        Ok(Arc::new(cluster))
+    }
+
+    /// Validates, and a verified client over `transport`.
+    async fn open(&self, transport: Arc<dyn json_rpc::Client>) -> anyhow::Result<Client> {
+        self.validate()?;
+        let client = Client::new(transport, self.network);
         client.verify().await?;
         Ok(client)
     }
@@ -136,6 +158,44 @@ impl Config {
             name: Some(BTC_NAME.to_owned()),
             ticker: Some(BTC_TICKER.to_owned()),
         }
+    }
+}
+
+impl base::Config for Config {
+    fn network(&self) -> base::Network {
+        self.network.into()
+    }
+
+    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn json_rpc::Client>>> {
+        Box::pin(self.cluster())
+    }
+
+    fn build<'a>(
+        &'a self,
+        storage: &'a Storage,
+        client: Arc<dyn json_rpc::Client>,
+    ) -> Future<'a, anyhow::Result<Service>> {
+        Box::pin(async move {
+            let rpc = self.open(Arc::clone(&client)).await?;
+            let chain = self.chain(&rpc)?;
+            let indexer = Arc::new(Indexer::new(
+                Arc::new(chain),
+                Arc::clone(&storage.blocks),
+                Arc::clone(&storage.indexes),
+                Arc::new(Timer(Duration::from_millis(self.interval_ms))),
+            ));
+            Ok(Service {
+                indexer,
+                wallets: WalletFactoryBroadcaster {
+                    network: self.network.into(),
+                    factory: Arc::new(self.factory(&rpc, Arc::clone(&storage.inputs))),
+                    broadcaster: Arc::new(rpc),
+                },
+                assets: std::iter::once(self.asset()).collect(),
+                storage: storage.clone(),
+                client,
+            })
+        })
     }
 }
 

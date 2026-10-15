@@ -339,3 +339,25 @@ fn receipts_fall_back_to_one_call_per_transaction() {
 fn hex(text: &str) -> Vec<u8> {
     alloy_primitives::hex::decode(text).unwrap()
 }
+
+#[test]
+fn a_chain_over_a_swap_follows_its_replacement() {
+    let old = Script::new([]);
+    let swap = Arc::new(json_rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
+    let config = config();
+    let chain = config.chain(&Client::new(swap.clone(), config.native()));
+    let tips = |script: &Script, produced: &str| {
+        script.push([
+            Reply::ok("eth_blockNumber", json!(produced)),
+            Reply::ok("eth_getBlockByNumber", json!({"number": "0x1"})),
+        ]);
+        block_on(chain.tips()).unwrap().produced
+    };
+    assert_eq!(tips(&old, "0xa"), 10);
+
+    let next = Script::new([]);
+    swap.replace(Arc::new(next.clone()), Vec::new());
+    assert_eq!(tips(&next, "0x14"), 20);
+    old.exhausted();
+    next.exhausted();
+}

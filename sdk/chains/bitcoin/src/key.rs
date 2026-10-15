@@ -1,6 +1,7 @@
 use anyhow::Context as _;
+use base::{Signer, TransactionError};
 use bitcoin::{CompressedPublicKey, XOnlyPublicKey};
-use crypto::{PrivateKey as _, Secp256k1Ecdsa, SecretBytes};
+use crypto::{Curve, PrivateKey as _, Secp256k1Ecdsa, SecretBytes};
 
 use crate::{Address, AddressType, Network};
 
@@ -35,6 +36,19 @@ impl KeyPair {
     ) -> anyhow::Result<Self> {
         let key = Secp256k1Ecdsa::from_bytes(secret.as_bytes()).context("invalid Bitcoin key")?;
         Self::new(key, network, kind)
+    }
+
+    /// The key of `signer`, deriving its address (of either type) on
+    /// `network`.
+    pub(crate) fn from_signer(signer: &Signer, network: Network) -> Result<Self, TransactionError> {
+        if signer.curve != Curve::Secp256k1 {
+            return Err(TransactionError::failed("a Bitcoin key is secp256k1"));
+        }
+        [AddressType::SegwitV0, AddressType::Taproot]
+            .into_iter()
+            .filter_map(|kind| Self::import(signer.secret(), network, kind).ok())
+            .find(|key| base::Addressed::address(key) == &signer.address)
+            .ok_or_else(|| TransactionError::failed("the key does not sign for its address"))
     }
 
     fn new(key: Secp256k1Ecdsa, network: Network, kind: AddressType) -> anyhow::Result<Self> {

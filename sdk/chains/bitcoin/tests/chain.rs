@@ -103,10 +103,8 @@ fn block(height: u64, own: u8, parent: u8, transactions: &[(&Transaction, Vec<Tx
 
 fn chain(script: &Script, depth: u64) -> chain_bitcoin::Chain {
     let rpc = Client::new(Arc::new(script.clone()), Network::Regtest);
-    let config = Config {
-        confirmation_depth: depth,
-        ..Config::new(Network::Regtest, Vec::new())
-    };
+    let mut config = Config::new(Network::Regtest, Vec::new());
+    config.confirmation_depth = depth;
     config.chain(&rpc).expect("valid depth")
 }
 
@@ -288,4 +286,21 @@ async fn a_refetch_after_a_reorg_no_longer_holds_the_old_tip() {
     let after = chain.blocks(1, 2).await.expect("second branch");
     assert!(!after.contains(&old), "the old tip was taken back");
     assert!(after.contains(&before[0].header), "the common parent stays");
+}
+
+#[tokio::test]
+async fn a_chain_over_a_swap_follows_its_replacement() {
+    let old = Script::new([Reply::ok("getblockcount", json!(10))]);
+    let swap = Arc::new(json_rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
+    let rpc = Client::new(swap.clone(), Network::Regtest);
+    let chain = Config::new(Network::Regtest, Vec::new())
+        .chain(&rpc)
+        .expect("chain");
+    assert_eq!(chain.tips().await.expect("old node").produced, 10);
+
+    let next = Script::new([Reply::ok("getblockcount", json!(20))]);
+    swap.replace(Arc::new(next.clone()), Vec::new());
+    assert_eq!(chain.tips().await.expect("new node").produced, 20);
+    old.exhausted();
+    next.exhausted();
 }

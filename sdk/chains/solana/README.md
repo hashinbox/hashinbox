@@ -7,16 +7,20 @@ token transfers.
 ## Usage
 
 ```rust,no_run
-use base::{Asset, Broadcaster as _, Chained as _, WalletFactory as _};
+use base::{Asset, Broadcaster as _, BuilderExt as _, Chained as _, Config as _, Storage, WalletFactory as _};
 use chain_solana::{Config, Network};
 use json_rpc::Endpoint;
 
-async fn solana() -> anyhow::Result<()> {
+async fn solana(storage: Storage) -> anyhow::Result<()> {
     let genesis = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d".parse()?;
     let config = Config::new(
         Network::new(genesis, "mainnet-beta"),
         vec![Endpoint::new("http://127.0.0.1:8899")],
     );
+    // The one entry point a container uses: indexer, factory, broadcaster,
+    // and assets over the application's stores.
+    let _service = config.build(&storage, config.client().await?).await?;
+
     // Checks the genesis hash, the Memo-v3 program and every mint's decimals.
     let rpc = config.connect().await?;
 
@@ -30,10 +34,11 @@ async fn solana() -> anyhow::Result<()> {
     let wallet = factory.from_pk(factory.generate().await?).await?;
     let sol = Asset::native((&config.native()).into());
     let mut builder = wallet.transaction(&sol)?;
-    builder.transfer(factory.parse_address("...")?, 10_000_u64.into())?;
+    builder.send((factory.parse_address("...")?, 10_000_u64.into()))?;
     for transaction in builder.sign().await? {
         rpc.broadcast(&transaction).await?;
     }
+
     Ok(())
 }
 ```
@@ -49,6 +54,13 @@ tokens = [{ mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals = 6 
 
 ## Notes
 
+- `Config` implements `base::Config`: `build(&storage, client)` validates,
+  verifies the node and returns the `base::Service`. The indexer wakes every
+  `interval_ms` milliseconds (default 1,000).
+- `client()` is the chain's own cluster over `endpoints`; `build(&storage,
+  client)` verifies once that `client` serves the network and builds every
+  part over it. Pass a `json_rpc::Swap` and keep it to change nodes live.
+  Endpoints are needed only by `client()`.
 - Position is the slot; a skipped slot holds no block. `Header.height` is the
   block height. Blocks are read at `confirmed` commitment; `Tips.produced` is
   the newest confirmed slot, `Tips.confirmed` the newest rooted (`finalized`)

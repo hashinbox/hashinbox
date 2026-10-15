@@ -1,456 +1,349 @@
-//! [`Payments`]: the container. Parse or build each chain's configuration,
-//! attach a store slot by slot, and [`Builder::start`] verifies every node,
-//! composes, drives the index and waits for readiness.
+//! [`Payments`]: every configured network built over the application's
+//! stores, and its [`Builder`].
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use base::{BoxFuture, Network, Units};
-use futures_channel::mpsc::UnboundedReceiver;
-use indexing::{
-    Birthday, Change, Driver, Holder, IndexError, IndexErrorKind, IndexStore, IndexedBatch,
-    Indexers, Notifying, OutputKey, OutputPage, OutputRequest, OutputStore, Pending, PurgedRows,
-    Watch, WatchProgress, WatchStore, Watching,
+use anyhow::{Context as _, ensure};
+use base::{
+    Address, Asset, Assets, Birthday, Config, Enveloped, Handles, Network, Service, Stats, Storage,
+    TransactionError, TransactionErrorKind, Wallet, WalletError, WalletErrorKind, WalletFactories,
 };
+use crypto::SecretBytes;
+use json_rpc::Swap;
 use serde::de::DeserializeOwned;
-use tokio::{sync::watch, task::JoinHandle};
-use wallets::{SubmissionRegistrar, Submissions, WalletRepository, Wallets};
+use serde_json::Value;
 
-use crate::{
-    Networks,
-    config::{Chain, Chains, Document, Error, Registry, Sections},
-};
+use crate::Document;
 
-/// The store every chain is composed over: one view per trait slot of the
-/// caller's instance(s), never a wrapper around the store itself.
+/// Builds a registered chain's configuration from its section.
+type Parser = Box<dyn Fn(Value) -> anyhow::Result<Box<dyn Config>> + Send + Sync>;
+
+/// Every configured network's [`Service`], and the swappable transport it
+/// reaches its nodes through; every call is keyed by network.
 ///
-/// The two required views drive the engine; each optional one reaches only the
-/// machine that needs it. An optional slot left empty answers its one consumer
-/// with an error naming the missing `with_*` call. Built only by
-/// [`Builder::start`].
-#[derive(Clone)]
-pub struct Split {
-    watches: Arc<dyn WatchStore>,
-    index: Arc<dyn IndexStore>,
-    outputs: Option<Arc<dyn OutputStore>>,
+/// It names no chain: the application registers each chain's configuration
+/// with [`Builder::with_chain`], or hands configurations in with
+/// [`Builder::with_network`].
+pub struct Payments {
+    services: BTreeMap<Network, Service>,
+    clients: BTreeMap<Network, Arc<Swap>>,
 }
 
-/// Why an optional slot was asked for and never attached.
-fn unattached(call: &str) -> IndexError {
-    IndexError::new(
-        IndexErrorKind::InvalidRequest,
-        format!("this store slot was never attached to Payments ({call})"),
-        false,
-    )
-}
-
-impl WatchStore for Split {
-    fn add<'a>(&'a self, watches: Vec<Watch>) -> BoxFuture<'a, Result<(), IndexError>> {
-        self.watches.add(watches)
-    }
-
-    fn all<'a>(
-        &'a self,
-        network: &'a Network,
-    ) -> BoxFuture<'a, Result<Vec<WatchProgress>, IndexError>> {
-        self.watches.all(network)
-    }
-
-    fn forget<'a>(
-        &'a self,
-        network: &'a Network,
-        watch: &'a Watch,
-    ) -> BoxFuture<'a, Result<(), IndexError>> {
-        self.watches.forget(network, watch)
-    }
-}
-
-impl IndexStore for Split {
-    fn checkpoint<'a>(
-        &'a self,
-        network: &'a Network,
-    ) -> BoxFuture<'a, Result<Option<base::BlockRef>, IndexError>> {
-        self.index.checkpoint(network)
-    }
-
-    fn commit<'a>(
-        &'a self,
-        batch: IndexedBatch,
-    ) -> BoxFuture<'a, Result<Vec<OutputKey>, IndexError>> {
-        self.index.commit(batch)
-    }
-
-    fn purge<'a>(&'a self, network: &'a Network) -> BoxFuture<'a, Result<PurgedRows, IndexError>> {
-        self.index.purge(network)
-    }
-}
-
-impl OutputStore for Split {
-    fn list<'a>(&'a self, request: OutputRequest) -> BoxFuture<'a, Result<OutputPage, IndexError>> {
-        match &self.outputs {
-            Some(outputs) => outputs.list(request),
-            None => Box::pin(async { Err(unattached("with_output_store")) }),
-        }
-    }
-}
-
-/// Why [`Builder::start`] (or a builder step) refused.
-#[derive(Debug)]
-pub enum StartError {
-    /// The document or a chain's section.
-    Config(Error),
-    /// A required slot ([`Builder::with_store`]) was never attached.
-    MissingStore,
-    /// Composing a verified chain, or registering its wallet factories.
-    Compose(String),
-    /// The driver stopped before every network settled.
-    Stopped,
-}
-
-impl fmt::Display for StartError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Config(error) => write!(formatter, "{error}"),
-            Self::MissingStore => formatter.write_str("no store was attached (with_store)"),
-            Self::Compose(message) => write!(formatter, "composition failed: {message}"),
-            Self::Stopped => formatter.write_str("synchronization stopped before readiness"),
-        }
-    }
-}
-
-impl std::error::Error for StartError {}
-
-impl From<Error> for StartError {
-    fn from(error: Error) -> Self {
-        Self::Config(error)
-    }
-}
-
-impl From<wallets::WalletError> for StartError {
-    fn from(error: wallets::WalletError) -> Self {
-        Self::Compose(error.to_string())
-    }
-}
-
-/// One container under construction; every step is one decision.
-pub struct Builder<A: Ord> {
-    sections: Option<Sections>,
-    registry: Registry<A, Split>,
-    coded: Vec<(String, Box<dyn Chain<A, Split>>)>,
-    endpoints: Option<BTreeMap<Network, Vec<serde_json::Value>>>,
-    logger: logging::Logger,
-    watches: Option<Arc<dyn WatchStore>>,
-    index: Option<Arc<dyn IndexStore>>,
-    index_override: bool,
-    outputs: Option<Arc<dyn OutputStore>>,
-    registry_slot: Option<Arc<dyn WalletRepository>>,
-}
-
-/// Every configured chain composed, its index driven, its operational handle.
-pub struct Payments<A: Ord> {
-    /// Every configured asset's wallet factory, keyed by asset tag, holding
-    /// the signers [`Builder::start`] restored from the wallet registry.
-    pub wallets: Wallets<A>,
-    /// Every composed network's index.
-    pub index: Arc<Indexers>,
-    /// Every composed network's blocks above its confirmed line, to complete
-    /// a repository's balance and history reads.
-    pub pending: Vec<(Network, Arc<dyn Pending>)>,
-    /// Every declared asset's unit.
-    pub units: Units,
-    /// The operational handle: nodes, pause, resume, rescan, health.
-    pub networks: Networks<A>,
-    /// The wallet registry slot, when one was attached; [`Builder::start`]
-    /// reads it once to restore the signers, and nothing else calls it.
-    pub registry: Option<Arc<dyn WalletRepository>>,
-    /// Lines each accepted chain asked an operator to read.
-    pub notices: Vec<String>,
-    /// Why each section whose node failed verification was skipped.
-    pub skipped: Vec<Error>,
-    notifying: Option<Arc<Notifying<Arc<dyn IndexStore>>>>,
-    submissions: Arc<Submissions>,
-    stop: watch::Sender<bool>,
-    sync: JoinHandle<()>,
-}
-
-impl<A> Payments<A>
-where
-    A: Clone + Ord + Send + Sync + 'static,
-{
-    /// A builder over a TOML document of chain sections, one per name a
-    /// later [`Builder::with`] registers.
-    ///
-    /// # Errors
-    ///
-    /// The document does not decode into named sections.
-    #[cfg(feature = "toml")]
-    pub fn from_toml(text: &str) -> Result<Builder<A>, Error> {
-        let sections: Sections = Document::toml(text).parse()?;
-        Ok(Builder::with_sections(Some(sections)))
-    }
-
-    /// A builder over a JSON document of chain sections.
-    ///
-    /// # Errors
-    ///
-    /// The document does not decode into named sections.
-    pub fn from_json(bytes: &[u8]) -> Result<Builder<A>, Error> {
-        let sections: Sections = Document::json(bytes)?.parse()?;
-        Ok(Builder::with_sections(Some(sections)))
-    }
-
-    /// A builder with no document: every chain is added in code
-    /// ([`Builder::chain`]).
+impl Payments {
+    /// A builder with nothing configured.
     #[must_use]
-    pub fn builder() -> Builder<A> {
-        Builder::with_sections(None)
+    pub fn builder() -> Builder {
+        Builder::default()
     }
 
-    /// Observes wallet `id` — filed first in the wallet repository — at
-    /// `holder`'s address in its asset, from `birthday`.
+    /// The service of `network`.
     ///
     /// # Errors
     ///
-    /// The index's refusal ([`indexing::Watching::watch`]).
+    /// `Unsupported` for a network that is not configured.
+    pub fn service(&self, network: &Network) -> anyhow::Result<&Service> {
+        self.services
+            .get(network)
+            .ok_or_else(|| unsupported().into())
+    }
+
+    /// Every network's service.
+    #[must_use]
+    pub const fn services(&self) -> &BTreeMap<Network, Service> {
+        &self.services
+    }
+
+    /// The configured networks, in order.
+    pub fn networks(&self) -> impl Iterator<Item = &Network> {
+        self.services.keys()
+    }
+
+    /// Every network's native currency and configured tokens.
+    #[must_use]
+    pub fn assets(&self) -> Assets {
+        self.services
+            .values()
+            .flat_map(|service| service.assets.clone())
+            .collect()
+    }
+
+    /// The transport every part of `network` reaches its nodes through:
+    /// [`Swap::replace`] moves its indexer, factory, wallets and broadcaster
+    /// to other nodes at once, without verifying them.
+    ///
+    /// # Errors
+    ///
+    /// `Unsupported` for a network that is not configured.
+    pub fn client(&self, network: &Network) -> anyhow::Result<&Arc<Swap>> {
+        self.clients
+            .get(network)
+            .ok_or_else(|| unsupported().into())
+    }
+
+    /// Runs every network's indexer on its own task; the caller stops and
+    /// joins them.
+    #[must_use]
+    pub fn run(&self) -> Handles {
+        let mut handles = Handles::default();
+        for service in self.services.values() {
+            handles.push(Arc::clone(&service.indexer).run());
+        }
+        handles
+    }
+
+    /// Indexes `asset` of `address` from `birthday`, on the address's network.
+    ///
+    /// # Errors
+    ///
+    /// An unconfigured network, an asset of another network, or a chain or
+    /// store failure.
     pub async fn watch(
         &self,
-        id: &str,
-        holder: &dyn Holder,
+        address: &Address,
+        asset: &Asset,
         birthday: Birthday,
-    ) -> Result<Watch, IndexError> {
-        self.index.watch(id, holder, birthday).await
+    ) -> anyhow::Result<()> {
+        self.service(&address.network)?
+            .indexer
+            .watch(address, asset, birthday)
+            .await
     }
 
-    /// A stream of every [`Change`] committed from now on: one per watch a
-    /// commit advanced. `None` when [`Builder::with_index_store`] replaced
-    /// the container's notifying index slot.
+    /// Every network's indexing health.
     #[must_use]
-    pub fn changes(&self) -> Option<UnboundedReceiver<Change>> {
-        self.notifying.as_ref().map(|notifying| notifying.changes())
+    pub fn stats(&self) -> BTreeMap<Network, Stats> {
+        self.services
+            .iter()
+            .map(|(network, service)| (network.clone(), service.indexer.stats()))
+            .collect()
     }
 
-    /// Stops in the one safe order: no new sends, submission registration
-    /// closed and drained while indexing can still reconcile them, then
-    /// indexing stopped and joined.
+    /// A new wallet of `network` and its key, kept in the wallet store.
     ///
     /// # Errors
     ///
-    /// A submission or the driver task panicked.
-    pub async fn shutdown(self) -> Result<(), tokio::task::JoinError> {
-        self.networks.reset_health();
-        self.wallets.close();
-        self.submissions.close();
-        let drained = self.submissions.drain().await;
-        let _ = self.stop.send(true);
-        let joined = self.sync.await;
-        drained.and(joined)
+    /// An unconfigured network, key generation, or the store.
+    pub async fn generate(
+        &self,
+        network: &Network,
+    ) -> anyhow::Result<(Arc<dyn Wallet>, SecretBytes)> {
+        let service = self.service(network)?;
+        let (wallet, secret) = self.factories().generate(network).await?;
+        service.storage.wallets.insert(&*wallet).await?;
+        Ok((wallet, secret))
+    }
+
+    /// The kept wallet of `address`, restored through its network's factory.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidAddress` when no wallet of `address` is kept; an unconfigured
+    /// network, or the store.
+    pub async fn wallet(&self, address: &Address) -> anyhow::Result<Arc<dyn Wallet>> {
+        let service = self.service(&address.network)?;
+        let wallets = service.storage.wallets.find_all(&self.factories()).await?;
+        wallets
+            .into_iter()
+            .find(|wallet| wallet.address() == address)
+            .ok_or_else(|| {
+                WalletError::new(WalletErrorKind::InvalidAddress, "no wallet of this address")
+                    .into()
+            })
+    }
+
+    /// Every kept wallet, restored through its network's factory.
+    ///
+    /// # Errors
+    ///
+    /// When the wallet store cannot read or a key does not restore.
+    pub async fn wallets(&self) -> anyhow::Result<Vec<Arc<dyn Wallet>>> {
+        match self.services.values().next() {
+            Some(service) => service.storage.wallets.find_all(&self.factories()).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The canonical address of `text` in `network`.
+    ///
+    /// # Errors
+    ///
+    /// `Unsupported` for an unconfigured network; `InvalidAddress` otherwise.
+    pub fn parse(&self, network: &Network, text: &str) -> anyhow::Result<Address> {
+        self.service(network)?.wallets.factory.parse_address(text)
+    }
+
+    /// Submits the exact signed `transaction` to every node of `network`.
+    ///
+    /// # Errors
+    ///
+    /// `Unsupported` for an unconfigured network; the broadcaster's failure
+    /// otherwise.
+    pub async fn broadcast(
+        &self,
+        network: &Network,
+        transaction: &(dyn Enveloped + Sync),
+    ) -> Result<(), TransactionError> {
+        let service = self.services.get(network).ok_or_else(|| {
+            TransactionError::new(
+                TransactionErrorKind::Unsupported,
+                "network is not configured",
+            )
+        })?;
+        service.wallets.broadcaster.broadcast(transaction).await
+    }
+
+    fn factories(&self) -> WalletFactories {
+        let mut factories = WalletFactories::new();
+        for service in self.services.values() {
+            factories.set(service.wallets.clone());
+        }
+        factories
     }
 }
 
-impl<A> Builder<A>
-where
-    A: Clone + Ord + Send + Sync + 'static,
-{
-    fn with_sections(sections: Option<Sections>) -> Self {
-        Self {
-            sections,
-            registry: Registry::new(),
-            coded: Vec::new(),
-            endpoints: None,
-            logger: logging::Logger::default(),
-            watches: None,
-            index: None,
-            index_override: false,
-            outputs: None,
-            registry_slot: None,
-        }
-    }
+fn unsupported() -> WalletError {
+    WalletError::new(WalletErrorKind::Unsupported, "network is not configured")
+}
 
-    /// Registers `C` as the chain that parses the section called `name`.
+impl fmt::Debug for Payments {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Payments")
+            .field("networks", &self.services.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Collects configuration and stores, then [`Builder::build`] connects every
+/// network.
+#[derive(Default)]
+pub struct Builder {
+    parsers: BTreeMap<String, Parser>,
+    document: Option<Document>,
+    networks: Vec<Box<dyn Config>>,
+    clients: BTreeMap<Network, Arc<dyn json_rpc::Client>>,
+    storage: Option<Storage>,
+}
+
+impl Builder {
+    /// Reads the document's sections whose `chain` is `name` as `C`.
+    /// Registering a name again replaces the earlier chain.
     #[must_use]
-    pub fn with<C>(mut self, name: &str) -> Self
-    where
-        C: Chain<A, Split> + DeserializeOwned,
-    {
-        self.registry.register::<C>(name);
-        self
-    }
-
-    /// Adds one chain's configuration built in code, named by its network.
-    #[must_use]
-    pub fn chain(mut self, chain: impl Chain<A, Split>) -> Self {
-        let network = chain.network();
-        let name = format!("{}/{}", network.chain, network.name);
-        self.coded.push((name, Box::new(chain)));
-        self
-    }
-
-    /// Logs every chain's RPC traffic and the driver's passes to `logger`.
-    #[must_use]
-    pub fn with_logger(mut self, logger: logging::Logger) -> Self {
-        self.logger = logger;
-        self
-    }
-
-    /// Composes each named network over these endpoint documents instead of
-    /// its section's (an application that keeps its nodes elsewhere).
-    #[must_use]
-    pub fn with_endpoints(mut self, endpoints: BTreeMap<Network, Vec<serde_json::Value>>) -> Self {
-        self.endpoints = Some(endpoints);
-        self
-    }
-
-    /// The required ports, both views of one caller instance.
-    #[must_use]
-    pub fn with_store<S>(mut self, store: Arc<S>) -> Self
-    where
-        S: WatchStore + IndexStore + 'static,
-    {
-        self.watches = Some(store.clone());
-        if !self.index_override {
-            self.index = Some(store);
-        }
-        self
-    }
-
-    /// The optional output slot (Bitcoin's coin selection).
-    #[must_use]
-    pub fn with_output_store<S: OutputStore + 'static>(mut self, store: Arc<S>) -> Self {
-        self.outputs = Some(store);
-        self
-    }
-
-    /// The optional wallet repository slot (the `wallet` rows), held for the
-    /// application; the engine never calls it.
-    #[must_use]
-    pub fn with_wallet_registry<S: WalletRepository + 'static>(mut self, store: Arc<S>) -> Self {
-        self.registry_slot = Some(store);
-        self
-    }
-
-    /// Replaces the container's notifying index slot with `store`;
-    /// [`Payments::changes`] then answers `None`.
-    #[must_use]
-    pub fn with_index_store<S: IndexStore + 'static>(mut self, store: Arc<S>) -> Self {
-        self.index = Some(store);
-        self.index_override = true;
-        self
-    }
-
-    /// Every configured chain with its endpoint documents as written, before
-    /// [`Self::with_endpoints`] replaced them.
-    ///
-    /// # Errors
-    ///
-    /// A section no chain registered for, or one its chain refuses.
-    pub fn endpoints(&self) -> Result<BTreeMap<Network, Vec<serde_json::Value>>, Error> {
-        Ok(self
-            .chains()?
-            .endpoints()
-            .map(|(network, documents)| (network.clone(), documents.to_vec()))
-            .collect())
-    }
-
-    fn chains(&self) -> Result<Chains<A, Split>, Error> {
-        match &self.sections {
-            Some(sections) => self.registry.chains(sections),
-            None => Ok(Chains::new()),
-        }
-    }
-
-    /// Verifies every node, composes each chain whose node passed over the
-    /// attached slots, drives the index, and returns once every network
-    /// settled. A chain whose node fails is skipped ([`Payments::skipped`]).
-    /// With a wallet registry ([`Self::with_wallet_registry`]) it first
-    /// restores the signers of the served networks
-    /// ([`wallets::Wallets::load_signers`]); without one no signer is loaded.
-    ///
-    /// # Errors
-    ///
-    /// A refused section, no [`Self::with_store`], a composition or signer
-    /// restore failure, or
-    /// the driver stopping before readiness.
-    pub async fn start(mut self) -> Result<Payments<A>, StartError> {
-        let mut chains = self.chains()?.with_logger(self.logger.clone());
-        for (name, chain) in std::mem::take(&mut self.coded) {
-            chains.push(name, chain)?;
-        }
-        if let Some(endpoints) = &self.endpoints {
-            chains = chains.with_endpoints(endpoints)?;
-        }
-        let notices = chains.notices().to_vec();
-        let endpoints = chains
-            .endpoints()
-            .map(|(network, documents)| {
-                crate::config::Endpoints::decode(documents).map(|nodes| (network.clone(), nodes))
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let (Some(watches), Some(index)) = (self.watches, self.index) else {
-            return Err(StartError::MissingStore);
-        };
-        let notifying = (!self.index_override).then(|| Arc::new(Notifying::new(index.clone())));
-        let index: Arc<dyn IndexStore> = match &notifying {
-            Some(notifying) => notifying.clone(),
-            None => index,
-        };
-        let split = Split {
-            watches,
-            index: index.clone(),
-            outputs: self.outputs,
-        };
-        let submissions = Arc::new(Submissions::new());
-        let registrar: Arc<dyn SubmissionRegistrar> = submissions.clone();
-        let startup = chains
-            .compose_available(
-                || std::future::ready(Ok::<_, StartError>(split)),
-                |split: &Split| Ok::<_, StartError>(split.clone()),
-                &registrar,
-            )
-            .await?;
-        let composition = startup.composition;
-        // Every network's watch list is loaded from its `wallet_index` rows
-        // now, so a store that cannot answer fails the start rather than the
-        // first pass.
-        for network in composition.index.networks() {
-            composition
-                .index
-                .watched(network)
-                .await
-                .map_err(|error| StartError::Compose(error.message))?;
-        }
-        let driver = Driver::new(composition.index.clone()).with_logger(self.logger);
-        let mut readiness = driver.readiness();
-        let networks = Networks::new(
-            startup.networks,
-            endpoints,
-            composition.wallets.clone(),
-            composition.index.clone(),
-            index,
-            &driver,
+    pub fn with_chain<C: Config + DeserializeOwned + 'static>(
+        mut self,
+        name: impl Into<String>,
+    ) -> Self {
+        self.parsers.insert(
+            name.into(),
+            Box::new(|section| Ok(Box::new(serde_json::from_value::<C>(section)?))),
         );
-        // Before syncing: every keyed wallet of a served network is rebuilt as
-        // a signer. Without a wallet registry slot no signer is loaded.
-        if let Some(registry) = &self.registry_slot {
-            composition
-                .wallets
-                .load_signers(registry.as_ref(), composition.index.networks())
-                .await?;
+        self
+    }
+
+    /// The configuration document: its networks, read by the registered
+    /// chains.
+    #[must_use]
+    pub fn with_config(mut self, document: Document) -> Self {
+        self.document = Some(document);
+        self
+    }
+
+    /// One more network, configured in code.
+    #[must_use]
+    pub fn with_network(mut self, config: impl Config + 'static) -> Self {
+        self.networks.push(Box::new(config));
+        self
+    }
+
+    /// Reaches `network`'s nodes through `client` instead of the chain's own
+    /// [`Config::client`].
+    #[must_use]
+    pub fn with_client(
+        mut self,
+        network: impl Into<Network>,
+        client: Arc<dyn json_rpc::Client>,
+    ) -> Self {
+        self.clients.insert(network.into(), client);
+        self
+    }
+
+    /// Every store the networks are built over. Required.
+    #[must_use]
+    pub fn with_storage(mut self, storage: Storage) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Reads every section, then builds each network over a [`Swap`] of its
+    /// given client or the chain's own.
+    ///
+    /// # Errors
+    ///
+    /// No storage, a section of an unregistered chain or that does not
+    /// decode, a network configured twice, a client for a network with no
+    /// configuration, or a network whose configuration is invalid or whose
+    /// nodes do not connect.
+    pub async fn build(self) -> anyhow::Result<Payments> {
+        let storage = self.storage.context("payments needs with_storage")?;
+
+        let mut configs = Vec::new();
+        for (chain, section) in self
+            .document
+            .as_ref()
+            .map_or(Ok(Vec::new()), Document::sections)?
+        {
+            let parse = self.parsers.get(&chain).with_context(|| {
+                let known = self.parsers.keys().cloned().collect::<Vec<_>>();
+                format!("no chain {chain:?} is registered; registered: {known:?}")
+            })?;
+            configs.push(parse(section).with_context(|| chain.clone())?);
         }
-        let (stop, stopped) = watch::channel(false);
-        let sync = tokio::spawn(driver.run(stopped));
-        readiness.settled().await.ok_or(StartError::Stopped)?;
-        Ok(Payments {
-            wallets: composition.wallets,
-            index: composition.index,
-            pending: composition.pending,
-            units: composition.units,
-            networks,
-            registry: self.registry_slot,
-            notices,
-            skipped: startup.skipped,
-            notifying,
-            submissions,
-            stop,
-            sync,
-        })
+        configs.extend(self.networks);
+        let mut given = self.clients;
+        for network in given.keys() {
+            ensure!(
+                configs.iter().any(|config| config.network() == *network),
+                "a client is given for {}/{}, which is not configured",
+                network.chain,
+                network.name
+            );
+        }
+
+        let mut payments = Payments {
+            services: BTreeMap::new(),
+            clients: BTreeMap::new(),
+        };
+        for config in configs {
+            let network = config.network();
+            let label = format!("{}/{}", network.chain, network.name);
+            ensure!(
+                !payments.services.contains_key(&network),
+                "network {label} is configured twice"
+            );
+            let transport = match given.remove(&network) {
+                Some(client) => client,
+                None => config.client().await.with_context(|| label.clone())?,
+            };
+            let client = Arc::new(Swap::new(transport, Vec::new()));
+            let service = config
+                .build(&storage, client.clone())
+                .await
+                .with_context(|| label.clone())?;
+            payments.services.insert(network.clone(), service);
+            payments.clients.insert(network, client);
+        }
+        Ok(payments)
+    }
+}
+
+impl fmt::Debug for Builder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Builder")
+            .field("chains", &self.parsers.keys().collect::<Vec<_>>())
+            .field("document", &self.document)
+            .field("networks", &self.networks.len())
+            .field("clients", &self.clients.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
     }
 }

@@ -37,15 +37,14 @@ impl FeeRate {
     }
 }
 
-/// Virtual size of a transaction spending `inputs` outputs that pay
-/// `input` (P2WPKH or P2TR) and paying `outputs`.
+/// Virtual size of a transaction spending outputs that pay `inputs` (each
+/// P2WPKH or P2TR) and paying `outputs`.
 pub(crate) fn vsize<'a>(
-    input: &Script,
-    inputs: usize,
+    inputs: impl IntoIterator<Item = &'a Script>,
     outputs: impl IntoIterator<Item = &'a Script>,
 ) -> u64 {
     let weight = BASE_WEIGHT
-        + inputs as u64 * input_weight(input)
+        + inputs.into_iter().map(input_weight).sum::<u64>()
         + outputs.into_iter().map(output_weight).sum::<u64>();
     weight.div_ceil(4)
 }

@@ -1,13 +1,11 @@
 [workspace]
 members = [
-    "examples",
     "apps/server",
     "sdk/base",
     "sdk/chains/bitcoin",
     "sdk/chains/ethereum",
     "sdk/chains/solana",
     "sdk/payments",
-    "sdk/wallets",
     "packages/decimal",
     "packages/crypto",
     "packages/json-rpc",
@@ -25,6 +23,7 @@ rust-version = "1.91"
 
 [workspace.dependencies]
 clap = { version = "4.6", features = ["derive"] }
+anyhow = "1"
 alloy-primitives = { version = "1", default-features = false, features = ["std"] }
 alloy-consensus = { version = "1.8", features = ["k256"] }
 alloy-eips = "1.8"
@@ -42,10 +41,11 @@ jsonrpsee = { version = "=0.24.10", default-features = false, features = ["http-
 serde = { version = "1", default-features = false }
 serde_json = "1"
 sha2 = "=0.10.9"
-# The server's SQL store: bundled
-# SQLite on Tokio, runtime-checked queries and `FromRow`, no macros reading a
-# database at build time. 0.8 because 0.9 needs a newer Rust than the MSRV.
-sqlx = { version = "=0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "derive"] }
+# The server's SQL store: diesel on SQLite (sync; run on `spawn_blocking`),
+# pooled with r2d2. 2.3 needs Rust 1.86, within the MSRV.
+diesel = { version = "=2.3.14", default-features = false, features = ["sqlite", "r2d2", "returning_clauses_for_sqlite_3_35"] }
+# Diesel links SQLite through this; bundled, so no system library is needed.
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "=1.18.1", features = ["v7"] }
 zeroize = "=1.8.2"

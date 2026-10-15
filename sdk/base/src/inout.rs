@@ -160,13 +160,11 @@ impl<A: Addressed> IntoIterator for Outputs<A> {
 
 /// Where spendable inputs are read.
 pub trait Store: Send + Sync {
-    /// Every unspent output of `address`, as inputs to spend.
+    /// Every unspent output of `addresses`, as inputs to spend, in one read;
+    /// each input names its address.
     ///
     /// # Errors
     ///
     /// When the store cannot read.
-    fn find_unspent_for_address<'a>(
-        &'a self,
-        address: &'a Address,
-    ) -> Future<'a, anyhow::Result<Inputs>>;
+    fn find_unspent<'a>(&'a self, addresses: &'a [Address]) -> Future<'a, anyhow::Result<Inputs>>;
 }

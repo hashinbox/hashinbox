@@ -10,19 +10,25 @@ rest of the SDK.
 ```rust,no_run
 use std::sync::Arc;
 
-use base::{Asset, Broadcaster as _, Chained as _, InputStore, WalletFactory as _};
+use base::{
+    Asset, Broadcaster as _, BuilderExt as _, Chained as _, Config as _, Storage, WalletFactory as _,
+};
 use chain_bitcoin::{AddressType, Config, Network};
 use json_rpc::Endpoint;
 
-/// `inputs` is the store of unspent outputs, which coin selection spends.
-async fn bitcoin(inputs: Arc<dyn InputStore>) -> anyhow::Result<()> {
-    let config = Config {
-        address_type: AddressType::Taproot,
-        ..Config::new(
-            Network::Regtest,
-            vec![Endpoint::new("http://bitcoin:bitcoin@127.0.0.1:18443")],
-        )
-    };
+/// `storage` is the application's stores; its `inputs` are the unspent
+/// outputs coin selection spends.
+async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
+    let mut config = Config::new(
+        Network::Regtest,
+        vec![Endpoint::new("http://bitcoin:bitcoin@127.0.0.1:18443")],
+    );
+    config.address_type = AddressType::Taproot;
+
+    // The one entry point a container uses: indexer, factory, broadcaster
+    // and assets over the application's stores.
+    let _service = config.build(&storage, config.client().await?).await?;
+
     // Checks the node and its network.
     let rpc = config.connect().await?;
 
@@ -32,19 +38,27 @@ async fn bitcoin(inputs: Arc<dyn InputStore>) -> anyhow::Result<()> {
     let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
 
     // Sending: sign, keep the bytes, then broadcast them to every node.
-    let factory = config.factory(&rpc, inputs);
+    let factory = config.factory(&rpc, Arc::clone(&storage.inputs));
     let wallet = factory.from_pk(factory.generate().await?).await?;
     let mut builder = wallet.transaction(&Asset::native(Network::Regtest.into()))?;
-    builder.transfer(factory.parse_address("bcrt1q...")?, 10_000_u64.into())?;
+    builder.send((factory.parse_address("bcrt1q...")?, 10_000_u64.into()))?;
     for transaction in builder.sign().await? {
         rpc.broadcast(&transaction).await?;
     }
+
     Ok(())
 }
 ```
 
 ## Notes
 
+- `Config` implements `base::Config`: `build(&storage, client)` validates,
+  verifies the node and returns the `base::Service`. The indexer wakes every
+  `interval_ms` milliseconds (default 30,000).
+- `client()` is the chain's own cluster over `endpoints`; `build(&storage,
+  client)` verifies once that `client` serves the network and builds every
+  part over it. Pass a `json_rpc::Swap` and keep it to change nodes live.
+  Endpoints are needed only by `client()`.
 - Position and height are both the block height. `confirmation_depth`
   (1 to 1000, default 6) makes a block final once that many blocks, itself
   included, are on the chain: `confirmed = produced - (depth - 1)`. Bitcoin

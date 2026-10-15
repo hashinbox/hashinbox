@@ -1,5 +1,6 @@
 use anyhow::Context as _;
-use crypto::{PrivateKey as _, Secp256k1Ecdsa, SecretBytes};
+use base::{Signer, TransactionError};
+use crypto::{Curve, PrivateKey as _, Secp256k1Ecdsa, SecretBytes};
 
 use crate::{Address, Network};
 
@@ -28,6 +29,20 @@ impl KeyPair {
     pub fn import(secret: &SecretBytes, network: &Network) -> anyhow::Result<Self> {
         let key = Secp256k1Ecdsa::from_bytes(secret.as_bytes()).context("invalid Ethereum key")?;
         Ok(Self::new(key, network))
+    }
+
+    /// The key of `signer`, deriving its address on `network`.
+    pub(crate) fn from_signer(
+        signer: &Signer,
+        network: &Network,
+    ) -> Result<Self, TransactionError> {
+        if signer.curve != Curve::Secp256k1 {
+            return Err(TransactionError::failed("an Ethereum key is secp256k1"));
+        }
+        Self::import(signer.secret(), network)
+            .ok()
+            .filter(|key| base::Addressed::address(key) == &signer.address)
+            .ok_or_else(|| TransactionError::failed("the key does not sign for its address"))
     }
 
     fn new(key: Secp256k1Ecdsa, network: &Network) -> Self {

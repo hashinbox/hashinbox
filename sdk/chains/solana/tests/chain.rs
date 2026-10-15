@@ -218,3 +218,25 @@ fn a_listed_slot_that_turns_out_skipped_asks_for_a_retry() {
     ]);
     assert!(block_on(chain(&script).blocks(5, 5)).is_err());
 }
+
+#[test]
+fn a_chain_over_a_swap_follows_its_replacement() {
+    let old = Script::new([]);
+    let swap = Arc::new(json_rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
+    let config = config();
+    let chain = config.chain(&Client::new(swap.clone(), config.native()));
+    let tips = |script: &Script, produced: u64| {
+        script.push([
+            Reply::ok("getSlot", json!(produced)),
+            Reply::ok("getSlot", json!(1)),
+        ]);
+        block_on(chain.tips()).unwrap().produced
+    };
+    assert_eq!(tips(&old, 10), 10);
+
+    let next = Script::new([]);
+    swap.replace(Arc::new(next.clone()), Vec::new());
+    assert_eq!(tips(&next, 20), 20);
+    old.exhausted();
+    next.exhausted();
+}

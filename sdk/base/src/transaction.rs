@@ -1,8 +1,9 @@
-use std::{collections::BTreeSet, error::Error as StdError, fmt, pin::Pin};
+use std::{collections::BTreeSet, error::Error as StdError, fmt, pin::Pin, sync::Arc};
 
+use crypto::{Curve, SecretBytes};
 use serde::{Deserialize, Serialize};
 
-use crate::{Address, Addressed, Asset, Coin, Decimal, Network};
+use crate::{Address, Addressed, Asset, Coin, Decimal, Network, Wallet};
 
 /// The future transaction capabilities return: boxed so the traits stay `dyn`-safe.
 pub type Future<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
@@ -149,19 +150,112 @@ impl Id {
     }
 }
 
-/// Ordered transfers of one asset from one wallet, signed into one or more
-/// transactions. The asset is fixed when the wallet creates the builder; it
-/// knows nothing of broadcasting: save the signed transactions, then hand each
-/// to a [`Broadcaster`].
+/// Who spends: an address and the key that signs for it. Cheap to clone
+/// (the secret is shared, zeroized on drop); `Debug` shows no secret.
+#[derive(Clone)]
+pub struct Signer {
+    /// The spending address.
+    pub address: Address,
+    /// The key's curve.
+    pub curve: Curve,
+    secret: Arc<SecretBytes>,
+}
+
+impl Signer {
+    /// The signer of `address` with `secret` on `curve`; the chain checks
+    /// that the key derives the address when it signs.
+    #[must_use]
+    pub fn new(address: Address, curve: Curve, secret: SecretBytes) -> Self {
+        Self {
+            address,
+            curve,
+            secret: Arc::new(secret),
+        }
+    }
+
+    /// The key bytes, in the chain's import format.
+    #[must_use]
+    pub fn secret(&self) -> &SecretBytes {
+        &self.secret
+    }
+}
+
+impl fmt::Debug for Signer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Signer")
+            .field("address", &self.address)
+            .field("curve", &self.curve)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<W: Wallet + ?Sized> From<&W> for Signer {
+    fn from(wallet: &W) -> Self {
+        let (curve, secret) = wallet.private_key();
+        Self::new(wallet.address().clone(), curve, secret)
+    }
+}
+
+impl From<&Arc<dyn Wallet>> for Signer {
+    fn from(wallet: &Arc<dyn Wallet>) -> Self {
+        Self::from(&**wallet)
+    }
+}
+
+/// One payment: `amount` (atomic units) `to` a recipient, from its own
+/// source or, without one, the builder's default source.
+#[derive(Clone, Debug)]
+pub struct Transfer {
+    /// The recipient.
+    pub to: Address,
+    /// Atomic amount.
+    pub amount: Decimal,
+    /// Who pays; `None` for the builder's default source.
+    pub from: Option<Signer>,
+}
+
+impl Transfer {
+    /// `amount` to `to`, from the builder's default source.
+    #[must_use]
+    pub const fn new(to: Address, amount: Decimal) -> Self {
+        Self {
+            to,
+            amount,
+            from: None,
+        }
+    }
+
+    /// The same transfer, paid by `source`.
+    #[must_use]
+    pub fn from(mut self, source: impl Into<Signer>) -> Self {
+        self.from = Some(source.into());
+        self
+    }
+}
+
+impl From<(Address, Decimal)> for Transfer {
+    fn from((to, amount): (Address, Decimal)) -> Self {
+        Self::new(to, amount)
+    }
+}
+
+/// Ordered transfers of one asset, signed into one or more transactions.
+/// The asset is fixed when the factory or wallet creates the builder; each
+/// transfer is paid by its own source or the default one. It knows nothing
+/// of broadcasting: save the signed transactions, then hand each to a
+/// [`Broadcaster`].
 pub trait Builder: Send {
-    /// Queues a transfer of `amount` (atomic units) `to` a recipient;
-    /// checks the address and amount now, without I/O.
+    /// Source used by transfers without their own `from`.
+    fn with_default_source(&mut self, source: Signer);
+
+    /// Queues `transfer`; checks the address and amount now, without I/O.
     ///
     /// # Errors
     ///
     /// `Failed` for an invalid address or amount; `Unsupported` for a
     /// transfer this builder cannot add.
-    fn transfer(&mut self, to: Address, amount: Decimal) -> Result<(), Error>;
+    fn transfer(&mut self, transfer: Transfer) -> Result<(), Error>;
 
     /// Fetches its own chain inputs (coins, nonces or blockhash), estimates
     /// fees and signs every queued transfer, in order: one or more
@@ -171,10 +265,28 @@ pub trait Builder: Send {
     ///
     /// # Errors
     ///
-    /// `Failed` for no transfers; any build, fee, funds, or signing failure.
+    /// `Failed` for no transfers, a transfer without a source, a key that
+    /// does not sign for its address; any build, fee, funds, or signing
+    /// failure.
     fn sign<'a>(self: Box<Self>) -> Future<'a, Result<Transactions, Error>>
     where
         Self: 'a;
+}
+
+/// `builder.send((to, amount))`, `builder.send(Transfer::new(to, amount).from(wallet))`.
+pub trait BuilderExt {
+    /// Queues `transfer`, as [`Builder::transfer`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Builder::transfer`].
+    fn send(&mut self, transfer: impl Into<Transfer>) -> Result<(), Error>;
+}
+
+impl<B: Builder + ?Sized> BuilderExt for B {
+    fn send(&mut self, transfer: impl Into<Transfer>) -> Result<(), Error> {
+        self.transfer(transfer.into())
+    }
 }
 
 /// The only external effect in transaction submission: the exact signed
