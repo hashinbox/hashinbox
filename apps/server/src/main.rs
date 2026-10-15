@@ -1,31 +1,35 @@
-//! Payment server process: reads one configuration document, has each
-//! registered chain parse its own section (`chains`, the only module that
-//! names a chain), composes every chain's RPC client, indexer, and wallet
-//! factories once over one storage backend, and serves the
-//! public HTTP API (`api`, which names no chain, no configuration reader and
-//! no storage backend) while indexing catches up, with the browser page
-//! (`ui`) beside it. The durable entities and their tables are `models`.
-//! Nothing is recomposed while the process runs: each network's nodes are
-//! stored in the database and composed behind a `json_rpc::Swap`, so a
-//! verified replacement repoints them live, and one network can be rescanned
-//! online; both are routes (`api`) over handles composed here.
+//! Payment server process: reads one configuration document, opens the one
+//! SQLite file, builds `payments::Payments` over its stores with every chain
+//! `chains` registers (the only module that names a chain), runs each
+//! network's indexer and the send queue, and serves the public HTTP API
+//! (`api`, which names no chain and no storage backend) beside the browser
+//! page (`ui`). The tables and their statements are `models`; the stores and
+//! reads on them are `storage`; the send queue is `workers`.
+//!
+//! A network's stored `rpc_endpoints` row replaces its section's
+//! `endpoints` before the chain reads it, so a replacement made through the
+//! API survives a restart.
 
 mod api;
 
-mod asset;
 mod chains;
 mod config;
 mod models;
 mod state;
 mod storage;
 mod ui;
+mod workers;
+
+#[cfg(test)]
+#[path = "../tests/mod.rs"]
+mod tests;
 
 use std::{path::PathBuf, sync::Arc};
 
 use config::{AnyError, Config};
-use models::NetworkEndpoints;
+use payments::{Document, Payments};
+use serde_json::Value;
 use state::AppState;
-use wallets::Policy;
 
 /// Every way the binary may be invoked; every refusal of an argument prints it.
 const USAGE: &str = "usage: payment-server serve <config.toml> \
@@ -79,50 +83,61 @@ async fn main() -> Result<(), AnyError> {
         api_base: Config::api_base()?,
     });
 
-    // The database is every network's node source; the file's nodes are the
-    // fallback for a network it holds none of.
-    let store = config.storage.open().await?;
-    let (pool, repo) = (store.pool(), Arc::new(store.indexing()));
-    let builder = config.payments()?;
-    let endpoints = NetworkEndpoints::find_all(&pool)
-        .await?
-        .or_configured(builder.endpoints()?)?;
-    let mut payments = builder
-        .with_endpoints(endpoints.documents())
-        .with_store(repo.clone())
-        .with_output_store(repo.clone())
-        .with_wallet_registry(Arc::new(store.wallets()))
-        .start()
+    let storage = config.storage.open()?;
+    let document = stored_endpoints(config.payments.clone(), &storage).await?;
+    let stores = Arc::new(storage.clone());
+    let payments = chains::register(Payments::builder())
+        .with_config(document)
+        .with_storage(base::Storage {
+            blocks: stores.clone(),
+            indexes: stores.clone(),
+            inputs: stores.clone(),
+            transactions: stores.clone(),
+            wallets: stores.clone(),
+        })
+        .build()
         .await?;
-    for notice in &payments.notices {
-        println!("{notice}");
-    }
-    for error in &payments.skipped {
-        eprintln!("skipped, its node failed verification: {error}");
-    }
-    // Every sending asset's sends wait in one in-memory queue; its pauses are
-    // Tokio's, the one runtime this process names.
-    payments.wallets.queue(&Policy {
-        pause: Arc::new(|delay| Box::pin(tokio::time::sleep(delay))),
-        ..Policy::default()
-    });
-    let state = Arc::new(AppState {
-        payments,
-        repo,
-        pool,
-    });
-    let router = api::router(state.clone(), &server)?.merge(face.routes()?);
+    let payments = Arc::new(payments);
+    let indexers = payments.run();
+    // Sends are durable jobs, one lane per sender, run by one runner.
+    let runner = tasks::Runner::new(stores).executor(
+        workers::send::KIND,
+        Arc::new(workers::send::Sends::new(payments.clone())),
+    );
+    let jobs = tokio::spawn(async move { runner.run().await });
+    let state = Arc::new(AppState { payments, storage });
+    let router = api::router(state, &server)?.merge(face.routes()?);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    // Stop reporting ready before HTTP stops accepting; the handlers in
-    // flight, and the sends they admitted, drain before `serve` returns.
-    let networks = state.payments.networks.clone();
+    // Handlers in flight drain before `serve` returns; jobs left running
+    // resume on the next start.
     let served = axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
+        .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
-            networks.reset_health();
         })
         .await;
-    let state = Arc::try_unwrap(state).map_err(|_| "a request still holds the server state")?;
-    state.payments.shutdown().await?;
+    jobs.abort();
+    indexers.stop();
+    indexers.join().await?;
     Ok(served?)
+}
+
+/// `document` with each section's `endpoints` replaced by its network's
+/// stored row, matched on the section's `chain` and `network` text.
+async fn stored_endpoints(
+    mut document: Document,
+    storage: &storage::Storage,
+) -> anyhow::Result<Document> {
+    let stored = storage.endpoints().await?.documents();
+    for section in &mut document.networks {
+        let (Some(Value::String(chain)), Some(Value::String(name))) =
+            (section.get("chain"), section.get("network"))
+        else {
+            continue;
+        };
+        let network = base::Network::new(base::Chain::new(chain), name);
+        if let Some(nodes) = stored.get(&network) {
+            section.insert("endpoints".to_owned(), Value::Array(nodes.clone()));
+        }
+    }
+    Ok(document)
 }

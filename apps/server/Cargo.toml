@@ -15,30 +15,33 @@ path = "src/main.rs"
 solana-node = []
 
 [dependencies]
+anyhow.workspace = true
 clap.workspace = true
 axum = "0.8"
 base = { path = "../../sdk/base" }
 base64 = "=0.22.1"
+crypto = { path = "../../packages/crypto" }
 chain-bitcoin = { path = "../../sdk/chains/bitcoin" }
 chain-ethereum = { path = "../../sdk/chains/ethereum" }
 chain-solana = { path = "../../sdk/chains/solana" }
 hex.workspace = true
 http-server = { path = "../../packages/http-server" }
 json-rpc = { path = "../../packages/json-rpc" }
-# Exact signed totals for the balance read: amounts are u256-capable text.
-num-bigint.workspace = true
 payments = { path = "../../sdk/payments", features = ["toml"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
-# The one file's pool (`indexing::sqlite::Database::pool`): the models' own
-# table, `rpc_endpoints`, is read and written through it.
-sqlx.workspace = true
+# The one SQLite file: every table's model (`src/models`) and the SDK storage
+# traits implemented on them (`src/storage`).
+diesel.workspace = true
+libsqlite3-sys.workspace = true
+# The job queue contract and runner; its SQLite store is `src/storage/tasks.rs`.
+tasks = { path = "../../packages/tasks", features = ["runner"] }
 tokio = { workspace = true, features = ["fs", "net", "process", "rt", "signal", "sync", "time"] }
+# The server's own configuration file, when its path ends in `.toml`.
+toml = "=0.9.12"
 utoipa = { version = "=5.5.0", features = ["axum_extras"] }
 utoipa-axum = "=0.2.0"
 url = "=2.5.8"
-uuid.workspace = true
-wallets = { path = "../../sdk/wallets", features = ["submissions", "sqlite"] }
 zeroize.workspace = true
 
 [dev-dependencies]
@@ -48,16 +51,14 @@ alloy-primitives.workspace = true
 bitcoin.workspace = true
 futures-executor.workspace = true
 http-body-util = "=0.1.4"
+# The scripted node behind a test network's client.
+json-rpc = { path = "../../packages/json-rpc", features = ["testing"] }
 # A test chain implements `payments::config::Chain`, whose `connect` names the logger.
 logging = { path = "../../packages/logging" }
-# The route tests run on the in-memory store, the scripted chain double and
-# the scripted wallet double; none is ever linked into the binary.
-indexing = { path = "../../sdk/indexing", features = ["memory", "testing"] }
 reqwest.workspace = true
 sha2.workspace = true
 tempfile = "=3.27.0"
 tower = { version = "=0.5.2", features = ["util"] }
-wallets = { path = "../../sdk/wallets", features = ["submissions", "testing"] }
 
 [lints]
 workspace = true

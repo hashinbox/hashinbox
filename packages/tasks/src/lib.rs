@@ -3,14 +3,14 @@
 mod handle;
 #[cfg(feature = "runner")]
 mod runner;
-pub mod storage;
+mod storage;
 mod task;
 
 pub use handle::Handle;
 #[cfg(feature = "runner")]
-pub use runner::{Ack, Delivery, Executor, Runner, now};
+pub use runner::{Ack, Executor, Runner, now};
 pub use storage::{Store, StoreError, StoreFuture};
-pub use task::{Claimed, Id, NewTask, Outcome, Policy, Settlement, Status, TaskResult};
+pub use task::{Id, Job, State};
 
 use std::{
     fmt,
@@ -21,7 +21,7 @@ use tokio::task::{JoinError, JoinSet};
 
 /// Background tasks owned until drained; dropping the owner aborts remaining work.
 #[derive(Default)]
-pub struct Tasks(Mutex<State>);
+pub struct Tasks(Mutex<Owned>);
 
 /// Why a task was refused before spawning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +39,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Everything registered and not yet joined.
-struct State {
+struct Owned {
     running: JoinSet<()>,
     /// Whether a registration is still accepted.
     open: bool,
@@ -47,7 +47,7 @@ struct State {
     failure: Option<JoinError>,
 }
 
-impl Default for State {
+impl Default for Owned {
     fn default() -> Self {
         Self {
             running: JoinSet::new(),
@@ -57,7 +57,7 @@ impl Default for State {
     }
 }
 
-impl State {
+impl Owned {
     /// Joins every task that has already ended, so a long-lived process holds
     /// the running ones and not every one it ever ran.
     fn reap(&mut self) {
@@ -127,7 +127,7 @@ impl Tasks {
 
     /// The tasks, whatever a panicking holder left behind: nothing runs under
     /// this lock that could leave them half-written.
-    fn tasks(&self) -> MutexGuard<'_, State> {
+    fn tasks(&self) -> MutexGuard<'_, Owned> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

@@ -26,8 +26,7 @@ cargo run --locked -p payment-server -- ./payments.toml
 curl -H "Authorization: Bearer $PAYMENT_API_TOKEN" http://127.0.0.1:3000/v1/assets
 ```
 
-The full configuration is in [apps/server](apps/server/README.md). To use the
-SDK as a library, start with [examples](examples/README.md).
+The full configuration is in [apps/server](apps/server/README.md).
 
 ## Folders
 
@@ -38,14 +37,12 @@ SDK as a library, start with [examples](examples/README.md).
 | [sdk/chains/bitcoin](sdk/chains/bitcoin/README.md) | Bitcoin: RPC, blocks, UTXO wallets, sending |
 | [sdk/chains/ethereum](sdk/chains/ethereum/README.md) | Ethereum: RPC, blocks, ETH and ERC-20 wallets, sending |
 | [sdk/chains/solana](sdk/chains/solana/README.md) | Solana: RPC, blocks, SOL and SPL wallets, SOL sending |
-| [sdk/wallets](sdk/wallets/README.md) | The wallet map and batch sends across chains |
-| [sdk/indexing](sdk/indexing/README.md) | Watches, block synchronization and the repositories |
+| [sdk/indexing](sdk/indexing/README.md) | Watches, block synchronization and the store contracts |
 | [sdk/payments](sdk/payments/README.md) | The configuration document and chain registration |
 | [packages/crypto](packages/crypto/README.md) | Keys and signing |
 | [packages/decimal](packages/decimal/README.md) | Exact decimal amounts |
 | [packages/json-rpc](packages/json-rpc/README.md) | JSON-RPC client with retry and failover |
 | [packages/http-server](packages/http-server/README.md) | Authenticated axum serving |
-| [examples](examples/README.md) | Runnable scenarios against local nodes |
 | [docs/design](docs/design) | Design notes |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Ownership and dependency direction |
 

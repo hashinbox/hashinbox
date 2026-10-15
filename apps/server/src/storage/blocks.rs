@@ -1,0 +1,147 @@
+//! `base::BlockStore` on the `block`, `transaction`,
+//! `leg` and `wallet_index` models.
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{bail, ensure};
+use base::Addressed as _;
+use base::{Block as BaseBlock, BlockHeader, BlockStore, Blocks, Future, Network, Networked as _};
+use diesel::SqliteConnection;
+
+use super::Storage;
+use crate::models::{Block, LegRow, TransactionRow, WalletIndexRow, int};
+
+impl BlockStore for Storage {
+    fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            let network = blocks.network().clone();
+            let run = blocks.to_vec();
+            self.write(move |connection| keep(connection, &network, &run))
+                .await?;
+            Ok(())
+        })
+    }
+
+    fn find_last<'a>(
+        &'a self,
+        network: &'a Network,
+    ) -> Future<'a, anyhow::Result<Option<BlockHeader>>> {
+        let network = network.clone();
+        Box::pin(self.read(move |connection| {
+            Block::find_last(connection, &network)?
+                .map(|block| block.header())
+                .transpose()
+        }))
+    }
+
+    fn delete<'a>(&'a self, network: &'a Network, from: u64) -> Future<'a, anyhow::Result<()>> {
+        let network = network.clone();
+        Box::pin(async move {
+            let from = int(from)?;
+            let now = int(u64::try_from(
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+            )?)?;
+            self.write(move |connection| {
+                let below = Block::find_below(connection, &network, from)?;
+                WalletIndexRow::rewind(connection, &network, from, below.as_ref())?;
+                Block::archive(connection, &network, from, now)?;
+                Ok(())
+            })
+            .await
+        })
+    }
+}
+
+/// Keeps `run` ([`BlockStore::insert`]); the headers of the blocks it added
+/// or kept facts or progress for.
+fn keep(
+    connection: &mut SqliteConnection,
+    network: &Network,
+    run: &[BaseBlock],
+) -> anyhow::Result<Vec<BlockHeader>> {
+    let mut kept = Vec::new();
+    let mut added = Vec::new();
+    for block in run {
+        ensure!(block.network == *network, "a block is not of {network:?}");
+        let header = &block.header;
+        let position = int(header.position)?;
+        let id = match Block::find_live(connection, network, position)? {
+            Some(held) if held.is(header) => held.id.clone(),
+            Some(_) => bail!("{network:?}: block {position} conflicts with the kept one"),
+            None => {
+                let id = Block::insert(connection, network, header)?;
+                added.push(position);
+                kept.push(header.clone());
+                id
+            }
+        };
+        let parent = Block::find_below(connection, network, position)?
+            .filter(|below| below.is_parent_of(header))
+            .map(|below| below.id);
+        let pairs =
+            WalletIndexRow::find_applying(connection, network, position, parent.as_deref())?;
+        if pairs.is_empty() {
+            continue;
+        }
+        for transaction in &block.transactions {
+            let legs = (0_u32..)
+                .zip(&transaction.legs)
+                .filter(|(_, leg)| applies(&pairs, leg.address(), leg_asset(leg)));
+            let legs: Vec<_> = legs.collect();
+            if legs.is_empty() {
+                continue;
+            }
+            TransactionRow::upsert_mined(connection, &id, transaction, legs)?;
+        }
+        let rewards = block
+            .rewards
+            .iter()
+            .filter(|reward| applies(&pairs, &reward.address, &reward.asset))
+            .map(|reward| LegRow::reward(&id, reward))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        LegRow::insert(connection, &rewards)?;
+        WalletIndexRow::advance(connection, network, &pairs, &id)?;
+        if kept.last() != Some(header) {
+            kept.push(header.clone());
+        }
+    }
+    // Every added block must link to its live neighbours.
+    for position in added {
+        let Some(block) = Block::find_live(connection, network, position)? else {
+            continue;
+        };
+        let header = block.header()?;
+        if let Some(below) = Block::find_below(connection, network, position)?
+            && !below.is_parent_of(&header)
+        {
+            bail!("{network:?}: block {position} does not link onto the kept block below it");
+        }
+        if let Some(above) = Block::find_above(connection, network, position)?
+            && !block.is_parent_of(&above.header()?)
+        {
+            bail!("{network:?}: the kept block above {position} does not link onto it");
+        }
+    }
+    Ok(kept)
+}
+
+/// The asset a leg moves.
+fn leg_asset(leg: &base::Leg) -> &base::Asset {
+    use base::Leg::{Burned, Fee, Minted, Received, Spent};
+    match leg {
+        Received { asset, .. }
+        | Spent { asset, .. }
+        | Burned { asset, .. }
+        | Minted { asset, .. }
+        | Fee { asset, .. } => asset,
+    }
+}
+
+/// Whether (`address`, `asset`) is one of `pairs`.
+fn applies(
+    pairs: &std::collections::BTreeSet<(String, String)>,
+    address: &base::Address,
+    asset: &base::Asset,
+) -> bool {
+    pairs.contains(&(address.value.clone(), asset.id.clone()))
+}

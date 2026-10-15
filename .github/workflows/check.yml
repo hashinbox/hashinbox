@@ -35,10 +35,6 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - name: Doc tests
         run: cargo test --locked --workspace --doc
-          # The contract scenarios are integration-test code now, so the store
-          # they are held against has to be on for `--all-targets` to build.
-          cargo check --locked -p indexing --no-default-features \
-            --features sqlite,memory,driver --all-targets
       # payments::config's types are the API and the TOML reader is a convenience:
       # it compiles only with the feature, and everything else — the registry,
       # the JSON reader, the shared shell — compiles without it. A workspace
@@ -55,7 +51,7 @@ jobs:
       - name: No SDK crate links toml
         run: |
           status=0
-          for crate in base indexing wallets chain-bitcoin chain-ethereum chain-solana \
+          for crate in base chain-bitcoin chain-ethereum chain-solana \
                        decimal crypto json-rpc http-server payments; do
             if cargo tree --locked -q -p "$crate" -e normal --prefix none \
                  | grep -q '^toml '; then
@@ -64,29 +60,22 @@ jobs:
             fi
           done
           exit "$status"
-      # The same invariant for the SQL driver: sqlx is the `sqlite` store's
-      # (`indexing --features sqlite`) and the binary's. The vocabulary crates,
-      # the chains and indexing without that store link none of it.
+      # The same invariant for the SQL driver: sqlx is the binary's alone
+      # (`apps/server/src/storage`). No SDK crate or package links it.
       - name: No SDK crate links sqlx
         run: |
           status=0
-          for crate in base wallets payments chain-bitcoin chain-ethereum chain-solana; do
+          for crate in base payments tasks chain-bitcoin chain-ethereum \
+                       chain-solana; do
             if cargo tree --locked -q -p "$crate" -e normal --prefix none \
                  | grep -q '^sqlx '; then
               echo "$crate links sqlx"
               status=1
             fi
           done
-          if cargo tree --locked -q -p indexing --no-default-features --features memory \
-               -e normal --prefix none | grep -q '^sqlx '; then
-            echo "indexing without the sqlite store links sqlx"
-            status=1
-          fi
           exit "$status"
       - name: Test
         run: cargo test --locked --workspace --no-fail-fast
-      - name: Submission supervision
-        run: cargo test --locked -p wallets --features submissions
       # docs/openapi.json is the committed contract typed clients are generated
       # from. Regenerating it here catches a change that only the test would
       # otherwise report, and proves the flag works on a clean checkout.

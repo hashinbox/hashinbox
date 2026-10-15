@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "payment-api",
-    "description": "The payment HTTP routes and OpenAPI contract over the chain-neutral wallet and index abstractions. Every asset is an open tag; no chain or asset is named in this contract.",
+    "description": "The payment HTTP routes and OpenAPI contract over the chain-neutral wallet and index abstractions. An asset is its network's own asset id (`native`, or a token); no chain or asset is named in this contract.",
     "version": "0.1.0"
   },
   "servers": [
@@ -18,7 +18,7 @@
           "health"
         ],
         "summary": "Read readiness and network health from memory",
-        "description": "Public memory-only readiness. Ready when every network is ready or quarantined and at least one is ready. No RPC or storage reads.",
+        "description": "Public memory-only readiness: ready when at least one network is configured and no network's last indexing step failed. No RPC or storage reads.",
         "operationId": "read_health",
         "responses": {
           "200": {
@@ -82,11 +82,11 @@
           "assets"
         ],
         "summary": "List every configured asset",
-        "description": "Every asset tag registered at startup, with its network and metadata. This is the only list of tags the wallet routes accept.",
+        "description": "Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept.",
         "operationId": "list_assets",
         "responses": {
           "200": {
-            "description": "Configured assets in tag order",
+            "description": "Configured assets",
             "content": {
               "application/json": {
                 "schema": {
@@ -113,17 +113,85 @@
         ]
       }
     },
+    "/v1/jobs/{id}": {
+      "get": {
+        "tags": [
+          "transactions"
+        ],
+        "summary": "Read a queued job",
+        "description": "The job's outcome and how many transactions it signed and the nodes accepted.",
+        "operationId": "read_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The id a send returned.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job is unknown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The queue is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/networks": {
       "get": {
         "tags": [
           "networks"
         ],
-        "summary": "List every configured network and its RPC nodes",
-        "description": "Every network the configuration names, its state, and the nodes it uses now. Nodes come from the database once a network has stored them; the configuration file only seeds that list on the first start. Only each node's origin is returned.",
+        "summary": "List every configured network, its indexing and its stored RPC nodes",
+        "description": "Every network the configuration names, what its indexer did since the process started, and the nodes stored for it. Only each node's origin is returned.",
         "operationId": "list_networks",
         "responses": {
           "200": {
-            "description": "Networks in configuration order",
+            "description": "Every configured network",
             "content": {
               "application/json": {
                 "schema": {
@@ -141,86 +209,9 @@
                 }
               }
             }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/v1/networks/{chain}/{network}/rescans": {
-      "post": {
-        "tags": [
-          "networks"
-        ],
-        "summary": "Purge a network's indexed facts and index it again",
-        "description": "One action: refuses new wallets and sends on the network and waits for those running, pauses its indexing, deletes its indexed history, balances, outputs and checkpoint, and resumes indexing from every watch's birthday. Answers once indexing has resumed; the network then reports `catching_up` until it reaches the tip. Watches, wallet keys and every other network are untouched. A failure after the deletion leaves the network paused; rescanning again finishes it.",
-        "operationId": "rescan_network",
-        "parameters": [
-          {
-            "name": "chain",
-            "in": "path",
-            "description": "Chain name, as `GET /v1/networks` lists it.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "network",
-            "in": "path",
-            "description": "Network name, as `GET /v1/networks` lists it.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "202": {
-            "description": "Purged; indexing has resumed from the birthdays",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConfiguredNetwork"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Network is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "A rescan or node change of this network is in progress, or the network is not in service",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
           },
           "503": {
-            "description": "The rescan failed; the message says whether the network is paused",
+            "description": "The stored nodes could not be read",
             "content": {
               "application/json": {
                 "schema": {
@@ -243,7 +234,7 @@
           "networks"
         ],
         "summary": "Replace a network's RPC nodes",
-        "description": "Verifies the nodes with the chain's own startup check over the new list, stores them, then sends every later call to them; calls already sent finish on the node they reached. A node that fails the check leaves the current nodes in use and stores nothing. The stored list is used on every later start, whatever the configuration file says. Credentials in the URL are stored as sent. A network that is unavailable stores the verified nodes and uses them from the next start.",
+        "description": "Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. The nodes are not verified here: the chain verifies them on the next start, which uses the stored list whatever the configuration file says. Credentials in the URL are stored as sent.",
         "operationId": "replace_network_rpc",
         "parameters": [
           {
@@ -277,7 +268,7 @@
         },
         "responses": {
           "200": {
-            "description": "Nodes verified, stored and in use",
+            "description": "Nodes stored and in use",
             "content": {
               "application/json": {
                 "schema": {
@@ -287,7 +278,7 @@
             }
           },
           "400": {
-            "description": "Malformed node list or a node the chain refuses",
+            "description": "Malformed node list",
             "content": {
               "application/json": {
                 "schema": {
@@ -316,115 +307,8 @@
               }
             }
           },
-          "422": {
-            "description": "The node was unreachable or serves another network; the message says which, and the current nodes stay in use",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
           "503": {
-            "description": "Another change to this network is in progress, or the nodes could not be stored",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/v1/transactions": {
-      "post": {
-        "tags": [
-          "transactions"
-        ],
-        "summary": "Submit an ordered batch of transfers",
-        "description": "Submits one ordered exact-asset batch of one configured wallet asset. Every asset uses this shared route; no chain-specific transaction route exists. Requests mixing wallet assets are rejected before any transaction is submitted. The asset's chain may group occurrences into one transaction, or reserve consecutive sequence numbers per sender and prepare the whole batch before submitting exact envelopes in request order. Definitely acknowledged transaction IDs are returned only when a non-empty prefix was accepted, and a failed index is returned only when one original occurrence truthfully failed.",
-        "operationId": "send_transfer_batch",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TransferBatch"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "Asset batch submitted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BatchAccepted"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body, batch size, amount, or destination",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "A batch wallet is unknown",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The batch asset's network is being rescanned",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Definite batch failure; transaction_ids is present only for a definitely acknowledged prefix and failed_index only for a truthful item-scoped failure",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Batch unavailable or exact-envelope submission outcome ambiguous; transaction_ids is present only for a definitely acknowledged prefix, failed_index only for a truthful item-scoped failure, and ambiguous_transaction_id only for an unknown outcome",
+            "description": "The nodes could not be stored",
             "content": {
               "application/json": {
                 "schema": {
@@ -447,20 +331,8 @@
           "wallets"
         ],
         "summary": "List the wallets",
-        "description": "Every active wallet and watched address in wallet ID order; with `archived=true`, the archived ones too.",
+        "description": "Every keyed wallet and watched address, in wallet ID order.",
         "operationId": "list_wallets",
-        "parameters": [
-          {
-            "name": "archived",
-            "in": "query",
-            "description": "Include archived wallets; they are left out by default.",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false
-            }
-          }
-        ],
         "responses": {
           "200": {
             "description": "Wallets in ID order",
@@ -468,16 +340,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/WalletList"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed query",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -493,7 +355,7 @@
             }
           },
           "503": {
-            "description": "The wallet collection is unavailable",
+            "description": "The wallet store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -513,8 +375,8 @@
         "tags": [
           "wallets"
         ],
-        "summary": "Generate a wallet, or watch an address, in one configured asset",
-        "description": "Without `address`, generates a wallet, stores it with its key, then watches it in `asset` from creation. Keys never leave the server. Retrying creates another wallet. With `address`, observes that address in `asset` from registration: a new address becomes a watch-only wallet, and sending from it answers 422; an address that already is a wallet gains `asset`. `label` names either. `start` is `\"fresh\"` (the default) or the native position observation of `asset` begins at; a position older than the network's backfill policy allows answers 400. An archived wallet's address is refused: archiving is final.",
+        "summary": "Generate a wallet, or watch an address, in one configured network",
+        "description": "Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start.",
         "operationId": "create_wallet",
         "requestBody": {
           "content": {
@@ -528,7 +390,7 @@
         },
         "responses": {
           "201": {
-            "description": "Wallet generated or address watched, and registered for indexing",
+            "description": "Wallet generated or address watched",
             "content": {
               "application/json": {
                 "schema": {
@@ -538,7 +400,7 @@
             }
           },
           "400": {
-            "description": "Malformed body, asset tag, label, address text, or a start the backfill policy refuses",
+            "description": "Malformed body or address text",
             "content": {
               "application/json": {
                 "schema": {
@@ -558,17 +420,7 @@
             }
           },
           "404": {
-            "description": "Asset is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The address is an archived wallet, is already watched in this asset from another start, or the asset's network is being rescanned",
+            "description": "Network or asset is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -578,7 +430,7 @@
             }
           },
           "503": {
-            "description": "Wallet generation or registration is unavailable",
+            "description": "Generation, the node or the store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -601,13 +453,13 @@
           "wallets"
         ],
         "summary": "Read one wallet's public metadata",
-        "description": "The wallet's network, canonical address, watch-only flag, label, archive time and observed assets, archived or not; never its key.",
+        "description": "The wallet's network, canonical address, whether it is keyed, and the assets it is indexed in; never its key.",
         "operationId": "read_wallet",
         "parameters": [
           {
             "name": "id",
             "in": "path",
-            "description": "The wallet ID a create or watch call returned.",
+            "description": "`<chain>:<network>:<address>`, as a create call returned it.",
             "required": true,
             "schema": {
               "type": "string"
@@ -625,58 +477,12 @@
               }
             }
           },
-          "401": {
-            "description": "Missing or invalid bearer token",
+          "400": {
+            "description": "Malformed wallet ID",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Wallet is unknown",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "wallets"
-        ],
-        "summary": "Archive a wallet",
-        "description": "Marks the wallet archived and stops observing its address. Its history and balance stay readable from what was indexed; sending from it answers 409. Archiving again answers the same wallet. Archiving is final: its address cannot be created again.",
-        "operationId": "archive_wallet",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "The wallet ID a create or watch call returned.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The archived wallet",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Wallet"
                 }
               }
             }
@@ -693,16 +499,6 @@
           },
           "404": {
             "description": "Wallet is unknown",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The wallet's network is being rescanned",
             "content": {
               "application/json": {
                 "schema": {
@@ -712,7 +508,7 @@
             }
           },
           "503": {
-            "description": "The wallet could not be archived or unwatched",
+            "description": "The wallet store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -735,13 +531,13 @@
           "wallets"
         ],
         "summary": "Read a wallet's balance in one asset",
-        "description": "The confirmed indexed total and pending incoming/outgoing amounts in the asset's display units, with the confirmed and pending heights and how many blocks the address's inspection is behind. Chain spending rules still apply. A watch-only address reads the same balance without a key. An asset the wallet is not observed in reads what was indexed for its address.",
+        "description": "The total of every indexed movement of the address in `asset` over every kept block (unconfirmed ones included), in display units, with how far the address is indexed and the chain's tip. A watch-only address reads the same way.",
         "operationId": "read_wallet_balance",
         "parameters": [
           {
             "name": "id",
             "in": "path",
-            "description": "The wallet ID a create or watch call returned.",
+            "description": "`<chain>:<network>:<address>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -750,11 +546,11 @@
           {
             "name": "asset",
             "in": "query",
-            "description": "A configured asset tag of the wallet's network (`GET /v1/assets`).",
-            "required": true,
+            "description": "An asset id of the wallet's network (`GET /v1/assets`); default\n`native`.",
+            "required": false,
             "schema": {
               "type": "string",
-              "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+              "default": "native"
             }
           }
         ],
@@ -770,7 +566,7 @@
             }
           },
           "400": {
-            "description": "Malformed query",
+            "description": "Malformed wallet ID or query",
             "content": {
               "application/json": {
                 "schema": {
@@ -790,7 +586,7 @@
             }
           },
           "404": {
-            "description": "Wallet is unknown, or the asset is not of its network",
+            "description": "Network or asset is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -800,7 +596,7 @@
             }
           },
           "503": {
-            "description": "The index is unavailable",
+            "description": "The store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -823,13 +619,13 @@
           "transactions"
         ],
         "summary": "Read one page of a wallet's history",
-        "description": "The wallet's canonical history in `asset`; a fee is shown where this address was charged it. `transactions` is confirmed and append-only, so its cursor stays valid however far the checkpoint moves; `pending` carries the transactions above the confirmed line and is populated on the first page only; `behind` says how many blocks the address's inspection trails the confirmed line, as the balance does.",
+        "description": "The wallet's transactions in `asset`, in chain order, with only its own movements of that asset; a fee is shown where this address paid it in the native asset. Block rewards count in the balance but are not transactions.",
         "operationId": "read_wallet_transactions",
         "parameters": [
           {
             "name": "id",
             "in": "path",
-            "description": "The wallet ID a create or watch call returned.",
+            "description": "`<chain>:<network>:<address>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -838,11 +634,11 @@
           {
             "name": "asset",
             "in": "query",
-            "description": "A configured asset tag of the wallet's network: the asset whose\nhistory is read.",
-            "required": true,
+            "description": "An asset id of the wallet's network; default `native`.",
+            "required": false,
             "schema": {
               "type": "string",
-              "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+              "default": "native"
             }
           },
           {
@@ -879,7 +675,7 @@
             }
           },
           "400": {
-            "description": "Malformed query, cursor, or limit",
+            "description": "Malformed wallet ID, query, cursor, or limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -899,17 +695,7 @@
             }
           },
           "404": {
-            "description": "Wallet is unknown, or the asset is not of its network",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "The next cursor could not be encoded",
+            "description": "Network or asset is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -919,7 +705,7 @@
             }
           },
           "503": {
-            "description": "The index is unavailable",
+            "description": "The store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -939,14 +725,14 @@
         "tags": [
           "transactions"
         ],
-        "summary": "Submit one transfer from a wallet",
-        "description": "Submits one transfer of `asset` from the wallet. Every asset uses this shared route; no chain-specific transaction route exists. A watch-only wallet answers 422. A 202 response means submitted, not confirmed.",
-        "operationId": "send_transfer",
+        "summary": "Enqueue an ordered send from a wallet",
+        "description": "Enqueues one send job of `asset` from the keyed wallet: its transfers are signed up front and broadcast in order. A 202 response means queued, not submitted: `GET /v1/jobs/{id}` reports the outcome. Indexing records the transactions once they are mined, for the assets the wallet is watched in. A watch-only wallet answers 422.",
+        "operationId": "send_transfers",
         "parameters": [
           {
             "name": "id",
             "in": "path",
-            "description": "The wallet ID a create or watch call returned.",
+            "description": "`<chain>:<network>:<address>`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -957,7 +743,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/Transfer"
+                "$ref": "#/components/schemas/Send"
               }
             }
           },
@@ -965,17 +751,17 @@
         },
         "responses": {
           "202": {
-            "description": "Transaction submitted",
+            "description": "Send queued",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TransferAccepted"
+                  "$ref": "#/components/schemas/SendAccepted"
                 }
               }
             }
           },
           "400": {
-            "description": "Malformed body, amount, or destination",
+            "description": "Malformed body, wallet ID, amount, or destination",
             "content": {
               "application/json": {
                 "schema": {
@@ -995,17 +781,7 @@
             }
           },
           "404": {
-            "description": "Wallet is unknown",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The wallet's network is being rescanned",
+            "description": "Network or asset is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -1015,7 +791,7 @@
             }
           },
           "422": {
-            "description": "Deterministic rejection, or a watch-only wallet",
+            "description": "A watch-only or unknown wallet",
             "content": {
               "application/json": {
                 "schema": {
@@ -1025,7 +801,7 @@
             }
           },
           "503": {
-            "description": "Transaction unavailable or exact-envelope submission outcome ambiguous; ambiguous_transaction_id is present only for an unknown outcome",
+            "description": "The queue or store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1045,24 +821,6 @@
   },
   "components": {
     "schemas": {
-      "Address": {
-        "type": "object",
-        "description": "A canonical address within its network.",
-        "required": [
-          "network",
-          "value"
-        ],
-        "properties": {
-          "network": {
-            "$ref": "#/components/schemas/Network",
-            "description": "The address's chain and network."
-          },
-          "value": {
-            "type": "string",
-            "description": "Canonical address text."
-          }
-        }
-      },
       "Asset": {
         "type": "object",
         "description": "Metadata of the asset an amount is denominated in.",
@@ -1116,230 +874,143 @@
             "items": {
               "$ref": "#/components/schemas/Listing"
             },
-            "description": "Assets in tag order."
-          }
-        }
-      },
-      "Backfill": {
-        "type": "object",
-        "description": "The history one network still owes addresses watched from below its\ncheckpoint, and why the last attempt at it stopped.\n\nIt is reported and never gating: a range a pruned node can no longer serve\nwould otherwise hold `ready` at false for the life of the process while\nforward indexing answered every question a client actually asks. The range\nis published here, and the reads it weakens say so themselves through their\nown `behind`.",
-        "required": [
-          "pending",
-          "resume",
-          "anchor",
-          "failure"
-        ],
-        "properties": {
-          "anchor": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The highest native block position any of them needs: the network's\nconfirmed line, which is where an address reading its own past rejoins\nthe front of the chain. It follows the line until that happens.",
-            "minimum": 0
-          },
-          "failure": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/IndexFailure",
-                "description": "Why the last attempt stopped short of its budget; null while the range\nis merely unfinished. A range that keeps reporting the same failure is\none this node cannot serve: history below `resume` for those addresses\nwill not arrive until the node can. Always present."
-              }
-            ]
-          },
-          "pending": {
-            "type": "integer",
-            "format": "int64",
-            "description": "How many watched addresses still owe history below their registration.",
-            "minimum": 0
-          },
-          "resume": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The lowest native block position any of them still needs inspected.",
-            "minimum": 0
+            "description": "Assets in network, then id, order."
           }
         }
       },
       "Balance": {
         "type": "object",
-        "description": "A wallet's balance in its asset, on both sides of its chain's confirmed\nline.\n\n`amount` is the confirmed indexed total, negative when indexed debits\nexceed known credits; `behind` states how far the address's inspection\ntrails the confirmed line. Chain spending rules, such as coinbase\nmaturity, still apply.\nThe two pending figures describe blocks above the confirmed line: they are\nreported apart rather than netted, because \"3.0 arriving\" and \"1.0\nleaving\" are different facts to a payments operator, and neither is ever\nnegative. Pending fees are not folded in; a pending transaction's fee is\nreported with it in history.",
+        "description": "A wallet's balance in one asset over every block kept so far.\n\nBlocks are kept up to the chain's produced tip, so `amount` includes\nblocks the chain may still take back; a reorg archives them and the\namount follows.",
         "required": [
+          "asset",
           "amount",
-          "pending_incoming",
-          "pending_outgoing",
-          "observed_height",
-          "pending_height",
-          "behind"
+          "indexed_through",
+          "tip"
         ],
         "properties": {
           "amount": {
             "type": "string",
-            "description": "Confirmed indexed amount in exact display units, e.g. `12.5`; negative,\ne.g. `-0.5`, when indexed debits exceed known credits. Chain spending\nrules apply separately."
+            "description": "Exact display units, e.g. `12.5`; negative, e.g. `-0.5`, when indexed\ndebits exceed indexed credits (history before the start is unknown)."
           },
-          "behind": {
-            "type": "integer",
-            "format": "int64",
-            "description": "How many blocks this address's inspection is behind the confirmed\nline; 0 when caught up. While it is above 0, `amount` may still change\nas history below the line is read.",
-            "minimum": 0
+          "asset": {
+            "$ref": "#/components/schemas/Asset",
+            "description": "The asset."
           },
-          "observed_height": {
+          "indexed_through": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Height of the confirmed line for the saved total; null before a\ncheckpoint. Always present.",
+            "description": "Native position the address is indexed through in this asset; null\nbefore its first block or when it is not watched in it. Always present.",
             "minimum": 0
           },
-          "pending_height": {
+          "tip": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Height of the newest block above the confirmed line; null when nothing\nis pending. Always present.",
+            "description": "The chain's produced tip at the indexer's last step; null before the\nfirst. Always present.",
             "minimum": 0
-          },
-          "pending_incoming": {
-            "type": "string",
-            "description": "Incoming value in blocks above the confirmed line. Never negative."
-          },
-          "pending_outgoing": {
-            "type": "string",
-            "description": "Outgoing value in blocks above the confirmed line. Never negative."
           }
         }
-      },
-      "BatchAccepted": {
-        "type": "object",
-        "description": "Result of an accepted batch.",
-        "required": [
-          "transaction_ids"
-        ],
-        "properties": {
-          "transaction_ids": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Accepted transaction IDs in chain-native submission order."
-          }
-        }
-      },
-      "BatchedTransfer": {
-        "type": "object",
-        "description": "One ordered item of a `TransferBatch`.",
-        "required": [
-          "wallet_id",
-          "destination",
-          "amount"
-        ],
-        "properties": {
-          "amount": {
-            "type": "string",
-            "description": "Exact decimal in display units, or `all` to sweep spendable funds."
-          },
-          "destination": {
-            "type": "string",
-            "description": "Recipient address text, as the wallet's chain writes it."
-          },
-          "wallet_id": {
-            "type": "string",
-            "description": "The sending wallet."
-          }
-        },
-        "additionalProperties": false
       },
       "Block": {
         "type": "object",
-        "description": "A block reference: where a transaction was included, or a checkpoint.",
+        "description": "The block a transaction was mined in.",
         "required": [
           "position",
           "height",
           "hash",
-          "parent"
+          "timestamp"
         ],
         "properties": {
           "hash": {
             "type": "string",
-            "description": "Lowercase hex block hash."
+            "description": "Block hash, hexadecimal, in the chain's native byte order."
           },
           "height": {
             "type": "integer",
             "format": "int64",
-            "description": "Block height.",
+            "description": "Produced-block count.",
             "minimum": 0
-          },
-          "parent": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ParentBlock",
-                "description": "The parent block, when known; always present."
-              }
-            ]
           },
           "position": {
             "type": "integer",
             "format": "int64",
-            "description": "Chain-native position (a block height or slot).",
+            "description": "Native position (Bitcoin/Ethereum height, Solana slot).",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix seconds, when the chain reports one; always present.",
             "minimum": 0
           }
-        },
-        "additionalProperties": false
+        }
       },
       "ConfiguredNetwork": {
         "type": "object",
-        "description": "One configured network, its state, and its nodes.",
+        "description": "One configured network, its indexing, and its stored nodes.",
         "required": [
           "network",
-          "state",
+          "indexing",
           "nodes"
         ],
         "properties": {
+          "indexing": {
+            "$ref": "#/components/schemas/Indexing",
+            "description": "What its indexer did since the process started."
+          },
           "network": {
             "$ref": "#/components/schemas/Network"
           },
           "nodes": {
-            "type": "array",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
               "$ref": "#/components/schemas/RpcNode"
             },
-            "description": "Nodes in failover order; ordinal `i` is `rpc[i]` of `GET /health`."
-          },
-          "state": {
-            "$ref": "#/components/schemas/ServiceState"
+            "description": "Stored nodes in failover order; null while the network uses its\nconfiguration file's nodes. Always present."
           }
         }
       },
       "CreateWallet": {
         "type": "object",
-        "description": "`POST /v1/wallets` body: generate a wallet for one configured asset, or\nwatch an existing address in it without its key. A wallet is an address:\nwatching another asset of an address that already is a wallet adds that\nasset to it.",
+        "description": "`POST /v1/wallets` body: generate a wallet in one network, or watch an\naddress in it without its key.",
         "required": [
-          "asset"
+          "chain",
+          "network"
         ],
         "properties": {
           "address": {
             "type": "string",
-            "description": "Address text in any form the asset's chain accepts. Present: watch this\naddress without its key. Absent: generate a new wallet."
+            "description": "Address text in any form the chain accepts. Present: watch this\naddress without its key. Absent: generate a new wallet."
           },
-          "asset": {
-            "type": "string",
-            "description": "The configured asset tag to observe the wallet in (`GET /v1/assets`).",
-            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+          "assets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The asset ids to index it in; absent means `[\"native\"]`."
           },
-          "label": {
+          "chain": {
             "type": "string",
-            "description": "The operator's name for the wallet, 1 to 64 characters.",
-            "maxLength": 64,
-            "minLength": 1
+            "description": "Chain name, as `GET /v1/assets` lists it."
+          },
+          "network": {
+            "type": "string",
+            "description": "Network name, as `GET /v1/assets` lists it."
           },
           "start": {
             "$ref": "#/components/schemas/Start",
-            "description": "Where observation begins: `\"fresh\"` for an address never used before,\nor the native position to inspect from. Absent means `\"fresh\"`."
+            "description": "Where indexing begins: `\"fresh\"` for the chain's tip, or the native\nposition to index from. Absent means `\"fresh\"`."
           }
         },
         "additionalProperties": false
@@ -1367,60 +1038,19 @@
       },
       "ErrorBody": {
         "type": "object",
-        "description": "The body of every error response: `message` is always present, the\nsubmission fields only when they are truthfully known.",
+        "description": "The body of every error response: `message` is always present, the\nfailing transfer's index only when one transfer of a send failed.",
         "required": [
           "message"
         ],
         "properties": {
-          "ambiguous_transaction_id": {
-            "type": "string",
-            "description": "Canonical ID derived from the exact locally signed envelope. Present only\nwhen its submission outcome remains unknown; its presence produces 503."
-          },
           "failed_index": {
             "type": "integer",
-            "description": "Zero-based original request index. Present only when one public batch\noccurrence truthfully failed.",
+            "description": "Zero-based index of the transfer that failed. Present only when one\ntransfer of a send failed.",
             "minimum": 0
           },
           "message": {
             "type": "string",
             "description": "What went wrong."
-          },
-          "transaction_ids": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Definitely acknowledged transaction IDs before an ordered batch failed.\nPresent only when that accepted prefix is non-empty."
-          }
-        }
-      },
-      "Fee": {
-        "type": "object",
-        "description": "A transaction fee, always in the chain's native asset.",
-        "required": [
-          "asset",
-          "amount",
-          "payer"
-        ],
-        "properties": {
-          "amount": {
-            "type": "string",
-            "description": "Exact decimal in display units."
-          },
-          "asset": {
-            "$ref": "#/components/schemas/Asset",
-            "description": "The chain's native asset."
-          },
-          "payer": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Address",
-                "description": "Fee payer, when the chain attributes one; always present."
-              }
-            ]
           }
         }
       },
@@ -1431,57 +1061,126 @@
           "fresh"
         ]
       },
-      "IndexFailure": {
+      "Indexing": {
         "type": "object",
-        "description": "Why one indexed network is failing: its forward synchronization, or the\nhistorical range it still owes.",
+        "description": "One network's indexing health, from memory.",
         "required": [
-          "kind",
-          "retryable",
-          "attempts",
-          "since",
-          "message"
+          "blocks",
+          "last",
+          "tip",
+          "reorgs",
+          "watched",
+          "failures",
+          "error"
         ],
         "properties": {
-          "attempts": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Consecutive attempts that got nowhere: failed passes, and passes whose\nbackfill was refused.",
-            "minimum": 0
-          },
-          "kind": {
-            "type": "string",
-            "description": "Failure category, for example `invalid_block` or `source`."
-          },
-          "message": {
-            "type": "string",
-            "description": "Human-readable reason; never contains credentials."
-          },
-          "retryable": {
-            "type": "boolean",
-            "description": "Whether the same pass can succeed later."
-          },
-          "since": {
+          "blocks": {
             "type": "integer",
             "format": "int64",
-            "description": "Unix seconds at which this network entered its current state.",
+            "description": "Blocks kept.",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The last failure, cleared by the next kept block; always present."
+          },
+          "failures": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Failed steps.",
+            "minimum": 0
+          },
+          "last": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Native position of the last block kept; always present.",
+            "minimum": 0
+          },
+          "reorgs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Kept blocks archived because the chain took them back.",
+            "minimum": 0
+          },
+          "tip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The chain's produced tip at the last step; always present.",
+            "minimum": 0
+          },
+          "watched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Watches added.",
             "minimum": 0
           }
         }
       },
-      "IndexState": {
+      "Job": {
+        "type": "object",
+        "description": "`GET /v1/jobs/{id}`.",
+        "required": [
+          "id",
+          "kind",
+          "state",
+          "reason",
+          "signed",
+          "accepted"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "description": "How many of them, in broadcast order, the nodes accepted.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "The job id."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The job kind (`send`)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it failed, or why its last attempt is being retried; always\npresent."
+          },
+          "signed": {
+            "type": "integer",
+            "description": "How many transactions it signed.",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState",
+            "description": "Where it is."
+          }
+        }
+      },
+      "JobState": {
         "type": "string",
-        "description": "What one indexed network's synchronization is doing.",
+        "description": "Where a job is.",
         "enum": [
-          "paused",
-          "catching_up",
-          "ready",
-          "retrying",
-          "quarantined"
+          "pending",
+          "running",
+          "succeeded",
+          "failed"
         ]
       },
       "Listing": {
         "type": "object",
-        "description": "One configured asset: its tag, where its wallets live, and what they hold.",
+        "description": "One configured asset: its id, where its wallets live, and what they hold.",
         "required": [
           "asset",
           "network",
@@ -1490,8 +1189,7 @@
         "properties": {
           "asset": {
             "type": "string",
-            "description": "The tag every wallet route takes (`GET /v1/assets` is the whole list).",
-            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+            "description": "The id every wallet route's `asset` takes within `network`: `native`,\nor a token's chain-owned id."
           },
           "metadata": {
             "$ref": "#/components/schemas/Asset",
@@ -1505,65 +1203,38 @@
       },
       "Movement": {
         "type": "object",
-        "description": "One value change of the wallet's asset inside a transaction.",
+        "description": "One movement of the wallet's asset inside a transaction.",
         "required": [
-          "id",
+          "index",
           "kind",
-          "asset",
-          "amount",
-          "from",
-          "to"
+          "amount"
         ],
         "properties": {
           "amount": {
             "type": "string",
             "description": "Exact decimal in display units."
           },
-          "asset": {
-            "$ref": "#/components/schemas/Asset",
-            "description": "The moved asset."
-          },
-          "from": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Address",
-                "description": "Sender or spent-output owner, when there is one; always present."
-              }
-            ]
-          },
-          "id": {
-            "type": "string",
-            "description": "Chain-derived movement ID."
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Its order among the movements shown.",
+            "minimum": 0
           },
           "kind": {
             "$ref": "#/components/schemas/MovementKind",
-            "description": "What kind of value change this is."
-          },
-          "to": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Address",
-                "description": "Recipient or created-output owner, when there is one; always present."
-              }
-            ]
+            "description": "What it did."
           }
         }
       },
       "MovementKind": {
         "type": "string",
-        "description": "Kind of a [`Movement`].",
+        "description": "What a movement did to the wallet.",
         "enum": [
-          "transfer",
-          "input",
-          "output",
-          "mint",
-          "burn"
+          "received",
+          "spent",
+          "burned",
+          "minted",
+          "fee"
         ]
       },
       "Network": {
@@ -1584,69 +1255,21 @@
           }
         }
       },
-      "NetworkCheckpoint": {
+      "NetworkHealth": {
         "type": "object",
-        "description": "The persisted checkpoint and indexing state of one network.",
+        "description": "One network's indexing.",
         "required": [
           "network",
-          "checkpoint",
-          "pending_block",
-          "state",
-          "failure",
-          "backfill"
+          "indexing"
         ],
         "properties": {
-          "backfill": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Backfill",
-                "description": "The historical range this network still owes, and why it is stuck;\nnull when nothing is owed. A network can be `ready` and still report\none: the tip is indexed, and only the addresses named by that range\nhave history still arriving. Always present."
-              }
-            ]
-          },
-          "checkpoint": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Block",
-                "description": "The last committed block: this network's confirmed line, and the point\n`transactions` and `amount` are answered at. Null before the first one.\nAlways present."
-              }
-            ]
-          },
-          "failure": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/IndexFailure",
-                "description": "Why forward synchronization is held back. Present exactly when `state`\nis `retrying` or `quarantined`. Always present as a field."
-              }
-            ]
+          "indexing": {
+            "$ref": "#/components/schemas/Indexing",
+            "description": "What its indexer did since the process started."
           },
           "network": {
             "$ref": "#/components/schemas/Network",
             "description": "The indexed chain and network."
-          },
-          "pending_block": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Block",
-                "description": "The newest block held above the confirmed line; null when nothing is.\nRead beside `checkpoint` it shows that a checkpoint below the node's\ntip is the chain's confirmation depth rather than lag. Always present."
-              }
-            ]
-          },
-          "state": {
-            "$ref": "#/components/schemas/IndexState",
-            "description": "What this network's synchronization is doing."
           }
         }
       },
@@ -1662,144 +1285,36 @@
             "items": {
               "$ref": "#/components/schemas/ConfiguredNetwork"
             },
-            "description": "Networks in configuration order."
+            "description": "Networks in chain, then name, order."
           }
         }
       },
-      "ParentBlock": {
-        "type": "object",
-        "description": "The parent of a [`Block`].",
-        "required": [
-          "position",
-          "hash"
-        ],
-        "properties": {
-          "hash": {
-            "type": "string",
-            "description": "Lowercase hex parent hash."
-          },
-          "position": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Chain-native position of the parent.",
-            "minimum": 0
-          }
-        },
-        "additionalProperties": false
-      },
-      "Queue": {
-        "type": "object",
-        "description": "One asset's in-memory send queue, read without touching its dispatch.",
-        "required": [
-          "asset",
-          "depth",
-          "in_flight",
-          "completed"
-        ],
-        "properties": {
-          "asset": {
-            "type": "string",
-            "description": "The configured asset tag whose sends wait in this queue."
-          },
-          "completed": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Sends answered since the process started, success or failure.",
-            "minimum": 0
-          },
-          "depth": {
-            "type": "integer",
-            "description": "Sends admitted and not yet answered.",
-            "minimum": 0
-          },
-          "in_flight": {
-            "type": "integer",
-            "description": "Sends with the node right now.",
-            "minimum": 0
-          }
-        }
+      "Outcome": {
+        "type": "string",
+        "description": "How a mined transaction executed.",
+        "enum": [
+          "succeeded",
+          "reverted"
+        ]
       },
       "Report": {
         "type": "object",
         "description": "The memory-only health snapshot of this process.",
         "required": [
           "ready",
-          "networks",
-          "rpc",
-          "queues"
+          "networks"
         ],
         "properties": {
           "networks": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/NetworkCheckpoint"
+              "$ref": "#/components/schemas/NetworkHealth"
             },
-            "description": "Latest notification for each network; no repository or node calls."
-          },
-          "queues": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Queue"
-            },
-            "description": "One send queue per asset that sends, in asset tag order."
+            "description": "Every configured network."
           },
           "ready": {
             "type": "boolean",
-            "description": "Every network settled and at least one ready; false if reporting stopped."
-          },
-          "rpc": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Rpc"
-            },
-            "description": "One set of counters per configured RPC endpoint."
-          }
-        }
-      },
-      "Rpc": {
-        "type": "object",
-        "description": "One RPC endpoint's sanitized execution counters.",
-        "required": [
-          "network",
-          "endpoint",
-          "attempts",
-          "failures",
-          "consecutive_failures"
-        ],
-        "properties": {
-          "attempts": {
-            "type": "integer",
-            "format": "int64",
-            "description": "HTTP executions, including failed attempts hidden by transport retries.",
-            "minimum": 0
-          },
-          "consecutive_failures": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Failed completions since the last successful completion.",
-            "minimum": 0
-          },
-          "endpoint": {
-            "type": "integer",
-            "description": "Zero-based ordinal of the node in the network's current list\n(`GET /v1/networks`).",
-            "minimum": 0
-          },
-          "failures": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Transport failures or JSON-RPC errors.",
-            "minimum": 0
-          },
-          "last_failure": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Sanitized failure category; never RPC response text or endpoint credentials."
-          },
-          "network": {
-            "$ref": "#/components/schemas/Network",
-            "description": "Chain and network this client serves."
+            "description": "At least one network, and none whose last step failed."
           }
         }
       },
@@ -1814,7 +1329,7 @@
             "description": "The node's URL and bounds."
           }
         ],
-        "description": "One RPC node, written as the configuration file's `rpc.endpoints` writes\nit. The URL carries any credentials: userinfo (HTTP Basic) or query keys."
+        "description": "One RPC node, written as the configuration file's `endpoints` writes it.\nThe URL carries any credentials: userinfo (HTTP Basic) or query keys."
       },
       "RpcNode": {
         "type": "object",
@@ -1825,7 +1340,7 @@
         "properties": {
           "origin": {
             "type": "string",
-            "description": "Scheme, host and port of the node's URL. User information, path and\nquery are never returned: any of them may hold a\ncredential."
+            "description": "Scheme, host and port of the node's URL. User information, path and\nquery are never returned: any of them may hold a credential."
           }
         }
       },
@@ -1848,157 +1363,89 @@
         },
         "additionalProperties": false
       },
-      "ServiceState": {
-        "type": "string",
-        "description": "What a configured network is doing.",
-        "enum": [
-          "unavailable",
-          "rescanning",
-          "paused",
-          "catching_up",
-          "ready",
-          "retrying",
-          "quarantined"
-        ]
+      "Send": {
+        "type": "object",
+        "description": "`POST /v1/wallets/{id}/transactions` body: an ordered send from the\npath's wallet in one asset.",
+        "required": [
+          "transfers"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "An asset id of the wallet's network; default `native`."
+          },
+          "transfers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransferItem"
+            },
+            "description": "The transfers, in execution order.",
+            "maxItems": 50,
+            "minItems": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "SendAccepted": {
+        "type": "object",
+        "description": "An enqueued send.",
+        "required": [
+          "job"
+        ],
+        "properties": {
+          "job": {
+            "type": "string",
+            "description": "The send job; `GET /v1/jobs/{id}` reports it."
+          }
+        }
       },
       "Start": {
         "oneOf": [
           {
             "$ref": "#/components/schemas/Fresh",
-            "description": "The address has never been used: observe from the next block."
+            "description": "Index from the chain's tip."
           },
           {
             "type": "integer",
             "format": "int64",
-            "description": "Observe from this native position.",
+            "description": "Index from this native position.",
             "minimum": 0
           }
         ],
         "description": "A wallet's birthday on the wire: `\"fresh\"` or a native position."
       },
-      "Status": {
-        "oneOf": [
-          {
-            "type": "object",
-            "description": "In a canonical block above the confirmed line; it may still revert.",
-            "required": [
-              "block",
-              "confirmations",
-              "kind"
-            ],
-            "properties": {
-              "block": {
-                "$ref": "#/components/schemas/Block",
-                "description": "The including block."
-              },
-              "confirmations": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Blocks from inclusion to the newest indexed block, inclusive.",
-                "minimum": 0
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "pending"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Committed at or below the confirmed line; it will not revert.",
-            "required": [
-              "block",
-              "confirmations",
-              "kind"
-            ],
-            "properties": {
-              "block": {
-                "$ref": "#/components/schemas/Block",
-                "description": "The including block."
-              },
-              "confirmations": {
-                "type": "integer",
-                "format": "int64",
-                "description": "Blocks from inclusion to the newest indexed block, inclusive.",
-                "minimum": 0
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "confirmed"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Included but failed on chain.",
-            "required": [
-              "block",
-              "reason",
-              "kind"
-            ],
-            "properties": {
-              "block": {
-                "$ref": "#/components/schemas/Block",
-                "description": "The including block."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "failed"
-                ]
-              },
-              "reason": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "Chain-reported failure reason, when available; always present."
-              }
-            }
-          }
-        ],
-        "description": "Where a history transaction stands relative to its chain's confirmed line."
-      },
       "Transaction": {
         "type": "object",
         "description": "One transaction of a wallet's history.",
         "required": [
-          "network",
           "transaction_id",
-          "status",
-          "movements",
-          "fee"
+          "block",
+          "outcome",
+          "reason",
+          "movements"
         ],
         "properties": {
-          "fee": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Fee",
-                "description": "The fee, when one is attributed; always present."
-              }
-            ]
+          "block": {
+            "$ref": "#/components/schemas/Block",
+            "description": "The block it was mined in."
           },
           "movements": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Movement"
             },
-            "description": "Movements of the wallet's asset."
+            "description": "The wallet's movements of the asset."
           },
-          "network": {
-            "$ref": "#/components/schemas/Network",
-            "description": "The transaction's chain and network."
+          "outcome": {
+            "$ref": "#/components/schemas/Outcome",
+            "description": "How it executed."
           },
-          "status": {
-            "$ref": "#/components/schemas/Status",
-            "description": "Inclusion, confirmation, or failure at a block."
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it reverted, as the chain reported it; always present."
           },
           "transaction_id": {
             "type": "string",
@@ -2010,70 +1457,42 @@
         "type": "object",
         "description": "One page of `GET /v1/wallets/{id}/transactions`.",
         "required": [
-          "checkpoint",
+          "asset",
           "transactions",
-          "pending",
-          "next_cursor",
-          "behind"
+          "next_cursor"
         ],
         "properties": {
-          "behind": {
-            "type": "integer",
-            "format": "int64",
-            "description": "How many blocks this address's inspection is behind the confirmed\nline; 0 when caught up. `next_cursor` cannot carry it — that speaks\nabout what follows the page, and a backfill inserts rows *before* it —\nso a caller paging to the end mid-backfill reads a non-zero `behind`\nrather than a complete export.",
-            "minimum": 0
-          },
-          "checkpoint": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Block",
-                "description": "The confirmed line the page was read at; null before the first sync.\nAlways present."
-              }
-            ]
+          "asset": {
+            "$ref": "#/components/schemas/Asset",
+            "description": "The asset."
           },
           "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Opaque cursor of the next page; null when no transaction follows.\nAlways present."
-          },
-          "pending": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Transaction"
-            },
-            "description": "Transactions in canonical blocks above the confirmed line, oldest\nfirst. They are not in `transactions` because they can still revert,\nwhich would break that list's ordering guarantee. Populated on the\nfirst page only (`cursor` absent), and bounded by the chain's\nconfirmation depth."
+            "description": "Opaque cursor of the next page; null on a short page. Always present."
           },
           "transactions": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Transaction"
             },
-            "description": "At most `limit` confirmed transactions; fewer only on the last page.\nAppend-only: a transaction already returned on a page is never removed\nor reordered, so a `next_cursor` stays valid however long it is held."
+            "description": "At most `limit` transactions in kept blocks, in chain order. Kept\nblocks reach the produced tip, so the last ones may still be taken\nback by a reorg."
           }
         }
       },
-      "Transfer": {
+      "TransferItem": {
         "type": "object",
-        "description": "`POST /v1/wallets/{id}/transactions` body: one transfer from the path's wallet.",
+        "description": "One ordered transfer of a send.",
         "required": [
-          "asset",
           "destination",
           "amount"
         ],
         "properties": {
           "amount": {
             "type": "string",
-            "description": "Exact decimal in display units, or `all` for the available balance after fees."
-          },
-          "asset": {
-            "type": "string",
-            "description": "A configured asset tag of the wallet's network: the asset sent.",
-            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+            "description": "Exact positive decimal in display units."
           },
           "destination": {
             "type": "string",
@@ -2082,54 +1501,14 @@
         },
         "additionalProperties": false
       },
-      "TransferAccepted": {
-        "type": "object",
-        "description": "A submitted, not yet confirmed, transaction.",
-        "required": [
-          "transaction_id"
-        ],
-        "properties": {
-          "transaction_id": {
-            "type": "string",
-            "description": "Chain-native transaction ID."
-          }
-        }
-      },
-      "TransferBatch": {
-        "type": "object",
-        "description": "`POST /v1/transactions` body: an ordered batch of one wallet asset.",
-        "required": [
-          "asset",
-          "transfers"
-        ],
-        "properties": {
-          "asset": {
-            "type": "string",
-            "description": "The configured asset tag every transfer sends.",
-            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
-          },
-          "transfers": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/BatchedTransfer"
-            },
-            "description": "Transfers of `asset`, in execution order.",
-            "maxItems": 50,
-            "minItems": 1
-          }
-        },
-        "additionalProperties": false
-      },
       "Wallet": {
         "type": "object",
-        "description": "One wallet: one address of one network, its lifecycle, and the assets it\nis observed in. Its wire form is what every wallet route returns; it never\nholds the key.",
+        "description": "One wallet's public metadata; never its key.",
         "required": [
           "id",
           "network",
           "address",
-          "watch_only",
-          "label",
-          "archived_at",
+          "keyed",
           "assets"
         ],
         "properties": {
@@ -2137,40 +1516,24 @@
             "type": "string",
             "description": "Canonical address text."
           },
-          "archived_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Unix seconds when the wallet was archived; null while it is active.\nAlways present.",
-            "minimum": 0
-          },
           "assets": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/WatchedAsset"
+              "type": "string"
             },
-            "description": "The assets the index observes the address in, in asset order; empty\nonce archived or when this process does not serve its network."
+            "description": "The asset ids it is indexed in."
           },
           "id": {
             "type": "string",
-            "description": "Wallet ID, a UUIDv7 the API minted."
+            "description": "`<chain>:<network>:<address>`: what every wallet route takes."
           },
-          "label": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The operator's label; null when none was given. Always present."
+          "keyed": {
+            "type": "boolean",
+            "description": "Whether this server holds its key and can send from it."
           },
           "network": {
             "$ref": "#/components/schemas/Network",
-            "description": "The chain and network of the wallet's address."
-          },
-          "watch_only": {
-            "type": "boolean",
-            "description": "Observed without a key: history and balance only, no sends."
+            "description": "The wallet's chain and network."
           }
         }
       },
@@ -2187,28 +1550,6 @@
               "$ref": "#/components/schemas/Wallet"
             },
             "description": "Wallets in ID order."
-          }
-        }
-      },
-      "WatchedAsset": {
-        "type": "object",
-        "description": "One asset the index observes a wallet's address in.",
-        "required": [
-          "asset",
-          "asset_id"
-        ],
-        "properties": {
-          "asset": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The configured asset tag; null when no configured asset is it any\nmore. Always present.",
-            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
-          },
-          "asset_id": {
-            "type": "string",
-            "description": "The asset's identity within its chain: `native`, or a token\nidentifier."
           }
         }
       }
@@ -2236,11 +1577,11 @@
     },
     {
       "name": "networks",
-      "description": "Configured networks, their RPC nodes, and rescans"
+      "description": "Configured networks, their indexing and RPC nodes"
     },
     {
       "name": "health",
-      "description": "Readiness, network state, and RPC statistics"
+      "description": "Readiness and indexing state"
     },
     {
       "name": "openapi",

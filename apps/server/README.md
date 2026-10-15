@@ -1,20 +1,20 @@
 # payment-server
 
-The one executable of the workspace: it reads a configuration file, connects the
-configured Bitcoin, Ethereum and Solana nodes, indexes into one SQLite file and
-serves the wallet HTTP API. It is a binary with no library.
+The one executable of the workspace: it reads a configuration file, builds
+`payments::Payments` over one SQLite file with the Bitcoin, Ethereum and Solana
+chains registered, runs every network's indexer and the send queue, and serves
+the wallet HTTP API. It is a binary with no library.
 
 ## Usage
 
 ```bash
 export PAYMENT_API_TOKEN='replace-me'
-cargo run --locked -p payment-server -- migrate ./payments.toml  # optional: create the database
+cargo run --locked -p payment-server -- migrate ./payments.toml  # once: create the database
 cargo run --locked -p payment-server -- serve ./payments.toml
 ```
 
-`migrate` opens the configured database file: an empty file gets the schema,
-a file already holding this schema is left as it is (re-running is a no-op),
-any other file is refused. `serve` does the same on start, then serves.
+`migrate` executes `schema/sdk.sql`, `schema/server.sql` and `schema/queue.sql`
+on the configured (new) file; there are no migrations. `serve` only opens it.
 
 ```toml
 # payments.toml (a `.toml` path is read as TOML, anything else as JSON)
@@ -22,130 +22,90 @@ bind = '127.0.0.1:8080'
 bearer_token_env = 'PAYMENT_API_TOKEN'   # the variable that holds the API token
 storage = { path = 'payment.db' }        # optional, this is the default
 
-[chains.bitcoin]
+[[payments.networks]]
+chain = 'bitcoin'
 network = 'regtest'
-confirmation_depth = 6
-rpc.endpoints = ['http://user:password@127.0.0.1:18443']
+endpoints = ['http://user:password@127.0.0.1:18443']
 
-[chains.ethereum]
+[[payments.networks]]
+chain = 'ethereum'
 network = 'mainnet'
 chain_id = 1
-rpc.endpoints = ['https://node.invalid/v3/KEY']
-
-[chains.solana]
-network = 'mainnet'
-genesis_hash = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d'
-rpc.endpoints = ['https://node.invalid']
+endpoints = ['https://node.invalid/v3/KEY']
 ```
 
-Wallets are created through the API and restored from the database on restart.
-Public addresses can be observed through the API.
+`payments` is `payments::Document`: one section per network, its `chain` naming
+the chain `src/chains.rs` registers; the rest is that chain's own `Config` (see the
+chain's README). Every network is built at startup; one that fails verification
+stops the start. `bearer_token_env` is optional only for a loopback `bind`.
 
-Chains are composed once, at startup, from this file; edit it and restart to add
-or remove chains. A chain whose node fails verification at startup is skipped and
-named on stderr; the others serve. Chains are optional. Each section is the chain
-crate's own `Config`; its keys are in the chain's README. `bearer_token_env` is
-optional only for a loopback `bind`.
+A network's stored `rpc_endpoints` row replaces its section's `endpoints` at
+startup (matched on the section's `chain` and `network` text).
+`PUT /v1/networks/{chain}/{network}/rpc` stores a list and moves every later call
+of the network to it at once (`json_rpc::Failover` behind the network's
+`json_rpc::Swap`), unverified; the chain verifies it on the next start.
 
-A section's `rpc.endpoints` are only the bootstrap: the first start stores them in
-the database, and from then on the stored list is what the network uses, whatever
-the file says. Change nodes while running with
-`PUT /v1/networks/{chain}/{network}/rpc` (or the page's Networks tab): the chain's
-own startup check runs over the new nodes, and only a list that passes is stored and
-used for later calls. `POST /v1/networks/{chain}/{network}/rescans` purges one
-network's indexed facts and indexes it again from every watch's birthday, while the
-other networks keep running. `GET /v1/networks` lists every configured network, its
-state and its nodes' origins.
+The server also serves a browser page at `/` (`[ui] brand`, `PAYMENT_UI_API_BASE`).
+The committed page (`ui/dist`) was built against the previous API and needs a
+rebuild for the routes below.
 
-The server also serves a browser page at `/`: wallets, networks, and the API reference
-rendered from `GET /openapi.json` with a request console. `[ui] brand` names it,
-and `PAYMENT_UI_API_BASE` points it at another origin when a proxy fronts the API.
+## API
 
-```bash
-curl -H "Authorization: Bearer $PAYMENT_API_TOKEN" http://127.0.0.1:8080/v1/assets
-curl http://127.0.0.1:8080/health
-```
+`payment-server --openapi` prints the OpenAPI document; `docs/openapi.json` is the
+committed copy. `GET /health` and `GET /openapi.json` need no token.
 
-`payment-server --openapi` prints the OpenAPI document with every route and
-body; `docs/openapi.json` is the committed copy. `GET /health`, `GET /openapi.json`
-and the page need no token. `POST /v1/wallets` generates a wallet, or watches an
-`address` without its key, with an optional `label`; the server mints a UUIDv7 ID.
-`start` is `"fresh"` (the default: the next block) or a native position; a start
-the network's backfill policy refuses answers `400`. HTTP accepts no private keys.
-`DELETE /v1/wallets/{id}` archives a wallet: its address is no longer observed,
-its signer is dropped, its indexed history and balance stay readable, and sends
-from it answer `409`. Archiving is final: creating its address again answers `409`.
-`GET /v1/wallets` leaves archived wallets out unless `archived=true`. Single and
-batch transfers accept an exact decimal amount or `"all"` to send the available
-balance after chain fees.
+- `GET /v1/assets`: every configured asset (`payments.assets()`): its network, its
+  id (`native` or a token's) and metadata.
+- `POST /v1/wallets` `{chain, network, address?, assets?, start?}`: without
+  `address`, generates a wallet and keeps its key (`payments.generate`); with it,
+  watches the address without a key. Then indexes it in each asset id of `assets`
+  (default `["native"]`) from `start` (`"fresh"`, the default, or a native
+  position). HTTP accepts no private keys. A wallet's ID is
+  `<chain>:<network>:<address>`.
+- `GET /v1/wallets`, `GET /v1/wallets/{id}`: keyed wallets and watched addresses,
+  with their watched asset ids.
+- `GET /v1/wallets/{id}/balance?asset=`: the signed sum of the address's legs
+  (received and minted less spent, burned and fees) and rewards in the asset over
+  every live block, in display units, with the position the address is indexed
+  through and the indexer's last seen tip.
+- `GET /v1/wallets/{id}/transactions?asset=&limit=&cursor=`: transactions in live
+  blocks with a leg of the address in the asset, in chain order, with only those
+  legs; keyset-paged on (block position, order, txid).
+- `POST /v1/wallets/{id}/transactions` `{asset?, transfers}`: enqueues one send
+  job (one lane per sender) and answers `202 {job}`; a watch-only wallet is `422`.
+- `GET /v1/jobs/{id}`: the job's state, reason, and signed/accepted counts.
+- `GET /v1/networks`: every network's indexer stats and stored nodes' origins.
+- `GET /health`: every network's indexer stats; ready (`200`) when at least one
+  network is configured and none's last step failed, else `503`.
 
 ## Layout
 
-- `src/main.rs`: composition and startup (stored nodes, the `payments` builder, the
-  send queues, wallet restore) and `Payments::shutdown` after HTTP drains. `src/chains.rs` is the only file that names a
-  chain crate; `src/config.rs` reads the file; `src/storage.rs` opens the one
-  SQLite file; `src/ui.rs` serves the
-  page.
-- `src/api/`: one file per endpoint group (`assets.rs`, `wallets.rs`,
-  `balance.rs`, `transactions.rs`, `networks.rs`, `health.rs`, `openapi.rs`);
-  `mod.rs` assembles the router and OpenAPI root and holds the shared `Error`.
-  `src/state.rs` is the handler state and `src/asset.rs` the asset tag. None of
-  them names a chain crate or `payments::config`; `state.rs` alone holds the
-  concrete repository.
-- `src/models/`: the nouns the endpoints and the tables share (`asset`, `block`,
-  `network`, `wallet`, `endpoint`), each with its own serde/utoipa wire
-  form and, for the durable ones, its SQL. Balance and history are the
-  repository's own reads (`AppState::repository`), completed by each network's
-  pending blocks.
-  No axum, no chain crate.
+- `src/main.rs`: composition (stored nodes into the document, `base::Storage` from
+  the one `storage::Storage`, the `payments` builder, `run()`, the send runner,
+  HTTP) and shutdown (stop and join the indexers after HTTP drains).
+  `src/chains.rs` is the only file that names a chain crate; `src/config.rs` reads
+  the file; `src/ui.rs` serves the page; `src/state.rs` is the handler state
+  (`Arc<Payments>` and the storage).
+- `src/api/`: one file per resource; `mod.rs` assembles the router and OpenAPI root
+  and holds the shared `Error`.
+- `src/models/`: one file per table (diesel row and its SQL) and the shared wire
+  shapes (`asset`, `network`, `indexing`).
+- `src/storage/`: every `base` store and `tasks::Store` on the models, the balance
+  and history reads (`history.rs`), the wallet listing and stored nodes.
+- `src/workers/send.rs`: the send job.
 
 ## Notes
 
-- Generated keys persist directly in SQLite; no encryption or passphrase.
-  Keys never appear in API responses, logs or Debug.
-- One SQLite file, one `sqlx` pool (`indexing::sqlite::Database::open`).
-  Wallets are indexing's `wallet` rows, read and filed through
-  `indexing::WalletRegistry`; the server's own table, `rpc_endpoints`, is
-  [`src/models/schema.sql`](src/models/schema.sql), executed with `schema/sdk.sql` and
-  `schema/queue.sql` by `payment-server migrate` on a new file; `serve` only opens it.
-  No migrations and no version check. Index rescans keep every
-  wallet, label and key.
-- `POST /v1/wallets`: admit, generate a key or parse the address, file the row
-  archived and unobserved (`register`, so the key is durable first), then
-  `index.watch` it from the requested `start`, then keep the signer. An interrupted
-  or refused creation leaves an archived, never-observed row, which the next
-  creation of that address takes over. An address of a wallet that was observed and
-  archived is refused with 409; nothing is restored.
-- `DELETE /v1/wallets/{id}`: `index.unwatch` archives the row under the publication
-  permit; a wallet of a network this process does not serve is archived by the
-  registry directly. History and balance stay readable.
-- At startup every active, keyed wallet of a served network and configured asset is
-  rebuilt as a signer; nothing is watched or unwatched, because the index restores
-  its watch list from the same rows. A wallet whose asset is no longer configured
-  is listed with `asset: null` and its `asset_id`.
-- The API token comes from `bearer_token_env`. An RPC endpoint is just its URL,
-  like a database URI: userinfo (sent as HTTP Basic) and query/path keys carry
-  credentials; no headers or references. Never log the configuration.
+- Balances and history include every live block up to the produced tip: the
+  store records no confirmation, and `payments` exposes no chain's confirmed tip
+  (`base::Stats` carries only the produced `tip`), so no confirmed/pending split
+  is reported. A reorg archives blocks and both reads follow.
+- The send job signs through `wallet.transaction(asset)` → `transfer` → `sign()`,
+  saves every transaction's signed bytes in its payload before broadcasting, and
+  broadcasts them in order through `payments.broadcast`; a retry resends the saved
+  bytes, never re-signs. Nothing is written to the index: indexing records the
+  transactions once mined.
+- Generated keys persist directly in SQLite; no encryption or passphrase. Keys
+  never appear in API responses, logs or Debug.
 - The server speaks plain HTTP. A `bind` that is not loopback is refused unless
-  `tls_terminated_upstream = true`, which states that a proxy in front of it
-  terminates TLS.
-- One chain's failure quarantines that chain only; the others keep indexing.
-  `GET /health` reports each network, sanitized RPC counters and each asset's
-  in-memory send queue from memory.
-  It answers `200` only when every network is ready or quarantined and at least
-  one is ready; otherwise it answers `503` with the same report shape.
-- `rpc_endpoints` holds one JSON list per network, 1 to 16 nodes in failover order.
-  Rows hold the URLs as sent, credentials included. The API
-  returns only each node's origin. A network skipped at startup is listed
-  `unavailable`; replacing its nodes takes effect at the next start.
-- Storage opens before any node is contacted: the stored nodes replace each
-  section's, and a network with no row stores the file's.
-- During a rescan, wallet creation, archiving and sends on that network answer `409`
-  (`wallets::Wallets::pause`, which also waits for those already running); reads
-  answer from the purged store, marked incomplete. The rescan itself is
-  `indexing::Control::rescan`. A second rescan answers `409` and a node change
-  `503` until it finishes.
-- After fixing a quarantine's cause, rescan the network or restart the server.
-- A confirmed reorg requires a rescan: `POST .../rescans` (`payments.networks.rescan`).
-  It deletes only that network's indexing facts and preserves watches, birthdays and
-  wallets.
+  `tls_terminated_upstream = true`.

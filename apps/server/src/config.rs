@@ -1,20 +1,15 @@
-//! The server's configuration document: HTTP binding, storage, the chain
-//! sections. An RPC endpoint is its URL, credentials included.
+//! The server's configuration document: HTTP binding, storage, the payments
+//! networks. An RPC endpoint is its URL, credentials included.
 //!
-//! `payments::config::Document::read` is the reader — TOML for a `.toml` path, JSON
-//! for anything else — and the chain sections arrive as `payments::config::Sections`,
-//! which this module never looks inside. `crate::chains` says which chain owns
-//! which name; the chain itself says what its section means.
+//! A `.toml` path is read as TOML, anything else as JSON. The `payments`
+//! section is `payments::Document`, which this module never looks inside:
+//! `crate::chains` says which chain owns which section name.
 
 use std::{env, error::Error, net::SocketAddr, path::Path};
 
-use payments::{
-    Builder, Payments,
-    config::{Document, Sections},
-};
 use serde::Deserialize;
 
-use crate::{asset::AssetTag, chains, storage};
+use crate::storage;
 
 pub(crate) type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -30,10 +25,9 @@ pub(crate) struct Config {
     tls_terminated_upstream: bool,
     #[serde(default)]
     pub(crate) storage: storage::Config,
-    /// One section per chain, still raw: `crate::chains::register` decides
-    /// which chain parses which, and this module never looks inside one.
+    /// Every network, each section naming its `chain`.
     #[serde(default)]
-    pub(crate) chains: Sections,
+    pub(crate) payments: payments::Document,
     /// How the browser page presents itself; every key is optional.
     #[serde(default)]
     pub(crate) ui: Ui,
@@ -49,35 +43,24 @@ pub(crate) struct Ui {
 
 impl Config {
     pub(crate) async fn read(path: impl AsRef<Path>) -> Result<Self, AnyError> {
-        let config: Self = Document::read(path).await?.parse()?;
-        config.validate()?;
-        Ok(config)
-    }
-
-    /// The payments container over every configured chain section, each
-    /// owned by the chain `crate::chains` registers for its name. Nothing is
-    /// contacted and nothing is opened.
-    ///
-    /// # Errors
-    ///
-    /// The sections do not re-encode as one document.
-    pub(crate) fn payments(&self) -> Result<Builder<AssetTag>, AnyError> {
-        let document = serde_json::to_vec(&self.chains.clone().into_values())?;
-        Ok(chains::register(Payments::from_json(&document)?))
-    }
-
-    fn validate(&self) -> Result<(), AnyError> {
-        if self
+        let path = path.as_ref();
+        let text = tokio::fs::read_to_string(path).await?;
+        let config: Self = if path
+            .extension()
+            .is_some_and(|extension| extension == "toml")
+        {
+            toml::from_str(&text)?
+        } else {
+            serde_json::from_str(&text)?
+        };
+        if config
             .bearer_token_env
             .as_deref()
             .is_some_and(|name| name.trim().is_empty())
         {
             return Err("bearer-token environment name must not be empty".into());
         }
-        self.storage.validate()?;
-        // Every section parsed and accepted by the chain that owns it.
-        self.payments()?.endpoints()?;
-        Ok(())
+        Ok(config)
     }
 
     /// Where the browser page sends its API calls, from `PAYMENT_UI_API_BASE`.

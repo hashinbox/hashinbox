@@ -1,13 +1,13 @@
-//! A task's handle: its status by id, and an optional polling wait.
+//! A job's handle: the job by id, and an optional wait for its end.
 
 use std::sync::Arc;
 
 use crate::{
     storage::{Store, StoreError},
-    task::{Id, Status},
+    task::{Id, Job},
 };
 
-/// One enqueued task, looked up in its store.
+/// One job, looked up in its store.
 #[derive(Clone)]
 pub struct Handle {
     id: Id,
@@ -21,40 +21,40 @@ impl Handle {
         Self { id, store }
     }
 
-    /// The task.
+    /// The job's id.
     #[must_use]
     pub fn id(&self) -> &Id {
         &self.id
     }
 
-    /// Where the task is; `None` when the store does not know it.
+    /// The job; `None` when the store does not know it.
     ///
     /// # Errors
     /// The store's failure.
-    pub async fn status(&self) -> Result<Option<Status>, StoreError> {
-        self.store.status(&self.id).await
+    pub async fn job(&self) -> Result<Option<Job>, StoreError> {
+        self.store.get(&self.id).await
     }
 
-    /// Polls every `poll` until the task finishes or `timeout` passes; the
-    /// last status seen.
+    /// Waits until the job finishes or `timeout` passes; the last job seen.
     ///
     /// # Errors
     /// The store's failure.
     #[cfg(feature = "runner")]
-    pub async fn wait(
-        &self,
-        poll: std::time::Duration,
-        timeout: std::time::Duration,
-    ) -> Result<Option<Status>, StoreError> {
+    pub async fn wait(&self, timeout: std::time::Duration) -> Result<Option<Job>, StoreError> {
         let deadline = tokio::time::Instant::now() + timeout;
+        let mut changes = self.store.changes();
         loop {
-            let status = self.status().await?;
-            if matches!(status, Some(Status::Finished(_)) | None)
-                || tokio::time::Instant::now() >= deadline
-            {
-                return Ok(status);
+            let job = self.job().await?;
+            if job.as_ref().is_none_or(|job| job.state.is_finished()) {
+                return Ok(job);
             }
-            tokio::time::sleep(poll).await;
+            // Any change, a lag or a closed store means: look again.
+            if tokio::time::timeout_at(deadline, changes.recv())
+                .await
+                .is_err()
+            {
+                return self.job().await;
+            }
         }
     }
 }

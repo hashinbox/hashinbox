@@ -1,8 +1,18 @@
-//! The optional Tokio runner: claims due tasks, hands them to executors, and
-//! stores each settlement. The caller spawns, cancels and joins it.
+//! The optional Tokio runner, owner of every queue rule: one running job per
+//! lane (oldest first), deadlines, attempts with backoff, recovery, unknown
+//! kinds and panics. It wakes on a store change, an ended execution or the
+//! earliest `run_at`/deadline. The caller spawns, cancels and joins it.
+//!
+//! Single process: [`Runner::run`] first returns every running job to pending,
+//! so only one process may run jobs from a store.
+//!
+//! Payload keys the runner owns (the payload must be a JSON object):
+//! `attempts` (executions started), `reason` (why it failed or last retried)
+//! and, set by the enqueuer, an optional `deadline` (ms): a pending job at or
+//! past it fails as `expired`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     num::NonZeroUsize,
     pin::Pin,
@@ -11,88 +21,92 @@ use std::{
 };
 
 use logging::{Level, Logger};
+use serde_json::Value;
 use tokio::task::JoinSet;
 
 use crate::{
     storage::{Store, StoreError},
-    task::{Id, Outcome, Settlement},
+    task::{Job, State},
 };
 
-/// What a claimed task hands its executor.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Delivery {
-    /// The task.
-    pub id: Id,
-    /// Its lane.
-    pub lane: String,
-    /// This attempt, from 1.
-    pub attempt: u32,
-    /// Its payload.
-    pub payload: Vec<u8>,
-}
-
-/// The executor's explicit settlement; the runner enforces the consequences.
+/// How an execution ended; the runner stores it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ack {
-    /// Terminal success, with the stored output.
-    Done(Option<Vec<u8>>),
-    /// Terminal refusal; never retried.
-    Reject(String),
-    /// Terminal uncertainty; never retried.
-    Ambiguous(String),
-    /// Run again after the backoff while attempts remain.
+    /// Succeeded.
+    Done,
+    /// Failed for good, with why.
+    Fail(String),
+    /// Run again after the backoff while attempts remain, with why not now.
     Retry(String),
 }
 
-/// Runs the tasks of one kind. At-least-once: it must be idempotent.
+/// Runs the jobs of one kind. A job may run again after a crash: an executor
+/// resumes from its payload. To save mid-run (e.g. signed bytes before
+/// broadcasting them) it sets the job, still running, with a new payload.
 pub trait Executor: Send + Sync {
-    /// Executes one delivery.
-    fn execute(&self, delivery: Delivery) -> Pin<Box<dyn Future<Output = Ack> + Send>>;
+    /// Executes one running job.
+    fn execute(&self, job: Job, store: Arc<dyn Store>)
+    -> Pin<Box<dyn Future<Output = Ack> + Send>>;
 }
 
-/// Claims and executes tasks over one store.
+/// Runs jobs over one store.
 pub struct Runner {
     store: Arc<dyn Store>,
     executors: HashMap<String, Arc<dyn Executor>>,
-    owner: String,
-    lease: Duration,
     concurrency: NonZeroUsize,
+    attempts: u64,
+    backoff: Duration,
     logger: Logger,
 }
 
+/// The wait after a store failure, and the unit of the idle wait.
+const PAUSE: Duration = Duration::from_secs(1);
+
+/// How often a settlement is attempted before the job is left running
+/// (its lane blocked until restart).
+const SETTLE_TRIES: u32 = 5;
+
 impl Runner {
-    /// A runner over `store` leasing as `owner` (unique per worker): 30 s
-    /// leases, four tasks at once, no executors, no logging.
+    /// A runner over `store`: four jobs at once, three attempts, 250 ms
+    /// backoff per attempt, no executors, no logging.
     #[must_use]
-    pub fn new(store: Arc<dyn Store>, owner: impl Into<String>) -> Self {
+    pub fn new(store: Arc<dyn Store>) -> Self {
         Self {
             store,
             executors: HashMap::new(),
-            owner: owner.into(),
-            lease: Duration::from_secs(30),
             concurrency: NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN),
+            attempts: 3,
+            backoff: Duration::from_millis(250),
             logger: Logger::default(),
         }
     }
 
-    /// Runs tasks of `kind` with `executor`.
+    /// Runs jobs of `kind` with `executor`.
     #[must_use]
     pub fn executor(mut self, kind: impl Into<String>, executor: Arc<dyn Executor>) -> Self {
         self.executors.insert(kind.into(), executor);
         self
     }
 
-    /// How long one execution may hold its task; it is not settled beyond it.
-    #[must_use]
-    pub fn lease(mut self, lease: Duration) -> Self {
-        self.lease = lease;
-        self
-    }
-
-    /// How many tasks (of different lanes) execute at once.
+    /// How many jobs (of different lanes) execute at once.
     #[must_use]
     pub fn concurrency(mut self, concurrency: NonZeroUsize) -> Self {
         self.concurrency = concurrency;
+        self
+    }
+
+    /// Executions per job, the first included; a retry past them fails
+    /// (`attempts-exhausted: …`).
+    #[must_use]
+    pub fn attempts(mut self, attempts: NonZeroUsize) -> Self {
+        self.attempts = u64::try_from(attempts.get()).unwrap_or(u64::MAX);
+        self
+    }
+
+    /// A retry after attempt `n` waits `backoff * n`.
+    #[must_use]
+    pub fn backoff(mut self, backoff: Duration) -> Self {
+        self.backoff = backoff;
         self
     }
 
@@ -103,139 +117,158 @@ impl Runner {
         self
     }
 
-    /// Claims and executes until nothing is claimable; how many it settled
-    /// or lost.
+    /// Returns jobs a dead process left running to pending, then runs jobs
+    /// until the caller drops or aborts it. Dropping it aborts the executions
+    /// in flight; their jobs stay running until the next start.
     ///
     /// # Errors
-    /// The store's failure to claim; executions already started still finish.
-    pub async fn pass(&self) -> Result<usize, StoreError> {
-        let mut running = JoinSet::new();
-        let mut done = 0;
-        let mut failure = None;
-        loop {
-            while failure.is_none() && running.len() < self.concurrency.get() {
-                let now = now();
-                let lease_until = now.saturating_add(millis(self.lease));
-                match self.store.claim(&self.owner, lease_until, now).await {
-                    Ok(Some(claimed)) => {
-                        self.logger.event(
-                            Level::Debug,
-                            "task.claimed",
-                            "task claimed",
-                            &[("task", claimed.id.as_str()), ("kind", &claimed.kind)],
-                        );
-                        let execution = Execution {
-                            store: self.store.clone(),
-                            executor: self.executors.get(&claimed.kind).cloned(),
-                            owner: self.owner.clone(),
-                            lease: self.lease,
-                            logger: self.logger.clone(),
-                        };
-                        let delivery = Delivery {
-                            id: claimed.id,
-                            lane: claimed.lane,
-                            attempt: claimed.attempt,
-                            payload: claimed.payload,
-                        };
-                        running.spawn(execution.run(delivery));
-                    }
-                    Ok(None) => break,
-                    Err(error) => failure = Some(error),
-                }
+    /// The store's failure to recover; later failures are logged and retried.
+    pub async fn run(&self) -> Result<(), StoreError> {
+        // Subscribe first: a change between a look and the wait is not lost.
+        let mut changes = self.store.changes();
+        for mut job in self.store.next(u64::MAX).await? {
+            if job.state == State::Running {
+                job.state = State::Pending;
+                self.store.set(job).await?;
             }
-            let Some(ended) = running.join_next().await else {
-                break;
-            };
-            if ended.is_err() {
-                self.logger.event(
-                    Level::Warn,
-                    "task.lost",
-                    "executor panicked; the lease will lapse",
-                    &[],
-                );
-            }
-            done += 1;
         }
-        failure.map_or(Ok(done), Err)
+        let mut running = JoinSet::new();
+        loop {
+            let wake = match self.fill(&mut running).await {
+                Ok(wake) => wake,
+                Err(error) => {
+                    self.warn("task.store", "queue store failed", &error.to_string());
+                    PAUSE
+                }
+            };
+            tokio::select! {
+                _ = changes.recv() => {}
+                Some(_) = running.join_next(), if !running.is_empty() => {}
+                () = tokio::time::sleep(wake) => {}
+            }
+        }
     }
 
-    /// Repeats [`Self::pass`] every `cadence`, logging store failures; runs
-    /// until the caller drops or aborts it.
-    pub async fn run(&self, cadence: Duration) {
-        loop {
-            if let Err(error) = self.pass().await {
-                self.logger.event(
-                    Level::Warn,
-                    "task.store",
-                    "queue store failed",
-                    &[("error", &error.to_string())],
-                );
+    /// Starts every due lane head while there is room; how long until the
+    /// earliest waiting head falls due or expires.
+    async fn fill(&self, running: &mut JoinSet<()>) -> Result<Duration, StoreError> {
+        let now = now();
+        let mut wake = PAUSE * 60;
+        let mut seen = HashSet::new();
+        // Every unfinished job, by id: the first of each lane is its head.
+        for mut job in self.store.next(u64::MAX).await? {
+            if !seen.insert(job.lane.clone()) || job.state == State::Running {
+                continue;
             }
-            tokio::time::sleep(cadence).await;
+            let deadline = job.payload.get("deadline").and_then(Value::as_u64);
+            if deadline.is_some_and(|deadline| deadline <= now) {
+                self.store
+                    .set(settled(job, State::Failed, "expired"))
+                    .await?;
+                continue;
+            }
+            let due = deadline.map_or(job.run_at, |deadline| deadline.min(job.run_at));
+            if job.run_at > now {
+                wake = wake.min(Duration::from_millis(due - now));
+                continue;
+            }
+            if running.len() >= self.concurrency.get() {
+                continue;
+            }
+            let Some(payload) = job.payload.as_object_mut() else {
+                let job = settled(job, State::Failed, "payload-not-object");
+                self.store.set(job).await?;
+                continue;
+            };
+            let attempts = payload.get("attempts").and_then(Value::as_u64).unwrap_or(0);
+            payload.insert("attempts".into(), (attempts + 1).into());
+            job.state = State::Running;
+            self.store.set(job.clone()).await?;
+            let execution = Execution {
+                store: self.store.clone(),
+                executor: self.executors.get(&job.kind).cloned(),
+                attempts: self.attempts,
+                backoff: self.backoff,
+                logger: self.logger.clone(),
+            };
+            running.spawn(execution.run(job));
         }
+        Ok(wake)
+    }
+
+    fn warn(&self, code: &str, message: &str, error: &str) {
+        self.logger
+            .event(Level::Warn, code, message, &[("error", error)]);
     }
 }
 
-/// One claimed task's execution and settlement.
+/// `job` ended or rescheduled as `state`, with `reason` in its payload.
+fn settled(mut job: Job, state: State, reason: &str) -> Job {
+    if let Some(payload) = job.payload.as_object_mut() {
+        payload.insert("reason".into(), reason.into());
+    }
+    job.state = state;
+    job
+}
+
+/// One running job's execution and settlement.
 struct Execution {
     store: Arc<dyn Store>,
     executor: Option<Arc<dyn Executor>>,
-    owner: String,
-    lease: Duration,
+    attempts: u64,
+    backoff: Duration,
     logger: Logger,
 }
 
 impl Execution {
-    async fn run(self, delivery: Delivery) {
-        let id = delivery.id.clone();
+    async fn run(self, job: Job) {
+        let id = job.id.clone();
         let ack = match &self.executor {
-            None => Ack::Reject("no executor for this kind".into()),
-            Some(executor) => {
-                match tokio::time::timeout(self.lease, executor.execute(delivery)).await {
-                    Ok(ack) => ack,
-                    Err(_) => {
-                        self.logger.event(
-                            Level::Warn,
-                            "task.lost",
-                            "execution outlived its lease",
-                            &[("task", id.as_str())],
-                        );
-                        return;
-                    }
-                }
+            None => Ack::Fail("unknown-kind".into()),
+            // Its own task, so a panic is a failure and not a blocked lane.
+            Some(executor) => tokio::spawn(executor.execute(job, self.store.clone()))
+                .await
+                .unwrap_or_else(|_| Ack::Fail("panicked".into())),
+        };
+        for _ in 0..SETTLE_TRIES {
+            // Reread: the executor may have saved a new payload.
+            let stored = match self.store.get(&id).await {
+                Ok(Some(job)) => self.store.set(self.settle(job, &ack)).await,
+                Ok(None) => return,
+                Err(error) => Err(error),
+            };
+            match stored {
+                Ok(()) => return,
+                Err(error) => self.logger.event(
+                    Level::Warn,
+                    "task.settle",
+                    "settlement not stored",
+                    &[("task", id.as_str()), ("error", &error.to_string())],
+                ),
             }
-        };
-        let settlement = match ack {
-            Ack::Done(output) => Settlement::Finish {
-                outcome: Outcome::Succeeded,
-                output,
-                error: None,
-            },
-            Ack::Reject(error) => Settlement::Finish {
-                outcome: Outcome::Rejected,
-                output: None,
-                error: Some(error),
-            },
-            Ack::Ambiguous(error) => Settlement::Finish {
-                outcome: Outcome::Ambiguous,
-                output: None,
-                error: Some(error),
-            },
-            Ack::Retry(error) => Settlement::Retry { error },
-        };
-        match self.store.settle(&id, &self.owner, settlement, now()).await {
-            Ok(()) => self.logger.event(
-                Level::Debug,
-                "task.settled",
-                "task settled",
-                &[("task", id.as_str())],
-            ),
-            Err(error) => self.logger.event(
-                Level::Warn,
-                "task.lost",
-                "settlement not stored",
-                &[("task", id.as_str()), ("error", &error.to_string())],
-            ),
+            tokio::time::sleep(PAUSE).await;
+        }
+    }
+
+    fn settle(&self, mut job: Job, ack: &Ack) -> Job {
+        match ack {
+            Ack::Done => {
+                job.state = State::Done;
+                job
+            }
+            Ack::Fail(reason) => settled(job, State::Failed, reason),
+            Ack::Retry(reason) => {
+                let attempts = job.payload.get("attempts").and_then(Value::as_u64);
+                let attempts = attempts.unwrap_or(0);
+                if attempts >= self.attempts {
+                    let reason = format!("attempts-exhausted: {reason}");
+                    return settled(job, State::Failed, &reason);
+                }
+                let attempts = u32::try_from(attempts).unwrap_or(u32::MAX);
+                let wait = millis(self.backoff.saturating_mul(attempts));
+                job.run_at = now().saturating_add(wait);
+                settled(job, State::Pending, reason)
+            }
         }
     }
 }

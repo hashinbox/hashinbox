@@ -4,28 +4,17 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-description = "Owned Tokio tasks and durable task queues with stored results."
+description = "Owned Tokio tasks and the durable job queue contract with its runner."
 
 [features]
-# The in-process queue store (`tasks::memory`), on no file and no runtime.
-memory = []
-# The queue store on SQLite (`tasks::sqlite`): a caller pool whose file already
-# holds `schema/queue.sql`.
-sqlite = ["dep:sqlx"]
 # The Tokio runner (`tasks::Runner`) and `Handle::wait`.
 runner = ["dep:logging", "tokio/time", "tokio/macros"]
 
 [dependencies]
-tokio = { version = "=1.49.0", default-features = false, features = ["rt"] }
+tokio = { version = "=1.49.0", default-features = false, features = ["rt", "sync"] }
 uuid.workspace = true
-sqlx = { workspace = true, optional = true }
+serde_json.workspace = true
 logging = { path = "../logging", optional = true }
-
-[dev-dependencies]
-tasks = { path = ".", features = ["memory", "sqlite", "runner"] }
-tempfile = "=3.27.0"
-sqlx.workspace = true
-tokio = { workspace = true, features = ["macros", "sync", "time"] }
 
 [lints]
 workspace = true

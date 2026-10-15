@@ -4,9 +4,12 @@
 
 use std::{collections::BTreeMap, fmt};
 
-use base::{ChainName, Network};
+use anyhow::Context as _;
+use base::{Chain, Network};
+use diesel::{prelude::*, sqlite::Sqlite, upsert::excluded};
 use serde_json::Value;
-use sqlx::{Error, SqlitePool as Pool};
+
+use super::schema::rpc_endpoints;
 
 /// The most endpoints one network may list.
 const MOST: usize = 16;
@@ -39,7 +42,8 @@ pub(crate) struct RpcEndpoints(Vec<Endpoint>);
 pub(crate) struct NetworkEndpoints(BTreeMap<Network, RpcEndpoints>);
 
 /// One `rpc_endpoints` row as the file holds it, before it is checked.
-#[derive(sqlx::FromRow)]
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = rpc_endpoints, check_for_backend(Sqlite))]
 struct Row {
     chain: String,
     network: String,
@@ -56,10 +60,7 @@ impl TryFrom<Row> for (Network, RpcEndpoints) {
             .map_err(|_| "stored RPC nodes are not a JSON list".to_owned())
             .and_then(RpcEndpoints::new)
             .map_err(|reason| format!("{}/{}: {reason}", row.chain, row.network))?;
-        Ok((
-            Network::new(ChainName::new(&row.chain), row.network),
-            endpoints,
-        ))
+        Ok((Network::new(Chain::new(&row.chain), row.network), endpoints))
     }
 }
 
@@ -146,37 +147,28 @@ impl RpcEndpoints {
     }
 
     /// Makes `endpoints` the stored ones of `network`.
-    pub(crate) async fn upsert(
-        pool: &Pool,
+    ///
+    /// # Errors
+    ///
+    /// When the documents do not encode or the write fails.
+    pub(crate) fn upsert(
+        connection: &mut SqliteConnection,
         network: &Network,
         endpoints: &Self,
-    ) -> Result<(), Error> {
-        Self::write(
-            pool,
-            "INSERT INTO rpc_endpoints (chain, network, nodes) VALUES (?1, ?2, ?3)
-             ON CONFLICT (chain, network) DO UPDATE SET nodes = excluded.nodes",
-            network,
-            endpoints,
-        )
-        .await
-    }
-
-    /// One statement, atomic on its own.
-    async fn write(
-        pool: &Pool,
-        sql: &'static str,
-        network: &Network,
-        endpoints: &Self,
-    ) -> Result<(), Error> {
-        let documents = serde_json::to_string(&endpoints.documents())
-            .map_err(|_| Error::Encode("RPC nodes did not encode".into()))?;
-        sqlx::query(sql)
-            .bind(network.chain.as_str())
-            .bind(&network.name)
-            .bind(documents)
-            .execute(pool)
-            .await
-            .map(drop)
+    ) -> anyhow::Result<()> {
+        let documents =
+            serde_json::to_string(&endpoints.documents()).context("RPC nodes did not encode")?;
+        diesel::insert_into(rpc_endpoints::table)
+            .values((
+                rpc_endpoints::chain.eq(network.chain.as_str()),
+                rpc_endpoints::network.eq(&network.name),
+                rpc_endpoints::nodes.eq(documents),
+            ))
+            .on_conflict((rpc_endpoints::chain, rpc_endpoints::network))
+            .do_update()
+            .set(rpc_endpoints::nodes.eq(excluded(rpc_endpoints::nodes)))
+            .execute(connection)?;
+        Ok(())
     }
 }
 
@@ -192,39 +184,14 @@ impl NetworkEndpoints {
     /// # Errors
     ///
     /// The read, or a row that no longer checks; the refusal never quotes it.
-    pub(crate) async fn find_all(pool: &Pool) -> Result<Self, Error> {
-        let rows: Vec<Row> = sqlx::query_as("SELECT chain, network, nodes FROM rpc_endpoints")
-            .fetch_all(pool)
-            .await?;
+    pub(crate) fn find_all(connection: &mut SqliteConnection) -> anyhow::Result<Self> {
+        let rows = rpc_endpoints::table
+            .select(Row::as_select())
+            .load(connection)?;
         rows.into_iter()
-            .map(|row| {
-                row.try_into()
-                    .map_err(|reason: String| Error::Decode(reason.into()))
-            })
-            .collect::<Result<_, _>>()
+            .map(|row| row.try_into().map_err(anyhow::Error::msg))
+            .collect::<anyhow::Result<_>>()
             .map(Self)
-    }
-
-    /// These endpoints, plus `configured`'s for every network not already
-    /// held.
-    ///
-    /// # Errors
-    ///
-    /// A configured list that does not check, naming its network and never
-    /// quoting it.
-    pub(crate) fn or_configured(
-        mut self,
-        configured: BTreeMap<Network, Vec<Value>>,
-    ) -> Result<Self, String> {
-        for (network, documents) in configured {
-            if self.0.contains_key(&network) {
-                continue;
-            }
-            let endpoints = RpcEndpoints::new(documents)
-                .map_err(|reason| format!("{}/{}: {reason}", network.chain, network.name))?;
-            self.0.insert(network, endpoints);
-        }
-        Ok(self)
     }
 
     /// Every network's documents, in failover order, for composition.

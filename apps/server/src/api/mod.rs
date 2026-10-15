@@ -6,7 +6,8 @@
 mod assets;
 mod balance;
 mod health;
-pub(crate) mod networks;
+mod jobs;
+mod networks;
 mod openapi;
 mod transactions;
 mod wallets;
@@ -43,49 +44,21 @@ use crate::state::AppState;
     info(
         title = "payment-api",
         description = "The payment HTTP routes and OpenAPI contract over the chain-neutral \
-            wallet and index abstractions. Every asset is an open tag; no chain or asset is \
-            named in this contract."
+            wallet and index abstractions. An asset is its network's own asset id \
+            (`native`, or a token); no chain or asset is named in this contract."
     ),
     servers((url = "/", description = "The payment server's own origin")),
-    modifiers(&BearerAuth),
     tags(
         (name = "assets", description = "Configured assets"),
         (name = "wallets", description = "Wallets and balances"),
         (name = "transactions", description = "History, single transfers, and batches"),
-        (name = "networks", description = "Configured networks, their RPC nodes, and rescans"),
-        (name = "health", description = "Readiness, network state, and RPC statistics"),
+        (name = "networks", description = "Configured networks, their indexing and RPC nodes"),
+        (name = "health", description = "Readiness and indexing state"),
         (name = "openapi", description = "This document")
     )
 )]
 struct Contract;
 
-/// Declares the `bearerAuth` scheme the protected operations reference.
-// linter:disable rust/empty-struct -- Utoipa's Modify contract is a trait on a type.
-struct BearerAuth;
-
-impl BearerAuth {
-    /// The one credential the protected routes accept.
-    fn scheme() -> SecurityScheme {
-        SecurityScheme::Http(
-            HttpBuilder::new()
-                .scheme(HttpAuthScheme::Bearer)
-                .description(Some(
-                    "The configured bearer token; health and this document are public.",
-                ))
-                .build(),
-        )
-    }
-}
-
-impl Modify for BearerAuth {
-    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        // Cargo always defines CARGO_PKG_LICENSE, so Utoipa's env defaults
-        // publish an empty license object for a crate that declares none.
-        openapi.info.license = None;
-        let components = openapi.components.get_or_insert_with(Default::default);
-        components.add_security_scheme("bearerAuth", Self::scheme());
-    }
-}
 
 /// The complete OpenAPI 3 document, without binding a listener.
 ///
@@ -131,6 +104,7 @@ fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
         .merge(wallets::routes())
         .merge(balance::routes())
         .merge(transactions::routes())
+        .merge(jobs::routes())
         .merge(networks::routes())
 }
 
@@ -141,26 +115,16 @@ fn public_routes() -> OpenApiRouter<Arc<AppState>> {
 }
 
 /// The body of every error response: `message` is always present, the
-/// submission fields only when they are truthfully known.
+/// failing transfer's index only when one transfer of a send failed.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
 pub(crate) struct ErrorBody {
     /// What went wrong.
     pub(crate) message: String,
-    /// Definitely acknowledged transaction IDs before an ordered batch failed.
-    /// Present only when that accepted prefix is non-empty.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[schema(required = false)]
-    pub(crate) transaction_ids: Vec<String>,
-    /// Zero-based original request index. Present only when one public batch
-    /// occurrence truthfully failed.
+    /// Zero-based index of the transfer that failed. Present only when one
+    /// transfer of a send failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub(crate) failed_index: Option<usize>,
-    /// Canonical ID derived from the exact locally signed envelope. Present only
-    /// when its submission outcome remains unknown; its presence produces 503.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub(crate) ambiguous_transaction_id: Option<String>,
 }
 
 /// One HTTP status the API answers with; every handler failure picks one.
@@ -168,7 +132,6 @@ pub(crate) struct ErrorBody {
 enum Failure {
     BadRequest,
     NotFound,
-    Conflict,
     Unprocessable,
     Internal,
     Unavailable,
@@ -179,7 +142,6 @@ impl Failure {
         match self {
             Self::BadRequest => StatusCode::BAD_REQUEST,
             Self::NotFound => StatusCode::NOT_FOUND,
-            Self::Conflict => StatusCode::CONFLICT,
             Self::Unprocessable => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -191,34 +153,12 @@ impl Failure {
 pub(crate) struct Error {
     failure: Failure,
     message: String,
-    transaction_ids: Vec<String>,
     failed_index: Option<usize>,
-    ambiguous_transaction_id: Option<String>,
 }
 
 impl Error {
     pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
         Self::new(Failure::BadRequest, message)
-    }
-
-    /// An index page that breaks the read contract: a 503.
-    pub(crate) fn indexed(message: impl Into<String>) -> Self {
-        Self::new(Failure::Unavailable, message)
-    }
-
-    /// An indexed amount that is not a non-negative whole number of atomic
-    /// units, which no chain reports.
-    pub(crate) fn unscalable(error: base::DecimalError) -> Self {
-        Self::indexed(format!(
-            "indexed amount is not a non-negative integer: {error}"
-        ))
-    }
-
-    /// An indexed asset whose unit no configured chain declared. Composition
-    /// refuses to start a process whose factories leave one undeclared, so
-    /// this is an index reporting an asset nothing was configured for.
-    pub(crate) fn undeclared() -> Self {
-        Self::indexed("indexed asset has no unit declared by any configured chain")
     }
 
     pub(crate) fn invalid_json(_error: JsonRejection) -> Self {
@@ -235,36 +175,16 @@ impl Error {
         Self::new(Failure::Internal, message)
     }
 
+    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(Failure::Unavailable, message)
+    }
+
     pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self::new(Failure::NotFound, message)
     }
 
-    pub(crate) fn conflict(message: impl Into<String>) -> Self {
-        Self::new(Failure::Conflict, message)
-    }
-
-    /// A network a rescan cannot touch: nothing of it was composed.
-    pub(crate) fn not_in_service() -> Self {
-        Self::conflict("network is not in service")
-    }
-
     pub(crate) fn unprocessable(message: impl Into<String>) -> Self {
         Self::new(Failure::Unprocessable, message)
-    }
-
-    /// A wallet error of an operation selected by asset tag: an unregistered
-    /// tag (`Unsupported`) is `404 wallet asset is not configured`.
-    pub(crate) fn by_asset(error: ::wallets::WalletError) -> Self {
-        if error.kind == ::wallets::WalletErrorKind::Unsupported {
-            return Self::not_found("wallet asset is not configured");
-        }
-        error.into()
-    }
-
-    /// The network is being rescanned: no watch is registered and no send
-    /// starts on it until indexing resumes.
-    pub(crate) fn rescanning() -> Self {
-        Self::conflict("the network is being rescanned; retry once it is indexing again")
     }
 
     /// The same failure, attributed to one authored batch occurrence.
@@ -280,89 +200,74 @@ impl Error {
         Self {
             failure,
             message: message.into(),
-            transaction_ids: Vec::new(),
             failed_index: None,
-            ambiguous_transaction_id: None,
         }
     }
 }
 
-impl From<::wallets::WalletError> for Error {
-    fn from(error: ::wallets::WalletError) -> Self {
-        let ::wallets::WalletError {
-            kind,
-            message,
-            ambiguous_transaction_id,
-        } = error;
-        let failure = match kind {
-            ::wallets::WalletErrorKind::Unsupported
-            | ::wallets::WalletErrorKind::InvalidSecret
-            | ::wallets::WalletErrorKind::InvalidAddress
-            | ::wallets::WalletErrorKind::InvalidAmount
-            | ::wallets::WalletErrorKind::InvalidBatch
-            | ::wallets::WalletErrorKind::AddressMismatch => Failure::BadRequest,
-            ::wallets::WalletErrorKind::Duplicate | ::wallets::WalletErrorKind::Conflict => {
-                Failure::Conflict
+/// The handled failures inside an `anyhow::Error` by their status: an
+/// unconfigured network is a 404, a bad address or key a 400; any other
+/// failure (a store, a node, generation) is a 503.
+impl From<anyhow::Error> for Error {
+    fn from(error: anyhow::Error) -> Self {
+        let failure = match error.downcast_ref::<base::WalletError>().map(|e| e.kind) {
+            Some(base::WalletErrorKind::Unsupported) => Failure::NotFound,
+            Some(base::WalletErrorKind::InvalidAddress | base::WalletErrorKind::InvalidSecret) => {
+                Failure::BadRequest
             }
-            ::wallets::WalletErrorKind::NotFound => Failure::NotFound,
-            ::wallets::WalletErrorKind::Transaction | ::wallets::WalletErrorKind::WatchOnly => {
-                Failure::Unprocessable
-            }
-            ::wallets::WalletErrorKind::Unavailable
-            | ::wallets::WalletErrorKind::SourceBusy
-            | ::wallets::WalletErrorKind::OutcomeUnknown
-            | ::wallets::WalletErrorKind::Generation => Failure::Unavailable,
-            // This server pauses a network only to rescan it.
-            ::wallets::WalletErrorKind::Paused => return Self::rescanning(),
-        };
-        let mut response = Self::new(failure, message);
-        response.ambiguous_transaction_id = ambiguous_transaction_id.map(|id| id.to_string());
-        response
-    }
-}
-
-/// The index's own failures, with the same status mapping the wallet errors
-/// they used to travel through had.
-impl From<indexing::IndexError> for Error {
-    fn from(error: indexing::IndexError) -> Self {
-        let failure = match error.kind {
-            indexing::IndexErrorKind::InvalidRequest => Failure::BadRequest,
-            indexing::IndexErrorKind::NetworkMismatch => Failure::NotFound,
-            indexing::IndexErrorKind::Conflict => Failure::Conflict,
             _ => Failure::Unavailable,
         };
-        Self::new(failure, error.message)
+        Self::new(failure, format!("{error:#}"))
     }
 }
 
-impl From<::wallets::SendError> for Error {
-    fn from(error: ::wallets::SendError) -> Self {
-        let mut response = Self::from(error.source);
-        response.transaction_ids = error
-            .accepted
-            .into_iter()
-            .map(|id| id.to_string())
-            .collect();
-        response.failed_index = error.failed_index;
-        response.ambiguous_transaction_id = error.ambiguous_transaction_id.map(|id| id.to_string());
-        response
-    }
+/// The address a wallet ID (`<chain>:<network>:<address>`) names, parsed by
+/// its network's chain.
+///
+/// # Errors
+///
+/// A 400 for a malformed ID or address; a 404 for an unconfigured network.
+fn wallet_address(payments: &payments::Payments, id: &str) -> Result<base::Address, Error> {
+    let mut parts = id.splitn(3, ':');
+    let (Some(chain), Some(network), Some(text)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(Error::invalid_request(
+            "wallet ID must be <chain>:<network>:<address>",
+        ));
+    };
+    let network = base::Network::new(base::Chain::new(chain), network);
+    Ok(payments.parse(&network, text)?)
+}
+
+/// The asset `id` of `network` and its description.
+///
+/// # Errors
+///
+/// A 404 when the network does not configure it.
+fn asset_info(
+    payments: &payments::Payments,
+    network: &base::Network,
+    id: &str,
+) -> Result<base::AssetInfo, Error> {
+    let asset = base::Asset {
+        network: network.clone(),
+        id: id.to_owned(),
+    };
+    payments
+        .service(network)?
+        .assets
+        .get(&asset)
+        .cloned()
+        .ok_or_else(|| Error::not_found("asset is not configured"))
 }
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let status = if self.ambiguous_transaction_id.is_some() {
-            StatusCode::SERVICE_UNAVAILABLE
-        } else {
-            self.failure.status()
-        };
         (
-            status,
+            self.failure.status(),
             Json(ErrorBody {
                 message: self.message,
-                transaction_ids: self.transaction_ids,
                 failed_index: self.failed_index,
-                ambiguous_transaction_id: self.ambiguous_transaction_id,
             }),
         )
             .into_response()

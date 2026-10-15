@@ -20,14 +20,14 @@ pub(crate) struct Asset {
 }
 
 impl Asset {
-    /// The asset `id` names, described by the unit its own chain declared.
-    pub(crate) fn new(id: &base::AssetId, unit: &base::Unit) -> Self {
+    /// The asset as its own chain declared it.
+    pub(crate) fn new(info: &base::AssetInfo) -> Self {
         Self {
-            chain: id.chain.to_string(),
-            id: id.asset.clone(),
-            name: unit.name.clone(),
-            ticker: unit.ticker.clone(),
-            decimals: unit.decimals,
+            chain: info.asset.network.chain.to_string(),
+            id: info.asset.id.clone(),
+            name: info.name.clone(),
+            ticker: info.ticker.clone(),
+            decimals: info.decimals,
         }
     }
 }
