@@ -15,16 +15,15 @@ use diesel::{Connection as _, SqliteConnection, connection::SimpleConnection as 
 
 use crate::{
     models::{
-        Json, Tag, Trigger, TriggerRun, Wallet, balance, int, tag, trigger, trigger_run, wallet,
+        Json, Tag, Trigger, TriggerRun, Wallet, balance, int, tag, trigger,
+        trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Operator, Target, This},
+        trigger_run, wallet,
         wallet::db::IndexedSelector,
         wallet_index,
-        wallet_index::WalletIndexes,
+        wallet_index::{Selector, WalletIndexes},
         wallet_index_balance::{self, WalletIndexBalances},
     },
-    trigger::{
-        Aggregate, Amount, Compare, Decimals, Filter, Gate, LastRun, Leaf, Logic, Operator, Reads,
-        Selector, Target, Targets, This,
-    },
+    trigger::{Decimals, Evaluation, Fees as TriggerFees},
 };
 
 /// The confirmed tip of the test network.
@@ -368,37 +367,42 @@ fn open<'a>(
     connection: &'a mut SqliteConnection,
     runtime: &tokio::runtime::Runtime,
     fees: Arc<Fees>,
-    run: Option<LastRun>,
-) -> Reads<'a> {
-    Reads {
+    run: Option<TriggerRun>,
+) -> Evaluation<'a> {
+    Evaluation::new(
         connection,
-        now: 100_000,
-        fees,
-        runtime: runtime.handle().clone(),
-        decimals: Decimals(BTreeMap::from([
+        100_000,
+        run,
+        Decimals(BTreeMap::from([
             ("native".to_owned(), 8),
             ("tok".to_owned(), 2),
         ])),
-        targets: Targets::default(),
-        last_run: Box::new(move || Ok(run)),
-        seen: Default::default(),
+        TriggerFees::new(fees, runtime.handle().clone()),
+    )
+}
+
+/// A run of the test trigger started at `started_at`.
+fn run(started_at: i64, settled: bool) -> TriggerRun {
+    TriggerRun {
+        settled_at: settled.then_some(started_at),
+        ..TriggerRun::new("t", started_at)
     }
 }
 
 fn compares(
-    reads: &mut Reads<'_>,
+    evaluation: &mut Evaluation<'_>,
     compare: &Compare,
     this: &WalletIndexBalances,
 ) -> anyhow::Result<bool> {
-    compare.holds(reads, this)
+    evaluation.filter(&Logic::Leaf(Filter::Compare(compare.clone())), this)
 }
 
 fn checks(
-    reads: &mut Reads<'_>,
+    evaluation: &mut Evaluation<'_>,
     check: &Logic<Gate>,
     this: &WalletIndexBalances,
 ) -> anyhow::Result<bool> {
-    check.holds(reads, this)
+    evaluation.check(check, this)
 }
 
 fn this(asset: Option<&str>) -> Target {
@@ -436,11 +440,16 @@ fn selection(connection: &mut SqliteConnection, ids: &[String]) -> WalletIndexBa
 fn aggregates_and_operators() {
     let (_directory, runtime, mut connection) = seeded();
     let both = selection(&mut connection, &[id("a", "native"), id("b", "native")]);
-    let mut reads = open(&mut connection, &runtime, fees("1"), None);
+    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
     let empty = WalletIndexBalances::new(network(), int(TIP).unwrap());
     let native = || Target::Select(asset("native"));
     let mut holds = |of: Target, aggregate, operator, amount, on: &WalletIndexBalances| {
-        compares(&mut reads, &compare(of, aggregate, operator, amount), on).unwrap()
+        compares(
+            &mut evaluation,
+            &compare(of, aggregate, operator, amount),
+            on,
+        )
+        .unwrap()
     };
     // a 690, b 50 sats; 0.0000074 BTC is 740 sats.
     assert!(holds(
@@ -535,23 +544,23 @@ fn aggregates_and_operators() {
 fn values_must_fit_their_asset() {
     let (_directory, runtime, mut connection) = seeded();
     let a = selection(&mut connection, &[id("a", "native")]);
-    let mut reads = open(&mut connection, &runtime, fees("1"), None);
+    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
     let too_fine = compare(
         this(None),
         Aggregate::Sum,
         Operator::Above,
         value("0.000000001"),
     );
-    assert!(compares(&mut reads, &too_fine, &a).is_err());
+    assert!(compares(&mut evaluation, &too_fine, &a).is_err());
     let fraction = compare(this(None), Aggregate::Count, Operator::Above, value("0.5"));
-    assert!(compares(&mut reads, &fraction, &a).is_err());
+    assert!(compares(&mut evaluation, &fraction, &a).is_err());
 }
 
 #[test]
 fn amounts_evaluate_in_atomic_units() {
     let (_directory, runtime, mut connection) = seeded();
     let a = selection(&mut connection, &[id("a", "native")]);
-    let mut reads = open(&mut connection, &runtime, fees("100"), None);
+    let mut evaluation = open(&mut connection, &runtime, fees("100"), None);
     let balance = || Box::new(Amount::Balance { of: this(None) });
     let fee = || Box::new(Amount::Fee { of: this(None) });
     // 690 - 100 = 590; 590 + 10 = 600; min(690, 5 sats) = 5; max(-…, 0) = 0.
@@ -581,7 +590,7 @@ fn amounts_evaluate_in_atomic_units() {
         let total = Amount::Add(Box::new(amount), Box::new(gap_value));
         assert!(
             compares(
-                &mut reads,
+                &mut evaluation,
                 &compare(this(None), Aggregate::Sum, Operator::Equal, total),
                 &a
             )
@@ -592,7 +601,7 @@ fn amounts_evaluate_in_atomic_units() {
     let short = Amount::Sub(fee(), Box::new(value("0.00001")));
     assert!(
         compares(
-            &mut reads,
+            &mut evaluation,
             &compare(this(None), Aggregate::Sum, Operator::Above, short),
             &a
         )
@@ -605,7 +614,7 @@ fn counterparts_must_be_fully_indexed() {
     let (_directory, runtime, mut connection) = seeded();
     let toks = selection(&mut connection, &[id("a", "tok"), id("b", "tok")]);
     let with_c = selection(&mut connection, &[id("a", "tok"), id("c", "tok")]);
-    let mut reads = open(&mut connection, &runtime, fees("1"), None);
+    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
     // The tok indexes read in native: a 690, b 50.
     let in_native = compare(
         this(Some("native")),
@@ -613,7 +622,7 @@ fn counterparts_must_be_fully_indexed() {
         Operator::Equal,
         value("0.0000074"),
     );
-    assert!(compares(&mut reads, &in_native, &toks).unwrap());
+    assert!(compares(&mut evaluation, &in_native, &toks).unwrap());
     // c's native index is behind the tip: unknown, the compare fails, under Not too.
     let any = compare(
         this(Some("native")),
@@ -621,9 +630,9 @@ fn counterparts_must_be_fully_indexed() {
         Operator::AtLeast,
         value("0"),
     );
-    assert!(!compares(&mut reads, &any, &with_c).unwrap());
+    assert!(!compares(&mut evaluation, &any, &with_c).unwrap());
     let check = Logic::Leaf(Gate::Compare(any));
-    assert!(!checks(&mut reads, &check, &with_c).unwrap());
+    assert!(!checks(&mut evaluation, &check, &with_c).unwrap());
 }
 
 #[test]
@@ -631,7 +640,7 @@ fn a_fee_is_estimated_once_per_evaluation() {
     let (_directory, runtime, mut connection) = seeded();
     let estimator = fees("7");
     let a = selection(&mut connection, &[id("a", "native")]);
-    let mut reads = open(&mut connection, &runtime, estimator.clone(), None);
+    let mut evaluation = open(&mut connection, &runtime, estimator.clone(), None);
     // ETH-forward style check: Sum above Fee, then the same fee as an amount.
     let above_fee = compare(
         this(None),
@@ -639,8 +648,8 @@ fn a_fee_is_estimated_once_per_evaluation() {
         Operator::Above,
         Amount::Fee { of: this(None) },
     );
-    assert!(compares(&mut reads, &above_fee, &a).unwrap());
-    assert!(compares(&mut reads, &above_fee, &a).unwrap());
+    assert!(compares(&mut evaluation, &above_fee, &a).unwrap());
+    assert!(compares(&mut evaluation, &above_fee, &a).unwrap());
     assert_eq!(estimator.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -676,12 +685,13 @@ fn logic_stops_early_and_errors_stay_errors() {
     // An unsettled run stops the check before the fee is read.
     let (_directory, runtime, mut connection) = seeded();
     let estimator = fees("1");
-    let run = LastRun {
-        started_at: 0,
-        settled: false,
-    };
     let a = selection(&mut connection, &[id("a", "native")]);
-    let mut reads = open(&mut connection, &runtime, estimator.clone(), Some(run));
+    let mut evaluation = open(
+        &mut connection,
+        &runtime,
+        estimator.clone(),
+        Some(run(0, false)),
+    );
     let check = Logic::All(vec![
         Logic::Leaf(Gate::Idle),
         Logic::Leaf(Gate::Compare(compare(
@@ -691,7 +701,7 @@ fn logic_stops_early_and_errors_stay_errors() {
             Amount::Fee { of: this(None) },
         ))),
     ]);
-    assert!(!checks(&mut reads, &check, &a).unwrap());
+    assert!(!checks(&mut evaluation, &check, &a).unwrap());
     assert_eq!(estimator.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -703,38 +713,21 @@ fn idle_and_since_read_the_last_run() {
     let since = |seconds| Logic::Leaf(Gate::Since { seconds });
     let cases = [
         (None, &idle, true),
-        (
-            Some(LastRun {
-                started_at: 0,
-                settled: false,
-            }),
-            &idle,
-            false,
-        ),
-        (
-            Some(LastRun {
-                started_at: 0,
-                settled: true,
-            }),
-            &idle,
-            true,
-        ),
+        (Some(run(0, false)), &idle, false),
+        (Some(run(0, true)), &idle, true),
     ];
-    for (run, check, passes) in cases {
-        let mut reads = open(&mut connection, &runtime, fees("1"), run);
-        assert_eq!(checks(&mut reads, check, &empty).unwrap(), passes);
+    for (last, check, passes) in cases {
+        let mut evaluation = open(&mut connection, &runtime, fees("1"), last);
+        assert_eq!(checks(&mut evaluation, check, &empty).unwrap(), passes);
     }
     // now is 100 000 ms.
     for (started_at, passes) in [(40_001, false), (40_000, true)] {
-        let run = Some(LastRun {
-            started_at,
-            settled: false,
-        });
-        let mut reads = open(&mut connection, &runtime, fees("1"), run);
-        assert_eq!(checks(&mut reads, &since(60), &empty).unwrap(), passes);
+        let last = Some(run(started_at, false));
+        let mut evaluation = open(&mut connection, &runtime, fees("1"), last);
+        assert_eq!(checks(&mut evaluation, &since(60), &empty).unwrap(), passes);
     }
-    let mut reads = open(&mut connection, &runtime, fees("1"), None);
-    assert!(checks(&mut reads, &since(60), &empty).unwrap());
+    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
+    assert!(checks(&mut evaluation, &since(60), &empty).unwrap());
 }
 
 #[test]
@@ -781,7 +774,7 @@ fn triggers_and_their_runs_are_stored() {
         selector: Json(serde_json::from_str(r#"{"tag":"deposit"}"#).unwrap()),
         filter: None,
         check: Json(serde_json::from_str(r#""idle""#).unwrap()),
-        action: Json(serde_json::json!({})),
+        action: Json(serde_json::from_str(r#"{"sweep":{"to":"a"}}"#).unwrap()),
         enabled: true,
         created_at: 1,
         updated_at: 1,
@@ -812,13 +805,7 @@ fn triggers_and_their_runs_are_stored() {
     let last = trigger_run::db::find_last(&mut connection, "sweep")
         .unwrap()
         .unwrap();
-    assert_eq!(
-        LastRun::from(last),
-        LastRun {
-            started_at: 20,
-            settled: false
-        }
-    );
+    assert_eq!((last.started_at, last.settled_at), (20, None));
     assert!(start_run(&mut connection, "missing", 10).is_err());
 
     assert_eq!(trigger::db::delete(&mut connection, "sweep").unwrap(), 1);

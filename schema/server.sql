@@ -32,7 +32,7 @@ CREATE INDEX tag_tag ON tag (chain, network, tag);
 
 
 -- One trigger (pipes): its selector, filter, check and action as JSON, the
--- types of `apps/server/src/pipe`. id: its slug, chosen at creation.
+-- types of `apps/server/src/models/trigger.rs`. id: its slug, chosen at creation.
 CREATE TABLE "trigger" (
     id         TEXT    NOT NULL PRIMARY KEY,
     chain      TEXT    NOT NULL,

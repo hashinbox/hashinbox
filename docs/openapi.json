@@ -3,6 +3,9 @@
   "info": {
     "title": "payment-api",
     "description": "The payment HTTP routes and OpenAPI contract over the chain-neutral wallet and index abstractions. An asset is its network's own asset id (`native`, or a token); no chain or asset is named in this contract.",
+    "license": {
+      "name": ""
+    },
     "version": "0.1.0"
   },
   "servers": [
@@ -325,6 +328,528 @@
         ]
       }
     },
+    "/v1/tags": {
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "List every tag",
+        "operationId": "list_tags",
+        "responses": {
+          "200": {
+            "description": "Every tag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/triggers": {
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "List triggers",
+        "operationId": "list_triggers",
+        "responses": {
+          "200": {
+            "description": "Every trigger",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Create a trigger",
+        "description": "Stores a trigger on a configured network. Its `id` is chosen here and never changes.",
+        "operationId": "create_trigger",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TriggerDefinition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Trigger created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Trigger"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, id or action address",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The id is taken",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/triggers/preview": {
+      "post": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Preview what a trigger would see now",
+        "description": "Without storing anything: the wallet indexes the selector picks at the last kept block, fully indexed, with balances, and whether the filter and check hold for a trigger that never ran. A fee in the filter or check is estimated.",
+        "operationId": "preview_trigger",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TriggerPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What it would see",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store, node or estimator is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/triggers/{id}": {
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Read a trigger",
+        "operationId": "read_trigger",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The trigger's slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The trigger",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Trigger"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such trigger",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Replace a trigger",
+        "description": "Replaces everything but its id and creation time; a body `id` is refused. Setting `enabled` to false pauses it.",
+        "operationId": "replace_trigger",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The trigger's slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TriggerDefinition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Trigger replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Trigger"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body or action address",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such trigger, or network not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Delete a trigger and its runs",
+        "operationId": "delete_trigger",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The trigger's slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Trigger deleted"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such trigger",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/triggers/{id}/runs": {
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "List a trigger's latest runs",
+        "operationId": "list_trigger_runs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The trigger's slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Its latest 50 runs, latest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerRunList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/wallets": {
       "get": {
         "tags": [
@@ -587,6 +1112,163 @@
           },
           "404": {
             "description": "Network or asset is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/{id}/tags/{tag}": {
+      "put": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Tag an address",
+        "description": "Tags the address; tagging twice keeps one tag. Any address of a configured network can be tagged, keyed or not.",
+        "operationId": "add_wallet_tag",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "`<chain>:<network>:<address>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "path",
+            "description": "1 to 64 of `[a-z0-9-]`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Tagged"
+          },
+          "400": {
+            "description": "Malformed wallet ID or tag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "Untag an address",
+        "operationId": "remove_wallet_tag",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "`<chain>:<network>:<address>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "path",
+            "description": "1 to 64 of `[a-z0-9-]`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Untagged"
+          },
+          "400": {
+            "description": "Malformed wallet ID or tag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such tag, or network not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -1363,6 +2045,39 @@
         },
         "additionalProperties": false
       },
+      "Selected": {
+        "type": "object",
+        "description": "One wallet index a selector picked.",
+        "required": [
+          "wallet_id",
+          "address",
+          "asset",
+          "confirmed",
+          "pending"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "Address text."
+          },
+          "asset": {
+            "type": "string",
+            "description": "Asset id."
+          },
+          "confirmed": {
+            "type": "string",
+            "description": "Confirmed balance in display units."
+          },
+          "pending": {
+            "type": "string",
+            "description": "Not yet confirmed change in display units; negative when leaving."
+          },
+          "wallet_id": {
+            "type": "string",
+            "description": "`<chain>:<network>:<address>`, as the wallet routes take it."
+          }
+        }
+      },
       "Send": {
         "type": "object",
         "description": "`POST /v1/wallets/{id}/transactions` body: an ordered send from the\npath's wallet in one asset.",
@@ -1413,6 +2128,40 @@
           }
         ],
         "description": "A wallet's birthday on the wire: `\"fresh\"` or a native position."
+      },
+      "Tag": {
+        "type": "object",
+        "description": "One tag on one address.",
+        "required": [
+          "wallet_id",
+          "tag"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string",
+            "description": "The tag: 1 to 64 of `[a-z0-9-]`."
+          },
+          "wallet_id": {
+            "type": "string",
+            "description": "`<chain>:<network>:<address>`, as the wallet routes take it."
+          }
+        }
+      },
+      "TagList": {
+        "type": "object",
+        "description": "`GET /v1/tags`.",
+        "required": [
+          "tags"
+        ],
+        "properties": {
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tag"
+            },
+            "description": "Every tag, by network, address, then tag."
+          }
+        }
       },
       "Transaction": {
         "type": "object",
@@ -1501,6 +2250,235 @@
         },
         "additionalProperties": false
       },
+      "Trigger": {
+        "type": "object",
+        "description": "One trigger.",
+        "required": [
+          "id",
+          "chain",
+          "network",
+          "selector",
+          "check",
+          "action",
+          "enabled",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "action": {
+            "type": "object",
+            "description": "What it does: `{\"sweep\": {\"to\": …}}` or\n`{\"transfer\": {\"to\": …, \"amount\": …}}`."
+          },
+          "chain": {
+            "type": "string",
+            "description": "Chain name, as `GET /v1/assets` lists it."
+          },
+          "check": {
+            "type": "object",
+            "description": "When it acts: `\"idle\"`, `{\"since\": {\"seconds\": …}}` and compares under\n`all`/`any`/`not`."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix ms."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether it runs."
+          },
+          "filter": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Which of them it acts on: compares under `all`/`any`/`not`; null:\nevery one."
+          },
+          "id": {
+            "type": "string",
+            "description": "Its slug: 1 to 64 of `[a-z0-9-]`."
+          },
+          "network": {
+            "type": "string",
+            "description": "Network name, as `GET /v1/assets` lists it."
+          },
+          "selector": {
+            "type": "object",
+            "description": "Which wallet indexes it acts on: `{\"ids\": […]}`, `{\"asset\": \"…\"}`,\n`{\"tag\": \"…\"}`, `{\"all\": […]}`, `{\"any\": […]}`, `{\"not\": …}`."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix ms."
+          }
+        }
+      },
+      "TriggerDefinition": {
+        "type": "object",
+        "description": "A trigger as written: `POST` (with `id`) and `PUT` bodies.",
+        "required": [
+          "chain",
+          "network",
+          "selector",
+          "check",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "object"
+          },
+          "chain": {
+            "type": "string"
+          },
+          "check": {
+            "type": "object"
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Absent means `true`."
+          },
+          "filter": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "Its slug; `POST` only (`PUT` takes it from the path)."
+          },
+          "network": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TriggerList": {
+        "type": "object",
+        "description": "`GET /v1/triggers`.",
+        "required": [
+          "triggers"
+        ],
+        "properties": {
+          "triggers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Trigger"
+            },
+            "description": "Triggers in id order."
+          }
+        }
+      },
+      "TriggerPreview": {
+        "type": "object",
+        "description": "What a trigger would see now.",
+        "required": [
+          "confirmed",
+          "selected",
+          "filter",
+          "check"
+        ],
+        "properties": {
+          "check": {
+            "type": "boolean",
+            "description": "Whether the check holds for a trigger that never ran."
+          },
+          "confirmed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The block position balances are read at; null before the first\nblock. Always present."
+          },
+          "filter": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the filter holds; null without a filter. Always present."
+          },
+          "selected": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Selected"
+            },
+            "description": "What the selector picks, fully indexed, with balances."
+          }
+        }
+      },
+      "TriggerPreviewRequest": {
+        "type": "object",
+        "description": "`POST /v1/triggers/preview` body: a trigger's targeting, unsaved.",
+        "required": [
+          "chain",
+          "network",
+          "selector",
+          "check"
+        ],
+        "properties": {
+          "chain": {
+            "type": "string"
+          },
+          "check": {
+            "type": "object"
+          },
+          "filter": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "network": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TriggerRun": {
+        "type": "object",
+        "description": "One run of a trigger.",
+        "required": [
+          "started_at",
+          "settled_at"
+        ],
+        "properties": {
+          "settled_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms; null while a send is in flight. Always present."
+          },
+          "started_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix ms."
+          }
+        }
+      },
+      "TriggerRunList": {
+        "type": "object",
+        "description": "`GET /v1/triggers/{id}/runs`.",
+        "required": [
+          "runs"
+        ],
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TriggerRun"
+            },
+            "description": "The latest runs, latest first."
+          }
+        }
+      },
       "Wallet": {
         "type": "object",
         "description": "One wallet's public metadata; never its key.",
@@ -1553,13 +2531,6 @@
           }
         }
       }
-    },
-    "securitySchemes": {
-      "bearerAuth": {
-        "type": "http",
-        "scheme": "bearer",
-        "description": "The configured bearer token; health and this document are public."
-      }
     }
   },
   "tags": [
@@ -1578,6 +2549,10 @@
     {
       "name": "networks",
       "description": "Configured networks, their indexing and RPC nodes"
+    },
+    {
+      "name": "triggers",
+      "description": "Triggers, their runs, and the tags they select by"
     },
     {
       "name": "health",

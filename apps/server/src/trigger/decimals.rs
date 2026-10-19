@@ -1,4 +1,4 @@
-//! [`Decimals`]: each asset's decimals, for display to atomic units.
+//! [`Decimals`]: a network's asset decimals.
 
 use std::collections::BTreeMap;
 

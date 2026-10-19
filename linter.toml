@@ -233,7 +233,7 @@ files.required = ["Cargo.toml", "README.md", "src/lib.rs"]
 [[rules.layout]]
 target = "apps/server"
 mode = "permissive"
-files.required = ["Cargo.toml", "README.md", "src/main.rs", "src/chains.rs", "src/api/mod.rs"]
+files.required = ["Cargo.toml", "README.md", "src/main.rs", "src/api/mod.rs"]
 
 # The server's browser app (React, built by Vite, embedded by src/ui.rs).
 # Generic components carry no domain and sit in src/_components; a page is one

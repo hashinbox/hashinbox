@@ -35,7 +35,7 @@ endpoints = ['https://node.invalid/v3/KEY']
 ```
 
 `payments` is `payments::Document`: one section per network, its `chain` naming
-the chain `src/chains.rs` registers; the rest is that chain's own `Config` (see the
+the chain `src/main.rs` registers; the rest is that chain's own `Config` (see the
 chain's README). Every network is built at startup; one that fails verification
 stops the start. `bearer_token_env` is optional only for a loopback `bind`.
 
@@ -83,7 +83,7 @@ committed copy. `GET /health` and `GET /openapi.json` need no token.
 - `src/main.rs`: composition (stored nodes into the document, `base::Storage` from
   the one `storage::Storage`, the `payments` builder, `run()`, the send runner,
   HTTP) and shutdown (stop and join the indexers after HTTP drains).
-  `src/chains.rs` is the only file that names a chain crate; `src/config.rs` reads
+  `src/main.rs` is the only file that names a chain crate; `src/config.rs` reads
   the file; `src/ui.rs` serves the page; `src/state.rs` is the handler state
   (`Arc<Payments>` and the storage).
 - `src/api/`: one file per resource; `mod.rs` assembles the router and OpenAPI root

@@ -9,7 +9,9 @@ mod health;
 mod jobs;
 mod networks;
 mod openapi;
+mod tags;
 mod transactions;
+mod triggers;
 mod wallets;
 
 use std::sync::Arc;
@@ -49,6 +51,7 @@ use crate::state::AppState;
         (name = "wallets", description = "Wallets and balances"),
         (name = "transactions", description = "History, single transfers, and batches"),
         (name = "networks", description = "Configured networks, their indexing and RPC nodes"),
+        (name = "triggers", description = "Triggers, their runs, and the tags they select by"),
         (name = "health", description = "Readiness and indexing state"),
         (name = "openapi", description = "This document")
     )
@@ -101,6 +104,8 @@ fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
         .merge(transactions::routes())
         .merge(jobs::routes())
         .merge(networks::routes())
+        .merge(triggers::routes())
+        .merge(tags::routes())
 }
 
 fn public_routes() -> OpenApiRouter<Arc<AppState>> {

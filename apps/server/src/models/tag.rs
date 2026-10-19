@@ -107,4 +107,13 @@ pub(crate) mod db {
             .load(connection)?;
         Ok(tags.into())
     }
+
+    /// Every tag, by network, address, then name.
+    pub(crate) fn find_all(connection: &mut SqliteConnection) -> QueryResult<Tags> {
+        let tags = tag::table
+            .order((tag::chain, tag::network, tag::address, tag::name))
+            .select(Tag::as_select())
+            .load(connection)?;
+        Ok(tags.into())
+    }
 }

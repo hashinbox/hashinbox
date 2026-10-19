@@ -1,6 +1,6 @@
 //! Payment server process: reads one configuration document, opens the one
 //! SQLite file, builds `payments::Payments` over its stores with every chain
-//! `chains` registers (the only module that names a chain), runs each
+//! registered here (the only module that names a chain crate), runs each
 //! network's indexer and the send queue, and serves the public HTTP API
 //! (`api`, which names no chain and no storage backend) beside the browser
 //! page (`ui`). The tables and their statements are `models`; the stores and
@@ -11,20 +11,10 @@
 //! API survives a restart.
 
 mod api;
-
-mod chains;
 mod config;
 mod models;
 mod state;
 mod storage;
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        unused_imports,
-        reason = "playground: wired by the pipe evaluator later"
-    )
-)]
 mod trigger;
 mod ui;
 mod workers;
@@ -95,7 +85,11 @@ async fn main() -> Result<(), AnyError> {
     let storage = config.storage.open()?;
     let document = stored_endpoints(config.payments.clone(), &storage).await?;
     let stores = Arc::new(storage.clone());
-    let payments = chains::register(Payments::builder())
+    // Each chain's `Config` reads its own section of the payments document.
+    let payments = Payments::builder()
+        .with_chain::<chain_bitcoin::Config>("bitcoin")
+        .with_chain::<chain_ethereum::Config>("ethereum")
+        .with_chain::<chain_solana::Config>("solana")
         .with_config(document)
         .with_storage(base::Storage {
             blocks: stores.clone(),

@@ -74,4 +74,18 @@ pub(crate) mod db {
             .first(connection)
             .optional()
     }
+
+    /// The latest `limit` runs of `trigger`, latest first.
+    pub(crate) fn find_recent(
+        connection: &mut SqliteConnection,
+        trigger: &str,
+        limit: i64,
+    ) -> QueryResult<Vec<TriggerRun>> {
+        trigger_run::table
+            .filter(trigger_run::trigger.eq(trigger))
+            .order(trigger_run::started_at.desc())
+            .limit(limit)
+            .select(TriggerRun::as_select())
+            .load(connection)
+    }
 }

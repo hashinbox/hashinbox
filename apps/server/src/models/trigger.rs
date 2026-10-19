@@ -130,6 +130,23 @@ pub(crate) enum Amount {
     Max(Box<Amount>, Box<Amount>),
 }
 
+/// What a trigger does when its filter and check hold.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Action {
+    /// Send everything `This` holds, less the fee, to `to`.
+    Sweep {
+        /// Address text of the trigger's network.
+        to: String,
+    },
+    /// Send `amount` of `This`'s asset from `This` to `to`.
+    Transfer {
+        /// Address text of the trigger's network.
+        to: String,
+        amount: Amount,
+    },
+}
+
 /// A [`Decimal`] as its exact text.
 mod text {
     use base::Decimal;
@@ -263,8 +280,7 @@ pub(crate) struct Trigger {
     pub(crate) selector: Json<Selector>,
     pub(crate) filter: Option<Json<Logic<Filter>>>,
     pub(crate) check: Json<Logic<Gate>>,
-    /// Untyped until the action type exists.
-    pub(crate) action: Json<serde_json::Value>,
+    pub(crate) action: Json<Action>,
     pub(crate) enabled: bool,
     /// Unix ms.
     pub(crate) created_at: i64,
@@ -305,6 +321,35 @@ pub(crate) mod db {
             .find(id)
             .select(Trigger::as_select())
             .first(connection)
+    }
+
+    /// Every trigger, by id.
+    pub(crate) fn find_all(connection: &mut SqliteConnection) -> QueryResult<Triggers> {
+        let triggers = triggers::table
+            .order(triggers::id)
+            .select(Trigger::as_select())
+            .load(connection)?;
+        Ok(triggers.into())
+    }
+
+    /// Replaces trigger `trigger.id` with `trigger`, keeping its
+    /// `created_at`; how many changed (0 or 1).
+    pub(crate) fn update(
+        connection: &mut SqliteConnection,
+        trigger: &Trigger,
+    ) -> QueryResult<usize> {
+        diesel::update(triggers::table.find(&trigger.id))
+            .set((
+                triggers::chain.eq(&trigger.chain),
+                triggers::network.eq(&trigger.network),
+                triggers::selector.eq(&trigger.selector),
+                triggers::filter.eq(&trigger.filter),
+                triggers::check.eq(&trigger.check),
+                triggers::action.eq(&trigger.action),
+                triggers::enabled.eq(trigger.enabled),
+                triggers::updated_at.eq(trigger.updated_at),
+            ))
+            .execute(connection)
     }
 
     /// The enabled triggers of `network`, by id.

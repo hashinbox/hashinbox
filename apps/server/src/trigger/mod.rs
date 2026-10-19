@@ -1,22 +1,15 @@
-//! Pipes (docs/design/065-pipes.md, eval.md). Playground: Select and Check
-//! only; actions, runs and the evaluator loop come later.
+//! Evaluating a trigger (docs/design/065-pipes.md). Playground: filter and
+//! check only; actions and the loop that runs triggers come later.
 //!
-//! - `reads`: one evaluation's reads, each made once.
-//! - `check`: step 2, whether a check or filter holds.
-//! - `targets`: what targets name, each resolved once.
-//! - `decimals`: each asset's decimals.
+//! - [`Evaluation`]: whether a trigger's filter or check holds over `This`,
+//!   the wallet indexes its selector picked, with balances.
+//! - [`Fees`]: a network's fee estimates, each made once.
+//! - [`Decimals`]: a network's asset decimals, for display amounts.
 
-mod check;
 mod decimals;
-mod reads;
-mod targets;
+mod evaluation;
+mod fees;
 
-pub(crate) use crate::models::trigger::Logic;
-pub(crate) use crate::models::{
-    trigger::{Aggregate, Amount, Compare, Filter, Gate, Operator, Target, This},
-    wallet_index::Selector,
-};
-pub(crate) use check::Leaf;
 pub(crate) use decimals::Decimals;
-pub(crate) use reads::{LastRun, Reads};
-pub(crate) use targets::Targets;
+pub(crate) use evaluation::Evaluation;
+pub(crate) use fees::Fees;

@@ -14,6 +14,7 @@ mod indexes;
 mod inputs;
 mod tasks;
 mod transactions;
+pub(crate) mod triggers;
 mod wallets;
 
 use std::{
