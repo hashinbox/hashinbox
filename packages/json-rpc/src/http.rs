@@ -7,7 +7,7 @@ use jsonrpsee::{
         params::BatchRequestBuilder,
         traits::ToRpcParams,
     },
-    http_client::{HttpClient, HttpClientBuilder, transport},
+    http_client::{HeaderMap, HttpClient, HttpClientBuilder, transport},
     types::ErrorObjectOwned,
 };
 use serde_json::{Value, value::RawValue};
@@ -42,9 +42,15 @@ impl fmt::Debug for Http {
 
 impl Http {
     /// Builds the client; does no I/O. Userinfo in `target` becomes HTTP
-    /// Basic authorization.
-    pub(crate) fn build(target: &str, redacted: String, bounds: Bounds) -> Result<Self, Error> {
+    /// Basic authorization; every call carries `headers`.
+    pub(crate) fn build(
+        target: &str,
+        redacted: String,
+        bounds: Bounds,
+        headers: HeaderMap,
+    ) -> Result<Self, Error> {
         let client = HttpClientBuilder::default()
+            .set_headers(headers)
             .request_timeout(bounds.timeout())
             .max_request_size(bounds.max_request_bytes)
             .max_response_size(bounds.max_response_bytes)

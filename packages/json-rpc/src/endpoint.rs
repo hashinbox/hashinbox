@@ -3,7 +3,14 @@ use std::{fmt, time::Duration};
 use serde::{Deserialize, Deserializer, de};
 use url::Url;
 
+use std::collections::HashMap;
+
+use jsonrpsee::http_client::HeaderMap;
+
 use crate::{Error, ErrorKind, Http};
+
+/// The query parameter prefix naming a static header.
+const HEADER: &str = "header.";
 
 /// What one call to one node may take and carry: 15 s, 10 MiB requests,
 /// 64 MiB responses.
@@ -60,7 +67,9 @@ impl Bounds {
 ///
 /// The URL carries everything, like a database URI: scheme, host, port, path,
 /// `user:password` userinfo (sent as HTTP Basic authorization) and query
-/// parameters (API keys). It reaches the node unaltered.
+/// parameters (API keys). A query parameter named `header.<Name>` is not sent
+/// in the URL: every call carries it as the static header `<Name>` instead
+/// (`?header.x-api-key=KEY`). The rest reaches the node unaltered.
 ///
 /// A deployment document writes either the URL alone or the full object:
 ///
@@ -150,11 +159,41 @@ impl Endpoint {
     ///
     /// As [`Self::validate`].
     pub fn connect(&self) -> Result<Http, Error> {
-        let url = Self::check_url(&self.url)?;
+        let mut url = Self::check_url(&self.url)?;
         self.bounds.validate()?;
-        Http::build(url.as_str(), self.redacted(), self.bounds)
+        let headers = Self::headers(&url)?;
+        let kept: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(key, _)| !key.starts_with(HEADER))
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        if kept.is_empty() {
+            url.set_query(None);
+        } else {
+            url.query_pairs_mut().clear().extend_pairs(kept);
+        }
+        Http::build(url.as_str(), self.redacted(), self.bounds, headers)
     }
 
+    /// The static headers `url`'s `header.` parameters name.
+    fn headers(url: &Url) -> Result<HeaderMap, Error> {
+        let mut named = HashMap::new();
+        for (key, value) in url.query_pairs() {
+            let Some(name) = key.strip_prefix(HEADER) else {
+                continue;
+            };
+            if named
+                .insert(name.to_ascii_lowercase(), value.into_owned())
+                .is_some()
+            {
+                return Err(Self::invalid("JSON-RPC endpoint names a header twice"));
+            }
+        }
+        HeaderMap::try_from(&named)
+            .map_err(|_| Self::invalid("JSON-RPC endpoint header is invalid"))
+    }
+
+    /// The URL, with its `header.` parameters checked.
     fn check_url(text: &str) -> Result<Url, Error> {
         let url =
             Url::parse(text).map_err(|_| Self::invalid("JSON-RPC endpoint URL is invalid"))?;
@@ -169,6 +208,7 @@ impl Endpoint {
         if url.fragment().is_some() {
             return Err(Self::invalid("JSON-RPC endpoint must not carry a fragment"));
         }
+        Self::headers(&url)?;
         Ok(url)
     }
 
@@ -223,5 +263,31 @@ impl<'de> de::Visitor<'de> for Form {
             url: url.ok_or_else(|| de::Error::missing_field("url"))?,
             bounds: bounds.unwrap_or_default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Endpoint;
+
+    #[test]
+    fn header_parameters_become_headers_and_stay_redacted() {
+        let endpoint = Endpoint::new("https://node.invalid/v1?apikey=A&header.x-api-key=B");
+        let url = url::Url::parse(&endpoint.url).unwrap();
+        let headers = Endpoint::headers(&url).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers["x-api-key"], "B");
+        assert!(endpoint.connect().is_ok());
+        assert_eq!(
+            endpoint.redacted(),
+            "https://node.invalid/v1?apikey=***&header.x-api-key=***"
+        );
+        for bad in [
+            "https://node.invalid/?header.x-key=1&header.X-Key=2",
+            "https://node.invalid/?header.bad%20name=1",
+            "https://node.invalid/?header.x-key=%0A",
+        ] {
+            assert!(Endpoint::new(bad).validate().is_err(), "{bad}");
+        }
     }
 }

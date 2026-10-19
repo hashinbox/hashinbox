@@ -16,9 +16,10 @@ async fn block_count(rpc: &dyn Client) -> Result<u64, CallError> {
 }
 
 fn connect() -> Result<impl Client, json_rpc::Error> {
-    // The URL carries everything: userinfo becomes HTTP Basic, query keys stay.
+    // The URL carries everything: userinfo becomes HTTP Basic, query keys stay,
+    // and a `header.<Name>` parameter is sent as that header instead.
     let primary = Endpoint::new("https://user:pass@node.invalid/").connect()?;
-    let backup = Endpoint::new("https://backup.invalid/v1?apikey=KEY").connect()?;
+    let backup = Endpoint::new("https://backup.invalid/v1?header.x-api-key=KEY").connect()?;
 
     // Three attempts; one attempt tries each endpoint in order.
     Ok(Retry::new(Failover::new(vec![primary, backup])?))
