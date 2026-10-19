@@ -5,10 +5,10 @@
 //! the produced tip, and the caller states how far that is.
 
 use anyhow::Context as _;
-use base::{Address, Asset, BlockHeader, Decimal, Transaction};
+use base::{Address, Asset, BlockHeader, Decimal};
 
 use super::Storage;
-use crate::models::{Block, LegRow, TransactionRow, int};
+use crate::models::{block, int, leg, transaction};
 
 /// Where a history page starts: after this transaction's
 /// (block position, order in block, txid).
@@ -30,7 +30,7 @@ impl Storage {
         let (address, asset) = (address.clone(), asset.clone());
         self.read(move |connection| {
             let mut total = Decimal::zero();
-            for leg in LegRow::find_live(connection, &address, &asset)? {
+            for leg in leg::db::find_live(connection, &address, &asset)? {
                 total += leg.signed()?;
             }
             Ok(total)
@@ -51,7 +51,7 @@ impl Storage {
         asset: &Asset,
         after: Option<After>,
         limit: usize,
-    ) -> anyhow::Result<Vec<(BlockHeader, Transaction)>> {
+    ) -> anyhow::Result<Vec<(BlockHeader, base::Transaction)>> {
         let (address, asset) = (address.clone(), asset.clone());
         let limit = i64::try_from(limit).context("history limit is out of range")?;
         let after = match after {
@@ -60,15 +60,15 @@ impl Storage {
         };
         self.read(move |connection| {
             let key = (after.0, after.1, after.2.as_str());
-            let rows = TransactionRow::find_page(connection, &address, &asset, key, limit)?;
+            let rows = transaction::db::find_page(connection, &address, &asset, key, limit)?;
             let mut page = Vec::with_capacity(rows.len());
             for row in rows {
                 let block = row
                     .block
                     .as_deref()
                     .context("a paged transaction is pending")?;
-                let header = Block::find(connection, block)?.header()?;
-                let legs = LegRow::find_for(connection, &row.id)?
+                let header = block::db::get_by_id(connection, block)?.header()?;
+                let legs = leg::db::find_for(connection, &row.id)?
                     .into_iter()
                     .filter(|leg| leg.address == address.value && leg.asset == asset.id)
                     .collect();

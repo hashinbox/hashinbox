@@ -16,10 +16,7 @@ use std::sync::Arc;
 
 use axum::{Extension, Router};
 
-use utoipa::{
-    Modify, OpenApi,
-    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
-};
+use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 
 use axum::{
@@ -33,8 +30,7 @@ use utoipa::ToSchema;
 
 use crate::state::AppState;
 
-/// The document root: title, version, description, servers, and the one
-/// `bearerAuth` security scheme the protected operations declare. Title and
+/// The document root: title, version, description and servers. Title and
 /// description are stated here and the version is this crate's own, so a
 /// published contract never carries a dependency's metadata. The title is the
 /// contract's published name, not the name of the crate that serves it.
@@ -58,7 +54,6 @@ use crate::state::AppState;
     )
 )]
 struct Contract;
-
 
 /// The complete OpenAPI 3 document, without binding a listener.
 ///

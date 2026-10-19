@@ -5,7 +5,7 @@ use tasks::{Id, Job, State, Store, StoreError, StoreFuture};
 use tokio::sync::broadcast;
 
 use super::Storage;
-use crate::models::Task;
+use crate::models::{Task, task};
 
 /// A store failure, without any bound value.
 fn backend(error: anyhow::Error) -> StoreError {
@@ -56,7 +56,7 @@ impl Store for Storage {
         Box::pin(async move {
             let row = row(&job)?;
             let now = int(tasks::now())?;
-            self.write(move |connection| Ok(row.set(connection, now)?))
+            self.write(move |connection| Ok(task::db::upsert(connection, &row, now)?))
                 .await
                 .map_err(backend)?;
             // No subscriber is not an error.
@@ -68,7 +68,7 @@ impl Store for Storage {
     fn get<'a>(&'a self, id: &'a Id) -> StoreFuture<'a, Option<Job>> {
         let id = id.as_str().to_owned();
         Box::pin(async move {
-            let row = self.read(move |connection| Ok(Task::get(connection, &id)?));
+            let row = self.read(move |connection| Ok(task::db::find_by_id(connection, &id)?));
             row.await.map_err(backend)?.map(job).transpose()
         })
     }
@@ -77,7 +77,7 @@ impl Store for Storage {
         Box::pin(async move {
             // Above the storable range means "everything".
             let now = i64::try_from(now).unwrap_or(i64::MAX);
-            let rows = self.read(move |connection| Ok(Task::next(connection, now)?));
+            let rows = self.read(move |connection| Ok(task::db::find_due(connection, now)?));
             rows.await.map_err(backend)?.into_iter().map(job).collect()
         })
     }

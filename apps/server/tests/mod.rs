@@ -3,6 +3,7 @@
 //! (`send`) and the routes (`routes`), over one scripted network. Offline and
 //! deterministic.
 
+mod pipe;
 mod routes;
 mod send;
 mod storage;

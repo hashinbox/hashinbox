@@ -1,22 +1,22 @@
 //! `base::WalletIndexStore` on the `wallet_index` model.
 
-use base::{Address, Asset, Future, Network, WalletIndex, WalletIndexStore};
+use base::{Address, Asset, Future, Network, WalletIndexStore};
 
 use super::Storage;
-use crate::models::{WalletIndexRow, int, uint};
+use crate::models::{int, uint, wallet_index};
 
 impl WalletIndexStore for Storage {
-    fn insert<'a>(&'a self, index: &'a WalletIndex) -> Future<'a, anyhow::Result<()>> {
+    fn insert<'a>(&'a self, index: &'a base::WalletIndex) -> Future<'a, anyhow::Result<()>> {
         let index = index.clone();
-        Box::pin(self.write(move |connection| WalletIndexRow::insert(connection, &index)))
+        Box::pin(self.write(move |connection| wallet_index::db::insert(connection, &index)))
     }
 
     fn find_all<'a>(
         &'a self,
         network: &'a Network,
-    ) -> Future<'a, anyhow::Result<Vec<WalletIndex>>> {
+    ) -> Future<'a, anyhow::Result<Vec<base::WalletIndex>>> {
         let network = network.clone();
-        Box::pin(self.read(move |connection| WalletIndexRow::find_all(connection, &network)))
+        Box::pin(self.read(move |connection| wallet_index::db::find_all(connection, &network)))
     }
 
     fn find_next<'a>(
@@ -29,7 +29,7 @@ impl WalletIndexStore for Storage {
             // Above SQLite's range bounds nothing.
             let through = through.map(|through| int(through).unwrap_or(i64::MAX));
             self.read(move |connection| {
-                WalletIndexRow::find_next(connection, &network, through)?
+                wallet_index::db::find_next(connection, &network, through)?
                     .map(uint)
                     .transpose()
             })
@@ -44,7 +44,7 @@ impl WalletIndexStore for Storage {
     ) -> Future<'a, anyhow::Result<()>> {
         let (address, asset) = (address.clone(), asset.clone());
         Box::pin(self.write(move |connection| {
-            WalletIndexRow::delete(connection, &address, &asset)?;
+            wallet_index::db::delete(connection, &address, &asset)?;
             Ok(())
         }))
     }

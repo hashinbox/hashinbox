@@ -91,8 +91,53 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    tag (id) {
+        id -> Text,
+        chain -> Text,
+        network -> Text,
+        address -> Text,
+        #[sql_name = "tag"]
+        name -> Text,
+    }
+}
+
+diesel::table! {
+    #[sql_name = "trigger"]
+    triggers (id) {
+        id -> Text,
+        chain -> Text,
+        network -> Text,
+        selector -> Text,
+        filter -> Nullable<Text>,
+        check -> Text,
+        action -> Text,
+        enabled -> Bool,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    trigger_run (id) {
+        id -> Text,
+        trigger -> Text,
+        started_at -> BigInt,
+        settled_at -> Nullable<BigInt>,
+    }
+}
+
 diesel::joinable!(transactions -> block (block));
+diesel::joinable!(trigger_run -> triggers (trigger));
 diesel::joinable!(leg -> transactions (transaction));
 diesel::joinable!(wallet_index -> block (indexed_at));
 
-diesel::allow_tables_to_appear_in_same_query!(block, transactions, leg, wallet_index);
+diesel::allow_tables_to_appear_in_same_query!(
+    block,
+    transactions,
+    leg,
+    wallet_index,
+    tag,
+    triggers,
+    trigger_run
+);

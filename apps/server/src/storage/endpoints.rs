@@ -3,7 +3,7 @@
 use base::Network;
 
 use super::Storage;
-use crate::models::{NetworkEndpoints, RpcEndpoints};
+use crate::models::{NetworkEndpoints, RpcEndpoints, endpoint};
 
 impl Storage {
     /// Every network's stored nodes.
@@ -12,7 +12,7 @@ impl Storage {
     ///
     /// The read, or a row that no longer checks.
     pub(crate) async fn endpoints(&self) -> anyhow::Result<NetworkEndpoints> {
-        self.read(NetworkEndpoints::find_all).await
+        self.read(endpoint::db::find_all).await
     }
 
     /// Makes `endpoints` the stored nodes of `network`.
@@ -26,7 +26,7 @@ impl Storage {
         endpoints: RpcEndpoints,
     ) -> anyhow::Result<()> {
         let network = network.clone();
-        self.write(move |connection| RpcEndpoints::upsert(connection, &network, &endpoints))
+        self.write(move |connection| endpoint::db::upsert(connection, &network, &endpoints))
             .await
     }
 }

@@ -41,29 +41,6 @@ pub(crate) struct RpcEndpoints(Vec<Endpoint>);
 /// truth; the file is the fallback, never an override.
 pub(crate) struct NetworkEndpoints(BTreeMap<Network, RpcEndpoints>);
 
-/// One `rpc_endpoints` row as the file holds it, before it is checked.
-#[derive(Queryable, Selectable)]
-#[diesel(table_name = rpc_endpoints, check_for_backend(Sqlite))]
-struct Row {
-    chain: String,
-    network: String,
-    nodes: String,
-}
-
-impl TryFrom<Row> for (Network, RpcEndpoints) {
-    type Error = String;
-
-    /// The network and its endpoints; a refusal names the network and never
-    /// quotes the stored documents.
-    fn try_from(row: Row) -> Result<Self, String> {
-        let endpoints = serde_json::from_str::<Vec<Value>>(&row.nodes)
-            .map_err(|_| "stored RPC nodes are not a JSON list".to_owned())
-            .and_then(RpcEndpoints::new)
-            .map_err(|reason| format!("{}/{}: {reason}", row.chain, row.network))?;
-        Ok((Network::new(Chain::new(&row.chain), row.network), endpoints))
-    }
-}
-
 impl Endpoint {
     /// Checks `document` without contacting a node.
     ///
@@ -145,6 +122,51 @@ impl RpcEndpoints {
             .map(|endpoint| endpoint.endpoint.clone())
             .collect()
     }
+}
+
+impl fmt::Debug for RpcEndpoints {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_list().entries(&self.0).finish()
+    }
+}
+
+impl NetworkEndpoints {
+    /// Every network's documents, in failover order, for composition.
+    pub(crate) fn documents(&self) -> BTreeMap<Network, Vec<Value>> {
+        self.0
+            .iter()
+            .map(|(network, endpoints)| (network.clone(), endpoints.documents()))
+            .collect()
+    }
+}
+
+/// The `rpc_endpoints` table's statements.
+pub(crate) mod db {
+    #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
+    use super::*;
+
+    /// One `rpc_endpoints` row as the file holds it, before it is checked.
+    #[derive(Queryable, Selectable)]
+    #[diesel(table_name = rpc_endpoints, check_for_backend(Sqlite))]
+    struct Row {
+        chain: String,
+        network: String,
+        nodes: String,
+    }
+
+    impl TryFrom<Row> for (Network, RpcEndpoints) {
+        type Error = String;
+
+        /// The network and its endpoints; a refusal names the network and never
+        /// quotes the stored documents.
+        fn try_from(row: Row) -> Result<Self, String> {
+            let endpoints = serde_json::from_str::<Vec<Value>>(&row.nodes)
+                .map_err(|_| "stored RPC nodes are not a JSON list".to_owned())
+                .and_then(RpcEndpoints::new)
+                .map_err(|reason| format!("{}/{}: {reason}", row.chain, row.network))?;
+            Ok((Network::new(Chain::new(&row.chain), row.network), endpoints))
+        }
+    }
 
     /// Makes `endpoints` the stored ones of `network`.
     ///
@@ -154,7 +176,7 @@ impl RpcEndpoints {
     pub(crate) fn upsert(
         connection: &mut SqliteConnection,
         network: &Network,
-        endpoints: &Self,
+        endpoints: &RpcEndpoints,
     ) -> anyhow::Result<()> {
         let documents =
             serde_json::to_string(&endpoints.documents()).context("RPC nodes did not encode")?;
@@ -170,35 +192,19 @@ impl RpcEndpoints {
             .execute(connection)?;
         Ok(())
     }
-}
 
-impl fmt::Debug for RpcEndpoints {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_list().entries(&self.0).finish()
-    }
-}
-
-impl NetworkEndpoints {
     /// The stored endpoints of every network, one row each.
     ///
     /// # Errors
     ///
     /// The read, or a row that no longer checks; the refusal never quotes it.
-    pub(crate) fn find_all(connection: &mut SqliteConnection) -> anyhow::Result<Self> {
+    pub(crate) fn find_all(connection: &mut SqliteConnection) -> anyhow::Result<NetworkEndpoints> {
         let rows = rpc_endpoints::table
             .select(Row::as_select())
             .load(connection)?;
         rows.into_iter()
             .map(|row| row.try_into().map_err(anyhow::Error::msg))
             .collect::<anyhow::Result<_>>()
-            .map(Self)
-    }
-
-    /// Every network's documents, in failover order, for composition.
-    pub(crate) fn documents(&self) -> BTreeMap<Network, Vec<Value>> {
-        self.0
-            .iter()
-            .map(|(network, endpoints)| (network.clone(), endpoints.documents()))
-            .collect()
+            .map(NetworkEndpoints)
     }
 }

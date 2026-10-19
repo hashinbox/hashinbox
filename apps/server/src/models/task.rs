@@ -1,11 +1,11 @@
 //! `q`: one row per queued job for its whole life (`schema/queue.sql`). The
 //! statements behind `tasks::Store` (`crate::storage::tasks`).
 
-use diesel::{prelude::*, sqlite::Sqlite, upsert::excluded};
+use diesel::{prelude::*, sqlite::Sqlite};
 
 use super::schema::q;
 
-/// One `q` row, as read and written (the stamps are the statements').
+/// One queued job, as read and written (the stamps are the statements').
 #[derive(Debug, Queryable, Selectable, Insertable)]
 #[diesel(table_name = q, check_for_backend(Sqlite))]
 pub(crate) struct Task {
@@ -17,11 +17,26 @@ pub(crate) struct Task {
     pub(crate) run_at: i64,
 }
 
-impl Task {
-    /// Inserts or replaces the row (payload whole), stamped `now`.
-    pub(crate) fn set(&self, connection: &mut SqliteConnection, now: i64) -> QueryResult<()> {
+collection! {
+    /// Tasks, ordered by id.
+    Tasks(Task)
+}
+
+/// The `q` table's statements.
+pub(crate) mod db {
+    use diesel::{prelude::*, upsert::excluded};
+
+    use super::{Task, Tasks};
+    use crate::models::schema::q;
+
+    /// Inserts or replaces `task` (payload whole), stamped `now`.
+    pub(crate) fn upsert(
+        connection: &mut SqliteConnection,
+        task: &Task,
+        now: i64,
+    ) -> QueryResult<()> {
         diesel::insert_into(q::table)
-            .values((self, q::created_at.eq(now), q::updated_at.eq(now)))
+            .values((task, q::created_at.eq(now), q::updated_at.eq(now)))
             .on_conflict(q::id)
             .do_update()
             .set((
@@ -36,22 +51,26 @@ impl Task {
             .map(drop)
     }
 
-    /// The row of `id`, if any.
-    pub(crate) fn get(connection: &mut SqliteConnection, id: &str) -> QueryResult<Option<Self>> {
+    /// The task `id`, if any.
+    pub(crate) fn find_by_id(
+        connection: &mut SqliteConnection,
+        id: &str,
+    ) -> QueryResult<Option<Task>> {
         q::table
             .find(id)
-            .select(Self::as_select())
+            .select(Task::as_select())
             .first(connection)
             .optional()
     }
 
-    /// Unfinished rows with `run_at <= now`, by id.
-    pub(crate) fn next(connection: &mut SqliteConnection, now: i64) -> QueryResult<Vec<Self>> {
-        q::table
+    /// Unfinished tasks with `run_at <= now`, by id.
+    pub(crate) fn find_due(connection: &mut SqliteConnection, now: i64) -> QueryResult<Tasks> {
+        let tasks = q::table
             .filter(q::state.eq_any([0, 1]))
             .filter(q::run_at.le(now))
             .order(q::id)
-            .select(Self::as_select())
-            .load(connection)
+            .select(Task::as_select())
+            .load(connection)?;
+        Ok(tasks.into())
     }
 }

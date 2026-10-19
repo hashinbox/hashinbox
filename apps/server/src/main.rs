@@ -17,6 +17,15 @@ mod config;
 mod models;
 mod state;
 mod storage;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "playground: wired by the pipe evaluator later"
+    )
+)]
+mod trigger;
 mod ui;
 mod workers;
 

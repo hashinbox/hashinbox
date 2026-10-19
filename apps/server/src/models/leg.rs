@@ -3,7 +3,7 @@
 //! in a live block names it.
 
 use anyhow::Context as _;
-use base::{Address, Asset, Coin, Decimal, Input, Leg, Network, Reward, TransactionId};
+use base::{Address, Asset, Coin, Decimal, Input, Network, Reward, TransactionId};
 use diesel::{
     prelude::*,
     sql_types::{BigInt, Text},
@@ -14,17 +14,6 @@ use super::{child, int, schema::leg, uint};
 
 /// The `kind` of a reward row.
 const REWARD: i32 = 5;
-
-/// One `leg` row.
-#[derive(Clone, Debug, Queryable, Selectable, Insertable, QueryableByName)]
-#[diesel(table_name = leg, check_for_backend(Sqlite))]
-pub(crate) struct LegRow {
-    pub(crate) id: String,
-    pub(crate) block: Option<String>,
-    pub(crate) transaction: Option<String>,
-    #[diesel(embed)]
-    pub(crate) facts: LegFacts,
-}
 
 /// What one leg moved: a `leg` row's own columns.
 #[derive(Clone, Debug, Queryable, Selectable, Insertable, QueryableByName)]
@@ -39,37 +28,135 @@ pub(crate) struct LegFacts {
     pub(crate) coin_index: Option<i64>,
 }
 
-/// A coin with its creating block's height.
-#[derive(QueryableByName)]
-struct Unspent {
-    #[diesel(embed)]
-    leg: LegFacts,
-    #[diesel(sql_type = BigInt)]
-    height: i64,
+impl LegFacts {
+    /// The facts of transaction leg `index`.
+    pub(crate) fn new(index: u32, leg: &base::Leg) -> Self {
+        let (kind, address, asset, amount, coin) = match leg {
+            base::Leg::Received {
+                address,
+                asset,
+                amount,
+                coin,
+            } => (0, address, asset, amount, coin.as_ref()),
+            base::Leg::Spent {
+                address,
+                asset,
+                amount,
+                coin,
+            } => (1, address, asset, amount, coin.as_ref()),
+            base::Leg::Burned {
+                address,
+                asset,
+                amount,
+            } => (2, address, asset, amount, None),
+            base::Leg::Minted {
+                address,
+                asset,
+                amount,
+            } => (3, address, asset, amount, None),
+            base::Leg::Fee {
+                address,
+                asset,
+                amount,
+            } => (4, address, asset, amount, None),
+        };
+        Self {
+            leg_index: i64::from(index),
+            kind,
+            address: address.value.clone(),
+            asset: asset.id.clone(),
+            amount: amount.to_string(),
+            coin_txid: coin.map(|coin| coin.transaction.id.clone()),
+            coin_index: coin.map(|coin| i64::from(coin.index)),
+        }
+    }
+
+    /// What it adds to its address's balance: credits (received, minted, a
+    /// signed reward) count up, debits (spent, burned, fees) down.
+    ///
+    /// # Errors
+    ///
+    /// When the stored amount or kind does not decode.
+    pub(crate) fn signed(&self) -> anyhow::Result<Decimal> {
+        let amount: Decimal = self
+            .amount
+            .parse()
+            .context("a stored amount does not decode")?;
+        Ok(match self.kind {
+            0 | 3 | REWARD => amount,
+            1 | 2 | 4 => Decimal::zero() - amount,
+            _ => anyhow::bail!("a stored leg kind is unknown"),
+        })
+    }
+
+    /// The transaction leg of these facts, of `network`.
+    ///
+    /// # Errors
+    ///
+    /// When a stored value does not decode, or it is a reward.
+    pub(crate) fn leg(self, network: &Network) -> anyhow::Result<base::Leg> {
+        let address = Address::new(network.clone(), self.address);
+        let asset = Asset {
+            network: network.clone(),
+            id: self.asset,
+        };
+        let amount: Decimal = self
+            .amount
+            .parse()
+            .context("a stored amount does not decode")?;
+        let coin = match (self.coin_txid, self.coin_index) {
+            (Some(txid), Some(index)) => Some(Coin {
+                transaction: TransactionId::new(network.clone(), txid),
+                index: u32::try_from(uint(index)?)
+                    .context("a stored coin index is out of range")?,
+            }),
+            _ => None,
+        };
+        Ok(match self.kind {
+            0 => base::Leg::Received {
+                address,
+                asset,
+                amount,
+                coin,
+            },
+            1 => base::Leg::Spent {
+                address,
+                asset,
+                amount,
+                coin,
+            },
+            2 => base::Leg::Burned {
+                address,
+                asset,
+                amount,
+            },
+            3 => base::Leg::Minted {
+                address,
+                asset,
+                amount,
+            },
+            4 => base::Leg::Fee {
+                address,
+                asset,
+                amount,
+            },
+            _ => anyhow::bail!("a stored leg kind is not a transaction leg"),
+        })
+    }
 }
 
-/// The `Received` legs of an address with a coin, in live blocks, that no
-/// `Spent` leg in a live block of the same network consumes.
-const UNSPENT: &str = r#"
-SELECT l.*, b.height AS height FROM leg l
-JOIN block b ON b.id = l.block
-JOIN "transaction" t ON t.id = l."transaction"
-WHERE b.chain = ?1 AND b.network = ?2
-  AND l.address IN (SELECT value FROM json_each(?3))
-  AND l.kind = 0 AND l.coin_txid IS NOT NULL AND b.archived_at IS NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM leg s JOIN block sb ON sb.id = s.block
-    WHERE s.kind = 1 AND s.coin_txid = l.coin_txid AND s.coin_index = l.coin_index
-      AND sb.chain = b.chain AND sb.network = b.network AND sb.archived_at IS NULL)
-ORDER BY b.position, t."order", l.leg_index"#;
+/// One `leg` row.
+#[derive(Clone, Debug, Queryable, Selectable, Insertable, QueryableByName)]
+#[diesel(table_name = leg, check_for_backend(Sqlite))]
+pub(crate) struct Leg {
+    pub(crate) id: String,
+    pub(crate) block: Option<String>,
+    pub(crate) transaction: Option<String>,
+    #[diesel(embed)]
+    pub(crate) facts: LegFacts,
+}
 
-/// The legs (rewards included) of an address in an asset, in live blocks.
-const LIVE: &str = "
-SELECT l.* FROM leg l JOIN block b ON b.id = l.block
-WHERE b.chain = ?1 AND b.network = ?2 AND l.address = ?3 AND l.asset = ?4
-  AND b.archived_at IS NULL";
-
-impl LegRow {
+impl Leg {
     /// The row of leg `index` of transaction `transaction`, mined in
     /// `block` or pending (`None`): id `"{transaction}.{index}"`.
     ///
@@ -80,7 +167,7 @@ impl LegRow {
         block: Option<&str>,
         transaction: &str,
         index: u32,
-        leg: &Leg,
+        leg: &base::Leg,
     ) -> anyhow::Result<Self> {
         let facts = LegFacts::new(index, leg);
         Ok(Self {
@@ -113,11 +200,52 @@ impl LegRow {
             },
         })
     }
+}
+
+collection! {
+    /// Legs, in the order written.
+    Legs(Leg)
+}
+
+/// The `leg` table's statements.
+pub(crate) mod db {
+    #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
+    use super::*;
+
+    /// A coin with its creating block's height.
+    #[derive(QueryableByName)]
+    struct Unspent {
+        #[diesel(embed)]
+        leg: LegFacts,
+        #[diesel(sql_type = BigInt)]
+        height: i64,
+    }
+
+    /// The `Received` legs of an address with a coin, in live blocks, that no
+    /// `Spent` leg in a live block of the same network consumes.
+    const UNSPENT: &str = r#"
+    SELECT l.*, b.height AS height FROM leg l
+    JOIN block b ON b.id = l.block
+    JOIN "transaction" t ON t.id = l."transaction"
+    WHERE b.chain = ?1 AND b.network = ?2
+      AND l.address IN (SELECT value FROM json_each(?3))
+      AND l.kind = 0 AND l.coin_txid IS NOT NULL AND b.archived_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM leg s JOIN block sb ON sb.id = s.block
+        WHERE s.kind = 1 AND s.coin_txid = l.coin_txid AND s.coin_index = l.coin_index
+          AND sb.chain = b.chain AND sb.network = b.network AND sb.archived_at IS NULL)
+    ORDER BY b.position, t."order", l.leg_index"#;
+
+    /// The legs (rewards included) of an address in an asset, in live blocks.
+    const LIVE: &str = "
+    SELECT l.* FROM leg l JOIN block b ON b.id = l.block
+    WHERE b.chain = ?1 AND b.network = ?2 AND l.address = ?3 AND l.asset = ?4
+      AND b.archived_at IS NULL";
 
     /// Keeps `rows`; a leg already kept is kept once.
-    pub(crate) fn insert(connection: &mut SqliteConnection, rows: &[Self]) -> QueryResult<usize> {
+    pub(crate) fn insert(connection: &mut SqliteConnection, rows: &Legs) -> QueryResult<usize> {
         diesel::insert_or_ignore_into(leg::table)
-            .values(rows)
+            .values(&rows[..])
             .execute(connection)
     }
 
@@ -128,7 +256,7 @@ impl LegRow {
         connection: &mut SqliteConnection,
         block: &str,
         transaction: &str,
-        rows: &[Self],
+        rows: &Legs,
     ) -> QueryResult<usize> {
         diesel::delete(
             leg::table
@@ -136,7 +264,7 @@ impl LegRow {
                 .filter(leg::block.is_null().or(leg::block.ne(block))),
         )
         .execute(connection)?;
-        Self::insert(connection, rows)
+        insert(connection, rows)
     }
 
     /// The legs of transaction `transaction`, in order.
@@ -186,7 +314,7 @@ impl LegRow {
             .map(|row| {
                 let height = uint(row.height)?;
                 match row.leg.leg(network)? {
-                    Leg::Received {
+                    base::Leg::Received {
                         address,
                         asset,
                         amount,
@@ -202,122 +330,5 @@ impl LegRow {
                 }
             })
             .collect()
-    }
-}
-
-impl LegFacts {
-    /// The facts of transaction leg `index`.
-    pub(crate) fn new(index: u32, leg: &Leg) -> Self {
-        let (kind, address, asset, amount, coin) = match leg {
-            Leg::Received {
-                address,
-                asset,
-                amount,
-                coin,
-            } => (0, address, asset, amount, coin.as_ref()),
-            Leg::Spent {
-                address,
-                asset,
-                amount,
-                coin,
-            } => (1, address, asset, amount, coin.as_ref()),
-            Leg::Burned {
-                address,
-                asset,
-                amount,
-            } => (2, address, asset, amount, None),
-            Leg::Minted {
-                address,
-                asset,
-                amount,
-            } => (3, address, asset, amount, None),
-            Leg::Fee {
-                address,
-                asset,
-                amount,
-            } => (4, address, asset, amount, None),
-        };
-        Self {
-            leg_index: i64::from(index),
-            kind,
-            address: address.value.clone(),
-            asset: asset.id.clone(),
-            amount: amount.to_string(),
-            coin_txid: coin.map(|coin| coin.transaction.id.clone()),
-            coin_index: coin.map(|coin| i64::from(coin.index)),
-        }
-    }
-
-    /// What it adds to its address's balance: credits (received, minted, a
-    /// signed reward) count up, debits (spent, burned, fees) down.
-    ///
-    /// # Errors
-    ///
-    /// When the stored amount or kind does not decode.
-    pub(crate) fn signed(&self) -> anyhow::Result<Decimal> {
-        let amount: Decimal = self
-            .amount
-            .parse()
-            .context("a stored amount does not decode")?;
-        Ok(match self.kind {
-            0 | 3 | REWARD => amount,
-            1 | 2 | 4 => Decimal::zero() - amount,
-            _ => anyhow::bail!("a stored leg kind is unknown"),
-        })
-    }
-
-    /// The transaction leg of these facts, of `network`.
-    ///
-    /// # Errors
-    ///
-    /// When a stored value does not decode, or it is a reward.
-    pub(crate) fn leg(self, network: &Network) -> anyhow::Result<Leg> {
-        let address = Address::new(network.clone(), self.address);
-        let asset = Asset {
-            network: network.clone(),
-            id: self.asset,
-        };
-        let amount: Decimal = self
-            .amount
-            .parse()
-            .context("a stored amount does not decode")?;
-        let coin = match (self.coin_txid, self.coin_index) {
-            (Some(txid), Some(index)) => Some(Coin {
-                transaction: TransactionId::new(network.clone(), txid),
-                index: u32::try_from(uint(index)?)
-                    .context("a stored coin index is out of range")?,
-            }),
-            _ => None,
-        };
-        Ok(match self.kind {
-            0 => Leg::Received {
-                address,
-                asset,
-                amount,
-                coin,
-            },
-            1 => Leg::Spent {
-                address,
-                asset,
-                amount,
-                coin,
-            },
-            2 => Leg::Burned {
-                address,
-                asset,
-                amount,
-            },
-            3 => Leg::Minted {
-                address,
-                asset,
-                amount,
-            },
-            4 => Leg::Fee {
-                address,
-                asset,
-                amount,
-            },
-            _ => anyhow::bail!("a stored leg kind is not a transaction leg"),
-        })
     }
 }

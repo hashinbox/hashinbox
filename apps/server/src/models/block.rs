@@ -38,31 +38,6 @@ pub(crate) struct Block {
     pub(crate) archived_at: Option<i64>,
 }
 
-#[derive(Insertable)]
-#[diesel(table_name = block)]
-struct NewBlock<'a> {
-    id: &'a str,
-    chain: &'a str,
-    network: &'a str,
-    position: i64,
-    height: i64,
-    hash: &'a [u8],
-    parent: Option<&'a str>,
-    parent_position: Option<i64>,
-    parent_hash: Option<&'a [u8]>,
-    timestamp: Option<i64>,
-}
-
-/// The live blocks of `network`.
-macro_rules! live {
-    ($network:expr) => {
-        block::table
-            .filter(block::chain.eq($network.chain.as_str()))
-            .filter(block::network.eq($network.name.as_str()))
-            .filter(block::archived_at.is_null())
-    };
-}
-
 impl Block {
     /// The header it was written from.
     ///
@@ -107,6 +82,37 @@ impl Block {
     pub(crate) fn id(network: &Network, hash: &BlockHash) -> anyhow::Result<String> {
         key(&[network.chain.as_str(), &network.name, &hex::encode(&hash.0)])
     }
+}
+
+/// The `block` table's statements.
+pub(crate) mod db {
+    #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
+    use super::*;
+
+    #[derive(Insertable)]
+    #[diesel(table_name = block)]
+    struct NewBlock<'a> {
+        id: &'a str,
+        chain: &'a str,
+        network: &'a str,
+        position: i64,
+        height: i64,
+        hash: &'a [u8],
+        parent: Option<&'a str>,
+        parent_position: Option<i64>,
+        parent_hash: Option<&'a [u8]>,
+        timestamp: Option<i64>,
+    }
+
+    /// The live blocks of `network`.
+    macro_rules! live {
+        ($network:expr) => {
+            block::table
+                .filter(block::chain.eq($network.chain.as_str()))
+                .filter(block::network.eq($network.name.as_str()))
+                .filter(block::archived_at.is_null())
+        };
+    }
 
     /// Adds `header` as a live block of `network`, linked to its parent when
     /// that is stored, and links a stored child to it; a block archived
@@ -121,7 +127,7 @@ impl Block {
         network: &Network,
         header: &BlockHeader,
     ) -> anyhow::Result<String> {
-        let id = Self::id(network, &header.hash)?;
+        let id = Block::id(network, &header.hash)?;
         let revived = diesel::update(block::table.find(&id))
             .set(block::archived_at.eq(None::<i64>))
             .execute(connection)?;
@@ -130,7 +136,7 @@ impl Block {
         }
         let parent = match &header.parent {
             Some(parent) => {
-                let parent = Self::id(network, &parent.hash)?;
+                let parent = Block::id(network, &parent.hash)?;
                 block::table
                     .find(&parent)
                     .select(block::id)
@@ -171,10 +177,10 @@ impl Block {
     }
 
     /// The block of row `id`.
-    pub(crate) fn find(connection: &mut SqliteConnection, id: &str) -> QueryResult<Self> {
+    pub(crate) fn get_by_id(connection: &mut SqliteConnection, id: &str) -> QueryResult<Block> {
         block::table
             .find(id)
-            .select(Self::as_select())
+            .select(Block::as_select())
             .first(connection)
     }
 
@@ -183,10 +189,10 @@ impl Block {
         connection: &mut SqliteConnection,
         network: &Network,
         position: i64,
-    ) -> QueryResult<Option<Self>> {
+    ) -> QueryResult<Option<Block>> {
         live!(network)
             .filter(block::position.eq(position))
-            .select(Self::as_select())
+            .select(Block::as_select())
             .first(connection)
             .optional()
     }
@@ -195,10 +201,10 @@ impl Block {
     pub(crate) fn find_last(
         connection: &mut SqliteConnection,
         network: &Network,
-    ) -> QueryResult<Option<Self>> {
+    ) -> QueryResult<Option<Block>> {
         live!(network)
             .order(block::position.desc())
-            .select(Self::as_select())
+            .select(Block::as_select())
             .first(connection)
             .optional()
     }
@@ -208,11 +214,11 @@ impl Block {
         connection: &mut SqliteConnection,
         network: &Network,
         position: i64,
-    ) -> QueryResult<Option<Self>> {
+    ) -> QueryResult<Option<Block>> {
         live!(network)
             .filter(block::position.lt(position))
             .order(block::position.desc())
-            .select(Self::as_select())
+            .select(Block::as_select())
             .first(connection)
             .optional()
     }
@@ -222,11 +228,11 @@ impl Block {
         connection: &mut SqliteConnection,
         network: &Network,
         position: i64,
-    ) -> QueryResult<Option<Self>> {
+    ) -> QueryResult<Option<Block>> {
         live!(network)
             .filter(block::position.gt(position))
             .order(block::position.asc())
-            .select(Self::as_select())
+            .select(Block::as_select())
             .first(connection)
             .optional()
     }

@@ -4,17 +4,17 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, ensure};
-use base::{Address, Asset, Chain, Future, Network, Wallet, WalletFactories, WalletStore};
+use base::{Address, Asset, Future, Wallet, WalletFactories, WalletStore};
 
 use super::Storage;
-use crate::models::{WalletIndexRow, WalletRow};
+use crate::models::{self, wallet_index};
 
 impl WalletStore for Storage {
     fn insert<'a>(&'a self, wallet: &'a dyn Wallet) -> Future<'a, anyhow::Result<()>> {
         let address = wallet.address().clone();
         let (curve, secret) = wallet.private_key();
         Box::pin(self.write(move |connection| {
-            WalletRow::insert(connection, &address, curve, &secret)?;
+            models::wallet::db::insert(connection, &models::Wallet::new(&address, curve, secret)?)?;
             Ok(())
         }))
     }
@@ -25,7 +25,7 @@ impl WalletStore for Storage {
     ) -> Future<'a, anyhow::Result<Vec<Arc<dyn Wallet>>>> {
         Box::pin(async move {
             let rows = self
-                .read(|connection| Ok(WalletRow::find_all(connection)?))
+                .read(|connection| Ok(models::wallet::db::find_all(connection)?))
                 .await?;
             let mut wallets = Vec::with_capacity(rows.len());
             for row in rows {
@@ -48,7 +48,7 @@ impl WalletStore for Storage {
     fn delete<'a>(&'a self, address: &'a Address) -> Future<'a, anyhow::Result<()>> {
         let address = address.clone();
         Box::pin(self.write(move |connection| {
-            WalletRow::delete(connection, &address)?;
+            models::wallet::db::delete(connection, &models::Wallet::id(&address)?)?;
             Ok(())
         }))
     }
@@ -61,13 +61,8 @@ impl Storage {
     ///
     /// The read.
     pub(crate) async fn keyed(&self) -> anyhow::Result<Vec<Address>> {
-        self.read(|connection| {
-            Ok(WalletRow::find_all(connection)?
-                .iter()
-                .map(WalletRow::address)
-                .collect())
-        })
-        .await
+        self.read(|connection| Ok(models::wallet::db::find_all(connection)?.addresses()))
+            .await
     }
 
     /// Every watched (address, asset) of every network.
@@ -77,16 +72,9 @@ impl Storage {
     /// The read.
     pub(crate) async fn watched(&self) -> anyhow::Result<Vec<(Address, Asset)>> {
         self.read(|connection| {
-            Ok(WalletIndexRow::find_every(connection)?
+            Ok(wallet_index::db::find_every(connection)?
                 .into_iter()
-                .map(|row| {
-                    let network = Network::new(Chain::new(row.chain), row.network);
-                    let asset = Asset {
-                        network: network.clone(),
-                        id: row.asset,
-                    };
-                    (Address::new(network, row.address), asset)
-                })
+                .map(|index| (index.address, index.asset))
                 .collect())
         })
         .await

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use base::{Address, Future, InputStore, Inputs, Network};
 
 use super::Storage;
-use crate::models::LegRow;
+use crate::models::leg;
 
 impl InputStore for Storage {
     fn find_unspent<'a>(&'a self, addresses: &'a [Address]) -> Future<'a, anyhow::Result<Inputs>> {
@@ -20,7 +20,7 @@ impl InputStore for Storage {
             let mut inputs = Vec::new();
             for (network, values) in &by_network {
                 let values: Vec<&str> = values.iter().map(String::as_str).collect();
-                inputs.extend(LegRow::find_unspent(connection, network, &values)?);
+                inputs.extend(leg::db::find_unspent(connection, network, &values)?);
             }
             Ok(Inputs::from(inputs))
         }))

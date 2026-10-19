@@ -9,7 +9,7 @@ use base::{Block as BaseBlock, BlockHeader, BlockStore, Blocks, Future, Network,
 use diesel::SqliteConnection;
 
 use super::Storage;
-use crate::models::{Block, LegRow, TransactionRow, WalletIndexRow, int};
+use crate::models::{Leg, block, int, leg, transaction, wallet_index};
 
 impl BlockStore for Storage {
     fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>> {
@@ -28,7 +28,7 @@ impl BlockStore for Storage {
     ) -> Future<'a, anyhow::Result<Option<BlockHeader>>> {
         let network = network.clone();
         Box::pin(self.read(move |connection| {
-            Block::find_last(connection, &network)?
+            block::db::find_last(connection, &network)?
                 .map(|block| block.header())
                 .transpose()
         }))
@@ -42,9 +42,9 @@ impl BlockStore for Storage {
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
             )?)?;
             self.write(move |connection| {
-                let below = Block::find_below(connection, &network, from)?;
-                WalletIndexRow::rewind(connection, &network, from, below.as_ref())?;
-                Block::archive(connection, &network, from, now)?;
+                let below = block::db::find_below(connection, &network, from)?;
+                wallet_index::db::rewind(connection, &network, from, below.as_ref())?;
+                block::db::archive(connection, &network, from, now)?;
                 Ok(())
             })
             .await
@@ -65,21 +65,21 @@ fn keep(
         ensure!(block.network == *network, "a block is not of {network:?}");
         let header = &block.header;
         let position = int(header.position)?;
-        let id = match Block::find_live(connection, network, position)? {
+        let id = match block::db::find_live(connection, network, position)? {
             Some(held) if held.is(header) => held.id.clone(),
             Some(_) => bail!("{network:?}: block {position} conflicts with the kept one"),
             None => {
-                let id = Block::insert(connection, network, header)?;
+                let id = block::db::insert(connection, network, header)?;
                 added.push(position);
                 kept.push(header.clone());
                 id
             }
         };
-        let parent = Block::find_below(connection, network, position)?
+        let parent = block::db::find_below(connection, network, position)?
             .filter(|below| below.is_parent_of(header))
             .map(|below| below.id);
         let pairs =
-            WalletIndexRow::find_applying(connection, network, position, parent.as_deref())?;
+            wallet_index::db::find_applying(connection, network, position, parent.as_deref())?;
         if pairs.is_empty() {
             continue;
         }
@@ -91,32 +91,32 @@ fn keep(
             if legs.is_empty() {
                 continue;
             }
-            TransactionRow::upsert_mined(connection, &id, transaction, legs)?;
+            transaction::db::upsert_mined(connection, &id, transaction, legs)?;
         }
         let rewards = block
             .rewards
             .iter()
             .filter(|reward| applies(&pairs, &reward.address, &reward.asset))
-            .map(|reward| LegRow::reward(&id, reward))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        LegRow::insert(connection, &rewards)?;
-        WalletIndexRow::advance(connection, network, &pairs, &id)?;
+            .map(|reward| Leg::reward(&id, reward))
+            .collect::<anyhow::Result<leg::Legs>>()?;
+        leg::db::insert(connection, &rewards)?;
+        wallet_index::db::advance(connection, network, &pairs, &id)?;
         if kept.last() != Some(header) {
             kept.push(header.clone());
         }
     }
     // Every added block must link to its live neighbours.
     for position in added {
-        let Some(block) = Block::find_live(connection, network, position)? else {
+        let Some(block) = block::db::find_live(connection, network, position)? else {
             continue;
         };
         let header = block.header()?;
-        if let Some(below) = Block::find_below(connection, network, position)?
+        if let Some(below) = block::db::find_below(connection, network, position)?
             && !below.is_parent_of(&header)
         {
             bail!("{network:?}: block {position} does not link onto the kept block below it");
         }
-        if let Some(above) = Block::find_above(connection, network, position)?
+        if let Some(above) = block::db::find_above(connection, network, position)?
             && !block.is_parent_of(&above.header()?)
         {
             bail!("{network:?}: the kept block above {position} does not link onto it");
