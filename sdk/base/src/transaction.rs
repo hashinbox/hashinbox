@@ -494,14 +494,4 @@ pub trait Store: Send + Sync {
     ///
     /// When the store cannot write.
     fn insert<'a>(&'a self, transaction: &'a Transaction) -> Future<'a, anyhow::Result<()>>;
-
-    /// Every kept transaction with a leg of `address`.
-    ///
-    /// # Errors
-    ///
-    /// When the store cannot read.
-    fn find_for_address<'a>(
-        &'a self,
-        address: &'a Address,
-    ) -> Future<'a, anyhow::Result<Vec<Transaction>>>;
 }

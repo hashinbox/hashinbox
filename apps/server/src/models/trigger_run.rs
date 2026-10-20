@@ -2,7 +2,7 @@
 
 use diesel::{prelude::*, sqlite::Sqlite};
 
-use super::schema::trigger_run;
+use super::{Json, schema::trigger_run};
 
 /// One run of a trigger.
 #[derive(Clone, Debug, Queryable, Selectable, Insertable)]
@@ -14,6 +14,8 @@ pub(crate) struct TriggerRun {
     pub(crate) started_at: i64,
     /// Unix ms; `None`: a send is in flight.
     pub(crate) settled_at: Option<i64>,
+    /// The ids of the send jobs it queued.
+    pub(crate) jobs: Json<Vec<String>>,
 }
 
 impl TriggerRun {
@@ -24,6 +26,7 @@ impl TriggerRun {
             trigger: trigger.to_owned(),
             started_at: now,
             settled_at: None,
+            jobs: Json(Vec::new()),
         }
     }
 }
@@ -73,6 +76,22 @@ pub(crate) mod db {
             .select(TriggerRun::as_select())
             .first(connection)
             .optional()
+    }
+
+    /// The unsettled runs of the triggers of `network`, oldest first.
+    pub(crate) fn find_unsettled(
+        connection: &mut SqliteConnection,
+        network: &base::Network,
+    ) -> QueryResult<Vec<TriggerRun>> {
+        use crate::models::schema::triggers;
+        trigger_run::table
+            .inner_join(triggers::table)
+            .filter(triggers::chain.eq(network.chain.as_str()))
+            .filter(triggers::network.eq(&network.name))
+            .filter(trigger_run::settled_at.is_null())
+            .order(trigger_run::started_at)
+            .select(TriggerRun::as_select())
+            .load(connection)
     }
 
     /// The latest `limit` runs of `trigger`, latest first.

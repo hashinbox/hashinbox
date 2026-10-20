@@ -1,4 +1,5 @@
-//! [`Evaluation`]: whether a trigger's filter or check holds over `This`.
+//! [`Evaluation`]: which indexes a trigger's filter keeps, and whether its
+//! check holds over them.
 //!
 //! A leaf that refers to something unknown (an index not fully indexed, an
 //! asset without balances) is `false`; a read error stays an error.
@@ -6,10 +7,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, bail, ensure};
-use base::Decimal;
+use std::sync::Arc;
+
+use base::{Assets, Decimal, FeeEstimator, Networked as _};
 use diesel::SqliteConnection;
 
-use super::{Decimals, Fees};
 use crate::models::{
     TriggerRun,
     trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Target},
@@ -24,8 +26,12 @@ pub(crate) struct Evaluation<'a> {
     now: i64,
     /// The trigger's latest run.
     run: Option<TriggerRun>,
-    decimals: Decimals,
-    fees: Fees,
+    /// The network's assets, for display amounts.
+    assets: Assets,
+    /// The network's fee estimator, awaited on `runtime`: an evaluation runs
+    /// on a blocking thread.
+    estimator: Arc<dyn FeeEstimator>,
+    runtime: tokio::runtime::Handle,
     /// What targets named, by (`This` ids, target JSON); `None`: not fully
     /// indexed.
     targets: BTreeMap<(Vec<String>, String), Option<WalletIndexBalances>>,
@@ -37,15 +43,17 @@ impl<'a> Evaluation<'a> {
         connection: &'a mut SqliteConnection,
         now: i64,
         run: Option<TriggerRun>,
-        decimals: Decimals,
-        fees: Fees,
+        assets: Assets,
+        estimator: Arc<dyn FeeEstimator>,
+        runtime: tokio::runtime::Handle,
     ) -> Self {
         Self {
             connection,
             now,
             run,
-            decimals,
-            fees,
+            assets,
+            estimator,
+            runtime,
             targets: BTreeMap::new(),
         }
     }
@@ -63,7 +71,8 @@ impl<'a> Evaluation<'a> {
         check.eval(&mut |gate| self.gate(gate, this))
     }
 
-    /// Whether `filter` holds over `this`, as [`Self::check`].
+    /// The indexes of `this` that `filter` keeps, each tested alone as
+    /// `This`; an index whose filter refers to something unknown is dropped.
     ///
     /// # Errors
     ///
@@ -72,8 +81,15 @@ impl<'a> Evaluation<'a> {
         &mut self,
         filter: &Logic<Filter>,
         this: &WalletIndexBalances,
-    ) -> anyhow::Result<bool> {
-        filter.eval(&mut |Filter::Compare(compare)| self.compare(compare, this))
+    ) -> anyhow::Result<WalletIndexBalances> {
+        let mut kept = this.emptied();
+        for one in this.values() {
+            let alone = this.only(one)?;
+            if filter.eval(&mut |Filter::Compare(compare)| self.compare(compare, &alone))? {
+                kept.insert(one.clone())?;
+            }
+        }
+        Ok(kept)
     }
 
     /// A check leaf: a compare, or a test of the latest run (none: passes).
@@ -129,14 +145,24 @@ impl<'a> Evaluation<'a> {
     }
 
     /// `amount` in atomic units of `asset`; `None` when a term is unknown.
-    fn amount(
+    pub(super) fn amount(
         &mut self,
         amount: &Amount,
         this: &WalletIndexBalances,
         asset: &str,
     ) -> anyhow::Result<Option<Decimal>> {
         let (a, b, combine): (_, _, fn(Decimal, Decimal) -> Decimal) = match amount {
-            Amount::Value(value) => return self.decimals.atomic(value, asset).map(Some),
+            Amount::Value(value) => {
+                let id = base::Asset {
+                    network: this.network().clone(),
+                    id: asset.to_owned(),
+                };
+                let info = self
+                    .assets
+                    .get(&id)
+                    .with_context(|| format!("asset {asset} is not configured"))?;
+                return Ok(Some(info.atomic(value)?));
+            }
             Amount::Balance { of } => {
                 let indexes = self.target(of, this)?;
                 return Ok(indexes.map(|indexes| indexes.confirmed().sum()));
@@ -145,7 +171,13 @@ impl<'a> Evaluation<'a> {
                 let Some(indexes) = self.target(of, this)? else {
                     return Ok(None);
                 };
-                return self.fees.estimate(&indexes).map(Some);
+                if indexes.is_empty() {
+                    return Ok(Some(Decimal::zero()));
+                }
+                let fee = self
+                    .runtime
+                    .block_on(self.estimator.estimate(&indexes.sources()))?;
+                return Ok(Some(fee));
             }
             Amount::Add(a, b) => (a, b, |a, b| a + b),
             Amount::Sub(a, b) => (a, b, |a, b| a - b),
@@ -158,7 +190,7 @@ impl<'a> Evaluation<'a> {
     }
 
     /// What `target` names with `this` in context, resolved once.
-    fn target(
+    pub(super) fn target(
         &mut self,
         target: &Target,
         this: &WalletIndexBalances,

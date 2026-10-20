@@ -17,6 +17,29 @@ pub(crate) struct Task {
     pub(crate) run_at: i64,
 }
 
+impl Task {
+    /// The row of `job`.
+    ///
+    /// # Errors
+    ///
+    /// When its run time is above SQLite's integer range.
+    pub(crate) fn new(job: &tasks::Job) -> anyhow::Result<Self> {
+        Ok(Self {
+            id: job.id.to_string(),
+            lane: job.lane.clone(),
+            kind: job.kind.clone(),
+            state: match job.state {
+                tasks::State::Pending => 0,
+                tasks::State::Running => 1,
+                tasks::State::Done => 2,
+                tasks::State::Failed => 3,
+            },
+            payload: job.payload.to_string(),
+            run_at: super::int(job.run_at)?,
+        })
+    }
+}
+
 collection! {
     /// Tasks, ordered by id.
     Tasks(Task)

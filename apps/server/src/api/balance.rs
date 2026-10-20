@@ -6,13 +6,16 @@ use axum::{
     Json,
     extract::{Path, Query, State, rejection::QueryRejection},
 };
-use base::{Decimal, WalletIndexStore as _};
+use base::Decimal;
 use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody, asset_info, wallet_address};
-use crate::{models::Asset, state::AppState};
+use crate::{
+    models::{Asset, wallet_index},
+    state::AppState,
+};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(balance))
@@ -69,9 +72,10 @@ async fn balance(
     let address = wallet_address(&state.payments, &path.id)?;
     let info = asset_info(&state.payments, &address.network, &query.asset)?;
     let total = state.storage.balance(&address, &info.asset).await?;
+    let network = address.network.clone();
     let indexed_through = state
         .storage
-        .find_all(&address.network)
+        .read(move |connection| wallet_index::db::find_all(connection, &network))
         .await?
         .into_iter()
         .find(|index| index.address == address && index.asset == info.asset)

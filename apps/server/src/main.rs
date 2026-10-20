@@ -7,8 +7,8 @@
 //! reads on them are `storage`; the send queue is `workers`.
 //!
 //! A network's stored `rpc_endpoints` row replaces its section's
-//! `endpoints` before the chain reads it, so a replacement made through the
-//! API survives a restart.
+//! `endpoints` before the chain reads it, so a change made through the API
+//! survives a restart; a section with no row seeds it on the first start.
 
 mod api;
 mod config;
@@ -85,6 +85,17 @@ async fn main() -> Result<(), AnyError> {
     let storage = config.storage.open()?;
     let document = stored_endpoints(config.payments.clone(), &storage).await?;
     let stores = Arc::new(storage.clone());
+    // Kept blocks are heard by the trigger loop, after each write commits.
+    let blocks = Arc::new(base::Notifying::new(storage.clone()));
+    let (kept, heard) = tokio::sync::mpsc::unbounded_channel();
+    base::BlockNotify::subscribe(
+        blocks.as_ref(),
+        Box::new(move |blocks: &base::Blocks| {
+            let headers = blocks.iter().map(|block| block.header.clone()).collect();
+            // A closed loop is shutting down; a lost hint is caught up later.
+            let _ = kept.send((base::Networked::network(blocks).clone(), headers));
+        }),
+    );
     // Each chain's `Config` reads its own section of the payments document.
     let payments = Payments::builder()
         .with_chain::<chain_bitcoin::Config>("bitcoin")
@@ -92,7 +103,7 @@ async fn main() -> Result<(), AnyError> {
         .with_chain::<chain_solana::Config>("solana")
         .with_config(document)
         .with_storage(base::Storage {
-            blocks: stores.clone(),
+            blocks,
             indexes: stores.clone(),
             inputs: stores.clone(),
             transactions: stores.clone(),
@@ -108,6 +119,14 @@ async fn main() -> Result<(), AnyError> {
         Arc::new(workers::send::Sends::new(payments.clone())),
     );
     let jobs = tokio::spawn(async move { runner.run().await });
+    // Triggers decide on kept blocks and queue sends; the runner sends them.
+    let triggers = workers::triggers::Triggers::new(
+        payments.clone(),
+        storage.clone(),
+        logging::Logger::default(),
+        heard,
+    );
+    let loop_ = tokio::spawn(async move { triggers.run().await });
     let state = Arc::new(AppState { payments, storage });
     let router = api::router(state, &server)?.merge(face.routes()?);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
@@ -119,18 +138,25 @@ async fn main() -> Result<(), AnyError> {
         })
         .await;
     jobs.abort();
+    loop_.abort();
     indexers.stop();
     indexers.join().await?;
     Ok(served?)
 }
 
 /// `document` with each section's `endpoints` replaced by its network's
-/// stored row, matched on the section's `chain` and `network` text.
+/// stored row, matched on the section's `chain` and `network` text; a section
+/// with no stored row has its `endpoints` stored, so the stored rows are the
+/// one list every later change edits.
 async fn stored_endpoints(
     mut document: Document,
     storage: &storage::Storage,
 ) -> anyhow::Result<Document> {
-    let stored = storage.endpoints().await?.documents();
+    let stored = storage
+        .read(models::endpoint::db::find_all)
+        .await?
+        .documents();
+    let mut seeds = Vec::new();
     for section in &mut document.networks {
         let (Some(Value::String(chain)), Some(Value::String(name))) =
             (section.get("chain"), section.get("network"))
@@ -140,7 +166,18 @@ async fn stored_endpoints(
         let network = base::Network::new(base::Chain::new(chain), name);
         if let Some(nodes) = stored.get(&network) {
             section.insert("endpoints".to_owned(), Value::Array(nodes.clone()));
+        } else if let Some(Value::Array(nodes)) = section.get("endpoints") {
+            let nodes = models::RpcEndpoints::new(nodes.clone()).map_err(anyhow::Error::msg)?;
+            seeds.push((network, nodes));
         }
     }
+    storage
+        .write(move |connection| {
+            for (network, nodes) in &seeds {
+                models::endpoint::db::upsert(connection, network, nodes)?;
+            }
+            Ok(())
+        })
+        .await?;
     Ok(document)
 }

@@ -71,6 +71,16 @@ impl AssetInfo {
     pub fn display(&self, atomic: &Decimal) -> Result<Decimal, DecimalError> {
         Ok(Decimal::from_atomic(atomic.to_atomic(0)?, self.decimals))
     }
+
+    /// `value` in display units as exact atomic units.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError`] when `value` is negative or has more fractional
+    /// digits than the asset.
+    pub fn atomic(&self, value: &Decimal) -> Result<Decimal, DecimalError> {
+        Ok(Decimal::from_atomic(value.to_atomic(self.decimals)?, 0))
+    }
 }
 
 /// Every configured asset's description, by asset identity: what an edge

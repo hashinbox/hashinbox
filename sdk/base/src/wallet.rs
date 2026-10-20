@@ -263,13 +263,6 @@ pub trait Store: Send + Sync {
     /// When the store cannot read or a key does not restore.
     fn find_all<'a>(&'a self, factories: &'a Factories)
     -> Future<'a, Result<Vec<Arc<dyn Wallet>>>>;
-
-    /// Forgets the wallet of `address`.
-    ///
-    /// # Errors
-    ///
-    /// When the store cannot write.
-    fn delete<'a>(&'a self, address: &'a Address) -> Future<'a, Result<()>>;
 }
 
 /// How far one asset of one address has been indexed. Progress is per
@@ -327,13 +320,6 @@ pub trait IndexStore: Send + Sync {
     /// When the store cannot write.
     fn insert<'a>(&'a self, index: &'a Index) -> Future<'a, Result<()>>;
 
-    /// Every index of `network`.
-    ///
-    /// # Errors
-    ///
-    /// When the store cannot read.
-    fn find_all<'a>(&'a self, network: &'a Network) -> Future<'a, Result<Vec<Index>>>;
-
     /// The lowest [`Index::next`] of `network` at or below `through`; with
     /// `None`, the lowest of all. `None` when no index qualifies.
     ///
@@ -345,11 +331,4 @@ pub trait IndexStore: Send + Sync {
         network: &'a Network,
         through: Option<u64>,
     ) -> Future<'a, Result<Option<u64>>>;
-
-    /// Forgets the index of `asset` of `address`.
-    ///
-    /// # Errors
-    ///
-    /// When the store cannot write.
-    fn delete<'a>(&'a self, address: &'a Address, asset: &'a Asset) -> Future<'a, Result<()>>;
 }

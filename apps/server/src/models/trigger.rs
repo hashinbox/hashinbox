@@ -130,21 +130,27 @@ pub(crate) enum Amount {
     Max(Box<Amount>, Box<Amount>),
 }
 
-/// What a trigger does when its filter and check hold.
+/// What a trigger does when its check passes. Send is the only action now.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Action {
-    /// Send everything `This` holds, less the fee, to `to`.
-    Sweep {
-        /// Address text of the trigger's network.
-        to: String,
-    },
-    /// Send `amount` of `This`'s asset from `This` to `to`.
-    Transfer {
-        /// Address text of the trigger's network.
-        to: String,
-        amount: Amount,
-    },
+    Send(Send),
+}
+
+/// Moves `amount` of `asset` from the `source` wallet indexes to the
+/// `destination` addresses. At most one side may be many: many sources pay
+/// one destination (`amount` per source, `This` being it), or one source
+/// pays many destinations (`amount` per destination, `This` being it).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Send {
+    /// Where the funds come from; every source must be keyed here.
+    pub(crate) source: Target,
+    /// The asset id sent; every source is read in it.
+    pub(crate) asset: String,
+    /// Where the funds go: the addresses of these wallet indexes.
+    pub(crate) destination: Target,
+    /// How much, per send, in `asset`.
+    pub(crate) amount: Amount,
 }
 
 /// A [`Decimal`] as its exact text.

@@ -1,0 +1,25 @@
+# Development configuration: public test networks, no keys, loopback only.
+#   cargo run -p payment-server -- migrate config.toml   (once, new database)
+#   cargo run -p payment-server -- serve config.toml
+# The UI dev server (apps/server/ui, `npm run dev`) proxies to this `bind`.
+bind = '127.0.0.1:8080'
+storage = { path = '.data/payment.db' }  # .data/ is git-ignored
+
+[ui]
+brand = 'payments · dev'
+
+[[payments.networks]]
+chain = 'ethereum'
+network = 'sepolia'
+chain_id = 11155111
+endpoints = ['https://ethereum-sepolia-rpc.publicnode.com']
+# Circle's test USDC.
+tokens = [{ contract = '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238', decimals = 6 }]
+
+[[payments.networks]]
+chain = 'solana'
+network = 'devnet'
+genesis_hash = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'
+endpoints = ['https://api.devnet.solana.com']
+# Circle's test USDC.
+tokens = [{ mint = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', decimals = 6 }]

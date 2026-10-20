@@ -108,12 +108,11 @@ fn repoint() -> Result<(), json_rpc::Error> {
   decorator forwards a broadcast, so wrapping never narrows it to one node.
   When no node succeeds, a transport failure is returned before an error
   object, because that node may have accepted the envelope.
-- An endpoint is its URL, like a database URI: no separate headers, secrets or
+- An endpoint is its URL, like a database URI: no separate headers or
   references. It reaches the node as written, path and query included, so
   provider keys such as `/v3/<key>` or `?apikey=<key>` just work; `user:password`
-  userinfo is sent as HTTP Basic authorization.
-- `Endpoint`'s and `Http`'s `Debug`/`Display` show `Endpoint::redacted`:
-  userinfo and query values become `***`. A key in the path is shown.
+  userinfo is sent as HTTP Basic authorization, and a `header.<Name>=value`
+  query parameter is sent as that header instead. `Endpoint::parts` parses it.
 
 ## Injected events
 

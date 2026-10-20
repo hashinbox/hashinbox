@@ -56,7 +56,9 @@ struct CreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     address: Option<String>,
-    /// The asset ids to index it in; absent means `["native"]`.
+    /// The asset ids to index it in; absent means `["native"]`. Empty
+    /// generates a wallet without watching it yet (watch it later by posting
+    /// its address); an address needs at least one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     assets: Option<Vec<String>>,
@@ -94,7 +96,7 @@ enum Fresh {
         leave the server and HTTP accepts none. Retrying creates another wallet. With \
         `address`, watches that address without its key. Either way the address is then \
         indexed in every asset of `assets` from `start`; watching an asset already watched \
-        keeps its first start.",
+        keeps its first start. A generated wallet with empty `assets` is kept unwatched.",
     request_body = CreateRequest,
     security(("bearerAuth" = [])),
     responses(
@@ -114,8 +116,9 @@ async fn create(
     let Json(request) = request.map_err(Error::invalid_json)?;
     let network = base::Network::new(Chain::new(request.chain), request.network);
     let ids = request.assets.unwrap_or_else(|| vec!["native".to_owned()]);
-    if ids.is_empty() {
-        return Err(Error::invalid_request("assets must not be empty"));
+    // A generated wallet may wait unwatched; a watched address needs an asset.
+    if ids.is_empty() && request.address.is_some() {
+        return Err(Error::invalid_request("watching an address needs an asset"));
     }
     let assets = ids
         .iter()

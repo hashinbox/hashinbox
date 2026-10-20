@@ -189,8 +189,8 @@
         "tags": [
           "networks"
         ],
-        "summary": "List every configured network, its indexing and its stored RPC nodes",
-        "description": "Every network the configuration names, what its indexer did since the process started, and the nodes stored for it. Only each node's origin is returned.",
+        "summary": "List every configured network, its indexing and its RPC nodes",
+        "description": "Every network the configuration names, what its indexer did since the process started, and its nodes, each URL parsed.",
         "operationId": "list_networks",
         "responses": {
           "200": {
@@ -214,7 +214,84 @@
             }
           },
           "503": {
-            "description": "The stored nodes could not be read",
+            "description": "The nodes could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/networks/rpc": {
+      "post": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "Add RPC nodes to one or more networks",
+        "description": "Appends each node after its network's current ones, stores every changed list in one write (all or none), then sends every later call of those networks to their new lists. A provider's nodes for several networks are added at once this way.",
+        "operationId": "add_network_rpc",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RpcAdditions"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Nodes stored and in use",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed node, or a list above 16 nodes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "A network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The nodes could not be stored",
             "content": {
               "application/json": {
                 "schema": {
@@ -237,7 +314,7 @@
           "networks"
         ],
         "summary": "Replace a network's RPC nodes",
-        "description": "Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. The nodes are not verified here: the chain verifies them on the next start, which uses the stored list whatever the configuration file says. Credentials in the URL are stored as sent.",
+        "description": "Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. The nodes are not verified here: the chain verifies them on the next start, which uses the stored list whatever the configuration file says.",
         "operationId": "replace_network_rpc",
         "parameters": [
           {
@@ -302,6 +379,101 @@
           },
           "404": {
             "description": "Network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The nodes could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/networks/{chain}/{network}/rpc/{index}": {
+      "delete": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "Remove one RPC node of a network",
+        "description": "Removes the node at `index`, stores the rest and uses them from now on. A network's last node cannot be removed.",
+        "operationId": "remove_network_rpc",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "index",
+            "in": "path",
+            "description": "The node's `index` in `GET /v1/networks`.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Node removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfiguredNetwork"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "It is the network's last node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such node, or network not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -423,14 +595,14 @@
         "tags": [
           "triggers"
         ],
-        "summary": "Create a trigger",
-        "description": "Stores a trigger on a configured network. Its `id` is chosen here and never changes.",
-        "operationId": "create_trigger",
+        "summary": "Create triggers",
+        "description": "Stores every trigger or none, all on one configured network, each with an `id` chosen here that never changes: a template of several triggers (gas funding and sweep) never lands half.",
+        "operationId": "create_triggers",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/TriggerDefinition"
+                "$ref": "#/components/schemas/TriggerBatch"
               }
             }
           },
@@ -438,17 +610,17 @@
         },
         "responses": {
           "201": {
-            "description": "Trigger created",
+            "description": "Triggers created",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Trigger"
+                  "$ref": "#/components/schemas/TriggerList"
                 }
               }
             }
           },
           "400": {
-            "description": "Malformed body, id or action address",
+            "description": "Malformed body or id, several networks, or a send from This to This",
             "content": {
               "application/json": {
                 "schema": {
@@ -468,7 +640,7 @@
             }
           },
           "404": {
-            "description": "Network is not configured",
+            "description": "Network or sent asset is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -478,7 +650,7 @@
             }
           },
           "422": {
-            "description": "The id is taken",
+            "description": "An id is taken or repeated",
             "content": {
               "application/json": {
                 "schema": {
@@ -511,7 +683,7 @@
           "triggers"
         ],
         "summary": "Preview what a trigger would see now",
-        "description": "Without storing anything: the wallet indexes the selector picks at the last kept block, fully indexed, with balances, and whether the filter and check hold for a trigger that never ran. A fee in the filter or check is estimated.",
+        "description": "Without storing anything, at the last kept block: the wallet indexes the selector picks (fully indexed, with balances), which of them the filter keeps, whether the check holds over those for a trigger that never ran, and the transfers the action would make. Fees used are estimated.",
         "operationId": "preview_trigger",
         "requestBody": {
           "content": {
@@ -688,7 +860,7 @@
             }
           },
           "400": {
-            "description": "Malformed body or action address",
+            "description": "Malformed body, or a send from This to This",
             "content": {
               "application/json": {
                 "schema": {
@@ -901,7 +1073,7 @@
           "wallets"
         ],
         "summary": "Generate a wallet, or watch an address, in one configured network",
-        "description": "Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start.",
+        "description": "Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start. A generated wallet with empty `assets` is kept unwatched.",
         "operationId": "create_wallet",
         "requestBody": {
           "content": {
@@ -1637,7 +1809,7 @@
       },
       "ConfiguredNetwork": {
         "type": "object",
-        "description": "One configured network, its indexing, and its stored nodes.",
+        "description": "One configured network, its indexing, and its nodes.",
         "required": [
           "network",
           "indexing",
@@ -1652,14 +1824,11 @@
             "$ref": "#/components/schemas/Network"
           },
           "nodes": {
-            "type": [
-              "array",
-              "null"
-            ],
+            "type": "array",
             "items": {
               "$ref": "#/components/schemas/RpcNode"
             },
-            "description": "Stored nodes in failover order; null while the network uses its\nconfiguration file's nodes. Always present."
+            "description": "Its nodes in failover order."
           }
         }
       },
@@ -1680,7 +1849,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The asset ids to index it in; absent means `[\"native\"]`."
+            "description": "The asset ids to index it in; absent means `[\"native\"]`. Empty\ngenerates a wallet without watching it yet (watch it later by posting\nits address); an address needs at least one."
           },
           "chain": {
             "type": "string",
@@ -1957,7 +2126,7 @@
       },
       "NetworkList": {
         "type": "object",
-        "description": "`GET /v1/networks`: every configured network.",
+        "description": "Every configured network, or the ones a change touched.",
         "required": [
           "networks"
         ],
@@ -1971,6 +2140,27 @@
           }
         }
       },
+      "NetworkNode": {
+        "type": "object",
+        "description": "One node to add, and its network.",
+        "required": [
+          "chain",
+          "network",
+          "endpoint"
+        ],
+        "properties": {
+          "chain": {
+            "type": "string"
+          },
+          "endpoint": {
+            "$ref": "#/components/schemas/RpcEndpoint"
+          },
+          "network": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "Outcome": {
         "type": "string",
         "description": "How a mined transaction executed.",
@@ -1978,6 +2168,29 @@
           "succeeded",
           "reverted"
         ]
+      },
+      "PlannedTransfer": {
+        "type": "object",
+        "description": "One transfer a run would make.",
+        "required": [
+          "from",
+          "to",
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string",
+            "description": "Display units of the send's asset."
+          },
+          "from": {
+            "type": "string",
+            "description": "Sender address text."
+          },
+          "to": {
+            "type": "string",
+            "description": "Recipient address text."
+          }
+        }
       },
       "Report": {
         "type": "object",
@@ -2000,6 +2213,25 @@
           }
         }
       },
+      "RpcAdditions": {
+        "type": "object",
+        "description": "`POST /v1/networks/rpc` body.",
+        "required": [
+          "nodes"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetworkNode"
+            },
+            "description": "Nodes to append, each after its network's current ones, in order.",
+            "maxItems": 64,
+            "minItems": 1
+          }
+        },
+        "additionalProperties": false
+      },
       "RpcEndpoint": {
         "oneOf": [
           {
@@ -2011,18 +2243,93 @@
             "description": "The node's URL and bounds."
           }
         ],
-        "description": "One RPC node, written as the configuration file's `endpoints` writes it.\nThe URL carries any credentials: userinfo (HTTP Basic) or query keys."
+        "description": "One RPC node, written as the configuration file's `endpoints` writes it.\nThe URL carries everything: userinfo (HTTP Basic), query keys, a key in\nthe path, or `header.<Name>=value` parameters sent as headers."
       },
       "RpcNode": {
         "type": "object",
-        "description": "One RPC node as it may be shown.",
+        "description": "One RPC node: its URL, parsed.",
         "required": [
-          "origin"
+          "index",
+          "url",
+          "origin",
+          "scheme",
+          "host",
+          "port",
+          "path",
+          "username",
+          "password",
+          "parameters",
+          "timeout_ms",
+          "max_request_bytes",
+          "max_response_bytes"
         ],
         "properties": {
+          "host": {
+            "type": "string"
+          },
+          "index": {
+            "type": "integer",
+            "description": "Its position in failover order; what removing it takes.",
+            "minimum": 0
+          },
+          "max_request_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Largest request body, in bytes.",
+            "minimum": 0
+          },
+          "max_response_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Largest response body, in bytes.",
+            "minimum": 0
+          },
           "origin": {
             "type": "string",
-            "description": "Scheme, host and port of the node's URL. User information, path and\nquery are never returned: any of them may hold a credential."
+            "description": "Scheme, host and port."
+          },
+          "parameters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RpcParameter"
+            },
+            "description": "Its query parameters, in order."
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Always present."
+          },
+          "path": {
+            "type": "string"
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The port, the scheme's default when unwritten; always present.",
+            "minimum": 0
+          },
+          "scheme": {
+            "type": "string"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Longest one call may take, in milliseconds.",
+            "minimum": 0
+          },
+          "url": {
+            "type": "string",
+            "description": "The URL as stored."
+          },
+          "username": {
+            "type": "string",
+            "description": "The user of `user:password`, sent as HTTP Basic; empty when none."
           }
         }
       },
@@ -2045,6 +2352,28 @@
         },
         "additionalProperties": false
       },
+      "RpcParameter": {
+        "type": "object",
+        "description": "One query parameter of a node's URL.",
+        "required": [
+          "name",
+          "value",
+          "header"
+        ],
+        "properties": {
+          "header": {
+            "type": "boolean",
+            "description": "Whether every call sends it as a header instead of in the URL."
+          },
+          "name": {
+            "type": "string",
+            "description": "The parameter's name, or for a `header.<Name>` one, the header's."
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
       "Selected": {
         "type": "object",
         "description": "One wallet index a selector picked.",
@@ -2053,7 +2382,8 @@
           "address",
           "asset",
           "confirmed",
-          "pending"
+          "pending",
+          "kept"
         ],
         "properties": {
           "address": {
@@ -2067,6 +2397,10 @@
           "confirmed": {
             "type": "string",
             "description": "Confirmed balance in display units."
+          },
+          "kept": {
+            "type": "boolean",
+            "description": "Whether the filter keeps it (it is then `This` for check and action)."
           },
           "pending": {
             "type": "string",
@@ -2267,7 +2601,7 @@
         "properties": {
           "action": {
             "type": "object",
-            "description": "What it does: `{\"sweep\": {\"to\": …}}` or\n`{\"transfer\": {\"to\": …, \"amount\": …}}`."
+            "description": "What it does: `{\"send\": {\"source\": target, \"asset\": id,\n\"destination\": target, \"amount\": amount}}`."
           },
           "chain": {
             "type": "string",
@@ -2312,9 +2646,28 @@
           }
         }
       },
+      "TriggerBatch": {
+        "type": "object",
+        "description": "`POST /v1/triggers` body: triggers of one network stored together, all or none.",
+        "required": [
+          "triggers"
+        ],
+        "properties": {
+          "triggers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TriggerDefinition"
+            },
+            "description": "One to 16 triggers, each with its `id`.",
+            "maxItems": 16,
+            "minItems": 1
+          }
+        },
+        "additionalProperties": false
+      },
       "TriggerDefinition": {
         "type": "object",
-        "description": "A trigger as written: `POST` (with `id`) and `PUT` bodies.",
+        "description": "A trigger as written: in a `POST` (with `id`) or as a `PUT` body.",
         "required": [
           "chain",
           "network",
@@ -2344,7 +2697,7 @@
           },
           "id": {
             "type": "string",
-            "description": "Its slug; `POST` only (`PUT` takes it from the path)."
+            "description": "Its slug; required in a `POST`, refused in a `PUT` (the path names it)."
           },
           "network": {
             "type": "string"
@@ -2377,13 +2730,15 @@
         "required": [
           "confirmed",
           "selected",
-          "filter",
-          "check"
+          "check",
+          "transfers",
+          "plan_error",
+          "unkeyed"
         ],
         "properties": {
           "check": {
             "type": "boolean",
-            "description": "Whether the check holds for a trigger that never ran."
+            "description": "Whether the check holds over the kept ones, for a trigger that never ran."
           },
           "confirmed": {
             "type": [
@@ -2393,32 +2748,50 @@
             "format": "int64",
             "description": "The block position balances are read at; null before the first\nblock. Always present."
           },
-          "filter": {
+          "plan_error": {
             "type": [
-              "boolean",
+              "string",
               "null"
             ],
-            "description": "Whether the filter holds; null without a filter. Always present."
+            "description": "Why the action cannot be planned; null when it can. Always present."
           },
           "selected": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Selected"
             },
-            "description": "What the selector picks, fully indexed, with balances."
+            "description": "What the selector picks, fully indexed, with balances, each marked\nkept or not by the filter."
+          },
+          "transfers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlannedTransfer"
+            },
+            "description": "The transfers the action would make now; empty when nothing is due."
+          },
+          "unkeyed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Senders of `transfers` this server holds no key for; a run refuses them."
           }
         }
       },
       "TriggerPreviewRequest": {
         "type": "object",
-        "description": "`POST /v1/triggers/preview` body: a trigger's targeting, unsaved.",
+        "description": "`POST /v1/triggers/preview` body: a trigger, unsaved.",
         "required": [
           "chain",
           "network",
           "selector",
-          "check"
+          "check",
+          "action"
         ],
         "properties": {
+          "action": {
+            "type": "object"
+          },
           "chain": {
             "type": "string"
           },

@@ -8,13 +8,11 @@
 //! writes). A store only orchestrates; every statement is a model's.
 
 mod blocks;
-mod endpoints;
 mod history;
 mod indexes;
 mod inputs;
 mod tasks;
 mod transactions;
-pub(crate) mod triggers;
 mod wallets;
 
 use std::{
@@ -149,7 +147,7 @@ impl Storage {
 
     /// Runs `work` in one `BEGIN IMMEDIATE` transaction on a blocking thread;
     /// an error rolls it back. A commit error is not proof nothing landed.
-    async fn write<T: Send + 'static>(
+    pub(crate) async fn write<T: Send + 'static>(
         &self,
         work: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<T> + Send + 'static,
     ) -> anyhow::Result<T> {
@@ -163,7 +161,7 @@ impl Storage {
     }
 
     /// Runs `work` in one read transaction (one snapshot) on a blocking thread.
-    async fn read<T: Send + 'static>(
+    pub(crate) async fn read<T: Send + 'static>(
         &self,
         work: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<T> + Send + 'static,
     ) -> anyhow::Result<T> {

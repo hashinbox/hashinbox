@@ -131,7 +131,9 @@ async fn watch(storage: &Storage, address: &Address, birthday: u64) {
 }
 
 async fn indexed_at(storage: &Storage, address: &Address) -> Option<u64> {
-    let all = WalletIndexStore::find_all(storage, &address.network)
+    let network = address.network.clone();
+    let all = storage
+        .read(move |connection| crate::models::wallet_index::db::find_all(connection, &network))
         .await
         .unwrap();
     let index = all
@@ -141,12 +143,29 @@ async fn indexed_at(storage: &Storage, address: &Address) -> Option<u64> {
     index.indexed_at.map(|header| header.position)
 }
 
-async fn history(storage: &Storage, address: &Address) -> Vec<String> {
-    let found = storage.find_for_address(address).await.unwrap();
-    found
-        .into_iter()
-        .map(|transaction| transaction.id.id)
-        .collect()
+/// The txids with a leg of `address`, pending or in a live block: mined ones
+/// in chain order, then pending ones.
+fn history(directory: &tempfile::TempDir, address: &Address) -> Vec<String> {
+    use diesel::{Connection as _, RunQueryDsl as _, sql_types::Text};
+    #[derive(diesel::QueryableByName)]
+    struct Txid {
+        #[diesel(sql_type = Text)]
+        txid: String,
+    }
+    let path = directory.path().join("test.db");
+    let mut connection = diesel::SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+    diesel::sql_query(
+        r#"SELECT t.txid FROM "transaction" t LEFT JOIN block b ON b.id = t.block
+        WHERE (t.block IS NULL OR b.archived_at IS NULL)
+          AND EXISTS (SELECT 1 FROM leg l WHERE l."transaction" = t.id AND l.address = ?)
+        ORDER BY t.block IS NULL, b.position, t."order", t.id"#,
+    )
+    .bind::<Text, _>(&address.value)
+    .load::<Txid>(&mut connection)
+    .unwrap()
+    .into_iter()
+    .map(|row| row.txid)
+    .collect()
 }
 
 #[tokio::test]
@@ -185,7 +204,7 @@ async fn insert_links_and_refuses_non_linking_blocks() {
 
 #[tokio::test]
 async fn insert_keeps_only_indexed_pairs_from_their_birthday() {
-    let (storage, _directory) = storage().await;
+    let (storage, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     let bob = address(&network, "bob");
@@ -210,8 +229,8 @@ async fn insert_keeps_only_indexed_pairs_from_their_birthday() {
         ],
     );
     BlockStore::insert(&storage, &blocks).await.unwrap();
-    assert_eq!(history(&storage, &alice).await, ["a"]);
-    assert!(history(&storage, &bob).await.is_empty());
+    assert_eq!(history(&directory, &alice), ["a"]);
+    assert!(history(&directory, &bob).is_empty());
     assert_eq!(indexed_at(&storage, &alice).await, Some(3));
     // Another asset of a watched address is not kept.
     let token = Asset {
@@ -230,13 +249,13 @@ async fn insert_keeps_only_indexed_pairs_from_their_birthday() {
     )
     .await
     .unwrap();
-    assert_eq!(history(&storage, &alice).await, ["a"]);
+    assert_eq!(history(&directory, &alice), ["a"]);
     assert_eq!(indexed_at(&storage, &alice).await, Some(4));
 }
 
 #[tokio::test]
 async fn a_new_index_backfills_without_duplicating_other_facts() {
-    let (storage, _directory) = storage().await;
+    let (storage, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     let bob = address(&network, "bob");
@@ -258,29 +277,28 @@ async fn a_new_index_backfills_without_duplicating_other_facts() {
         ],
     );
     BlockStore::insert(&storage, &blocks).await.unwrap();
-    let found = storage.find_for_address(&alice).await.unwrap();
-    assert_eq!(found[0].legs.len(), 1);
+    assert_eq!(rows(&directory, "x").1.len(), 1);
 
     watch(&storage, &bob, 1).await;
     assert_eq!(storage.find_next(&network, Some(2)).await.unwrap(), Some(1));
     // The indexer refetches from bob's birthday.
     let rerun = run(&network, blocks.iter().skip(1).cloned().collect());
     BlockStore::insert(&storage, &rerun).await.unwrap();
-    let found = storage.find_for_address(&alice).await.unwrap();
-    assert_eq!(found.len(), 1, "one transaction row");
-    assert_eq!(found[0].legs.len(), 2, "bob's leg added once");
-    assert_eq!(history(&storage, &bob).await, ["x"]);
+    let found = rows(&directory, "x");
+    assert_eq!(found.0.len(), 1, "one transaction row");
+    assert_eq!(found.1.len(), 2, "bob's leg added once");
+    assert_eq!(history(&directory, &bob), ["x"]);
     assert_eq!(indexed_at(&storage, &bob).await, Some(2));
     assert_eq!(storage.find_next(&network, Some(2)).await.unwrap(), None);
 
     // A repeat is a no-op.
     BlockStore::insert(&storage, &rerun).await.unwrap();
-    assert_eq!(storage.find_for_address(&alice).await.unwrap(), found);
+    assert_eq!(rows(&directory, "x"), found);
 }
 
 #[tokio::test]
 async fn a_new_index_below_the_kept_run_backfills_beneath_it() {
-    let (storage, _directory) = storage().await;
+    let (storage, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &address(&network, "bob"), 3).await;
@@ -303,13 +321,13 @@ async fn a_new_index_below_the_kept_run_backfills_beneath_it() {
         ],
     );
     BlockStore::insert(&storage, &blocks).await.unwrap();
-    assert_eq!(history(&storage, &alice).await, ["a"]);
+    assert_eq!(history(&directory, &alice), ["a"]);
     assert_eq!(indexed_at(&storage, &alice).await, Some(4));
 }
 
 #[tokio::test]
 async fn delete_archives_unspends_and_rewinds() {
-    let (storage, _directory) = storage().await;
+    let (storage, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;
@@ -353,7 +371,7 @@ async fn delete_archives_unspends_and_rewinds() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(history(&storage, &alice).await, ["fund", "spend"]);
+    assert_eq!(history(&directory, &alice), ["fund", "spend"]);
 
     BlockStore::delete(&storage, &network, 2).await.unwrap();
     assert_eq!(
@@ -368,7 +386,7 @@ async fn delete_archives_unspends_and_rewinds() {
             .len(),
         1
     );
-    assert_eq!(history(&storage, &alice).await, ["fund"]);
+    assert_eq!(history(&directory, &alice), ["fund"]);
     assert_eq!(indexed_at(&storage, &alice).await, Some(1));
 
     // The new branch is kept at the archived position.
@@ -432,16 +450,6 @@ async fn find_next_is_the_lowest_lagging_index() {
         .unwrap();
     assert_eq!(storage.find_next(&network, None).await.unwrap(), Some(7));
     assert_eq!(storage.find_next(&network, Some(6)).await.unwrap(), None);
-    WalletIndexStore::delete(&storage, &address(&network, "a"), &native(&network))
-        .await
-        .unwrap();
-    assert_eq!(
-        WalletIndexStore::find_all(&storage, &network)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
 }
 
 #[tokio::test]
@@ -451,8 +459,9 @@ async fn notifying_storage_tells_listeners_after_commit() {
     let network = network();
     let heard = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&heard);
-    storage.subscribe(Box::new(move |header| {
-        sink.lock().unwrap().push(header.position)
+    storage.subscribe(Box::new(move |blocks| {
+        let positions: Vec<u64> = blocks.iter().map(|block| block.header.position).collect();
+        sink.lock().unwrap().push(positions);
     }));
     BlockStore::insert(&storage, &empty(&network, 0, 2, 0))
         .await
@@ -460,13 +469,13 @@ async fn notifying_storage_tells_listeners_after_commit() {
     BlockStore::insert(&storage, &empty(&network, 0, 2, 0))
         .await
         .unwrap();
-    // A repeat is heard again: listeners are hints.
-    assert_eq!(*heard.lock().unwrap(), [0, 1, 2, 0, 1, 2]);
+    // Once per insert, with its run; a repeat is heard again: listeners are hints.
+    assert_eq!(*heard.lock().unwrap(), [[0, 1, 2], [0, 1, 2]]);
 }
 
 #[tokio::test]
 async fn pending_transactions_are_kept_until_mined() {
-    let (storage, _directory) = storage().await;
+    let (storage, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;
@@ -475,7 +484,8 @@ async fn pending_transactions_are_kept_until_mined() {
     pending.order = None;
     TransactionStore::insert(&storage, &pending).await.unwrap();
     TransactionStore::insert(&storage, &pending).await.unwrap();
-    assert_eq!(storage.find_for_address(&alice).await.unwrap(), [pending]);
+    assert_eq!(history(&directory, &alice), ["p"]);
+    assert_eq!(rows(&directory, "p").0, [None]);
     let mined = payment(&network, "p", "alice", 3, None);
     BlockStore::insert(
         &storage,
@@ -483,7 +493,11 @@ async fn pending_transactions_are_kept_until_mined() {
     )
     .await
     .unwrap();
-    assert_eq!(storage.find_for_address(&alice).await.unwrap(), [mined]);
+    assert_eq!(history(&directory, &alice), ["p"]);
+    assert_eq!(
+        rows(&directory, "p").0,
+        [Some("bitcoin.regtest.0000".to_owned())]
+    );
 }
 
 /// The `transaction` rows of `txid`: their block ids, and the block ids of
@@ -538,12 +552,16 @@ async fn mining_upserts_the_pending_row_and_its_legs() {
     .await
     .unwrap();
     let block0 = Some("bitcoin.regtest.0000".to_owned());
-    assert_eq!(rows(&directory, "p"), (vec![block0.clone()], vec![block0]));
+    assert_eq!(
+        rows(&directory, "p"),
+        (vec![block0.clone()], vec![block0.clone()])
+    );
     // A pending insert after mining is a no-op.
     TransactionStore::insert(&storage, &pending(&network, "p", "alice", 9))
         .await
         .unwrap();
-    assert_eq!(storage.find_for_address(&alice).await.unwrap(), [mined]);
+    assert_eq!(history(&directory, &alice), ["p"]);
+    assert_eq!(rows(&directory, "p").0, [block0]);
 }
 
 #[tokio::test]
@@ -564,7 +582,7 @@ async fn a_reorged_transaction_moves_to_its_new_block() {
     .unwrap();
     BlockStore::delete(&storage, &network, 1).await.unwrap();
     // Archived and not re-mined: not shown, not counted.
-    assert!(history(&storage, &alice).await.is_empty());
+    assert!(history(&directory, &alice).is_empty());
     assert_eq!(
         storage.balance(&alice, &native(&network)).await.unwrap(),
         Decimal::zero()
@@ -576,7 +594,7 @@ async fn a_reorged_transaction_moves_to_its_new_block() {
         .unwrap();
     let moved = Some("bitcoin.regtest.0101".to_owned());
     assert_eq!(rows(&directory, "m"), (vec![moved.clone()], vec![moved]));
-    assert_eq!(history(&storage, &alice).await, ["m"]);
+    assert_eq!(history(&directory, &alice), ["m"]);
     assert_eq!(
         storage.balance(&alice, &native(&network)).await.unwrap(),
         Decimal::from(4_u64)
@@ -695,14 +713,6 @@ async fn wallets_round_trip_through_their_factory() {
     let mut addresses: Vec<_> = restored.iter().map(|w| w.address().value.clone()).collect();
     addresses.sort();
     assert_eq!(addresses, ["alice", "bob"]);
-    WalletStore::delete(&storage, &alice.0).await.unwrap();
-    assert_eq!(
-        WalletStore::find_all(&storage, &factories)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
 }
 
 #[tokio::test]

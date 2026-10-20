@@ -330,7 +330,7 @@ async fn send(
             .parse::<Decimal>()
             .ok()
             .filter(|amount| amount > &Decimal::zero())
-            .and_then(|amount| amount.to_atomic(info.decimals).ok())
+            .and_then(|amount| info.atomic(&amount).ok())
             .ok_or_else(|| {
                 at(Error::invalid_request(
                     "amount must be a positive exact decimal within the asset's decimals",
@@ -342,7 +342,7 @@ async fn send(
             .map_err(|error| at(error.into()))?;
         transfers.push(Payment {
             to: to.value,
-            amount: Decimal::from_atomic(units, 0).to_string(),
+            amount: units.to_string(),
         });
     }
     let intent = SendIntent {

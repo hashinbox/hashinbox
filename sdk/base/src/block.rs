@@ -379,18 +379,19 @@ pub trait Store: Send + Sync {
     fn delete<'a>(&'a self, network: &'a Network, from: u64) -> Future<'a, anyhow::Result<()>>;
 }
 
-/// Tells listeners about each block a [`Store`] kept.
+/// Tells listeners about each run of blocks a [`Store`] kept.
 pub trait Notify: Send + Sync {
-    /// Calls `listener` after each kept block.
+    /// Calls `listener` once after each accepted insert, with its run.
     fn subscribe(&self, listener: Box<Listener>);
 }
 
-/// A [`Notify`] listener: called with each block's header after its write.
-pub type Listener = dyn Fn(&Header) + Send + Sync;
+/// A [`Notify`] listener: called with each accepted insert (one network's
+/// run of blocks, ascending) after its write.
+pub type Listener = dyn Fn(&Blocks) + Send + Sync;
 
-/// A [`Store`] that tells its listeners about every block of each accepted
-/// insert, after the write commits and outside every lock. A repeated insert
-/// is heard again: listeners are hints, never transactional, and cannot veto.
+/// A [`Store`] that tells its listeners about each accepted insert, once,
+/// after the write commits and outside every lock. A repeated insert is heard
+/// again: listeners are hints, never transactional, and cannot veto.
 pub struct Notifying<S> {
     inner: S,
     listeners: Mutex<Vec<Arc<Listener>>>,
@@ -420,11 +421,7 @@ impl<S: Store> Store for Notifying<S> {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
-            for block in blocks.iter() {
-                listeners
-                    .iter()
-                    .for_each(|listener| listener(&block.header));
-            }
+            listeners.iter().for_each(|listener| listener(blocks));
             Ok(())
         })
     }

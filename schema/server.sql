@@ -56,6 +56,7 @@ CREATE TABLE trigger_run (
     "trigger"  TEXT    NOT NULL REFERENCES "trigger" (id) ON DELETE CASCADE,
     started_at INTEGER NOT NULL, -- Unix ms.
     settled_at INTEGER,          -- Unix ms; NULL: a send is in flight.
+    jobs       TEXT    NOT NULL CHECK (json_valid(jobs)), -- The send jobs' ids, a JSON list.
     CHECK (id = "trigger" || '.' || started_at)
 );
 CREATE INDEX trigger_run_latest ON trigger_run ("trigger", started_at);

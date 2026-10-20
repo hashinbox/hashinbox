@@ -129,17 +129,6 @@ pub(crate) mod db {
         bytes: &'a [u8],
     }
 
-    /// Every transaction pending or in a live block with a leg of an address:
-    /// mined ones in chain order, then pending ones. One whose block is archived
-    /// is not shown (a reorg cannot make funds appear).
-    const FOR_ADDRESS: &str = r#"
-    SELECT t.* FROM "transaction" t
-    LEFT JOIN block b ON b.id = t.block
-    WHERE t.chain = ?1 AND t.network = ?2
-      AND (t.block IS NULL OR b.archived_at IS NULL)
-      AND EXISTS (SELECT 1 FROM leg l WHERE l."transaction" = t.id AND l.address = ?3)
-    ORDER BY t.block IS NULL, b.position, t."order", t.id"#;
-
     /// One page of the transactions in live blocks with a leg of an address in
     /// an asset, after a (position, order, txid) key, in that order.
     const PAGE: &str = r#"
@@ -253,16 +242,21 @@ pub(crate) mod db {
         Ok(())
     }
 
-    /// Every pending or live mined transaction with a leg of `address` (see [`FOR_ADDRESS`]).
-    pub(crate) fn find_for_address(
+    /// Whether transaction `id` is mined in a live block at or below
+    /// position `confirmed`.
+    pub(crate) fn is_confirmed(
         connection: &mut SqliteConnection,
-        address: &Address,
-    ) -> QueryResult<Transactions> {
-        diesel::sql_query(FOR_ADDRESS)
-            .bind::<Text, _>(address.network.chain.as_str())
-            .bind::<Text, _>(&address.network.name)
-            .bind::<Text, _>(&address.value)
-            .load::<Transaction>(connection)
-            .map(Transactions::from)
+        id: &str,
+        confirmed: i64,
+    ) -> QueryResult<bool> {
+        use crate::models::schema::block;
+        diesel::select(diesel::dsl::exists(
+            transactions::table
+                .inner_join(block::table)
+                .filter(transactions::id.eq(id))
+                .filter(block::archived_at.is_null())
+                .filter(block::position.le(confirmed)),
+        ))
+        .get_result(connection)
     }
 }

@@ -15,6 +15,8 @@ path = "src/main.rs"
 solana-node = []
 
 [dependencies]
+# The trigger loop reports refusals through an injected sink.
+logging = { path = "../../packages/logging" }
 anyhow.workspace = true
 clap.workspace = true
 axum = "0.8"
@@ -53,8 +55,6 @@ futures-executor.workspace = true
 http-body-util = "=0.1.4"
 # The scripted node behind a test network's client.
 json-rpc = { path = "../../packages/json-rpc", features = ["testing"] }
-# A test chain implements `payments::config::Chain`, whose `connect` names the logger.
-logging = { path = "../../packages/logging" }
 reqwest.workspace = true
 sha2.workspace = true
 tempfile = "=3.27.0"

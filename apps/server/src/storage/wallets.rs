@@ -44,14 +44,6 @@ impl WalletStore for Storage {
             Ok(wallets)
         })
     }
-
-    fn delete<'a>(&'a self, address: &'a Address) -> Future<'a, anyhow::Result<()>> {
-        let address = address.clone();
-        Box::pin(self.write(move |connection| {
-            models::wallet::db::delete(connection, &models::Wallet::id(&address)?)?;
-            Ok(())
-        }))
-    }
 }
 
 impl Storage {

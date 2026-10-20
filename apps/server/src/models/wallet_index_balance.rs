@@ -39,6 +39,23 @@ impl WalletIndexBalances {
         self.confirmed
     }
 
+    /// None, of the same network at the same tip.
+    #[must_use]
+    pub(crate) fn emptied(&self) -> Self {
+        Self::new(self.network.clone(), self.confirmed)
+    }
+
+    /// `one` alone, of the same network at the same tip.
+    ///
+    /// # Errors
+    ///
+    /// When it is of another network.
+    pub(crate) fn only(&self, one: &WalletIndexBalance) -> anyhow::Result<Self> {
+        let mut alone = self.emptied();
+        alone.insert(one.clone())?;
+        Ok(alone)
+    }
+
     /// Adds `one`.
     ///
     /// # Errors

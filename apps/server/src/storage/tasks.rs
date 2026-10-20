@@ -17,19 +17,7 @@ fn int(value: u64) -> Result<i64, StoreError> {
 }
 
 fn row(job: &Job) -> Result<Task, StoreError> {
-    Ok(Task {
-        id: job.id.to_string(),
-        lane: job.lane.clone(),
-        kind: job.kind.clone(),
-        state: match job.state {
-            State::Pending => 0,
-            State::Running => 1,
-            State::Done => 2,
-            State::Failed => 3,
-        },
-        payload: job.payload.to_string(),
-        run_at: int(job.run_at)?,
-    })
+    Task::new(job).map_err(|_| StoreError::Invalid("time is above the storable range".into()))
 }
 
 fn job(row: Task) -> Result<Job, StoreError> {
@@ -49,6 +37,15 @@ fn job(row: Task) -> Result<Job, StoreError> {
         payload,
         run_at: u64::try_from(row.run_at).unwrap_or(0),
     })
+}
+
+impl Storage {
+    /// Tells the queue about `job`, written outside [`Store::set`] (with the
+    /// run that queued it).
+    pub(crate) fn announce(&self, job: Job) {
+        // No subscriber is not an error.
+        let _ = self.changes.send(job);
+    }
 }
 
 impl Store for Storage {

@@ -12,6 +12,38 @@ use crate::{Error, ErrorKind, Http};
 /// The query parameter prefix naming a static header.
 const HEADER: &str = "header.";
 
+/// An endpoint URL's parts ([`Endpoint::parts`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Parts {
+    /// Scheme, host and port.
+    pub origin: String,
+    /// `http` or `https`.
+    pub scheme: String,
+    /// The host name or address.
+    pub host: String,
+    /// The port, the scheme's default when unwritten.
+    pub port: Option<u16>,
+    /// The path.
+    pub path: String,
+    /// The user of `user:password` (sent as HTTP Basic); empty when none.
+    pub username: String,
+    /// The password of `user:password`.
+    pub password: Option<String>,
+    /// The query parameters, in order.
+    pub parameters: Vec<Parameter>,
+}
+
+/// One query parameter of an endpoint URL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Parameter {
+    /// Its name, or for a `header.<Name>` parameter, the header's.
+    pub name: String,
+    /// Its value.
+    pub value: String,
+    /// Whether every call sends it as a header instead of in the URL.
+    pub header: bool,
+}
+
 /// What one call to one node may take and carry: 15 s, 10 MiB requests,
 /// 64 MiB responses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -77,8 +109,6 @@ impl Bounds {
 /// ["https://node.invalid/v3/KEY",
 ///  {"url": "http://user:pass@node.invalid/", "bounds": {"timeout_ms": 20000}}]
 /// ```
-///
-/// `Debug` and `Display` show [`Self::redacted`], never userinfo or query values.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Endpoint {
     /// The node's URL: `http` or `https`, a host, and no fragment.
@@ -91,7 +121,7 @@ impl fmt::Debug for Endpoint {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Endpoint")
-            .field("url", &self.redacted())
+            .field("url", &self.url)
             .field("bounds", &self.bounds)
             .finish()
     }
@@ -99,7 +129,7 @@ impl fmt::Debug for Endpoint {
 
 impl fmt::Display for Endpoint {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.redacted())
+        formatter.write_str(&self.url)
     }
 }
 
@@ -120,25 +150,28 @@ impl Endpoint {
         self
     }
 
-    /// The URL safe to show: userinfo becomes `***` and every query value
-    /// becomes `***`; `invalid URL` when it does not parse.
+    /// The URL's parts; `None` when it does not parse.
     #[must_use]
-    pub fn redacted(&self) -> String {
-        let Ok(mut url) = Url::parse(&self.url) else {
-            return "invalid URL".to_owned();
-        };
-        if !url.username().is_empty() || url.password().is_some() {
-            // Fails only for URLs that cannot carry userinfo, which then has none.
-            let _ = url.set_username("***");
-            let _ = url.set_password(None);
-        }
-        if url.query().is_some() {
-            let keys: Vec<String> = url.query_pairs().map(|(key, _)| key.into_owned()).collect();
-            url.query_pairs_mut()
-                .clear()
-                .extend_pairs(keys.iter().map(|key| (key.as_str(), "***")));
-        }
-        url.into()
+    pub fn parts(&self) -> Option<Parts> {
+        let url = Url::parse(&self.url).ok()?;
+        let parameters = url
+            .query_pairs()
+            .map(|(key, value)| Parameter {
+                header: key.starts_with(HEADER),
+                name: key.strip_prefix(HEADER).unwrap_or(&key).to_owned(),
+                value: value.into_owned(),
+            })
+            .collect();
+        Some(Parts {
+            origin: url.origin().ascii_serialization(),
+            scheme: url.scheme().to_owned(),
+            host: url.host_str().unwrap_or_default().to_owned(),
+            port: url.port_or_known_default(),
+            path: url.path().to_owned(),
+            username: url.username().to_owned(),
+            password: url.password().map(str::to_owned),
+            parameters,
+        })
     }
 
     /// Rejects an unusable node.
@@ -147,7 +180,7 @@ impl Endpoint {
     ///
     /// [`ErrorKind::InvalidConfiguration`] when the URL is not an `http` or
     /// `https` URL naming a host, when it carries a fragment, or when a bound
-    /// is zero. No message echoes the URL.
+    /// is zero.
     pub fn validate(&self) -> Result<(), Error> {
         Self::check_url(&self.url)?;
         self.bounds.validate()
@@ -172,7 +205,7 @@ impl Endpoint {
         } else {
             url.query_pairs_mut().clear().extend_pairs(kept);
         }
-        Http::build(url.as_str(), self.redacted(), self.bounds, headers)
+        Http::build(url.as_str(), self.url.clone(), self.bounds, headers)
     }
 
     /// The static headers `url`'s `header.` parameters name.
@@ -271,17 +304,27 @@ mod tests {
     use super::Endpoint;
 
     #[test]
-    fn header_parameters_become_headers_and_stay_redacted() {
+    fn header_parameters_become_headers() {
         let endpoint = Endpoint::new("https://node.invalid/v1?apikey=A&header.x-api-key=B");
         let url = url::Url::parse(&endpoint.url).unwrap();
         let headers = Endpoint::headers(&url).unwrap();
         assert_eq!(headers.len(), 1);
         assert_eq!(headers["x-api-key"], "B");
         assert!(endpoint.connect().is_ok());
+        let parts = Endpoint::new("https://u:p@node.invalid/v2/KEY?header.x-k=B")
+            .parts()
+            .unwrap();
         assert_eq!(
-            endpoint.redacted(),
-            "https://node.invalid/v1?apikey=***&header.x-api-key=***"
+            (
+                parts.path.as_str(),
+                parts.username.as_str(),
+                parts.password.as_deref()
+            ),
+            ("/v2/KEY", "u", Some("p"))
         );
+        assert_eq!(parts.port, Some(443));
+        assert!(parts.parameters[0].header && parts.parameters[0].name == "x-k");
+        assert_eq!(parts.parameters[0].value, "B");
         for bad in [
             "https://node.invalid/?header.x-key=1&header.X-Key=2",
             "https://node.invalid/?header.bad%20name=1",

@@ -55,10 +55,13 @@ pub(crate) struct Payment {
 
 /// How far a job got, saved in its payload beside the intent.
 #[derive(Default, Serialize, Deserialize)]
-struct Progress {
+pub(crate) struct Progress {
     /// Every transaction's exact signed bytes in hex, in broadcast order.
     #[serde(default)]
     signed: Vec<String>,
+    /// Every transaction's id (txid), in the order of `signed`.
+    #[serde(default)]
+    pub(crate) ids: Vec<String>,
     /// How many of `signed`, a prefix, the nodes accepted.
     #[serde(default)]
     accepted: usize,
@@ -107,7 +110,7 @@ impl Sends {
             .and_then(|progress| serde_json::from_value::<Progress>(progress).ok())
             .unwrap_or_default();
         if progress.signed.is_empty() {
-            progress.signed = match self.sign(&sender, &intent).await {
+            (progress.signed, progress.ids) = match self.sign(&sender, &intent).await {
                 Ok(signed) => signed,
                 Err(ack) => return ack,
             };
@@ -142,8 +145,13 @@ impl Sends {
     }
 
     /// Every transaction of `intent`, signed by the kept wallet of `sender`,
-    /// as hex. A missing key fails the job; a store failure retries.
-    async fn sign(&self, sender: &Address, intent: &SendIntent) -> Result<Vec<String>, Ack> {
+    /// as hex, and their ids. A missing key fails the job; a store failure
+    /// retries.
+    async fn sign(
+        &self,
+        sender: &Address,
+        intent: &SendIntent,
+    ) -> Result<(Vec<String>, Vec<String>), Ack> {
         let wallet = self.payments.wallet(sender).await.map_err(|error| {
             match error.downcast_ref::<WalletError>() {
                 Some(wallet) if !wallet.kind.retryable() => {
@@ -168,8 +176,8 @@ impl Sends {
         let signed = builder.sign().await.map_err(Self::refused)?;
         Ok(signed
             .iter()
-            .map(|transaction| hex::encode(&transaction.bytes))
-            .collect())
+            .map(|transaction| (hex::encode(&transaction.bytes), transaction.id.id.clone()))
+            .unzip())
     }
 
     /// A build failure: transient ones retry, the rest fail the job.

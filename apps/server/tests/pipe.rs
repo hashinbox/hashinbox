@@ -2,12 +2,9 @@
 //! resolution in `models::WalletIndex`, confirmed balances, compares,
 //! amounts, fees and run gates, and the JSON form.
 
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use base::{Address, Asset, Chain, Decimal, FeeEstimator, Future, Network, Networked};
@@ -16,14 +13,14 @@ use diesel::{Connection as _, SqliteConnection, connection::SimpleConnection as 
 use crate::{
     models::{
         Json, Tag, Trigger, TriggerRun, Wallet, balance, int, tag, trigger,
-        trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Operator, Target, This},
+        trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Operator, Send, Target, This},
         trigger_run, wallet,
         wallet::db::IndexedSelector,
         wallet_index,
         wallet_index::{Selector, WalletIndexes},
         wallet_index_balance::{self, WalletIndexBalances},
     },
-    trigger::{Decimals, Evaluation, Fees as TriggerFees},
+    trigger::{Evaluation, Planned},
 };
 
 /// The confirmed tip of the test network.
@@ -373,11 +370,20 @@ fn open<'a>(
         connection,
         100_000,
         run,
-        Decimals(BTreeMap::from([
-            ("native".to_owned(), 8),
-            ("tok".to_owned(), 2),
-        ])),
-        TriggerFees::new(fees, runtime.handle().clone()),
+        [("native", 8), ("tok", 2)]
+            .into_iter()
+            .map(|(id, decimals)| {
+                base::AssetInfo::token(
+                    Asset {
+                        network: network(),
+                        id: id.to_owned(),
+                    },
+                    decimals,
+                )
+            })
+            .collect(),
+        fees,
+        runtime.handle().clone(),
     )
 }
 
@@ -394,7 +400,7 @@ fn compares(
     compare: &Compare,
     this: &WalletIndexBalances,
 ) -> anyhow::Result<bool> {
-    evaluation.filter(&Logic::Leaf(Filter::Compare(compare.clone())), this)
+    evaluation.check(&Logic::Leaf(Gate::Compare(compare.clone())), this)
 }
 
 fn checks(
@@ -636,24 +642,6 @@ fn counterparts_must_be_fully_indexed() {
 }
 
 #[test]
-fn a_fee_is_estimated_once_per_evaluation() {
-    let (_directory, runtime, mut connection) = seeded();
-    let estimator = fees("7");
-    let a = selection(&mut connection, &[id("a", "native")]);
-    let mut evaluation = open(&mut connection, &runtime, estimator.clone(), None);
-    // ETH-forward style check: Sum above Fee, then the same fee as an amount.
-    let above_fee = compare(
-        this(None),
-        Aggregate::Sum,
-        Operator::Above,
-        Amount::Fee { of: this(None) },
-    );
-    assert!(compares(&mut evaluation, &above_fee, &a).unwrap());
-    assert!(compares(&mut evaluation, &above_fee, &a).unwrap());
-    assert_eq!(estimator.calls.load(Ordering::SeqCst), 1);
-}
-
-#[test]
 fn logic_stops_early_and_errors_stay_errors() {
     let leaves = Logic::All(vec![Logic::Leaf(false), Logic::Leaf(true)]);
     let mut seen = 0;
@@ -774,7 +762,7 @@ fn triggers_and_their_runs_are_stored() {
         selector: Json(serde_json::from_str(r#"{"tag":"deposit"}"#).unwrap()),
         filter: None,
         check: Json(serde_json::from_str(r#""idle""#).unwrap()),
-        action: Json(serde_json::from_str(r#"{"sweep":{"to":"a"}}"#).unwrap()),
+        action: Json(serde_json::from_str(r#"{"send":{"source":{"this":{}},"asset":"native","destination":{"select":{"ids":["x"]}},"amount":{"balance":{}}}}"#).unwrap()),
         enabled: true,
         created_at: 1,
         updated_at: 1,
@@ -873,4 +861,181 @@ fn wallets_are_found_through_their_indexes() {
         ..IndexedSelector::default()
     };
     assert_eq!(find(c, tagged), ["a"]);
+}
+
+#[test]
+fn a_filter_keeps_each_index_on_its_own() {
+    let (_directory, runtime, mut connection) = seeded();
+    let both = selection(&mut connection, &[id("a", "native"), id("b", "native")]);
+    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
+    // a 690, b 50 sats: only a holds more than 100 sats; together they would.
+    let filter = Logic::Leaf(Filter::Compare(compare(
+        this(None),
+        Aggregate::Sum,
+        Operator::Above,
+        value("0.000001"),
+    )));
+    let kept = evaluation.filter(&filter, &both).unwrap();
+    assert_eq!(kept.ids(), vec![id("a", "native")]);
+    assert_eq!(kept.confirmed_at(), both.confirmed_at());
+}
+
+fn send(source: Target, destination: Target, amount: Amount) -> Send {
+    Send {
+        source,
+        asset: "native".to_owned(),
+        destination,
+        amount,
+    }
+}
+
+fn ids_of(names: &[&str]) -> Target {
+    Target::Select(Selector::Ids(
+        names.iter().map(|name| id(name, "native")).collect(),
+    ))
+}
+
+#[test]
+fn a_send_pays_per_source_or_per_destination() {
+    let (_directory, runtime, mut connection) = seeded();
+    let both = selection(&mut connection, &[id("a", "native"), id("b", "native")]);
+    let b = selection(&mut connection, &[id("b", "native")]);
+    let mut evaluation = open(&mut connection, &runtime, fees("100"), None);
+    let balance = || Box::new(Amount::Balance { of: this(None) });
+    let fee = || Box::new(Amount::Fee { of: this(None) });
+
+    // Many sources to one: everything less the fee, each source alone;
+    // b's 50 sats do not cover its 100 sat fee, so it is skipped.
+    let sweep = send(this(None), ids_of(&["b"]), Amount::Sub(balance(), fee()));
+    let plan = evaluation.plan(&sweep, &both).unwrap();
+    assert_eq!(
+        plan.transfers,
+        vec![Planned {
+            from: address("a"),
+            to: address("b"),
+            amount: decimal("590"),
+        }]
+    );
+
+    // One source to many: each destination's shortfall up to 100 sats.
+    let shortfall = Amount::Max(
+        Box::new(Amount::Sub(Box::new(value("0.000001")), balance())),
+        Box::new(value("0")),
+    );
+    let fund = send(ids_of(&["a"]), this(None), shortfall);
+    let plan = evaluation.plan(&fund, &b).unwrap();
+    assert_eq!(
+        plan.transfers,
+        vec![Planned {
+            from: address("a"),
+            to: address("b"),
+            amount: decimal("50"),
+        }]
+    );
+
+    // Many to many is refused.
+    let tangled = send(
+        this(None),
+        ids_of(&["a", "b"]),
+        Amount::Balance { of: this(None) },
+    );
+    assert!(evaluation.plan(&tangled, &both).is_err());
+}
+
+/// A stored, enabled trigger `id` on the test network picking `selector`.
+fn keep_trigger(connection: &mut SqliteConnection, id: &str, selector: Selector) {
+    let row = Trigger {
+        id: id.to_owned(),
+        chain: "bitcoin".to_owned(),
+        network: "regtest".to_owned(),
+        selector: Json(selector),
+        filter: None,
+        check: Json(Logic::Leaf(Gate::Idle)),
+        action: Json(
+            serde_json::from_str(
+                r#"{"send":{"source":{"this":{}},"asset":"native","destination":{"select":{"ids":["x"]}},"amount":{"balance":{}}}}"#,
+            )
+            .unwrap(),
+        ),
+        enabled: true,
+        created_at: 1,
+        updated_at: 1,
+    };
+    trigger::db::insert(connection, &row).unwrap();
+}
+
+fn header(position: u64, hash: u8) -> base::BlockHeader {
+    base::BlockHeader {
+        position,
+        height: position,
+        hash: base::BlockHash(vec![hash]),
+        parent: None,
+        timestamp: None,
+    }
+}
+
+#[test]
+fn a_block_touches_the_triggers_selecting_what_it_changed() {
+    let (_directory, _runtime, mut connection) = seeded();
+    keep_trigger(&mut connection, "natives", asset("native"));
+    keep_trigger(&mut connection, "tokens", asset("tok"));
+    // Block 2 moved only a's native; block 1 a's native and token.
+    let touched = |connection: &mut SqliteConnection, headers: &[base::BlockHeader]| {
+        crate::trigger::touched(connection, &network(), headers).unwrap()
+    };
+    assert_eq!(
+        touched(&mut connection, &[header(2, 2)])
+            .iter()
+            .collect::<Vec<_>>(),
+        ["natives"]
+    );
+    assert_eq!(touched(&mut connection, &[header(1, 1)]).len(), 2);
+    // One insert of several blocks is one answer.
+    assert_eq!(
+        touched(&mut connection, &[header(1, 1), header(2, 2)]).len(),
+        2
+    );
+    // An archived block touches nothing.
+    assert!(touched(&mut connection, &[header(5, 0xf5)]).is_empty());
+}
+
+/// A queued send job `id` in `state` that sent `txids`.
+fn job_row(id: &str, state: i32, txids: &[&str]) -> crate::models::Task {
+    crate::models::Task {
+        id: id.to_owned(),
+        lane: "l".to_owned(),
+        kind: "send".to_owned(),
+        state,
+        payload: serde_json::json!({ "progress": { "ids": txids } }).to_string(),
+        run_at: 0,
+    }
+}
+
+#[test]
+fn a_run_settles_when_its_sends_are_done_and_confirmed() {
+    let (_directory, _runtime, mut connection) = seeded();
+    keep_trigger(&mut connection, "sweep", asset("native"));
+    let cases = [
+        // Done, its transaction in a live block: settles.
+        (10, job_row("j1", 2, &["t2"]), true),
+        // Done, its transaction only in an archived block: waits.
+        (20, job_row("j2", 2, &["t3"]), false),
+        // Still running: waits.
+        (30, job_row("j3", 1, &[]), false),
+        // Failed: over.
+        (40, job_row("j4", 3, &["t9"]), true),
+    ];
+    for (started, job, _) in &cases {
+        crate::models::task::db::upsert(&mut connection, job, 0).unwrap();
+        let run = TriggerRun {
+            jobs: Json(vec![job.id.clone()]),
+            ..TriggerRun::new("sweep", *started)
+        };
+        trigger_run::db::insert(&mut connection, &run).unwrap();
+    }
+    let settled = crate::trigger::run::settle(&mut connection, &network(), 99).unwrap();
+    assert_eq!(settled, ["sweep", "sweep"]);
+    let open = trigger_run::db::find_unsettled(&mut connection, &network()).unwrap();
+    let open: Vec<i64> = open.iter().map(|run| run.started_at).collect();
+    assert_eq!(open, [20, 30]);
 }

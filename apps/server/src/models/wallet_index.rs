@@ -459,15 +459,41 @@ pub(crate) mod db {
         Ok(Owned { owned, contested })
     }
 
-    /// Forgets the index of `asset` of `address`.
-    pub(crate) fn delete(
+    /// The ids of `network`'s wallet indexes `selector` picks, however far
+    /// each is indexed.
+    pub(crate) fn find_matching(
         connection: &mut SqliteConnection,
-        address: &Address,
-        asset: &Asset,
-    ) -> anyhow::Result<usize> {
-        Ok(
-            diesel::delete(wallet_index::table.find(WalletIndex::id(address, asset)?))
-                .execute(connection)?,
-        )
+        network: &Network,
+        selector: &Selector,
+    ) -> QueryResult<Vec<String>> {
+        of!(network)
+            .filter(selector.predicate())
+            .select(wallet_index::id)
+            .order(wallet_index::id)
+            .load(connection)
+    }
+
+    /// The ids of the wallet indexes with a leg in one of `blocks` (block
+    /// ids of one network), live: what those blocks changed.
+    pub(crate) fn find_touched(
+        connection: &mut SqliteConnection,
+        blocks: &[String],
+    ) -> QueryResult<Vec<String>> {
+        use crate::models::schema::{block, leg};
+        wallet_index::table
+            .inner_join(
+                leg::table.on(leg::address
+                    .eq(wallet_index::address)
+                    .and(leg::asset.eq(wallet_index::asset))),
+            )
+            .inner_join(block::table.on(block::id.nullable().eq(leg::block)))
+            .filter(leg::block.eq_any(blocks.iter().map(|id| Some(id.as_str()))))
+            .filter(block::chain.eq(wallet_index::chain))
+            .filter(block::network.eq(wallet_index::network))
+            .filter(block::archived_at.is_null())
+            .select(wallet_index::id)
+            .distinct()
+            .order(wallet_index::id)
+            .load(connection)
     }
 }

@@ -21,12 +21,11 @@ use crate::{
 /// and no failover. Compose [`crate::Retry`] and [`crate::Failover`] around it
 /// for those. Cheap to clone; clones share the connection pool.
 ///
-/// `Debug` shows the redacted URL only; the `jsonrpsee` client keeps the full
-/// URL, userinfo included, so it is never handed to a formatter.
+/// `Debug` shows its URL.
 #[derive(Clone)]
 pub struct Http {
     client: HttpClient,
-    redacted: String,
+    url: String,
     statistics: Statistics,
     events: Arc<crate::events::Events>,
 }
@@ -35,7 +34,7 @@ impl fmt::Debug for Http {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Http")
-            .field("url", &self.redacted)
+            .field("url", &self.url)
             .finish()
     }
 }
@@ -45,7 +44,7 @@ impl Http {
     /// Basic authorization; every call carries `headers`.
     pub(crate) fn build(
         target: &str,
-        redacted: String,
+        url: String,
         bounds: Bounds,
         headers: HeaderMap,
     ) -> Result<Self, Error> {
@@ -58,7 +57,7 @@ impl Http {
             .map_err(Error::from_rpc)?;
         Ok(Self {
             client,
-            redacted,
+            url,
             statistics: Statistics::default(),
             events: Arc::default(),
         })

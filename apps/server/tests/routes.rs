@@ -168,7 +168,7 @@ async fn wallets_balance_history_and_sends() {
     assert_eq!(assets["assets"][0]["metadata"]["decimals"], 8);
     let (status, networks) = call(&router, Method::GET, "/v1/networks", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(networks["networks"][0]["nodes"], Value::Null);
+    assert_eq!(networks["networks"][0]["nodes"], json!([]));
     let (status, health) = call(&router, Method::GET, "/health", None).await;
     assert_eq!((status, &health["ready"]), (StatusCode::OK, &json!(true)));
 }

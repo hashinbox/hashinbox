@@ -1,6 +1,6 @@
 //! `base::WalletIndexStore` on the `wallet_index` model.
 
-use base::{Address, Asset, Future, Network, WalletIndexStore};
+use base::{Future, Network, WalletIndexStore};
 
 use super::Storage;
 use crate::models::{int, uint, wallet_index};
@@ -9,14 +9,6 @@ impl WalletIndexStore for Storage {
     fn insert<'a>(&'a self, index: &'a base::WalletIndex) -> Future<'a, anyhow::Result<()>> {
         let index = index.clone();
         Box::pin(self.write(move |connection| wallet_index::db::insert(connection, &index)))
-    }
-
-    fn find_all<'a>(
-        &'a self,
-        network: &'a Network,
-    ) -> Future<'a, anyhow::Result<Vec<base::WalletIndex>>> {
-        let network = network.clone();
-        Box::pin(self.read(move |connection| wallet_index::db::find_all(connection, &network)))
     }
 
     fn find_next<'a>(
@@ -35,17 +27,5 @@ impl WalletIndexStore for Storage {
             })
             .await
         })
-    }
-
-    fn delete<'a>(
-        &'a self,
-        address: &'a Address,
-        asset: &'a Asset,
-    ) -> Future<'a, anyhow::Result<()>> {
-        let (address, asset) = (address.clone(), asset.clone());
-        Box::pin(self.write(move |connection| {
-            wallet_index::db::delete(connection, &address, &asset)?;
-            Ok(())
-        }))
     }
 }

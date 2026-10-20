@@ -17,11 +17,7 @@ const MOST: usize = 16;
 /// One configured RPC endpoint: the document a configuration file's
 /// `rpc.endpoints` holds — a URL, or an object with the URL and bounds —
 /// checked as `json_rpc::Endpoint` checks it.
-///
-/// The URL may carry credentials (userinfo, query keys, a path key). It is
-/// stored as written and leaves this value only as
-/// [`RpcEndpoints::documents`]; what is shown is [`Self::origin`], which is all
-/// `Display` and `Debug` print.
+
 #[derive(Clone)]
 pub(crate) struct Endpoint {
     document: Value,
@@ -31,23 +27,13 @@ pub(crate) struct Endpoint {
     origin: String,
 }
 
-/// One row of `rpc_endpoints`: a network's endpoints in failover order, one
-/// to [`MOST`] of them. The store's operations are this row's.
-#[derive(Clone)]
-pub(crate) struct RpcEndpoints(Vec<Endpoint>);
-
-/// Every network's endpoints: the stored rows, and the configuration file's
-/// for a network the database holds none of. The database is the source of
-/// truth; the file is the fallback, never an override.
-pub(crate) struct NetworkEndpoints(BTreeMap<Network, RpcEndpoints>);
-
 impl Endpoint {
     /// Checks `document` without contacting a node.
     ///
     /// # Errors
     ///
-    /// A message that never quotes the document: one that is neither a URL
-    /// nor an endpoint object, or one `json_rpc::Endpoint::validate` refuses.
+    /// One that is neither a URL nor an endpoint object, or one
+    /// `json_rpc::Endpoint::validate` refuses.
     pub(crate) fn new(document: Value) -> Result<Self, String> {
         let endpoint: json_rpc::Endpoint = serde_json::from_value(document.clone())
             .map_err(|_| "an RPC node is a URL or an object of url and bounds")?;
@@ -63,10 +49,14 @@ impl Endpoint {
         })
     }
 
-    /// What may be shown of the endpoint: user information, path and query
-    /// are dropped, because any of them may hold a credential.
-    pub(crate) fn origin(&self) -> &str {
-        &self.origin
+    /// Its URL, the URL's parts ([`json_rpc::Endpoint::parts`]) and its bounds;
+    /// `None` when its URL does not parse.
+    pub(crate) fn view(&self) -> Option<(String, json_rpc::Parts, json_rpc::Bounds)> {
+        Some((
+            self.endpoint.url.clone(),
+            self.endpoint.parts()?,
+            self.endpoint.bounds,
+        ))
     }
 }
 
@@ -84,6 +74,11 @@ impl fmt::Debug for Endpoint {
             .finish()
     }
 }
+
+/// One row of `rpc_endpoints`: a network's endpoints in failover order, one
+/// to [`MOST`] of them. The store's operations are this row's.
+#[derive(Clone)]
+pub(crate) struct RpcEndpoints(Vec<Endpoint>);
 
 impl RpcEndpoints {
     /// Every document checked, in order.
@@ -115,6 +110,12 @@ impl RpcEndpoints {
             .collect()
     }
 
+    /// Each one's parts and bounds, in failover order; one whose URL does
+    /// not parse is left out.
+    pub(crate) fn views(&self) -> Vec<(String, json_rpc::Parts, json_rpc::Bounds)> {
+        self.0.iter().filter_map(Endpoint::view).collect()
+    }
+
     /// The nodes the documents describe, in failover order, for a transport.
     pub(crate) fn nodes(&self) -> Vec<json_rpc::Endpoint> {
         self.0
@@ -130,7 +131,17 @@ impl fmt::Debug for RpcEndpoints {
     }
 }
 
+/// Every network's endpoints: the stored rows, and the configuration file's
+/// for a network the database holds none of. The database is the source of
+/// truth; the file is the fallback, never an override.
+pub(crate) struct NetworkEndpoints(BTreeMap<Network, RpcEndpoints>);
+
 impl NetworkEndpoints {
+    /// Every network's list.
+    pub(crate) fn rows(&self) -> &BTreeMap<Network, RpcEndpoints> {
+        &self.0
+    }
+
     /// Every network's documents, in failover order, for composition.
     pub(crate) fn documents(&self) -> BTreeMap<Network, Vec<Value>> {
         self.0

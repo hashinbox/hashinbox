@@ -82,7 +82,7 @@ pub(crate) mod wallet_index_balance;
 
 pub(crate) use asset::Asset;
 pub(crate) use block::Block;
-pub(crate) use endpoint::{Endpoint, NetworkEndpoints, RpcEndpoints};
+pub(crate) use endpoint::RpcEndpoints;
 pub(crate) use indexing::Indexing;
 pub(crate) use json::Json;
 pub(crate) use leg::{Leg, LegFacts};

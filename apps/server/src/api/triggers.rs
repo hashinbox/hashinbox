@@ -15,6 +15,7 @@ use axum::{
     http::StatusCode,
 };
 use base::{Decimal, Networked as _};
+use diesel::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -23,12 +24,12 @@ use super::{Error, ErrorBody};
 use crate::{
     models::{
         self,
-        trigger::{Action, Filter, Gate, Logic},
+        trigger::{self as triggers, Action, Filter, Gate, Logic, Target},
+        trigger_run,
         wallet_index::Selector,
     },
     state::AppState,
-    storage::triggers::PreviewSources,
-    trigger::Decimals,
+    trigger::{self, Definition as Unsaved, Sources},
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -63,8 +64,8 @@ struct Trigger {
     /// `all`/`any`/`not`.
     #[schema(value_type = Object)]
     check: Logic<Gate>,
-    /// What it does: `{"sweep": {"to": …}}` or
-    /// `{"transfer": {"to": …, "amount": …}}`.
+    /// What it does: `{"send": {"source": target, "asset": id,
+    /// "destination": target, "amount": amount}}`.
     #[schema(value_type = Object)]
     action: Action,
     /// Whether it runs.
@@ -92,12 +93,12 @@ impl From<models::Trigger> for Trigger {
     }
 }
 
-/// A trigger as written: `POST` (with `id`) and `PUT` bodies.
+/// A trigger as written: in a `POST` (with `id`) or as a `PUT` body.
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 #[schema(as = TriggerDefinition)]
 #[serde(deny_unknown_fields)]
 struct Definition {
-    /// Its slug; `POST` only (`PUT` takes it from the path).
+    /// Its slug; required in a `POST`, refused in a `PUT` (the path names it).
     #[serde(default)]
     #[schema(nullable = false)]
     id: Option<String>,
@@ -119,6 +120,16 @@ struct Definition {
 
 fn enabled() -> bool {
     true
+}
+
+/// `POST /v1/triggers` body: triggers of one network stored together, all or none.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[schema(as = TriggerBatch)]
+#[serde(deny_unknown_fields)]
+struct BatchRequest {
+    /// One to 16 triggers, each with its `id`.
+    #[schema(min_items = 1, max_items = 16)]
+    triggers: Vec<Definition>,
 }
 
 /// `GET /v1/triggers`.
@@ -155,7 +166,7 @@ struct RunsResponse {
     runs: Vec<TriggerRun>,
 }
 
-/// `POST /v1/triggers/preview` body: a trigger's targeting, unsaved.
+/// `POST /v1/triggers/preview` body: a trigger, unsaved.
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 #[schema(as = TriggerPreviewRequest)]
 #[serde(deny_unknown_fields)]
@@ -169,6 +180,19 @@ struct PreviewRequest {
     filter: Option<Logic<Filter>>,
     #[schema(value_type = Object)]
     check: Logic<Gate>,
+    #[schema(value_type = Object)]
+    action: Action,
+}
+
+/// One transfer a run would make.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+struct PlannedTransfer {
+    /// Sender address text.
+    from: String,
+    /// Recipient address text.
+    to: String,
+    /// Display units of the send's asset.
+    amount: String,
 }
 
 /// One wallet index a selector picked.
@@ -184,6 +208,8 @@ struct Selected {
     confirmed: String,
     /// Not yet confirmed change in display units; negative when leaving.
     pending: String,
+    /// Whether the filter keeps it (it is then `This` for check and action).
+    kept: bool,
 }
 
 /// What a trigger would see now.
@@ -194,13 +220,18 @@ struct PreviewResponse {
     /// block. Always present.
     #[schema(required)]
     confirmed: Option<i64>,
-    /// What the selector picks, fully indexed, with balances.
+    /// What the selector picks, fully indexed, with balances, each marked
+    /// kept or not by the filter.
     selected: Vec<Selected>,
-    /// Whether the filter holds; null without a filter. Always present.
-    #[schema(required)]
-    filter: Option<bool>,
-    /// Whether the check holds for a trigger that never ran.
+    /// Whether the check holds over the kept ones, for a trigger that never ran.
     check: bool,
+    /// The transfers the action would make now; empty when nothing is due.
+    transfers: Vec<PlannedTransfer>,
+    /// Why the action cannot be planned; null when it can. Always present.
+    #[schema(required)]
+    plan_error: Option<String>,
+    /// Senders of `transfers` this server holds no key for; a run refuses them.
+    unkeyed: Vec<String>,
 }
 
 #[utoipa::path(
@@ -217,7 +248,10 @@ struct PreviewResponse {
     tag = "triggers"
 )]
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, Error> {
-    let triggers = state.storage.triggers().await?;
+    let triggers = state
+        .storage
+        .read(|connection| Ok(triggers::db::find_all(connection)?))
+        .await?;
     Ok(Json(ListResponse {
         triggers: triggers.into_iter().map(Trigger::from).collect(),
     }))
@@ -226,37 +260,83 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, 
 #[utoipa::path(
     post,
     path = "/v1/triggers",
-    operation_id = "create_trigger",
-    summary = "Create a trigger",
-    description = "Stores a trigger on a configured network. Its `id` is chosen here and \
-        never changes.",
-    request_body = Definition,
+    operation_id = "create_triggers",
+    summary = "Create triggers",
+    description = "Stores every trigger or none, all on one configured network, each with an \
+        `id` chosen here that never changes: a template of several triggers (gas funding and \
+        sweep) never lands half.",
+    request_body = BatchRequest,
     security(("bearerAuth" = [])),
     responses(
-        (status = 201, description = "Trigger created", body = Trigger),
-        (status = 400, description = "Malformed body, id or action address", body = ErrorBody),
+        (status = 201, description = "Triggers created", body = ListResponse),
+        (status = 400, description = "Malformed body or id, several networks, or a send from \
+            This to This", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Network is not configured", body = ErrorBody),
-        (status = 422, description = "The id is taken", body = ErrorBody),
+        (status = 404, description = "Network or sent asset is not configured",
+            body = ErrorBody),
+        (status = 422, description = "An id is taken or repeated", body = ErrorBody),
         (status = 503, description = "The store is unavailable", body = ErrorBody)
     ),
     tag = "triggers"
 )]
 async fn create(
     State(state): State<Arc<AppState>>,
-    request: Result<Json<Definition>, JsonRejection>,
-) -> Result<(StatusCode, Json<Trigger>), Error> {
-    let Json(definition) = request.map_err(Error::invalid_json)?;
-    let id = definition
-        .id
-        .clone()
-        .ok_or_else(|| Error::invalid_request("a new trigger needs an id"))?;
-    let now = now()?;
-    let row = row(&state, id, definition, now, now)?;
-    if !state.storage.insert_trigger(row.clone()).await? {
-        return Err(Error::unprocessable("a trigger with this id exists"));
+    request: Result<Json<BatchRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<ListResponse>), Error> {
+    let Json(request) = request.map_err(Error::invalid_json)?;
+    if request.triggers.is_empty() || request.triggers.len() > 16 {
+        return Err(Error::invalid_request("a batch holds 1 to 16 triggers"));
     }
-    Ok((StatusCode::CREATED, Json(row.into())))
+    let now = now()?;
+    let mut rows = Vec::with_capacity(request.triggers.len());
+    for definition in request.triggers {
+        let id = definition
+            .id
+            .clone()
+            .ok_or_else(|| Error::invalid_request("every trigger of a batch needs an id"))?;
+        if rows.iter().any(|row: &models::Trigger| row.id == id) {
+            return Err(Error::unprocessable("a batch repeats a trigger id"));
+        }
+        if rows.first().is_some_and(|first: &models::Trigger| {
+            (first.chain.as_str(), first.network.as_str())
+                != (definition.chain.as_str(), definition.network.as_str())
+        }) {
+            return Err(Error::invalid_request(
+                "every trigger of a batch is on one network",
+            ));
+        }
+        rows.push(row(&state, id, definition, now, now)?);
+    }
+    let kept = rows.clone();
+    let taken = state
+        .storage
+        .write(move |connection| {
+            // Every id is checked before any is written: all or none.
+            for row in &kept {
+                if triggers::db::get_by_id(connection, &row.id)
+                    .optional()?
+                    .is_some()
+                {
+                    return Ok(Some(row.id.clone()));
+                }
+            }
+            for row in &kept {
+                triggers::db::insert(connection, row)?;
+            }
+            Ok(None)
+        })
+        .await?;
+    if let Some(taken) = taken {
+        return Err(Error::unprocessable(format!(
+            "a trigger with id {taken} exists"
+        )));
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(ListResponse {
+            triggers: rows.into_iter().map(Trigger::from).collect(),
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -278,9 +358,10 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
 ) -> Result<Json<Trigger>, Error> {
+    let id = path.id;
     let row = state
         .storage
-        .trigger(&path.id)
+        .read(move |connection| Ok(triggers::db::get_by_id(connection, &id).optional()?))
         .await?
         .ok_or_else(|| Error::not_found("no such trigger"))?;
     Ok(Json(row.into()))
@@ -298,7 +379,8 @@ async fn read(
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Trigger replaced", body = Trigger),
-        (status = 400, description = "Malformed body or action address", body = ErrorBody),
+        (status = 400, description = "Malformed body, or a send from This to This",
+            body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "No such trigger, or network not configured",
             body = ErrorBody),
@@ -315,13 +397,20 @@ async fn replace(
     if definition.id.is_some() {
         return Err(Error::invalid_request("a trigger's id never changes"));
     }
-    let kept = state
+    let id = path.id.clone();
+    let created_at = state
         .storage
-        .trigger(&path.id)
+        .read(move |connection| Ok(triggers::db::get_by_id(connection, &id).optional()?))
         .await?
-        .ok_or_else(|| Error::not_found("no such trigger"))?;
-    let row = row(&state, path.id, definition, kept.created_at, now()?)?;
-    if !state.storage.update_trigger(row.clone()).await? {
+        .ok_or_else(|| Error::not_found("no such trigger"))?
+        .created_at;
+    let row = row(&state, path.id, definition, created_at, now()?)?;
+    let replaced = row.clone();
+    let changed = state
+        .storage
+        .write(move |connection| Ok(triggers::db::update(connection, &replaced)?))
+        .await?;
+    if changed == 0 {
         return Err(Error::not_found("no such trigger"));
     }
     Ok(Json(row.into()))
@@ -346,7 +435,12 @@ async fn delete(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
 ) -> Result<StatusCode, Error> {
-    if !state.storage.delete_trigger(&path.id).await? {
+    let id = path.id;
+    let deleted = state
+        .storage
+        .write(move |connection| Ok(triggers::db::delete(connection, &id)?))
+        .await?;
+    if deleted == 0 {
         return Err(Error::not_found("no such trigger"));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -370,7 +464,11 @@ async fn runs(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
 ) -> Result<Json<RunsResponse>, Error> {
-    let runs = state.storage.trigger_runs(&path.id, RUNS).await?;
+    let id = path.id;
+    let runs = state
+        .storage
+        .read(move |connection| Ok(trigger_run::db::find_recent(connection, &id, RUNS)?))
+        .await?;
     Ok(Json(RunsResponse {
         runs: runs
             .into_iter()
@@ -387,9 +485,10 @@ async fn runs(
     path = "/v1/triggers/preview",
     operation_id = "preview_trigger",
     summary = "Preview what a trigger would see now",
-    description = "Without storing anything: the wallet indexes the selector picks at the last \
-        kept block, fully indexed, with balances, and whether the filter and check hold for \
-        a trigger that never ran. A fee in the filter or check is estimated.",
+    description = "Without storing anything, at the last kept block: the wallet indexes the \
+        selector picks (fully indexed, with balances), which of them the filter keeps, whether \
+        the check holds over those for a trigger that never ran, and the transfers the action \
+        would make. Fees used are estimated.",
     request_body = PreviewRequest,
     security(("bearerAuth" = [])),
     responses(
@@ -415,25 +514,24 @@ async fn preview(
         .into_iter()
         .map(|info| (info.asset.id.clone(), info))
         .collect();
-    let sources = PreviewSources {
-        decimals: Decimals(
-            infos
-                .iter()
-                .map(|(id, info)| (id.clone(), info.decimals))
-                .collect(),
-        ),
-        estimator: service.wallets.factory.fees(),
-        now: now()?,
+    let sources = Sources::new(
+        service.assets.clone(),
+        service.wallets.factory.fees(),
+        now()?,
+    );
+    let send_asset = {
+        let Action::Send(send) = &request.action;
+        send.asset.clone()
+    };
+    let definition = Unsaved {
+        selector: request.selector,
+        filter: request.filter,
+        check: request.check,
+        action: request.action,
     };
     let preview = state
         .storage
-        .preview(
-            network,
-            request.selector,
-            request.filter,
-            request.check,
-            sources,
-        )
+        .read(move |connection| trigger::preview(connection, &network, &definition, &sources))
         .await?;
     let display = |info: Option<&base::AssetInfo>, atomic: &Decimal| -> String {
         let Some(info) = info else {
@@ -467,14 +565,33 @@ async fn preview(
                 asset: one.index.asset.id.clone(),
                 confirmed: display(info, &one.balance.confirmed),
                 pending: display(info, &one.balance.pending),
+                kept: preview.kept.contains_key(&one.index.id),
             }
         })
         .collect();
+    let (transfers, plan_error) = match preview.plan {
+        Ok(plan) => (plan.transfers, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    let sent = infos.get(&send_asset);
     Ok(Json(PreviewResponse {
         confirmed: preview.confirmed,
         selected,
-        filter: preview.filter,
         check: preview.check,
+        transfers: transfers
+            .into_iter()
+            .map(|transfer| PlannedTransfer {
+                from: transfer.from.value,
+                to: transfer.to.value,
+                amount: display(sent, &transfer.amount),
+            })
+            .collect(),
+        plan_error,
+        unkeyed: preview
+            .unkeyed
+            .into_iter()
+            .map(|address| address.value)
+            .collect(),
     }))
 }
 
@@ -482,8 +599,8 @@ async fn preview(
 ///
 /// # Errors
 ///
-/// A 400 for a malformed id or action address; a 404 for an unconfigured
-/// network.
+/// A 400 for a malformed id or a send from `This` to `This`; a 404 for an
+/// unconfigured network or sent asset.
 fn row(
     state: &AppState,
     id: String,
@@ -496,15 +613,25 @@ fn row(
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     {
-        return Err(Error::invalid_request("a trigger id is 1 to 64 of [a-z0-9-]"));
+        return Err(Error::invalid_request(
+            "a trigger id is 1 to 64 of [a-z0-9-]",
+        ));
     }
     let network = base::Network::new(
         base::Chain::new(&definition.chain),
         definition.network.clone(),
     );
     state.payments.service(&network)?;
-    let (Action::Sweep { to } | Action::Transfer { to, .. }) = &definition.action;
-    state.payments.parse(&network, to)?;
+    let Action::Send(send) = &definition.action;
+    super::asset_info(&state.payments, &network, &send.asset)?;
+    if matches!(
+        (&send.source, &send.destination),
+        (Target::This(_), Target::This(_))
+    ) {
+        return Err(Error::invalid_request(
+            "a send from This to This is many to many",
+        ));
+    }
     Ok(models::Trigger {
         id,
         chain: definition.chain,
