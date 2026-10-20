@@ -3,8 +3,6 @@ import AccordionDetails from '@mui/material/AccordionDetails';
 import AccordionSummary from '@mui/material/AccordionSummary';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
-import Checkbox from '@mui/material/Checkbox';
-import FormControlLabel from '@mui/material/FormControlLabel';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
@@ -24,7 +22,6 @@ export function Send({
 }) {
   const [destination, setDestination] = useState('');
   const [amount, setAmount] = useState('');
-  const [everything, setEverything] = useState(false);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -35,15 +32,14 @@ export function Send({
     const params = { path: { id: wallet.id } };
     const body = {
       asset: assetOf(wallet),
-      destination: destination.trim(),
-      amount: everything ? 'all' : amount.trim(),
+      transfers: [{ destination: destination.trim(), amount: amount.trim() }],
     };
     call(client.POST('/v1/wallets/{id}/transactions', { params, body }))
       .then((accepted) => {
-        setNote(`submitted as ${shorten(accepted.transaction_id)}`);
+        setNote(`queued as job ${shorten(accepted.job)}`);
         setDestination('');
         setAmount('');
-        shell.notify('Submitted. It appears as pending once the node reports it.');
+        shell.notify('Queued. It appears in the history once it is mined.');
         onSent();
       })
       .catch(shell.fail)
@@ -84,22 +80,10 @@ export function Send({
           <TextField
             label="Amount"
             placeholder="0.00"
-            value={everything ? 'all' : amount}
+            value={amount}
             onChange={(e) => setAmount(e.target.value)}
-            disabled={everything}
-            required={!everything}
+            required
             slotProps={{ htmlInput: { inputMode: 'decimal' } }}
-          />
-          <FormControlLabel
-            sx={{ gridColumn: '1 / -1' }}
-            control={
-              <Checkbox
-                size="small"
-                checked={everything}
-                onChange={(e) => setEverything(e.target.checked)}
-              />
-            }
-            label="Everything after fees"
           />
           <Stack direction="row" spacing={2} sx={{ alignItems: 'center', gridColumn: '1 / -1' }}>
             <Button type="submit" variant="contained" loading={busy}>

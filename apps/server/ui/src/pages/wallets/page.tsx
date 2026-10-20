@@ -11,24 +11,14 @@ interface Props {
   selected: string | null;
   onSelect: (id: string) => void;
   onAdded: (wallet: Account) => void;
-  /** Whether the list includes archived wallets. */
-  archived: boolean;
-  onArchived: (archived: boolean) => void;
-  /** Called with the wallet a successful archive returned. */
-  onRetired: (wallet: Account) => void;
+  /** Tags by wallet id. */
+  tags: Map<string, string[]>;
+  /** Called after a tag was added or removed. */
+  onTagged: () => void;
 }
 
 /** The wallet list beside the one wallet it has selected. */
-export function Wallets({
-  shell,
-  wallets,
-  selected,
-  onSelect,
-  onAdded,
-  archived,
-  onArchived,
-  onRetired,
-}: Props) {
+export function Wallets({ shell, wallets, selected, onSelect, onAdded, tags, onTagged }: Props) {
   const current = wallets.find((w) => w.id === selected) ?? null;
   return (
     <Box
@@ -44,12 +34,18 @@ export function Wallets({
         selected={selected}
         onSelect={onSelect}
         onAdded={onAdded}
-        archived={archived}
-        onArchived={onArchived}
+        tags={tags}
       />
       <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
         {current ? (
-          <Wallet key={current.id} shell={shell} wallet={current} onRetired={onRetired} />
+          <Wallet
+            key={current.id}
+            shell={shell}
+            wallet={current}
+            tags={tags.get(current.id) ?? []}
+            onTagged={onTagged}
+            onWatched={onAdded}
+          />
         ) : (
           <Typography variant="h3" color="text.secondary">
             Pick a wallet, or create one.

@@ -11,8 +11,11 @@ export type Balance = Schemas['Balance'];
 export type Transaction = Schemas['Transaction'];
 export type TransactionPage = Schemas['TransactionPage'];
 export type Report = Schemas['Report'];
-export type Fee = Schemas['Fee'];
 export type ConfiguredNetwork = Schemas['ConfiguredNetwork'];
+export type Tag = Schemas['Tag'];
+export type Trigger = Schemas['Trigger'];
+export type TriggerRun = Schemas['TriggerRun'];
+export type TriggerPreview = Schemas['TriggerPreview'];
 
 /** Raised for any non-2xx answer; `message` is the server's own. */
 export class ApiError extends Error {

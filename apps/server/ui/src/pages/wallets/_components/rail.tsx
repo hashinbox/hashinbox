@@ -1,4 +1,5 @@
 import Add from '@mui/icons-material/Add';
+import Autocomplete from '@mui/material/Autocomplete';
 import FilterList from '@mui/icons-material/FilterList';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -17,12 +18,18 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
+import FormControlLabel from '@mui/material/FormControlLabel';
+import Switch from '@mui/material/Switch';
+import ToggleButton from '@mui/material/ToggleButton';
+import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import { useState, type SubmitEvent } from 'react';
 import { call, client, type Wallet } from '@/api/client';
 import { Coin } from '@/_components/coin';
 import type { Shell } from '@/layout';
 import { assetOf } from '@/money';
 import { mono } from '@/theme';
+import { WatchFields } from './watch';
+import { WATCH_NOTHING, watchBody, type Watching } from './watching';
 
 interface Props {
   shell: Shell;
@@ -30,8 +37,8 @@ interface Props {
   selected: string | null;
   onSelect: (id: string) => void;
   onAdded: (wallet: Wallet) => void;
-  archived: boolean;
-  onArchived: (archived: boolean) => void;
+  /** Tags by wallet id. */
+  tags: Map<string, string[]>;
 }
 
 /** The address with its middle elided, so both ends stay checkable. */
@@ -39,7 +46,7 @@ function middle(text: string): string {
   return text.length > 22 ? `${text.slice(0, 10)}…${text.slice(-8)}` : text;
 }
 
-export function Rail({ shell, wallets, selected, onSelect, onAdded, archived, onArchived }: Props) {
+export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Props) {
   const [creating, setCreating] = useState(false);
   const [filtering, setFiltering] = useState(false);
   const [query, setQuery] = useState('');
@@ -52,7 +59,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, archived, on
       (needle === '' ||
         w.address.toLowerCase().includes(needle) ||
         w.id.includes(needle) ||
-        (w.label?.toLowerCase().includes(needle) ?? false)),
+        (tags.get(w.id) ?? []).some((t) => t.includes(needle))),
   );
   const assets = [...new Set(wallets.map((w) => assetOf(w)))].sort();
 
@@ -102,11 +109,11 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, archived, on
       <Collapse in={filtering}>
         <Stack spacing={1.25} sx={{ pb: 2 }}>
           <TextField
-            placeholder="label, address or id"
+            placeholder="tag, address or id"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             slotProps={{
-              htmlInput: { 'aria-label': 'Filter by label, address or id', spellCheck: false },
+              htmlInput: { 'aria-label': 'Filter by tag, address or id', spellCheck: false },
             }}
           />
           <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
@@ -120,12 +127,6 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, archived, on
                 icon={<Coin symbol={a} size={16} />}
               />
             ))}
-            <Chip
-              size="small"
-              label="Archived"
-              variant={archived ? 'filled' : 'outlined'}
-              onClick={() => onArchived(!archived)}
-            />
           </Stack>
         </Stack>
       </Collapse>
@@ -140,20 +141,13 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, archived, on
           >
             <Coin symbol={assetOf(w)} />
             <Box sx={{ minWidth: 0, flexGrow: 1 }}>
-              {w.label != null ? (
-                <Typography noWrap sx={{ fontSize: 13 }}>
-                  {w.label}
-                </Typography>
-              ) : (
-                <Typography noWrap sx={{ fontFamily: mono, fontSize: 12.5 }}>
-                  {middle(w.address)}
-                </Typography>
-              )}
+              <Typography noWrap sx={{ fontFamily: mono, fontSize: 12.5 }}>
+                {middle(w.address)}
+              </Typography>
               <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary' }}>
-                {w.label != null && `${middle(w.address)} · `}
                 {assetOf(w).toUpperCase()} · {w.network.chain}/{w.network.name}
-                {w.watch_only && ' · watch only'}
-                {w.archived_at != null && ' · archived'}
+                {!w.keyed && ' · watch only'}
+                {(tags.get(w.id) ?? []).map((t) => ` · #${t}`).join('')}
               </Typography>
             </Box>
           </ListItemButton>
@@ -175,7 +169,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, archived, on
         onDone={(wallet) => {
           setCreating(false);
           onAdded(wallet);
-          shell.notify('Wallet created. Its address is watched from now on.');
+          shell.notify('Wallet added.');
         }}
       />
     </Box>
@@ -189,38 +183,34 @@ interface DialogProps {
   onDone: (wallet: Wallet) => void;
 }
 
-function AssetField({
-  shell,
-  value,
-  onChange,
-}: {
-  shell: Shell;
-  value: string;
-  onChange: (asset: string) => void;
-}) {
-  return (
-    <TextField
-      select
-      label="Asset"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      required
-    >
-      {shell.listings.map((l) => (
-        <MenuItem key={`${l.asset}:${l.network.chain}:${l.network.name}`} value={l.asset}>
-          {l.asset} · {l.network.chain}/{l.network.name}
-        </MenuItem>
-      ))}
-    </TextField>
-  );
+/** The networks the configured assets live in, as `chain/network`. */
+function networksOf(shell: Shell): string[] {
+  return [...new Set(shell.listings.map((l) => `${l.network.chain}/${l.network.name}`))];
 }
 
 function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
-  const [asset, setAsset] = useState('');
-  const [label, setLabel] = useState('');
+  const [mode, setMode] = useState<'generate' | 'watch'>('generate');
+  const [network, setNetwork] = useState('');
+  const [address, setAddress] = useState('');
+  const [watchNow, setWatchNow] = useState(true);
+  const [watching, setWatching] = useState<Watching>({ ...WATCH_NOTHING, assets: ['native'] });
+  const [tags, setTags] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const chosen = asset || (shell.listings[0]?.asset ?? '');
-  const named = label.trim();
+  const chosen = network || (networksOf(shell)[0] ?? '');
+  const [chain = '', name = ''] = chosen.split('/');
+  const offered = shell.listings.filter(
+    (l) => l.network.chain === chain && l.network.name === name,
+  );
+  const watches = mode === 'watch' || watchNow;
+  const ready =
+    (mode === 'generate' || address.trim() !== '') && (!watches || watching.assets.length > 0);
+
+  const reset = () => {
+    setAddress('');
+    setWatching({ ...WATCH_NOTHING, assets: ['native'] });
+    setTags([]);
+  };
+
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="xs">
       <Box
@@ -228,10 +218,19 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
         onSubmit={(event: SubmitEvent<HTMLFormElement>) => {
           event.preventDefault();
           setBusy(true);
-          const body = named === '' ? { asset: chosen } : { asset: chosen, label: named };
+          const body = {
+            chain,
+            network: name,
+            ...(mode === 'watch' ? { address: address.trim() } : {}),
+            ...(watches ? watchBody(watching) : { assets: [] }),
+          };
           call(client.POST('/v1/wallets', { body }))
-            .then((wallet) => {
-              setLabel('');
+            .then(async (wallet) => {
+              for (const tag of tags) {
+                const params = { path: { id: wallet.id, tag } };
+                await call(client.PUT('/v1/wallets/{id}/tags/{tag}', { params }));
+              }
+              reset();
               onDone(wallet);
             })
             .catch(shell.fail)
@@ -240,16 +239,67 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
       >
         <DialogTitle variant="h3">New wallet</DialogTitle>
         <DialogContent>
-          <DialogContentText sx={{ fontSize: 13, mb: 2 }}>
-            Generates a key, keeps it on this server, and watches the address from now.
-          </DialogContentText>
-          <Stack spacing={2}>
-            <AssetField shell={shell} value={chosen} onChange={setAsset} />
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <ToggleButtonGroup
+              exclusive
+              fullWidth
+              size="small"
+              value={mode}
+              onChange={(_, next: 'generate' | 'watch' | null) => next && setMode(next)}
+            >
+              <ToggleButton value="generate">Generate a wallet</ToggleButton>
+              <ToggleButton value="watch">Add an address</ToggleButton>
+            </ToggleButtonGroup>
+            <DialogContentText sx={{ fontSize: 13 }}>
+              {mode === 'generate'
+                ? 'Generates a key and keeps it on this server.'
+                : 'Watches an existing address; its key is not kept here, so it cannot send.'}
+            </DialogContentText>
             <TextField
-              label="Label (optional)"
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              slotProps={{ htmlInput: { maxLength: 64 } }}
+              select
+              label="Network"
+              value={chosen}
+              onChange={(e) => {
+                setNetwork(e.target.value);
+                setWatching({ ...watching, assets: ['native'] });
+              }}
+              required
+            >
+              {networksOf(shell).map((n) => (
+                <MenuItem key={n} value={n}>
+                  {n}
+                </MenuItem>
+              ))}
+            </TextField>
+            {mode === 'watch' && (
+              <TextField
+                label="Address"
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                slotProps={{ htmlInput: { spellCheck: false } }}
+                required
+              />
+            )}
+            {mode === 'generate' && (
+              <FormControlLabel
+                control={
+                  <Switch checked={watchNow} onChange={(e) => setWatchNow(e.target.checked)} />
+                }
+                label={watchNow ? 'Watch it now' : 'Do not watch yet (watch it later)'}
+              />
+            )}
+            {watches && <WatchFields offered={offered} value={watching} onChange={setWatching} />}
+            <Autocomplete
+              multiple
+              freeSolo
+              options={[]}
+              value={tags}
+              onChange={(_, next) =>
+                setTags(next.map((t) => t.trim().toLowerCase()).filter((t) => t !== ''))
+              }
+              renderInput={(params) => (
+                <TextField {...params} label="Tags (optional)" placeholder="deposit" />
+              )}
             />
           </Stack>
         </DialogContent>
@@ -257,8 +307,8 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
           <Button color="inherit" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" variant="contained" loading={busy}>
-            Create
+          <Button type="submit" variant="contained" loading={busy} disabled={!ready}>
+            {mode === 'generate' ? 'Generate' : 'Add'}
           </Button>
         </DialogActions>
       </Box>

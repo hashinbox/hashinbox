@@ -22,16 +22,17 @@ import {
 import { Networks, type Line } from '@/_components/networks';
 import { Toast, type Message } from '@/_components/toast';
 import { Docs } from '@/pages/docs/page';
-import { Networks as Configured } from '@/pages/networks';
+import { Networks as Configured } from '@/pages/networks/page';
+import { Triggers } from '@/pages/triggers/page';
 import { Wallets } from '@/pages/wallets/page';
 import { settings } from '@/settings';
 import { display } from '@/theme';
 
-type View = 'wallets' | 'networks' | 'docs';
+type View = 'wallets' | 'triggers' | 'networks' | 'docs';
 /** Whether the server wants a token: not asked yet, no, or yes. */
 type Door = 'unknown' | 'open' | 'locked';
 const TOKEN_KEY = 'tally.token';
-const VIEWS: View[] = ['wallets', 'networks', 'docs'];
+const VIEWS: View[] = ['wallets', 'triggers', 'networks', 'docs'];
 
 /** The tab named in the address, so a reload or a shared link lands on it. */
 function linked(): View {
@@ -62,7 +63,8 @@ export function Layout() {
   const [listings, setListings] = useState<Listing[]>([]);
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [archived, setArchived] = useState(false);
+  const [tags, setTags] = useState<Map<string, string[]>>(new Map());
+  const [tagged, setTagged] = useState(0);
   const [lines, setLines] = useState<Line[]>([]);
   const [ready, setReady] = useState<boolean | null>(null);
   const [toast, setToast] = useState<Message | null>(null);
@@ -121,12 +123,17 @@ export function Layout() {
     let live = true;
     Promise.all([
       call(client.GET('/v1/assets')),
-      call(client.GET('/v1/wallets', { params: { query: { archived } } })),
+      call(client.GET('/v1/wallets')),
+      call(client.GET('/v1/tags')),
     ])
-      .then(([assets, list]) => {
+      .then(([assets, list, all]) => {
         if (!live) return;
         setListings(assets.assets);
         setWallets(list.wallets);
+        const byWallet = new Map<string, string[]>();
+        for (const t of all.tags)
+          byWallet.set(t.wallet_id, [...(byWallet.get(t.wallet_id) ?? []), t.tag]);
+        setTags(byWallet);
         setSelected((current) => current ?? list.wallets[0]?.id ?? null);
       })
       .catch((error: unknown) => {
@@ -135,7 +142,7 @@ export function Layout() {
     return () => {
       live = false;
     };
-  }, [door, token, view, archived, fail]);
+  }, [door, token, view, tagged, fail]);
 
   useEffect(() => {
     const navigate = () => setView(linked());
@@ -156,23 +163,13 @@ export function Layout() {
           if (!live) return;
           setReady(report.ready);
           setLines(
-            report.networks.map((n) => {
-              const name = `${n.network.chain}/${n.network.name}`;
-              return {
-                name,
-                state: n.state,
-                height: n.checkpoint?.height ?? null,
-                tip: n.pending_block?.height ?? null,
-                endpoints: report.rpc
-                  .filter((r) => `${r.network.chain}/${r.network.name}` === name)
-                  .map((r) => ({
-                    label: `endpoint #${r.endpoint}`,
-                    failures: r.failures,
-                    streak: r.consecutive_failures,
-                    last: r.last_failure ?? null,
-                  })),
-              };
-            }),
+            report.networks.map((n) => ({
+              name: `${n.network.chain}/${n.network.name}`,
+              state: n.indexing.error ? 'retrying' : 'ready',
+              height: n.indexing.last,
+              tip: n.indexing.tip,
+              error: n.indexing.error,
+            })),
           );
         })
         .catch(() => {
@@ -197,20 +194,12 @@ export function Layout() {
     setSession(value);
   };
 
+  // Added, or watched in more assets: replaces the listed one with the same id.
   const added = (wallet: Wallet) => {
-    setWallets((list) => [...list, wallet]);
+    setWallets((list) => [...list.filter((w) => w.id !== wallet.id), wallet]);
     setSelected(wallet.id);
     setView('wallets');
-  };
-
-  // The list leaves archived wallets out unless it was asked to show them.
-  const retired = (wallet: Wallet) => {
-    setWallets((list) =>
-      archived
-        ? list.map((w) => (w.id === wallet.id ? wallet : w))
-        : list.filter((w) => w.id !== wallet.id),
-    );
-    if (!archived) setSelected(null);
+    setTagged((n) => n + 1);
   };
 
   useEffect(() => {
@@ -239,6 +228,7 @@ export function Layout() {
               aria-label="Views"
             >
               {open && <Tab value="wallets" label="Wallets" />}
+              {open && <Tab value="triggers" label="Triggers" />}
               {open && <Tab value="networks" label="Networks" />}
               <Tab value="docs" label="Docs" />
             </Tabs>
@@ -262,11 +252,11 @@ export function Layout() {
               selected={selected}
               onSelect={setSelected}
               onAdded={added}
-              archived={archived}
-              onArchived={setArchived}
-              onRetired={retired}
+              tags={tags}
+              onTagged={() => setTagged((n) => n + 1)}
             />
           )}
+          {view === 'triggers' && <Triggers shell={shell} wallets={wallets} />}
           {view === 'networks' && <Configured shell={shell} />}
           {view === 'docs' && <Docs shell={shell} secured={token !== null} />}
         </Box>

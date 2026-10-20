@@ -1,6 +1,6 @@
 // Exact amounts. The API sends decimal strings in display units; nothing here
 // ever goes through a float.
-import type { Fee, Listing, Transaction, Wallet } from '@/api/client';
+import type { Listing, Transaction, Wallet } from '@/api/client';
 
 /** Display text to atomic units, given the asset's decimals. */
 export function atomic(text: string, decimals: number): bigint {
@@ -22,10 +22,9 @@ export function format(value: bigint, decimals: number): string {
   return `${negative ? '−' : ''}${whole}${fraction ? `.${fraction}` : ''}`;
 }
 
-/** The wallet's first observed asset tag: the asset this UI reads and sends. */
+/** The wallet's first indexed asset: the asset this UI reads and sends. */
 export function assetOf(wallet: Wallet): string {
-  const first = wallet.assets[0];
-  return first ? (first.asset ?? first.asset_id) : '';
+  return wallet.assets[0] ?? 'native';
 }
 
 export function listingOf(wallet: Wallet, listings: Listing[]): Listing | undefined {
@@ -45,40 +44,27 @@ export function decimalsOf(wallet: Wallet, listings: Listing[]): number {
   return listingOf(wallet, listings)?.metadata.decimals ?? 0;
 }
 
-/** What one transaction did to one wallet. */
+/** What one transaction did to one wallet in one asset. */
 export interface Effect {
   credit: bigint;
   debit: bigint;
   net: bigint;
-  counterparties: string[];
-  /** The fee, when this wallet paid it. */
-  fee: Fee | null;
+  /** The fee this wallet paid in the asset; 0 when none. */
+  fee: bigint;
 }
 
-/**
- * Folds a transaction's movements onto one address. A movement between two of
- * the address's own endpoints nets to zero, the same rule the server's balance
- * fold uses, so a list of these sums to the confirmed balance.
- */
-export function effect(wallet: Wallet, tx: Transaction, decimals: number): Effect {
-  const mine = wallet.address.toLowerCase();
-  const own = (value: string | undefined) => value?.toLowerCase() === mine;
+/** Folds a transaction's movements, all of this wallet in this asset. */
+export function effect(tx: Transaction, decimals: number): Effect {
   let credit = 0n;
   let debit = 0n;
-  const others = new Set<string>();
+  let fee = 0n;
   for (const m of tx.movements) {
-    const to = m.to?.value;
-    const from = m.from?.value;
-    if (own(to) && !own(from)) {
-      credit += atomic(m.amount, decimals);
-      if (from) others.add(from);
-    } else if (own(from) && !own(to)) {
-      debit += atomic(m.amount, decimals);
-      if (to) others.add(to);
-    }
+    const amount = atomic(m.amount, decimals);
+    if (m.kind === 'received' || m.kind === 'minted') credit += amount;
+    else if (m.kind === 'fee') fee += amount;
+    else debit += amount;
   }
-  const fee = tx.fee && own(tx.fee.payer?.value) ? tx.fee : null;
-  return { credit, debit, net: credit - debit, counterparties: [...others], fee };
+  return { credit, debit, net: credit - debit - fee, fee };
 }
 
 export function shorten(text: string): string {

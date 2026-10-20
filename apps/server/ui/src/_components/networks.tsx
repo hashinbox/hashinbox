@@ -15,8 +15,8 @@ export interface Line {
   state: string;
   height: number | null;
   tip: number | null;
-  /** One entry per RPC endpoint of the network. */
-  endpoints: { label: string; failures: number; streak: number; last: string | null }[];
+  /** The indexer's last failure, cleared by the next kept block. */
+  error: string | null;
 }
 
 const TONE: Record<string, string> = { ready: 'success.main', quarantined: 'error.main' };
@@ -81,24 +81,11 @@ export function Networks({ lines, ready }: { lines: Line[]; ready: boolean | nul
                 <Typography sx={{ ...figures, color: 'text.secondary' }}>{l.state}</Typography>
               </Stack>
               <Typography sx={{ ...figures, color: 'text.secondary', pl: 2 }}>
-                confirmed #{l.height ?? '—'} · tip #{l.tip ?? '—'}
+                kept #{l.height ?? '—'} · tip #{l.tip ?? '—'}
               </Typography>
-              {l.endpoints.map((e) => (
-                <Stack
-                  key={e.label}
-                  direction="row"
-                  spacing={1}
-                  sx={{ alignItems: 'center', pl: 2 }}
-                >
-                  <Dot color={e.streak > 0 ? 'error.main' : 'grey.400'} />
-                  <Typography sx={{ ...figures, flexGrow: 1 }}>{e.label}</Typography>
-                  <Typography
-                    sx={{ ...figures, color: e.failures > 0 ? 'error.main' : 'text.secondary' }}
-                  >
-                    {e.failures} failed
-                  </Typography>
-                </Stack>
-              ))}
+              {l.error && (
+                <Typography sx={{ ...figures, color: 'error.main', pl: 2 }}>{l.error}</Typography>
+              )}
             </Stack>
           </Box>
         ))}

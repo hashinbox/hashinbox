@@ -92,12 +92,32 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List every configured network, its indexing and its stored RPC nodes
-         * @description Every network the configuration names, what its indexer did since the process started, and the nodes stored for it. Only each node's origin is returned.
+         * List every configured network, its indexing and its RPC nodes
+         * @description Every network the configuration names, what its indexer did since the process started, and its nodes, each URL parsed.
          */
         get: operations["list_networks"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/networks/rpc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add RPC nodes to one or more networks
+         * @description Appends each node after its network's current ones, stores every changed list in one write (all or none), then sends every later call of those networks to their new lists. A provider's nodes for several networks are added at once this way.
+         */
+        post: operations["add_network_rpc"];
         delete?: never;
         options?: never;
         head?: never;
@@ -114,11 +134,31 @@ export interface paths {
         get?: never;
         /**
          * Replace a network's RPC nodes
-         * @description Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. The nodes are not verified here: the chain verifies them on the next start, which uses the stored list whatever the configuration file says. Credentials in the URL are stored as sent.
+         * @description Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. The nodes are not verified here: the chain verifies them on the next start, which uses the stored list whatever the configuration file says.
          */
         put: operations["replace_network_rpc"];
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/networks/{chain}/{network}/rpc/{index}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove one RPC node of a network
+         * @description Removes the node at `index`, stores the rest and uses them from now on. A network's last node cannot be removed.
+         */
+        delete: operations["remove_network_rpc"];
         options?: never;
         head?: never;
         patch?: never;
@@ -152,10 +192,10 @@ export interface paths {
         get: operations["list_triggers"];
         put?: never;
         /**
-         * Create a trigger
-         * @description Stores a trigger on a configured network. Its `id` is chosen here and never changes.
+         * Create triggers
+         * @description Stores every trigger or none, all on one configured network, each with an `id` chosen here that never changes: a template of several triggers (gas funding and sweep) never lands half.
          */
-        post: operations["create_trigger"];
+        post: operations["create_triggers"];
         delete?: never;
         options?: never;
         head?: never;
@@ -173,7 +213,7 @@ export interface paths {
         put?: never;
         /**
          * Preview what a trigger would see now
-         * @description Without storing anything: the wallet indexes the selector picks at the last kept block, fully indexed, with balances, and whether the filter and check hold for a trigger that never ran. A fee in the filter or check is estimated.
+         * @description Without storing anything, at the last kept block: the wallet indexes the selector picks (fully indexed, with balances), which of them the filter keeps, whether the check holds over those for a trigger that never ran, and the transfers the action would make. Fees used are estimated.
          */
         post: operations["preview_trigger"];
         delete?: never;
@@ -236,7 +276,7 @@ export interface paths {
         put?: never;
         /**
          * Generate a wallet, or watch an address, in one configured network
-         * @description Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start.
+         * @description Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start. A generated wallet with empty `assets` is kept unwatched.
          */
         post: operations["create_wallet"];
         delete?: never;
@@ -403,16 +443,13 @@ export interface components {
              */
             timestamp: number | null;
         };
-        /** @description One configured network, its indexing, and its stored nodes. */
+        /** @description One configured network, its indexing, and its nodes. */
         ConfiguredNetwork: {
             /** @description What its indexer did since the process started. */
             indexing: components["schemas"]["Indexing"];
             network: components["schemas"]["Network"];
-            /**
-             * @description Stored nodes in failover order; null while the network uses its
-             *     configuration file's nodes. Always present.
-             */
-            nodes: components["schemas"]["RpcNode"][] | null;
+            /** @description Its nodes in failover order. */
+            nodes: components["schemas"]["RpcNode"][];
         };
         /**
          * @description `POST /v1/wallets` body: generate a wallet in one network, or watch an
@@ -424,7 +461,11 @@ export interface components {
              *     address without its key. Absent: generate a new wallet.
              */
             address?: string;
-            /** @description The asset ids to index it in; absent means `["native"]`. */
+            /**
+             * @description The asset ids to index it in; absent means `["native"]`. Empty
+             *     generates a wallet without watching it yet (watch it later by posting
+             *     its address); an address needs at least one.
+             */
             assets?: string[];
             /** @description Chain name, as `GET /v1/assets` lists it. */
             chain: string;
@@ -568,16 +609,31 @@ export interface components {
             /** @description The indexed chain and network. */
             network: components["schemas"]["Network"];
         };
-        /** @description `GET /v1/networks`: every configured network. */
+        /** @description Every configured network, or the ones a change touched. */
         NetworkList: {
             /** @description Networks in chain, then name, order. */
             networks: components["schemas"]["ConfiguredNetwork"][];
+        };
+        /** @description One node to add, and its network. */
+        NetworkNode: {
+            chain: string;
+            endpoint: components["schemas"]["RpcEndpoint"];
+            network: string;
         };
         /**
          * @description How a mined transaction executed.
          * @enum {string}
          */
         Outcome: "succeeded" | "reverted";
+        /** @description One transfer a run would make. */
+        PlannedTransfer: {
+            /** @description Display units of the send's asset. */
+            amount: string;
+            /** @description Sender address text. */
+            from: string;
+            /** @description Recipient address text. */
+            to: string;
+        };
         /** @description The memory-only health snapshot of this process. */
         Report: {
             /** @description Every configured network. */
@@ -585,23 +641,67 @@ export interface components {
             /** @description At least one network, and none whose last step failed. */
             ready: boolean;
         };
+        /** @description `POST /v1/networks/rpc` body. */
+        RpcAdditions: {
+            /** @description Nodes to append, each after its network's current ones, in order. */
+            nodes: components["schemas"]["NetworkNode"][];
+        };
         /**
          * @description One RPC node, written as the configuration file's `endpoints` writes it.
-         *     The URL carries any credentials: userinfo (HTTP Basic) or query keys.
+         *     The URL carries everything: userinfo (HTTP Basic), query keys, a key in
+         *     the path, or `header.<Name>=value` parameters sent as headers.
          */
         RpcEndpoint: string | components["schemas"]["DetailedEndpoint"];
-        /** @description One RPC node as it may be shown. */
+        /** @description One RPC node: its URL, parsed. */
         RpcNode: {
+            host: string;
+            /** @description Its position in failover order; what removing it takes. */
+            index: number;
             /**
-             * @description Scheme, host and port of the node's URL. User information, path and
-             *     query are never returned: any of them may hold a credential.
+             * Format: int32
+             * @description Largest request body, in bytes.
              */
+            max_request_bytes: number;
+            /**
+             * Format: int32
+             * @description Largest response body, in bytes.
+             */
+            max_response_bytes: number;
+            /** @description Scheme, host and port. */
             origin: string;
+            /** @description Its query parameters, in order. */
+            parameters: components["schemas"]["RpcParameter"][];
+            /** @description Always present. */
+            password: string | null;
+            path: string;
+            /**
+             * Format: int32
+             * @description The port, the scheme's default when unwritten; always present.
+             */
+            port: number | null;
+            scheme: string;
+            /**
+             * Format: int64
+             * @description Longest one call may take, in milliseconds.
+             */
+            timeout_ms: number;
+            /** @description The URL as stored. */
+            url: string;
+            /** @description The user of `user:password`, sent as HTTP Basic; empty when none. */
+            username: string;
         };
         /** @description `PUT /v1/networks/{chain}/{network}/rpc` body. */
         RpcNodes: {
             /** @description One to 16 nodes, in failover order. */
             endpoints: components["schemas"]["RpcEndpoint"][];
+        };
+        /** @description One query parameter of a node's URL. */
+        RpcParameter: {
+            /** @description Whether every call sends it as a header instead of in the URL. */
+            header: boolean;
+            /** @description The parameter's name, or for a `header.<Name>` one, the header's. */
+            name: string;
+            value: string;
         };
         /** @description One wallet index a selector picked. */
         Selected: {
@@ -611,6 +711,8 @@ export interface components {
             asset: string;
             /** @description Confirmed balance in display units. */
             confirmed: string;
+            /** @description Whether the filter keeps it (it is then `This` for check and action). */
+            kept: boolean;
             /** @description Not yet confirmed change in display units; negative when leaving. */
             pending: string;
             /** @description `<chain>:<network>:<address>`, as the wallet routes take it. */
@@ -681,8 +783,8 @@ export interface components {
         /** @description One trigger. */
         Trigger: {
             /**
-             * @description What it does: `{"sweep": {"to": …}}` or
-             *     `{"transfer": {"to": …, "amount": …}}`.
+             * @description What it does: `{"send": {"source": target, "asset": id,
+             *     "destination": target, "amount": amount}}`.
              */
             action: Record<string, never>;
             /** @description Chain name, as `GET /v1/assets` lists it. */
@@ -719,7 +821,12 @@ export interface components {
              */
             updated_at: number;
         };
-        /** @description A trigger as written: `POST` (with `id`) and `PUT` bodies. */
+        /** @description `POST /v1/triggers` body: triggers of one network stored together, all or none. */
+        TriggerBatch: {
+            /** @description One to 16 triggers, each with its `id`. */
+            triggers: components["schemas"]["TriggerDefinition"][];
+        };
+        /** @description A trigger as written: in a `POST` (with `id`) or as a `PUT` body. */
         TriggerDefinition: {
             action: Record<string, never>;
             chain: string;
@@ -727,7 +834,7 @@ export interface components {
             /** @description Absent means `true`. */
             enabled?: boolean;
             filter?: Record<string, never> | null;
-            /** @description Its slug; `POST` only (`PUT` takes it from the path). */
+            /** @description Its slug; required in a `POST`, refused in a `PUT` (the path names it). */
             id?: string;
             network: string;
             selector: Record<string, never>;
@@ -739,7 +846,7 @@ export interface components {
         };
         /** @description What a trigger would see now. */
         TriggerPreview: {
-            /** @description Whether the check holds for a trigger that never ran. */
+            /** @description Whether the check holds over the kept ones, for a trigger that never ran. */
             check: boolean;
             /**
              * Format: int64
@@ -747,13 +854,21 @@ export interface components {
              *     block. Always present.
              */
             confirmed: number | null;
-            /** @description Whether the filter holds; null without a filter. Always present. */
-            filter: boolean | null;
-            /** @description What the selector picks, fully indexed, with balances. */
+            /** @description Why the action cannot be planned; null when it can. Always present. */
+            plan_error: string | null;
+            /**
+             * @description What the selector picks, fully indexed, with balances, each marked
+             *     kept or not by the filter.
+             */
             selected: components["schemas"]["Selected"][];
+            /** @description The transfers the action would make now; empty when nothing is due. */
+            transfers: components["schemas"]["PlannedTransfer"][];
+            /** @description Senders of `transfers` this server holds no key for; a run refuses them. */
+            unkeyed: string[];
         };
-        /** @description `POST /v1/triggers/preview` body: a trigger's targeting, unsaved. */
+        /** @description `POST /v1/triggers/preview` body: a trigger, unsaved. */
         TriggerPreviewRequest: {
+            action: Record<string, never>;
             chain: string;
             check: Record<string, never>;
             filter?: Record<string, never> | null;
@@ -969,7 +1084,67 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description The stored nodes could not be read */
+            /** @description The nodes could not be read */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    add_network_rpc: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RpcAdditions"];
+            };
+        };
+        responses: {
+            /** @description Nodes stored and in use */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkList"];
+                };
+            };
+            /** @description Malformed node, or a list above 16 nodes */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description A network is not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The nodes could not be stored */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -1026,6 +1201,67 @@ export interface operations {
                 };
             };
             /** @description Network is not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The nodes could not be stored */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    remove_network_rpc: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                chain: string;
+                network: string;
+                /** @description The node's `index` in `GET /v1/networks`. */
+                index: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Node removed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfiguredNetwork"];
+                };
+            };
+            /** @description It is the network's last node */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such node, or network not configured */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1121,7 +1357,7 @@ export interface operations {
             };
         };
     };
-    create_trigger: {
+    create_triggers: {
         parameters: {
             query?: never;
             header?: never;
@@ -1130,20 +1366,20 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["TriggerDefinition"];
+                "application/json": components["schemas"]["TriggerBatch"];
             };
         };
         responses: {
-            /** @description Trigger created */
+            /** @description Triggers created */
             201: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Trigger"];
+                    "application/json": components["schemas"]["TriggerList"];
                 };
             };
-            /** @description Malformed body, id or action address */
+            /** @description Malformed body or id, several networks, or a send from This to This */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1161,7 +1397,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Network is not configured */
+            /** @description Network or sent asset is not configured */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1170,7 +1406,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description The id is taken */
+            /** @description An id is taken or repeated */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -1325,7 +1561,7 @@ export interface operations {
                     "application/json": components["schemas"]["Trigger"];
                 };
             };
-            /** @description Malformed body or action address */
+            /** @description Malformed body, or a send from This to This */
             400: {
                 headers: {
                     [name: string]: unknown;
