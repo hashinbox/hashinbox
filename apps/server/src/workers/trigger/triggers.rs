@@ -1,61 +1,99 @@
-//! [`Evaluation`]: which indexes a trigger's filter keeps, and whether its
-//! check holds over them.
+//! [`Triggers`]: a network's enabled triggers, read at its last kept block;
+//! each [`Trigger`] decides what its action starts.
 //!
 //! A leaf that refers to something unknown (an index not fully indexed, an
 //! asset without balances) is `false`; a read error stays an error.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use anyhow::{Context as _, bail, ensure};
-use std::sync::Arc;
-
-use base::{Assets, Decimal, FeeEstimator, Networked as _};
+use base::{Address, Assets, Decimal, FeeEstimator, Network, Networked as _};
 use diesel::SqliteConnection;
+use tasks::Job;
 
+use super::{Actions, Invocation};
 use crate::models::{
-    TriggerRun,
+    self, TriggerRun, block, trigger,
     trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Target},
+    trigger_run, wallet,
     wallet_index_balance::{self, WalletIndexBalances},
 };
 
-/// One trigger evaluated at `now`: what it reads, and what it resolved so
-/// far, so its filter and check see the same figures.
-pub(crate) struct Evaluation<'a> {
-    connection: &'a mut SqliteConnection,
+/// What every trigger of a round decides with, besides the connection.
+#[derive(Clone)]
+pub(crate) struct Context {
+    /// The network's assets.
+    pub(crate) assets: Assets,
+    pub(crate) estimator: Arc<dyn FeeEstimator>,
+    /// Where a fee estimate is awaited (decisions run on blocking threads).
+    pub(crate) runtime: tokio::runtime::Handle,
+    /// What a trigger's action names.
+    pub(crate) actions: Arc<Actions>,
     /// Unix ms.
-    now: i64,
-    /// The trigger's latest run.
+    pub(crate) now: i64,
+}
+
+/// One enabled trigger deciding: its row, what it reads, and what it
+/// resolved so far, so its filter, check and action see the same figures.
+pub(crate) struct Trigger<'a> {
+    row: models::Trigger,
+    connection: &'a mut SqliteConnection,
+    context: Context,
+    /// Its latest run.
     run: Option<TriggerRun>,
-    /// The network's assets, for display amounts.
-    assets: Assets,
-    /// The network's fee estimator, awaited on `runtime`: an evaluation runs
-    /// on a blocking thread.
-    estimator: Arc<dyn FeeEstimator>,
-    runtime: tokio::runtime::Handle,
     /// What targets named, by (`This` ids, target JSON); `None`: not fully
     /// indexed.
     targets: BTreeMap<(Vec<String>, String), Option<WalletIndexBalances>>,
 }
 
-impl<'a> Evaluation<'a> {
-    /// The evaluation of a trigger whose latest run is `run`, at `now`.
+impl<'a> Trigger<'a> {
+    /// `row` deciding over `connection` with `context`, its latest run `run`.
     pub(crate) fn new(
+        row: models::Trigger,
         connection: &'a mut SqliteConnection,
-        now: i64,
+        context: Context,
         run: Option<TriggerRun>,
-        assets: Assets,
-        estimator: Arc<dyn FeeEstimator>,
-        runtime: tokio::runtime::Handle,
     ) -> Self {
         Self {
+            row,
             connection,
-            now,
+            context,
             run,
-            assets,
-            estimator,
-            runtime,
             targets: BTreeMap::new(),
         }
+    }
+
+    /// What it starts on `network` at block position `last`: the wallet
+    /// indexes its selector picks, with spendable balances; those its filter
+    /// keeps (`This`); if its check holds, what its action starts. Empty:
+    /// nothing to do.
+    ///
+    /// # Errors
+    ///
+    /// When a read, the fee estimate or the action fails.
+    fn decide(
+        &mut self,
+        network: &Network,
+        last: i64,
+        keyed: &BTreeSet<Address>,
+    ) -> anyhow::Result<Vec<Job>> {
+        let row = self.row.clone();
+        let selected =
+            wallet_index_balance::db::select(self.connection, network, &row.selector.0, last)?;
+        let kept = match &row.filter {
+            Some(filter) => self.filter(&filter.0, &selected)?,
+            None => selected,
+        };
+        if !self.check(&row.check.0, &kept)? {
+            return Ok(Vec::new());
+        }
+        let actions = self.context.actions.clone();
+        let mut invocation = Invocation::new(network, &kept, self, keyed);
+        actions.run(&row.action.0.name, &row.action.0.input, &mut invocation)?;
+        Ok(invocation.started())
     }
 
     /// Whether `check` holds over `this`, leaves in written order, stopping early.
@@ -97,13 +135,12 @@ impl<'a> Evaluation<'a> {
         Ok(match (gate, &self.run) {
             (Gate::Compare(compare), _) => self.compare(compare, this)?,
             (_, None) => true,
-            (Gate::Idle, Some(run)) => run.settled_at.is_some(),
             (Gate::Since { seconds }, Some(run)) => {
                 let wait = i64::try_from(*seconds)
                     .ok()
                     .and_then(|seconds| seconds.checked_mul(1000))
                     .context("a wait is out of range")?;
-                self.now.saturating_sub(run.started_at) >= wait
+                self.context.now.saturating_sub(run.started_at) >= wait
             }
         })
     }
@@ -131,7 +168,7 @@ impl<'a> Evaluation<'a> {
         let Some(asset) = asset else {
             return Ok(false);
         };
-        let balances = indexes.confirmed();
+        let balances = indexes.spendable();
         let left = match compare.aggregate {
             Aggregate::Min => balances.min(),
             Aggregate::Max => balances.max(),
@@ -145,7 +182,7 @@ impl<'a> Evaluation<'a> {
     }
 
     /// `amount` in atomic units of `asset`; `None` when a term is unknown.
-    pub(super) fn amount(
+    pub(crate) fn amount(
         &mut self,
         amount: &Amount,
         this: &WalletIndexBalances,
@@ -158,6 +195,7 @@ impl<'a> Evaluation<'a> {
                     id: asset.to_owned(),
                 };
                 let info = self
+                    .context
                     .assets
                     .get(&id)
                     .with_context(|| format!("asset {asset} is not configured"))?;
@@ -165,7 +203,7 @@ impl<'a> Evaluation<'a> {
             }
             Amount::Balance { of } => {
                 let indexes = self.target(of, this)?;
-                return Ok(indexes.map(|indexes| indexes.confirmed().sum()));
+                return Ok(indexes.map(|indexes| indexes.spendable().sum()));
             }
             Amount::Fee { of } => {
                 let Some(indexes) = self.target(of, this)? else {
@@ -175,8 +213,9 @@ impl<'a> Evaluation<'a> {
                     return Ok(Some(Decimal::zero()));
                 }
                 let fee = self
+                    .context
                     .runtime
-                    .block_on(self.estimator.estimate(&indexes.sources()))?;
+                    .block_on(self.context.estimator.estimate(&indexes.sources()))?;
                 return Ok(Some(fee));
             }
             Amount::Add(a, b) => (a, b, |a, b| a + b),
@@ -190,7 +229,7 @@ impl<'a> Evaluation<'a> {
     }
 
     /// What `target` names with `this` in context, resolved once.
-    pub(super) fn target(
+    pub(crate) fn target(
         &mut self,
         target: &Target,
         this: &WalletIndexBalances,
@@ -202,5 +241,72 @@ impl<'a> Evaluation<'a> {
         let found = wallet_index_balance::db::find_by_target(self.connection, this, target)?;
         self.targets.insert(key, found.clone());
         Ok(found)
+    }
+}
+
+/// Every enabled trigger of one network, at its last kept block, with the
+/// addresses this server holds keys for.
+pub(crate) struct Triggers {
+    network: Network,
+    /// The last kept block's position; `None` before the first block.
+    last: Option<i64>,
+    keyed: BTreeSet<Address>,
+    all: Vec<models::Trigger>,
+}
+
+impl Triggers {
+    /// Reads them; none before `network`'s first kept block.
+    ///
+    /// # Errors
+    ///
+    /// When a read fails.
+    pub(crate) fn new(
+        connection: &mut SqliteConnection,
+        network: &Network,
+    ) -> anyhow::Result<Self> {
+        let last = block::db::find_last(connection, network)?.map(|block| block.position);
+        let all = match last {
+            Some(_) => trigger::db::find_enabled(connection, network)?
+                .iter()
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        let keyed = wallet::db::find_all(connection)?
+            .addresses()
+            .into_iter()
+            .collect();
+        Ok(Self {
+            network: network.clone(),
+            last,
+            keyed,
+            all,
+        })
+    }
+
+    /// Each one's id and what it starts, or why it cannot, in id order.
+    pub(crate) fn decide(
+        &self,
+        connection: &mut SqliteConnection,
+        context: &Context,
+    ) -> Vec<(String, anyhow::Result<Vec<Job>>)> {
+        let Some(last) = self.last else {
+            return Vec::new();
+        };
+        self.all
+            .iter()
+            .map(|row| {
+                let jobs = trigger_run::db::find_last(connection, &row.id)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|run| {
+                        Trigger::new(row.clone(), connection, context.clone(), run).decide(
+                            &self.network,
+                            last,
+                            &self.keyed,
+                        )
+                    });
+                (row.id.clone(), jobs)
+            })
+            .collect()
     }
 }

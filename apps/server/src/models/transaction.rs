@@ -314,22 +314,4 @@ pub(crate) mod db {
         }
         Ok(ids.len())
     }
-
-    /// Whether transaction `id` is mined in a live block at or below
-    /// position `confirmed`.
-    pub(crate) fn is_confirmed(
-        connection: &mut SqliteConnection,
-        id: &str,
-        confirmed: i64,
-    ) -> QueryResult<bool> {
-        use crate::models::schema::block;
-        diesel::select(diesel::dsl::exists(
-            transactions::table
-                .inner_join(block::table)
-                .filter(transactions::id.eq(id))
-                .filter(block::archived_at.is_null())
-                .filter(block::position.le(confirmed)),
-        ))
-        .get_result(connection)
-    }
 }

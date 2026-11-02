@@ -746,7 +746,7 @@ export interface components {
             /** @description Chain name, as `GET /v1/assets` lists it. */
             chain: string;
             /**
-             * @description When it acts: `"idle"`, `{"since": {"seconds": …}}` and compares under
+             * @description When it acts: `{"since": {"seconds": …}}` and compares under
              *     `all`/`any`/`not`.
              */
             check: Record<string, never>;
@@ -802,11 +802,6 @@ export interface components {
         };
         /** @description One run of a trigger. */
         TriggerRun: {
-            /**
-             * Format: int64
-             * @description Unix ms; null while a send is in flight. Always present.
-             */
-            settled_at: number | null;
             /**
              * Format: int64
              * @description Unix ms.

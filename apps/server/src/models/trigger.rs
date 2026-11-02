@@ -46,8 +46,6 @@ impl Default for Target {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Gate {
-    /// No earlier run of this trigger is in flight.
-    Idle,
     /// At least `seconds` since this trigger's last run started.
     Since { seconds: u64 },
     /// A balance comparison.
@@ -112,7 +110,8 @@ impl Operator {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Amount {
-    /// The summed confirmed balance of `of` (default: `This {}`).
+    /// The summed spendable balance of `of` (default: `This {}`): confirmed,
+    /// less what pending transactions take.
     Balance {
         #[serde(default)]
         of: Target,

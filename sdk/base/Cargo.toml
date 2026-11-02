@@ -11,10 +11,9 @@ anyhow.workspace = true
 crypto = { path = "../../packages/crypto" }
 decimal = { path = "../../packages/decimal" }
 rpc = { path = "../../packages/rpc" }
-logging = { path = "../../packages/logging" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["time", "rt", "sync"] }
+tokio = { workspace = true, features = ["sync"] }
 
 [lints]
 workspace = true

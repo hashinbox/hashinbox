@@ -761,7 +761,6 @@ dependencies = [
  "anyhow",
  "crypto",
  "decimal",
- "logging",
  "rpc",
  "serde",
  "serde_json",

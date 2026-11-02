@@ -104,15 +104,13 @@ function Runs({ shell, id }: { shell: Shell; id: string }) {
         <TableHead>
           <TableRow>
             <TableCell>Started</TableCell>
-            <TableCell>Settled</TableCell>
           </TableRow>
         </TableHead>
         <TableBody>
-          {runs.length === 0 && <EmptyRow columns={2} message="It has not run yet." />}
+          {runs.length === 0 && <EmptyRow columns={1} message="It has not run yet." />}
           {runs.map((r) => (
             <TableRow key={r.started_at}>
               <TableCell>{time(r.started_at)}</TableCell>
-              <TableCell>{r.settled_at == null ? 'in flight' : time(r.settled_at)}</TableCell>
             </TableRow>
           ))}
         </TableBody>

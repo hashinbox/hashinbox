@@ -22,7 +22,7 @@ use crate::{
     },
     workers::broadcast::SendIntent,
     workers::trigger::{
-        Context, Evaluation,
+        Actions, Invocation, Trigger as Deciding,
         actions::{Action as _, SendInput, Transfer},
     },
 };
@@ -271,45 +271,6 @@ fn a_tag_or_indexing_brings_indexes_in() {
 }
 
 #[test]
-fn contested_indexes_are_dropped_and_reported() {
-    let (_directory, _runtime, mut connection) = seeded();
-    let selected = wallet_index::db::select_owned(
-        &mut connection,
-        &network(),
-        &asset("tok"),
-        &[Selector::Ids(vec![id("b", "tok")]), asset("nothing")],
-        int(TIP).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        selected
-            .owned
-            .iter()
-            .map(|index| &index.id)
-            .collect::<Vec<_>>(),
-        [&id("a", "tok"), &id("c", "tok")]
-    );
-    assert_eq!(
-        selected
-            .contested
-            .iter()
-            .map(|index| &index.id)
-            .collect::<Vec<_>>(),
-        [&id("b", "tok")]
-    );
-    let alone = wallet_index::db::select_owned(
-        &mut connection,
-        &network(),
-        &asset("tok"),
-        &[],
-        int(TIP).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(alone.owned.len(), 3);
-    assert_eq!(alone.contested, WalletIndexes::default());
-}
-
-#[test]
 fn balances_are_confirmed_exact_and_folded() {
     let (_directory, _runtime, mut connection) = seeded();
     let all = [
@@ -330,6 +291,38 @@ fn balances_are_confirmed_exact_and_folded() {
     assert_eq!(balances[&id("b", "tok")].confirmed, Decimal::zero());
     let later = balance::db::find_by_ids(&mut connection, &refs[..1], 3).unwrap();
     assert_eq!(later[&id("a", "native")].confirmed, decimal("695"));
+    assert_eq!(balances[&id("a", "native")].spendable, decimal("690"));
+}
+
+#[test]
+fn a_pending_send_is_taken_off_what_its_sender_can_spend() {
+    let (_directory, _runtime, mut connection) = seeded();
+    // a sends 100 to b, fee 5; still pending.
+    connection
+        .batch_execute(
+            "INSERT INTO \"transaction\" (id, block, chain, network, txid, state, bytes, \
+               sent_at, expires_at) \
+             VALUES ('bitcoin.regtest.p',NULL,'bitcoin','regtest','p',0,x'',1,9); \
+             INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, amount) \
+             VALUES ('bitcoin.regtest.p.0',NULL,'bitcoin.regtest.p',0,1,'a','native','100'), \
+                    ('bitcoin.regtest.p.1',NULL,'bitcoin.regtest.p',1,4,'a','native','5'), \
+                    ('bitcoin.regtest.p.2',NULL,'bitcoin.regtest.p',2,0,'b','native','100');",
+        )
+        .unwrap();
+    let ids = [id("a", "native"), id("b", "native")];
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let balances = balance::db::find_by_ids(&mut connection, &refs, 2).unwrap();
+    let a = &balances[&id("a", "native")];
+    assert_eq!(
+        (a.confirmed.clone(), a.spendable.clone()),
+        (decimal("690"), decimal("585"))
+    );
+    // What arrives counts once mined.
+    let b = &balances[&id("b", "native")];
+    assert_eq!(
+        (b.confirmed.clone(), b.spendable.clone()),
+        (decimal("50"), decimal("50"))
+    );
 }
 
 /// A fee estimator answering a fixed fee and counting its calls.
@@ -369,38 +362,48 @@ fn open<'a>(
     runtime: &tokio::runtime::Runtime,
     fees: Arc<Fees>,
     run: Option<TriggerRun>,
-) -> Evaluation<'a> {
-    Evaluation::new(
-        connection,
-        100_000,
-        run,
-        [("native", 8), ("tok", 2)]
-            .into_iter()
-            .map(|(id, decimals)| {
-                base::AssetInfo::token(
-                    Asset {
-                        network: network(),
-                        id: id.to_owned(),
-                    },
-                    decimals,
-                )
-            })
-            .collect(),
-        fees,
-        runtime.handle().clone(),
-    )
+) -> Deciding<'a> {
+    let row = Trigger {
+        id: "t".to_owned(),
+        chain: "bitcoin".to_owned(),
+        network: "regtest".to_owned(),
+        selector: Json(Selector::Ids(Vec::new())),
+        filter: None,
+        check: Json(Logic::All(Vec::new())),
+        action: Json(serde_json::from_str(r#"{"name":"none"}"#).unwrap()),
+        enabled: true,
+        created_at: 1,
+        updated_at: 1,
+    };
+    let assets = [("native", 8), ("tok", 2)]
+        .into_iter()
+        .map(|(id, decimals)| {
+            base::AssetInfo::token(
+                Asset {
+                    network: network(),
+                    id: id.to_owned(),
+                },
+                decimals,
+            )
+        })
+        .collect();
+    let context = crate::workers::trigger::Context {
+        assets,
+        estimator: fees,
+        runtime: runtime.handle().clone(),
+        actions: Arc::new(Actions::new()),
+        now: 100_000,
+    };
+    Deciding::new(row, connection, context, run)
 }
 
 /// A run of the test trigger started at `started_at`.
-fn run(started_at: i64, settled: bool) -> TriggerRun {
-    TriggerRun {
-        settled_at: settled.then_some(started_at),
-        ..TriggerRun::new("t", started_at)
-    }
+fn run(started_at: i64) -> TriggerRun {
+    TriggerRun::new("t", started_at)
 }
 
 fn compares(
-    evaluation: &mut Evaluation<'_>,
+    evaluation: &mut Deciding<'_>,
     compare: &Compare,
     this: &WalletIndexBalances,
 ) -> anyhow::Result<bool> {
@@ -408,7 +411,7 @@ fn compares(
 }
 
 fn checks(
-    evaluation: &mut Evaluation<'_>,
+    evaluation: &mut Deciding<'_>,
     check: &Logic<Gate>,
     this: &WalletIndexBalances,
 ) -> anyhow::Result<bool> {
@@ -674,7 +677,8 @@ fn logic_stops_early_and_errors_stay_errors() {
     let not = Logic::Not(Box::new(Logic::Leaf(true)));
     assert!(not.eval(&mut |_| anyhow::bail!("read failed")).is_err());
 
-    // An unsettled run stops the check before the fee is read.
+    // A run too recent stops the check before the fee is read (now is
+    // 100 000 ms).
     let (_directory, runtime, mut connection) = seeded();
     let estimator = fees("1");
     let a = selection(&mut connection, &[id("a", "native")]);
@@ -682,10 +686,10 @@ fn logic_stops_early_and_errors_stay_errors() {
         &mut connection,
         &runtime,
         estimator.clone(),
-        Some(run(0, false)),
+        Some(run(50_000)),
     );
     let check = Logic::All(vec![
-        Logic::Leaf(Gate::Idle),
+        Logic::Leaf(Gate::Since { seconds: 60 }),
         Logic::Leaf(Gate::Compare(compare(
             this(None),
             Aggregate::Sum,
@@ -698,23 +702,13 @@ fn logic_stops_early_and_errors_stay_errors() {
 }
 
 #[test]
-fn idle_and_since_read_the_last_run() {
+fn since_reads_the_last_run() {
     let (_directory, runtime, mut connection) = seeded();
     let empty = WalletIndexBalances::new(network(), int(TIP).unwrap());
-    let idle = Logic::Leaf(Gate::Idle);
     let since = |seconds| Logic::Leaf(Gate::Since { seconds });
-    let cases = [
-        (None, &idle, true),
-        (Some(run(0, false)), &idle, false),
-        (Some(run(0, true)), &idle, true),
-    ];
-    for (last, check, passes) in cases {
-        let mut evaluation = open(&mut connection, &runtime, fees("1"), last);
-        assert_eq!(checks(&mut evaluation, check, &empty).unwrap(), passes);
-    }
     // now is 100 000 ms.
     for (started_at, passes) in [(40_001, false), (40_000, true)] {
-        let last = Some(run(started_at, false));
+        let last = Some(run(started_at));
         let mut evaluation = open(&mut connection, &runtime, fees("1"), last);
         assert_eq!(checks(&mut evaluation, &since(60), &empty).unwrap(), passes);
     }
@@ -726,7 +720,7 @@ fn idle_and_since_read_the_last_run() {
 fn the_sweep_trigger_round_trips_through_json() {
     let selector = r#"{"all":[{"tag":"deposit"},{"asset":"0xa0b8eb48"}]}"#;
     let filter = r#"{"compare":{"of":{"this":{"asset":"native"}},"aggregate":"sum","operator":"at_least","value":{"fee":{"of":{"this":{}}}}}}"#;
-    let check = r#""idle""#;
+    let check = r#"{"since":{"seconds":60}}"#;
     let parsed: Selector = serde_json::from_str(selector).unwrap();
     assert_eq!(
         parsed,
@@ -745,10 +739,10 @@ fn the_sweep_trigger_round_trips_through_json() {
     );
     assert_eq!(serde_json::to_string(&parsed).unwrap(), filter);
     let parsed: Logic<Gate> = serde_json::from_str(check).unwrap();
-    assert_eq!(parsed, Logic::Leaf(Gate::Idle));
+    assert_eq!(parsed, Logic::Leaf(Gate::Since { seconds: 60 }));
     assert_eq!(serde_json::to_string(&parsed).unwrap(), check);
     // Combinators, Since and decimal strings; `{"balance":{}}` is This.
-    let full = r#"{"all":["idle",{"since":{"seconds":60}},{"not":{"compare":{"of":{"select":{"ids":["x"]}},"aggregate":"max","operator":"at_most","value":{"max":[{"sub":[{"balance":{"of":{"this":{}}}},{"value":"1.25"}]},{"value":"0"}]}}}}]}"#;
+    let full = r#"{"all":[{"since":{"seconds":60}},{"not":{"compare":{"of":{"select":{"ids":["x"]}},"aggregate":"max","operator":"at_most","value":{"max":[{"sub":[{"balance":{"of":{"this":{}}}},{"value":"1.25"}]},{"value":"0"}]}}}}]}"#;
     let parsed: Logic<Gate> = serde_json::from_str(full).unwrap();
     assert_eq!(serde_json::to_string(&parsed).unwrap(), full);
     let short: Amount = serde_json::from_str(r#"{"balance":{}}"#).unwrap();
@@ -765,7 +759,7 @@ fn triggers_and_their_runs_are_stored() {
         network: "regtest".to_owned(),
         selector: Json(serde_json::from_str(r#"{"tag":"deposit"}"#).unwrap()),
         filter: None,
-        check: Json(serde_json::from_str(r#""idle""#).unwrap()),
+        check: Json(serde_json::from_str(r#"{"since":{"seconds":60}}"#).unwrap()),
         action: Json(serde_json::from_str(r#"{"name":"send","input":{"source":{"this":{}},"asset":"native","destination":{"select":{"ids":["x"]}},"amount":{"balance":{}}}}"#).unwrap()),
         enabled: true,
         created_at: 1,
@@ -784,20 +778,12 @@ fn triggers_and_their_runs_are_stored() {
             .unwrap()
             .is_none()
     );
-    let first = start_run(&mut connection, "sweep", 10).unwrap();
+    start_run(&mut connection, "sweep", 10).unwrap();
     start_run(&mut connection, "sweep", 20).unwrap();
-    assert_eq!(
-        trigger_run::db::settle(&mut connection, &first.id, 30).unwrap(),
-        1
-    );
-    assert_eq!(
-        trigger_run::db::settle(&mut connection, &first.id, 40).unwrap(),
-        0
-    );
     let last = trigger_run::db::find_last(&mut connection, "sweep")
         .unwrap()
         .unwrap();
-    assert_eq!((last.started_at, last.settled_at), (20, None));
+    assert_eq!(last.started_at, 20);
     assert!(start_run(&mut connection, "missing", 10).is_err());
 
     assert_eq!(trigger::db::delete(&mut connection, "sweep").unwrap(), 1);
@@ -914,9 +900,9 @@ fn a_send_pays_per_source_or_per_destination() {
     let keyed = [address("a"), address("b")].into_iter().collect();
     // Each started job's sender and its (recipient, amount) transfers.
     let mut plan = |send: &SendInput, this: &WalletIndexBalances| {
-        let mut context = Context::new(this.network(), this, &mut evaluation, &keyed);
-        Transfer.run(&mut context, &serde_json::to_value(send)?)?;
-        let sends = context.started().into_iter().map(|job| {
+        let mut invocation = Invocation::new(this.network(), this, &mut evaluation, &keyed);
+        Transfer.run(&mut invocation, &serde_json::to_value(send)?)?;
+        let sends = invocation.started().into_iter().map(|job| {
             let intent: SendIntent = serde_json::from_value(job.input).unwrap();
             let paid = intent
                 .transfers
@@ -950,110 +936,4 @@ fn a_send_pays_per_source_or_per_destination() {
         Amount::Balance { of: this(None) },
     );
     assert!(plan(&tangled, &both).is_err());
-}
-
-/// A stored, enabled trigger `id` on the test network picking `selector`.
-fn keep_trigger(connection: &mut SqliteConnection, id: &str, selector: Selector) {
-    let row = Trigger {
-        id: id.to_owned(),
-        chain: "bitcoin".to_owned(),
-        network: "regtest".to_owned(),
-        selector: Json(selector),
-        filter: None,
-        check: Json(Logic::Leaf(Gate::Idle)),
-        action: Json(
-            serde_json::from_str(
-                r#"{"name":"send","input":{"source":{"this":{}},"asset":"native","destination":{"select":{"ids":["x"]}},"amount":{"balance":{}}}}"#,
-            )
-            .unwrap(),
-        ),
-        enabled: true,
-        created_at: 1,
-        updated_at: 1,
-    };
-    trigger::db::insert(connection, &row).unwrap();
-}
-
-fn header(position: u64, hash: u8) -> base::BlockHeader {
-    base::BlockHeader {
-        position,
-        height: position,
-        hash: base::BlockHash(vec![hash]),
-        parent: None,
-        timestamp: None,
-    }
-}
-
-#[test]
-fn a_block_touches_the_triggers_selecting_what_it_changed() {
-    let (_directory, _runtime, mut connection) = seeded();
-    keep_trigger(&mut connection, "natives", asset("native"));
-    keep_trigger(&mut connection, "tokens", asset("tok"));
-    // Block 2 moved only a's native; block 1 a's native and token.
-    let touched = |connection: &mut SqliteConnection, headers: &[base::BlockHeader]| {
-        let blocks: Vec<String> = headers
-            .iter()
-            .map(|header| crate::models::Block::id(&network(), &header.hash).unwrap())
-            .collect();
-        crate::workers::trigger::touched(connection, &network(), &blocks).unwrap()
-    };
-    assert_eq!(
-        touched(&mut connection, &[header(2, 2)])
-            .iter()
-            .collect::<Vec<_>>(),
-        ["natives"]
-    );
-    assert_eq!(touched(&mut connection, &[header(1, 1)]).len(), 2);
-    // One insert of several blocks is one answer.
-    assert_eq!(
-        touched(&mut connection, &[header(1, 1), header(2, 2)]).len(),
-        2
-    );
-    // An archived block touches nothing.
-    assert!(touched(&mut connection, &[header(5, 0xf5)]).is_empty());
-}
-
-/// A queued send job `id` in `status` that sent `txids`.
-fn job_row(id: &str, status: i32, txids: &[&str]) -> crate::models::Task {
-    crate::models::Task {
-        id: id.to_owned(),
-        topic: "l".to_owned(),
-        kind: "send".to_owned(),
-        status,
-        run_at: 0,
-        deadline: None,
-        attempts: 1,
-        reason: None,
-        input: "{}".to_owned(),
-        state: Some(serde_json::json!({ "ids": txids, "sent": txids.len() }).to_string()),
-    }
-}
-
-#[test]
-fn a_run_settles_when_its_sends_are_done_and_confirmed() {
-    let (_directory, _runtime, mut connection) = seeded();
-    keep_trigger(&mut connection, "sweep", asset("native"));
-    let cases = [
-        // Done, its transaction in a live block: settles.
-        (10, job_row("j1", 2, &["t2"]), true),
-        // Done, its transaction only in an archived block: waits.
-        (20, job_row("j2", 2, &["t3"]), false),
-        // Still running: waits.
-        (30, job_row("j3", 1, &[]), false),
-        // Failed: over.
-        (40, job_row("j4", 3, &["t9"]), true),
-    ];
-    for (started, job, _) in &cases {
-        crate::models::task::db::insert(&mut connection, job, 0).unwrap();
-        let run = TriggerRun {
-            jobs: Json(vec![job.id.clone()]),
-            ..TriggerRun::new("sweep", *started)
-        };
-        trigger_run::db::insert(&mut connection, &run).unwrap();
-    }
-    let settled = crate::workers::trigger::settle(&mut connection, &network(), 99).unwrap();
-    assert_eq!(settled, ["sweep", "sweep"]);
-    let open = trigger_run::db::find_unsettled(&mut connection, &network()).unwrap();
-    let open: Vec<i64> = open.iter().map(|run| run.started_at).collect();
-    assert_eq!(open, [20, 30]);
 }

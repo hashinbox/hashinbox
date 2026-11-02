@@ -48,14 +48,13 @@ CREATE TABLE "trigger" (
 );
 CREATE INDEX trigger_network ON "trigger" (chain, network);
 
--- One run of a trigger: started when its action is decided, settled when
--- every send of it is confirmed or definitively failed.
+-- One run of a trigger: started when its action is decided, with the jobs
+-- it queued.
 -- id: "{trigger}.{started_at}".
 CREATE TABLE trigger_run (
     id         TEXT    NOT NULL PRIMARY KEY,
     "trigger"  TEXT    NOT NULL REFERENCES "trigger" (id) ON DELETE CASCADE,
     started_at INTEGER NOT NULL, -- Unix ms.
-    settled_at INTEGER,          -- Unix ms; NULL: a send is in flight.
     jobs       TEXT    NOT NULL CHECK (json_valid(jobs)), -- The send jobs' ids, a JSON list.
     CHECK (id = "trigger" || '.' || started_at)
 );

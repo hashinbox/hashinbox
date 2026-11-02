@@ -75,11 +75,12 @@ impl WalletIndexBalances {
         self.indexes.keys().cloned().collect()
     }
 
-    /// Their confirmed balances, in id order.
-    pub(crate) fn confirmed(&self) -> impl Iterator<Item = Decimal> + '_ {
+    /// Their spendable balances (confirmed, less what pending transactions
+    /// take), in id order.
+    pub(crate) fn spendable(&self) -> impl Iterator<Item = Decimal> + '_ {
         self.indexes
             .values()
-            .map(|one| one.balance.confirmed.clone())
+            .map(|one| one.balance.spendable.clone())
     }
 
     /// Each one's (address, asset), what a fee estimate takes.

@@ -84,17 +84,6 @@ async fn main() -> Result<(), AnyError> {
     let storage = config.storage.open()?;
     let document = stored_endpoints(config.payments.clone(), &storage).await?;
     let stores = Arc::new(storage.clone());
-    // Kept blocks are heard by the trigger loop, after each write commits.
-    let blocks = Arc::new(base::Notifying::new(storage.clone()));
-    let (kept, heard) = tokio::sync::mpsc::unbounded_channel();
-    base::BlockNotify::subscribe(
-        blocks.as_ref(),
-        Box::new(move |blocks: &base::Blocks| {
-            let headers = blocks.iter().map(|block| block.header.clone()).collect();
-            // A closed loop is shutting down; a lost hint is caught up later.
-            let _ = kept.send((base::Networked::network(blocks).clone(), headers));
-        }),
-    );
     // Each chain's `Config` reads its own section of the payments document.
     let payments = Payments::builder()
         .with_chain::<chain_bitcoin::Config>("bitcoin")
@@ -102,7 +91,7 @@ async fn main() -> Result<(), AnyError> {
         .with_chain::<chain_solana::Config>("solana")
         .with_config(document)
         .with_storage(base::Storage {
-            blocks,
+            blocks: stores.clone(),
             indexes: stores.clone(),
             inputs: stores.clone(),
             wallets: stores.clone(),
@@ -110,16 +99,23 @@ async fn main() -> Result<(), AnyError> {
         .build()
         .await?;
     let payments = Arc::new(payments);
-    let indexers = payments.run();
-    // Broadcasts are durable jobs, one topic per sender; trigger jobs lock
-    // their whole network.
+    // Every network's index job steps its indexer; at the tip it queues a
+    // triggers job (locking the whole network), whose sends are broadcast
+    // jobs (one topic per sender).
+    let index = workers::indexer::Index::new(payments.clone(), storage.clone());
+    index.start().await?;
+    // Every network's expire job frees what pending transactions held.
+    let expire = workers::broadcast::Expire::new(payments.clone(), storage.clone());
+    expire.start().await?;
     let executor = workers::executor::Executor::new(storage.clone())
+        .add(index, tasks::Retry::default())
+        .add(expire, tasks::Retry::default())
         .add(
             workers::broadcast::Broadcast::new(payments.clone(), storage.clone()),
             tasks::Retry::default(),
         )
         .add(
-            workers::trigger::Triggers::new(
+            workers::trigger::Round::new(
                 payments.clone(),
                 storage.clone(),
                 logging::Logger::default(),
@@ -127,14 +123,6 @@ async fn main() -> Result<(), AnyError> {
             tasks::Retry::default(),
         );
     let jobs = tokio::spawn(executor.run());
-    // Kept blocks queue trigger jobs.
-    let triggers = workers::trigger::Listen::new(
-        payments.clone(),
-        storage.clone(),
-        logging::Logger::default(),
-        heard,
-    );
-    let loop_ = tokio::spawn(async move { triggers.run().await });
     let state = Arc::new(AppState { payments, storage });
     let router = api::router(state, &server)?.merge(face.routes()?);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
@@ -146,9 +134,6 @@ async fn main() -> Result<(), AnyError> {
         })
         .await;
     jobs.abort();
-    loop_.abort();
-    indexers.stop();
-    indexers.join().await?;
     Ok(served?)
 }
 

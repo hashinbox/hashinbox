@@ -1,6 +1,7 @@
 //! What a trigger does once its check passes: a named [`Action`] run with
-//! the trigger's context and its own static input. Effects go through the
-//! [`Context`]; starting jobs is the usual one, never an obligation.
+//! an [`Invocation`] (the trigger, what it fired on) and its own static
+//! input. Effects go through the invocation; starting jobs is the usual one,
+//! never an obligation.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tasks::Job;
 
-use super::Evaluation;
+use super::triggers::Trigger;
 use crate::{
     models::{
         trigger::{Amount, Target},
@@ -20,29 +21,29 @@ use crate::{
 };
 
 /// What an action sees, and what it asks the run to do.
-pub(crate) struct Context<'a, 'c> {
+pub(crate) struct Invocation<'a, 'c> {
     /// The trigger's network.
     pub(crate) network: &'a Network,
     /// The wallet indexes it fired on (`This`), with balances.
     pub(crate) this: &'a WalletIndexBalances,
-    /// Amounts and targets, read at the decided block.
-    pub(crate) evaluation: &'a mut Evaluation<'c>,
+    /// The trigger deciding: amounts and targets, read at the decided block.
+    pub(crate) trigger: &'a mut Trigger<'c>,
     /// Addresses this server holds keys for.
     pub(crate) keyed: &'a BTreeSet<Address>,
     started: Vec<Job>,
 }
 
-impl<'a, 'c> Context<'a, 'c> {
+impl<'a, 'c> Invocation<'a, 'c> {
     pub(crate) const fn new(
         network: &'a Network,
         this: &'a WalletIndexBalances,
-        evaluation: &'a mut Evaluation<'c>,
+        trigger: &'a mut Trigger<'c>,
         keyed: &'a BTreeSet<Address>,
     ) -> Self {
         Self {
             network,
             this,
-            evaluation,
+            trigger,
             keyed,
             started: Vec::new(),
         }
@@ -65,12 +66,12 @@ pub(crate) trait Action: Send + Sync {
     /// Its name, as stored on the trigger.
     fn name(&self) -> &'static str;
 
-    /// Decides what to do now; effects only through `context`.
+    /// Decides what to do now; effects only through `invocation`.
     ///
     /// # Errors
     ///
     /// When `input` does not decode, a read fails, or it refuses.
-    fn run(&self, context: &mut Context<'_, '_>, input: &Value) -> anyhow::Result<()>;
+    fn run(&self, invocation: &mut Invocation<'_, '_>, input: &Value) -> anyhow::Result<()>;
 }
 
 /// Every action by name; built by the trigger worker.
@@ -98,13 +99,13 @@ impl Actions {
         &self,
         name: &str,
         input: &Value,
-        context: &mut Context<'_, '_>,
+        invocation: &mut Invocation<'_, '_>,
     ) -> anyhow::Result<()> {
         let action = self
             .0
             .get(name)
             .with_context(|| format!("unknown action {name}"))?;
-        action.run(context, input)
+        action.run(invocation, input)
     }
 }
 
@@ -143,13 +144,13 @@ impl Action for Transfer {
     /// Refuses many sources and many destinations, a source in another
     /// asset than the send's, a target not fully indexed, and a source not
     /// keyed here.
-    fn run(&self, context: &mut Context<'_, '_>, input: &Value) -> anyhow::Result<()> {
+    fn run(&self, invocation: &mut Invocation<'_, '_>, input: &Value) -> anyhow::Result<()> {
         let send = SendInput::deserialize(input).context("send input")?;
-        let (evaluation, this) = (&mut *context.evaluation, context.this);
-        let Some(sources) = evaluation.target(&send.source, this)? else {
+        let (trigger, this) = (&mut *invocation.trigger, invocation.this);
+        let Some(sources) = trigger.target(&send.source, this)? else {
             bail!("a source is not fully indexed");
         };
-        let Some(destinations) = evaluation.target(&send.destination, this)? else {
+        let Some(destinations) = trigger.target(&send.destination, this)? else {
             bail!("a destination is not fully indexed");
         };
         ensure!(
@@ -178,7 +179,7 @@ impl Action for Transfer {
         let mut by_sender: BTreeMap<Address, Vec<Payment>> = BTreeMap::new();
         for one in each.values() {
             let alone = each.only(one)?;
-            let amount = evaluation.amount(&send.amount, &alone, &send.asset)?;
+            let amount = trigger.amount(&send.amount, &alone, &send.asset)?;
             let Some(amount) = amount.filter(|amount| *amount > Decimal::zero()) else {
                 continue;
             };
@@ -189,7 +190,7 @@ impl Action for Transfer {
                 (other.clone(), mine)
             };
             ensure!(
-                context.keyed.contains(&from),
+                invocation.keyed.contains(&from),
                 "source {} is not keyed here",
                 from.value
             );
@@ -200,13 +201,13 @@ impl Action for Transfer {
         }
         for (from, transfers) in by_sender {
             let intent = SendIntent {
-                chain: context.network.chain.as_str().to_owned(),
-                network: context.network.name.clone(),
+                chain: invocation.network.chain.as_str().to_owned(),
+                network: invocation.network.name.clone(),
                 address: from.value,
                 asset: send.asset.clone(),
                 transfers,
             };
-            context.start(intent.job()?);
+            invocation.start(intent.job()?);
         }
         Ok(())
     }

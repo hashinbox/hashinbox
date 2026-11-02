@@ -2471,7 +2471,7 @@
           },
           "check": {
             "type": "object",
-            "description": "When it acts: `\"idle\"`, `{\"since\": {\"seconds\": …}}` and compares under\n`all`/`any`/`not`."
+            "description": "When it acts: `{\"since\": {\"seconds\": …}}` and compares under\n`all`/`any`/`not`."
           },
           "created_at": {
             "type": "integer",
@@ -2590,18 +2590,9 @@
         "type": "object",
         "description": "One run of a trigger.",
         "required": [
-          "started_at",
-          "settled_at"
+          "started_at"
         ],
         "properties": {
-          "settled_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Unix ms; null while a send is in flight. Always present."
-          },
           "started_at": {
             "type": "integer",
             "format": "int64",

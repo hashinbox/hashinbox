@@ -3,7 +3,6 @@ import Alert from '@mui/material/Alert';
 import Autocomplete from '@mui/material/Autocomplete';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
-import Checkbox from '@mui/material/Checkbox';
 import Chip from '@mui/material/Chip';
 import Collapse from '@mui/material/Collapse';
 import FormControlLabel from '@mui/material/FormControlLabel';
@@ -352,12 +351,6 @@ function CheckPart({
   return (
     <Stack spacing={1.5}>
       <Stack direction="row" spacing={3} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-        <FormControlLabel
-          control={
-            <Checkbox checked={form.idle} onChange={(e) => set({ idle: e.target.checked })} />
-          }
-          label="Not while its last run is unsettled"
-        />
         <TextField
           size="small"
           type="number"

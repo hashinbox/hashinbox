@@ -129,7 +129,6 @@ diesel::table! {
         id -> Text,
         trigger -> Text,
         started_at -> BigInt,
-        settled_at -> Nullable<BigInt>,
         jobs -> Text,
     }
 }

@@ -9,16 +9,16 @@ use base::Decimal;
 pub(crate) struct Balance {
     /// The sum of its legs in live blocks at or below the tip.
     pub(crate) confirmed: Decimal,
-    /// The sum of its other legs: in live blocks above the tip, or of
-    /// pending transactions; negative when more leaves than arrives.
-    pub(crate) pending: Decimal,
+    /// What it can spend: `confirmed` less what its pending transactions
+    /// take (spent, burned, fee). What they bring counts once mined.
+    pub(crate) spendable: Decimal,
 }
 
 impl Default for Balance {
     fn default() -> Self {
         Self {
             confirmed: Decimal::zero(),
-            pending: Decimal::zero(),
+            spendable: Decimal::zero(),
         }
     }
 }
@@ -104,9 +104,10 @@ pub(crate) mod db {
             let signed = row.leg.signed()?;
             let balance = balances.entry(row.index_id).or_default();
             if row.confirmed {
-                balance.confirmed += signed;
-            } else {
-                balance.pending += signed;
+                balance.confirmed += signed.clone();
+                balance.spendable += signed;
+            } else if row.leg.block.is_none() && signed < base::Decimal::zero() {
+                balance.spendable += signed;
             }
         }
         ensure!(

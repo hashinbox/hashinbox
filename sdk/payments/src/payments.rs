@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Address, Asset, Assets, Birthday, Config, Handles, Network, Service, Stats, Storage,
-    TransactionError, TransactionErrorKind, Wallet, WalletError, WalletErrorKind, WalletFactories,
+    Address, Asset, Assets, Birthday, Config, Network, Service, Stats, Storage, TransactionError,
+    TransactionErrorKind, Wallet, WalletError, WalletErrorKind, WalletFactories,
 };
 use crypto::SecretBytes;
 use rpc::Swap;
@@ -78,17 +78,6 @@ impl Payments {
         self.clients
             .get(network)
             .ok_or_else(|| unsupported().into())
-    }
-
-    /// Runs every network's indexer on its own task; the caller stops and
-    /// joins them.
-    #[must_use]
-    pub fn run(&self) -> Handles {
-        let mut handles = Handles::default();
-        for service in self.services.values() {
-            handles.push(Arc::clone(&service.indexer).run());
-        }
-        handles
     }
 
     /// Indexes `asset` of `address` from `birthday`, on the address's network.

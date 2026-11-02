@@ -4,7 +4,6 @@ use std::{
 };
 
 use anyhow::Context as _;
-use tokio::sync::mpsc;
 
 use crate::{
     Address, Addressed, Asset, Decimal, Future, Network, Networked, transaction::Transactions,
@@ -272,33 +271,6 @@ pub trait Chained: Networked + Send + Sync {
             }
             Ok(run)
         })
-    }
-}
-
-/// Wakes the [`Indexer`](crate::Indexer) run: on a new block (a websocket
-/// subscription), a timer, or anything else.
-pub trait Notified: Send + Sync {
-    /// A new channel of wakes; the run stops when it closes.
-    fn subscribe(&self) -> mpsc::Receiver<()>;
-}
-
-/// Wakes every period; stops the moment its receiver is dropped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Timer(pub std::time::Duration);
-
-impl Notified for Timer {
-    fn subscribe(&self) -> mpsc::Receiver<()> {
-        let (sender, receiver) = mpsc::channel(1);
-        let period = self.0;
-        tokio::spawn(async move {
-            // Ends as soon as the receiver is dropped, not a period later.
-            while sender.send(()).await.is_ok() {
-                if tokio::time::timeout(period, sender.closed()).await.is_ok() {
-                    return;
-                }
-            }
-        });
-        receiver
     }
 }
 

@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use ::rpc::{BoxFuture, CallError, Client as _, Cluster, Endpoint, Http, Policy, Request};
 use anyhow::{Context as _, ensure};
 use base::{
-    Asset, AssetInfo, Cache, Future, Indexer, InputStore, Service, Storage, Timer,
+    Asset, AssetInfo, Cache, Future, Indexer, InputStore, Service, Storage,
     WalletFactoryBroadcaster,
 };
 use serde::Deserialize;
@@ -209,7 +209,7 @@ impl base::Config for Config {
                 Arc::new(chain),
                 Arc::clone(&storage.blocks),
                 Arc::clone(&storage.indexes),
-                Arc::new(Timer(Duration::from_millis(self.interval_ms))),
+                Duration::from_millis(self.interval_ms),
             ));
             Ok(Service {
                 indexer,

@@ -16,7 +16,7 @@ use std::{
 
 use base::{
     Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Future,
-    Indexer, Network, Networked, Service, Signer, Timer, Tips, Transaction, TransactionError,
+    Indexer, Network, Networked, Service, Signer, Tips, Transaction, TransactionError,
     TransactionErrorKind, TransactionId, TransactionState, Transactions, Transfer, Wallet,
     WalletFactory, WalletFactoryBroadcaster,
 };
@@ -236,7 +236,7 @@ impl base::Config for Config {
                 Arc::new(Empty),
                 storage.blocks.clone(),
                 storage.indexes.clone(),
-                Arc::new(Timer(Duration::from_secs(3_600))),
+                Duration::from_secs(3_600),
             );
             let wallet = Fake {
                 address: Address::new(network(), "unused"),

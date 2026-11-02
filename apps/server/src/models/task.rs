@@ -126,19 +126,6 @@ pub(crate) mod db {
             .optional()
     }
 
-    /// The tasks `ids`, by id; unknown ids are skipped.
-    pub(crate) fn find_by_ids(
-        connection: &mut SqliteConnection,
-        ids: &[String],
-    ) -> QueryResult<Tasks> {
-        let tasks = q::table
-            .filter(q::id.eq_any(ids))
-            .order(q::id)
-            .select(Task::as_select())
-            .load(connection)?;
-        Ok(tasks.into())
-    }
-
     /// Every unfinished (pending or running) task, by id: what `next`
     /// weighs topics against.
     pub(crate) fn find_unfinished(connection: &mut SqliteConnection) -> QueryResult<Tasks> {

@@ -92,18 +92,6 @@ impl Selector {
     }
 }
 
-/// What a selector owns among others: what it picks that no other picks,
-/// and what it picks that another picks too.
-#[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "playground: wired by the pipe evaluator later")
-)]
-pub(crate) struct Owned {
-    pub(crate) owned: WalletIndexes,
-    pub(crate) contested: WalletIndexes,
-}
-
 /// One asset of one address being indexed.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct WalletIndex {
@@ -162,16 +150,6 @@ collection! {
     /// Wallet indexes, ordered by id.
     #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
     WalletIndexes(WalletIndex)
-}
-
-impl WalletIndexes {
-    /// These, minus the ones in `other`.
-    #[must_use]
-    pub(crate) fn without(self, other: &Self) -> Self {
-        self.into_iter()
-            .filter(|index| !other.iter().any(|one| one.id == index.id))
-            .collect()
-    }
 }
 
 /// The `wallet_index` table's statements.
@@ -399,10 +377,6 @@ pub(crate) mod db {
     /// The fully indexed indexes of `network` that `selector` picks, by id:
     /// indexed through a live block at or above `confirmed` (the universe, so
     /// `Not` is relative to it).
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "playground: wired by the pipe evaluator later")
-    )]
     pub(crate) fn select(
         connection: &mut SqliteConnection,
         network: &Network,
@@ -422,78 +396,5 @@ pub(crate) mod db {
             .order(wallet_index::id)
             .load(connection)
             .map(indexes)
-    }
-
-    /// The indexes `selector` picks (as [`WalletIndex::select`]) that any of
-    /// `others` picks too: contested, so no trigger owns them.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "playground: wired by the pipe evaluator later")
-    )]
-    pub(crate) fn contested(
-        connection: &mut SqliteConnection,
-        network: &Network,
-        selector: &Selector,
-        others: &[Selector],
-        confirmed: i64,
-    ) -> QueryResult<WalletIndexes> {
-        let both = Selector::All(vec![selector.clone(), Selector::Any(others.to_vec())]);
-        select(connection, network, &both, confirmed)
-    }
-
-    /// What `selector` owns on `network` at `confirmed`, against `others`
-    /// (the network's other enabled triggers' selectors).
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "playground: wired by the pipe evaluator later")
-    )]
-    pub(crate) fn select_owned(
-        connection: &mut SqliteConnection,
-        network: &Network,
-        selector: &Selector,
-        others: &[Selector],
-        confirmed: i64,
-    ) -> QueryResult<Owned> {
-        let contested = contested(connection, network, selector, others, confirmed)?;
-        let owned = select(connection, network, selector, confirmed)?.without(&contested);
-        Ok(Owned { owned, contested })
-    }
-
-    /// The ids of `network`'s wallet indexes `selector` picks, however far
-    /// each is indexed.
-    pub(crate) fn find_matching(
-        connection: &mut SqliteConnection,
-        network: &Network,
-        selector: &Selector,
-    ) -> QueryResult<Vec<String>> {
-        of!(network)
-            .filter(selector.predicate())
-            .select(wallet_index::id)
-            .order(wallet_index::id)
-            .load(connection)
-    }
-
-    /// The ids of the wallet indexes with a leg in one of `blocks` (block
-    /// ids of one network), live: what those blocks changed.
-    pub(crate) fn find_touched(
-        connection: &mut SqliteConnection,
-        blocks: &[String],
-    ) -> QueryResult<Vec<String>> {
-        use crate::models::schema::{block, leg};
-        wallet_index::table
-            .inner_join(
-                leg::table.on(leg::address
-                    .eq(wallet_index::address)
-                    .and(leg::asset.eq(wallet_index::asset))),
-            )
-            .inner_join(block::table.on(block::id.nullable().eq(leg::block)))
-            .filter(leg::block.eq_any(blocks.iter().map(|id| Some(id.as_str()))))
-            .filter(block::chain.eq(wallet_index::chain))
-            .filter(block::network.eq(wallet_index::network))
-            .filter(block::archived_at.is_null())
-            .select(wallet_index::id)
-            .distinct()
-            .order(wallet_index::id)
-            .load(connection)
     }
 }

@@ -1,4 +1,4 @@
-//! `trigger_run`: when a trigger's runs started and settled.
+//! `trigger_run`: when a trigger's runs started, and the jobs each queued.
 
 use diesel::{prelude::*, sqlite::Sqlite};
 
@@ -12,20 +12,17 @@ pub(crate) struct TriggerRun {
     pub(crate) trigger: String,
     /// Unix ms.
     pub(crate) started_at: i64,
-    /// Unix ms; `None`: a send is in flight.
-    pub(crate) settled_at: Option<i64>,
     /// The ids of the send jobs it queued.
     pub(crate) jobs: Json<Vec<String>>,
 }
 
 impl TriggerRun {
-    /// A run of `trigger` starting `now`, not settled.
+    /// A run of `trigger` starting `now`.
     pub(crate) fn new(trigger: &str, now: i64) -> Self {
         Self {
             id: format!("{trigger}.{now}"),
             trigger: trigger.to_owned(),
             started_at: now,
-            settled_at: None,
             jobs: Json(Vec::new()),
         }
     }
@@ -53,18 +50,6 @@ pub(crate) mod db {
             .execute(connection)
     }
 
-    /// Settles run `id` at `now`; how many runs settled (0 or 1).
-    pub(crate) fn settle(
-        connection: &mut SqliteConnection,
-        id: &str,
-        now: i64,
-    ) -> QueryResult<usize> {
-        diesel::update(trigger_run::table.find(id))
-            .filter(trigger_run::settled_at.is_null())
-            .set(trigger_run::settled_at.eq(now))
-            .execute(connection)
-    }
-
     /// The latest run of `trigger`.
     pub(crate) fn find_last(
         connection: &mut SqliteConnection,
@@ -76,22 +61,6 @@ pub(crate) mod db {
             .select(TriggerRun::as_select())
             .first(connection)
             .optional()
-    }
-
-    /// The unsettled runs of the triggers of `network`, oldest first.
-    pub(crate) fn find_unsettled(
-        connection: &mut SqliteConnection,
-        network: &base::Network,
-    ) -> QueryResult<Vec<TriggerRun>> {
-        use crate::models::schema::triggers;
-        trigger_run::table
-            .inner_join(triggers::table)
-            .filter(triggers::chain.eq(network.chain.as_str()))
-            .filter(triggers::network.eq(&network.name))
-            .filter(trigger_run::settled_at.is_null())
-            .order(trigger_run::started_at)
-            .select(TriggerRun::as_select())
-            .load(connection)
     }
 
     /// The latest `limit` runs of `trigger`, latest first.

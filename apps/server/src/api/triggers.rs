@@ -56,7 +56,7 @@ struct Trigger {
     /// every one.
     #[schema(value_type = Option<Object>)]
     filter: Option<Logic<Filter>>,
-    /// When it acts: `"idle"`, `{"since": {"seconds": …}}` and compares under
+    /// When it acts: `{"since": {"seconds": …}}` and compares under
     /// `all`/`any`/`not`.
     #[schema(value_type = Object)]
     check: Logic<Gate>,
@@ -149,9 +149,6 @@ struct TriggerPath {
 struct TriggerRun {
     /// Unix ms.
     started_at: i64,
-    /// Unix ms; null while a send is in flight. Always present.
-    #[schema(required)]
-    settled_at: Option<i64>,
 }
 
 /// `GET /v1/triggers/{id}/runs`.
@@ -402,7 +399,6 @@ async fn runs(
             .into_iter()
             .map(|run| TriggerRun {
                 started_at: run.started_at,
-                settled_at: run.settled_at,
             })
             .collect(),
     }))

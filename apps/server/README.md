@@ -81,8 +81,9 @@ committed copy. `GET /health` and `GET /openapi.json` need no token.
 ## Layout
 
 - `src/main.rs`: composition (stored nodes into the document, `base::Storage` from
-  the one `storage::Storage`, the `payments` builder, `run()`, the send runner,
-  HTTP) and shutdown (stop and join the indexers after HTTP drains).
+  the one `storage::Storage`, the `payments` builder, the executor with the
+  index, expire, triggers and broadcast jobs, HTTP) and shutdown (the executor
+  stops after HTTP drains; unfinished jobs resume on the next start).
   `src/main.rs` is the only file that names a chain crate; `src/config.rs` reads
   the file; `src/ui.rs` serves the page; `src/state.rs` is the handler state
   (`Arc<Payments>` and the storage).
@@ -92,7 +93,9 @@ committed copy. `GET /health` and `GET /openapi.json` need no token.
   shapes (`asset`, `network`, `indexing`).
 - `src/storage/`: every `base` store and `tasks::Store` on the models, the balance
   and history reads (`history.rs`), the wallet listing and stored nodes.
-- `src/workers/send.rs`: the send job.
+- `src/workers/`: the executor and its jobs: `indexer/` (index), `broadcast/`
+  (broadcast, `expire.rs`), `trigger/` (triggers round, `actions.rs`,
+  `evaluation.rs`); docs/design/068-index-job.md.
 
 ## Notes
 

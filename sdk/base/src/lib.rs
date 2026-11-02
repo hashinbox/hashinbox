@@ -18,15 +18,14 @@ pub use address::{Address, Addressed};
 pub use asset::{Asset, AssetInfo, Assets};
 pub use block::{
     Block, Blocks, Chained, Hash as BlockHash, Header as BlockHeader, Listener as BlockListener,
-    Notified, Notify as BlockNotify, Notifying, Parent as BlockParent, Reward, Store as BlockStore,
-    Timer, Tips,
+    Notify as BlockNotify, Notifying, Parent as BlockParent, Reward, Store as BlockStore, Tips,
 };
 pub use cache::Cache;
 pub use chain::Chain;
 pub use config::{Config, Service, Storage};
 pub use decimal::{Decimal, Error as DecimalError};
 pub use fee::Estimator as FeeEstimator;
-pub use indexer::{Birthday, DEFAULT_BATCH, Handle, Handles, Indexer, Indexers, Next, Stats};
+pub use indexer::{Birthday, DEFAULT_BATCH, Indexer, Next, Stats};
 
 pub use inout::{Coin, Input, Inputs, Output, Outputs, Store as InputStore};
 pub use network::{Network, Networked};

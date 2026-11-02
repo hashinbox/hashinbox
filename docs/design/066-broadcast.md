@@ -123,7 +123,7 @@ mined. A fresh database is needed.
 
 | Job | Topic | Does |
 | --- | --- | --- |
-| `triggers` | `chain:network` | expire, settle runs, decide; a plan starts a run and its broadcast jobs |
+| `triggers` | `chain:network` | decide; an action starts a run and its broadcast jobs (068) |
 | `broadcast` | `chain:network.sender` | sign, check and record, broadcast |
 
 A triggers job locks the whole network, so it runs only once every earlier
@@ -154,7 +154,7 @@ A rerun never builds again; a recorded transaction forgotten meanwhile
 
 #### Expiry
 
-Each triggers job of a network first runs `expire(network, now)`.
+Each network's `expire` job runs `expire(network, now)` every minute (068).
 
 ## Tests
 

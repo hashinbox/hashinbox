@@ -18,8 +18,9 @@ through. It names no chain; every call is keyed by network.
   - services: `service(network)`, `services()`, `networks()`, `assets()`
     (merged), `client(network)` (the `Swap`: `replace` changes nodes live,
     without verifying them);
-  - indexing: `run()` → `base::Handles` (the caller stops and joins),
-    `watch(address, asset, birthday)` on the address's network, `stats()`;
+  - indexing: each service's `indexer` (the caller steps `next()`, about
+    every `interval()`), `watch(address, asset, birthday)` on the address's
+    network, `stats()`;
   - wallets: `generate(network)` (kept in the wallet store),
     `wallet(address)`, `wallets()` (restored through the factories),
     `parse(network, text)`, `broadcast(network, signed)`.
@@ -46,14 +47,12 @@ async fn serve<C: Config + DeserializeOwned + 'static>(
     for (network, stats) in payments.stats() {
         println!("{}: {stats:?}", network.name);
     }
-    let handles = payments.run();
     if let Some(network) = payments.networks().next() {
         let (wallet, _secret) = payments.generate(network).await?;
         println!("new wallet {}", wallet.address().value);
         // Every part of the network moves to the other nodes at once.
         payments.client(network)?.replace(other_nodes, Vec::new());
     }
-    handles.stop();
-    handles.join().await
+    Ok(())
 }
 ```

@@ -4,9 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use ::rpc::{Cluster, Endpoint, Policy, Retry};
 use anyhow::{Context as _, ensure};
-use base::{
-    Asset, AssetInfo, Assets, Future, Indexer, Service, Storage, Timer, WalletFactoryBroadcaster,
-};
+use base::{Asset, AssetInfo, Assets, Future, Indexer, Service, Storage, WalletFactoryBroadcaster};
 use serde::{Deserialize, Deserializer, de};
 
 use crate::{
@@ -222,7 +220,7 @@ impl base::Config for Config {
                 Arc::new(self.chain(&rpc)),
                 Arc::clone(&storage.blocks),
                 Arc::clone(&storage.indexes),
-                Arc::new(Timer(Duration::from_millis(self.interval_ms))),
+                Duration::from_millis(self.interval_ms),
             ));
             Ok(Service {
                 indexer,

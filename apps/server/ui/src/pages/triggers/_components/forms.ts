@@ -35,7 +35,7 @@ export interface Compare {
 export interface FilterLeaf {
   compare: Compare;
 }
-export type GateLeaf = 'idle' | { since: { seconds: number } } | { compare: Compare };
+export type GateLeaf = { since: { seconds: number } } | { compare: Compare };
 export type Logic<L> = L | { all: Logic<L>[] } | { any: Logic<L>[] } | { not: Logic<L> };
 
 /** Moves `amount` of `asset` from `source` to `destination`; one side may be many. */
@@ -193,11 +193,7 @@ function isCompareLeaf(value: unknown): value is { compare: Compare } {
 }
 
 function isGateLeaf(value: unknown): value is GateLeaf {
-  return (
-    value === 'idle' ||
-    isCompareLeaf(value) ||
-    (typeof value === 'object' && value !== null && 'since' in value)
-  );
+  return isCompareLeaf(value) || (typeof value === 'object' && value !== null && 'since' in value);
 }
 
 /** Every compare must hold; empty: no filter. */
@@ -216,9 +212,8 @@ export function parseFilter(filter: Logic<FilterLeaf> | null): FilterForm | null
   return forms.every((f) => f !== null) ? forms : null;
 }
 
-/** When a trigger acts: not while a run is in flight, a pause, and compares. */
+/** When a trigger acts: a pause since its last run, and compares. */
 export interface CheckForm {
-  idle: boolean;
   /** Seconds since the last run started; 0: none. */
   since: number;
   compares: CompareForm[];
@@ -226,7 +221,6 @@ export interface CheckForm {
 
 export function compileCheck(form: CheckForm): Logic<GateLeaf> {
   const all: GateLeaf[] = [];
-  if (form.idle) all.push('idle');
   if (form.since > 0) all.push({ since: { seconds: form.since } });
   for (const c of form.compares) all.push({ compare: compileCompare(c) });
   return all.length === 1 && all[0] !== undefined ? all[0] : { all };
@@ -235,10 +229,9 @@ export function compileCheck(form: CheckForm): Logic<GateLeaf> {
 export function parseCheck(check: Logic<GateLeaf>): CheckForm | null {
   const found = leaves(check, isGateLeaf);
   if (!found) return null;
-  const form: CheckForm = { idle: false, since: 0, compares: [] };
+  const form: CheckForm = { since: 0, compares: [] };
   for (const leaf of found) {
-    if (leaf === 'idle') form.idle = true;
-    else if ('since' in leaf) form.since = leaf.since.seconds;
+    if ('since' in leaf) form.since = leaf.since.seconds;
     else {
       const c = parseCompare(leaf.compare);
       if (!c) return null;
@@ -334,7 +327,7 @@ export function blank(chain: string, network: string): Definition {
     network,
     selector: { asset: 'native' },
     filter: null,
-    check: 'idle',
+    check: { all: [] },
     action: {
       name: 'send',
       input: {
@@ -389,7 +382,7 @@ export const TEMPLATES: Template[] = [
       {
         ...native(place, 'forward'),
         filter: { compare: { of: { this: {} }, aggregate: 'sum', operator: 'above', value: FEE } },
-        check: 'idle',
+        check: { all: [] },
         action: {
           name: 'send',
           input: {
@@ -412,17 +405,12 @@ export const TEMPLATES: Template[] = [
         ...native(place, 'gather'),
         filter: { compare: { of: { this: {} }, aggregate: 'sum', operator: 'above', value: FEE } },
         check: {
-          all: [
-            'idle',
-            {
-              compare: {
-                of: { this: {} },
-                aggregate: 'sum',
-                operator: 'at_least',
-                value: { value: '1' },
-              },
-            },
-          ],
+          compare: {
+            of: { this: {} },
+            aggregate: 'sum',
+            operator: 'at_least',
+            value: { value: '1' },
+          },
         },
         action: {
           name: 'send',
@@ -464,7 +452,7 @@ export const TEMPLATES: Template[] = [
             },
           ],
         },
-        check: 'idle',
+        check: { all: [] },
         action: {
           name: 'send',
           input: {
@@ -486,7 +474,7 @@ export const TEMPLATES: Template[] = [
             value: FEE,
           },
         },
-        check: 'idle',
+        check: { all: [] },
         action: {
           name: 'send',
           input: {
@@ -508,7 +496,7 @@ export const TEMPLATES: Template[] = [
         ...native(place, 'daily'),
         selector: tagged('treasury', 'native'),
         filter: null,
-        check: { all: ['idle', { since: { seconds: 86400 } }] },
+        check: { since: { seconds: 86400 } },
         action: {
           name: 'send',
           input: {

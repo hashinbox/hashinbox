@@ -14,6 +14,9 @@ pub enum Ack {
     Fail(String),
     /// Run again after the backoff while attempts remain, with why not now.
     Retry(String),
+    /// Succeeded for now; run again at this Unix ms, as fresh: attempts and
+    /// reason cleared. A job that never ends (a poller) answers this.
+    Again(u64),
 }
 
 /// How retries go: at most `attempts` executions, a retry after attempt `n`
@@ -63,6 +66,12 @@ impl Job {
             Ack::Retry(reason) if self.attempts >= retry.attempts.get() => {
                 self.status = Status::Failed;
                 self.reason = Some(format!("attempts-exhausted: {reason}"));
+            }
+            Ack::Again(at) => {
+                self.status = Status::Pending;
+                self.run_at = at;
+                self.attempts = 0;
+                self.reason = None;
             }
             Ack::Retry(reason) => {
                 let wait = retry.backoff.saturating_mul(self.attempts);
@@ -115,6 +124,14 @@ mod tests {
         );
         let again = running.settle(Ack::Retry("busy".into()), &retry(), 100);
         assert_eq!((again.status, again.run_at), (Status::Pending, 110));
+        let polled = again
+            .clone()
+            .start(110)
+            .settle(Ack::Again(500), &retry(), 120);
+        assert_eq!(
+            (polled.status, polled.run_at, polled.attempts, polled.reason),
+            (Status::Pending, 500, 0, None)
+        );
         let exhausted = again
             .start(110)
             .settle(Ack::Retry("busy".into()), &retry(), 120);

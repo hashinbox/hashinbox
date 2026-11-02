@@ -1,17 +1,14 @@
 //! [`Indexer`]: one network's chain into its [`BlockStore`], a step at a time.
 
 use std::{
-    collections::BTreeMap,
     sync::{Arc, Mutex, PoisonError},
+    time::Duration,
 };
 
-use logging::{Level, Logger};
-use tokio::task::JoinHandle;
-
-use anyhow::{Context as _, ensure};
+use anyhow::ensure;
 
 use crate::{
-    Addressed, Asset, BlockHeader, BlockStore, Chained, Network, Networked, Notified, WalletIndex,
+    Addressed, Asset, BlockHeader, BlockStore, Chained, Network, Networked, WalletIndex,
     WalletIndexStore,
 };
 
@@ -57,44 +54,52 @@ pub struct Stats {
     pub error: Option<String>,
 }
 
+/// [`Stats`] as they change, behind their own lock.
+#[derive(Default)]
+struct StatsWithMutex(Mutex<Stats>);
+
+impl StatsWithMutex {
+    fn get(&self) -> std::sync::MutexGuard<'_, Stats> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Indexes one network: fetches blocks up to the produced tip and keeps them,
-/// archiving kept blocks the chain took back.
+/// archiving kept blocks the chain took back. The caller steps it
+/// ([`Indexer::next`]), about every [`Indexer::interval`].
 pub struct Indexer {
     chain: Arc<dyn Chained>,
     blocks: Arc<dyn BlockStore>,
     indexes: Arc<dyn WalletIndexStore>,
-    notified: Arc<dyn Notified>,
+    interval: Duration,
     batch: u64,
-    logger: Logger,
-    stats: Mutex<Stats>,
+    stats: StatsWithMutex,
 }
 
 impl Indexer {
-    /// Indexes `chain` into `blocks`, for the addresses of `indexes`, woken
-    /// by `notified`.
+    /// Indexes `chain` into `blocks`, for the addresses of `indexes`, stepped
+    /// about every `interval` once at the tip.
     #[must_use]
     pub fn new(
         chain: Arc<dyn Chained>,
         blocks: Arc<dyn BlockStore>,
         indexes: Arc<dyn WalletIndexStore>,
-        notified: Arc<dyn Notified>,
+        interval: Duration,
     ) -> Self {
         Self {
             chain,
             blocks,
             indexes,
-            notified,
+            interval,
             batch: DEFAULT_BATCH,
-            logger: Logger::default(),
-            stats: Mutex::default(),
+            stats: StatsWithMutex::default(),
         }
     }
 
-    /// Logs each step of [`Indexer::run`] to `logger`; none by default.
+    /// How long to wait between steps once at the tip.
     #[must_use]
-    pub fn with_logger(mut self, logger: Logger) -> Self {
-        self.logger = logger;
-        self
+    pub const fn interval(&self) -> Duration {
+        self.interval
     }
 
     /// Fetches at most `batch` positions per step (at least one).
@@ -135,21 +140,14 @@ impl Indexer {
             indexed_at: None,
         };
         self.indexes.insert(&index).await?;
-        self.record(|stats| stats.watched += 1);
+        self.stats.get().watched += 1;
         Ok(())
     }
 
     /// What it did so far.
     #[must_use]
     pub fn stats(&self) -> Stats {
-        self.stats
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-
-    fn record(&self, change: impl FnOnce(&mut Stats)) {
-        change(&mut self.stats.lock().unwrap_or_else(PoisonError::into_inner));
+        self.stats.get().clone()
     }
 
     /// One step of at most a batch: from the furthest-behind index, or else
@@ -159,8 +157,18 @@ impl Indexer {
     /// # Errors
     ///
     /// When the chain or a store fails, or the chain changes mid-fetch
-    /// (retry).
+    /// (retry); counted in [`Stats::failures`].
     pub async fn next(&self) -> anyhow::Result<Next> {
+        let next = self.step().await;
+        if let Err(error) = &next {
+            let mut stats = self.stats.get();
+            stats.failures += 1;
+            stats.error = Some(format!("{error:#}"));
+        }
+        next
+    }
+
+    async fn step(&self) -> anyhow::Result<Next> {
         let network = self.network();
         let last = self.blocks.find_last(network).await?;
         let lagging = self
@@ -172,7 +180,7 @@ impl Indexer {
             return Ok(Next::Idle);
         };
         let tip = self.chain.tips().await?.produced;
-        self.record(|stats| stats.tip = Some(tip));
+        self.stats.get().tip = Some(tip);
         let end = tip.min(start.saturating_add(self.batch - 1));
         let run = self.chain.blocks(start, end).await?;
 
@@ -181,7 +189,7 @@ impl Indexer {
             && !run.contains(last)
         {
             self.blocks.delete(network, last.position).await?;
-            self.record(|stats| stats.reorgs += 1);
+            self.stats.get().reorgs += 1;
             return Ok(Next::Reorged(last.position));
         }
         let Some(header) = run.last().cloned() else {
@@ -191,171 +199,12 @@ impl Indexer {
             return Ok(Next::Idle);
         }
         self.blocks.insert(&run).await?;
-        self.record(|stats| {
-            stats.blocks += run.len() as u64;
-            stats.last = Some(header.clone());
-            stats.error = None;
-        });
+        let mut stats = self.stats.get();
+        stats.blocks += run.len() as u64;
+        stats.last = Some(header.clone());
+        stats.error = None;
+        drop(stats);
         Ok(Next::Indexed(header))
-    }
-
-    /// Steps until [`Next::Idle`] or a failure, logging each step.
-    pub async fn drain(&self) {
-        let logger = self.logger.with("network", format!("{:?}", self.network()));
-        loop {
-            let (level, next) = match self.next().await {
-                Ok(Next::Idle) => return,
-                Ok(next @ Next::Indexed(_)) => (Level::Debug, format!("{next:?}")),
-                Ok(next @ Next::Reorged(_)) => (Level::Warn, format!("{next:?}")),
-                Err(error) => {
-                    let error = format!("{error:#}");
-                    self.record(|stats| {
-                        stats.failures += 1;
-                        stats.error = Some(error.clone());
-                    });
-                    (Level::Error, error)
-                }
-            };
-            logger.event(level, "indexer.next", &next, &[]);
-            if level == Level::Error {
-                return;
-            }
-        }
-    }
-
-    /// Runs on its own task until stopped: [`Indexer::drain`] on every
-    /// notification; the task ends when the notifications close.
-    #[must_use]
-    pub fn run(self: Arc<Self>) -> Handle {
-        let mut notifications = self.notified.subscribe();
-        Handle(tokio::spawn(async move {
-            while notifications.recv().await.is_some() {
-                self.drain().await;
-            }
-        }))
-    }
-}
-
-/// A running [`Indexer::run`].
-pub struct Handle(JoinHandle<()>);
-
-impl Handle {
-    /// Stops the run at its next await; every write it made is whole.
-    pub fn stop(&self) {
-        self.0.abort();
-    }
-
-    /// Waits for the run to end.
-    ///
-    /// # Errors
-    ///
-    /// When the run panicked.
-    pub async fn join(self) -> anyhow::Result<()> {
-        match self.0.await {
-            Err(error) if error.is_panic() => Err(error.into()),
-            _ => Ok(()),
-        }
-    }
-}
-
-/// Several runs, stopped and joined together.
-#[derive(Default)]
-pub struct Handles(Vec<Handle>);
-
-impl Handles {
-    /// Adds `handle`.
-    pub fn push(&mut self, handle: Handle) {
-        self.0.push(handle);
-    }
-
-    /// Asks every run to stop.
-    pub fn stop(&self) {
-        self.0.iter().for_each(Handle::stop);
-    }
-
-    /// Waits for every run to end.
-    ///
-    /// # Errors
-    ///
-    /// The first run that panicked; the rest are still awaited.
-    pub async fn join(self) -> anyhow::Result<()> {
-        let mut result = Ok(());
-        for handle in self.0 {
-            let joined = handle.join().await;
-            if result.is_ok() {
-                result = joined;
-            }
-        }
-        result
-    }
-}
-
-/// One [`Indexer`] per network.
-#[derive(Clone, Default)]
-pub struct Indexers(BTreeMap<Network, Arc<Indexer>>);
-
-impl Indexers {
-    /// Adds `indexer` under its network.
-    ///
-    /// # Errors
-    ///
-    /// When the network has one already.
-    pub fn insert(&mut self, indexer: Indexer) -> anyhow::Result<()> {
-        let network = indexer.network().clone();
-        ensure!(
-            !self.0.contains_key(&network),
-            "{network:?} has an indexer already"
-        );
-        self.0.insert(network, Arc::new(indexer));
-        Ok(())
-    }
-
-    /// The indexer of `network`.
-    ///
-    /// # Errors
-    ///
-    /// When the network has none.
-    pub fn get(&self, network: &Network) -> anyhow::Result<&Arc<Indexer>> {
-        self.0
-            .get(network)
-            .with_context(|| format!("{network:?} has no indexer"))
-    }
-
-    /// Indexes `asset` of `address` from `birthday`, on its network's
-    /// indexer.
-    ///
-    /// # Errors
-    ///
-    /// When its network has no indexer, or [`Indexer::watch`] fails.
-    pub async fn watch(
-        &self,
-        address: &dyn Addressed,
-        asset: &Asset,
-        birthday: Birthday,
-    ) -> anyhow::Result<()> {
-        self.get(address.network())?
-            .watch(address, asset, birthday)
-            .await
-    }
-
-    /// Every network's stats.
-    #[must_use]
-    pub fn stats(&self) -> BTreeMap<Network, Stats> {
-        self.0
-            .iter()
-            .map(|(network, indexer)| (network.clone(), indexer.stats()))
-            .collect()
-    }
-
-    /// Runs every indexer, each on its own task.
-    #[must_use]
-    pub fn run(&self) -> Handles {
-        Handles(
-            self.0
-                .values()
-                .map(|indexer| Arc::clone(indexer).run())
-                .collect(),
-        )
     }
 }
 

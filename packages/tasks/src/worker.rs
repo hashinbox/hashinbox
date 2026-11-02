@@ -104,6 +104,12 @@ impl<I, S: Serialize> Task<I, S> {
     pub fn fail(self, reason: impl Into<String>) -> Ack {
         Ack::Fail(reason.into())
     }
+
+    /// Done for now; runs again at `at` (Unix ms) as fresh.
+    #[must_use]
+    pub fn again(self, at: u64) -> Ack {
+        Ack::Again(at)
+    }
 }
 
 /// Another [`Changes`]' signal, plus one every `period`: a retry falls due
