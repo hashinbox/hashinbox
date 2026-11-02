@@ -283,6 +283,70 @@ pub(crate) mod db {
             .optional()
     }
 
+    /// The kept transactions of `blocks`, in block order.
+    pub(crate) fn find_in(
+        connection: &mut SqliteConnection,
+        blocks: &[&str],
+    ) -> QueryResult<Transactions> {
+        transactions::table
+            .filter(transactions::block.eq_any(blocks))
+            .order(transactions::order)
+            .select(Transaction::as_select())
+            .load(connection)
+            .map(Transactions::from)
+    }
+
+    /// Of every network: how many transactions are kept mined in live
+    /// blocks, how many of those reverted, and how many are pending.
+    pub(crate) fn count(connection: &mut SqliteConnection) -> QueryResult<(i64, i64, i64)> {
+        use crate::models::schema::block;
+        let mined = || {
+            transactions::table
+                .inner_join(block::table.on(block::id.nullable().eq(transactions::block)))
+                .filter(block::archived_at.is_null())
+        };
+        let all = mined().count().get_result(connection)?;
+        let reverted = mined()
+            .filter(transactions::state.eq(2))
+            .count()
+            .get_result(connection)?;
+        let pending = transactions::table
+            .filter(transactions::block.is_null())
+            .count()
+            .get_result(connection)?;
+        Ok((all, reverted, pending))
+    }
+
+    /// For every kept transaction of every network mined in a live block
+    /// stamped at or after `since`: that stamp (Unix seconds).
+    pub(crate) fn find_stamps_since(
+        connection: &mut SqliteConnection,
+        since: i64,
+    ) -> QueryResult<Vec<i64>> {
+        use crate::models::schema::block;
+        transactions::table
+            .inner_join(block::table.on(block::id.nullable().eq(transactions::block)))
+            .filter(block::archived_at.is_null())
+            .filter(block::timestamp.ge(since))
+            .select(block::timestamp.assume_not_null())
+            .load(connection)
+    }
+
+    /// The pending transactions of `network`, oldest sent first.
+    pub(crate) fn find_all_pending(
+        connection: &mut SqliteConnection,
+        network: &Network,
+    ) -> QueryResult<Transactions> {
+        transactions::table
+            .filter(transactions::chain.eq(network.chain.as_str()))
+            .filter(transactions::network.eq(&network.name))
+            .filter(transactions::block.is_null())
+            .order(transactions::sent_at)
+            .select(Transaction::as_select())
+            .load(connection)
+            .map(Transactions::from)
+    }
+
     /// Forgets pending transaction `id` and its legs (refused, expired):
     /// its funds and coins are free again. A mined one is kept.
     pub(crate) fn delete_by_id(connection: &mut SqliteConnection, id: &str) -> QueryResult<usize> {

@@ -7,6 +7,24 @@ use serde::{Deserialize, Serialize};
 
 use super::{Json, schema::triggers, wallet_index::Selector};
 
+/// Why a trigger cannot be kept: which rule it breaks.
+#[derive(Debug)]
+pub(crate) struct Invalid(String);
+
+impl Invalid {
+    pub(crate) fn new(why: impl Into<String>) -> Self {
+        Self(why.into())
+    }
+}
+
+impl std::fmt::Display for Invalid {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Invalid {}
+
 /// The wallet indexes in context.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct This {
@@ -32,6 +50,16 @@ impl Target {
         match self {
             Self::This(This { asset }) => asset.as_deref(),
             Self::Select(selector) => selector.asset(),
+        }
+    }
+}
+
+impl Target {
+    /// Whether a chosen set names wallets on purpose ([`Selector::validate`]).
+    pub(crate) fn validate(&self) -> Result<(), Invalid> {
+        match self {
+            Self::This(_) => Ok(()),
+            Self::Select(selector) => selector.validate(),
         }
     }
 }
@@ -66,6 +94,19 @@ pub(crate) struct Compare {
     pub(crate) aggregate: Aggregate,
     pub(crate) operator: Operator,
     pub(crate) value: Amount,
+}
+
+impl Compare {
+    fn validate(&self) -> Result<(), Invalid> {
+        self.of.validate()?;
+        self.value.validate()
+    }
+
+    /// Whether it reads the wallet in context (`This`) on either side: only
+    /// then can it tell one wallet from another.
+    fn reads_this(&self) -> bool {
+        matches!(self.of, Target::This(_)) || self.value.reads_this()
+    }
 }
 
 /// Many wallet indexes' balances into one number.
@@ -129,6 +170,31 @@ pub(crate) enum Amount {
     Max(Box<Amount>, Box<Amount>),
 }
 
+impl Amount {
+    /// Whether every wallet set it reads names wallets on purpose.
+    pub(crate) fn validate(&self) -> Result<(), Invalid> {
+        match self {
+            Self::Balance { of } | Self::Fee { of } => of.validate(),
+            Self::Value(_) => Ok(()),
+            Self::Add(a, b) | Self::Sub(a, b) | Self::Min(a, b) | Self::Max(a, b) => {
+                a.validate()?;
+                b.validate()
+            }
+        }
+    }
+
+    /// Whether a balance or fee in it, at any depth, reads `This`.
+    fn reads_this(&self) -> bool {
+        match self {
+            Self::Balance { of } | Self::Fee { of } => matches!(of, Target::This(_)),
+            Self::Value(_) => false,
+            Self::Add(a, b) | Self::Sub(a, b) | Self::Min(a, b) | Self::Max(a, b) => {
+                a.reads_this() || b.reads_this()
+            }
+        }
+    }
+}
+
 /// What a trigger does when its check passes: an action by name, with its
 /// own static input (`workers::trigger::actions`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +248,22 @@ pub(crate) enum Logic<L> {
 }
 
 impl<L> Logic<L> {
+    /// Whether every leaf passes `leaf`, no "any of" is empty (it could
+    /// never hold) and no "not" sits right inside a "not".
+    fn validate(&self, leaf: &impl Fn(&L) -> Result<(), Invalid>) -> Result<(), Invalid> {
+        match self {
+            Self::Leaf(one) => leaf(one),
+            Self::Any(any) if any.is_empty() => {
+                Err(Invalid::new("an empty \"any of\" never holds"))
+            }
+            Self::All(many) | Self::Any(many) => many.iter().try_for_each(|one| one.validate(leaf)),
+            Self::Not(one) if matches!(**one, Self::Not(_)) => {
+                Err(Invalid::new("a \"not\" inside a \"not\" cancels out"))
+            }
+            Self::Not(one) => one.validate(leaf),
+        }
+    }
+
     /// Evaluates in written order, stopping early; `leaf` decides each leaf.
     /// An error stays an error, under `Not` too.
     ///
@@ -269,6 +351,8 @@ pub(crate) struct Trigger {
     pub(crate) id: String,
     pub(crate) chain: String,
     pub(crate) network: String,
+    /// The batch it was created in: the triggers created together share it.
+    pub(crate) group_id: String,
     pub(crate) selector: Json<Selector>,
     pub(crate) filter: Option<Json<Logic<Filter>>>,
     pub(crate) check: Json<Logic<Gate>>,
@@ -278,6 +362,47 @@ pub(crate) struct Trigger {
     pub(crate) created_at: i64,
     /// Unix ms.
     pub(crate) updated_at: i64,
+}
+
+impl Trigger {
+    /// Whether it may be kept: a well-formed id, wallets named on purpose
+    /// (see [`Selector::validate`]), a filter whose every compare reads the
+    /// wallet it tests, and a filter and check that can hold.
+    /// What needs the running configuration (the network, the action's
+    /// input) is checked where it is known.
+    ///
+    /// # Errors
+    ///
+    /// The first rule it breaks.
+    pub(crate) fn validate(&self) -> Result<(), Invalid> {
+        if !(1..=64).contains(&self.id.len())
+            || !self
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(Invalid::new("a trigger id is 1 to 64 of [a-z0-9-]"));
+        }
+        self.selector.0.validate()?;
+        if let Some(filter) = &self.filter {
+            // A filter runs per wallet: a compare that never reads that wallet
+            // gives every wallet the same answer, a switch that is When's.
+            filter.0.validate(&|Filter::Compare(compare)| {
+                compare.validate()?;
+                if compare.reads_this() {
+                    Ok(())
+                } else {
+                    Err(Invalid::new(
+                        "a filter that never looks at this wallet keeps all or none; put it under When",
+                    ))
+                }
+            })?;
+        }
+        self.check.0.validate(&|gate| match gate {
+            Gate::Since { .. } => Ok(()),
+            Gate::Compare(compare) => compare.validate(),
+        })
+    }
 }
 
 collection! {
@@ -305,6 +430,16 @@ pub(crate) mod db {
         diesel::insert_into(triggers::table)
             .values(trigger)
             .execute(connection)
+    }
+
+    /// How many triggers are kept, and how many of them are enabled.
+    pub(crate) fn count(connection: &mut SqliteConnection) -> QueryResult<(i64, i64)> {
+        let all = triggers::table.count().get_result(connection)?;
+        let enabled = triggers::table
+            .filter(triggers::enabled.eq(true))
+            .count()
+            .get_result(connection)?;
+        Ok((all, enabled))
     }
 
     /// The trigger `id`.
@@ -362,5 +497,100 @@ pub(crate) mod db {
     /// Removes trigger `id` and its runs; how many triggers went (0 or 1).
     pub(crate) fn delete(connection: &mut SqliteConnection, id: &str) -> QueryResult<usize> {
         diesel::delete(triggers::table.find(id)).execute(connection)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{Json, Logic, Trigger};
+
+    /// A trigger with these parts as JSON, the rest valid.
+    fn trigger(selector: serde_json::Value, check: serde_json::Value) -> Trigger {
+        Trigger {
+            id: "sweep".to_owned(),
+            chain: "ethereum".to_owned(),
+            network: "sepolia".to_owned(),
+            group_id: "group".to_owned(),
+            selector: Json(serde_json::from_value(selector).expect("a selector")),
+            filter: None,
+            check: Json(serde_json::from_value::<Logic<_>>(check).expect("a check")),
+            action: Json(serde_json::from_value(json!({ "name": "send" })).expect("an action")),
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn refusal(selector: serde_json::Value, check: serde_json::Value) -> String {
+        trigger(selector, check)
+            .validate()
+            .expect_err("refused")
+            .to_string()
+    }
+
+    #[test]
+    fn wallets_are_named_on_purpose() {
+        let always = json!({ "all": [] });
+        trigger(json!({ "tag": "deposit" }), always.clone())
+            .validate()
+            .expect("a tag names wallets");
+        trigger(json!({ "untagged": {} }), always.clone())
+            .validate()
+            .expect("no tag names wallets too");
+        assert!(refusal(json!({ "all": [] }), always.clone()).contains("every wallet"));
+        assert!(refusal(json!({ "any": [] }), always.clone()).contains("no wallet"));
+        assert!(refusal(json!({ "ids": [] }), always.clone()).contains("no wallet"));
+        assert!(refusal(json!({ "tag": "Not A Tag" }), always.clone()).contains("tag"));
+        assert!(
+            refusal(json!({ "not": { "not": { "tag": "deposit" } } }), always)
+                .contains("cancels out")
+        );
+    }
+
+    #[test]
+    fn a_filter_reads_the_wallet_it_tests() {
+        let mut kept = trigger(json!({ "tag": "deposit" }), json!({ "all": [] }));
+        let filter = |compare: serde_json::Value| {
+            Some(Json(
+                serde_json::from_value::<Logic<_>>(compare).expect("a filter"),
+            ))
+        };
+        kept.filter = filter(json!({ "compare": {
+            "of": { "this": {} }, "aggregate": "sum", "operator": "above",
+            "value": { "fee": {} } } }));
+        kept.validate()
+            .expect("this wallet's balance against its fee");
+        kept.filter = filter(json!({ "compare": {
+            "of": { "select": { "untagged": {} } }, "aggregate": "sum", "operator": "above",
+            "value": { "add": [{ "fee": {} }, { "value": "1" }] } } }));
+        kept.validate()
+            .expect("a fee of this wallet, nested, is enough");
+        kept.filter = filter(json!({ "compare": {
+            "of": { "select": { "untagged": {} } }, "aggregate": "sum", "operator": "above",
+            "value": { "fee": { "of": { "select": { "untagged": {} } } } } } }));
+        assert!(
+            kept.validate()
+                .expect_err("refused")
+                .to_string()
+                .contains("put it under When")
+        );
+    }
+
+    #[test]
+    fn a_check_can_hold() {
+        let wallets = json!({ "tag": "deposit" });
+        trigger(wallets.clone(), json!({ "all": [] }))
+            .validate()
+            .expect("an empty all always holds");
+        assert!(refusal(wallets.clone(), json!({ "any": [] })).contains("never holds"));
+        assert!(
+            refusal(
+                wallets,
+                json!({ "not": { "not": { "since": { "seconds": 60 } } } })
+            )
+            .contains("cancels out")
+        );
     }
 }

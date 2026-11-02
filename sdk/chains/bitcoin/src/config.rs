@@ -49,6 +49,9 @@ pub struct Config {
     /// How often the indexer wakes, in milliseconds; default 30,000.
     #[serde(default = "Config::default_interval_ms")]
     pub interval_ms: u64,
+    /// Fractional digits a view shows of the native currency; none: all.
+    #[serde(default)]
+    pub display_decimals: Option<u32>,
 }
 
 impl Config {
@@ -65,6 +68,7 @@ impl Config {
             fee_ttl_ms: Self::default_fee_ttl_ms(),
             pending_ttl_ms: Self::default_pending_ttl_ms(),
             interval_ms: Self::default_interval_ms(),
+            display_decimals: None,
         }
     }
 
@@ -184,6 +188,7 @@ impl Config {
             decimals: BTC_DECIMALS,
             name: Some(BTC_NAME.to_owned()),
             ticker: Some(BTC_TICKER.to_owned()),
+            display_decimals: self.display_decimals,
         }
     }
 }

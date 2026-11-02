@@ -2,11 +2,9 @@ import Add from '@mui/icons-material/Add';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
-import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import Tab from '@mui/material/Tab';
 import Tabs from '@mui/material/Tabs';
-import TextField from '@mui/material/TextField';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
@@ -14,7 +12,7 @@ import { call, client, type Trigger, type Wallet } from '@/api/client';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { TriggerForm } from './form';
-import { blank, type Definition } from './forms';
+import { blank, validId, type Definition } from './forms';
 
 /**
  * New triggers, one tab each, created together: all or none. A template
@@ -43,15 +41,11 @@ export function Compose({
   const [busy, setBusy] = useState(false);
   const current = drafts[tab] ?? drafts[0];
 
-  const set = (index: number, next: Definition) =>
-    setDrafts((all) => all.map((d, i) => (i === index ? next : d)));
-  // One batch, one network: choosing it moves every draft.
-  const networks = [...new Set(shell.listings.map((l) => `${l.network.chain}/${l.network.name}`))];
-  const network = current ? `${current.chain}/${current.network}` : '';
-  const move = (to: string) => {
-    const [chain = '', name = ''] = to.split('/');
-    setDrafts((all) => all.map((d) => ({ ...d, chain, network: name })));
-  };
+  // One batch, one network: choosing it on one draft moves every draft.
+  const change = (index: number, next: Definition) =>
+    setDrafts((all) =>
+      all.map((d, i) => (i === index ? next : { ...d, chain: next.chain, network: next.network })),
+    );
   const add = () => {
     const place = current ?? initial[0];
     if (!place) return;
@@ -73,35 +67,21 @@ export function Compose({
 
   return (
     <Box component="article" sx={{ maxWidth: 900 }}>
-      <Stack direction="row" spacing={2} sx={{ alignItems: 'center', mb: 1 }}>
+      <Stack direction="row" spacing={2} sx={{ alignItems: 'center', mb: 2 }}>
         <Typography variant="h2" component="h1" sx={{ flexGrow: 1 }}>
           {title}
         </Typography>
         <Button color="inherit" onClick={onCancel}>
           Cancel
         </Button>
-        <Button variant="contained" loading={busy} disabled={drafts.length === 0} onClick={create}>
+        <Button
+          variant="contained"
+          loading={busy}
+          disabled={drafts.length === 0 || drafts.some((d) => !validId(d.id))}
+          onClick={create}
+        >
           Create {drafts.length === 1 ? 'trigger' : `${drafts.length} triggers`}
         </Button>
-      </Stack>
-      <Stack direction="row" spacing={2} sx={{ alignItems: 'center', mb: 2 }}>
-        <TextField
-          select
-          size="small"
-          label="Network"
-          value={network}
-          onChange={(e) => move(e.target.value)}
-          sx={{ minWidth: 220 }}
-        >
-          {networks.map((n) => (
-            <MenuItem key={n} value={n}>
-              {n}
-            </MenuItem>
-          ))}
-        </TextField>
-        <Typography variant="body2" color="text.secondary">
-          Every trigger here is on this network and is created together with the others, or none is.
-        </Typography>
       </Stack>
       <Stack
         direction="row"
@@ -139,7 +119,7 @@ export function Compose({
           wallets={wallets}
           tags={tags}
           value={current}
-          onChange={(next) => set(tab, next)}
+          onChange={(next) => change(tab, next)}
           kept={false}
         />
       )}

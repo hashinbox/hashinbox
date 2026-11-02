@@ -130,6 +130,28 @@ pub(crate) struct SendInput {
     pub(crate) amount: Amount,
 }
 
+impl SendInput {
+    /// Whether it may be kept: its wallet sets name wallets on purpose, and
+    /// it is not many to many (`This` to `This`).
+    ///
+    /// # Errors
+    ///
+    /// The first rule it breaks.
+    pub(crate) fn validate(&self) -> Result<(), crate::models::trigger::Invalid> {
+        use crate::models::trigger::Invalid;
+        self.source.validate()?;
+        self.destination.validate()?;
+        self.amount.validate()?;
+        if matches!(
+            (&self.source, &self.destination),
+            (Target::This(_), Target::This(_))
+        ) {
+            return Err(Invalid::new("a send from This to This is many to many"));
+        }
+        Ok(())
+    }
+}
+
 impl Action for Transfer {
     fn name(&self) -> &'static str {
         "send"

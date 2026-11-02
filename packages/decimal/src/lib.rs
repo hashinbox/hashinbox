@@ -142,6 +142,16 @@ impl Decimal {
         Self(normalized)
     }
 
+    /// `self` cut toward zero to at most `digits` fractional digits:
+    /// `0.0021654232` to 7 digits is `0.0021654`.
+    #[must_use]
+    pub fn truncate(&self, digits: u32) -> Self {
+        Self::canonical(
+            self.0
+                .with_scale_round(i64::from(digits), bigdecimal::RoundingMode::Down),
+        )
+    }
+
     /// `self / divisor`, rounded to 100 significant digits when it does not
     /// terminate; `None`
     /// for a zero divisor.
@@ -223,6 +233,17 @@ mod tests {
 
     fn value(text: &str) -> Decimal {
         text.parse().expect("decimal")
+    }
+
+    #[test]
+    fn truncate_cuts_toward_zero() {
+        assert_eq!(
+            value("0.002165423221215478").truncate(7),
+            value("0.0021654")
+        );
+        assert_eq!(value("-1.999").truncate(2), value("-1.99"));
+        assert_eq!(value("1.5").truncate(0), value("1"));
+        assert_eq!(value("1.20").truncate(4), value("1.2"));
     }
 
     #[test]

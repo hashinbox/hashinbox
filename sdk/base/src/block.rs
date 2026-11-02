@@ -247,8 +247,11 @@ pub trait Chained: Networked + Send + Sync {
     /// When the node cannot answer or the block cannot be read.
     fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>>;
 
-    /// Blocks `start..=end`, linked, skipped positions omitted. Defaults to
-    /// [`Chained::block`] one at a time; a chain may fetch them together.
+    /// Blocks `start..=end`, linked, skipped positions omitted. It may end
+    /// early, before the first block the node cannot fully serve yet (a
+    /// node behind a load balancer); that is no error, the rest comes on a
+    /// later call. Defaults to [`Chained::block`] one at a time; a chain may
+    /// fetch them together.
     ///
     /// # Errors
     ///

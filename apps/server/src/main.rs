@@ -123,7 +123,11 @@ async fn main() -> Result<(), AnyError> {
             tasks::Retry::default(),
         );
     let jobs = tokio::spawn(executor.run());
-    let state = Arc::new(AppState { payments, storage });
+    let state = Arc::new(AppState {
+        payments,
+        storage,
+        explorers: config.ui.explorers.clone(),
+    });
     let router = api::router(state, &server)?.merge(face.routes()?);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     // Handlers in flight drain before `serve` returns; jobs left running

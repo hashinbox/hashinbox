@@ -41,7 +41,14 @@ impl Chained for Chain {
     /// Ethereum skips no height: a block the node does not hold yet is an
     /// error, not `None`.
     fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
-        Box::pin(async move { Ok(self.blocks(position, position).await?.first().cloned()) })
+        Box::pin(async move {
+            let block = self.blocks(position, position).await?.first().cloned();
+            anyhow::ensure!(
+                block.is_some(),
+                "Ethereum block {position} is not available yet"
+            );
+            Ok(block)
+        })
     }
 
     fn blocks(&self, start: u64, end: u64) -> Future<'_, anyhow::Result<Blocks>> {

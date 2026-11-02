@@ -15,6 +15,7 @@ import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { TriggerForm } from './form';
 import type { Definition } from './forms';
+import { When } from '@/_components/when';
 
 /** A stored trigger: its form, saving, deleting, and its runs. */
 export function Editor({
@@ -94,7 +95,6 @@ function Runs({ shell, id }: { shell: Shell; id: string }) {
       .then((list) => setRuns(list.runs))
       .catch(shell.fail);
   }, [id, shell.fail]);
-  const time = (ms: number) => new Date(ms).toLocaleString();
   return (
     <Box sx={{ mt: 3 }}>
       <Typography variant="h4" component="h2" sx={{ mb: 1 }}>
@@ -110,7 +110,9 @@ function Runs({ shell, id }: { shell: Shell; id: string }) {
           {runs.length === 0 && <EmptyRow columns={1} message="It has not run yet." />}
           {runs.map((r) => (
             <TableRow key={r.started_at}>
-              <TableCell>{time(r.started_at)}</TableCell>
+              <TableCell>
+                <When at={r.started_at} />
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>

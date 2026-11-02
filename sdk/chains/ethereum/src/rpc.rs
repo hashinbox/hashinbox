@@ -123,9 +123,10 @@ impl Client {
             .collect();
         let mut wires = Vec::new();
         for (height, reply) in (start..).zip(self.batch(calls).await?) {
-            let wire: Option<WireBlock> = decode("eth_getBlockByNumber", reply)?;
-            let wire =
-                wire.with_context(|| format!("Ethereum block {height} is not available yet"))?;
+            // `null`: this node does not have it yet; the run ends before it.
+            let Some(wire) = decode::<Option<WireBlock>>("eth_getBlockByNumber", reply)? else {
+                break;
+            };
             ensure!(
                 wire.number() == height,
                 "Ethereum node returned another block for {height}"
@@ -134,6 +135,10 @@ impl Client {
         }
         let receipts = self.receipts(&wires).await?;
         for (wire, receipts) in wires.into_iter().zip(receipts) {
+            // Receipts not served yet: the run ends before this block.
+            let Some(receipts) = receipts else {
+                break;
+            };
             let height = wire.number();
             let block = block(wire, &receipts, network, tokens)
                 .with_context(|| format!("Ethereum block {height}"))?;
@@ -312,10 +317,11 @@ impl Client {
         Ok(found.is_some())
     }
 
-    /// Every non-empty block's receipts, in one batch. A node without
+    /// Every block's receipts, in one batch; `None` for a block whose
+    /// receipts the node does not have yet. A node without
     /// `eth_getBlockReceipts` is asked once per transaction from then on, so
     /// this loops at most twice.
-    async fn receipts(&self, wires: &[WireBlock]) -> anyhow::Result<Vec<Vec<Value>>> {
+    async fn receipts(&self, wires: &[WireBlock]) -> anyhow::Result<Vec<Option<Vec<Value>>>> {
         loop {
             let by_transaction = self.0.receipts_by_transaction.load(Ordering::Acquire);
             let calls = calls(wires, by_transaction);
@@ -455,13 +461,14 @@ fn calls(wires: &[WireBlock], by_transaction: bool) -> Vec<Call> {
     calls
 }
 
-/// The answers to [`calls`], per block; `None` when the node does not serve
-/// `eth_getBlockReceipts`.
+/// The answers to [`calls`], per block, `None` for a block the node answered
+/// `null` for (it does not have it yet); `None` overall when the node does
+/// not serve `eth_getBlockReceipts`.
 fn collect(
     wires: &[WireBlock],
     by_transaction: bool,
     replies: Vec<CallResult>,
-) -> anyhow::Result<Option<Vec<Vec<Value>>>> {
+) -> anyhow::Result<Option<Vec<Option<Vec<Value>>>>> {
     let mut replies = replies.into_iter();
     let mut next = || {
         replies
@@ -472,20 +479,20 @@ fn collect(
     for wire in wires {
         let count = listed(wire).len();
         if count == 0 {
-            collected.push(Vec::new());
+            collected.push(Some(Vec::new()));
             continue;
         }
         let receipts = if by_transaction {
             (0..count)
-                .map(|_| decode("eth_getTransactionReceipt", next()?))
-                .collect::<anyhow::Result<_>>()?
+                .map(|_| decode::<Option<Value>>("eth_getTransactionReceipt", next()?))
+                .collect::<anyhow::Result<Option<Vec<_>>>>()?
         } else {
             match next()? {
                 Err(Failure {
                     code: METHOD_NOT_FOUND,
                     ..
                 }) => return Ok(None),
-                reply => decode("eth_getBlockReceipts", reply)?,
+                reply => decode::<Option<Vec<Value>>>("eth_getBlockReceipts", reply)?,
             }
         };
         collected.push(receipts);

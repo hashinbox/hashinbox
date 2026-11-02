@@ -183,9 +183,14 @@ impl Indexer {
         self.stats.get().tip = Some(tip);
         let end = tip.min(start.saturating_add(self.batch - 1));
         let run = self.chain.blocks(start, end).await?;
+        // The run may end early (the node has no more yet): only the
+        // positions it reached can tell whether the last kept block is gone.
+        let Some(reached) = run.last().map(|header| header.position) else {
+            return Ok(Next::Idle);
+        };
 
         if let Some(last) = &last
-            && last.position <= end
+            && last.position <= reached
             && !run.contains(last)
         {
             self.blocks.delete(network, last.position).await?;

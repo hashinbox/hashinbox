@@ -1,7 +1,8 @@
+import AccountBalanceWallet from '@mui/icons-material/AccountBalanceWallet';
 import Box from '@mui/material/Box';
-import Typography from '@mui/material/Typography';
 import type { Wallet as Account } from '@/api/client';
 import type { Shell } from '@/layout';
+import { Empty } from '@/_components/empty';
 import { Rail } from './_components/rail';
 import { Wallet } from './_components/wallet';
 
@@ -47,9 +48,10 @@ export function Wallets({ shell, wallets, selected, onSelect, onAdded, tags, onT
             onWatched={onAdded}
           />
         ) : (
-          <Typography variant="h3" color="text.secondary">
-            Pick a wallet, or create one.
-          </Typography>
+          <Empty icon={<AccountBalanceWallet />} title="Wallets">
+            A wallet is one address on one network, with its key kept here or watched only. Pick one
+            to see its balance and transactions.
+          </Empty>
         )}
       </Box>
     </Box>

@@ -37,6 +37,7 @@ CREATE TABLE "trigger" (
     id         TEXT    NOT NULL PRIMARY KEY,
     chain      TEXT    NOT NULL,
     network    TEXT    NOT NULL,
+    group_id   TEXT    NOT NULL, -- The batch it was created in: one UUIDv7 per create.
     selector   TEXT    NOT NULL CHECK (json_valid(selector)),
     filter     TEXT             CHECK (json_valid(filter)), -- NULL: no filter.
     "check"    TEXT    NOT NULL CHECK (json_valid("check")),
@@ -47,6 +48,7 @@ CREATE TABLE "trigger" (
     CHECK (length(id) BETWEEN 1 AND 64 AND id NOT GLOB '*[^a-z0-9-]*')
 );
 CREATE INDEX trigger_network ON "trigger" (chain, network);
+CREATE INDEX trigger_group ON "trigger" (group_id);
 
 -- One run of a trigger: started when its action is decided, with the jobs
 -- it queued.

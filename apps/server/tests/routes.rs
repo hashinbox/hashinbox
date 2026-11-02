@@ -84,6 +84,7 @@ async fn wallets_balance_history_and_sends() {
     let state = Arc::new(AppState {
         payments,
         storage: storage.clone(),
+        explorers: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),

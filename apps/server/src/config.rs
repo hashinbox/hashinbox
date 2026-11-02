@@ -39,6 +39,9 @@ pub(crate) struct Config {
 pub(crate) struct Ui {
     /// The name in the top bar; the page has its own default.
     pub(crate) brand: Option<String>,
+    /// Block explorer links, by chain, then network.
+    #[serde(default)]
+    pub(crate) explorers: crate::models::Explorers,
 }
 
 impl Config {

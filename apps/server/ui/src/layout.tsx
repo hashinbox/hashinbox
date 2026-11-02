@@ -20,23 +20,26 @@ import {
 } from '@/api/client';
 import { Toast, type Message } from '@/_components/toast';
 import { Docs } from '@/pages/docs/page';
+import { Explorers, type Explorer } from '@/_components/explorers';
+import { Dashboard } from '@/pages/dashboard/page';
 import { Jobs } from '@/pages/jobs/page';
 import { Networks as Configured } from '@/pages/networks/page';
 import { Triggers } from '@/pages/triggers/page';
 import { Wallets } from '@/pages/wallets/page';
+import { go, segments } from '@/route';
 import { settings } from '@/settings';
 import { display } from '@/theme';
 
-type View = 'wallets' | 'triggers' | 'networks' | 'jobs' | 'docs';
+type View = 'dashboard' | 'wallets' | 'triggers' | 'networks' | 'jobs' | 'docs';
 /** Whether the server wants a token: not asked yet, no, or yes. */
 type Door = 'unknown' | 'open' | 'locked';
 const TOKEN_KEY = 'tally.token';
-const VIEWS: View[] = ['wallets', 'triggers', 'networks', 'jobs', 'docs'];
+const VIEWS: View[] = ['dashboard', 'wallets', 'triggers', 'networks', 'jobs', 'docs'];
 
 /** The tab named in the address, so a reload or a shared link lands on it. */
 function linked(): View {
-  const named = window.location.hash.slice(1).split('/')[0];
-  return VIEWS.find((v) => v === named) ?? 'wallets';
+  const named = segments()[0];
+  return VIEWS.find((v) => v === named) ?? 'dashboard';
 }
 
 /** Everything a page needs to talk back to the shell. */
@@ -63,6 +66,7 @@ export function Layout() {
   const [selected, setSelected] = useState<string | null>(null);
   const [tags, setTags] = useState<Map<string, string[]>>(new Map());
   const [tagged, setTagged] = useState(0);
+  const [explorers, setExplorers] = useState<Map<string, Explorer>>(new Map());
   const [toast, setToast] = useState<Message | null>(null);
 
   const notify = useCallback((text: string, bad = false) => {
@@ -120,17 +124,21 @@ export function Layout() {
     Promise.all([
       call(client.GET('/v1/assets')),
       call(client.GET('/v1/wallets')),
-      call(client.GET('/v1/tags')),
+      call(client.GET('/v1/wallets/tags')),
+      call(client.GET('/v1/networks')),
     ])
-      .then(([assets, list, all]) => {
+      .then(([assets, list, all, configured]) => {
         if (!live) return;
+        const byNetwork = new Map<string, Explorer>();
+        for (const n of configured.networks)
+          if (n.explorer) byNetwork.set(`${n.network.chain}/${n.network.name}`, n.explorer);
+        setExplorers(byNetwork);
         setListings(assets.assets);
         setWallets(list.wallets);
         const byWallet = new Map<string, string[]>();
         for (const t of all.tags)
           byWallet.set(t.wallet_id, [...(byWallet.get(t.wallet_id) ?? []), t.tag]);
         setTags(byWallet);
-        setSelected((current) => current ?? list.wallets[0]?.id ?? null);
       })
       .catch((error: unknown) => {
         if (live) fail(error);
@@ -142,12 +150,8 @@ export function Layout() {
 
   useEffect(() => {
     const navigate = () => setView(linked());
-    window.addEventListener('hashchange', navigate);
     window.addEventListener('popstate', navigate);
-    return () => {
-      window.removeEventListener('hashchange', navigate);
-      window.removeEventListener('popstate', navigate);
-    };
+    return () => window.removeEventListener('popstate', navigate);
   }, []);
 
   const unlock = (value: string) => {
@@ -163,12 +167,12 @@ export function Layout() {
   const added = (wallet: Wallet) => {
     setWallets((list) => [...list.filter((w) => w.id !== wallet.id), wallet]);
     setSelected(wallet.id);
-    setView('wallets');
+    go(['wallets']);
     setTagged((n) => n + 1);
   };
 
   useEffect(() => {
-    if (linked() !== view) window.history.replaceState(null, '', `#${view}`);
+    if (linked() !== view || segments().length === 0) go([view], true);
   }, [view]);
 
   const shell = useMemo<Shell>(() => ({ listings, notify, fail }), [listings, notify, fail]);
@@ -189,9 +193,10 @@ export function Layout() {
           {door !== 'unknown' && (
             <Tabs
               value={open || view === 'docs' ? view : false}
-              onChange={(_, next: View) => setView(next)}
+              onChange={(_, next: View) => go([next])}
               aria-label="Views"
             >
+              {open && <Tab value="dashboard" label="Dashboard" />}
               {open && <Tab value="wallets" label="Wallets" />}
               {open && <Tab value="triggers" label="Triggers" />}
               {open && <Tab value="networks" label="Networks" />}
@@ -209,23 +214,26 @@ export function Layout() {
       </AppBar>
 
       {open && (
-        <Box component="main">
-          {view === 'wallets' && (
-            <Wallets
-              shell={shell}
-              wallets={wallets}
-              selected={selected}
-              onSelect={setSelected}
-              onAdded={added}
-              tags={tags}
-              onTagged={() => setTagged((n) => n + 1)}
-            />
-          )}
-          {view === 'triggers' && <Triggers shell={shell} wallets={wallets} />}
-          {view === 'networks' && <Configured shell={shell} />}
-          {view === 'jobs' && <Jobs shell={shell} />}
-          {view === 'docs' && <Docs shell={shell} secured={token !== null} />}
-        </Box>
+        <Explorers.Provider value={explorers}>
+          <Box component="main">
+            {view === 'dashboard' && <Dashboard shell={shell} />}
+            {view === 'wallets' && (
+              <Wallets
+                shell={shell}
+                wallets={wallets}
+                selected={selected}
+                onSelect={setSelected}
+                onAdded={added}
+                tags={tags}
+                onTagged={() => setTagged((n) => n + 1)}
+              />
+            )}
+            {view === 'triggers' && <Triggers shell={shell} wallets={wallets} />}
+            {view === 'networks' && <Configured shell={shell} />}
+            {view === 'jobs' && <Jobs shell={shell} />}
+            {view === 'docs' && <Docs shell={shell} secured={token !== null} />}
+          </Box>
+        </Explorers.Provider>
       )}
       {door === 'locked' && view === 'docs' && (
         <Box component="main">

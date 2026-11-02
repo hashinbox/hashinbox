@@ -26,6 +26,9 @@ pub struct Config {
     /// Allowlisted SPL tokens: the only tokens indexed and sent.
     #[serde(default)]
     pub tokens: Vec<Token>,
+    /// Fractional digits a view shows of the native currency; none: all.
+    #[serde(default)]
+    pub display_decimals: Option<u32>,
     /// How long a fetched blockhash and fee price sends, in milliseconds;
     /// default 5,000.
     #[serde(default = "Config::default_fee_ttl_ms")]
@@ -51,6 +54,9 @@ pub struct Token {
     /// Its display symbol, such as `USDC`; none: shown by its mint.
     #[serde(default)]
     pub ticker: Option<String>,
+    /// Fractional digits a view shows; none: all.
+    #[serde(default)]
+    pub display_decimals: Option<u32>,
 }
 
 impl Config {
@@ -62,6 +68,7 @@ impl Config {
             genesis_hash: network.genesis_hash,
             endpoints,
             tokens: Vec::new(),
+            display_decimals: None,
             fee_ttl_ms: Self::default_fee_ttl_ms(),
             pending_ttl_ms: Self::default_pending_ttl_ms(),
             interval_ms: Self::default_interval_ms(),
@@ -175,6 +182,7 @@ impl Config {
             decimals: SOL_DECIMALS,
             name: Some(SOL_NAME.to_owned()),
             ticker: Some(SOL_TICKER.to_owned()),
+            display_decimals: self.display_decimals,
         };
         let tokens = self.tokens.iter().map(|token| {
             let asset = Asset {
@@ -183,6 +191,7 @@ impl Config {
             };
             AssetInfo {
                 ticker: token.ticker.clone(),
+                display_decimals: token.display_decimals,
                 ..AssetInfo::token(asset, token.decimals.into())
             }
         });

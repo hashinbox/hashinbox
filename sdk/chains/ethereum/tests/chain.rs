@@ -98,6 +98,7 @@ fn config() -> Config {
         contract: TOKEN.parse().unwrap(),
         decimals: 6,
         ticker: None,
+        display_decimals: None,
     }];
     config
 }

@@ -1,23 +1,27 @@
+import FilterList from '@mui/icons-material/FilterList';
+import WorkHistory from '@mui/icons-material/WorkHistory';
+import Autocomplete from '@mui/material/Autocomplete';
 import Box from '@mui/material/Box';
-import MenuItem from '@mui/material/MenuItem';
+import Chip from '@mui/material/Chip';
 import Stack from '@mui/material/Stack';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
 import TableCell from '@mui/material/TableCell';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
-import Tab from '@mui/material/Tab';
-import Tabs from '@mui/material/Tabs';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { call, client, type Job } from '@/api/client';
 import type { Shell } from '@/layout';
+import { Empty } from '@/_components/empty';
 import { EmptyRow } from '@/_components/table';
+import { shorten } from '@/_components/trim';
+import { When } from '@/_components/when';
 import { mono } from '@/theme';
 
 const BEAT_MS = 4000;
-/** Every job kind there is, as the tabs show them. */
+/** Every job kind there is, as the filter names them. */
 const KINDS = [
   { kind: 'triggers', label: 'Triggers' },
   { kind: 'broadcast', label: 'Broadcast' },
@@ -29,6 +33,13 @@ function labelOf(kind: string): string {
   return KINDS.find((k) => k.kind === kind)?.label ?? kind;
 }
 const STATES = ['pending', 'running', 'succeeded', 'failed'] as const;
+
+/** One tag of the filter: a network, a kind or a state. */
+interface Filter {
+  group: 'network' | 'kind' | 'state';
+  value: string;
+  label: string;
+}
 const TONE: Record<Job['state'], string> = {
   pending: 'text.disabled',
   running: 'info.main',
@@ -54,30 +65,44 @@ function Dot({ state }: { state: Job['state'] }) {
   );
 }
 
-/** `ms` as a local time; within the next minute, as seconds from now. */
-function when(ms: number, now: number): string {
-  const ahead = ms - now;
-  if (ahead > 0 && ahead < 60_000) return `in ${Math.ceil(ahead / 1000)} s`;
-  return new Date(ms).toLocaleString();
+/** The network a job's input names (every kind's input carries one). */
+function networkOf(job: Job): string {
+  const input = job.input as { chain?: unknown; network?: unknown };
+  return typeof input.chain === 'string' && typeof input.network === 'string'
+    ? `${input.chain}/${input.network}`
+    : '—';
 }
 
-/** The queue, one tab per kind, each latest written first. */
+/** When a pending job runs next, counting down; nothing for one that already ran. */
+function next(job: Job): ReactNode {
+  if (job.state !== 'pending') return '—';
+  // 0: as soon as a worker is free.
+  return job.run_at === 0 ? 'now' : <When at={job.run_at} due />;
+}
+
+/** The queue, latest written first, filtered by network, kind and state. */
 export function Jobs({ shell }: { shell: Shell }) {
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [kind, setKind] = useState<string>(KINDS[0].kind);
-  const [state, setState] = useState<string>('');
+  const [tags, setTags] = useState<Filter[]>([]);
+  const valueOf = (group: Filter['group']) => tags.find((t) => t.group === group)?.value ?? '';
+  const network = valueOf('network');
+  const kind = valueOf('kind');
+  const state = valueOf('state');
   const [selected, setSelected] = useState<string | null>(null);
-  const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(() => {
-    const query = { kind, ...(state ? { state: state as Job['state'] } : {}) };
+    const [chainName, networkName] = network.split('/');
+    const query = {
+      ...(chainName && networkName ? { chain: chainName, network: networkName } : {}),
+      ...(kind ? { kind } : {}),
+      ...(state ? { state: state as Job['state'] } : {}),
+    };
     call(client.GET('/v1/jobs', { params: { query } }))
       .then((list) => {
         setJobs(list.jobs);
-        setNow(Date.now());
       })
       .catch(shell.fail);
-  }, [kind, state, shell.fail]);
+  }, [network, kind, state, shell.fail]);
 
   useEffect(() => {
     refresh();
@@ -86,7 +111,14 @@ export function Jobs({ shell }: { shell: Shell }) {
   }, [refresh]);
 
   const current = jobs.find((j) => j.id === selected) ?? null;
-
+  const networks = [
+    ...new Set(shell.listings.map((l) => `${l.network.chain}/${l.network.name}`)),
+  ].sort();
+  const options: Filter[] = [
+    ...networks.map((n) => ({ group: 'network' as const, value: n, label: n })),
+    ...KINDS.map((k) => ({ group: 'kind' as const, value: k.kind, label: k.label })),
+    ...STATES.map((v) => ({ group: 'state' as const, value: v, label: v })),
+  ];
   return (
     <Box
       sx={{
@@ -96,51 +128,76 @@ export function Jobs({ shell }: { shell: Shell }) {
       }}
     >
       <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
-        <Stack direction="row" spacing={2} sx={{ alignItems: 'center', mb: 2, flexWrap: 'wrap' }}>
-          <Typography variant="h3" sx={{ flexGrow: 1 }}>
-            Jobs
-          </Typography>
-          <TextField
-            select
-            size="small"
-            label="State"
-            value={state}
-            onChange={(e) => setState(e.target.value)}
-            sx={{ minWidth: 140 }}
-          >
-            <MenuItem value="">every state</MenuItem>
-            {STATES.map((s) => (
-              <MenuItem key={s} value={s}>
-                {s}
-              </MenuItem>
-            ))}
-          </TextField>
-        </Stack>
-        <Tabs
-          value={kind}
-          onChange={(_, next: string) => {
-            setKind(next);
+        <Autocomplete
+          multiple
+          size="small"
+          options={options}
+          value={tags}
+          groupBy={(o) => o.group}
+          getOptionLabel={(o) => o.label}
+          isOptionEqualToValue={(o, v) => o.group === v.group && o.value === v.value}
+          onChange={(_, next) => {
+            // One tag per group: a newer one replaces the older.
+            setTags(next.filter((t, i) => !next.slice(i + 1).some((u) => u.group === t.group)));
             setSelected(null);
           }}
-          aria-label="Job kinds"
-          sx={{ mb: 1 }}
-        >
-          {KINDS.map((k) => (
-            <Tab key={k.kind} value={k.kind} label={k.label} />
-          ))}
-        </Tabs>
+          renderValue={(value, getItemProps) =>
+            value.map((t, index) => (
+              <Chip
+                {...getItemProps({ index })}
+                key={`${t.group}:${t.value}`}
+                size="small"
+                label={
+                  <>
+                    <Box component="span" sx={{ color: 'text.secondary', mr: 0.5 }}>
+                      {t.group}
+                    </Box>
+                    {t.label}
+                  </>
+                }
+                sx={{ borderRadius: '6px', bgcolor: 'grey.100', fontSize: 12 }}
+              />
+            ))
+          }
+          renderInput={(params) => (
+            <TextField
+              {...params}
+              placeholder={tags.length === 0 ? 'Filter by network, kind or state' : ''}
+              slotProps={{
+                ...params.slotProps,
+                input: {
+                  ...params.slotProps.input,
+                  startAdornment: (
+                    <>
+                      <FilterList
+                        fontSize="small"
+                        aria-hidden
+                        sx={{ color: 'text.secondary', ml: 0.5, mr: 0.25 }}
+                      />
+                      {params.slotProps.input.startAdornment}
+                    </>
+                  ),
+                },
+                htmlInput: { ...params.slotProps.htmlInput, 'aria-label': 'Filter jobs' },
+              }}
+              sx={{ '& .MuiOutlinedInput-root': { gap: 0.5, fontSize: 13 } }}
+            />
+          )}
+          sx={{ mb: 2, maxWidth: 720 }}
+        />
         <Table size="small">
           <TableHead>
             <TableRow>
-              <TableCell sx={{ width: 24 }} />
-              <TableCell>Topic</TableCell>
-              <TableCell>Run at</TableCell>
-              <TableCell align="right">Attempts</TableCell>
+              <TableCell>Job</TableCell>
+              <TableCell>Kind</TableCell>
+              <TableCell>Network</TableCell>
+              <TableCell>Next run</TableCell>
+              <TableCell>Attempts</TableCell>
               <TableCell>Reason</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
-            {jobs.length === 0 && <EmptyRow columns={5} message="No job matches." />}
+            {jobs.length === 0 && <EmptyRow columns={6} message="No job matches." />}
             {jobs.map((j) => (
               <TableRow
                 key={j.id}
@@ -149,14 +206,13 @@ export function Jobs({ shell }: { shell: Shell }) {
                 onClick={() => setSelected(j.id)}
                 sx={{ cursor: 'pointer' }}
               >
-                <TableCell>
-                  <Dot state={j.state} />
+                <TableCell sx={{ ...figures, whiteSpace: 'nowrap' }} title={j.id}>
+                  <Dot state={j.state} /> {shorten(j.id)}
                 </TableCell>
-                <TableCell sx={figures}>{j.topic}</TableCell>
-                <TableCell sx={figures}>{when(j.run_at, now)}</TableCell>
-                <TableCell align="right" sx={figures}>
-                  {j.attempts}
-                </TableCell>
+                <TableCell>{labelOf(j.kind)}</TableCell>
+                <TableCell sx={figures}>{networkOf(j)}</TableCell>
+                <TableCell sx={figures}>{next(j)}</TableCell>
+                <TableCell sx={figures}>{j.attempts}</TableCell>
                 <TableCell
                   sx={{
                     ...figures,
@@ -185,33 +241,45 @@ export function Jobs({ shell }: { shell: Shell }) {
           [t.breakpoints.up('lg')]: { borderTop: 0, borderLeft: `1px solid ${t.palette.divider}` },
         })}
       >
-        {current ? (
-          <Detail job={current} now={now} />
-        ) : (
-          <Typography color="text.secondary">
-            Pick a job to see what it was given and did.
-          </Typography>
-        )}
+        {/* Held in view while the list beside it scrolls. */}
+        <Box
+          sx={{
+            position: { lg: 'sticky' },
+            top: { lg: 88 },
+            height: { lg: 'calc(100vh - 120px)' },
+            overflowY: { lg: 'auto' },
+          }}
+        >
+          {current ? (
+            <Detail job={current} />
+          ) : (
+            <Empty icon={<WorkHistory />} title="Jobs">
+              A job is a piece of background work, like indexing a network, checking triggers or
+              sending a payment, retried until it is done. Pick one to see its input, progress and
+              why it last stopped.
+            </Empty>
+          )}
+        </Box>
       </Box>
     </Box>
   );
 }
 
 /** One job whole: where it is, what it was given, what its worker did. */
-function Detail({ job, now }: { job: Job; now: number }) {
-  const facts: [string, string][] = [
+function Detail({ job }: { job: Job }) {
+  const facts: [string, ReactNode][] = [
     ['id', job.id],
     ['kind', job.kind],
     ['topic', job.topic],
     ['state', job.state],
-    ['run at', when(job.run_at, now)],
-    ['deadline', job.deadline === null ? '—' : new Date(job.deadline).toLocaleString()],
+    ['next run', next(job)],
+    ['deadline', job.deadline === null ? '—' : <When at={job.deadline} />],
     ['attempts', String(job.attempts)],
     ...(job.kind === 'broadcast'
       ? ([
           ['signed', String(job.signed)],
           ['accepted', String(job.accepted)],
-        ] as [string, string][])
+        ] as [string, ReactNode][])
       : []),
   ];
   return (

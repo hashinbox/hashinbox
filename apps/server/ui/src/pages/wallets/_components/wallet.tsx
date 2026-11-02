@@ -1,6 +1,12 @@
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
+import ButtonGroup from '@mui/material/ButtonGroup';
 import Chip from '@mui/material/Chip';
+import Dialog from '@mui/material/Dialog';
+import DialogActions from '@mui/material/DialogActions';
+import DialogContent from '@mui/material/DialogContent';
+import DialogTitle from '@mui/material/DialogTitle';
+import Link from '@mui/material/Link';
 import Stack from '@mui/material/Stack';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
@@ -12,11 +18,15 @@ import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
 import { call, client, type Balance, type Transaction, type Wallet as Account } from '@/api/client';
-import { Coin } from '@/_components/coin';
-import { Copy } from '@/_components/copy';
+import { Address } from '@/_components/address';
+import { Currency } from '@/_components/currency';
+import { format } from '@/_components/format';
+import { Money } from '@/_components/money';
 import { EmptyRow } from '@/_components/table';
+import { Transaction as Tx } from '@/_components/transaction';
 import type { Shell } from '@/layout';
-import { assetOf, atomic, decimalsOf, effect, format, shorten, unitOf } from '@/money';
+import { assetOf, decimalsOf, displayOf, effect, unitOf } from '@/money';
+import { go, href } from '@/route';
 import { mono } from '@/theme';
 import { Send } from './send';
 import { WatchDialog } from './watch';
@@ -63,10 +73,12 @@ export function Wallet({
 }) {
   const decimals = decimalsOf(wallet, shell.listings);
   const unit = unitOf(wallet, shell.listings);
+  const display = displayOf(wallet, shell.listings);
   const [balance, setBalance] = useState<Balance | null>(null);
   const [rows, setRows] = useState<Transaction[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [watchOpen, setWatchOpen] = useState(false);
+  const [tagOpen, setTagOpen] = useState(false);
 
   const refresh = useCallback(() => {
     const id = { path: { id: wallet.id } };
@@ -109,71 +121,62 @@ export function Wallet({
 
   return (
     <Box component="article">
-      <Box
-        sx={{
-          display: 'grid',
-          gridTemplateColumns: { xs: 'minmax(0, 1fr)', md: 'minmax(0, 1fr) auto' },
-          gap: 3,
-          pb: 3,
-          mb: 2.5,
-          borderBottom: 1,
-          borderColor: 'divider',
-        }}
-      >
-        <Box sx={{ minWidth: 0 }}>
-          <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center' }}>
-            <Coin symbol={assetOf(wallet)} size={26} />
-            <Typography variant="overline" component="p" sx={{ flexGrow: 1 }}>
-              {wallet.assets.length === 0 ? 'not watched' : wallet.assets.join(', ')} ·{' '}
+      <Box sx={{ pb: 2, mb: 2.5, borderBottom: 1, borderColor: 'divider' }}>
+        <Stack
+          direction="row"
+          spacing={1.5}
+          useFlexGap
+          sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}
+        >
+          <Box sx={{ display: 'flex', fontSize: 22 }}>
+            <Currency ticker={unit} label={false} />
+          </Box>
+          <Box sx={{ minWidth: 0 }}>
+            <Box sx={{ fontSize: 15 }}>
+              <Address value={wallet.address} network={wallet.network} trim={false} />
+            </Box>
+            <Typography
+              variant="overline"
+              component="p"
+              sx={{ whiteSpace: 'nowrap', lineHeight: 1.6 }}
+            >
               {wallet.network.chain}/{wallet.network.name}
+              {wallet.assets.length === 0 && ' · not watched'}
               {!wallet.keyed && ' · watch only'}
             </Typography>
-            <Button size="small" variant="outlined" onClick={() => setWatchOpen(true)}>
-              {wallet.assets.length === 0 ? 'Watch' : 'Watch more assets'}
-            </Button>
-          </Stack>
-          <Typography sx={{ fontFamily: mono, fontSize: 17, overflowWrap: 'anywhere', my: 0.5 }}>
-            {wallet.address}
-          </Typography>
-          <Stack
-            direction="row"
-            spacing={1.5}
-            sx={{ alignItems: 'baseline', ...figures, fontSize: 12, color: 'text.secondary' }}
-          >
-            <span>{wallet.id}</span>
-            <Copy text={wallet.id} label="copy id" onDone={shell.notify} />
-            <Copy text={wallet.address} label="copy address" onDone={shell.notify} />
-          </Stack>
-          <Tags shell={shell} wallet={wallet} tags={tags} onTagged={onTagged} />
-        </Box>
-        <Box sx={{ textAlign: { md: 'right' } }}>
-          <Typography variant="overline" component="p">
-            Balance
-          </Typography>
+          </Box>
+          <Tags
+            shell={shell}
+            wallet={wallet}
+            tags={tags}
+            adding={tagOpen}
+            onClose={() => setTagOpen(false)}
+            onTagged={onTagged}
+          />
+          <Box sx={{ flexGrow: 1 }} />
           <Typography
-            variant="h1"
+            variant="h3"
             component="p"
+            title={claim?.text}
             sx={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}
           >
-            {balance ? format(atomic(balance.amount, decimals), decimals) : '—'}{' '}
-            <Box component="span" sx={{ fontSize: 22, color: 'text.secondary' }}>
+            {balance ? format(balance.amount, { display }) : '—'}{' '}
+            <Box component="span" sx={{ fontSize: '0.6em', color: 'text.secondary' }}>
               {unit}
             </Box>
           </Typography>
-          {claim && (
-            <Typography
-              sx={{
-                fontSize: 12,
-                color: claim.color,
-                mt: 0.75,
-                maxWidth: '42ch',
-                ml: { md: 'auto' },
-              }}
-            >
-              {claim.text}
-            </Typography>
-          )}
-        </Box>
+          <ButtonGroup size="small" variant="outlined" aria-label="Wallet actions">
+            <Button onClick={() => setWatchOpen(true)}>
+              {wallet.assets.length === 0 ? 'Watch' : 'Watch more'}
+            </Button>
+            <Button onClick={() => setTagOpen(true)}>Add tag</Button>
+          </ButtonGroup>
+        </Stack>
+        {claim && claim.color !== 'text.secondary' && (
+          <Typography sx={{ fontSize: 12, color: claim.color, mt: 0.75, textAlign: 'right' }}>
+            {claim.text}
+          </Typography>
+        )}
       </Box>
 
       {wallet.keyed && (
@@ -187,19 +190,25 @@ export function Wallet({
         <Table>
           <TableHead>
             <TableRow>
-              <TableCell>Outcome</TableCell>
-              <TableCell align="right">Block</TableCell>
-              <TableCell align="right">Amount</TableCell>
-              <TableCell align="right">Fee</TableCell>
               <TableCell>Transaction</TableCell>
+              <TableCell>Block</TableCell>
+              <TableCell>Amount</TableCell>
+              <TableCell>Fee</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {rows.length === 0 ? (
-              <EmptyRow columns={5} message="No transactions yet." />
+              <EmptyRow columns={4} message="No transactions yet." />
             ) : (
               rows.map((tx) => (
-                <Row key={tx.transaction_id} shell={shell} tx={tx} decimals={decimals} />
+                <Row
+                  key={tx.transaction_id}
+                  wallet={wallet}
+                  tx={tx}
+                  decimals={decimals}
+                  display={display}
+                  unit={unit}
+                />
               ))
             )}
           </TableBody>
@@ -225,16 +234,20 @@ export function Wallet({
   );
 }
 
-/** The wallet's tags, removable, and a field to add one. */
+/** The wallet's tags, removable; `adding` opens the dialog that adds one. */
 function Tags({
   shell,
   wallet,
   tags,
+  adding,
+  onClose,
   onTagged,
 }: {
   shell: Shell;
   wallet: Account;
   tags: string[];
+  adding: boolean;
+  onClose: () => void;
   onTagged: () => void;
 }) {
   const [text, setText] = useState('');
@@ -246,6 +259,7 @@ function Tags({
     call(client.PUT('/v1/wallets/{id}/tags/{tag}', params(tag)))
       .then(() => {
         setText('');
+        onClose();
         onTagged();
       })
       .catch(shell.fail);
@@ -256,63 +270,95 @@ function Tags({
       .catch(shell.fail);
   };
   return (
-    <Stack
-      component="form"
-      direction="row"
-      onSubmit={add}
-      sx={{ flexWrap: 'wrap', gap: 0.75, alignItems: 'center', mt: 1.5 }}
-    >
-      {tags.map((tag) => (
-        <Chip key={tag} size="small" label={tag} onDelete={() => remove(tag)} />
-      ))}
-      <TextField
-        size="small"
-        placeholder="add tag"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        slotProps={{
-          htmlInput: {
-            'aria-label': 'Add tag',
-            pattern: '[a-z0-9-]{1,64}',
-            spellCheck: false,
-            sx: { py: 0.5, fontSize: 12, width: 110 },
-          },
-        }}
-      />
-    </Stack>
+    <>
+      {tags.length > 0 && (
+        <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
+          {tags.map((tag) => (
+            <Chip key={tag} size="small" label={tag} onDelete={() => remove(tag)} />
+          ))}
+        </Stack>
+      )}
+      <Dialog open={adding} onClose={onClose} maxWidth="xs" fullWidth>
+        <Box component="form" onSubmit={add}>
+          <DialogTitle>Add tag</DialogTitle>
+          <DialogContent>
+            <TextField
+              autoFocus
+              fullWidth
+              size="small"
+              placeholder="treasury"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              helperText="Lowercase letters, digits and dashes; up to 64."
+              slotProps={{
+                htmlInput: {
+                  'aria-label': 'Tag',
+                  pattern: '[a-z0-9-]{1,64}',
+                  spellCheck: false,
+                },
+              }}
+              sx={{ mt: 1 }}
+            />
+          </DialogContent>
+          <DialogActions>
+            <Button variant="text" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="contained">
+              Add
+            </Button>
+          </DialogActions>
+        </Box>
+      </Dialog>
+    </>
   );
 }
 
-function Row({ shell, tx, decimals }: { shell: Shell; tx: Transaction; decimals: number }) {
+function Row({
+  wallet,
+  tx,
+  decimals,
+  display,
+  unit,
+}: {
+  wallet: Account;
+  tx: Transaction;
+  decimals: number;
+  display: number | null;
+  unit: string;
+}) {
   const e = effect(tx, decimals);
-  const sign = e.net > 0n ? '+' : e.net < 0n ? '−' : '';
-  const color = tx.outcome === 'reverted' ? 'error.main' : 'text.primary';
+  const { chain, name } = wallet.network;
+  const block = ['networks', chain, name, 'blocks', String(tx.block.position)];
   return (
     <TableRow hover>
-      <TableCell sx={{ whiteSpace: 'nowrap', color }}>
-        {tx.outcome}
-        {tx.reason && (
-          <Box
-            component="small"
-            sx={{ ...figures, fontSize: 11, color: 'text.secondary', ml: 0.75 }}
-          >
-            {tx.reason}
+      <TableCell sx={{ ...figures, fontSize: 12, whiteSpace: 'nowrap' }}>
+        <Tx value={tx.transaction_id} network={wallet.network} />
+        {tx.outcome === 'reverted' && (
+          <Box component="small" sx={{ color: 'error.main', ml: 1 }} title={tx.reason ?? undefined}>
+            reverted
           </Box>
         )}
       </TableCell>
-      <TableCell align="right" sx={figures}>
-        {tx.block.height}
+      <TableCell sx={figures}>
+        <Link
+          href={href(block)}
+          underline="hover"
+          onClick={(event) => {
+            event.preventDefault();
+            go(block);
+          }}
+        >
+          {tx.block.position}
+        </Link>
       </TableCell>
-      <TableCell align="right" sx={figures}>
-        {sign}
-        {format(e.net < 0n ? -e.net : e.net, decimals)}
+      <TableCell sx={figures}>
+        <Money amount={e.net.toString()} decimals={decimals} display={display} ticker={unit} />
       </TableCell>
-      <TableCell align="right" sx={figures}>
-        {e.fee > 0n ? format(e.fee, decimals) : ''}
-      </TableCell>
-      <TableCell sx={{ ...figures, fontSize: 12, whiteSpace: 'nowrap' }}>
-        <span title={tx.transaction_id}>{shorten(tx.transaction_id)}</span>{' '}
-        <Copy text={tx.transaction_id} label="copy" onDone={shell.notify} />
+      <TableCell sx={figures}>
+        {e.fee > 0n && (
+          <Money amount={e.fee.toString()} decimals={decimals} display={display} ticker={unit} />
+        )}
       </TableCell>
     </TableRow>
   );

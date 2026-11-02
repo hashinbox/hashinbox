@@ -2967,6 +2967,7 @@ dependencies = [
  "url",
  "utoipa",
  "utoipa-axum",
+ "uuid",
  "zeroize",
 ]
 

@@ -29,12 +29,54 @@ pub(crate) enum Selector {
     Asset(String),
     /// Every wallet index whose address carries this tag.
     Tag(String),
+    /// Every wallet index whose address carries no tag at all.
+    Untagged {},
     /// In every one of these (AND; empty: all).
     All(Vec<Selector>),
     /// In any of these (OR; empty: none).
     Any(Vec<Selector>),
     /// Not in this one (relative to the network's fully indexed indexes).
     Not(Box<Selector>),
+}
+
+impl Selector {
+    /// Whether it names wallets on purpose: no empty group (an empty "all
+    /// of" would be every wallet, an empty "any of" none), no "not" right
+    /// inside a "not", no empty id list, no empty asset, every tag well
+    /// formed.
+    ///
+    /// # Errors
+    ///
+    /// The first part that does not.
+    pub(crate) fn validate(&self) -> Result<(), super::trigger::Invalid> {
+        use super::trigger::Invalid;
+        match self {
+            Self::Ids(ids) if ids.is_empty() => Err(Invalid::new("a wallet list picks no wallet")),
+            Self::Ids(_) => Ok(()),
+            Self::Asset(asset) if asset.is_empty() => Err(Invalid::new("an asset is named")),
+            Self::Asset(_) => Ok(()),
+            Self::Tag(tag)
+                if !(1..=64).contains(&tag.len())
+                    || !tag
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') =>
+            {
+                Err(Invalid::new("a tag is 1 to 64 of [a-z0-9-]"))
+            }
+            Self::Tag(_) | Self::Untagged {} => Ok(()),
+            Self::All(all) if all.is_empty() => Err(Invalid::new(
+                "an empty \"all of\" would select every wallet; name them by tag, asset or id",
+            )),
+            Self::Any(any) if any.is_empty() => {
+                Err(Invalid::new("an empty \"any of\" selects no wallet"))
+            }
+            Self::All(many) | Self::Any(many) => many.iter().try_for_each(Self::validate),
+            Self::Not(one) if matches!(**one, Self::Not(_)) => {
+                Err(Invalid::new("a \"not\" inside a \"not\" cancels out"))
+            }
+            Self::Not(one) => one.validate(),
+        }
+    }
 }
 
 /// A boolean condition on one `wallet_index` row.
@@ -64,6 +106,20 @@ impl Selector {
                         ),
                     ),
             ),
+            Self::Untagged {} => Box::new(not(wallet_index::chain
+                .concat(".")
+                .concat(wallet_index::network)
+                .concat(".")
+                .concat(wallet_index::address)
+                .eq_any(
+                    tag::table.select(
+                        tag::chain
+                            .concat(".")
+                            .concat(tag::network)
+                            .concat(".")
+                            .concat(tag::address),
+                    ),
+                ))),
             Self::All(all) => all
                 .iter()
                 .map(Self::predicate)
@@ -261,6 +317,19 @@ pub(crate) mod db {
     }
 
     /// Every index of every network.
+    /// How many distinct addresses of every network are indexed.
+    pub(crate) fn count_addresses(connection: &mut SqliteConnection) -> QueryResult<usize> {
+        wallet_index::table
+            .select((
+                wallet_index::chain,
+                wallet_index::network,
+                wallet_index::address,
+            ))
+            .distinct()
+            .load::<(String, String, String)>(connection)
+            .map(|rows| rows.len())
+    }
+
     pub(crate) fn find_every(connection: &mut SqliteConnection) -> QueryResult<WalletIndexes> {
         wallet_index::table
             .select(Row::as_select())

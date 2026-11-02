@@ -27,6 +27,9 @@ pub struct Config {
     /// Allowlisted ERC-20 tokens: the only tokens indexed and sent.
     #[serde(default)]
     pub tokens: Vec<Token>,
+    /// Fractional digits a view shows of the native currency; none: all.
+    #[serde(default)]
+    pub display_decimals: Option<u32>,
     /// Ceilings on the fees a transaction is built under.
     #[serde(default)]
     pub limits: FeeLimits,
@@ -54,6 +57,9 @@ pub struct Token {
     /// Its display symbol, such as `USDC`; none: shown by its contract.
     #[serde(default)]
     pub ticker: Option<String>,
+    /// Fractional digits a view shows; none: all.
+    #[serde(default)]
+    pub display_decimals: Option<u32>,
 }
 
 impl Config {
@@ -66,6 +72,7 @@ impl Config {
             chain_id: network.chain_id,
             endpoints,
             tokens: Vec::new(),
+            display_decimals: None,
             limits: FeeLimits::default(),
             fee_ttl_ms: Self::default_fee_ttl_ms(),
             pending_ttl_ms: Self::default_pending_ttl_ms(),
@@ -186,6 +193,7 @@ impl Config {
             decimals: ETH_DECIMALS,
             name: Some(ETH_NAME.to_owned()),
             ticker: Some(ETH_TICKER.to_owned()),
+            display_decimals: self.display_decimals,
         };
         let tokens = self.tokens.iter().map(|token| {
             let asset = Asset {
@@ -194,6 +202,7 @@ impl Config {
             };
             AssetInfo {
                 ticker: token.ticker.clone(),
+                display_decimals: token.display_decimals,
                 ..AssetInfo::token(asset, token.decimals.into())
             }
         });

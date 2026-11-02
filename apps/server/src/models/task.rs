@@ -126,15 +126,55 @@ pub(crate) mod db {
             .optional()
     }
 
-    /// The `limit` tasks last written, latest first, of `kind` and `status`
-    /// when given.
+    /// How many jobs are in each status, as (status, count).
+    pub(crate) fn count_by_status(
+        connection: &mut SqliteConnection,
+    ) -> QueryResult<Vec<(i32, i64)>> {
+        q::table
+            .group_by(q::status)
+            .select((q::status, diesel::dsl::count_star()))
+            .load(connection)
+    }
+
+    /// The status and last write (Unix ms) of every job that finished
+    /// (succeeded or failed) at or after `since`.
+    pub(crate) fn find_finished_since(
+        connection: &mut SqliteConnection,
+        since: i64,
+    ) -> QueryResult<Vec<(i32, i64)>> {
+        q::table
+            .filter(q::status.eq_any([2, 3]))
+            .filter(q::updated_at.ge(since))
+            .select((q::status, q::updated_at))
+            .load(connection)
+    }
+
+    /// The `limit` tasks last written, latest first, of `network`, `kind`
+    /// and `status` when given. A job's network is its input's `chain` and
+    /// `network`, which every job kind's input carries.
     pub(crate) fn find_recent(
         connection: &mut SqliteConnection,
+        network: Option<&base::Network>,
         kind: Option<&str>,
         status: Option<i32>,
         limit: i64,
     ) -> QueryResult<Tasks> {
+        use diesel::{
+            dsl::sql,
+            sql_types::{Bool, Text},
+        };
         let mut query = q::table.into_boxed();
+        if let Some(network) = network {
+            query = query
+                .filter(
+                    sql::<Bool>("json_extract(input, '$.chain') = ")
+                        .bind::<Text, _>(network.chain.to_string()),
+                )
+                .filter(
+                    sql::<Bool>("json_extract(input, '$.network') = ")
+                        .bind::<Text, _>(network.name.clone()),
+                );
+        }
         if let Some(kind) = kind {
             query = query.filter(q::kind.eq(kind));
         }

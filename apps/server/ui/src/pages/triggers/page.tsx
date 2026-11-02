@@ -1,4 +1,5 @@
 import Add from '@mui/icons-material/Add';
+import Bolt from '@mui/icons-material/Bolt';
 import Box from '@mui/material/Box';
 import Chip from '@mui/material/Chip';
 import IconButton from '@mui/material/IconButton';
@@ -10,6 +11,7 @@ import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState } from 'react';
 import { call, client, type Listing, type Trigger, type Wallet } from '@/api/client';
 import { assetName } from '@/money';
+import { Empty } from '@/_components/empty';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { Editor } from './_components/editor';
@@ -55,7 +57,7 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
 
   useEffect(refresh, [refresh]);
   useEffect(() => {
-    call(client.GET('/v1/tags'))
+    call(client.GET('/v1/wallets/tags'))
       .then((list) => setTags([...new Set(list.tags.map((t) => t.tag))].sort()))
       .catch(shell.fail);
   }, [shell.fail]);
@@ -87,7 +89,14 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
             Triggers
           </Typography>
           <Tooltip title="New trigger">
-            <IconButton size="small" aria-label="New trigger" onClick={() => setChoosing(true)}>
+            <IconButton
+              size="small"
+              aria-label="New trigger"
+              onClick={(e) => {
+                e.currentTarget.blur();
+                setChoosing(true);
+              }}
+            >
               <Add fontSize="small" />
             </IconButton>
           </Tooltip>
@@ -159,9 +168,10 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
             />
           )
         ) : (
-          <Typography variant="h3" color="text.secondary">
-            Pick a trigger, or start new ones with +.
-          </Typography>
+          <Empty icon={<Bolt />} title="Triggers">
+            A trigger watches wallets and sends money on its own when a rule is met, like a balance
+            going over a limit. Pick one to edit its rule and action, or add new ones with +.
+          </Empty>
         )}
       </Box>
 

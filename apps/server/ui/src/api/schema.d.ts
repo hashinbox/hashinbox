@@ -141,6 +141,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/networks/{chain}/{network}/blocks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List a network's last kept blocks and its pending transactions */
+        get: operations["list_blocks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/networks/{chain}/{network}/blocks/{position}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read one kept block of a network, with its kept transactions */
+        get: operations["read_block"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/networks/{chain}/{network}/rpc": {
         parameters: {
             query?: never;
@@ -181,15 +215,18 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/tags": {
+    "/v1/stats": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List every tag */
-        get: operations["list_tags"];
+        /**
+         * Read what the store holds and its last day
+         * @description Counts across every network, and per hour over the last day: blocks and transactions by chain time (up to the newest kept block), jobs and trigger runs by this server's time.
+         */
+        get: operations["read_stats"];
         put?: never;
         post?: never;
         delete?: never;
@@ -276,6 +313,23 @@ export interface paths {
          * @description Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start. A generated wallet with empty `assets` is kept unwatched.
          */
         post: operations["create_wallet"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/wallets/tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List every tag */
+        get: operations["list_tags"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -380,6 +434,11 @@ export interface components {
              * @description Decimal places between atomic and display units.
              */
             decimals: number;
+            /**
+             * Format: int32
+             * @description Fractional digits a view shows; always present, null: all.
+             */
+            display_decimals: number | null;
             /** @description Asset ID within the chain (`native` or a token identifier). */
             id: string;
             /** @description Display name, when known; always present. */
@@ -440,8 +499,88 @@ export interface components {
              */
             timestamp: number | null;
         };
+        /** @description One kept block. */
+        ChainBlock: {
+            /** @description Block hash, hexadecimal. */
+            hash: string;
+            /**
+             * Format: int64
+             * @description Native position (height or slot).
+             */
+            position: number;
+            /**
+             * Format: int64
+             * @description Unix seconds, when reported; always present.
+             */
+            timestamp: number | null;
+            /** @description Its kept transactions, in block order. */
+            transactions: components["schemas"]["ChainTransaction"][];
+        };
+        /** @description One hour of chain time, across every network. */
+        ChainHour: {
+            /**
+             * Format: int64
+             * @description Live blocks stamped in it.
+             */
+            blocks: number;
+            /**
+             * Format: int64
+             * @description Its start, Unix seconds.
+             */
+            start: number;
+            /**
+             * Format: int64
+             * @description Kept transactions mined in those blocks.
+             */
+            transactions: number;
+        };
+        /** @description One kept leg: an indexed address's movement in a transaction. */
+        ChainLeg: {
+            address: string;
+            /** @description Exact atomic decimal. */
+            amount: string;
+            /** @description Asset id of the network. */
+            asset: string;
+            kind: components["schemas"]["ChainLegKind"];
+        };
+        /**
+         * @description What a leg did to its address.
+         * @enum {string}
+         */
+        ChainLegKind: "received" | "spent" | "burned" | "minted" | "fee";
+        /**
+         * @description Where a transaction is.
+         * @enum {string}
+         */
+        ChainState: "pending" | "succeeded" | "reverted";
+        /** @description One kept transaction. */
+        ChainTransaction: {
+            /**
+             * Format: int64
+             * @description Unix ms it stops holding funds; always present, null once mined.
+             */
+            expires_at: number | null;
+            /** @description The kept legs, in order. */
+            legs: components["schemas"]["ChainLeg"][];
+            /**
+             * Format: int64
+             * @description Position in its block; always present, null while pending.
+             */
+            order: number | null;
+            state: components["schemas"]["ChainState"];
+            /** @description Chain-native transaction id. */
+            txid: string;
+        };
+        /** @description `GET /v1/networks/{chain}/{network}/blocks`. */
+        ChainView: {
+            /** @description The last kept blocks, latest first. */
+            blocks: components["schemas"]["ChainBlock"][];
+            /** @description The pending transactions, oldest sent first. */
+            mempool: components["schemas"]["ChainTransaction"][];
+        };
         /** @description One configured network, its indexing, and its nodes. */
         ConfiguredNetwork: {
+            explorer: null | components["schemas"]["Explorer"];
             /** @description What its indexer did since the process started. */
             indexing: components["schemas"]["Indexing"];
             network: components["schemas"]["Network"];
@@ -496,6 +635,13 @@ export interface components {
             failed_index?: number;
             /** @description What went wrong. */
             message: string;
+        };
+        /** @description One network's explorer links. */
+        Explorer: {
+            /** @description An address's page; `{address}` is replaced by the address. */
+            address: string;
+            /** @description A transaction's page; `{tx}` is replaced by the transaction id. */
+            transaction: string;
         };
         /**
          * @description The `"fresh"` literal of a `Start`.
@@ -575,6 +721,17 @@ export interface components {
             state: components["schemas"]["JobState"];
             /** @description What it locks: jobs whose topics conflict run one at a time, in id order. */
             topic: string;
+        };
+        /** @description Jobs by where they are. */
+        JobCounts: {
+            /** Format: int64 */
+            failed: number;
+            /** Format: int64 */
+            pending: number;
+            /** Format: int64 */
+            running: number;
+            /** Format: int64 */
+            succeeded: number;
         };
         /** @description `GET /v1/jobs`. */
         JobList: {
@@ -732,8 +889,98 @@ export interface components {
             /** @description The send job; `GET /v1/jobs/{id}` reports it. */
             job: string;
         };
+        /** @description One hour of this server's time. */
+        ServerHour: {
+            /**
+             * Format: int64
+             * @description Jobs that failed for good in it.
+             */
+            failed: number;
+            /**
+             * Format: int64
+             * @description Trigger runs started in it.
+             */
+            runs: number;
+            /**
+             * Format: int64
+             * @description Its start, Unix seconds.
+             */
+            start: number;
+            /**
+             * Format: int64
+             * @description Jobs that succeeded in it.
+             */
+            succeeded: number;
+        };
         /** @description A wallet's birthday on the wire: `"fresh"` or a native position. */
         Start: components["schemas"]["Fresh"] | number;
+        /** @description `GET /v1/stats`. */
+        Stats: {
+            /**
+             * Format: int64
+             * @description Distinct addresses indexed, keyed or watch-only.
+             */
+            addresses: number;
+            /**
+             * Format: int64
+             * @description Live blocks kept.
+             */
+            blocks: number;
+            /**
+             * @description The last day of chain time (up to the newest kept block), hour by
+             *     hour, oldest first.
+             */
+            chain: components["schemas"]["ChainHour"][];
+            /**
+             * Format: int64
+             * @description Of those, how many are enabled.
+             */
+            enabled: number;
+            /** @description Jobs by where they are. */
+            jobs: components["schemas"]["JobCounts"];
+            /**
+             * Format: int64
+             * @description Legs kept: movements and rewards.
+             */
+            movements: number;
+            /**
+             * Format: int64
+             * @description Transactions kept pending.
+             */
+            pending: number;
+            /**
+             * Format: int64
+             * @description Blocks a reorg archived.
+             */
+            reorged: number;
+            /**
+             * Format: int64
+             * @description Of those, how many reverted.
+             */
+            reverted: number;
+            /** @description The last day of this server's time, hour by hour, oldest first. */
+            server: components["schemas"]["ServerHour"][];
+            /**
+             * Format: int64
+             * @description Tags on addresses.
+             */
+            tags: number;
+            /**
+             * Format: int64
+             * @description Transactions kept mined in live blocks.
+             */
+            transactions: number;
+            /**
+             * Format: int64
+             * @description Triggers kept.
+             */
+            triggers: number;
+            /**
+             * Format: int64
+             * @description Wallets whose key is kept.
+             */
+            wallets: number;
+        };
         /** @description One tag on one address. */
         Tag: {
             /** @description The tag: 1 to 64 of `[a-z0-9-]`. */
@@ -741,7 +988,7 @@ export interface components {
             /** @description `<chain>:<network>:<address>`, as the wallet routes take it. */
             wallet_id: string;
         };
-        /** @description `GET /v1/tags`. */
+        /** @description `GET /v1/wallets/tags`. */
         TagList: {
             /** @description Every tag, by network, address, then tag. */
             tags: components["schemas"]["Tag"][];
@@ -805,13 +1052,15 @@ export interface components {
              *     every one.
              */
             filter?: Record<string, never> | null;
+            /** @description The batch it was created in: every trigger of one create shares it. */
+            group: string;
             /** @description Its slug: 1 to 64 of `[a-z0-9-]`. */
             id: string;
             /** @description Network name, as `GET /v1/assets` lists it. */
             network: string;
             /**
              * @description Which wallet indexes it acts on: `{"ids": […]}`, `{"asset": "…"}`,
-             *     `{"tag": "…"}`, `{"all": […]}`, `{"any": […]}`, `{"not": …}`.
+             *     `{"tag": "…"}`, `{"untagged": {}}`, `{"all": […]}`, `{"any": […]}`, `{"not": …}`.
              */
             selector: Record<string, never>;
             /**
@@ -973,6 +1222,10 @@ export interface operations {
     list_jobs: {
         parameters: {
             query?: {
+                /** @description Only jobs of this chain; with `network`. */
+                chain?: string;
+                /** @description Only jobs of this network of `chain`. */
+                network?: string;
                 /** @description Only this kind (`index`, `expire`, `triggers`, `broadcast`). */
                 kind?: string;
                 /** @description Only jobs in this state. */
@@ -995,7 +1248,7 @@ export interface operations {
                     "application/json": components["schemas"]["JobList"];
                 };
             };
-            /** @description Malformed query or limit */
+            /** @description Malformed query or limit, or a chain without its network */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1172,6 +1425,124 @@ export interface operations {
             };
         };
     };
+    list_blocks: {
+        parameters: {
+            query?: {
+                /** @description At most this many, 1 to 100; 20 by default. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The last blocks and the mempool */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChainView"];
+                };
+            };
+            /** @description Malformed query or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The network is not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    read_block: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+                /** @description Native position (height or slot). */
+                position: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The block */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChainBlock"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The network is not configured, or no live block is kept at this position */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     replace_network_rpc: {
         parameters: {
             query?: never;
@@ -1298,7 +1669,7 @@ export interface operations {
             };
         };
     };
-    list_tags: {
+    read_stats: {
         parameters: {
             query?: never;
             header?: never;
@@ -1307,13 +1678,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Every tag */
+            /** @description The stats */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TagList"];
+                    "application/json": components["schemas"]["Stats"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -1733,6 +2104,44 @@ export interface operations {
                 };
             };
             /** @description Generation, the node or the store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_tags: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every tag */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TagList"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

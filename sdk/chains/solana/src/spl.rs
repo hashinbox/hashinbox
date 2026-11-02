@@ -128,6 +128,7 @@ impl Tokens {
             mint,
             decimals,
             ticker: None,
+            display_decimals: None,
         })
     }
 }

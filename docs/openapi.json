@@ -125,6 +125,24 @@
         "operationId": "list_jobs",
         "parameters": [
           {
+            "name": "chain",
+            "in": "query",
+            "description": "Only jobs of this chain; with `network`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "query",
+            "description": "Only jobs of this network of `chain`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "kind",
             "in": "query",
             "description": "Only this kind (`index`, `expire`, `triggers`, `broadcast`).",
@@ -165,7 +183,7 @@
             }
           },
           "400": {
-            "description": "Malformed query or limit",
+            "description": "Malformed query or limit, or a chain without its network",
             "content": {
               "application/json": {
                 "schema": {
@@ -394,6 +412,189 @@
         ]
       }
     },
+    "/v1/networks/{chain}/{network}/blocks": {
+      "get": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "List a network's last kept blocks and its pending transactions",
+        "operationId": "list_blocks",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "At most this many, 1 to 100; 20 by default.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The last blocks and the mempool",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChainView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/networks/{chain}/{network}/blocks/{position}": {
+      "get": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "Read one kept block of a network, with its kept transactions",
+        "operationId": "read_block",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "position",
+            "in": "path",
+            "description": "Native position (height or slot).",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The block",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChainBlock"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The network is not configured, or no live block is kept at this position",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/networks/{chain}/{network}/rpc": {
       "put": {
         "tags": [
@@ -586,20 +787,21 @@
         ]
       }
     },
-    "/v1/tags": {
+    "/v1/stats": {
       "get": {
         "tags": [
-          "triggers"
+          "stats"
         ],
-        "summary": "List every tag",
-        "operationId": "list_tags",
+        "summary": "Read what the store holds and its last day",
+        "description": "Counts across every network, and per hour over the last day: blocks and transactions by chain time (up to the newest kept block), jobs and trigger runs by this server's time.",
+        "operationId": "read_stats",
         "responses": {
           "200": {
-            "description": "Every tag",
+            "description": "The stats",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TagList"
+                  "$ref": "#/components/schemas/Stats"
                 }
               }
             }
@@ -1137,6 +1339,52 @@
           },
           "503": {
             "description": "Generation, the node or the store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/tags": {
+      "get": {
+        "tags": [
+          "triggers"
+        ],
+        "summary": "List every tag",
+        "operationId": "list_tags",
+        "responses": {
+          "200": {
+            "description": "Every tag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TagList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1692,7 +1940,8 @@
           "id",
           "name",
           "ticker",
-          "decimals"
+          "decimals",
+          "display_decimals"
         ],
         "properties": {
           "chain": {
@@ -1703,6 +1952,15 @@
             "type": "integer",
             "format": "int32",
             "description": "Decimal places between atomic and display units.",
+            "minimum": 0
+          },
+          "display_decimals": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Fractional digits a view shows; always present, null: all.",
             "minimum": 0
           },
           "id": {
@@ -1816,15 +2074,206 @@
           }
         }
       },
+      "ChainBlock": {
+        "type": "object",
+        "description": "One kept block.",
+        "required": [
+          "position",
+          "hash",
+          "timestamp",
+          "transactions"
+        ],
+        "properties": {
+          "hash": {
+            "type": "string",
+            "description": "Block hash, hexadecimal."
+          },
+          "position": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Native position (height or slot).",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix seconds, when reported; always present.",
+            "minimum": 0
+          },
+          "transactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChainTransaction"
+            },
+            "description": "Its kept transactions, in block order."
+          }
+        }
+      },
+      "ChainHour": {
+        "type": "object",
+        "description": "One hour of chain time, across every network.",
+        "required": [
+          "start",
+          "blocks",
+          "transactions"
+        ],
+        "properties": {
+          "blocks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live blocks stamped in it.",
+            "minimum": 0
+          },
+          "start": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its start, Unix seconds."
+          },
+          "transactions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Kept transactions mined in those blocks.",
+            "minimum": 0
+          }
+        }
+      },
+      "ChainLeg": {
+        "type": "object",
+        "description": "One kept leg: an indexed address's movement in a transaction.",
+        "required": [
+          "address",
+          "asset",
+          "kind",
+          "amount"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "string",
+            "description": "Exact atomic decimal."
+          },
+          "asset": {
+            "type": "string",
+            "description": "Asset id of the network."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ChainLegKind"
+          }
+        }
+      },
+      "ChainLegKind": {
+        "type": "string",
+        "description": "What a leg did to its address.",
+        "enum": [
+          "received",
+          "spent",
+          "burned",
+          "minted",
+          "fee"
+        ]
+      },
+      "ChainState": {
+        "type": "string",
+        "description": "Where a transaction is.",
+        "enum": [
+          "pending",
+          "succeeded",
+          "reverted"
+        ]
+      },
+      "ChainTransaction": {
+        "type": "object",
+        "description": "One kept transaction.",
+        "required": [
+          "txid",
+          "order",
+          "state",
+          "expires_at",
+          "legs"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms it stops holding funds; always present, null once mined."
+          },
+          "legs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChainLeg"
+            },
+            "description": "The kept legs, in order."
+          },
+          "order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Position in its block; always present, null while pending."
+          },
+          "state": {
+            "$ref": "#/components/schemas/ChainState"
+          },
+          "txid": {
+            "type": "string",
+            "description": "Chain-native transaction id."
+          }
+        }
+      },
+      "ChainView": {
+        "type": "object",
+        "description": "`GET /v1/networks/{chain}/{network}/blocks`.",
+        "required": [
+          "blocks",
+          "mempool"
+        ],
+        "properties": {
+          "blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChainBlock"
+            },
+            "description": "The last kept blocks, latest first."
+          },
+          "mempool": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChainTransaction"
+            },
+            "description": "The pending transactions, oldest sent first."
+          }
+        }
+      },
       "ConfiguredNetwork": {
         "type": "object",
         "description": "One configured network, its indexing, and its nodes.",
         "required": [
           "network",
           "indexing",
-          "nodes"
+          "nodes",
+          "explorer"
         ],
         "properties": {
+          "explorer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Explorer",
+                "description": "Its block explorer links; always present, null when none is configured."
+              }
+            ]
+          },
           "indexing": {
             "$ref": "#/components/schemas/Indexing",
             "description": "What its indexer did since the process started."
@@ -1913,6 +2362,25 @@
             "description": "What went wrong."
           }
         }
+      },
+      "Explorer": {
+        "type": "object",
+        "description": "One network's explorer links.",
+        "required": [
+          "address",
+          "transaction"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "An address's page; `{address}` is replaced by the address."
+          },
+          "transaction": {
+            "type": "string",
+            "description": "A transaction's page; `{tx}` is replaced by the transaction id."
+          }
+        },
+        "additionalProperties": false
       },
       "Fresh": {
         "type": "string",
@@ -2067,6 +2535,38 @@
           "topic": {
             "type": "string",
             "description": "What it locks: jobs whose topics conflict run one at a time, in id order."
+          }
+        }
+      },
+      "JobCounts": {
+        "type": "object",
+        "description": "Jobs by where they are.",
+        "required": [
+          "pending",
+          "running",
+          "succeeded",
+          "failed"
+        ],
+        "properties": {
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "running": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "succeeded": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },
@@ -2454,6 +2954,41 @@
           }
         }
       },
+      "ServerHour": {
+        "type": "object",
+        "description": "One hour of this server's time.",
+        "required": [
+          "start",
+          "succeeded",
+          "failed",
+          "runs"
+        ],
+        "properties": {
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Jobs that failed for good in it.",
+            "minimum": 0
+          },
+          "runs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Trigger runs started in it.",
+            "minimum": 0
+          },
+          "start": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its start, Unix seconds."
+          },
+          "succeeded": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Jobs that succeeded in it.",
+            "minimum": 0
+          }
+        }
+      },
       "Start": {
         "oneOf": [
           {
@@ -2468,6 +3003,112 @@
           }
         ],
         "description": "A wallet's birthday on the wire: `\"fresh\"` or a native position."
+      },
+      "Stats": {
+        "type": "object",
+        "description": "`GET /v1/stats`.",
+        "required": [
+          "wallets",
+          "addresses",
+          "tags",
+          "blocks",
+          "reorged",
+          "transactions",
+          "reverted",
+          "pending",
+          "movements",
+          "triggers",
+          "enabled",
+          "jobs",
+          "chain",
+          "server"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct addresses indexed, keyed or watch-only.",
+            "minimum": 0
+          },
+          "blocks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live blocks kept.",
+            "minimum": 0
+          },
+          "chain": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChainHour"
+            },
+            "description": "The last day of chain time (up to the newest kept block), hour by\nhour, oldest first."
+          },
+          "enabled": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, how many are enabled.",
+            "minimum": 0
+          },
+          "jobs": {
+            "$ref": "#/components/schemas/JobCounts",
+            "description": "Jobs by where they are."
+          },
+          "movements": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Legs kept: movements and rewards.",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Transactions kept pending.",
+            "minimum": 0
+          },
+          "reorged": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Blocks a reorg archived.",
+            "minimum": 0
+          },
+          "reverted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, how many reverted.",
+            "minimum": 0
+          },
+          "server": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServerHour"
+            },
+            "description": "The last day of this server's time, hour by hour, oldest first."
+          },
+          "tags": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tags on addresses.",
+            "minimum": 0
+          },
+          "transactions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Transactions kept mined in live blocks.",
+            "minimum": 0
+          },
+          "triggers": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Triggers kept.",
+            "minimum": 0
+          },
+          "wallets": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Wallets whose key is kept.",
+            "minimum": 0
+          }
+        }
       },
       "Tag": {
         "type": "object",
@@ -2489,7 +3130,7 @@
       },
       "TagList": {
         "type": "object",
-        "description": "`GET /v1/tags`.",
+        "description": "`GET /v1/wallets/tags`.",
         "required": [
           "tags"
         ],
@@ -2597,6 +3238,7 @@
           "id",
           "chain",
           "network",
+          "group",
           "selector",
           "check",
           "action",
@@ -2633,6 +3275,10 @@
             ],
             "description": "Which of them it acts on: compares under `all`/`any`/`not`; null:\nevery one."
           },
+          "group": {
+            "type": "string",
+            "description": "The batch it was created in: every trigger of one create shares it."
+          },
           "id": {
             "type": "string",
             "description": "Its slug: 1 to 64 of `[a-z0-9-]`."
@@ -2643,7 +3289,7 @@
           },
           "selector": {
             "type": "object",
-            "description": "Which wallet indexes it acts on: `{\"ids\": […]}`, `{\"asset\": \"…\"}`,\n`{\"tag\": \"…\"}`, `{\"all\": […]}`, `{\"any\": […]}`, `{\"not\": …}`."
+            "description": "Which wallet indexes it acts on: `{\"ids\": […]}`, `{\"asset\": \"…\"}`,\n`{\"tag\": \"…\"}`, `{\"untagged\": {}}`, `{\"all\": […]}`, `{\"any\": […]}`, `{\"not\": …}`."
           },
           "updated_at": {
             "type": "integer",
@@ -2838,6 +3484,10 @@
     {
       "name": "jobs",
       "description": "The job queue: indexing, expiry, trigger rounds, broadcasts"
+    },
+    {
+      "name": "stats",
+      "description": "What the store holds and its last day"
     },
     {
       "name": "health",

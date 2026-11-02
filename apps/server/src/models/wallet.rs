@@ -171,6 +171,11 @@ pub(crate) mod db {
         Ok(wallets.into())
     }
 
+    /// How many wallets (keyed) every network keeps.
+    pub(crate) fn count(connection: &mut SqliteConnection) -> QueryResult<i64> {
+        wallet::table.count().get_result(connection)
+    }
+
     /// The wallets with a wallet index `selector` picks.
     pub(crate) fn find_indexed(
         connection: &mut SqliteConnection,

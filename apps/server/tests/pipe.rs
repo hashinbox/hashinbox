@@ -241,7 +241,9 @@ fn combinators_are_set_operations_within_the_universe() {
             c
         ),
         [id("b", "native")]
-    );
+    ); // No tag: only addresses no tag names, whatever the tag.
+    tag_with(c, &address("b"), "cold").unwrap();
+    assert_eq!(ids(&Selector::Untagged {}, c), [id("c", "tok")]);
 }
 
 #[test]
@@ -367,6 +369,7 @@ fn open<'a>(
         id: "t".to_owned(),
         chain: "bitcoin".to_owned(),
         network: "regtest".to_owned(),
+        group_id: "group".to_owned(),
         selector: Json(Selector::Ids(Vec::new())),
         filter: None,
         check: Json(Logic::All(Vec::new())),
@@ -757,6 +760,7 @@ fn triggers_and_their_runs_are_stored() {
         id: "sweep".to_owned(),
         chain: "bitcoin".to_owned(),
         network: "regtest".to_owned(),
+        group_id: "group".to_owned(),
         selector: Json(serde_json::from_str(r#"{"tag":"deposit"}"#).unwrap()),
         filter: None,
         check: Json(serde_json::from_str(r#"{"since":{"seconds":60}}"#).unwrap()),

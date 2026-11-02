@@ -35,6 +35,17 @@ pub(crate) mod db {
     use super::TriggerRun;
     use crate::models::schema::trigger_run;
 
+    /// When (Unix ms) every run started at or after `since` started.
+    pub(crate) fn find_starts_since(
+        connection: &mut SqliteConnection,
+        since: i64,
+    ) -> QueryResult<Vec<i64>> {
+        trigger_run::table
+            .filter(trigger_run::started_at.ge(since))
+            .select(trigger_run::started_at)
+            .load(connection)
+    }
+
     /// Stores `run`.
     ///
     /// # Errors

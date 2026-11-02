@@ -2,13 +2,13 @@ import Dialog from '@mui/material/Dialog';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
 import ListItemButton from '@mui/material/ListItemButton';
-import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
-import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
 import type { Shell } from '@/layout';
 import { TEMPLATES, blank, type Definition } from './forms';
+import { NetworkSelect } from '@/_components/network-select';
+import { networkChoices } from '@/money';
 
 /** How new triggers start: blank, or from a template, on one network. */
 export function Start({
@@ -36,7 +36,14 @@ export function Start({
       key={title}
       disabled={off}
       onClick={() => onStart(title, make())}
-      sx={{ display: 'block', borderRadius: 1 }}
+      sx={{
+        display: 'block',
+        px: 1.5,
+        py: 1.25,
+        border: 1,
+        borderColor: 'divider',
+        borderRadius: '8px',
+      }}
     >
       <Typography sx={{ fontWeight: 600, fontSize: 14 }}>{title}</Typography>
       <Typography sx={{ fontSize: 12.5, color: 'text.secondary' }}>{description}</Typography>
@@ -47,20 +54,12 @@ export function Start({
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
       <DialogTitle variant="h3">New triggers</DialogTitle>
       <DialogContent>
-        <TextField
-          select
-          fullWidth
-          label="Network"
+        <NetworkSelect
           value={chosen}
-          onChange={(e) => setNetwork(e.target.value)}
-          sx={{ mt: 1, mb: 2 }}
-        >
-          {networks.map((n) => (
-            <MenuItem key={n} value={n}>
-              {n}
-            </MenuItem>
-          ))}
-        </TextField>
+          networks={networkChoices(shell.listings)}
+          onChange={setNetwork}
+          sx={{ mt: 1, mb: 2, width: '100%' }}
+        />
         <Stack spacing={0.5}>
           {option('Blank trigger', 'Start from nothing; add more triggers in the editor.', () => [
             blank(chain, name),

@@ -286,6 +286,11 @@ pub(crate) mod db {
         .execute(connection)
     }
 
+    /// How many legs (movements and rewards) every network keeps.
+    pub(crate) fn count(connection: &mut SqliteConnection) -> QueryResult<i64> {
+        leg::table.count().get_result(connection)
+    }
+
     /// The legs of transaction `transaction`, in order.
     pub(crate) fn find_for(
         connection: &mut SqliteConnection,

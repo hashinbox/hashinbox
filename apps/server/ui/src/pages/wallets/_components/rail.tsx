@@ -13,7 +13,6 @@ import DialogTitle from '@mui/material/DialogTitle';
 import IconButton from '@mui/material/IconButton';
 import List from '@mui/material/List';
 import ListItemButton from '@mui/material/ListItemButton';
-import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Tooltip from '@mui/material/Tooltip';
@@ -24,12 +23,13 @@ import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import { useState, type SubmitEvent } from 'react';
 import { call, client, type Wallet } from '@/api/client';
-import { Coin } from '@/_components/coin';
+import { Currency } from '@/_components/currency';
 import type { Shell } from '@/layout';
-import { assetOf } from '@/money';
+import { networkChoices, unitOf } from '@/money';
 import { mono } from '@/theme';
 import { WatchFields } from './watch';
 import { WATCH_NOTHING, watchBody, type Watching } from './watching';
+import { NetworkSelect } from '@/_components/network-select';
 
 interface Props {
   shell: Shell;
@@ -55,13 +55,14 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
   const needle = query.trim().toLowerCase();
   const shown = wallets.filter(
     (w) =>
-      (asset === null || assetOf(w) === asset) &&
+      (asset === null || unitOf(w, shell.listings) === asset) &&
       (needle === '' ||
         w.address.toLowerCase().includes(needle) ||
         w.id.includes(needle) ||
         (tags.get(w.id) ?? []).some((t) => t.includes(needle))),
   );
-  const assets = [...new Set(wallets.map((w) => assetOf(w)))].sort();
+  // Filtered by currency (ETH, USDC…), whatever network it is on.
+  const assets = [...new Set(wallets.map((w) => unitOf(w, shell.listings)))].sort();
 
   return (
     <Box
@@ -100,7 +101,14 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
           </IconButton>
         </Tooltip>
         <Tooltip title="New wallet">
-          <IconButton size="small" aria-label="New wallet" onClick={() => setCreating(true)}>
+          <IconButton
+            size="small"
+            aria-label="New wallet"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              setCreating(true);
+            }}
+          >
             <Add fontSize="small" />
           </IconButton>
         </Tooltip>
@@ -121,10 +129,9 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
               <Chip
                 key={a}
                 size="small"
-                label={a.toUpperCase()}
+                label={<Currency ticker={a} />}
                 variant={asset === a ? 'filled' : 'outlined'}
                 onClick={() => setAsset(asset === a ? null : a)}
-                icon={<Coin symbol={a} size={16} />}
               />
             ))}
           </Stack>
@@ -139,13 +146,15 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
             onClick={() => onSelect(w.id)}
             sx={{ gap: 1.5, py: 1.25, px: 1 }}
           >
-            <Coin symbol={assetOf(w)} />
+            <Box sx={{ display: 'flex', fontSize: 22, flex: 'none' }}>
+              <Currency ticker={unitOf(w, shell.listings)} label={false} />
+            </Box>
             <Box sx={{ minWidth: 0, flexGrow: 1 }}>
               <Typography noWrap sx={{ fontFamily: mono, fontSize: 12.5 }}>
                 {middle(w.address)}
               </Typography>
               <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary' }}>
-                {assetOf(w).toUpperCase()} · {w.network.chain}/{w.network.name}
+                {unitOf(w, shell.listings)} · {w.network.chain}/{w.network.name}
                 {!w.keyed && ' · watch only'}
                 {(tags.get(w.id) ?? []).map((t) => ` · #${t}`).join('')}
               </Typography>
@@ -255,22 +264,15 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
                 ? 'Generates a key and keeps it on this server.'
                 : 'Watches an existing address; its key is not kept here, so it cannot send.'}
             </DialogContentText>
-            <TextField
-              select
-              label="Network"
+            <NetworkSelect
               value={chosen}
-              onChange={(e) => {
-                setNetwork(e.target.value);
+              networks={networkChoices(shell.listings)}
+              onChange={(value) => {
+                setNetwork(value);
                 setWatching({ ...watching, assets: ['native'] });
               }}
               required
-            >
-              {networksOf(shell).map((n) => (
-                <MenuItem key={n} value={n}>
-                  {n}
-                </MenuItem>
-              ))}
-            </TextField>
+            />
             {mode === 'watch' && (
               <TextField
                 label="Address"

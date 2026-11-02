@@ -1,4 +1,4 @@
-//! `/v1/tags` and `/v1/wallets/{id}/tags/{tag}`: the labels on addresses
+//! `/v1/wallets/tags` and `/v1/wallets/{id}/tags/{tag}`: the labels on addresses
 //! that trigger selectors pick by (`{"tag": "…"}`).
 
 use std::sync::Arc;
@@ -33,7 +33,7 @@ struct Tag {
     tag: String,
 }
 
-/// `GET /v1/tags`.
+/// `GET /v1/wallets/tags`.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = TagList)]
 struct ListResponse {
@@ -53,7 +53,7 @@ struct TagPath {
 
 #[utoipa::path(
     get,
-    path = "/v1/tags",
+    path = "/v1/wallets/tags",
     operation_id = "list_tags",
     summary = "List every tag",
     security(("bearerAuth" = [])),

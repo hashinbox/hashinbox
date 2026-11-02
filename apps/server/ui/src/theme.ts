@@ -1,12 +1,14 @@
 // One theme for both modes: ink on paper by day, paper on ink by night.
-// Hairlines instead of fills, square corners, a wide geometric face for what
-// matters, mono for anything that must be read exactly, and a faint dot grid
-// underneath, like graph paper.
+// Hairlines instead of fills, square corners, the system's own faces, and
+// mono for anything that must be read exactly.
 import { createTheme, type Theme } from '@mui/material/styles';
 
-export const display = '"Unbounded", "Geist", "Helvetica Neue", Arial, sans-serif';
-export const mono = '"Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace';
-const text = '"Geist", "Helvetica Neue", Arial, sans-serif';
+// The operating system's own fonts only: the page loads nothing from outside.
+export const display =
+  'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+export const mono =
+  'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
+const text = display;
 
 export function theme(mode: 'light' | 'dark'): Theme {
   const light = mode === 'light';
@@ -78,10 +80,20 @@ export function theme(mode: 'light' | 'dark'): Theme {
         styleOverrides: { root: { borderBottom: `1px solid ${line}` } },
       },
       MuiDialog: {
-        styleOverrides: { paper: { border: `1px solid ${rule}` } },
+        styleOverrides: { paper: { border: `1px solid ${rule}`, borderRadius: 12 } },
       },
-      MuiTextField: { defaultProps: { variant: 'standard', fullWidth: true } },
-      MuiInputBase: { styleOverrides: { input: { fontFamily: mono, fontWeight: 300 } } },
+      MuiPopover: { styleOverrides: { paper: { border: `1px solid ${line}`, borderRadius: 8 } } },
+      // One field look everywhere: small, outlined, rounded, hairline border.
+      MuiTextField: { defaultProps: { variant: 'outlined', size: 'small', fullWidth: true } },
+      MuiOutlinedInput: {
+        styleOverrides: {
+          root: {
+            borderRadius: 8,
+            [`&:hover .MuiOutlinedInput-notchedOutline`]: { borderColor: mute },
+          },
+          notchedOutline: { borderColor: rule },
+        },
+      },
       MuiTab: {
         styleOverrides: {
           root: {
@@ -101,8 +113,8 @@ export function theme(mode: 'light' | 'dark'): Theme {
             borderBottomColor: line,
             fontSize: 12,
             padding: '8px 12px',
-            '&:first-child': { paddingLeft: 0 },
-            '&:last-child': { paddingRight: 0 },
+            '&:first-of-type': { paddingLeft: 0 },
+            '&:last-of-type': { paddingRight: 0 },
           },
           head: {
             paddingTop: 6,
@@ -118,7 +130,7 @@ export function theme(mode: 'light' | 'dark'): Theme {
           },
         },
       },
-      MuiTableRow: { styleOverrides: { root: { '&:last-child td': { borderBottom: 0 } } } },
+      MuiTableRow: { styleOverrides: { root: { '&:last-of-type td': { borderBottom: 0 } } } },
       MuiListItemButton: {
         styleOverrides: {
           root: {

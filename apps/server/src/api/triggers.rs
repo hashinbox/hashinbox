@@ -21,7 +21,7 @@ use super::{Error, ErrorBody};
 use crate::{
     models::{
         self,
-        trigger::{self as triggers, Action, Filter, Gate, Logic, Target},
+        trigger::{self as triggers, Action, Filter, Gate, Logic},
         trigger_run,
         wallet_index::Selector,
     },
@@ -48,8 +48,10 @@ struct Trigger {
     chain: String,
     /// Network name, as `GET /v1/assets` lists it.
     network: String,
+    /// The batch it was created in: every trigger of one create shares it.
+    group: String,
     /// Which wallet indexes it acts on: `{"ids": […]}`, `{"asset": "…"}`,
-    /// `{"tag": "…"}`, `{"all": […]}`, `{"any": […]}`, `{"not": …}`.
+    /// `{"tag": "…"}`, `{"untagged": {}}`, `{"all": […]}`, `{"any": […]}`, `{"not": …}`.
     #[schema(value_type = Object)]
     selector: Selector,
     /// Which of them it acts on: compares under `all`/`any`/`not`; null:
@@ -78,6 +80,7 @@ impl From<models::Trigger> for Trigger {
             id: row.id,
             chain: row.chain,
             network: row.network,
+            group: row.group_id,
             selector: row.selector.0,
             filter: row.filter.map(|filter| filter.0),
             check: row.check.0,
@@ -213,6 +216,8 @@ async fn create(
         return Err(Error::invalid_request("a batch holds 1 to 16 triggers"));
     }
     let now = now()?;
+    // One group for the whole batch, so it can be found (and removed) together.
+    let group = uuid::Uuid::now_v7().to_string();
     let mut rows = Vec::with_capacity(request.triggers.len());
     for definition in request.triggers {
         let id = definition
@@ -230,7 +235,7 @@ async fn create(
                 "every trigger of a batch is on one network",
             ));
         }
-        rows.push(row(&state, id, definition, now, now)?);
+        rows.push(row(&state, id, group.clone(), definition, now, now)?);
     }
     let kept = rows.clone();
     let taken = state
@@ -323,13 +328,20 @@ async fn replace(
         return Err(Error::invalid_request("a trigger's id never changes"));
     }
     let id = path.id.clone();
-    let created_at = state
+    let kept = state
         .storage
         .read(move |connection| Ok(triggers::db::get_by_id(connection, &id).optional()?))
         .await?
-        .ok_or_else(|| Error::not_found("no such trigger"))?
-        .created_at;
-    let row = row(&state, path.id, definition, created_at, now()?)?;
+        .ok_or_else(|| Error::not_found("no such trigger"))?;
+    // A replace keeps its id, creation time and group.
+    let row = row(
+        &state,
+        path.id,
+        kept.group_id,
+        definition,
+        kept.created_at,
+        now()?,
+    )?;
     let replaced = row.clone();
     let changed = state
         .storage
@@ -408,24 +420,17 @@ async fn runs(
 ///
 /// # Errors
 ///
-/// A 400 for a malformed id or a send from `This` to `This`; a 404 for an
+/// A 400 for a trigger the model refuses ([`models::Trigger::validate`]) or a
+/// send from `This` to `This`; a 404 for an
 /// unconfigured network or sent asset.
 fn row(
     state: &AppState,
     id: String,
+    group_id: String,
     definition: Definition,
     created_at: i64,
     updated_at: i64,
 ) -> Result<models::Trigger, Error> {
-    if !(1..=64).contains(&id.len())
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    {
-        return Err(Error::invalid_request(
-            "a trigger id is 1 to 64 of [a-z0-9-]",
-        ));
-    }
     let network = base::Network::new(
         base::Chain::new(&definition.chain),
         definition.network.clone(),
@@ -440,18 +445,13 @@ fn row(
     let send = SendInput::deserialize(&definition.action.input)
         .map_err(|error| Error::invalid_request(format!("send input: {error}")))?;
     super::asset_info(&state.payments, &network, &send.asset)?;
-    if matches!(
-        (&send.source, &send.destination),
-        (Target::This(_), Target::This(_))
-    ) {
-        return Err(Error::invalid_request(
-            "a send from This to This is many to many",
-        ));
-    }
-    Ok(models::Trigger {
+    send.validate()
+        .map_err(|invalid| Error::invalid_request(invalid.to_string()))?;
+    let trigger = models::Trigger {
         id,
         chain: definition.chain,
         network: definition.network,
+        group_id,
         selector: models::Json(definition.selector),
         filter: definition.filter.map(models::Json),
         check: models::Json(definition.check),
@@ -459,7 +459,12 @@ fn row(
         enabled: definition.enabled,
         created_at,
         updated_at,
-    })
+    };
+    // The model's own rules, before it is ever kept.
+    trigger
+        .validate()
+        .map_err(|invalid| Error::invalid_request(invalid.to_string()))?;
+    Ok(trigger)
 }
 
 /// Unix ms.

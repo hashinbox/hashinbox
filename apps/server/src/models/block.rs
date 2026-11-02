@@ -85,6 +85,11 @@ impl Block {
     }
 }
 
+collection! {
+    /// Blocks, in the order read.
+    Blocks(Block)
+}
+
 /// The `block` table's statements.
 pub(crate) mod db {
     #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
@@ -208,6 +213,55 @@ pub(crate) mod db {
             .select(Block::as_select())
             .first(connection)
             .optional()
+    }
+
+    /// The `limit` last live blocks of `network`, latest first.
+    pub(crate) fn find_latest(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        limit: i64,
+    ) -> QueryResult<Blocks> {
+        live!(network)
+            .order(block::position.desc())
+            .limit(limit)
+            .select(Block::as_select())
+            .load(connection)
+            .map(Blocks::from)
+    }
+
+    /// How many blocks of every network are kept live, and how many a reorg
+    /// archived.
+    pub(crate) fn count(connection: &mut SqliteConnection) -> QueryResult<(i64, i64)> {
+        let live = block::table
+            .filter(block::archived_at.is_null())
+            .count()
+            .get_result(connection)?;
+        let archived = block::table
+            .filter(block::archived_at.is_not_null())
+            .count()
+            .get_result(connection)?;
+        Ok((live, archived))
+    }
+
+    /// The stamp (Unix seconds) of the newest live block of any network.
+    pub(crate) fn find_newest_stamp(connection: &mut SqliteConnection) -> QueryResult<Option<i64>> {
+        block::table
+            .filter(block::archived_at.is_null())
+            .select(diesel::dsl::max(block::timestamp))
+            .first(connection)
+    }
+
+    /// The stamps (Unix seconds) of the live blocks of every network stamped
+    /// at or after `since`.
+    pub(crate) fn find_stamps_since(
+        connection: &mut SqliteConnection,
+        since: i64,
+    ) -> QueryResult<Vec<i64>> {
+        block::table
+            .filter(block::archived_at.is_null())
+            .filter(block::timestamp.ge(since))
+            .select(block::timestamp.assume_not_null())
+            .load(connection)
     }
 
     /// The live block of `network` right below `position`.

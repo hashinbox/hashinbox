@@ -41,6 +41,8 @@ tasks = { path = "../../packages/tasks", features = ["runner"] }
 tokio = { workspace = true, features = ["fs", "net", "process", "rt", "signal", "sync", "time"] }
 # The server's own configuration file, when its path ends in `.toml`.
 toml = "=0.9.12"
+# One UUIDv7 per trigger batch: its group id.
+uuid.workspace = true
 utoipa = { version = "=5.5.0", features = ["axum_extras"] }
 utoipa-axum = "=0.2.0"
 url = "=2.5.8"

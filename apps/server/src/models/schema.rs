@@ -114,6 +114,7 @@ diesel::table! {
         id -> Text,
         chain -> Text,
         network -> Text,
+        group_id -> Text,
         selector -> Text,
         filter -> Nullable<Text>,
         check -> Text,

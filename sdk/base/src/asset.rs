@@ -48,6 +48,9 @@ pub struct AssetInfo {
     /// Display symbol, such as `BTC` or `USDC`; `None` for a token configured
     /// without one.
     pub ticker: Option<String>,
+    /// Fractional digits a view shows, such as 2 for `USDC`; `None`: all of
+    /// them. Presentation only: amounts stay exact.
+    pub display_decimals: Option<u32>,
 }
 
 impl AssetInfo {
@@ -60,6 +63,21 @@ impl AssetInfo {
             decimals,
             name: None,
             ticker: None,
+            display_decimals: None,
+        }
+    }
+
+    /// `value`, in display units, as every view shows it (a page, a log
+    /// line): cut toward zero to `display_decimals`, then the ticker when
+    /// there is one, such as `0.0021654 ETH`. Exact amounts are not this.
+    #[must_use]
+    pub fn format(&self, value: &Decimal) -> String {
+        let shown = self
+            .display_decimals
+            .map_or_else(|| value.clone(), |digits| value.truncate(digits));
+        match &self.ticker {
+            Some(ticker) => format!("{shown} {ticker}"),
+            None => shown.to_string(),
         }
     }
 

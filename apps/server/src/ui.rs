@@ -6,8 +6,12 @@
 
 use axum::{
     Router,
-    http::header::{CONTENT_TYPE, HeaderValue},
-    response::Html,
+    extract::Path,
+    http::{
+        StatusCode,
+        header::{CONTENT_TYPE, HeaderValue},
+    },
+    response::{Html, IntoResponse},
     routing::get,
 };
 use serde::Serialize;
@@ -16,6 +20,15 @@ use serde::Serialize;
 // the server never needs Node. The styles travel inside the script.
 const PAGE: &str = include_str!("../ui/dist/index.html");
 const SCRIPT: &str = include_str!("../ui/dist/app.js");
+/// Each currency's symbol, `assets/currencies/<ticker>.svg`, ticker in
+/// lowercase: black on transparent, for any view to show beside an amount.
+const CURRENCIES: [(&str, &str); 5] = [
+    ("btc.svg", include_str!("../assets/currencies/btc.svg")),
+    ("eth.svg", include_str!("../assets/currencies/eth.svg")),
+    ("sol.svg", include_str!("../assets/currencies/sol.svg")),
+    ("usdc.svg", include_str!("../assets/currencies/usdc.svg")),
+    ("usdt.svg", include_str!("../assets/currencies/usdt.svg")),
+];
 /// The element the page reads its settings from; its body is replaced whole,
 /// whatever whitespace the build left inside it.
 const OPEN: &str = r#"<script id="settings" type="application/json">"#;
@@ -69,7 +82,7 @@ impl Settings {
         Ok(format!("{}{}{}", &PAGE[..body], self.json(), &PAGE[end..]))
     }
 
-    /// `GET /` and the script the page loads. The settings are written into
+    /// `GET /`, `GET /ui/...` and the script the page loads. The settings are written into
     /// the page once, here, so the page never has to be rebuilt to change them.
     pub(crate) fn routes(&self) -> Result<Router, &'static str> {
         let page: &'static str = self.page()?.leak();
@@ -79,6 +92,20 @@ impl Settings {
         };
         Ok(Router::new()
             .route("/", get(move || async move { Html(page) }))
-            .route("/ui/app.js", get(script)))
+            // Every page path (`/ui/networks/...`) is the page; it reads the path.
+            .route("/ui", get(move || async move { Html(page) }))
+            .route("/ui/{*path}", get(move || async move { Html(page) }))
+            .route("/ui/app.js", get(script))
+            .route("/assets/currencies/{file}", get(currency)))
     }
+}
+
+/// `GET /assets/currencies/{file}`: a currency's symbol, or 404.
+async fn currency(Path(file): Path<String>) -> impl IntoResponse {
+    let media = HeaderValue::from_static("image/svg+xml");
+    CURRENCIES
+        .iter()
+        .find(|(name, _)| *name == file)
+        .map(|(_, svg)| ([(CONTENT_TYPE, media)], *svg))
+        .ok_or(StatusCode::NOT_FOUND)
 }

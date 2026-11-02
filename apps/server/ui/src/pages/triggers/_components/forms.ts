@@ -1,15 +1,16 @@
-// A trigger as the API writes it, and the simple forms the editor shows
-// for it. A part the forms cannot express stays as written and is edited
-// as JSON; nothing here drops what it does not understand.
+// A trigger as the API writes it (the server's `models::trigger`), the
+// one-line summaries the editor shows for each part, and templates.
+import type { Wallet } from '@/api/client';
+
+/** A selector leaf: wallet indexes by id, by asset, or by tag. */
+export type Pick =
+  { ids: string[] } | { asset: string } | { tag: string } | { untagged: Record<string, never> };
+
+/** AND / OR / NOT over leaves; a leaf is written bare. */
+export type Logic<L> = L | { all: Logic<L>[] } | { any: Logic<L>[] } | { not: Logic<L> };
 
 /** Which wallet indexes a trigger acts on (the server's selector JSON). */
-export type Selector =
-  | { ids: string[] }
-  | { asset: string }
-  | { tag: string }
-  | { all: Selector[] }
-  | { any: Selector[] }
-  | { not: Selector };
+export type Selector = Logic<Pick>;
 
 export type Target = { this: { asset?: string } } | { select: Selector };
 
@@ -26,7 +27,7 @@ export type Aggregate = 'sum' | 'min' | 'max' | 'count';
 export type Operator = 'above' | 'at_least' | 'below' | 'at_most' | 'equal';
 
 export interface Compare {
-  of?: Target;
+  of: Target;
   aggregate: Aggregate;
   operator: Operator;
   value: Amount;
@@ -36,7 +37,6 @@ export interface FilterLeaf {
   compare: Compare;
 }
 export type GateLeaf = { since: { seconds: number } } | { compare: Compare };
-export type Logic<L> = L | { all: Logic<L>[] } | { any: Logic<L>[] } | { not: Logic<L> };
 
 /** Moves `amount` of `asset` from `source` to `destination`; one side may be many. */
 export interface Send {
@@ -64,258 +64,251 @@ export interface Definition {
   enabled: boolean;
 }
 
-export const OPERATORS: { value: Operator; label: string }[] = [
-  { value: 'above', label: '>' },
-  { value: 'at_least', label: '≥' },
-  { value: 'below', label: '<' },
-  { value: 'at_most', label: '≤' },
-  { value: 'equal', label: '=' },
+/** How an aggregate compares with its amount: a symbol for summaries, words for menus. */
+export const OPERATORS: { value: Operator; symbol: string; label: string }[] = [
+  { value: 'above', symbol: '>', label: 'more than' },
+  { value: 'at_least', symbol: '≥', label: 'at least' },
+  { value: 'below', symbol: '<', label: 'less than' },
+  { value: 'at_most', symbol: '≤', label: 'at most' },
+  { value: 'equal', symbol: '=', label: 'exactly' },
 ];
 
-export const AGGREGATES: Aggregate[] = ['sum', 'min', 'max', 'count'];
+/** What a compare reads of its wallets, in words. */
+export const AGGREGATES: { value: Aggregate; label: string }[] = [
+  { value: 'sum', label: 'total balance of' },
+  { value: 'min', label: 'lowest balance of' },
+  { value: 'max', label: 'highest balance of' },
+  { value: 'count', label: 'number of' },
+];
 
-// ---- Selector form ----------------------------------------------------------
-
-/** Tags, an asset and excluded tags: the selector most triggers need. */
-export interface SelectorForm {
-  /** Only this asset; empty: any. */
-  asset: string;
+/** What the pickers offer: the network's assets, wallets and tags. */
+export interface Choices {
+  /** What "this" (the wallets in context) is called where the picker is. */
+  self: string;
+  chain: string;
+  network: string;
+  assets: string[];
+  /** What an asset is called: its ticker, else its id shortened. */
+  name: (asset: string) => string;
+  wallets: Wallet[];
   tags: string[];
-  /** Whether an index needs every tag, or any one. */
-  match: 'all' | 'any';
-  /** Never an address with one of these tags. */
-  exclude: string[];
-}
-
-export function compileSelector(form: SelectorForm): Selector {
-  const parts: Selector[] = [];
-  if (form.asset) parts.push({ asset: form.asset });
-  if (form.match === 'all' || form.tags.length === 1) {
-    for (const tag of form.tags) parts.push({ tag });
-  } else if (form.tags.length > 1) {
-    parts.push({ any: form.tags.map((tag) => ({ tag })) });
-  }
-  if (form.exclude.length > 0) {
-    parts.push({ not: { any: form.exclude.map((tag) => ({ tag })) } });
-  }
-  return parts.length === 1 && parts[0] ? parts[0] : { all: parts };
-}
-
-/** The form `selector` was compiled from; null when it is not one. */
-export function parseSelector(selector: Selector): SelectorForm | null {
-  const form: SelectorForm = { asset: '', tags: [], match: 'all', exclude: [] };
-  const parts = 'all' in selector ? selector.all : [selector];
-  for (const part of parts) {
-    if ('asset' in part && !form.asset) form.asset = part.asset;
-    else if ('tag' in part) form.tags.push(part.tag);
-    else if ('any' in part && form.tags.length === 0 && part.any.every((p) => 'tag' in p)) {
-      form.tags = part.any.map((p) => ('tag' in p ? p.tag : ''));
-      form.match = 'any';
-    } else if (
-      'not' in part &&
-      'any' in part.not &&
-      form.exclude.length === 0 &&
-      part.not.any.every((p) => 'tag' in p)
-    ) {
-      form.exclude = part.not.any.map((p) => ('tag' in p ? p.tag : ''));
-    } else return null;
-  }
-  return JSON.stringify(compileSelector(form)) === JSON.stringify(selector) ? form : null;
-}
-
-// ---- Compare form -----------------------------------------------------------
-
-/** One compare of the wallet indexes in context against a simple amount. */
-export interface CompareForm {
-  /** Read the same addresses in this asset; empty: as they are. */
-  asset: string;
-  aggregate: Aggregate;
-  operator: Operator;
-  /** A fixed value, the fee of sending all, or the balance itself. */
-  amount: 'value' | 'fee' | 'balance';
-  /** Display units, when `amount` is `value`. */
-  value: string;
-}
-
-export function compileCompare(form: CompareForm): Compare {
-  const value: Amount =
-    form.amount === 'fee'
-      ? { fee: { of: { this: {} } } }
-      : form.amount === 'balance'
-        ? { balance: { of: { this: {} } } }
-        : { value: form.value.trim() || '0' };
-  return {
-    of: { this: form.asset ? { asset: form.asset } : {} },
-    aggregate: form.aggregate,
-    operator: form.operator,
-    value,
-  };
-}
-
-export function parseCompare(compare: Compare): CompareForm | null {
-  const of = compare.of ?? { this: {} };
-  if (!('this' in of)) return null;
-  const v = compare.value;
-  const plain = (target?: Target) =>
-    !target || ('this' in target && target.this.asset === undefined);
-  let amount: CompareForm['amount'];
-  let value = '';
-  if ('value' in v) {
-    amount = 'value';
-    value = v.value;
-  } else if ('fee' in v && plain(v.fee.of)) amount = 'fee';
-  else if ('balance' in v && plain(v.balance.of)) amount = 'balance';
-  else return null;
-  return {
-    asset: of.this.asset ?? '',
-    aggregate: compare.aggregate,
-    operator: compare.operator,
-    amount,
-    value,
-  };
-}
-
-// ---- Filter and check forms -------------------------------------------------
-
-/** Leaves under one AND, as the forms write them. */
-function leaves<L>(logic: Logic<L> | null, isLeaf: (value: unknown) => value is L): L[] | null {
-  if (logic === null) return [];
-  if (isLeaf(logic)) return [logic];
-  if (typeof logic === 'object' && 'all' in logic) {
-    const all = logic.all;
-    return all.every(isLeaf) ? all : null;
-  }
-  return null;
-}
-
-function isCompareLeaf(value: unknown): value is { compare: Compare } {
-  return typeof value === 'object' && value !== null && 'compare' in value;
-}
-
-function isGateLeaf(value: unknown): value is GateLeaf {
-  return isCompareLeaf(value) || (typeof value === 'object' && value !== null && 'since' in value);
-}
-
-/** Every compare must hold; empty: no filter. */
-export type FilterForm = CompareForm[];
-
-export function compileFilter(form: FilterForm): Logic<FilterLeaf> | null {
-  const all = form.map((c) => ({ compare: compileCompare(c) }));
-  if (all.length === 0) return null;
-  return all.length === 1 && all[0] ? all[0] : { all };
-}
-
-export function parseFilter(filter: Logic<FilterLeaf> | null): FilterForm | null {
-  const found = leaves(filter, isCompareLeaf);
-  if (!found) return null;
-  const forms = found.map((leaf) => parseCompare(leaf.compare));
-  return forms.every((f) => f !== null) ? forms : null;
-}
-
-/** When a trigger acts: a pause since its last run, and compares. */
-export interface CheckForm {
-  /** Seconds since the last run started; 0: none. */
-  since: number;
-  compares: CompareForm[];
-}
-
-export function compileCheck(form: CheckForm): Logic<GateLeaf> {
-  const all: GateLeaf[] = [];
-  if (form.since > 0) all.push({ since: { seconds: form.since } });
-  for (const c of form.compares) all.push({ compare: compileCompare(c) });
-  return all.length === 1 && all[0] !== undefined ? all[0] : { all };
-}
-
-export function parseCheck(check: Logic<GateLeaf>): CheckForm | null {
-  const found = leaves(check, isGateLeaf);
-  if (!found) return null;
-  const form: CheckForm = { since: 0, compares: [] };
-  for (const leaf of found) {
-    if ('since' in leaf) form.since = leaf.since.seconds;
-    else {
-      const c = parseCompare(leaf.compare);
-      if (!c) return null;
-      form.compares.push(c);
-    }
-  }
-  return JSON.stringify(compileCheck(form)) === JSON.stringify(check) ? form : null;
-}
-
-// ---- Targets and amounts -----------------------------------------------------
-
-/** A target as the action editor shows it. */
-export type TargetForm =
-  | { kind: 'this'; asset: string }
-  | { kind: 'ids'; ids: string[] }
-  | { kind: 'tag'; tag: string; asset: string };
-
-export function compileTarget(form: TargetForm): Target {
-  if (form.kind === 'this') return { this: form.asset ? { asset: form.asset } : {} };
-  if (form.kind === 'ids') return { select: { ids: form.ids } };
-  const tag: Selector = { tag: form.tag };
-  return { select: form.asset ? { all: [tag, { asset: form.asset }] } : tag };
-}
-
-export function parseTarget(target: Target): TargetForm | null {
-  if ('this' in target) return { kind: 'this', asset: target.this.asset ?? '' };
-  const s = target.select;
-  if ('ids' in s) return { kind: 'ids', ids: s.ids };
-  if ('tag' in s) return { kind: 'tag', tag: s.tag, asset: '' };
-  if ('all' in s && s.all.length === 2) {
-    const [a, b] = s.all;
-    if (a && b && 'tag' in a && 'asset' in b) return { kind: 'tag', tag: a.tag, asset: b.asset };
-  }
-  return null;
-}
-
-/** The amounts most sends need, by name. */
-export type AmountForm =
-  | { kind: 'all' }
-  | { kind: 'all-less-fee' }
-  | { kind: 'shortfall'; asset: string }
-  | { kind: 'value'; value: string };
-
-// Written as the server writes them back, so a stored trigger parses again.
-const BALANCE: Amount = { balance: { of: { this: {} } } };
-const FEE: Amount = { fee: { of: { this: {} } } };
-
-export function compileAmount(form: AmountForm): Amount {
-  switch (form.kind) {
-    case 'all':
-      return BALANCE;
-    case 'all-less-fee':
-      return { sub: [BALANCE, FEE] };
-    case 'shortfall':
-      return {
-        max: [{ sub: [{ fee: { of: { this: { asset: form.asset } } } }, BALANCE] }, { value: '0' }],
-      };
-    case 'value':
-      return { value: form.value.trim() || '0' };
-  }
-}
-
-export function parseAmount(amount: Amount): AmountForm | null {
-  if ('value' in amount) return { kind: 'value', value: amount.value };
-  const same = (a: Amount, b: Amount) => JSON.stringify(a) === JSON.stringify(b);
-  if (same(amount, BALANCE)) return { kind: 'all' };
-  if (same(amount, compileAmount({ kind: 'all-less-fee' }))) return { kind: 'all-less-fee' };
-  if ('max' in amount) {
-    const [inner] = amount.max;
-    if ('sub' in inner) {
-      const [fee] = inner.sub;
-      if ('fee' in fee && fee.fee.of && 'this' in fee.fee.of && fee.fee.of.this.asset) {
-        const form: AmountForm = { kind: 'shortfall', asset: fee.fee.of.this.asset };
-        if (same(amount, compileAmount(form))) return form;
-      }
-    }
-  }
-  return null;
 }
 
 /** The id of the wallet index of `address` in `asset`. */
 export function indexId(chain: string, network: string, address: string, asset: string): string {
   return `${chain}.${network}.${address}.${asset}`;
 }
+
+/** Every wallet index id of the network's wallets, with a label. */
+export function indexes(
+  choices: Choices,
+): { id: string; label: string; address: string; ticker: string; keyed: boolean }[] {
+  return choices.wallets
+    .filter((w) => w.network.chain === choices.chain && w.network.name === choices.network)
+    .flatMap((w) =>
+      w.assets.map((asset) => ({
+        id: indexId(choices.chain, choices.network, w.address, asset),
+        label: `${w.address.slice(0, 10)}… · ${choices.name(asset)}${w.keyed ? '' : ' · watch only'}`,
+        address: w.address,
+        ticker: choices.name(asset),
+        keyed: w.keyed,
+      })),
+    );
+}
+
+/** A trigger id the server takes: 1 to 64 of a-z, 0-9 and -. */
+export const validId = (id: string) => /^[a-z0-9-]{1,64}$/.test(id);
+
+// ---- Logic nodes ---------------------------------------------------------------
+
+/** One logic node opened up: a combinator with its children, or a leaf. */
+export type Node<L> =
+  | { kind: 'all' | 'any'; children: Logic<L>[] }
+  | { kind: 'not'; child: Logic<L> }
+  | { kind: 'leaf'; leaf: L };
+
+export function nodeOf<L extends object>(logic: Logic<L>): Node<L> {
+  if ('all' in logic) return { kind: 'all', children: logic.all };
+  if ('any' in logic) return { kind: 'any', children: logic.any };
+  if ('not' in logic) return { kind: 'not', child: logic.not };
+  return { kind: 'leaf', leaf: logic };
+}
+
+/** The first key of a JSON enum value: its variant. */
+export const variant = (value: object) => Object.keys(value)[0] ?? '';
+
+/**
+ * `logic` turned into `kind`: a combinator keeps what it holds (a leaf
+ * becomes its one child); a leaf keeps a child of that kind, else is
+ * `make`'s, from the leaf it replaces when there is one.
+ */
+export function rekind<L extends object>(
+  logic: Logic<L>,
+  kind: string,
+  kindOf: (leaf: L) => string,
+  make: (kind: string, from?: L) => L,
+): Logic<L> {
+  const node = nodeOf(logic);
+  const held = node.kind === 'all' || node.kind === 'any' ? node.children : [logic];
+  if (kind === 'all') return { all: node.kind === 'not' ? [node.child] : held };
+  if (kind === 'any') return { any: node.kind === 'not' ? [node.child] : held };
+  if (kind === 'not') return { not: node.kind === 'not' ? node.child : logic };
+  const leaves = held.flatMap((h) => {
+    const n = nodeOf(h);
+    return n.kind === 'leaf' ? [n.leaf] : [];
+  });
+  return leaves.find((l) => kindOf(l) === kind) ?? make(kind, leaves[0]);
+}
+
+/** The two sides of a two-sided amount; null for the others. */
+export function sides(amount: Amount): [Amount, Amount] | null {
+  if ('add' in amount) return amount.add;
+  if ('sub' in amount) return amount.sub;
+  if ('min' in amount) return amount.min;
+  if ('max' in amount) return amount.max;
+  return null;
+}
+
+/** `amount` turned into `kind`, keeping its sides and target where it can. */
+export function rekindAmount(amount: Amount, kind: string): Amount {
+  if (kind === variant(amount)) return amount;
+  const held = sides(amount) ?? [amount];
+  const of = 'balance' in amount ? amount.balance.of : 'fee' in amount ? amount.fee.of : undefined;
+  const target = of ?? { this: {} };
+  const pair: [Amount, Amount] = [held[0], held[1] ?? { value: '0' }];
+  switch (kind) {
+    case 'value':
+      return held.find((h) => 'value' in h) ?? { value: '0' };
+    case 'balance':
+      return { balance: { of: target } };
+    case 'fee':
+      return { fee: { of: target } };
+    default:
+      return paired(kind, pair);
+  }
+}
+
+/** The two-sided amount `kind` (add, sub, min, max) of `pair`. */
+export function paired(kind: string, pair: [Amount, Amount]): Amount {
+  if (kind === 'add') return { add: pair };
+  if (kind === 'sub') return { sub: pair };
+  if (kind === 'min') return { min: pair };
+  return { max: pair };
+}
+
+// ---- One-line summaries ----------------------------------------------------------
+
+type Name = (asset: string) => string;
+
+export function describeLogic<L extends object>(logic: Logic<L>, leaf: (l: L) => string): string {
+  const node = nodeOf(logic);
+  const inner = (l: Logic<L>) => {
+    const text = describeLogic(l, leaf);
+    const k = nodeOf(l).kind;
+    return k === 'all' || k === 'any' ? `(${text})` : text;
+  };
+  switch (node.kind) {
+    case 'leaf':
+      return leaf(node.leaf);
+    case 'not':
+      return `not ${inner(node.child)}`;
+    case 'all':
+      return node.children.length === 0 ? 'always' : node.children.map(inner).join(' and ');
+    case 'any':
+      return node.children.length === 0 ? 'never' : node.children.map(inner).join(' or ');
+  }
+}
+
+const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`;
+
+/** A selector as words: "tagged deposit and in USDC", "every wallet". */
+export function describeSelector(selector: Selector, name: Name): string {
+  const text = describeLogic(selector, (p) =>
+    'ids' in p
+      ? plural(p.ids.length, 'picked wallet')
+      : 'asset' in p
+        ? `in ${name(p.asset)}`
+        : 'untagged' in p
+          ? 'without a tag'
+          : `tagged ${p.tag || '…'}`,
+  );
+  return text === 'always' ? 'every wallet' : text === 'never' ? 'no wallet' : text;
+}
+
+/** "this wallet" (as `self` says), in an asset maybe, or the chosen wallets. */
+export function describeTarget(target: Target | undefined, name: Name, self: string): string {
+  if (!target || 'this' in target) {
+    const asset = target?.this.asset;
+    return asset === undefined ? self : `${self} in ${name(asset)}`;
+  }
+  const text = describeSelector(target.select, name);
+  return text.endsWith('wallet') || text.endsWith('wallets') ? text : `wallets ${text}`;
+}
+
+export function describeAmount(amount: Amount, name: Name, self: string): string {
+  const d = (a: Amount) => describeAmount(a, name, self);
+  if ('value' in amount) return amount.value || '0';
+  if ('balance' in amount) return `balance of ${describeTarget(amount.balance.of, name, self)}`;
+  if ('fee' in amount) return `fee to send all of ${describeTarget(amount.fee.of, name, self)}`;
+  if ('add' in amount) return `(${d(amount.add[0])} + ${d(amount.add[1])})`;
+  if ('sub' in amount) return `(${d(amount.sub[0])} − ${d(amount.sub[1])})`;
+  if ('min' in amount) return `lower of (${d(amount.min[0])}, ${d(amount.min[1])})`;
+  return `higher of (${d(amount.max[0])}, ${d(amount.max[1])})`;
+}
+
+export function describeCompare(c: Compare, name: Name, self: string): string {
+  const op = OPERATORS.find((o) => o.value === c.operator)?.symbol ?? c.operator;
+  const of = AGGREGATES.find((a) => a.value === c.aggregate)?.label ?? c.aggregate;
+  return `${of} ${describeTarget(c.of, name, self)} ${op} ${describeAmount(c.value, name, self)}`;
+}
+
+/** `seconds` as people read a wait: 1d 2h, 30m, 45s. */
+export function duration(seconds: number): string {
+  const parts: string[] = [];
+  let rest = seconds;
+  for (const [unit, size] of [
+    ['d', 86400],
+    ['h', 3600],
+    ['m', 60],
+    ['s', 1],
+  ] as const) {
+    if (rest >= size) {
+      parts.push(`${Math.floor(rest / size)}${unit}`);
+      rest %= size;
+    }
+  }
+  return parts.join(' ') || '0s';
+}
+
+export function describeGate(gate: GateLeaf, name: Name, self: string): string {
+  return 'since' in gate
+    ? `at least ${duration(gate.since.seconds)} since its last run`
+    : describeCompare(gate.compare, name, self);
+}
+
+/** What `this` is called in each step. */
+export const SELF = {
+  /** The filter tests one wallet at a time; so does a send's amount. */
+  one: 'this wallet',
+  /** The check, and a send's sides, see every wallet the filter kept. */
+  kept: 'the kept wallets',
+} as const;
+
+export function describeSend(send: Send, name: Name): string {
+  return `send ${name(send.asset)} from ${describeTarget(send.source, name, SELF.kept)} to ${describeTarget(send.destination, name, SELF.kept)}, ${describeAmount(send.amount, name, SELF.one)} each`;
+}
+
+// ---- Amounts the templates use ---------------------------------------------------
+
+// Written as the server writes them back.
+const BALANCE: Amount = { balance: { of: { this: {} } } };
+const FEE: Amount = { fee: { of: { this: {} } } };
+/** Everything it holds less the fee of sending it. */
+const ALL_LESS_FEE: Amount = { sub: [BALANCE, FEE] };
+/** The native a `token` send lacks for its fee; never below 0. */
+const shortfall = (token: string): Amount => ({
+  max: [{ sub: [{ fee: { of: { this: { asset: token } } } }, BALANCE] }, { value: '0' }],
+});
 
 // ---- Blank triggers and templates -----------------------------------------------
 
@@ -389,7 +382,7 @@ export const TEMPLATES: Template[] = [
             source: { this: {} },
             asset: 'native',
             destination: chosen,
-            amount: compileAmount({ kind: 'all-less-fee' }),
+            amount: ALL_LESS_FEE,
           },
         },
       },
@@ -418,7 +411,7 @@ export const TEMPLATES: Template[] = [
             source: { this: {} },
             asset: 'native',
             destination: chosen,
-            amount: compileAmount({ kind: 'all-less-fee' }),
+            amount: ALL_LESS_FEE,
           },
         },
       },
@@ -459,7 +452,7 @@ export const TEMPLATES: Template[] = [
             source: chosen,
             asset: 'native',
             destination: { this: {} },
-            amount: compileAmount({ kind: 'shortfall', asset: place.token }),
+            amount: shortfall(place.token),
           },
         },
       },

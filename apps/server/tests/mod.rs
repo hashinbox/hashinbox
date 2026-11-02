@@ -254,6 +254,7 @@ impl base::Config for Config {
                     decimals: 8,
                     name: Some("Bitcoin".to_owned()),
                     ticker: Some("BTC".to_owned()),
+                    display_decimals: None,
                 }]),
                 storage: storage.clone(),
                 client,

@@ -36,6 +36,10 @@ struct JobPath {
 #[derive(Clone, Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 struct ListQuery {
+    /// Only jobs of this chain; with `network`.
+    chain: Option<String>,
+    /// Only jobs of this network of `chain`.
+    network: Option<String>,
     /// Only this kind (`index`, `expire`, `triggers`, `broadcast`).
     kind: Option<String>,
     /// Only jobs in this state.
@@ -145,7 +149,7 @@ struct ListResponse {
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The latest jobs", body = ListResponse),
-        (status = 400, description = "Malformed query or limit", body = ErrorBody),
+        (status = 400, description = "Malformed query or limit, or a chain without its network", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 503, description = "The queue is unavailable", body = ErrorBody)
     ),
@@ -163,11 +167,17 @@ async fn list(
         ));
     }
     let status = query.state.map(JobState::status);
+    let network = match (query.chain, query.network) {
+        (Some(chain), Some(network)) => Some(base::Network::new(base::Chain::new(chain), network)),
+        (None, None) => None,
+        _ => return Err(Error::invalid_request("chain and network go together")),
+    };
     let rows = state
         .storage
         .read(move |connection| {
             Ok(task::db::find_recent(
                 connection,
+                network.as_ref(),
                 query.kind.as_deref(),
                 status,
                 limit,

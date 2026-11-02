@@ -17,6 +17,9 @@ pub(crate) struct Asset {
     pub(crate) ticker: Option<String>,
     /// Decimal places between atomic and display units.
     pub(crate) decimals: u32,
+    /// Fractional digits a view shows; always present, null: all.
+    #[schema(required)]
+    pub(crate) display_decimals: Option<u32>,
 }
 
 /// The asset as its own chain declared it.
@@ -28,6 +31,7 @@ impl From<&base::AssetInfo> for Asset {
             name: info.name.clone(),
             ticker: info.ticker.clone(),
             decimals: info.decimals,
+            display_decimals: info.display_decimals,
         }
     }
 }

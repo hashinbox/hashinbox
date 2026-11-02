@@ -15,6 +15,9 @@ export type Tag = Schemas['Tag'];
 export type Trigger = Schemas['Trigger'];
 export type TriggerRun = Schemas['TriggerRun'];
 export type Job = Schemas['Job'];
+export type ChainView = Schemas['ChainView'];
+export type ChainBlock = Schemas['ChainBlock'];
+export type ChainTransaction = Schemas['ChainTransaction'];
 
 /** Raised for any non-2xx answer; `message` is the server's own. */
 export class ApiError extends Error {

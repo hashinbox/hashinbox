@@ -16,7 +16,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody};
 use crate::{
-    models::{Indexing, Network, RpcEndpoints, endpoint},
+    models::{Explorer, Indexing, Network, RpcEndpoints, endpoint},
     state::AppState,
 };
 
@@ -104,6 +104,9 @@ struct ConfiguredNetwork {
     indexing: Indexing,
     /// Its nodes in failover order.
     nodes: Vec<RpcNode>,
+    /// Its block explorer links; always present, null when none is configured.
+    #[schema(required)]
+    explorer: Option<Explorer>,
 }
 
 /// Every configured network, or the ones a change touched.
@@ -229,6 +232,7 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, 
         .into_iter()
         .map(|(network, stats)| ConfiguredNetwork {
             nodes: stored.get(&network).map(nodes).unwrap_or_default(),
+            explorer: state.explorers.get(&network),
             network: network.into(),
             indexing: stats.into(),
         })
@@ -425,6 +429,7 @@ fn install(
     let stats = state.payments.service(&network)?.indexer.stats();
     Ok(ConfiguredNetwork {
         nodes: self::nodes(nodes),
+        explorer: state.explorers.get(&network),
         network: network.into(),
         indexing: stats.into(),
     })

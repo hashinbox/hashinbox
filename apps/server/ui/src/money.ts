@@ -1,6 +1,7 @@
 // Exact amounts. The API sends decimal strings in display units; nothing here
 // ever goes through a float.
 import type { Listing, Transaction, Wallet } from '@/api/client';
+import { shorten } from '@/_components/trim';
 
 /** Display text to atomic units, given the asset's decimals. */
 export function atomic(text: string, decimals: number): bigint {
@@ -36,6 +37,14 @@ export function listingOf(wallet: Wallet, listings: Listing[]): Listing | undefi
   );
 }
 
+/** Every listed network as `chain/network`, with its native currency's ticker. */
+export function networkChoices(listings: Listing[]): { value: string; ticker: string | null }[] {
+  return listings
+    .filter((l) => l.asset === 'native')
+    .map((l) => ({ value: `${l.network.chain}/${l.network.name}`, ticker: l.metadata.ticker }))
+    .sort((a, b) => a.value.localeCompare(b.value));
+}
+
 /** What `asset` of `chain/network` is called: its ticker, else its id shortened. */
 export function assetName(
   listings: Listing[],
@@ -51,6 +60,11 @@ export function assetName(
 
 export function unitOf(wallet: Wallet, listings: Listing[]): string {
   return listingOf(wallet, listings)?.metadata.ticker ?? assetOf(wallet).toUpperCase();
+}
+
+/** Fractional digits views show of the wallet's asset; `null`: all. */
+export function displayOf(wallet: Wallet, listings: Listing[]): number | null {
+  return listingOf(wallet, listings)?.metadata.display_decimals ?? null;
 }
 
 export function decimalsOf(wallet: Wallet, listings: Listing[]): number {
@@ -80,6 +94,4 @@ export function effect(tx: Transaction, decimals: number): Effect {
   return { credit, debit, net: credit - debit - fee, fee };
 }
 
-export function shorten(text: string): string {
-  return text.length > 20 ? `${text.slice(0, 9)}…${text.slice(-6)}` : text;
-}
+export { shorten } from '@/_components/trim';

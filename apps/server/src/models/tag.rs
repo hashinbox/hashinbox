@@ -81,6 +81,11 @@ pub(crate) mod db {
     use super::{Tag, Tags};
     use crate::models::schema::tag;
 
+    /// How many tags every network keeps.
+    pub(crate) fn count(connection: &mut SqliteConnection) -> QueryResult<i64> {
+        tag::table.count().get_result(connection)
+    }
+
     /// Keeps `tag`; a kept tag stays once.
     pub(crate) fn insert(connection: &mut SqliteConnection, tag: &Tag) -> QueryResult<usize> {
         diesel::insert_or_ignore_into(tag::table)

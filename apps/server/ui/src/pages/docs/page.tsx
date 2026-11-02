@@ -7,15 +7,16 @@ import { openapi } from '@/api/client';
 import { Prose } from '@/_components/prose';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
+import { go, segments } from '@/route';
 import { Operation } from './_components/operation';
 import { Rail } from './_components/rail';
 import { groups, isDocument, type Document, type Group } from './_components/spec';
 import { Verb } from './_components/verb';
 
-/** The operation named after `#docs/`, so a reload or a shared link lands on it. */
+/** The operation named after `docs/` in the address, so a reload or a shared link lands on it. */
 function linked(): string | null {
-  const [view, id] = window.location.hash.slice(1).split('/');
-  return view === 'docs' && id ? decodeURIComponent(id) : null;
+  const [view, id] = segments();
+  return view === 'docs' && id ? id : null;
 }
 
 interface Props {
@@ -55,8 +56,8 @@ export function Docs({ shell, secured }: Props) {
 
   useEffect(() => {
     const follow = () => setSelected(linked());
-    window.addEventListener('hashchange', follow);
-    return () => window.removeEventListener('hashchange', follow);
+    window.addEventListener('popstate', follow);
+    return () => window.removeEventListener('popstate', follow);
   }, []);
 
   const all = useMemo(() => (document ? groups(document) : []), [document]);
@@ -64,7 +65,7 @@ export function Docs({ shell, secured }: Props) {
 
   const select = (id: string | null) => {
     setSelected(id);
-    window.history.replaceState(null, '', id ? `#docs/${encodeURIComponent(id)}` : '#docs');
+    go(id ? ['docs', id] : ['docs'], true);
     window.scrollTo({ top: 0 });
   };
 
