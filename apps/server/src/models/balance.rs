@@ -92,6 +92,27 @@ pub(crate) mod db {
         ids: &[&str],
         confirmed: i64,
     ) -> anyhow::Result<Balances> {
+        let balances = find_signed_by_ids(connection, ids, confirmed)?;
+        ensure!(
+            balances
+                .values()
+                .all(|balance| balance.confirmed >= base::Decimal::zero()),
+            "a confirmed balance is negative"
+        );
+        Ok(balances)
+    }
+
+    /// As [`find_by_ids`], but a balance may be negative: indexed debits
+    /// over indexed credits (history before the start is unknown).
+    ///
+    /// # Errors
+    ///
+    /// When the read fails or a stored value does not decode.
+    pub(crate) fn find_signed_by_ids(
+        connection: &mut SqliteConnection,
+        ids: &[&str],
+        confirmed: i64,
+    ) -> anyhow::Result<Balances> {
         let rows: Vec<Counted> = diesel::sql_query(LEGS)
             .bind::<Text, _>(serde_json::to_string(ids)?)
             .bind::<BigInt, _>(confirmed)
@@ -110,12 +131,6 @@ pub(crate) mod db {
                 balance.spendable += signed;
             }
         }
-        ensure!(
-            balances
-                .values()
-                .all(|balance| balance.confirmed >= base::Decimal::zero()),
-            "a confirmed balance is negative"
-        );
         Ok(Balances(balances))
     }
 

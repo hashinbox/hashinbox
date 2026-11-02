@@ -6,6 +6,7 @@ import type { components, paths } from './schema';
 
 export type Schemas = components['schemas'];
 export type Wallet = Schemas['Wallet'];
+export type ListedWallet = Schemas['ListedWallet'];
 export type Listing = Schemas['Listing'];
 export type Balance = Schemas['Balance'];
 export type Transaction = Schemas['Transaction'];

@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use ::rpc::testing::{Reply, Script};
-use base::{Addressed as _, Asset, Chained, Coin, Leg, TransactionId, TransactionState};
+use base::{
+    Addressed as _, Asset, Chained, Coin, Dated as _, Leg, NotServed, TransactionId,
+    TransactionState,
+};
 use bitcoin::{
     Amount, BlockHash, Denomination, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
     Witness, absolute, consensus::encode::serialize_hex, hashes::Hash as _, transaction::Version,
@@ -251,6 +254,16 @@ async fn a_position_above_the_tip_is_none() {
 }
 
 #[tokio::test]
+async fn a_pruned_block_is_not_served() {
+    let script = Script::new([
+        Reply::ok("getblockhash", json!(hash(1).to_string())),
+        Reply::failure("getblock", -1, "Block not available (pruned data)"),
+    ]);
+    let error = chain(&script, 6).block(1).await.expect_err("pruned");
+    assert_eq!(NotServed::find(&error), Some(NotServed { position: 1 }));
+}
+
+#[tokio::test]
 async fn a_run_that_does_not_link_is_refused() {
     let one = coinbase(1, script_of(1), 1_000);
     let two = coinbase(2, script_of(1), 1_000);
@@ -303,4 +316,21 @@ async fn a_chain_over_a_swap_follows_its_replacement() {
     assert_eq!(chain.tips().await.expect("new node").produced, 20);
     old.exhausted();
     next.exhausted();
+}
+
+#[tokio::test]
+async fn a_block_time_is_a_header_read() {
+    let script = Script::new([
+        Reply::ok("getblockhash", json!(hash(1).to_string())).expecting(json!([1])),
+        Reply::ok(
+            "getblockheader",
+            json!({"hash": hash(1).to_string(), "height": 1, "time": 1_700_000_000}),
+        )
+        .expecting(json!([hash(1).to_string(), true])),
+    ]);
+    assert_eq!(
+        chain(&script, 1).time(1).await.unwrap(),
+        Some(1_700_000_000)
+    );
+    script.exhausted();
 }

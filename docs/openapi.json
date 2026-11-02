@@ -145,7 +145,7 @@
           {
             "name": "kind",
             "in": "query",
-            "description": "Only this kind (`index`, `expire`, `triggers`, `broadcast`).",
+            "description": "Only this kind (`index`, `expire`, `triggers`, `broadcast`, `prune`).",
             "required": false,
             "schema": {
               "type": "string"
@@ -787,6 +787,112 @@
         ]
       }
     },
+    "/v1/networks/{chain}/{network}/tip": {
+      "get": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "Read a network's newest block, or its last block at or before a time",
+        "description": "Read from the node. With `at`, a binary search over block times: about log2(tip) block reads, and on Bitcoin, whose block times only roughly ascend, possibly a few blocks off.",
+        "operationId": "read_tip",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at",
+            "in": "query",
+            "description": "RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: answer the\nlast block at or before it. Absent: the newest block.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The block",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChainTip"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed `at`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The network is not configured, or `at` is before its first block",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The network cannot find blocks by time",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The node is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/stats": {
       "get": {
         "tags": [
@@ -1239,7 +1345,7 @@
           "wallets"
         ],
         "summary": "List the wallets",
-        "description": "Every keyed wallet and watched address, in wallet ID order.",
+        "description": "Every keyed wallet and watched address, in wallet ID order, with its tags and its balance in each indexed asset.",
         "operationId": "list_wallets",
         "responses": {
           "200": {
@@ -1284,7 +1390,7 @@
           "wallets"
         ],
         "summary": "Generate a wallet, or watch an address, in one configured network",
-        "description": "Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start. A generated wallet with empty `assets` is kept unwatched.",
+        "description": "Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start. A generated wallet with empty `assets` is kept unwatched. A `start` older than the network's `max_history_days` is refused.",
         "operationId": "create_wallet",
         "requestBody": {
           "content": {
@@ -1308,7 +1414,7 @@
             }
           },
           "400": {
-            "description": "Malformed body or address text",
+            "description": "Malformed body or address text, or a start older than the network's history limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -1407,7 +1513,7 @@
           "wallets"
         ],
         "summary": "Read one wallet's public metadata",
-        "description": "The wallet's network, canonical address, whether it is keyed, and the assets it is indexed in; never its key.",
+        "description": "The wallet's network, canonical address, whether it is keyed, the assets it is indexed in and how far each is; never its key.",
         "operationId": "read_wallet",
         "parameters": [
           {
@@ -1551,6 +1657,162 @@
           },
           "503": {
             "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/{id}/pause": {
+      "post": {
+        "tags": [
+          "wallets"
+        ],
+        "summary": "Pause indexing every asset of a wallet",
+        "description": "Its indexes are skipped: no facts are kept for blocks while paused. Resume backfills what they missed.",
+        "operationId": "pause_wallet",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "`<chain>:<network>:<address>`, as a create call returned it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The wallet, paused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Wallet"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed wallet ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Wallet is unknown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The wallet store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/{id}/resume": {
+      "post": {
+        "tags": [
+          "wallets"
+        ],
+        "summary": "Resume indexing every asset of a wallet",
+        "description": "From `paused` or `no_data` (clearing its reason): each index continues from its last indexed block, backfilling what it missed.",
+        "operationId": "resume_wallet",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "`<chain>:<network>:<address>`, as a create call returned it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The wallet, indexing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Wallet"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed wallet ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Wallet is unknown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The wallet store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -2186,6 +2448,31 @@
           "reverted"
         ]
       },
+      "ChainTip": {
+        "type": "object",
+        "description": "`GET /v1/networks/{chain}/{network}/tip`.",
+        "required": [
+          "position",
+          "timestamp"
+        ],
+        "properties": {
+          "position": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Native position (height or slot).",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix seconds, when reported; always present.",
+            "minimum": 0
+          }
+        }
+      },
       "ChainTransaction": {
         "type": "object",
         "description": "One kept transaction.",
@@ -2260,7 +2547,8 @@
           "network",
           "indexing",
           "nodes",
-          "explorer"
+          "explorer",
+          "max_history_days"
         ],
         "properties": {
           "explorer": {
@@ -2277,6 +2565,15 @@
           "indexing": {
             "$ref": "#/components/schemas/Indexing",
             "description": "What its indexer did since the process started."
+          },
+          "max_history_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How old, in days, a wallet's start may be; null: no limit. Always\npresent.",
+            "minimum": 0
           },
           "network": {
             "$ref": "#/components/schemas/Network"
@@ -2319,7 +2616,7 @@
           },
           "start": {
             "$ref": "#/components/schemas/Start",
-            "description": "Where indexing begins: `\"fresh\"` for the chain's tip, or the native\nposition to index from. Absent means `\"fresh\"`."
+            "description": "Where indexing begins: `\"fresh\"` for the chain's tip, or the native\nposition to index from, no older than the network's\n`max_history_days`. Absent means `\"fresh\"`."
           }
         },
         "additionalProperties": false
@@ -2387,6 +2684,15 @@
         "description": "The `\"fresh\"` literal of a `Start`.",
         "enum": [
           "fresh"
+        ]
+      },
+      "IndexState": {
+        "type": "string",
+        "description": "Whether an asset of a wallet is indexed.",
+        "enum": [
+          "indexing",
+          "paused",
+          "no_data"
         ]
       },
       "Indexing": {
@@ -2501,7 +2807,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`)."
+            "description": "The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`, `prune`)."
           },
           "progress": {
             "type": [
@@ -2595,6 +2901,40 @@
           "succeeded",
           "failed"
         ]
+      },
+      "ListedWallet": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Wallet"
+          },
+          {
+            "type": "object",
+            "required": [
+              "tags",
+              "balances"
+            ],
+            "properties": {
+              "balances": {
+                "type": "object",
+                "description": "By asset id, its balance in each indexed asset this server configures:\nexact display units, as `GET /v1/wallets/{id}/balance` reports `amount`.",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Its tags, by name."
+              }
+            }
+          }
+        ],
+        "description": "One listed wallet: its public metadata, tags and balances."
       },
       "Listing": {
         "type": "object",
@@ -3414,7 +3754,8 @@
           "network",
           "address",
           "keyed",
-          "assets"
+          "assets",
+          "indexes"
         ],
         "properties": {
           "address": {
@@ -3432,6 +3773,13 @@
             "type": "string",
             "description": "`<chain>:<network>:<address>`: what every wallet route takes."
           },
+          "indexes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WalletIndexProgress"
+            },
+            "description": "How far each asset is indexed, in asset id order."
+          },
           "keyed": {
             "type": "boolean",
             "description": "Whether this server holds its key and can send from it."
@@ -3439,6 +3787,75 @@
           "network": {
             "$ref": "#/components/schemas/Network",
             "description": "The wallet's chain and network."
+          }
+        }
+      },
+      "WalletIndexProgress": {
+        "type": "object",
+        "description": "How far one asset of a wallet is indexed. Complete when `index_state`\nis `indexing` and `index_behind_tip` is 0; permanent up to\n`min(indexed_at, finality_at)`; history shortened when `indexed_from` is\nabove `index_requested_from`. Positions are native (height or slot).",
+        "required": [
+          "asset",
+          "index_state",
+          "index_reason",
+          "index_requested_from",
+          "indexed_from",
+          "indexed_at",
+          "finality_at",
+          "index_behind_tip"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "The asset id."
+          },
+          "finality_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The network's final (confirmed) block at its indexer's last step;\nnull before its first. Always present.",
+            "minimum": 0
+          },
+          "index_behind_tip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Blocks between the last indexed and the network's produced tip at\nits indexer's last step; null before its first. Always present.",
+            "minimum": 0
+          },
+          "index_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it is `no_data`; null otherwise. Always present."
+          },
+          "index_requested_from": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The start asked for.",
+            "minimum": 0
+          },
+          "index_state": {
+            "$ref": "#/components/schemas/IndexState"
+          },
+          "indexed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The last block indexed; null before the first. Always present.",
+            "minimum": 0
+          },
+          "indexed_from": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The start indexed from: the one asked for, or the first block the\nnode served when it no longer served that one.",
+            "minimum": 0
           }
         }
       },
@@ -3452,7 +3869,7 @@
           "wallets": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Wallet"
+              "$ref": "#/components/schemas/ListedWallet"
             },
             "description": "Wallets in ID order."
           }
@@ -3483,7 +3900,7 @@
     },
     {
       "name": "jobs",
-      "description": "The job queue: indexing, expiry, trigger rounds, broadcasts"
+      "description": "The job queue: indexing, expiry, trigger rounds, broadcasts, pruning"
     },
     {
       "name": "stats",

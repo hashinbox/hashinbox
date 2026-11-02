@@ -1,6 +1,6 @@
 //! [`Chain`]: Ethereum blocks as `base` blocks, final once finalized.
 
-use base::{Block, Blocks, Chained, Future, Network, Networked, Tips};
+use base::{Block, Blocks, Chained, Dated, Future, Network, Networked, Tips};
 
 use crate::{Client, Tokens};
 
@@ -53,5 +53,12 @@ impl Chained for Chain {
 
     fn blocks(&self, start: u64, end: u64) -> Future<'_, anyhow::Result<Blocks>> {
         Box::pin(self.rpc.blocks(start, end, &self.tokens))
+    }
+}
+
+/// Finds blocks by time through header-only reads.
+impl Dated for Chain {
+    fn time(&self, position: u64) -> Future<'_, anyhow::Result<Option<u64>>> {
+        Box::pin(async move { Ok(Some(self.rpc.time(position).await?)) })
     }
 }

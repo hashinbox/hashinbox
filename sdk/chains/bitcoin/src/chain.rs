@@ -1,7 +1,7 @@
 //! [`Chain`]: Bitcoin blocks as `base` blocks, final at a configured depth.
 
 use anyhow::ensure;
-use base::{Block, Blocks, Chained, Future, Network, Networked, Tips};
+use base::{Block, Blocks, Chained, Dated, Future, Network, Networked, Tips};
 
 use crate::Client;
 
@@ -54,5 +54,12 @@ impl Chained for Chain {
 
     fn blocks(&self, start: u64, end: u64) -> Future<'_, anyhow::Result<Blocks>> {
         Box::pin(self.rpc.blocks(start, end))
+    }
+}
+
+/// Finds blocks by time through header-only reads.
+impl Dated for Chain {
+    fn time(&self, position: u64) -> Future<'_, anyhow::Result<Option<u64>>> {
+        Box::pin(async move { Ok(Some(self.rpc.time(position).await?)) })
     }
 }

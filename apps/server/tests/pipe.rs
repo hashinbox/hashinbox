@@ -48,16 +48,16 @@ INSERT INTO block (id, chain, network, position, height, hash, archived_at) VALU
  ('bitcoin.regtest.03','bitcoin','regtest',3,3,x'03',NULL),
  ('bitcoin.regtest.f5','bitcoin','regtest',5,5,x'f5',1),
  ('bitcoin.other.03','bitcoin','other',3,3,x'03',NULL);
-INSERT INTO wallet_index (id, chain, network, address, asset, birthday, indexed_at) VALUES
- ('bitcoin.regtest.a.native','bitcoin','regtest','a','native',0,'bitcoin.regtest.03'),
- ('bitcoin.regtest.b.native','bitcoin','regtest','b','native',0,'bitcoin.regtest.02'),
- ('bitcoin.regtest.c.native','bitcoin','regtest','c','native',0,'bitcoin.regtest.01'),
- ('bitcoin.regtest.d.native','bitcoin','regtest','d','native',0,NULL),
- ('bitcoin.regtest.e.native','bitcoin','regtest','e','native',0,'bitcoin.regtest.f5'),
- ('bitcoin.regtest.a.tok','bitcoin','regtest','a','tok',0,'bitcoin.regtest.03'),
- ('bitcoin.regtest.b.tok','bitcoin','regtest','b','tok',0,'bitcoin.regtest.03'),
- ('bitcoin.regtest.c.tok','bitcoin','regtest','c','tok',0,'bitcoin.regtest.03'),
- ('bitcoin.other.a.native','bitcoin','other','a','native',0,'bitcoin.other.03');
+INSERT INTO wallet_index (id, chain, network, address, asset, requested_from, birthday, indexed_at, state) VALUES
+ ('bitcoin.regtest.a.native','bitcoin','regtest','a','native',0,0,'bitcoin.regtest.03',0),
+ ('bitcoin.regtest.b.native','bitcoin','regtest','b','native',0,0,'bitcoin.regtest.02',0),
+ ('bitcoin.regtest.c.native','bitcoin','regtest','c','native',0,0,'bitcoin.regtest.01',0),
+ ('bitcoin.regtest.d.native','bitcoin','regtest','d','native',0,0,NULL,0),
+ ('bitcoin.regtest.e.native','bitcoin','regtest','e','native',0,0,'bitcoin.regtest.f5',0),
+ ('bitcoin.regtest.a.tok','bitcoin','regtest','a','tok',0,0,'bitcoin.regtest.03',0),
+ ('bitcoin.regtest.b.tok','bitcoin','regtest','b','tok',0,0,'bitcoin.regtest.03',0),
+ ('bitcoin.regtest.c.tok','bitcoin','regtest','c','tok',0,0,'bitcoin.regtest.03',0),
+ ('bitcoin.other.a.native','bitcoin','other','a','native',0,0,'bitcoin.other.03',0);
 INSERT INTO \"transaction\" (id, block, chain, network, txid, \"order\", state, bytes) VALUES
  ('bitcoin.regtest.t1','bitcoin.regtest.01','bitcoin','regtest','t1',0,1,x''),
  ('bitcoin.regtest.t2','bitcoin.regtest.02','bitcoin','regtest','t2',0,1,x''),

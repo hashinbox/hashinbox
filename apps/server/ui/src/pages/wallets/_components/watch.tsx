@@ -1,3 +1,4 @@
+import Event from '@mui/icons-material/Event';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Dialog from '@mui/material/Dialog';
@@ -5,13 +6,16 @@ import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogContentText from '@mui/material/DialogContentText';
 import DialogTitle from '@mui/material/DialogTitle';
+import IconButton from '@mui/material/IconButton';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
-import { useState, type SubmitEvent } from 'react';
-import { call, client, type Listing, type Wallet } from '@/api/client';
+import Tooltip from '@mui/material/Tooltip';
+import Typography from '@mui/material/Typography';
+import { useRef, useState, type SubmitEvent } from 'react';
+import { ApiError, call, client, type Listing, type Wallet } from '@/api/client';
 import type { Shell } from '@/layout';
 import { WATCH_NOTHING, watchBody, type Watching } from './watching';
 
@@ -26,6 +30,80 @@ export function WatchFields({
   value: Watching;
   onChange: (value: Watching) => void;
 }) {
+  const network = offered[0]?.network;
+  const key = network ? `${network.chain}/${network.name}` : '';
+  const [picking, setPicking] = useState(false);
+  const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
+  // The network whose tip endpoint answered that it cannot find blocks by time.
+  const [undated, setUndated] = useState<string | null>(null);
+  const byTime = network !== undefined && undated !== key;
+  // Each pick's number: only the latest pick's answer fills the field.
+  const picks = useRef(0);
+  // How old, in days, a start may be on the network `key`, and the earliest
+  // time that allowed when it was learned (null: no limit).
+  const [limit, setLimit] = useState<{
+    key: string;
+    days: number | null;
+    earliest: number | null;
+  } | null>(null);
+  const days = limit?.key === key ? limit.days : null;
+  const earliest = limit?.key === key ? limit.earliest : null;
+
+  /** Opens or closes the time picker; learns the network's history limit once. */
+  const pickByTime = () => {
+    setPicking(!picking);
+    if (!network || limit?.key === key) return;
+    call(client.GET('/v1/networks'))
+      .then((list) => {
+        const found = list.networks.find(
+          (n) => n.network.chain === network.chain && n.network.name === network.name,
+        );
+        const days = found?.max_history_days ?? null;
+        const earliest = days === null ? null : Date.now() - days * 86_400_000;
+        setLimit({ key, days, earliest });
+      })
+      .catch(() => setLimit({ key, days: null, earliest: null }));
+  };
+
+  /** Fills the start block with the last block at or before `local` (a datetime-local value). */
+  const fill = (local: string) => {
+    const at = Math.floor(new Date(local).getTime() / 1000);
+    if (!network || !Number.isFinite(at)) return;
+    if (earliest !== null && at * 1000 < earliest) {
+      setNote({ text: `older than this network's ${days}-day history limit`, error: true });
+      return;
+    }
+    const path = { chain: network.chain, network: network.name };
+    const pick = ++picks.current;
+    call(
+      client.GET('/v1/networks/{chain}/{network}/tip', {
+        params: { path, query: { at: `${at}` } },
+      }),
+    )
+      .then((tip) => {
+        if (pick !== picks.current) return;
+        onChange({ ...value, from: `${tip.position}` });
+        setNote({
+          text:
+            tip.timestamp === null
+              ? `block ${tip.position}`
+              : `block from ${new Date(tip.timestamp * 1000).toLocaleString(undefined, {
+                  dateStyle: 'medium',
+                  timeStyle: 'short',
+                })}`,
+          error: false,
+        });
+      })
+      .catch((error: unknown) => {
+        if (pick !== picks.current) return;
+        if (error instanceof ApiError && error.status === 422) {
+          setUndated(key);
+          setPicking(false);
+        }
+        setNote({ text: error instanceof Error ? error.message : String(error), error: true });
+      });
+  };
+
   return (
     <Stack spacing={2}>
       <TextField
@@ -49,6 +127,7 @@ export function WatchFields({
         <ToggleButtonGroup
           size="small"
           exclusive
+          sx={{ flex: 'none', '& .MuiToggleButton-root': { whiteSpace: 'nowrap' } }}
           value={value.start}
           onChange={(_, start: Watching['start'] | null) => start && onChange({ ...value, start })}
         >
@@ -58,14 +137,43 @@ export function WatchFields({
         {value.start === 'at' && (
           <TextField
             size="small"
-            label="Birthday: block position"
+            fullWidth={false}
+            label="Start block"
             value={value.from}
-            onChange={(e) => onChange({ ...value, from: e.target.value.replace(/\D/g, '') })}
+            onChange={(e) => {
+              setNote(null);
+              onChange({ ...value, from: e.target.value.replace(/\D/g, '') });
+            }}
             slotProps={{ htmlInput: { inputMode: 'numeric' } }}
             required
+            sx={{ width: 150 }}
           />
         )}
+        {value.start === 'at' && byTime && (
+          <Tooltip title="Fill by time">
+            <IconButton size="small" onClick={pickByTime}>
+              <Event fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        )}
       </Stack>
+      {value.start === 'at' && byTime && picking && (
+        <TextField
+          size="small"
+          type="datetime-local"
+          label="Last block at or before"
+          onChange={(e) => fill(e.target.value)}
+          slotProps={{
+            inputLabel: { shrink: true },
+            ...(earliest !== null && { htmlInput: { min: local(earliest) } }),
+          }}
+        />
+      )}
+      {value.start === 'at' && note && (
+        <Typography variant="caption" color={note.error ? 'error' : 'text.secondary'}>
+          {note.text}
+        </Typography>
+      )}
     </Stack>
   );
 }
@@ -138,4 +246,10 @@ export function WatchDialog({
       </Box>
     </Dialog>
   );
+}
+
+/** `millis` as a `datetime-local` value, in local time. */
+function local(millis: number): string {
+  const offset = new Date(millis).getTimezoneOffset() * 60_000;
+  return new Date(millis - offset).toISOString().slice(0, 16);
 }

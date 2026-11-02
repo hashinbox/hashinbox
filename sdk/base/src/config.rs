@@ -1,10 +1,10 @@
 //! [`Config`]: a chain's configuration of one network, built into a
 //! [`Service`] over the application's [`Storage`].
 
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
 use crate::{
-    Assets, BlockStore, Future, Indexer, InputStore, Network, WalletFactoryBroadcaster,
+    Assets, BlockStore, Dated, Future, Indexer, InputStore, Network, WalletFactoryBroadcaster,
     WalletIndexStore, WalletStore,
 };
 
@@ -41,6 +41,11 @@ pub struct Service {
     /// The node transport every part of the service reads and broadcasts
     /// through: the one passed to [`Config::build`].
     pub client: Arc<dyn rpc::Client>,
+    /// Finds the network's blocks by time; `None` where the chain cannot.
+    pub dated: Option<Arc<dyn Dated>>,
+    /// How old a watch's start may be: about what history the nodes keep;
+    /// `None`: no limit.
+    pub max_history: Option<Duration>,
 }
 
 impl fmt::Debug for Service {

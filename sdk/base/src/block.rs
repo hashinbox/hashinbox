@@ -230,6 +230,34 @@ pub struct Tips {
     pub confirmed: u64,
 }
 
+/// The node no longer serves the block at `position`: its history there is
+/// pruned. A chain fails a read with it, inside an [`anyhow::Error`];
+/// [`NotServed::find`] finds it there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotServed {
+    /// The block's native coordinate.
+    pub position: u64,
+}
+
+impl NotServed {
+    /// The one `error` carries, anywhere in its chain of causes.
+    #[must_use]
+    pub fn find(error: &anyhow::Error) -> Option<Self> {
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<Self>())
+            .copied()
+    }
+}
+
+impl std::fmt::Display for NotServed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "node no longer serves block {}", self.position)
+    }
+}
+
+impl std::error::Error for NotServed {}
+
 /// A chain that can be read block by block.
 pub trait Chained: Networked + Send + Sync {
     /// The newest produced and newest final positions.
@@ -275,6 +303,123 @@ pub trait Chained: Networked + Send + Sync {
             Ok(run)
         })
     }
+}
+
+/// How many positions [`Dated::position_at`] steps over looking for a
+/// produced block (a run of skipped Solana slots) before it gives up.
+const SKIP_LIMIT: u64 = 1_000;
+
+/// A produced block's position and time: what [`Dated`] finds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    /// Native coordinate (Bitcoin/Ethereum height, Solana slot).
+    pub position: u64,
+    /// Unix seconds.
+    pub timestamp: u64,
+}
+
+/// A chain that can find its blocks by time: optional, a
+/// [`Service`](crate::Service) may lack it. The search reads only
+/// [`Dated::time`], which defaults to a whole block read through
+/// [`Chained::block`]; a chain with a lighter header read overrides it.
+pub trait Dated: Chained {
+    /// The time (Unix seconds) of the block at `position`; `None` where no
+    /// block was produced (a skipped Solana slot).
+    ///
+    /// # Errors
+    ///
+    /// When the node cannot answer, or the block carries no time.
+    fn time(&self, position: u64) -> Future<'_, anyhow::Result<Option<u64>>> {
+        Box::pin(async move {
+            let Some(block) = self.block(position).await? else {
+                return Ok(None);
+            };
+            let time = block
+                .header
+                .timestamp
+                .with_context(|| format!("block {position} carries no time"))?;
+            Ok(Some(time))
+        })
+    }
+
+    /// The newest produced block.
+    ///
+    /// # Errors
+    ///
+    /// When the node cannot answer, or holds no block at its own tip.
+    fn tip(&self) -> Future<'_, anyhow::Result<Stamp>> {
+        Box::pin(async move {
+            let position = self.tips().await?.produced;
+            let timestamp = self
+                .time(position)
+                .await?
+                .with_context(|| format!("no block at the tip {position}"))?;
+            Ok(Stamp {
+                position,
+                timestamp,
+            })
+        })
+    }
+
+    /// The last block at or before `time` (Unix seconds); `None` when `time`
+    /// is before the chain's first block.
+    ///
+    /// A binary search over positions `0..=tip`: about `log2(tip)`
+    /// [`Dated::time`] reads. Positions without a block are stepped over.
+    /// Block times only roughly ascend on Bitcoin, so there the answer may be
+    /// a few blocks off.
+    ///
+    /// # Errors
+    ///
+    /// When the node cannot answer, a block carries no time, or more than
+    /// a thousand positions in a row hold no block.
+    fn position_at(&self, time: u64) -> Future<'_, anyhow::Result<Option<Stamp>>> {
+        Box::pin(async move {
+            let tip = self.tip().await?;
+            if tip.timestamp <= time {
+                return Ok(Some(tip));
+            }
+            let Some(first) = produced(self, 0, tip.position).await? else {
+                return Ok(None);
+            };
+            if first.timestamp > time {
+                return Ok(None);
+            }
+            // `low` is at or before `time`; the block at `high` is after it.
+            let (mut low, mut high) = (first, tip.position);
+            while high - low.position > 1 {
+                let middle = low.position + (high - low.position) / 2;
+                match produced(self, middle, high - 1).await? {
+                    None => high = middle,
+                    Some(stamp) if stamp.timestamp <= time => low = stamp,
+                    Some(stamp) => high = stamp.position,
+                }
+            }
+            Ok(Some(low))
+        })
+    }
+}
+
+/// The first produced block in `start..=end`, stepping over at most
+/// [`SKIP_LIMIT`] empty positions.
+async fn produced<C: Dated + ?Sized>(
+    chain: &C,
+    start: u64,
+    end: u64,
+) -> anyhow::Result<Option<Stamp>> {
+    for position in start..=end {
+        anyhow::ensure!(
+            position - start < SKIP_LIMIT,
+            "no block in {SKIP_LIMIT} positions from {start}"
+        );
+        if let Some(timestamp) = chain.time(position).await? {
+            return Ok(Some(Stamp {
+                position,
+                timestamp,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// Where indexed blocks are kept: every block the [`Indexer`](crate::Indexer)
@@ -416,5 +561,65 @@ impl<S: Store> Notify for Notifying<S> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(Arc::from(listener));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Chain;
+
+    /// Blocks at even positions `0..=20`, block `p` made at time `100 + p`.
+    struct Even(Network);
+
+    impl Networked for Even {
+        fn network(&self) -> &Network {
+            &self.0
+        }
+    }
+
+    impl Chained for Even {
+        fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
+            Box::pin(async {
+                Ok(Tips {
+                    produced: 20,
+                    confirmed: 20,
+                })
+            })
+        }
+
+        fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
+            let block = position.is_multiple_of(2).then(|| Block {
+                network: self.0.clone(),
+                header: Header {
+                    position,
+                    height: position / 2,
+                    hash: Hash(position.to_be_bytes().to_vec()),
+                    parent: None,
+                    timestamp: Some(100 + position),
+                },
+                transactions: Transactions::default(),
+                rewards: Vec::new(),
+            });
+            Box::pin(async move { Ok(block) })
+        }
+    }
+
+    impl Dated for Even {}
+
+    #[tokio::test]
+    async fn position_at_finds_the_last_block_at_or_before() {
+        let chain = Even(Network::new(Chain::from_static("test"), "even"));
+        let at = |time| {
+            let chain = &chain;
+            async move { chain.position_at(time).await.unwrap().map(|h| h.position) }
+        };
+        assert_eq!(at(99).await, None);
+        assert_eq!(at(100).await, Some(0));
+        assert_eq!(at(107).await, Some(6));
+        assert_eq!(at(108).await, Some(8));
+        assert_eq!(at(119).await, Some(18));
+        assert_eq!(at(500).await, Some(20));
+        assert_eq!(chain.tip().await.unwrap().position, 20);
     }
 }

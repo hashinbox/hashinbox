@@ -1,6 +1,6 @@
 import AccountBalanceWallet from '@mui/icons-material/AccountBalanceWallet';
 import Box from '@mui/material/Box';
-import type { Wallet as Account } from '@/api/client';
+import type { ListedWallet as Account, Wallet as Created } from '@/api/client';
 import type { Shell } from '@/layout';
 import { Empty } from '@/_components/empty';
 import { Rail } from './_components/rail';
@@ -11,7 +11,7 @@ interface Props {
   wallets: Account[];
   selected: string | null;
   onSelect: (id: string) => void;
-  onAdded: (wallet: Account) => void;
+  onAdded: (wallet: Created) => void;
   /** Tags by wallet id. */
   tags: Map<string, string[]>;
   /** Called after a tag was added or removed. */

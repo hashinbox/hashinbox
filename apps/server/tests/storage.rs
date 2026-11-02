@@ -125,8 +125,11 @@ async fn watch(storage: &Storage, address: &Address, birthday: u64) {
     let index = WalletIndex {
         address: address.clone(),
         asset: native(&address.network),
+        requested_from: birthday,
         birthday,
         indexed_at: None,
+        state: base::WalletIndexState::Indexing,
+        reason: None,
     };
     WalletIndexStore::insert(storage, &index).await.unwrap();
 }
@@ -956,8 +959,11 @@ async fn ids_are_dotted_natural_keys() {
     let dotted = WalletIndex {
         address: address(&network, "a.b"),
         asset: native(&network),
+        requested_from: 0,
         birthday: 0,
         indexed_at: None,
+        state: base::WalletIndexState::Indexing,
+        reason: None,
     };
     assert!(WalletIndexStore::insert(&storage, &dotted).await.is_err());
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ::rpc::{Batch, Call, CallResult, Failure, Request};
 use anyhow::{Context as _, bail, ensure};
 use base::{
-    Block, BlockHash, BlockHeader, BlockParent, Blocks, Reason, Tips, TransactionError,
+    Block, BlockHash, BlockHeader, BlockParent, Blocks, NotServed, Reason, Tips, TransactionError,
     TransactionErrorKind, Transactions,
 };
 use bitcoin::{Amount, Denomination, hashes::Hash as _, hex::DisplayHex as _};
@@ -86,8 +86,9 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// A node failure, a block that does not parse or is not the one asked,
-    /// or a run that does not link (the chain moved mid-fetch; retry).
+    /// A node failure, a block it pruned ([`NotServed`]), a block that does
+    /// not parse or is not the one asked, or a run that does not link (the
+    /// chain moved mid-fetch; retry).
     pub async fn blocks(&self, start: u64, end: u64) -> anyhow::Result<Blocks> {
         let hashes = self.hashes(start, end).await?;
         let mut run = Blocks::new(self.network.into());
@@ -104,6 +105,9 @@ impl Client {
             hashes.len()
         );
         for ((position, hash), reply) in (start..).zip(&hashes).zip(replies) {
+            if matches!(&reply, Err(failure) if failure.message.contains("pruned data")) {
+                return Err(NotServed { position }.into());
+            }
             let wire: WireBlock = decode("getblock", reply)?;
             ensure!(
                 wire.hash == *hash && wire.height == position,
@@ -117,6 +121,22 @@ impl Client {
             }
         }
         Ok(run)
+    }
+
+    /// The time of the block at `height`: `getblockhash`, then
+    /// `getblockheader` (no transactions).
+    ///
+    /// # Errors
+    ///
+    /// A node failure, or a height above the node's tip.
+    pub async fn time(&self, height: u64) -> anyhow::Result<u64> {
+        let hash: String = self.call("getblockhash", json!([height])).await?;
+        let header: WireHeader = self.call("getblockheader", json!([hash, true])).await?;
+        ensure!(
+            header.height == height,
+            "Bitcoin node returned another header for {height}"
+        );
+        Ok(header.time)
     }
 
     /// Core's conservative fee rate for confirmation within `target` blocks;
@@ -278,6 +298,13 @@ struct WireBlock {
     previousblockhash: Option<String>,
     time: u64,
     tx: Vec<Value>,
+}
+
+/// `getblockheader <hash> true`, for its time.
+#[derive(Deserialize)]
+struct WireHeader {
+    height: u64,
+    time: u64,
 }
 
 /// Submits exact signed bytes to every node it reaches ([`Client::send`]).

@@ -137,6 +137,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pruning_deletes_only_jobs_that_succeeded_before() {
+        let (_directory, queue) = queue().await;
+        let mut ids = Vec::new();
+        for status in [Status::Done, Status::Failed, Status::Pending] {
+            let job = Job::new(topic("p"), "k", json!({}));
+            queue.enqueue(job.clone()).await.unwrap();
+            queue
+                .update(Job {
+                    status,
+                    ..job.clone()
+                })
+                .await
+                .unwrap();
+            ids.push(job.id);
+        }
+        let prune = |before: i64| {
+            let queue = queue.clone();
+            async move {
+                queue
+                    .write(move |c| {
+                        Ok(crate::models::task::db::delete_succeeded_before(
+                            c,
+                            &["k"],
+                            before,
+                        )?)
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+        // Written now: not before the Unix epoch, so nothing goes.
+        assert_eq!(prune(0).await, 0);
+        assert_eq!(prune(i64::MAX).await, 1);
+        assert_eq!(queue.get(&ids[0]).await.unwrap(), None);
+        assert!(
+            queue.get(&ids[1]).await.unwrap().is_some(),
+            "a failure keeps its reason"
+        );
+        assert!(queue.get(&ids[2]).await.unwrap().is_some());
+        let other = Job::new(topic("p"), "other", json!({}));
+        queue.enqueue(other.clone()).await.unwrap();
+        queue
+            .update(Job {
+                status: Status::Done,
+                ..other.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(prune(i64::MAX).await, 0, "another kind stays");
+    }
+
+    #[tokio::test]
     async fn update_replaces_the_job_whole() {
         let (_directory, queue) = queue().await;
         let mut job = Job::new(topic("a"), "k", json!({"x": 1})).with_deadline(9);

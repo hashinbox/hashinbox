@@ -67,8 +67,11 @@ diesel::table! {
         network -> Text,
         address -> Text,
         asset -> Text,
+        requested_from -> BigInt,
         birthday -> BigInt,
         indexed_at -> Nullable<Text>,
+        state -> Integer,
+        reason -> Nullable<Text>,
     }
 }
 

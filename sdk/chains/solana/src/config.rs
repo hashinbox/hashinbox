@@ -40,6 +40,10 @@ pub struct Config {
     /// How often the indexer wakes, in milliseconds; default 1,000.
     #[serde(default = "Config::default_interval_ms")]
     pub interval_ms: u64,
+    /// How old, in days, a watch's start may be: about what history the
+    /// nodes keep; none: no limit.
+    #[serde(default)]
+    pub max_history_days: Option<u32>,
 }
 
 /// One allowlisted SPL token and the decimals its mint must declare.
@@ -72,6 +76,7 @@ impl Config {
             fee_ttl_ms: Self::default_fee_ttl_ms(),
             pending_ttl_ms: Self::default_pending_ttl_ms(),
             interval_ms: Self::default_interval_ms(),
+            max_history_days: None,
         }
     }
 
@@ -231,8 +236,9 @@ impl base::Config for Config {
     ) -> Future<'a, anyhow::Result<Service>> {
         Box::pin(async move {
             let rpc = self.open(Arc::clone(&client)).await?;
+            let chain = Arc::new(self.chain(&rpc));
             let indexer = Arc::new(Indexer::new(
-                Arc::new(self.chain(&rpc)),
+                chain.clone(),
                 Arc::clone(&storage.blocks),
                 Arc::clone(&storage.indexes),
                 Duration::from_millis(self.interval_ms),
@@ -247,6 +253,10 @@ impl base::Config for Config {
                 assets: self.assets(),
                 storage: storage.clone(),
                 client,
+                dated: Some(chain),
+                max_history: self
+                    .max_history_days
+                    .map(|days| Duration::from_secs(u64::from(days) * 86_400)),
             })
         })
     }

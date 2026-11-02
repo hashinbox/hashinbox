@@ -2951,6 +2951,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "http-server",
+ "jiff",
  "libsqlite3-sys",
  "logging",
  "payments",

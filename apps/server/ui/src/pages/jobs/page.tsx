@@ -27,6 +27,7 @@ const KINDS = [
   { kind: 'broadcast', label: 'Broadcast' },
   { kind: 'index', label: 'Index' },
   { kind: 'expire', label: 'Expire' },
+  { kind: 'prune', label: 'Prune' },
 ] as const;
 
 function labelOf(kind: string): string {

@@ -126,6 +126,22 @@ pub(crate) mod db {
             .optional()
     }
 
+    /// Deletes every job of one of `kinds` that succeeded and was last
+    /// written before `before` (Unix ms); how many.
+    pub(crate) fn delete_succeeded_before(
+        connection: &mut SqliteConnection,
+        kinds: &[&str],
+        before: i64,
+    ) -> QueryResult<usize> {
+        diesel::delete(
+            q::table
+                .filter(q::kind.eq_any(kinds))
+                .filter(q::status.eq(2))
+                .filter(q::updated_at.lt(before)),
+        )
+        .execute(connection)
+    }
+
     /// How many jobs are in each status, as (status, count).
     pub(crate) fn count_by_status(
         connection: &mut SqliteConnection,

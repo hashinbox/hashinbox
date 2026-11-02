@@ -12,6 +12,7 @@ mod networks;
 mod openapi;
 mod stats;
 mod tags;
+mod tip;
 mod transactions;
 mod triggers;
 mod wallets;
@@ -54,7 +55,7 @@ use crate::state::AppState;
         (name = "transactions", description = "History, single transfers, and batches"),
         (name = "networks", description = "Configured networks, their indexing and RPC nodes"),
         (name = "triggers", description = "Triggers, their runs, and the tags they select by"),
-        (name = "jobs", description = "The job queue: indexing, expiry, trigger rounds, broadcasts"),
+        (name = "jobs", description = "The job queue: indexing, expiry, trigger rounds, broadcasts, pruning"),
         (name = "stats", description = "What the store holds and its last day"),
         (name = "health", description = "Readiness and indexing state"),
         (name = "openapi", description = "This document")
@@ -109,6 +110,7 @@ fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
         .merge(jobs::routes())
         .merge(networks::routes())
         .merge(blocks::routes())
+        .merge(tip::routes())
         .merge(stats::routes())
         .merge(triggers::routes())
         .merge(tags::routes())

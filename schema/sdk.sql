@@ -122,16 +122,24 @@ CREATE TABLE wallet (
 -- One asset of one address being indexed (keyed or watch-only, so no wallet
 -- FK): facts are kept for every live block from birthday through
 -- indexed_at, with no gaps. NULL indexed_at: nothing scanned yet.
+-- requested_from: the start asked for; birthday moves past it, before the
+-- first scan, to the first block the node serves.
+-- state: 0 indexing, 1 paused, 2 no_data (the node no longer serves a block
+-- it needs; reason says which). Only indexing indexes are scanned.
 -- id: "{chain}.{network}.{address}.{asset}".
 CREATE TABLE wallet_index (
-    id         TEXT    NOT NULL PRIMARY KEY,
-    chain      TEXT    NOT NULL,
-    network    TEXT    NOT NULL,
-    address    TEXT    NOT NULL,
-    asset      TEXT    NOT NULL,
-    birthday   INTEGER NOT NULL,
-    indexed_at TEXT    REFERENCES block (id),
-    CHECK (id = chain || '.' || network || '.' || address || '.' || asset)
+    id             TEXT    NOT NULL PRIMARY KEY,
+    chain          TEXT    NOT NULL,
+    network        TEXT    NOT NULL,
+    address        TEXT    NOT NULL,
+    asset          TEXT    NOT NULL,
+    requested_from INTEGER NOT NULL,
+    birthday       INTEGER NOT NULL,
+    indexed_at     TEXT    REFERENCES block (id),
+    state          INTEGER NOT NULL,
+    reason         TEXT,
+    CHECK (id = chain || '.' || network || '.' || address || '.' || asset),
+    CHECK (state IN (0, 1, 2))
 );
 CREATE INDEX wallet_index_network ON wallet_index (chain, network);
 CREATE INDEX wallet_index_progress ON wallet_index (indexed_at);

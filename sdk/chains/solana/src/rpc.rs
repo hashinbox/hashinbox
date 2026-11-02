@@ -6,8 +6,8 @@ use std::{str::FromStr as _, sync::Arc};
 use ::rpc::{Batch, Call, CallError, CallResult, Client as _, Request};
 use anyhow::{Context as _, anyhow, bail, ensure};
 use base::{
-    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, Reason, Reward, Tips,
-    TransactionError, TransactionErrorKind, Transactions,
+    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, NotServed, Reason, Reward,
+    Tips, TransactionError, TransactionErrorKind, Transactions,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -17,8 +17,11 @@ use solana_message::Message;
 
 use crate::{Network, Tokens, spl, transaction::Transaction};
 
-/// `getBlock` codes meaning no block was produced at the slot.
+/// `getBlock` and `getBlockTime` codes meaning no block was produced at the
+/// slot.
 const SKIPPED: [i64; 2] = [-32_007, -32_009];
+/// `getBlock` and `getBlockTime` code: the node cleaned the block up.
+const CLEANED_UP: i64 = -32_001;
 /// Blocks requested per JSON-RPC batch: a full block is large.
 const BATCH: usize = 10;
 /// Reads see blocks a supermajority voted on.
@@ -96,8 +99,8 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// A node failure, or a run that does not link (the chain moved
-    /// mid-fetch; retry).
+    /// A node failure, a block the node no longer keeps ([`NotServed`]), or
+    /// a run that does not link (the chain moved mid-fetch; retry).
     pub async fn blocks(&self, start: u64, end: u64, tokens: &Tokens) -> anyhow::Result<Blocks> {
         let network = self.network();
         let mut run = Blocks::new(network.into());
@@ -110,6 +113,14 @@ impl Client {
                 json!([start, end, { "commitment": CONFIRMED }]),
             )
             .await?;
+        // A node lists no slot below the first block it keeps: unless `start`
+        // is listed, it may be one it no longer serves, not a skipped one.
+        if slots.first() != Some(&start) {
+            let first: u64 = self.call("getFirstAvailableBlock", json!([])).await?;
+            if start < first {
+                return Err(NotServed { position: start }.into());
+            }
+        }
         for chunk in slots.chunks(BATCH) {
             let calls = chunk
                 .iter()
@@ -127,10 +138,14 @@ impl Client {
                 })
                 .collect();
             for (slot, reply) in chunk.iter().copied().zip(self.batch(calls).await?) {
-                if let Err(failure) = &reply
-                    && SKIPPED.contains(&failure.code)
-                {
-                    bail!("Solana slot {slot} was listed and then skipped; retry");
+                match &reply {
+                    Err(failure) if SKIPPED.contains(&failure.code) => {
+                        bail!("Solana slot {slot} was listed and then skipped; retry");
+                    }
+                    Err(failure) if failure.code == CLEANED_UP => {
+                        return Err(NotServed { position: slot }.into());
+                    }
+                    _ => {}
                 }
                 let wire: WireBlock = decode("getBlock", reply)?;
                 let block = block(slot, wire, network, tokens)
@@ -141,6 +156,26 @@ impl Client {
             }
         }
         Ok(run)
+    }
+
+    /// The time of the block at `slot` (`getBlockTime`); `None` for a
+    /// skipped slot, or one the node reports no time for.
+    ///
+    /// # Errors
+    ///
+    /// A node failure, or a block it no longer keeps ([`NotServed`]).
+    pub async fn time(&self, slot: u64) -> anyhow::Result<Option<u64>> {
+        let reply = self
+            .0
+            .transport
+            .request(Request::new("getBlockTime", json!([slot])))
+            .await
+            .context("Solana getBlockTime")?;
+        match &reply {
+            Err(failure) if SKIPPED.contains(&failure.code) => Ok(None),
+            Err(failure) if failure.code == CLEANED_UP => Err(NotServed { position: slot }.into()),
+            _ => decode("getBlockTime", reply),
+        }
     }
 
     /// A recent confirmed blockhash.

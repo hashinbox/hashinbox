@@ -12,8 +12,8 @@ use alloy_primitives::{B256, Bytes, U64, U256, hex, keccak256};
 use alloy_rpc_types_eth::Block as RpcBlock;
 use anyhow::{Context as _, anyhow, bail, ensure};
 use base::{
-    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, Reason, Reward, Tips,
-    TransactionError, TransactionErrorKind, Transactions,
+    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, NotServed, Reason, Reward,
+    Tips, TransactionError, TransactionErrorKind, Transactions,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -22,6 +22,8 @@ use crate::{Address, Network, Tokens, erc20, transaction::Transaction};
 
 /// JSON-RPC "method not found": a node without `eth_getBlockReceipts`.
 const METHOD_NOT_FOUND: i64 = -32_601;
+/// EIP-4444 "history expired": the node pruned the block's body.
+const HISTORY_EXPIRED: i64 = 4_444;
 /// Wei in one Gwei: withdrawal amounts are the only Gwei this crate meets.
 const WEI_PER_GWEI: u64 = 1_000_000_000;
 
@@ -105,8 +107,9 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// A node failure, a block the node does not hold yet, or a run that does
-    /// not link (the chain moved mid-fetch; retry).
+    /// A node failure, a block the node does not hold yet, a block or
+    /// receipts it keeps no history for ([`NotServed`], EIP-4444), or a run
+    /// that does not link (the chain moved mid-fetch; retry).
     pub async fn blocks(&self, start: u64, end: u64, tokens: &Tokens) -> anyhow::Result<Blocks> {
         let network = self.network();
         let mut run = Blocks::new(network.into());
@@ -123,6 +126,7 @@ impl Client {
             .collect();
         let mut wires = Vec::new();
         for (height, reply) in (start..).zip(self.batch(calls).await?) {
+            expired(height, &reply)?;
             // `null`: this node does not have it yet; the run ends before it.
             let Some(wire) = decode::<Option<WireBlock>>("eth_getBlockByNumber", reply)? else {
                 break;
@@ -147,6 +151,32 @@ impl Client {
             }
         }
         Ok(run)
+    }
+
+    /// The time of block `height`: `eth_getBlockByNumber(n, false)`, no
+    /// transactions and no receipts.
+    ///
+    /// # Errors
+    ///
+    /// A node failure, a block the node does not hold yet, or a node that
+    /// keeps no history for it ([`NotServed`], EIP-4444).
+    pub async fn time(&self, height: u64) -> anyhow::Result<u64> {
+        let method = "eth_getBlockByNumber";
+        let reply = self
+            .0
+            .transport
+            .request(Request::new(method, json!([format!("{height:#x}"), false])))
+            .await
+            .with_context(|| format!("Ethereum {method}"))?;
+        expired(height, &reply)?;
+        let timed: Option<Timed> = decode(method, reply)?;
+        let timed =
+            timed.with_context(|| format!("Ethereum block {height} is not available yet"))?;
+        ensure!(
+            timed.number == U64::from(height),
+            "Ethereum node returned another block for {height}"
+        );
+        Ok(timed.timestamp.to())
     }
 
     /// The next nonce of `address`, counting its pending transactions.
@@ -482,9 +512,14 @@ fn collect(
             collected.push(Some(Vec::new()));
             continue;
         }
+        let height = wire.number();
         let receipts = if by_transaction {
             (0..count)
-                .map(|_| decode::<Option<Value>>("eth_getTransactionReceipt", next()?))
+                .map(|_| {
+                    let reply = next()?;
+                    expired(height, &reply)?;
+                    decode::<Option<Value>>("eth_getTransactionReceipt", reply)
+                })
                 .collect::<anyhow::Result<Option<Vec<_>>>>()?
         } else {
             match next()? {
@@ -492,12 +527,24 @@ fn collect(
                     code: METHOD_NOT_FOUND,
                     ..
                 }) => return Ok(None),
-                reply => decode::<Option<Vec<Value>>>("eth_getBlockReceipts", reply)?,
+                reply => {
+                    expired(height, &reply)?;
+                    decode::<Option<Vec<Value>>>("eth_getBlockReceipts", reply)?
+                }
             }
         };
         collected.push(receipts);
     }
     Ok(Some(collected))
+}
+
+/// [`NotServed`] when `reply` says the node keeps no history for block
+/// `height` (EIP-4444).
+fn expired(height: u64, reply: &CallResult) -> Result<(), NotServed> {
+    match reply {
+        Err(failure) if failure.code == HISTORY_EXPIRED => Err(NotServed { position: height }),
+        _ => Ok(()),
+    }
 }
 
 /// A call's result decoded as `T`; a node error object is an error that
@@ -529,6 +576,13 @@ fn reason(message: &str) -> Option<Reason> {
 #[derive(Deserialize)]
 struct Numbered {
     number: U64,
+}
+
+/// `eth_getBlockByNumber(n, false)`, for its time.
+#[derive(Deserialize)]
+struct Timed {
+    number: U64,
+    timestamp: U64,
 }
 
 /// `eth_getBlockByNumber("latest", false)`, for its base fee.

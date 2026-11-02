@@ -107,9 +107,13 @@ async fn main() -> Result<(), AnyError> {
     // Every network's expire job frees what pending transactions held.
     let expire = workers::broadcast::Expire::new(payments.clone(), storage.clone());
     expire.start().await?;
+    // One prune job deletes jobs that succeeded more than a day ago.
+    let prune = workers::prune::Prune::new(storage.clone());
+    prune.start().await?;
     let executor = workers::executor::Executor::new(storage.clone())
         .add(index, tasks::Retry::default())
         .add(expire, tasks::Retry::default())
+        .add(prune, tasks::Retry::default())
         .add(
             workers::broadcast::Broadcast::new(payments.clone(), storage.clone()),
             tasks::Retry::default(),

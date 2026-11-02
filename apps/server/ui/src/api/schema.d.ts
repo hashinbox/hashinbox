@@ -215,6 +215,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/networks/{chain}/{network}/tip": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read a network's newest block, or its last block at or before a time
+         * @description Read from the node. With `at`, a binary search over block times: about log2(tip) block reads, and on Bitcoin, whose block times only roughly ascend, possibly a few blocks off.
+         */
+        get: operations["read_tip"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/stats": {
         parameters: {
             query?: never;
@@ -304,13 +324,13 @@ export interface paths {
         };
         /**
          * List the wallets
-         * @description Every keyed wallet and watched address, in wallet ID order.
+         * @description Every keyed wallet and watched address, in wallet ID order, with its tags and its balance in each indexed asset.
          */
         get: operations["list_wallets"];
         put?: never;
         /**
          * Generate a wallet, or watch an address, in one configured network
-         * @description Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start. A generated wallet with empty `assets` is kept unwatched.
+         * @description Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start. A generated wallet with empty `assets` is kept unwatched. A `start` older than the network's `max_history_days` is refused.
          */
         post: operations["create_wallet"];
         delete?: never;
@@ -345,7 +365,7 @@ export interface paths {
         };
         /**
          * Read one wallet's public metadata
-         * @description The wallet's network, canonical address, whether it is keyed, and the assets it is indexed in; never its key.
+         * @description The wallet's network, canonical address, whether it is keyed, the assets it is indexed in and how far each is; never its key.
          */
         get: operations["read_wallet"];
         put?: never;
@@ -370,6 +390,46 @@ export interface paths {
         get: operations["read_wallet_balance"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/wallets/{id}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pause indexing every asset of a wallet
+         * @description Its indexes are skipped: no facts are kept for blocks while paused. Resume backfills what they missed.
+         */
+        post: operations["pause_wallet"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/wallets/{id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume indexing every asset of a wallet
+         * @description From `paused` or `no_data` (clearing its reason): each index continues from its last indexed block, backfilling what it missed.
+         */
+        post: operations["resume_wallet"];
         delete?: never;
         options?: never;
         head?: never;
@@ -553,6 +613,19 @@ export interface components {
          * @enum {string}
          */
         ChainState: "pending" | "succeeded" | "reverted";
+        /** @description `GET /v1/networks/{chain}/{network}/tip`. */
+        ChainTip: {
+            /**
+             * Format: int64
+             * @description Native position (height or slot).
+             */
+            position: number;
+            /**
+             * Format: int64
+             * @description Unix seconds, when reported; always present.
+             */
+            timestamp: number | null;
+        };
         /** @description One kept transaction. */
         ChainTransaction: {
             /**
@@ -583,6 +656,12 @@ export interface components {
             explorer: null | components["schemas"]["Explorer"];
             /** @description What its indexer did since the process started. */
             indexing: components["schemas"]["Indexing"];
+            /**
+             * Format: int64
+             * @description How old, in days, a wallet's start may be; null: no limit. Always
+             *     present.
+             */
+            max_history_days: number | null;
             network: components["schemas"]["Network"];
             /** @description Its nodes in failover order. */
             nodes: components["schemas"]["RpcNode"][];
@@ -609,7 +688,8 @@ export interface components {
             network: string;
             /**
              * @description Where indexing begins: `"fresh"` for the chain's tip, or the native
-             *     position to index from. Absent means `"fresh"`.
+             *     position to index from, no older than the network's
+             *     `max_history_days`. Absent means `"fresh"`.
              */
             start?: components["schemas"]["Start"];
         };
@@ -648,6 +728,11 @@ export interface components {
          * @enum {string}
          */
         Fresh: "fresh";
+        /**
+         * @description Whether an asset of a wallet is indexed.
+         * @enum {string}
+         */
+        IndexState: "indexing" | "paused" | "no_data";
         /** @description One network's indexing health, from memory. */
         Indexing: {
             /**
@@ -701,7 +786,7 @@ export interface components {
             id: string;
             /** @description What it was given. */
             input: Record<string, never>;
-            /** @description The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`). */
+            /** @description The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`, `prune`). */
             kind: string;
             /** @description What its worker has done so far; always present. */
             progress: Record<string, never> | null;
@@ -743,6 +828,18 @@ export interface components {
          * @enum {string}
          */
         JobState: "pending" | "running" | "succeeded" | "failed";
+        /** @description One listed wallet: its public metadata, tags and balances. */
+        ListedWallet: components["schemas"]["Wallet"] & {
+            /**
+             * @description By asset id, its balance in each indexed asset this server configures:
+             *     exact display units, as `GET /v1/wallets/{id}/balance` reports `amount`.
+             */
+            balances: {
+                [key: string]: string;
+            };
+            /** @description Its tags, by name. */
+            tags: string[];
+        };
         /** @description One configured asset: its id, where its wallets live, and what they hold. */
         Listing: {
             /**
@@ -1113,15 +1210,58 @@ export interface components {
             assets: string[];
             /** @description `<chain>:<network>:<address>`: what every wallet route takes. */
             id: string;
+            /** @description How far each asset is indexed, in asset id order. */
+            indexes: components["schemas"]["WalletIndexProgress"][];
             /** @description Whether this server holds its key and can send from it. */
             keyed: boolean;
             /** @description The wallet's chain and network. */
             network: components["schemas"]["Network"];
         };
+        /**
+         * @description How far one asset of a wallet is indexed. Complete when `index_state`
+         *     is `indexing` and `index_behind_tip` is 0; permanent up to
+         *     `min(indexed_at, finality_at)`; history shortened when `indexed_from` is
+         *     above `index_requested_from`. Positions are native (height or slot).
+         */
+        WalletIndexProgress: {
+            /** @description The asset id. */
+            asset: string;
+            /**
+             * Format: int64
+             * @description The network's final (confirmed) block at its indexer's last step;
+             *     null before its first. Always present.
+             */
+            finality_at: number | null;
+            /**
+             * Format: int64
+             * @description Blocks between the last indexed and the network's produced tip at
+             *     its indexer's last step; null before its first. Always present.
+             */
+            index_behind_tip: number | null;
+            /** @description Why it is `no_data`; null otherwise. Always present. */
+            index_reason: string | null;
+            /**
+             * Format: int64
+             * @description The start asked for.
+             */
+            index_requested_from: number;
+            index_state: components["schemas"]["IndexState"];
+            /**
+             * Format: int64
+             * @description The last block indexed; null before the first. Always present.
+             */
+            indexed_at: number | null;
+            /**
+             * Format: int64
+             * @description The start indexed from: the one asked for, or the first block the
+             *     node served when it no longer served that one.
+             */
+            indexed_from: number;
+        };
         /** @description `GET /v1/wallets`: the wallets. */
         WalletList: {
             /** @description Wallets in ID order. */
-            wallets: components["schemas"]["Wallet"][];
+            wallets: components["schemas"]["ListedWallet"][];
         };
     };
     responses: never;
@@ -1226,7 +1366,7 @@ export interface operations {
                 chain?: string;
                 /** @description Only jobs of this network of `chain`. */
                 network?: string;
-                /** @description Only this kind (`index`, `expire`, `triggers`, `broadcast`). */
+                /** @description Only this kind (`index`, `expire`, `triggers`, `broadcast`, `prune`). */
                 kind?: string;
                 /** @description Only jobs in this state. */
                 state?: components["schemas"]["JobState"];
@@ -1669,6 +1809,82 @@ export interface operations {
             };
         };
     };
+    read_tip: {
+        parameters: {
+            query?: {
+                /**
+                 * @description RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: answer the
+                 *     last block at or before it. Absent: the newest block.
+                 */
+                at?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The block */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChainTip"];
+                };
+            };
+            /** @description Malformed `at` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The network is not configured, or `at` is before its first block */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The network cannot find blocks by time */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The node is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     read_stats: {
         parameters: {
             query?: never;
@@ -2076,7 +2292,7 @@ export interface operations {
                     "application/json": components["schemas"]["Wallet"];
                 };
             };
-            /** @description Malformed body or address text */
+            /** @description Malformed body or address text, or a start older than the network's history limit */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2266,6 +2482,124 @@ export interface operations {
                 };
             };
             /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    pause_wallet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `<chain>:<network>:<address>`, as a create call returned it. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The wallet, paused */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Wallet"];
+                };
+            };
+            /** @description Malformed wallet ID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Wallet is unknown */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The wallet store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    resume_wallet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `<chain>:<network>:<address>`, as a create call returned it. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The wallet, indexing */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Wallet"];
+                };
+            };
+            /** @description Malformed wallet ID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Wallet is unknown */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The wallet store is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

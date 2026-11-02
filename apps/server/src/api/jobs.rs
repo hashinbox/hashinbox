@@ -40,7 +40,7 @@ struct ListQuery {
     chain: Option<String>,
     /// Only jobs of this network of `chain`.
     network: Option<String>,
-    /// Only this kind (`index`, `expire`, `triggers`, `broadcast`).
+    /// Only this kind (`index`, `expire`, `triggers`, `broadcast`, `prune`).
     kind: Option<String>,
     /// Only jobs in this state.
     state: Option<JobState>,
@@ -78,7 +78,7 @@ impl JobState {
 struct Job {
     /// The job id.
     id: String,
-    /// The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`).
+    /// The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`, `prune`).
     kind: String,
     /// What it locks: jobs whose topics conflict run one at a time, in id order.
     topic: String,

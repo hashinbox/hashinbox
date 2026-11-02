@@ -25,11 +25,12 @@ import { Money } from '@/_components/money';
 import { EmptyRow } from '@/_components/table';
 import { Transaction as Tx } from '@/_components/transaction';
 import type { Shell } from '@/layout';
-import { assetOf, decimalsOf, displayOf, effect, unitOf } from '@/money';
+import { assetName, assetOf, decimalsOf, displayOf, effect, unitOf } from '@/money';
 import { go, href } from '@/route';
 import { mono } from '@/theme';
 import { Send } from './send';
 import { WatchDialog } from './watch';
+import { haltOf, progressOf } from './watching';
 
 const PAGE = 100;
 
@@ -118,6 +119,22 @@ export function Wallet({
   };
 
   const claim = balance ? claimOf(balance) : null;
+  const halt = haltOf(wallet);
+
+  /** Pauses every index of the wallet, or resumes them when one is stopped. */
+  const toggle = () => {
+    const params = { params: { path: { id: wallet.id } } };
+    call(
+      halt
+        ? client.POST('/v1/wallets/{id}/resume', params)
+        : client.POST('/v1/wallets/{id}/pause', params),
+    )
+      .then((changed) => {
+        shell.notify(halt ? 'Indexing resumed.' : 'Indexing paused.');
+        onWatched(changed);
+      })
+      .catch(shell.fail);
+  };
 
   return (
     <Box component="article">
@@ -144,6 +161,20 @@ export function Wallet({
               {wallet.assets.length === 0 && ' · not watched'}
               {!wallet.keyed && ' · watch only'}
             </Typography>
+            {wallet.indexes.map((index) => {
+              const progress = progressOf(index);
+              const name = assetName(
+                shell.listings,
+                wallet.network.chain,
+                wallet.network.name,
+                index.asset,
+              );
+              return (
+                <Typography key={index.asset} sx={{ fontSize: 11, color: progress.color }}>
+                  {name}: {progress.text}
+                </Typography>
+              );
+            })}
           </Box>
           <Tags
             shell={shell}
@@ -170,6 +201,9 @@ export function Wallet({
               {wallet.assets.length === 0 ? 'Watch' : 'Watch more'}
             </Button>
             <Button onClick={() => setTagOpen(true)}>Add tag</Button>
+            {wallet.indexes.length > 0 && (
+              <Button onClick={toggle}>{halt ? 'Resume' : 'Pause'}</Button>
+            )}
           </ButtonGroup>
         </Stack>
         {claim && claim.color !== 'text.secondary' && (

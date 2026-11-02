@@ -16,6 +16,7 @@ import {
   setToken,
   whenUnauthorized,
   type Listing,
+  type ListedWallet,
   type Wallet,
 } from '@/api/client';
 import { Toast, type Message } from '@/_components/toast';
@@ -62,7 +63,7 @@ export function Layout() {
   const [door, setDoor] = useState<Door>('unknown');
   const [view, setView] = useState<View>(linked);
   const [listings, setListings] = useState<Listing[]>([]);
-  const [wallets, setWallets] = useState<Wallet[]>([]);
+  const [wallets, setWallets] = useState<ListedWallet[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [tags, setTags] = useState<Map<string, string[]>>(new Map());
   const [tagged, setTagged] = useState(0);
@@ -163,9 +164,11 @@ export function Layout() {
     setSession(value);
   };
 
-  // Added, or watched in more assets: replaces the listed one with the same id.
+  // Added, or watched in more assets: replaces the listed one with the same id
+  // until the reload brings its tags and balances.
   const added = (wallet: Wallet) => {
-    setWallets((list) => [...list.filter((w) => w.id !== wallet.id), wallet]);
+    const listed = { ...wallet, tags: [], balances: {} };
+    setWallets((list) => [...list.filter((w) => w.id !== wallet.id), listed]);
     setSelected(wallet.id);
     go(['wallets']);
     setTagged((n) => n + 1);

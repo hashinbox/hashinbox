@@ -107,6 +107,10 @@ struct ConfiguredNetwork {
     /// Its block explorer links; always present, null when none is configured.
     #[schema(required)]
     explorer: Option<Explorer>,
+    /// How old, in days, a wallet's start may be; null: no limit. Always
+    /// present.
+    #[schema(required)]
+    max_history_days: Option<u64>,
 }
 
 /// Every configured network, or the ones a change touched.
@@ -228,13 +232,14 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, 
     let stored = stored.rows();
     let networks = state
         .payments
-        .stats()
-        .into_iter()
-        .map(|(network, stats)| ConfiguredNetwork {
-            nodes: stored.get(&network).map(nodes).unwrap_or_default(),
-            explorer: state.explorers.get(&network),
-            network: network.into(),
-            indexing: stats.into(),
+        .services()
+        .iter()
+        .map(|(network, service)| ConfiguredNetwork {
+            nodes: stored.get(network).map(nodes).unwrap_or_default(),
+            explorer: state.explorers.get(network),
+            network: network.clone().into(),
+            indexing: service.indexer.stats().into(),
+            max_history_days: max_history_days(service),
         })
         .collect();
     Ok(Json(ListResponse { networks }))
@@ -426,11 +431,17 @@ fn install(
     let failover =
         rpc::Failover::new(https).map_err(|error| Error::invalid_request(error.to_string()))?;
     client.replace(Arc::new(failover), statistics);
-    let stats = state.payments.service(&network)?.indexer.stats();
+    let service = state.payments.service(&network)?;
     Ok(ConfiguredNetwork {
         nodes: self::nodes(nodes),
         explorer: state.explorers.get(&network),
+        indexing: service.indexer.stats().into(),
+        max_history_days: max_history_days(service),
         network: network.into(),
-        indexing: stats.into(),
     })
+}
+
+/// The network's history limit in whole days.
+fn max_history_days(service: &base::Service) -> Option<u64> {
+    service.max_history.map(|limit| limit.as_secs() / 86_400)
 }

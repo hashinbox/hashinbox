@@ -2,7 +2,8 @@
 //! slots and a reorg-shaped refetch.
 
 use base::{
-    Address, Asset, BlockHash, Chained as _, Decimal, Leg, Network, Reason, TransactionState,
+    Address, Asset, BlockHash, Chained as _, Dated as _, Decimal, Leg, Network, NotServed, Reason,
+    TransactionState,
 };
 use std::sync::Arc;
 
@@ -179,10 +180,33 @@ fn a_block_becomes_balance_legs_fees_and_rewards() {
 
 #[test]
 fn a_skipped_slot_has_no_block() {
-    let script =
-        Script::new([Reply::ok("getBlocks", json!([]))
-            .expecting(json!([6, 6, { "commitment": "confirmed" }]))]);
+    let script = Script::new([
+        Reply::ok("getBlocks", json!([])).expecting(json!([6, 6, { "commitment": "confirmed" }])),
+        Reply::ok("getFirstAvailableBlock", json!(0)),
+    ]);
     assert_eq!(block_on(chain(&script).block(6)).unwrap(), None);
+    script.exhausted();
+}
+
+#[test]
+fn a_slot_below_the_first_kept_block_is_not_served() {
+    let script = Script::new([
+        Reply::ok("getBlocks", json!([9])),
+        Reply::ok("getFirstAvailableBlock", json!(9)),
+    ]);
+    let error = block_on(chain(&script).blocks(6, 9)).unwrap_err();
+    assert_eq!(NotServed::find(&error), Some(NotServed { position: 6 }));
+    let script = Script::new([
+        Reply::ok("getBlocks", json!([6])),
+        Reply::failure(
+            "getBlock",
+            -32_001,
+            "Block 6 cleaned up, does not exist on node",
+        ),
+    ]);
+    let error = block_on(chain(&script).block(6)).unwrap_err();
+    assert_eq!(NotServed::find(&error), Some(NotServed { position: 6 }));
+    script.exhausted();
 }
 
 #[test]
@@ -239,4 +263,22 @@ fn a_chain_over_a_swap_follows_its_replacement() {
     assert_eq!(tips(&next, 20), 20);
     old.exhausted();
     next.exhausted();
+}
+
+#[test]
+fn a_search_by_time_reads_block_times_and_steps_over_skipped_slots() {
+    let time = |slot: u64, seconds: u64| {
+        Reply::ok("getBlockTime", json!(seconds)).expecting(json!([slot]))
+    };
+    let script = Script::new([
+        Reply::ok("getSlot", json!(3)),
+        Reply::ok("getSlot", json!(3)),
+        time(3, 300),
+        time(0, 100),
+        Reply::failure("getBlockTime", -32_007, "Slot 1 was skipped").expecting(json!([1])),
+        time(2, 200),
+    ]);
+    let stamp = block_on(chain(&script).position_at(250)).unwrap().unwrap();
+    assert_eq!((stamp.position, stamp.timestamp), (2, 200));
+    script.exhausted();
 }

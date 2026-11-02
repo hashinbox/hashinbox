@@ -87,24 +87,32 @@ async fn balance(
         .indexer
         .stats()
         .tip;
-    // A deficit is shown as such: the magnitude is scaled, the sign kept.
+    Ok(Json(ReadResponse {
+        asset: Asset::from(&info),
+        amount: amount(&info, total)?,
+        indexed_through,
+        tip,
+    }))
+}
+
+/// Atomic `total` of `info` in exact display units; a deficit is shown as
+/// such: the magnitude is scaled, the sign kept.
+///
+/// # Errors
+///
+/// A 503 when `total` is not whole atomic units.
+pub(super) fn amount(info: &base::AssetInfo, total: Decimal) -> Result<String, Error> {
     let unscalable = |error: base::DecimalError| {
         Error::unavailable(format!("indexed amount is not whole atomic units: {error}"))
     };
-    let amount = if total < Decimal::zero() {
+    Ok(if total < Decimal::zero() {
         let magnitude = info
             .display(&(Decimal::zero() - total))
             .map_err(unscalable)?;
         format!("-{magnitude}")
     } else {
         info.display(&total).map_err(unscalable)?.to_string()
-    };
-    Ok(Json(ReadResponse {
-        asset: Asset::from(&info),
-        amount,
-        indexed_through,
-        tip,
-    }))
+    })
 }
 
 /// The wallet whose balance is read.

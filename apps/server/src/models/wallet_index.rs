@@ -3,7 +3,8 @@
 
 use std::collections::BTreeSet;
 
-use base::{Address, Addressed, Asset, BlockHeader, Chain, Network, Networked};
+use anyhow::bail;
+use base::{Address, Addressed, Asset, BlockHeader, Chain, Network, Networked, WalletIndexState};
 use diesel::{
     dsl::not,
     expression::BoxableExpression,
@@ -222,8 +223,34 @@ pub(crate) mod db {
         network: String,
         address: String,
         asset: String,
+        requested_from: i64,
         birthday: i64,
         indexed_at: Option<String>,
+        state: i32,
+        reason: Option<String>,
+    }
+
+    /// `state` as stored.
+    const fn code(state: WalletIndexState) -> i32 {
+        match state {
+            WalletIndexState::Indexing => 0,
+            WalletIndexState::Paused => 1,
+            WalletIndexState::NoData => 2,
+        }
+    }
+
+    /// A stored `state`.
+    ///
+    /// # Errors
+    ///
+    /// For a code no writer stores.
+    fn state(code: i32) -> anyhow::Result<WalletIndexState> {
+        Ok(match code {
+            0 => WalletIndexState::Indexing,
+            1 => WalletIndexState::Paused,
+            2 => WalletIndexState::NoData,
+            _ => bail!("a stored index state {code} is unknown"),
+        })
     }
 
     impl From<Row> for WalletIndex {
@@ -253,21 +280,22 @@ pub(crate) mod db {
         next: Option<i64>,
     }
 
-    /// The lowest next position of a network's indexes, at or below a bound
-    /// (NULL: none).
+    /// The lowest next position of a network's indexing (state 0) indexes,
+    /// at or below a bound (NULL: none).
     const NEXT: &str = "
     SELECT MIN(n) AS next FROM (
       SELECT CASE WHEN wi.indexed_at IS NULL THEN wi.birthday ELSE b.position + 1 END AS n
       FROM wallet_index wi LEFT JOIN block b ON b.id = wi.indexed_at
-      WHERE wi.chain = ?1 AND wi.network = ?2
+      WHERE wi.chain = ?1 AND wi.network = ?2 AND wi.state = 0
     ) WHERE ?3 IS NULL OR n <= ?3";
 
-    /// The (address, asset) of every index of a network that a block applies
-    /// to: birthday at or below it, and indexed through its parent block, or
-    /// unset with no live block from the birthday up to it.
+    /// The (address, asset) of every indexing (state 0) index of a network
+    /// that a block applies to: birthday at or below it, and indexed through
+    /// its parent block, or unset with no live block from the birthday up to
+    /// it.
     const APPLYING: &str = "
     SELECT wi.* FROM wallet_index wi
-    WHERE wi.chain = ?1 AND wi.network = ?2 AND wi.birthday <= ?3
+    WHERE wi.chain = ?1 AND wi.network = ?2 AND wi.state = 0 AND wi.birthday <= ?3
       AND ((wi.indexed_at IS NOT NULL AND wi.indexed_at = ?4)
         OR (wi.indexed_at IS NULL AND NOT EXISTS (
           SELECT 1 FROM block b
@@ -307,8 +335,11 @@ pub(crate) mod db {
             network: network.name.clone(),
             address: index.address.value.clone(),
             asset: index.asset.id.clone(),
+            requested_from: int(index.requested_from)?,
             birthday: int(index.birthday)?,
             indexed_at: None,
+            state: code(index.state),
+            reason: index.reason.clone(),
         };
         diesel::insert_or_ignore_into(wallet_index::table)
             .values(&row)
@@ -316,7 +347,6 @@ pub(crate) mod db {
         Ok(())
     }
 
-    /// Every index of every network.
     /// How many distinct addresses of every network are indexed.
     pub(crate) fn count_addresses(connection: &mut SqliteConnection) -> QueryResult<usize> {
         wallet_index::table
@@ -330,6 +360,7 @@ pub(crate) mod db {
             .map(|rows| rows.len())
     }
 
+    /// Every index of every network.
     pub(crate) fn find_every(connection: &mut SqliteConnection) -> QueryResult<WalletIndexes> {
         wallet_index::table
             .select(Row::as_select())
@@ -365,8 +396,11 @@ pub(crate) mod db {
                         network: network.clone(),
                         id: row.asset,
                     },
+                    requested_from: uint(row.requested_from)?,
                     birthday: uint(row.birthday)?,
                     indexed_at: block.as_ref().map(BlockHeader::try_from).transpose()?,
+                    state: state(row.state)?,
+                    reason: row.reason,
                 })
             })
             .collect()
@@ -405,6 +439,48 @@ pub(crate) mod db {
             .into_iter()
             .map(|row| (row.address, row.asset))
             .collect())
+    }
+
+    /// Moves the birthday of `index` to `birthday` while it has not started.
+    ///
+    /// # Errors
+    ///
+    /// When a value is out of range or the write fails.
+    pub(crate) fn move_birthday(
+        connection: &mut SqliteConnection,
+        index: &base::WalletIndex,
+        birthday: u64,
+    ) -> anyhow::Result<()> {
+        diesel::update(
+            wallet_index::table
+                .filter(wallet_index::id.eq(WalletIndex::id(&index.address, &index.asset)?))
+                .filter(wallet_index::indexed_at.is_null()),
+        )
+        .set(wallet_index::birthday.eq(int(birthday)?))
+        .execute(connection)?;
+        Ok(())
+    }
+
+    /// Sets the state and reason of the index of `asset` of `address`, or
+    /// with `None`, of every index of `address`; how many there are.
+    pub(crate) fn set_state(
+        connection: &mut SqliteConnection,
+        address: &Address,
+        asset: Option<&str>,
+        state: WalletIndexState,
+        reason: Option<&str>,
+    ) -> QueryResult<usize> {
+        let rows = of!(address.network).filter(wallet_index::address.eq(&address.value));
+        let changes = (
+            wallet_index::state.eq(code(state)),
+            wallet_index::reason.eq(reason),
+        );
+        match asset {
+            Some(asset) => diesel::update(rows.filter(wallet_index::asset.eq(asset)))
+                .set(changes)
+                .execute(connection),
+            None => diesel::update(rows).set(changes).execute(connection),
+        }
     }
 
     /// Moves the indexes `pairs` of `network` to block `block_id`.

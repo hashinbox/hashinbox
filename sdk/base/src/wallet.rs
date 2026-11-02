@@ -274,10 +274,29 @@ pub struct Index {
     pub address: Address,
     /// The indexed asset, of the address's network.
     pub asset: Asset,
-    /// The first position to scan.
+    /// The start asked for.
+    pub requested_from: u64,
+    /// The first position to scan: `requested_from`, or the first block the
+    /// node served when it no longer served that one.
     pub birthday: u64,
     /// Scanned through this block; `None` before the first.
     pub indexed_at: Option<BlockHeader>,
+    /// Whether it is scanned.
+    pub state: IndexState,
+    /// Why it is [`IndexState::NoData`]; `None` otherwise.
+    pub reason: Option<String>,
+}
+
+/// Whether an [`Index`] is scanned; set only on events.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IndexState {
+    /// Scanned: the state it is made in, and resumed to.
+    #[default]
+    Indexing,
+    /// Skipped until resumed; resumed, it backfills what it missed.
+    Paused,
+    /// Skipped: the node no longer serves a block it needs.
+    NoData,
 }
 
 impl Index {
@@ -320,8 +339,9 @@ pub trait IndexStore: Send + Sync {
     /// When the store cannot write.
     fn insert<'a>(&'a self, index: &'a Index) -> Future<'a, Result<()>>;
 
-    /// The lowest [`Index::next`] of `network` at or below `through`; with
-    /// `None`, the lowest of all. `None` when no index qualifies.
+    /// The lowest [`Index::next`] of `network`'s [`IndexState::Indexing`]
+    /// indexes at or below `through`; with `None`, the lowest of all. `None`
+    /// when no index qualifies.
     ///
     /// # Errors
     ///
@@ -331,4 +351,31 @@ pub trait IndexStore: Send + Sync {
         network: &'a Network,
         through: Option<u64>,
     ) -> Future<'a, Result<Option<u64>>>;
+
+    /// Every index of `network`, whatever its state.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot read.
+    fn find_all<'a>(&'a self, network: &'a Network) -> Future<'a, Result<Vec<Index>>>;
+
+    /// Moves the birthday of `index` to `birthday`, only while it has not
+    /// started (`indexed_at` unset); its `requested_from` stays.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot write.
+    fn move_birthday<'a>(&'a self, index: &'a Index, birthday: u64) -> Future<'a, Result<()>>;
+
+    /// Sets the state of `index`, and its reason (`None` clears it).
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot write.
+    fn set_state<'a>(
+        &'a self,
+        index: &'a Index,
+        state: IndexState,
+        reason: Option<&'a str>,
+    ) -> Future<'a, Result<()>>;
 }

@@ -27,6 +27,8 @@ chain-bitcoin = { path = "../../sdk/chains/bitcoin" }
 chain-ethereum = { path = "../../sdk/chains/ethereum" }
 chain-solana = { path = "../../sdk/chains/solana" }
 hex.workspace = true
+# Parses the RFC 3339 time `GET .../tip?at=` finds a block by.
+jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
 http-server = { path = "../../packages/http-server" }
 rpc = { path = "../../packages/rpc" }
 payments = { path = "../../sdk/payments", features = ["toml"] }

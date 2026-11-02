@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, ensure};
-use base::{Address, Asset, Future, Wallet, WalletFactories, WalletStore};
+use base::{Address, Future, Wallet, WalletFactories, WalletStore};
 
 use super::Storage;
-use crate::models::{self, wallet_index};
+use crate::models;
 
 impl WalletStore for Storage {
     fn insert<'a>(&'a self, wallet: &'a dyn Wallet) -> Future<'a, anyhow::Result<()>> {
@@ -55,20 +55,5 @@ impl Storage {
     pub(crate) async fn keyed(&self) -> anyhow::Result<Vec<Address>> {
         self.read(|connection| Ok(models::wallet::db::find_all(connection)?.addresses()))
             .await
-    }
-
-    /// Every watched (address, asset) of every network.
-    ///
-    /// # Errors
-    ///
-    /// The read.
-    pub(crate) async fn watched(&self) -> anyhow::Result<Vec<(Address, Asset)>> {
-        self.read(|connection| {
-            Ok(wallet_index::db::find_every(connection)?
-                .into_iter()
-                .map(|index| (index.address, index.asset))
-                .collect())
-        })
-        .await
     }
 }

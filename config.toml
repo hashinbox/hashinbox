@@ -4,6 +4,8 @@
 #   cargo run -p payment-server -- migrate config.toml   (once, new database)
 #   cargo run -p payment-server -- serve config.toml
 # The UI dev server (apps/server/ui, `npm run dev`) proxies to this `bind`.
+# `max_history_days` (a network's): how old a wallet's start may be, about
+# what history its public nodes keep (pruned, EIP-4444); absent: no limit.
 bind = '127.0.0.1:8080'
 storage = { path = '.data/payment.db' }  # .data/ is git-ignored
 
@@ -31,6 +33,7 @@ transaction = 'https://explorer.solana.com/tx/{tx}'
 chain = 'ethereum'
 network = 'sepolia'
 chain_id = 11155111
+max_history_days = 30
 display_decimals = 6
 endpoints = ['https://ethereum-sepolia-rpc.publicnode.com']
 # Circle's test USDC.
@@ -40,6 +43,7 @@ tokens = [{ contract = '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238', decimals = 
 chain = 'solana'
 network = 'devnet'
 genesis_hash = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'
+max_history_days = 30
 display_decimals = 4
 endpoints = ['https://api.devnet.solana.com']
 # Circle's test USDC.
@@ -49,6 +53,7 @@ tokens = [{ mint = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', decimals = 6,
 chain = 'ethereum'
 network = 'mainnet'
 chain_id = 1
+max_history_days = 30
 display_decimals = 6
 endpoints = ['https://ethereum-rpc.publicnode.com']
 # Circle's USDC, Tether's USDT.
@@ -61,6 +66,7 @@ tokens = [
 chain = 'solana'
 network = 'mainnet'
 genesis_hash = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d'
+max_history_days = 30
 display_decimals = 4
 endpoints = ['https://api.mainnet-beta.solana.com']
 # Circle's USDC, Tether's USDT.

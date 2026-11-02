@@ -4,7 +4,10 @@
 use std::sync::Arc;
 
 use ::rpc::testing::{Reply, Script};
-use base::{Asset, Chained as _, Decimal, Leg, Reason, Reward, Tips, TransactionState};
+use base::{
+    Asset, Chained as _, Dated as _, Decimal, Leg, NotServed, Reason, Reward, Tips,
+    TransactionState,
+};
 use chain_ethereum::{Chain, Client, Config, Network, Token};
 use futures_executor::block_on;
 use num_bigint::BigUint;
@@ -362,4 +365,30 @@ fn a_chain_over_a_swap_follows_its_replacement() {
     assert_eq!(tips(&next, "0x14"), 20);
     old.exhausted();
     next.exhausted();
+}
+
+#[test]
+fn a_block_time_is_a_header_read_and_expired_history_says_so() {
+    let script = Script::new([Reply::ok(
+        "eth_getBlockByNumber",
+        json!({"number": "0x5", "timestamp": "0x64"}),
+    )
+    .expecting(json!(["0x5", false]))]);
+    let chain = connect(&script, &config());
+    assert_eq!(block_on(chain.time(5)).unwrap(), Some(100));
+    script.push([Reply::failure(
+        "eth_getBlockByNumber",
+        4444,
+        "pruned history unavailable",
+    )]);
+    let error = block_on(chain.time(3)).unwrap_err();
+    assert_eq!(NotServed::find(&error), Some(NotServed { position: 3 }));
+    script.push([Reply::failure(
+        "eth_getBlockByNumber",
+        4444,
+        "pruned history unavailable",
+    )]);
+    let error = block_on(chain.block(3)).unwrap_err();
+    assert_eq!(NotServed::find(&error), Some(NotServed { position: 3 }));
+    script.exhausted();
 }

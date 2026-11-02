@@ -17,8 +17,9 @@ mod wallet;
 pub use address::{Address, Addressed};
 pub use asset::{Asset, AssetInfo, Assets};
 pub use block::{
-    Block, Blocks, Chained, Hash as BlockHash, Header as BlockHeader, Listener as BlockListener,
-    Notify as BlockNotify, Notifying, Parent as BlockParent, Reward, Store as BlockStore, Tips,
+    Block, Blocks, Chained, Dated, Hash as BlockHash, Header as BlockHeader,
+    Listener as BlockListener, NotServed, Notify as BlockNotify, Notifying, Parent as BlockParent,
+    Reward, Stamp as BlockStamp, Store as BlockStore, Tips,
 };
 pub use cache::Cache;
 pub use chain::Chain;
@@ -37,7 +38,7 @@ pub use transaction::{
 pub use wallet::{
     Error as WalletError, ErrorKind as WalletErrorKind, Factories as WalletFactories,
     Factory as WalletFactory, FactoryBroadcaster as WalletFactoryBroadcaster, Index as WalletIndex,
-    IndexStore as WalletIndexStore, Store as WalletStore, Wallet,
+    IndexState as WalletIndexState, IndexStore as WalletIndexStore, Store as WalletStore, Wallet,
 };
 
 use std::pin::Pin;

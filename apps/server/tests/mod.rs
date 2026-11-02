@@ -211,8 +211,45 @@ impl Chained for Empty {
     }
 }
 
-/// The scripted network's configuration.
-struct Config(Arc<Script>);
+/// A chain whose tip is block 100, block `p` made `100 - p` days ago: what
+/// the scripted network finds its blocks by time with, when it has a
+/// history limit.
+struct Days;
+
+impl Networked for Days {
+    fn network(&self) -> &Network {
+        Empty.network()
+    }
+}
+
+impl Chained for Days {
+    fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
+        Box::pin(async {
+            Ok(Tips {
+                produced: 100,
+                confirmed: 100,
+            })
+        })
+    }
+
+    fn block(&self, _position: u64) -> Future<'_, anyhow::Result<Option<base::Block>>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+impl base::Dated for Days {
+    fn time(&self, position: u64) -> Future<'_, anyhow::Result<Option<u64>>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs();
+        Box::pin(async move { Ok(Some(now - (100 - position) * 86_400)) })
+    }
+}
+
+/// The scripted network's configuration, and its history limit (found by
+/// time over [`Days`]).
+struct Config(Arc<Script>, Option<Duration>);
 
 impl base::Config for Config {
     fn network(&self) -> Network {
@@ -258,6 +295,8 @@ impl base::Config for Config {
                 }]),
                 storage: storage.clone(),
                 client,
+                dated: self.1.map(|_| -> Arc<dyn base::Dated> { Arc::new(Days) }),
+                max_history: self.1,
             })
         })
     }
@@ -265,9 +304,18 @@ impl base::Config for Config {
 
 /// The payments container of the scripted network over `storage`.
 async fn payments(storage: &crate::storage::Storage, script: Arc<Script>) -> Arc<Payments> {
+    limited(storage, script, None).await
+}
+
+/// [`payments`], with a history limit of `max_history`.
+async fn limited(
+    storage: &crate::storage::Storage,
+    script: Arc<Script>,
+    max_history: Option<Duration>,
+) -> Arc<Payments> {
     let stores = Arc::new(storage.clone());
     let payments = Payments::builder()
-        .with_network(Config(script))
+        .with_network(Config(script, max_history))
         .with_storage(base::Storage {
             blocks: stores.clone(),
             indexes: stores.clone(),
