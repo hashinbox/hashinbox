@@ -35,10 +35,10 @@ payments = { path = "../../sdk/payments", features = ["toml"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 # The one SQLite file: every table's model (`src/models`) and the SDK storage
-# traits implemented on them (`src/storage`).
+# traits implemented on them (`src/usecase/sdk`).
 diesel.workspace = true
 libsqlite3-sys.workspace = true
-# The job queue contract and runner; its SQLite store is `src/storage/tasks.rs`.
+# The job queue contract and runner; its SQLite store is `src/usecase/tasks.rs`.
 tasks = { path = "../../packages/tasks", features = ["runner"] }
 tokio = { workspace = true, features = ["fs", "net", "process", "rt", "signal", "sync", "time"] }
 # The server's own configuration file, when its path ends in `.toml`.

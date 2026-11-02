@@ -8,15 +8,16 @@ use base::Addressed as _;
 use base::{Block as BaseBlock, BlockHeader, BlockStore, Blocks, Future, Network, Networked as _};
 use diesel::SqliteConnection;
 
-use super::Storage;
+use super::Stores;
 use crate::models::{Leg, block, int, leg, transaction, wallet_index};
 
-impl BlockStore for Storage {
+impl BlockStore for Stores {
     fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>> {
         Box::pin(async move {
             let network = blocks.network().clone();
             let run = blocks.to_vec();
-            self.write(move |connection| keep(connection, &network, &run))
+            self.db
+                .write(move |connection| keep(connection, &network, &run))
                 .await?;
             Ok(())
         })
@@ -27,7 +28,7 @@ impl BlockStore for Storage {
         network: &'a Network,
     ) -> Future<'a, anyhow::Result<Option<BlockHeader>>> {
         let network = network.clone();
-        Box::pin(self.read(move |connection| {
+        Box::pin(self.db.read(move |connection| {
             block::db::find_last(connection, &network)?
                 .map(|block| BlockHeader::try_from(&block))
                 .transpose()
@@ -41,13 +42,14 @@ impl BlockStore for Storage {
             let now = int(u64::try_from(
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
             )?)?;
-            self.write(move |connection| {
-                let below = block::db::find_below(connection, &network, from)?;
-                wallet_index::db::rewind(connection, &network, from, below.as_ref())?;
-                block::db::archive(connection, &network, from, now)?;
-                Ok(())
-            })
-            .await
+            self.db
+                .write(move |connection| {
+                    let below = block::db::find_below(connection, &network, from)?;
+                    wallet_index::db::rewind(connection, &network, from, below.as_ref())?;
+                    block::db::archive(connection, &network, from, now)?;
+                    Ok(())
+                })
+                .await
         })
     }
 }

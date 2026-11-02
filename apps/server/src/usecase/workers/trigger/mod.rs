@@ -1,5 +1,6 @@
 //! Triggers (docs/design/065-pipes.md, eval.md): the [`Round`] job, one
-//! round of a network's triggers, queued by the index job at the tip.
+//! round of a network's triggers, queued by the index job at the tip. Each
+//! trigger decides in `usecase::trigger`; this worker runs its action.
 //!
 //! A round's topic is the whole network (`chain:network`), so it never runs
 //! beside a broadcast of that network, and the jobs it starts run after it:
@@ -7,7 +8,6 @@
 //! flight.
 
 pub(crate) mod actions;
-mod triggers;
 
 use std::sync::Arc;
 
@@ -19,14 +19,14 @@ use serde_json::json;
 use tasks::{Ack, Job, Task, Topic, Worker};
 
 pub(crate) use actions::{Actions, Invocation};
-pub(crate) use triggers::Context;
-#[cfg(test)]
-pub(crate) use triggers::Trigger;
-use triggers::Triggers;
 
 use crate::{
+    db::Db,
     models::{Json, Task as Row, TriggerRun, task, trigger_run},
-    storage::Storage,
+    usecase::{
+        tasks::Queue,
+        trigger::{Context, Triggers},
+    },
 };
 
 /// The job kind.
@@ -53,16 +53,18 @@ impl Scope {
 /// Runs a network's triggers: the triggers job.
 pub(crate) struct Round {
     payments: Arc<Payments>,
-    storage: Storage,
+    db: Db,
+    queue: Queue,
     logger: Logger,
     actions: Arc<Actions>,
 }
 
 impl Round {
-    pub(crate) fn new(payments: Arc<Payments>, storage: Storage, logger: Logger) -> Self {
+    pub(crate) fn new(payments: Arc<Payments>, db: Db, queue: Queue, logger: Logger) -> Self {
         Self {
             payments,
-            storage,
+            db,
+            queue,
             logger,
             actions: Arc::new(Actions::new().add(actions::Transfer)),
         }
@@ -89,14 +91,24 @@ impl Worker for Round {
                 assets: service.assets.clone(),
                 estimator: service.wallets.factory.fees(),
                 runtime: tokio::runtime::Handle::current(),
-                actions: self.actions.clone(),
                 now,
             };
-            let deciding = network.clone();
+            let (deciding, actions) = (network.clone(), self.actions.clone());
             let verdicts = self
-                .storage
+                .db
                 .read(move |connection| {
-                    Ok(Triggers::new(connection, &deciding)?.decide(connection, &context))
+                    let triggers = Triggers::new(connection, &deciding)?;
+                    Ok(triggers.decide(connection, &context, |decision| {
+                        let mut invocation = Invocation::new(
+                            decision.network,
+                            decision.this,
+                            decision.trigger,
+                            decision.keyed,
+                        );
+                        let action = decision.action;
+                        actions.run(&action.name, &action.input, &mut invocation)?;
+                        Ok(invocation.started())
+                    }))
                 })
                 .await?;
 
@@ -104,7 +116,7 @@ impl Worker for Round {
             let mut acting = Vec::new();
             for (id, verdict) in verdicts {
                 match verdict {
-                    Ok(jobs) if !jobs.is_empty() => acting.push((id, jobs)),
+                    Ok(Some(jobs)) if !jobs.is_empty() => acting.push((id, jobs)),
                     Ok(_) => {}
                     Err(error) => self.logger.event(
                         Level::Warn,
@@ -124,7 +136,7 @@ impl Worker for Round {
                     jobs: Json(jobs.iter().map(|job| job.id.to_string()).collect()),
                     ..TriggerRun::new(&id, now)
                 };
-                self.storage
+                self.db
                     .write(move |connection| {
                         trigger_run::db::insert(connection, &run)?;
                         for job in &jobs {
@@ -133,7 +145,7 @@ impl Worker for Round {
                         Ok(())
                     })
                     .await?;
-                self.storage.announce();
+                self.queue.announce();
             }
             anyhow::Ok(())
         };

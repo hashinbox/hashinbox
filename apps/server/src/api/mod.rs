@@ -10,6 +10,7 @@ mod health;
 mod jobs;
 mod networks;
 mod openapi;
+mod state;
 mod stats;
 mod tags;
 mod tip;
@@ -33,7 +34,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::state::AppState;
+pub(crate) use state::AppState;
 
 /// The document root: title, version, description and servers. Title and
 /// description are stated here and the version is this crate's own, so a

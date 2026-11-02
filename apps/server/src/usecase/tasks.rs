@@ -1,11 +1,25 @@
-//! The job queue: `tasks::Store` and `tasks::Changes` on the one file. Every
-//! statement is the [`Task`] model's; a write is announced after it lands.
+//! The job queue ([`Queue`]): `tasks::Store` and `tasks::Changes` on the one
+//! file, with the change channel its executor waits on. Every statement is
+//! the [`Task`] model's; a write is announced after it lands.
 
 use tasks::{Changes, Id, Job, Jobs, Store, StoreError, StoreFuture};
 use tokio::sync::broadcast;
 
-use super::Storage;
-use crate::models::{Task, task};
+use crate::{
+    db::Db,
+    models::{Task, task},
+};
+
+/// Changes a slow queue subscriber may fall behind by before it lags.
+const CHANGES: usize = 256;
+
+/// The job queue on the one SQLite file. Clones share the pool and the
+/// change channel.
+#[derive(Clone)]
+pub(crate) struct Queue {
+    db: Db,
+    changes: broadcast::Sender<()>,
+}
 
 /// A store failure, without any bound value.
 fn backend(error: anyhow::Error) -> StoreError {
@@ -20,7 +34,15 @@ fn now() -> Result<i64, StoreError> {
     i64::try_from(tasks::now()).map_err(|_| StoreError::Invalid("time is above range".into()))
 }
 
-impl Storage {
+impl Queue {
+    /// The queue on `db`.
+    pub(crate) fn new(db: Db) -> Self {
+        Self {
+            db,
+            changes: broadcast::channel(CHANGES).0,
+        }
+    }
+
     /// Tells the queue that jobs changed outside [`Store`] (written with the
     /// run that queued them).
     pub(crate) fn announce(&self) {
@@ -36,16 +58,18 @@ impl Storage {
     /// When the write fails.
     pub(crate) async fn recover(&self) -> anyhow::Result<usize> {
         let now = i64::try_from(tasks::now())?;
-        self.write(move |connection| Ok(task::db::recover(connection, now)?))
+        self.db
+            .write(move |connection| Ok(task::db::recover(connection, now)?))
             .await
     }
 }
 
-impl Store for Storage {
+impl Store for Queue {
     fn enqueue(&self, job: Job) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             let (row, now) = (row(&job)?, now()?);
-            self.write(move |connection| Ok(task::db::insert(connection, &row, now)?))
+            self.db
+                .write(move |connection| Ok(task::db::insert(connection, &row, now)?))
                 .await
                 .map_err(backend)?;
             self.announce();
@@ -56,7 +80,9 @@ impl Store for Storage {
     fn update(&self, job: Job) -> StoreFuture<'_, ()> {
         Box::pin(async move {
             let (row, now) = (row(&job)?, now()?);
-            let found = self.write(move |connection| Ok(task::db::update(connection, &row, now)?));
+            let found = self
+                .db
+                .write(move |connection| Ok(task::db::update(connection, &row, now)?));
             if !found.await.map_err(backend)? {
                 return Err(StoreError::Invalid(format!("job {} is unknown", job.id)));
             }
@@ -68,7 +94,9 @@ impl Store for Storage {
     fn get<'a>(&'a self, id: &'a Id) -> StoreFuture<'a, Option<Job>> {
         let id = id.as_str().to_owned();
         Box::pin(async move {
-            let row = self.read(move |connection| Ok(task::db::find_by_id(connection, &id)?));
+            let row = self
+                .db
+                .read(move |connection| Ok(task::db::find_by_id(connection, &id)?));
             row.await
                 .map_err(backend)?
                 .map(|row| Job::try_from(row).map_err(backend))
@@ -78,7 +106,9 @@ impl Store for Storage {
 
     fn next(&self, now: u64) -> StoreFuture<'_, Vec<Job>> {
         Box::pin(async move {
-            let rows = self.read(move |connection| Ok(task::db::find_unfinished(connection)?));
+            let rows = self
+                .db
+                .read(move |connection| Ok(task::db::find_unfinished(connection)?));
             let jobs = rows
                 .await
                 .map_err(backend)?
@@ -94,7 +124,7 @@ impl Store for Storage {
     }
 }
 
-impl Changes for Storage {
+impl Changes for Queue {
     fn changes(&self) -> broadcast::Receiver<()> {
         self.changes.subscribe()
     }
@@ -107,7 +137,7 @@ mod tests {
     use serde_json::json;
     use tasks::{Ack, Retry, Status, Task as Running, Worker};
 
-    use crate::workers::executor::Executor;
+    use crate::usecase::workers::executor::Executor;
 
     use super::*;
 
@@ -115,15 +145,15 @@ mod tests {
         tasks::Topic::parse(text).unwrap()
     }
 
-    async fn queue() -> (tempfile::TempDir, Storage) {
+    async fn queue() -> (tempfile::TempDir, Queue) {
         let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("q.db")).unwrap();
-        storage.migrate().await.unwrap();
-        (directory, storage)
+        let db = crate::db::Db::open(&directory.path().join("q.db")).unwrap();
+        db.migrate(&crate::schema::ALL).await.unwrap();
+        (directory, Queue::new(db))
     }
 
     /// The job `id` once finished, waiting at most five seconds.
-    async fn wait(store: &Storage, id: &Id) -> Job {
+    async fn wait(store: &Queue, id: &Id) -> Job {
         let mut changes = Changes::changes(store);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -156,6 +186,7 @@ mod tests {
             let queue = queue.clone();
             async move {
                 queue
+                    .db
                     .write(move |c| {
                         Ok(crate::models::task::db::delete_succeeded_before(
                             c,

@@ -4,7 +4,7 @@
 //! how far each is indexed; pause and resume its indexing.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -21,8 +21,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody, asset_info, balance::amount, wallet_address};
 use crate::{
-    models::{Network, balance, tag, wallet_index},
-    state::AppState,
+    api::AppState,
+    models::{Network, wallet_index},
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -319,72 +319,44 @@ struct ListResponse {
     tag = "wallets"
 )]
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, Error> {
-    let keyed: BTreeSet<_> = state.storage.keyed().await?.into_iter().collect();
-    let networks: Vec<_> = state.payments.networks().cloned().collect();
-    // Every index, every tag, and every index's balance in one query each;
-    // every index's progress in one query per network.
-    let (indexes, tags, balances, progress) = state
-        .storage
-        .read(move |connection| {
-            let indexes = wallet_index::db::find_every(connection)?;
-            let ids: Vec<&str> = indexes.iter().map(|index| index.id.as_str()).collect();
-            // Confirmed through every position: every live block, as the
-            // balance route sums them.
-            let balances = balance::db::find_signed_by_ids(connection, &ids, i64::MAX)?;
-            let mut progress = Vec::new();
-            for network in &networks {
-                progress.extend(wallet_index::db::find_all(connection, network)?);
-            }
-            Ok((indexes, tag::db::find_all(connection)?, balances, progress))
-        })
-        .await?;
+    let networks = state.payments.networks().cloned().collect();
+    let entries = crate::usecase::wallets::list(&state.db, networks).await?;
     let stats = state.payments.stats();
-    let listed = |address: &base::Address| Listed {
-        wallet: Wallet {
-            id: id(address),
-            network: address.network.clone().into(),
-            address: address.value.clone(),
-            keyed: keyed.contains(address),
-            assets: Vec::new(),
-            indexes: Vec::new(),
-        },
-        tags: Vec::new(),
-        balances: BTreeMap::new(),
-    };
-    let mut wallets: BTreeMap<base::Address, Listed> = keyed
-        .iter()
-        .map(|address| (address.clone(), listed(address)))
-        .collect();
-    for index in indexes {
-        let wallet = wallets
-            .entry(index.address.clone())
-            .or_insert_with(|| listed(&index.address));
+    let mut wallets = Vec::with_capacity(entries.len());
+    for entry in entries {
         // An asset the server no longer configures has no display units.
-        let info = asset_info(&state.payments, &index.asset.network, &index.asset.id);
-        if let (Ok(info), Some(balance)) = (info, balances.get(&index.id)) {
-            let total = balance.confirmed.clone();
-            wallet
-                .balances
-                .insert(index.asset.id.clone(), amount(&info, total)?);
-        }
-        wallet.wallet.assets.push(index.asset.id);
-    }
-    for index in progress {
-        if let Some(wallet) = wallets.get_mut(&index.address) {
+        let balances = entry
+            .indexes
+            .iter()
+            .filter_map(|(index, balance)| {
+                let info = asset_info(&state.payments, &index.asset.network, &index.asset.id);
+                let total = balance.clone()?;
+                Some(amount(&info.ok()?, total).map(|text| (index.asset.id.clone(), text)))
+            })
+            .collect::<Result<_, _>>()?;
+        let progress = entry.progress.into_iter().map(|index| {
             let stats = stats.get(&index.address.network);
-            wallet.wallet.indexes.push(Progress::new(index, stats));
-        }
+            Progress::new(index, stats)
+        });
+        let address = &entry.address;
+        wallets.push(Listed {
+            wallet: Wallet {
+                id: id(address),
+                network: address.network.clone().into(),
+                address: address.value.clone(),
+                keyed: entry.keyed,
+                assets: entry
+                    .indexes
+                    .into_iter()
+                    .map(|(index, _)| index.asset.id)
+                    .collect(),
+                indexes: progress.collect(),
+            },
+            tags: entry.tags,
+            balances,
+        });
     }
-    for tag in tags.iter() {
-        let network = base::Network::new(Chain::new(&tag.chain), &tag.network);
-        let address = base::Address::new(network, &tag.address);
-        if let Some(wallet) = wallets.get_mut(&address) {
-            wallet.tags.push(tag.tag.clone());
-        }
-    }
-    Ok(Json(ListResponse {
-        wallets: wallets.into_values().collect(),
-    }))
+    Ok(Json(ListResponse { wallets }))
 }
 
 /// The wallet a route reads.
@@ -480,7 +452,7 @@ async fn set_state(
     let address = wallet_address(&state.payments, id)?;
     let target = address.clone();
     state
-        .storage
+        .db
         .write(move |connection| {
             wallet_index::db::set_state(connection, &target, None, index_state, None)?;
             Ok(())
@@ -495,10 +467,14 @@ async fn set_state(
 ///
 /// Not found when it is neither keyed nor watched; the store's failure.
 async fn wallet(state: &AppState, address: base::Address) -> Result<Wallet, Error> {
-    let keyed = state.storage.keyed().await?.contains(&address);
+    let keyed = state
+        .db
+        .read(|connection| Ok(crate::models::wallet::db::find_all(connection)?.addresses()))
+        .await?
+        .contains(&address);
     let network = address.network.clone();
     let indexes = state
-        .storage
+        .db
         .read(move |connection| wallet_index::db::find_all(connection, &network))
         .await?;
     let stats = state

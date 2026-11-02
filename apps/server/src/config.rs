@@ -5,11 +5,17 @@
 //! section is `payments::Document`, which this module never looks inside:
 //! `crate::chains` says which chain owns which section name.
 
-use std::{env, error::Error, net::SocketAddr, path::Path};
+use std::{
+    env,
+    error::Error,
+    net::SocketAddr,
+    path::{self, Path, PathBuf},
+};
 
+use anyhow::{Context as _, ensure};
 use serde::Deserialize;
 
-use crate::storage;
+use crate::db::Db;
 
 pub(crate) type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -24,13 +30,46 @@ pub(crate) struct Config {
     #[serde(default)]
     tls_terminated_upstream: bool,
     #[serde(default)]
-    pub(crate) storage: storage::Config,
+    pub(crate) storage: Storage,
     /// Every network, each section naming its `chain`.
     #[serde(default)]
     pub(crate) payments: payments::Document,
     /// How the browser page presents itself; every key is optional.
     #[serde(default)]
     pub(crate) ui: Ui,
+}
+
+/// The `"storage"` section: `{"path": ...}`, defaulting to `payment.db`;
+/// a relative path resolves against the working directory.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Storage {
+    path: PathBuf,
+}
+
+impl Default for Storage {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::from("payment.db"),
+        }
+    }
+}
+
+impl Storage {
+    /// Opens the configured file as one pool; applies no schema.
+    ///
+    /// # Errors
+    ///
+    /// When the path does not resolve or the pool does not open.
+    pub(crate) fn open(&self) -> anyhow::Result<Db> {
+        ensure!(
+            !self.path.as_os_str().is_empty(),
+            "storage path must not be empty"
+        );
+        let path = path::absolute(&self.path)
+            .context("storage path is not resolvable against the working directory")?;
+        Db::open(&path)
+    }
 }
 
 /// The `[ui]` section: what the page shows that is the deployment's choice.

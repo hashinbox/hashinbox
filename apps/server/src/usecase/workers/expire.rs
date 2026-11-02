@@ -13,7 +13,8 @@ use payments::Payments;
 use serde_json::json;
 use tasks::{Ack, Id, Job, Status, Store as _, Task, Topic, Worker};
 
-use crate::{models::transaction, storage::Storage, workers::indexer::Target};
+use super::index::Target;
+use crate::{db::Db, models::transaction, usecase::tasks::Queue};
 
 /// The job kind.
 pub(crate) const KIND: &str = "expire";
@@ -24,12 +25,17 @@ const PERIOD: Duration = Duration::from_secs(60);
 /// Forgets every network's expired pending transactions.
 pub(crate) struct Expire {
     payments: Arc<Payments>,
-    storage: Storage,
+    db: Db,
+    queue: Queue,
 }
 
 impl Expire {
-    pub(crate) const fn new(payments: Arc<Payments>, storage: Storage) -> Self {
-        Self { payments, storage }
+    pub(crate) const fn new(payments: Arc<Payments>, db: Db, queue: Queue) -> Self {
+        Self {
+            payments,
+            db,
+            queue,
+        }
     }
 
     /// Makes sure every network has its expire job; a finished one starts
@@ -46,10 +52,10 @@ impl Expire {
                 id: Id::from(format!("expire.{}.{}", target.chain, target.network)),
                 ..Job::new(topic, KIND, json!(target))
             };
-            match self.storage.get(&job.id).await? {
-                None => self.storage.enqueue(job).await?,
+            match self.queue.get(&job.id).await? {
+                None => self.queue.enqueue(job).await?,
                 Some(kept) if matches!(kept.status, Status::Done | Status::Failed) => {
-                    self.storage.update(job).await?;
+                    self.queue.update(job).await?;
                 }
                 Some(_) => {}
             }
@@ -73,7 +79,7 @@ impl Worker for Expire {
             return task.fail("now is above range");
         };
         let expired = self
-            .storage
+            .db
             .write(move |connection| Ok(transaction::db::expire(connection, &network, at)?))
             .await;
         match expired {

@@ -1,5 +1,5 @@
 //! `q`: one row per queued job for its whole life (`schema/queue.sql`). The
-//! statements behind `tasks::Store` (`crate::storage::tasks`).
+//! statements behind `tasks::Store` (`crate::usecase::tasks`).
 
 use anyhow::Context as _;
 use diesel::{prelude::*, sqlite::Sqlite};

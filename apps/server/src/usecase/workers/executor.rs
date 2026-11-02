@@ -6,7 +6,7 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Durat
 use tasks::{Ack, Changes as _, Job, Retry, Status, Store, Task, Ticking, Worker};
 use tokio::task::JoinSet;
 
-use crate::storage::Storage;
+use crate::usecase::tasks::Queue;
 
 /// Jobs run at once, of topics that do not conflict.
 const CONCURRENCY: usize = 4;
@@ -23,15 +23,15 @@ type Run =
 
 /// Runs the queue's jobs with a worker and retry rule per kind.
 pub(crate) struct Executor {
-    storage: Storage,
+    queue: Queue,
     kinds: HashMap<&'static str, (Run, Retry)>,
 }
 
 impl Executor {
-    /// No workers, over `storage`.
-    pub(crate) fn new(storage: Storage) -> Self {
+    /// No workers, over `queue`.
+    pub(crate) fn new(queue: Queue) -> Self {
         Self {
-            storage,
+            queue,
             kinds: HashMap::new(),
         }
     }
@@ -59,8 +59,8 @@ impl Executor {
     ///
     /// When the recovery fails.
     pub(crate) async fn run(self) -> anyhow::Result<()> {
-        self.storage.recover().await?;
-        let ticking = Ticking::new(&self.storage, TICK);
+        self.queue.recover().await?;
+        let ticking = Ticking::new(&self.queue, TICK);
         // Subscribe first: a change between a look and the wait is not lost.
         let mut signal = ticking.changes();
         let mut running = JoinSet::new();
@@ -77,13 +77,13 @@ impl Executor {
 
     /// Starts due jobs, oldest first, while there is room.
     async fn start(&self, running: &mut JoinSet<()>) -> Result<(), tasks::StoreError> {
-        let due = self.storage.next(tasks::now()).await?;
+        let due = self.queue.next(tasks::now()).await?;
         for job in due
             .into_iter()
             .take(CONCURRENCY.saturating_sub(running.len()))
         {
             let job = job.start(tasks::now());
-            self.storage.update(job.clone()).await?;
+            self.queue.update(job.clone()).await?;
             if job.status == Status::Running {
                 running.spawn(self.execute(job));
             }
@@ -95,7 +95,7 @@ impl Executor {
     /// `unknown-kind`, a panic `panicked`; storing is retried until it lands,
     /// so a topic is never left locked.
     fn execute(&self, job: Job) -> impl Future<Output = ()> + Send + 'static {
-        let storage = self.storage.clone();
+        let queue = self.queue.clone();
         let kind = self.kinds.get(job.kind.as_str()).cloned();
         async move {
             let id = job.id.clone();
@@ -103,15 +103,15 @@ impl Executor {
                 None => (Ack::Fail("unknown-kind".into()), Retry::default()),
                 // Its own task, so a panic is a failure and not a locked topic.
                 Some((run, retry)) => {
-                    let ran = tokio::spawn(run(job, Arc::new(storage.clone()))).await;
+                    let ran = tokio::spawn(run(job, Arc::new(queue.clone()))).await;
                     (ran.unwrap_or_else(|_| Ack::Fail("panicked".into())), retry)
                 }
             };
             loop {
                 // Reread: the worker may have saved its state.
-                let stored = match storage.get(&id).await {
+                let stored = match queue.get(&id).await {
                     Ok(Some(job)) => {
-                        storage
+                        queue
                             .update(job.settle(ack.clone(), &retry, tasks::now()))
                             .await
                     }

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
+    api::AppState,
     models::{Indexing, Network},
-    state::AppState,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {

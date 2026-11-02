@@ -5,7 +5,7 @@ use utoipa::openapi::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody};
-use crate::state::AppState;
+use crate::api::AppState;
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(read))

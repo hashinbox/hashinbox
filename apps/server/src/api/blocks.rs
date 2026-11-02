@@ -14,8 +14,9 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody};
 use crate::{
-    models::{Block, Leg, block, int, leg, transaction, uint},
-    state::AppState,
+    api::AppState,
+    models::{Leg, int, uint},
+    usecase::chain,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -128,13 +129,11 @@ struct ChainTransaction {
     legs: Vec<ChainLeg>,
 }
 
-impl ChainTransaction {
-    /// The kept transaction of `row`, with its kept legs.
-    fn read(
-        connection: &mut diesel::SqliteConnection,
-        row: transaction::Transaction,
-    ) -> anyhow::Result<Self> {
-        let legs = leg::db::find_for(connection, &row.id)?
+impl TryFrom<chain::Transaction> for ChainTransaction {
+    type Error = anyhow::Error;
+
+    fn try_from(chain::Transaction { row, legs }: chain::Transaction) -> anyhow::Result<Self> {
+        let legs = legs
             .into_iter()
             .map(ChainLeg::try_from)
             .collect::<anyhow::Result<_>>()?;
@@ -166,12 +165,13 @@ struct ChainBlock {
     transactions: Vec<ChainTransaction>,
 }
 
-impl ChainBlock {
-    /// The kept block of `row`, with its kept transactions.
-    fn read(connection: &mut diesel::SqliteConnection, row: &Block) -> anyhow::Result<Self> {
-        let transactions = transaction::db::find_in(connection, &[row.id.as_str()])?
+impl TryFrom<chain::Block> for ChainBlock {
+    type Error = anyhow::Error;
+
+    fn try_from(chain::Block { row, transactions }: chain::Block) -> anyhow::Result<Self> {
+        let transactions = transactions
             .into_iter()
-            .map(|tx| ChainTransaction::read(connection, tx))
+            .map(ChainTransaction::try_from)
             .collect::<anyhow::Result<_>>()?;
         Ok(Self {
             position: uint(row.position)?,
@@ -222,21 +222,18 @@ async fn list(
     }
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
     state.payments.service(&network)?;
-    let response = state
-        .storage
-        .read(move |connection| {
-            let blocks = block::db::find_latest(connection, &network, limit)?
-                .iter()
-                .map(|row| ChainBlock::read(connection, row))
-                .collect::<anyhow::Result<_>>()?;
-            let mempool = transaction::db::find_all_pending(connection, &network)?
-                .into_iter()
-                .map(|tx| ChainTransaction::read(connection, tx))
-                .collect::<anyhow::Result<_>>()?;
-            Ok(ListResponse { blocks, mempool })
-        })
-        .await?;
-    Ok(Json(response))
+    let tail = chain::latest(&state.db, network, limit).await?;
+    let blocks = tail
+        .blocks
+        .into_iter()
+        .map(ChainBlock::try_from)
+        .collect::<anyhow::Result<_>>()?;
+    let mempool = tail
+        .mempool
+        .into_iter()
+        .map(ChainTransaction::try_from)
+        .collect::<anyhow::Result<_>>()?;
+    Ok(Json(ListResponse { blocks, mempool }))
 }
 
 #[utoipa::path(
@@ -261,15 +258,10 @@ async fn read(
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
     state.payments.service(&network)?;
     let position = int(path.position).map_err(|error| Error::invalid_request(error.to_string()))?;
-    let found = state
-        .storage
-        .read(move |connection| {
-            block::db::find_live(connection, &network, position)?
-                .map(|row| ChainBlock::read(connection, &row))
-                .transpose()
-        })
-        .await?;
+    let found = chain::at(&state.db, network, position).await?;
     found
+        .map(ChainBlock::try_from)
+        .transpose()?
         .map(Json)
         .ok_or_else(|| Error::not_found("no live block is kept at this position"))
 }

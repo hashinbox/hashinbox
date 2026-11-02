@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
 use super::{Script, database, limited, network, payments};
-use crate::{api, state::AppState};
+use crate::{api, api::AppState};
 
 async fn call(
     router: &Router,
@@ -79,11 +79,12 @@ fn paid(to: &str, amount: u64) -> Blocks {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wallets_balance_history_and_sends() {
-    let (storage, _directory) = database().await;
-    let payments = payments(&storage, Arc::new(Script::default())).await;
+    let (db, _directory) = database().await;
+    let payments = payments(&db, Arc::new(Script::default())).await;
     let state = Arc::new(AppState {
         payments,
-        storage: storage.clone(),
+        db: db.clone(),
+        queue: crate::usecase::tasks::Queue::new(db.clone()),
         explorers: Default::default(),
     });
     let config = http_server::Config::new(
@@ -113,9 +114,12 @@ async fn wallets_balance_history_and_sends() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(list["wallets"].as_array().map(Vec::len), Some(2));
 
-    BlockStore::insert(&storage, &paid("alice", 150_000_000))
-        .await
-        .expect("block 0 kept");
+    BlockStore::insert(
+        &crate::usecase::sdk::Stores::new(db.clone()),
+        &paid("alice", 150_000_000),
+    )
+    .await
+    .expect("block 0 kept");
     let (status, balance) = call(
         &router,
         Method::GET,
@@ -220,12 +224,13 @@ async fn wallets_balance_history_and_sends() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_start_past_the_history_limit_is_refused_and_a_wallet_pauses_and_resumes() {
-    let (storage, _directory) = database().await;
+    let (db, _directory) = database().await;
     let days = std::time::Duration::from_secs(30 * 86_400);
-    let payments = limited(&storage, Arc::new(Script::default()), Some(days)).await;
+    let payments = limited(&db, Arc::new(Script::default()), Some(days)).await;
     let state = Arc::new(AppState {
         payments,
-        storage: storage.clone(),
+        db: db.clone(),
+        queue: crate::usecase::tasks::Queue::new(db.clone()),
         explorers: Default::default(),
     });
     let config = http_server::Config::new(

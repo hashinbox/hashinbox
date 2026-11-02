@@ -80,22 +80,27 @@ committed copy. `GET /health` and `GET /openapi.json` need no token.
 
 ## Layout
 
+Layers, bottom up: `models`, `usecase`, `api`, `main`; `db` and `schema` beside
+them. Nothing imports upward (docs/design/069-server-layers.md;
+`scripts/server-layers.py` checks it).
+
 - `src/main.rs`: composition (stored nodes into the document, `base::Storage` from
-  the one `storage::Storage`, the `payments` builder, the executor with the
+  `usecase::sdk::Stores`, the `payments` builder, the executor with the
   index, expire, triggers and broadcast jobs, HTTP) and shutdown (the executor
   stops after HTTP drains; unfinished jobs resume on the next start).
   `src/main.rs` is the only file that names a chain crate; `src/config.rs` reads
-  the file; `src/ui.rs` serves the page; `src/state.rs` is the handler state
-  (`Arc<Payments>` and the storage).
+  the file; `src/ui.rs` serves the page.
+- `src/db.rs`: the SQLite pool, its pragmas, read and write transactions;
+  `src/schema.rs`: the embedded `schema/*.sql` files.
 - `src/api/`: one file per resource; `mod.rs` assembles the router and OpenAPI root
-  and holds the shared `Error`.
+  and holds the shared `Error`; `state.rs` is the handler state.
 - `src/models/`: one file per table (diesel row and its SQL) and the shared wire
   shapes (`asset`, `network`, `indexing`).
-- `src/storage/`: every `base` store and `tasks::Store` on the models, the balance
-  and history reads (`history.rs`), the wallet listing and stored nodes.
-- `src/workers/`: the executor and its jobs: `indexer/` (index), `broadcast/`
-  (broadcast, `expire.rs`), `trigger/` (triggers round, `actions.rs`,
-  `evaluation.rs`); docs/design/068-index-job.md.
+- `src/usecase/`: `sdk/` (every `base` store on the models), `tasks.rs` (the
+  job queue), `trigger.rs` (a trigger's decision), the multi-model reads
+  (`history.rs`, `wallets.rs`, `chain.rs`, `stats.rs`), and `workers/`: the
+  executor and its jobs (`index.rs`, `expire.rs`, `prune.rs`, `broadcast.rs`,
+  `trigger/` with `actions.rs`); docs/design/068-index-job.md.
 
 ## Notes
 

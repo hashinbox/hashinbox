@@ -12,21 +12,14 @@ use serde::Serialize;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody};
-use crate::{
-    models::{block, leg, tag, task, transaction, trigger, trigger_run, wallet, wallet_index},
-    state::AppState,
-};
+use crate::{api::AppState, usecase::stats};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(read))
 }
 
-/// How many hours a series covers, the current one last.
-const HOURS: usize = 24;
-const HOUR: i64 = 3_600;
-
 /// Jobs by where they are.
-#[derive(Clone, Debug, Default, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 struct JobCounts {
     pending: u64,
     running: u64,
@@ -35,7 +28,7 @@ struct JobCounts {
 }
 
 /// One hour of chain time, across every network.
-#[derive(Clone, Debug, Default, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 struct ChainHour {
     /// Its start, Unix seconds.
     start: i64,
@@ -46,7 +39,7 @@ struct ChainHour {
 }
 
 /// One hour of this server's time.
-#[derive(Clone, Debug, Default, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 struct ServerHour {
     /// Its start, Unix seconds.
     start: i64,
@@ -93,18 +86,6 @@ struct StatsResponse {
     server: Vec<ServerHour>,
 }
 
-/// The `HOURS` hours ending with the one `now` (Unix seconds) falls in: the
-/// first one's start, and the hour of `stamp` among them.
-fn window(now: i64) -> (i64, impl Fn(i64) -> Option<usize>) {
-    let first = (now / HOUR + 1 - HOURS as i64) * HOUR;
-    let hour = move |stamp: i64| {
-        usize::try_from((stamp - first).div_euclid(HOUR))
-            .ok()
-            .filter(|hour| *hour < HOURS)
-    };
-    (first, hour)
-}
-
 #[utoipa::path(
     get,
     path = "/v1/stats",
@@ -127,83 +108,44 @@ async fn read(State(state): State<Arc<AppState>>) -> Result<Json<StatsResponse>,
         .map_err(|error| Error::invalid_response(error.to_string()))?
         .as_secs();
     let clock = i64::try_from(clock).map_err(|error| Error::invalid_response(error.to_string()))?;
-    let response = state
-        .storage
-        .read(move |connection| {
-            let count = |value: i64| u64::try_from(value).unwrap_or_default();
-            let (blocks, reorged) = block::db::count(connection)?;
-            let (transactions, reverted, pending) = transaction::db::count(connection)?;
-            let (triggers, enabled) = trigger::db::count(connection)?;
-            let mut jobs = JobCounts::default();
-            for (status, n) in task::db::count_by_status(connection)? {
-                let n = count(n);
-                match status {
-                    0 => jobs.pending = n,
-                    1 => jobs.running = n,
-                    2 => jobs.succeeded = n,
-                    _ => jobs.failed = n,
-                }
-            }
-
-            // Chain time ends at the newest kept block: a skewed clock or a
-            // lagging indexer leaves no empty hours.
-            let newest = block::db::find_newest_stamp(connection)?.unwrap_or(clock);
-            let (first, hour) = window(newest);
-            let mut chain: Vec<ChainHour> = (0..HOURS)
-                .map(|i| ChainHour {
-                    start: first + i as i64 * HOUR,
-                    ..ChainHour::default()
-                })
-                .collect();
-            for stamp in block::db::find_stamps_since(connection, first)? {
-                if let Some(i) = hour(stamp) {
-                    chain[i].blocks += 1;
-                }
-            }
-            for stamp in transaction::db::find_stamps_since(connection, first)? {
-                if let Some(i) = hour(stamp) {
-                    chain[i].transactions += 1;
-                }
-            }
-
-            let (first, hour) = window(clock);
-            let mut server: Vec<ServerHour> = (0..HOURS)
-                .map(|i| ServerHour {
-                    start: first + i as i64 * HOUR,
-                    ..ServerHour::default()
-                })
-                .collect();
-            for (status, at) in task::db::find_finished_since(connection, first * 1_000)? {
-                if let Some(i) = hour(at / 1_000) {
-                    match status {
-                        2 => server[i].succeeded += 1,
-                        _ => server[i].failed += 1,
-                    }
-                }
-            }
-            for at in trigger_run::db::find_starts_since(connection, first * 1_000)? {
-                if let Some(i) = hour(at / 1_000) {
-                    server[i].runs += 1;
-                }
-            }
-
-            Ok(StatsResponse {
-                wallets: count(wallet::db::count(connection)?),
-                addresses: wallet_index::db::count_addresses(connection)? as u64,
-                tags: count(tag::db::count(connection)?),
-                blocks: count(blocks),
-                reorged: count(reorged),
-                transactions: count(transactions),
-                reverted: count(reverted),
-                pending: count(pending),
-                movements: count(leg::db::count(connection)?),
-                triggers: count(triggers),
-                enabled: count(enabled),
-                jobs,
-                chain,
-                server,
+    let stats = stats::read(&state.db, clock).await?;
+    let jobs = stats.jobs;
+    Ok(Json(StatsResponse {
+        wallets: stats.wallets,
+        addresses: stats.addresses,
+        tags: stats.tags,
+        blocks: stats.blocks,
+        reorged: stats.reorged,
+        transactions: stats.transactions,
+        reverted: stats.reverted,
+        pending: stats.pending,
+        movements: stats.movements,
+        triggers: stats.triggers,
+        enabled: stats.enabled,
+        jobs: JobCounts {
+            pending: jobs.pending,
+            running: jobs.running,
+            succeeded: jobs.succeeded,
+            failed: jobs.failed,
+        },
+        chain: stats
+            .chain
+            .into_iter()
+            .map(|hour| ChainHour {
+                start: hour.start,
+                blocks: hour.blocks,
+                transactions: hour.transactions,
             })
-        })
-        .await?;
-    Ok(Json(response))
+            .collect(),
+        server: stats
+            .server
+            .into_iter()
+            .map(|hour| ServerHour {
+                start: hour.start,
+                succeeded: hour.succeeded,
+                failed: hour.failed,
+                runs: hour.runs,
+            })
+            .collect(),
+    }))
 }

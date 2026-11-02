@@ -14,8 +14,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody, wallet_address};
 use crate::{
+    api::AppState,
     models::{self, tag},
-    state::AppState,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -66,7 +66,7 @@ struct TagPath {
 )]
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, Error> {
     let tags = state
-        .storage
+        .db
         .read(|connection| Ok(tag::db::find_all(connection)?))
         .await?;
     Ok(Json(ListResponse {
@@ -106,7 +106,7 @@ async fn add(
     let tag = models::Tag::new(&address, &path.tag)
         .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
     state
-        .storage
+        .db
         .write(move |connection| Ok(tag::db::insert(connection, &tag)?))
         .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -136,7 +136,7 @@ async fn remove(
     let id = models::Tag::id(&address, &path.tag)
         .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
     let removed = state
-        .storage
+        .db
         .write(move |connection| Ok(tag::db::delete(connection, &id)?))
         .await?;
     if removed == 0 {

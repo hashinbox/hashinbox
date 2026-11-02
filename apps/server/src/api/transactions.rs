@@ -19,9 +19,9 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody, asset_info, wallet_address};
 use crate::{
+    api::AppState,
     models::Asset,
-    state::AppState,
-    workers::broadcast::{Payment, SendIntent},
+    usecase::workers::broadcast::{Payment, SendIntent},
 };
 
 /// Maximum transfers one send request accepts.
@@ -189,10 +189,9 @@ async fn history(
     };
     let address = wallet_address(&state.payments, &path.id)?;
     let info = asset_info(&state.payments, &address.network, &query.asset)?;
-    let page = state
-        .storage
-        .history(&address, &info.asset, after, query.limit)
-        .await?;
+    let page =
+        crate::usecase::history::history(&state.db, &address, &info.asset, after, query.limit)
+            .await?;
     let next_cursor = (page.len() == query.limit)
         .then(|| page.last())
         .flatten()
@@ -319,7 +318,12 @@ async fn send(
     }
     let address = wallet_address(&state.payments, &path.id)?;
     let info = asset_info(&state.payments, &address.network, &request.asset)?;
-    if !state.storage.keyed().await?.contains(&address) {
+    if !state
+        .db
+        .read(|connection| Ok(crate::models::wallet::db::find_all(connection)?.addresses()))
+        .await?
+        .contains(&address)
+    {
         return Err(Error::unprocessable("the wallet holds no key here"));
     }
     let mut transfers = Vec::with_capacity(request.transfers.len());
@@ -356,7 +360,7 @@ async fn send(
         .job()
         .map_err(|error| Error::invalid_request(error.to_string()))?;
     let id = job.id.to_string();
-    tasks::Store::enqueue(&state.storage, job)
+    tasks::Store::enqueue(&state.queue, job)
         .await
         .map_err(|error| Error::unavailable(error.to_string()))?;
     Ok((StatusCode::ACCEPTED, Json(SendResponse { job: id })))

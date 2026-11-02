@@ -1,19 +1,19 @@
 //! `base::WalletStore` on the `wallet` model: keys restored through
-//! `WalletFactories::from_pk`; and the wallet listing's reads.
+//! `WalletFactories::from_pk`.
 
 use std::sync::Arc;
 
 use anyhow::{Context as _, ensure};
 use base::{Address, Future, Wallet, WalletFactories, WalletStore};
 
-use super::Storage;
+use super::Stores;
 use crate::models;
 
-impl WalletStore for Storage {
+impl WalletStore for Stores {
     fn insert<'a>(&'a self, wallet: &'a dyn Wallet) -> Future<'a, anyhow::Result<()>> {
         let address = wallet.address().clone();
         let (curve, secret) = wallet.private_key();
-        Box::pin(self.write(move |connection| {
+        Box::pin(self.db.write(move |connection| {
             models::wallet::db::insert(connection, &models::Wallet::new(&address, curve, secret)?)?;
             Ok(())
         }))
@@ -25,6 +25,7 @@ impl WalletStore for Storage {
     ) -> Future<'a, anyhow::Result<Vec<Arc<dyn Wallet>>>> {
         Box::pin(async move {
             let rows = self
+                .db
                 .read(|connection| Ok(models::wallet::db::find_all(connection)?))
                 .await?;
             let mut wallets = Vec::with_capacity(rows.len());
@@ -43,17 +44,5 @@ impl WalletStore for Storage {
             }
             Ok(wallets)
         })
-    }
-}
-
-impl Storage {
-    /// The address of every kept wallet; no key is restored.
-    ///
-    /// # Errors
-    ///
-    /// The read.
-    pub(crate) async fn keyed(&self) -> anyhow::Result<Vec<Address>> {
-        self.read(|connection| Ok(models::wallet::db::find_all(connection)?.addresses()))
-            .await
     }
 }

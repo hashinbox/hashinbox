@@ -1,5 +1,8 @@
-//! [`Triggers`]: a network's enabled triggers, read at its last kept block;
-//! each [`Trigger`] decides what its action starts.
+//! A trigger evaluated over its network: [`Triggers`], a network's enabled
+//! triggers read at its last kept block; each [`Trigger`] selects its wallet
+//! indexes, keeps those its filter keeps and tells whether its check holds.
+//! It ends at the decision ([`Decision`]): what the action does with it is
+//! the caller's (the triggers worker).
 //!
 //! A leaf that refers to something unknown (an index not fully indexed, an
 //! asset without balances) is `false`; a read error stays an error.
@@ -12,12 +15,10 @@ use std::{
 use anyhow::{Context as _, bail, ensure};
 use base::{Address, Assets, Decimal, FeeEstimator, Network, Networked as _};
 use diesel::SqliteConnection;
-use tasks::Job;
 
-use super::{Actions, Invocation};
 use crate::models::{
     self, TriggerRun, block, trigger,
-    trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Target},
+    trigger::{Action, Aggregate, Amount, Compare, Filter, Gate, Logic, Target},
     trigger_run, wallet,
     wallet_index_balance::{self, WalletIndexBalances},
 };
@@ -30,8 +31,6 @@ pub(crate) struct Context {
     pub(crate) estimator: Arc<dyn FeeEstimator>,
     /// Where a fee estimate is awaited (decisions run on blocking threads).
     pub(crate) runtime: tokio::runtime::Handle,
-    /// What a trigger's action names.
-    pub(crate) actions: Arc<Actions>,
     /// Unix ms.
     pub(crate) now: i64,
 }
@@ -66,20 +65,18 @@ impl<'a> Trigger<'a> {
         }
     }
 
-    /// What it starts on `network` at block position `last`: the wallet
-    /// indexes its selector picks, with spendable balances; those its filter
-    /// keeps (`This`); if its check holds, what its action starts. Empty:
-    /// nothing to do.
+    /// What it decides on `network` at block position `last`: the wallet
+    /// indexes its selector picks, with spendable balances, and those its
+    /// filter keeps (`This`) if its check holds; `None` when it does not.
     ///
     /// # Errors
     ///
-    /// When a read, the fee estimate or the action fails.
+    /// When a read or the fee estimate fails.
     fn decide(
         &mut self,
         network: &Network,
         last: i64,
-        keyed: &BTreeSet<Address>,
-    ) -> anyhow::Result<Vec<Job>> {
+    ) -> anyhow::Result<Option<WalletIndexBalances>> {
         let row = self.row.clone();
         let selected =
             wallet_index_balance::db::select(self.connection, network, &row.selector.0, last)?;
@@ -87,13 +84,7 @@ impl<'a> Trigger<'a> {
             Some(filter) => self.filter(&filter.0, &selected)?,
             None => selected,
         };
-        if !self.check(&row.check.0, &kept)? {
-            return Ok(Vec::new());
-        }
-        let actions = self.context.actions.clone();
-        let mut invocation = Invocation::new(network, &kept, self, keyed);
-        actions.run(&row.action.0.name, &row.action.0.input, &mut invocation)?;
-        Ok(invocation.started())
+        Ok(self.check(&row.check.0, &kept)?.then_some(kept))
     }
 
     /// Whether `check` holds over `this`, leaves in written order, stopping early.
@@ -284,29 +275,52 @@ impl Triggers {
         })
     }
 
-    /// Each one's id and what it starts, or why it cannot, in id order.
-    pub(crate) fn decide(
+    /// Each one's id and what `act` made of its decision, in id order:
+    /// `None` when its check does not hold, the error when it cannot decide
+    /// or `act` fails.
+    pub(crate) fn decide<T>(
         &self,
         connection: &mut SqliteConnection,
         context: &Context,
-    ) -> Vec<(String, anyhow::Result<Vec<Job>>)> {
+        mut act: impl FnMut(Decision<'_, '_>) -> anyhow::Result<T>,
+    ) -> Vec<(String, anyhow::Result<Option<T>>)> {
         let Some(last) = self.last else {
             return Vec::new();
         };
-        self.all
-            .iter()
-            .map(|row| {
-                let jobs = trigger_run::db::find_last(connection, &row.id)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|run| {
-                        Trigger::new(row.clone(), connection, context.clone(), run).decide(
-                            &self.network,
-                            last,
-                            &self.keyed,
-                        )
-                    });
-                (row.id.clone(), jobs)
-            })
-            .collect()
+        let mut decided = Vec::with_capacity(self.all.len());
+        for row in &self.all {
+            let outcome = trigger_run::db::find_last(connection, &row.id)
+                .map_err(anyhow::Error::from)
+                .and_then(|run| {
+                    let mut trigger = Trigger::new(row.clone(), connection, context.clone(), run);
+                    let Some(this) = trigger.decide(&self.network, last)? else {
+                        return Ok(None);
+                    };
+                    act(Decision {
+                        action: &row.action.0,
+                        network: &self.network,
+                        this: &this,
+                        trigger: &mut trigger,
+                        keyed: &self.keyed,
+                    })
+                    .map(Some)
+                });
+            decided.push((row.id.clone(), outcome));
+        }
+        decided
     }
+}
+
+/// A trigger whose check holds: what its action runs with.
+pub(crate) struct Decision<'a, 'c> {
+    /// The action it names, with its static input.
+    pub(crate) action: &'a Action,
+    /// The trigger's network.
+    pub(crate) network: &'a Network,
+    /// The wallet indexes its filter kept (`This`), with balances.
+    pub(crate) this: &'a WalletIndexBalances,
+    /// The trigger still deciding: amounts and targets read at the same block.
+    pub(crate) trigger: &'a mut Trigger<'c>,
+    /// Addresses this server holds keys for.
+    pub(crate) keyed: &'a BTreeSet<Address>,
 }

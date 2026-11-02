@@ -1,4 +1,4 @@
-//! The server's `models` and `storage` on SQLite temp files: the `base`
+//! The server's `models` and stores (`usecase`) on SQLite temp files: the `base`
 //! store contracts, and the balance and history reads. Offline and
 //! deterministic.
 
@@ -13,13 +13,13 @@ use base::{
 };
 use crypto::{Curve, SecretBytes};
 
-use crate::storage::Storage;
+use crate::{db::Db, usecase::sdk::Stores};
 
-async fn storage() -> (Storage, tempfile::TempDir) {
+async fn storage() -> (Stores, Db, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&directory.path().join("test.db")).unwrap();
-    storage.migrate().await.unwrap();
-    (storage, directory)
+    let db = crate::db::Db::open(&directory.path().join("test.db")).unwrap();
+    db.migrate(&crate::schema::ALL).await.unwrap();
+    (Stores::new(db.clone()), db, directory)
 }
 
 fn network() -> Network {
@@ -121,7 +121,7 @@ fn empty(network: &Network, from: u64, to: u64, fork: u8) -> Blocks {
     )
 }
 
-async fn watch(storage: &Storage, address: &Address, birthday: u64) {
+async fn watch(storage: &Stores, address: &Address, birthday: u64) {
     let index = WalletIndex {
         address: address.clone(),
         asset: native(&address.network),
@@ -134,10 +134,8 @@ async fn watch(storage: &Storage, address: &Address, birthday: u64) {
     WalletIndexStore::insert(storage, &index).await.unwrap();
 }
 
-async fn indexed_at(storage: &Storage, address: &Address) -> Option<u64> {
-    let network = address.network.clone();
-    let all = storage
-        .read(move |connection| crate::models::wallet_index::db::find_all(connection, &network))
+async fn indexed_at(storage: &Stores, address: &Address) -> Option<u64> {
+    let all = WalletIndexStore::find_all(storage, &address.network)
         .await
         .unwrap();
     let index = all
@@ -174,7 +172,7 @@ fn history(directory: &tempfile::TempDir, address: &Address) -> Vec<String> {
 
 #[tokio::test]
 async fn insert_links_and_refuses_non_linking_blocks() {
-    let (storage, _directory) = storage().await;
+    let (storage, _db, _directory) = storage().await;
     let network = network();
     BlockStore::insert(&storage, &empty(&network, 0, 3, 0))
         .await
@@ -208,7 +206,7 @@ async fn insert_links_and_refuses_non_linking_blocks() {
 
 #[tokio::test]
 async fn insert_keeps_only_indexed_pairs_from_their_birthday() {
-    let (storage, directory) = storage().await;
+    let (storage, _db, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     let bob = address(&network, "bob");
@@ -259,7 +257,7 @@ async fn insert_keeps_only_indexed_pairs_from_their_birthday() {
 
 #[tokio::test]
 async fn a_new_index_backfills_without_duplicating_other_facts() {
-    let (storage, directory) = storage().await;
+    let (storage, _db, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     let bob = address(&network, "bob");
@@ -302,7 +300,7 @@ async fn a_new_index_backfills_without_duplicating_other_facts() {
 
 #[tokio::test]
 async fn a_new_index_below_the_kept_run_backfills_beneath_it() {
-    let (storage, directory) = storage().await;
+    let (storage, _db, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &address(&network, "bob"), 3).await;
@@ -331,7 +329,7 @@ async fn a_new_index_below_the_kept_run_backfills_beneath_it() {
 
 #[tokio::test]
 async fn delete_archives_unspends_and_rewinds() {
-    let (storage, directory) = storage().await;
+    let (storage, _db, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;
@@ -421,7 +419,7 @@ async fn delete_archives_unspends_and_rewinds() {
 
 #[tokio::test]
 async fn networks_are_isolated() {
-    let (storage, _directory) = storage().await;
+    let (storage, _db, _directory) = storage().await;
     let (network, other) = (network(), other());
     watch(&storage, &address(&network, "alice"), 0).await;
     watch(&storage, &address(&other, "alice"), 0).await;
@@ -442,7 +440,7 @@ async fn networks_are_isolated() {
 
 #[tokio::test]
 async fn find_next_is_the_lowest_lagging_index() {
-    let (storage, _directory) = storage().await;
+    let (storage, _db, _directory) = storage().await;
     let network = network();
     assert_eq!(storage.find_next(&network, None).await.unwrap(), None);
     watch(&storage, &address(&network, "a"), 5).await;
@@ -458,7 +456,7 @@ async fn find_next_is_the_lowest_lagging_index() {
 
 #[tokio::test]
 async fn notifying_storage_tells_listeners_after_commit() {
-    let (storage, _directory) = storage().await;
+    let (storage, _db, _directory) = storage().await;
     let storage = base::Notifying::new(storage);
     let network = network();
     let heard = Arc::new(Mutex::new(Vec::new()));
@@ -479,15 +477,15 @@ async fn notifying_storage_tells_listeners_after_commit() {
 
 #[tokio::test]
 async fn pending_transactions_are_kept_until_mined() {
-    let (storage, directory) = storage().await;
+    let (storage, db, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;
     let mut pending = payment(&network, "p", "alice", 3, None);
     pending.state = TransactionState::Pending;
     pending.order = None;
-    record(&storage, &pending).await;
-    record(&storage, &pending).await;
+    record(&db, &pending).await;
+    record(&db, &pending).await;
     assert_eq!(history(&directory, &alice), ["p"]);
     assert_eq!(rows(&directory, "p").0, [None]);
     let mined = payment(&network, "p", "alice", 3, None);
@@ -532,19 +530,18 @@ struct Row {
 }
 
 /// Records `transaction` as pending, as the queued broadcaster does.
-async fn record(storage: &crate::storage::Storage, transaction: &Transaction) {
+async fn record(db: &Db, transaction: &Transaction) {
     let transaction = transaction.clone();
-    storage
-        .write(move |connection| {
-            crate::models::transaction::db::insert_pending(connection, &transaction, 0)
-        })
-        .await
-        .unwrap();
+    db.write(move |connection| {
+        crate::models::transaction::db::insert_pending(connection, &transaction, 0)
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
 async fn a_pending_spend_holds_its_coin_until_it_expires() {
-    let (storage, _directory) = storage().await;
+    let (storage, db, _directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;
@@ -555,7 +552,7 @@ async fn a_pending_spend_holds_its_coin_until_it_expires() {
     )
     .await
     .unwrap();
-    let unspent = |storage: crate::storage::Storage| {
+    let unspent = |storage: Stores| {
         let alice = alice.clone();
         async move {
             storage
@@ -574,19 +571,18 @@ async fn a_pending_spend_holds_its_coin_until_it_expires() {
         coin: Some(coin(&network, "f", 0)),
     });
     spend.expires = Some(100);
-    record(&storage, &spend).await;
+    record(&db, &spend).await;
     assert_eq!(unspent(storage.clone()).await, 0);
     let expired = |now| {
-        let (storage, network) = (storage.clone(), network.clone());
+        let (db, network) = (db.clone(), network.clone());
         async move {
-            storage
-                .write(move |connection| {
-                    Ok(crate::models::transaction::db::expire(
-                        connection, &network, now,
-                    )?)
-                })
-                .await
-                .unwrap()
+            db.write(move |connection| {
+                Ok(crate::models::transaction::db::expire(
+                    connection, &network, now,
+                )?)
+            })
+            .await
+            .unwrap()
         }
     };
     assert_eq!(expired(99).await, 0);
@@ -604,11 +600,11 @@ fn pending(network: &Network, txid: &str, to: &str, amount: u64) -> Transaction 
 
 #[tokio::test]
 async fn mining_upserts_the_pending_row_and_its_legs() {
-    let (storage, directory) = storage().await;
+    let (storage, db, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;
-    record(&storage, &pending(&network, "p", "alice", 3)).await;
+    record(&db, &pending(&network, "p", "alice", 3)).await;
     assert_eq!(rows(&directory, "p"), (vec![None], vec![None]));
     let mined = payment(&network, "p", "alice", 3, None);
     BlockStore::insert(
@@ -623,14 +619,14 @@ async fn mining_upserts_the_pending_row_and_its_legs() {
         (vec![block0.clone()], vec![block0.clone()])
     );
     // A pending insert after mining is a no-op.
-    record(&storage, &pending(&network, "p", "alice", 9)).await;
+    record(&db, &pending(&network, "p", "alice", 9)).await;
     assert_eq!(history(&directory, &alice), ["p"]);
     assert_eq!(rows(&directory, "p").0, [block0]);
 }
 
 #[tokio::test]
 async fn a_reorged_transaction_moves_to_its_new_block() {
-    let (storage, directory) = storage().await;
+    let (storage, db, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;
@@ -648,7 +644,9 @@ async fn a_reorged_transaction_moves_to_its_new_block() {
     // Archived and not re-mined: not shown, not counted.
     assert!(history(&directory, &alice).is_empty());
     assert_eq!(
-        storage.balance(&alice, &native(&network)).await.unwrap(),
+        crate::usecase::history::balance(&db, &alice, &native(&network))
+            .await
+            .unwrap(),
         Decimal::zero()
     );
     let mut branch = block(&network, 1, 1, vec![mined.clone()]);
@@ -660,20 +658,24 @@ async fn a_reorged_transaction_moves_to_its_new_block() {
     assert_eq!(rows(&directory, "m"), (vec![moved.clone()], vec![moved]));
     assert_eq!(history(&directory, &alice), ["m"]);
     assert_eq!(
-        storage.balance(&alice, &native(&network)).await.unwrap(),
+        crate::usecase::history::balance(&db, &alice, &native(&network))
+            .await
+            .unwrap(),
         Decimal::from(4_u64)
     );
 }
 
 #[tokio::test]
 async fn pending_legs_never_count() {
-    let (storage, _directory) = storage().await;
+    let (storage, db, _directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;
-    record(&storage, &pending(&network, "p", "alice", 3)).await;
+    record(&db, &pending(&network, "p", "alice", 3)).await;
     assert_eq!(
-        storage.balance(&alice, &native(&network)).await.unwrap(),
+        crate::usecase::history::balance(&db, &alice, &native(&network))
+            .await
+            .unwrap(),
         Decimal::zero()
     );
     assert!(
@@ -684,8 +686,7 @@ async fn pending_legs_never_count() {
             .is_empty()
     );
     assert!(
-        storage
-            .history(&alice, &native(&network), None, 10)
+        crate::usecase::history::history(&db, &alice, &native(&network), None, 10)
             .await
             .unwrap()
             .is_empty()
@@ -755,7 +756,7 @@ impl Broadcaster for Silent {
 
 #[tokio::test]
 async fn wallets_round_trip_through_their_factory() {
-    let (storage, _directory) = storage().await;
+    let (storage, _db, _directory) = storage().await;
     let network = network();
     let mut factories = WalletFactories::new();
     factories.set(WalletFactoryBroadcaster {
@@ -776,7 +777,7 @@ async fn wallets_round_trip_through_their_factory() {
 
 #[tokio::test]
 async fn rewards_of_indexed_pairs_are_kept_once() {
-    let (storage, _directory) = storage().await;
+    let (storage, _db, _directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;
@@ -795,7 +796,7 @@ async fn rewards_of_indexed_pairs_are_kept_once() {
 
 #[tokio::test]
 async fn balance_and_history_read_live_blocks_only() {
-    let (storage, _directory) = storage().await;
+    let (storage, db, _directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     let asset = native(&network);
@@ -822,15 +823,21 @@ async fn balance_and_history_read_live_blocks_only() {
     let blocks = run(&network, vec![paid, block(&network, 1, 0, vec![spent])]);
     BlockStore::insert(&storage, &blocks).await.unwrap();
     assert_eq!(
-        storage.balance(&alice, &asset).await.unwrap(),
+        crate::usecase::history::balance(&db, &alice, &asset)
+            .await
+            .unwrap(),
         Decimal::from(3)
     );
 
-    let first = storage.history(&alice, &asset, None, 1).await.unwrap();
+    let first = crate::usecase::history::history(&db, &alice, &asset, None, 1)
+        .await
+        .unwrap();
     let ids: Vec<_> = first.iter().map(|(_, t)| t.id.id.clone()).collect();
     assert_eq!(ids, ["a"]);
     let after = Some((0, 0, "a".to_owned()));
-    let second = storage.history(&alice, &asset, after, 10).await.unwrap();
+    let second = crate::usecase::history::history(&db, &alice, &asset, after, 10)
+        .await
+        .unwrap();
     assert_eq!(second.len(), 1);
     let (header, transaction) = &second[0];
     assert_eq!((header.position, transaction.id.id.as_str()), (1, "b"));
@@ -839,12 +846,13 @@ async fn balance_and_history_read_live_blocks_only() {
 
     BlockStore::delete(&storage, &network, 1).await.unwrap();
     assert_eq!(
-        storage.balance(&alice, &asset).await.unwrap(),
+        crate::usecase::history::balance(&db, &alice, &asset)
+            .await
+            .unwrap(),
         Decimal::from(6)
     );
     assert_eq!(
-        storage
-            .history(&alice, &asset, None, 10)
+        crate::usecase::history::history(&db, &alice, &asset, None, 10)
             .await
             .unwrap()
             .len(),
@@ -852,8 +860,7 @@ async fn balance_and_history_read_live_blocks_only() {
     );
     let other = address(&other(), "alice");
     assert_eq!(
-        storage
-            .balance(&other, &native(&other.network))
+        crate::usecase::history::balance(&db, &other, &native(&other.network))
             .await
             .unwrap(),
         Decimal::zero()
@@ -874,7 +881,7 @@ fn raw(directory: &tempfile::TempDir) -> diesel::SqliteConnection {
 #[tokio::test]
 async fn the_database_refuses_a_parent_that_is_not_stored() {
     use diesel::connection::SimpleConnection as _;
-    let (storage, directory) = storage().await;
+    let (storage, _db, directory) = storage().await;
     BlockStore::insert(&storage, &empty(&network(), 0, 0, 0))
         .await
         .unwrap();
@@ -900,7 +907,7 @@ async fn ids_are_dotted_natural_keys() {
         #[diesel(sql_type = Text)]
         id: String,
     }
-    let (storage, directory) = storage().await;
+    let (storage, _db, directory) = storage().await;
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;

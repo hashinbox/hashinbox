@@ -19,14 +19,14 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody};
 use crate::{
+    api::AppState,
     models::{
         self,
         trigger::{self as triggers, Action, Filter, Gate, Logic},
         trigger_run,
         wallet_index::Selector,
     },
-    state::AppState,
-    workers::trigger::actions::SendInput,
+    usecase::workers::trigger::actions::SendInput,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -177,7 +177,7 @@ struct RunsResponse {
 )]
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, Error> {
     let triggers = state
-        .storage
+        .db
         .read(|connection| Ok(triggers::db::find_all(connection)?))
         .await?;
     Ok(Json(ListResponse {
@@ -239,7 +239,7 @@ async fn create(
     }
     let kept = rows.clone();
     let taken = state
-        .storage
+        .db
         .write(move |connection| {
             // Every id is checked before any is written: all or none.
             for row in &kept {
@@ -290,7 +290,7 @@ async fn read(
 ) -> Result<Json<Trigger>, Error> {
     let id = path.id;
     let row = state
-        .storage
+        .db
         .read(move |connection| Ok(triggers::db::get_by_id(connection, &id).optional()?))
         .await?
         .ok_or_else(|| Error::not_found("no such trigger"))?;
@@ -329,7 +329,7 @@ async fn replace(
     }
     let id = path.id.clone();
     let kept = state
-        .storage
+        .db
         .read(move |connection| Ok(triggers::db::get_by_id(connection, &id).optional()?))
         .await?
         .ok_or_else(|| Error::not_found("no such trigger"))?;
@@ -344,7 +344,7 @@ async fn replace(
     )?;
     let replaced = row.clone();
     let changed = state
-        .storage
+        .db
         .write(move |connection| Ok(triggers::db::update(connection, &replaced)?))
         .await?;
     if changed == 0 {
@@ -374,7 +374,7 @@ async fn delete(
 ) -> Result<StatusCode, Error> {
     let id = path.id;
     let deleted = state
-        .storage
+        .db
         .write(move |connection| Ok(triggers::db::delete(connection, &id)?))
         .await?;
     if deleted == 0 {
@@ -403,7 +403,7 @@ async fn runs(
 ) -> Result<Json<RunsResponse>, Error> {
     let id = path.id;
     let runs = state
-        .storage
+        .db
         .read(move |connection| Ok(trigger_run::db::find_recent(connection, &id, RUNS)?))
         .await?;
     Ok(Json(RunsResponse {

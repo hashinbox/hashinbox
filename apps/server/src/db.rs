@@ -1,23 +1,12 @@
-//! The one SQLite file as one pool ([`Storage`]) and every storage trait of
-//! `base` and `tasks` on the models, one file per trait, plus the server's
-//! own reads (`history`: balances and history pages; `endpoints`). `migrate` executes
-//! the schemas; there are no migrations.
+//! The one SQLite file as one bounded pool ([`Db`]): the pragmas every
+//! connection runs, the read and write transactions, and executing schemas.
+//! It knows no model, no schema and no queue; anything may use it.
 //!
 //! Diesel is synchronous: every operation runs on Tokio's blocking pool with
 //! one pooled connection, inside one transaction (`BEGIN IMMEDIATE` for
-//! writes). A store only orchestrates; every statement is a model's.
+//! writes). There are no migrations: `migrate` executes the given schemas.
 
-mod blocks;
-mod history;
-mod indexes;
-mod inputs;
-mod tasks;
-mod wallets;
-
-use std::{
-    path::{self, Path, PathBuf},
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 use anyhow::{Context as _, ensure};
 use diesel::{
@@ -25,63 +14,9 @@ use diesel::{
     prelude::*,
     r2d2::{ConnectionManager, CustomizeConnection, Pool},
 };
-use serde::Deserialize;
-use tokio::sync::broadcast;
-
-/// The `"storage"` configuration: `{"path": ...}`, defaulting to `payment.db`;
-/// a relative path resolves against the working directory.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Config {
-    path: PathBuf,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            path: PathBuf::from("payment.db"),
-        }
-    }
-}
-
-/// Every schema file, in the order `migrate` executes them.
-const SCHEMAS: [&str; 3] = [
-    include_str!("../../../../schema/sdk.sql"),
-    include_str!("../../../../schema/server.sql"),
-    include_str!("../../../../schema/queue.sql"),
-];
-
-impl Config {
-    /// Opens the configured file and executes every schema on it (a new file).
-    ///
-    /// # Errors
-    ///
-    /// When the file does not open or a schema does not apply.
-    pub(crate) async fn migrate(&self) -> anyhow::Result<()> {
-        self.open()?.migrate().await
-    }
-
-    /// Opens the configured file as one pool; applies no schema.
-    ///
-    /// # Errors
-    ///
-    /// When the path does not resolve or the pool does not open.
-    pub(crate) fn open(&self) -> anyhow::Result<Storage> {
-        ensure!(
-            !self.path.as_os_str().is_empty(),
-            "storage path must not be empty"
-        );
-        let path = path::absolute(&self.path)
-            .context("storage path is not resolvable against the working directory")?;
-        Storage::open(&path)
-    }
-}
 
 /// How long a statement waits for another connection's lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Changes a slow queue subscriber may fall behind by before it lags.
-const CHANGES: usize = 256;
 
 /// The pragmas every connection runs when it opens.
 #[derive(Debug)]
@@ -99,15 +34,13 @@ impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for Pragmas {
     }
 }
 
-/// The one SQLite file's bounded pool with every store on it. Clones share
-/// the pool and the queue's change channel.
+/// The one SQLite file's bounded pool. Clones share the pool.
 #[derive(Clone)]
-pub(crate) struct Storage {
+pub(crate) struct Db {
     pool: Pool<ConnectionManager<SqliteConnection>>,
-    changes: broadcast::Sender<()>,
 }
 
-impl Storage {
+impl Db {
     /// Opens or creates the SQLite file at `path` (absolute); applies no schema.
     ///
     /// # Errors
@@ -123,20 +56,18 @@ impl Storage {
             .connection_customizer(Box::new(Pragmas))
             .build(ConnectionManager::new(url))
             .context("sqlite pool did not open")?;
-        Ok(Self {
-            pool,
-            changes: broadcast::channel(CHANGES).0,
-        })
+        Ok(Self { pool })
     }
 
-    /// Executes every schema file on this (new) file.
+    /// Executes `schemas`, in order, in one write on this (new) file.
     ///
     /// # Errors
     ///
     /// When a schema does not apply.
-    pub(crate) async fn migrate(&self) -> anyhow::Result<()> {
-        self.write(|connection| {
-            for schema in SCHEMAS {
+    pub(crate) async fn migrate(&self, schemas: &[&'static str]) -> anyhow::Result<()> {
+        let schemas = schemas.to_vec();
+        self.write(move |connection| {
+            for schema in schemas {
                 connection.batch_execute(schema)?;
             }
             Ok(())
@@ -146,6 +77,10 @@ impl Storage {
 
     /// Runs `work` in one `BEGIN IMMEDIATE` transaction on a blocking thread;
     /// an error rolls it back. A commit error is not proof nothing landed.
+    ///
+    /// # Errors
+    ///
+    /// When no connection is lent, or `work` or the commit fails.
     pub(crate) async fn write<T: Send + 'static>(
         &self,
         work: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<T> + Send + 'static,
@@ -160,6 +95,10 @@ impl Storage {
     }
 
     /// Runs `work` in one read transaction (one snapshot) on a blocking thread.
+    ///
+    /// # Errors
+    ///
+    /// When no connection is lent, or `work` fails.
     pub(crate) async fn read<T: Send + 'static>(
         &self,
         work: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<T> + Send + 'static,

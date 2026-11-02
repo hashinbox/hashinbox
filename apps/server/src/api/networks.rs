@@ -16,8 +16,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody};
 use crate::{
+    api::AppState,
     models::{Explorer, Indexing, Network, RpcEndpoints, endpoint},
-    state::AppState,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -228,7 +228,7 @@ struct NodePath {
     tag = "networks"
 )]
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, Error> {
-    let stored = state.storage.read(endpoint::db::find_all).await?;
+    let stored = state.db.read(endpoint::db::find_all).await?;
     let stored = stored.rows();
     let networks = state
         .payments
@@ -272,11 +272,7 @@ async fn add(
     if request.nodes.is_empty() || request.nodes.len() > 64 {
         return Err(Error::invalid_request("add 1 to 64 nodes at once"));
     }
-    let stored = state
-        .storage
-        .read(endpoint::db::find_all)
-        .await?
-        .documents();
+    let stored = state.db.read(endpoint::db::find_all).await?.documents();
     let mut lists: BTreeMap<base::Network, Vec<Value>> = BTreeMap::new();
     for node in request.nodes {
         let network = base::Network::new(base::Chain::new(node.chain), node.network);
@@ -297,7 +293,7 @@ async fn add(
     let kept = lists.clone();
     // Stored before installed: a restart never forgets a change in use.
     state
-        .storage
+        .db
         .write(move |connection| {
             for (network, nodes) in &kept {
                 endpoint::db::upsert(connection, network, nodes)?;
@@ -373,7 +369,7 @@ async fn remove(
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
     state.payments.service(&network)?;
     let mut documents = state
-        .storage
+        .db
         .read(endpoint::db::find_all)
         .await?
         .documents()
@@ -408,7 +404,7 @@ async fn store(
     let (network, nodes) = (network.clone(), nodes.clone());
     // Stored before installed: a restart never forgets a change in use.
     state
-        .storage
+        .db
         .write(move |connection| endpoint::db::upsert(connection, &network, &nodes))
         .await?;
     Ok(())

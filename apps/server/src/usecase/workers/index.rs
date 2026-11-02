@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tasks::{Ack, Id, Job, Status, Store as _, Task, Topic, Worker};
 
-use crate::{storage::Storage, workers::trigger::Scope};
+use super::trigger::Scope;
+use crate::usecase::tasks::Queue;
 
 /// The job kind.
 pub(crate) const KIND: &str = "index";
@@ -35,12 +36,12 @@ pub(crate) struct Target {
 /// Steps every network's indexer.
 pub(crate) struct Index {
     payments: Arc<Payments>,
-    storage: Storage,
+    queue: Queue,
 }
 
 impl Index {
-    pub(crate) const fn new(payments: Arc<Payments>, storage: Storage) -> Self {
-        Self { payments, storage }
+    pub(crate) const fn new(payments: Arc<Payments>, queue: Queue) -> Self {
+        Self { payments, queue }
     }
 
     /// Makes sure every network has its index job, pending now; a finished
@@ -58,10 +59,10 @@ impl Index {
                 id: Id::from(format!("index.{}.{}", target.chain, target.network)),
                 ..Job::new(topic, KIND, json!(target))
             };
-            match self.storage.get(&job.id).await? {
-                None => self.storage.enqueue(job).await?,
+            match self.queue.get(&job.id).await? {
+                None => self.queue.enqueue(job).await?,
                 Some(kept) if matches!(kept.status, Status::Done | Status::Failed) => {
-                    self.storage.update(job).await?;
+                    self.queue.update(job).await?;
                 }
                 Some(_) => {}
             }
@@ -98,7 +99,7 @@ impl Worker for Index {
                     };
                     // Not queued, the next interval queues one.
                     if let Ok(job) = scope.job() {
-                        let _ = self.storage.enqueue(job).await;
+                        let _ = self.queue.enqueue(job).await;
                     }
                     return task.again(later);
                 }

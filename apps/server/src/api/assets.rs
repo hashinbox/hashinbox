@@ -8,8 +8,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::ErrorBody;
 use crate::{
+    api::AppState,
     models::{Asset, Network},
-    state::AppState,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {

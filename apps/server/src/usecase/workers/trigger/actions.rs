@@ -11,13 +11,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tasks::Job;
 
-use super::triggers::Trigger;
 use crate::{
     models::{
         trigger::{Amount, Target},
         wallet_index_balance::WalletIndexBalances,
     },
-    workers::broadcast::{Payment, SendIntent},
+    usecase::{
+        trigger::Trigger,
+        workers::broadcast::{Payment, SendIntent},
+    },
 };
 
 /// What an action sees, and what it asks the run to do.

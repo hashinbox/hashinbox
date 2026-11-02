@@ -13,7 +13,7 @@ use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody};
-use crate::{models::task, state::AppState, workers::broadcast};
+use crate::{api::AppState, models::task, usecase::workers::broadcast};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
@@ -173,7 +173,7 @@ async fn list(
         _ => return Err(Error::invalid_request("chain and network go together")),
     };
     let rows = state
-        .storage
+        .db
         .read(move |connection| {
             Ok(task::db::find_recent(
                 connection,
@@ -214,7 +214,7 @@ async fn read(
     Path(path): Path<JobPath>,
 ) -> Result<Json<Job>, Error> {
     let id = tasks::Id::from(path.id);
-    let job = tasks::Store::get(&state.storage, &id)
+    let job = tasks::Store::get(&state.queue, &id)
         .await
         .map_err(|error| Error::unavailable(error.to_string()))?
         .ok_or_else(|| Error::not_found("job does not exist"))?;

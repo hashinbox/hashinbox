@@ -20,10 +20,15 @@ use crate::{
         wallet_index::{Selector, WalletIndexes},
         wallet_index_balance::{self, WalletIndexBalances},
     },
-    workers::broadcast::SendIntent,
-    workers::trigger::{
-        Actions, Invocation, Trigger as Deciding,
-        actions::{Action as _, SendInput, Transfer},
+    usecase::{
+        trigger::{Context, Trigger as Deciding},
+        workers::{
+            broadcast::SendIntent,
+            trigger::{
+                Invocation,
+                actions::{Action as _, SendInput, Transfer},
+            },
+        },
     },
 };
 
@@ -81,8 +86,8 @@ fn seeded() -> (tempfile::TempDir, tokio::runtime::Runtime, SqliteConnection) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let storage = crate::storage::Storage::open(&path).unwrap();
-    runtime.block_on(storage.migrate()).unwrap();
+    let db = crate::db::Db::open(&path).unwrap();
+    runtime.block_on(db.migrate(&crate::schema::ALL)).unwrap();
     let mut connection = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
     connection
         .batch_execute("PRAGMA foreign_keys = ON;")
@@ -390,11 +395,10 @@ fn open<'a>(
             )
         })
         .collect();
-    let context = crate::workers::trigger::Context {
+    let context = Context {
         assets,
         estimator: fees,
         runtime: runtime.handle().clone(),
-        actions: Arc::new(Actions::new()),
         now: 100_000,
     };
     Deciding::new(row, connection, context, run)

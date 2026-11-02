@@ -28,8 +28,8 @@ use serde_json::{Value, json};
 use tasks::{Ack, Job, Task, Topic, Worker};
 
 use crate::{
+    db::Db,
     models::{Task as Row, leg, task, transaction, transaction::Transaction},
-    storage::Storage,
 };
 
 /// The job kind.
@@ -89,15 +89,15 @@ impl SendIntent {
 }
 
 /// The broadcast worker: the payments container that signs and sends, and
-/// the storage that records.
+/// the database that records.
 pub(crate) struct Broadcast {
     payments: Arc<Payments>,
-    storage: Storage,
+    db: Db,
 }
 
 impl Broadcast {
-    pub(crate) const fn new(payments: Arc<Payments>, storage: Storage) -> Self {
-        Self { payments, storage }
+    pub(crate) const fn new(payments: Arc<Payments>, db: Db) -> Self {
+        Self { payments, db }
     }
 
     /// Every transaction of `intent`, signed by the kept wallet of `sender`.
@@ -152,7 +152,7 @@ impl Broadcast {
         })?;
         let now = i64::try_from(tasks::now())?;
         let recorded = self
-            .storage
+            .db
             .write(move |connection| {
                 // A short one rolls the write back: nothing recorded.
                 for transaction in signed.iter() {
@@ -176,7 +176,7 @@ impl Broadcast {
         txid: &str,
     ) -> anyhow::Result<Option<base::Transaction>> {
         let id = Transaction::id(network, txid)?;
-        self.storage
+        self.db
             .read(move |connection| {
                 let Some(row) = transaction::db::find_pending(connection, &id)? else {
                     return Ok(None);
@@ -194,7 +194,7 @@ impl Broadcast {
             .iter()
             .map(|txid| Transaction::id(network, txid))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        self.storage
+        self.db
             .write(move |connection| {
                 for id in &ids {
                     transaction::db::delete_by_id(connection, id)?;

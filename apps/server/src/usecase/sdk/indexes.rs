@@ -2,13 +2,16 @@
 
 use base::{Future, Network, WalletIndex, WalletIndexState, WalletIndexStore};
 
-use super::Storage;
+use super::Stores;
 use crate::models::{int, uint, wallet_index};
 
-impl WalletIndexStore for Storage {
+impl WalletIndexStore for Stores {
     fn insert<'a>(&'a self, index: &'a WalletIndex) -> Future<'a, anyhow::Result<()>> {
         let index = index.clone();
-        Box::pin(self.write(move |connection| wallet_index::db::insert(connection, &index)))
+        Box::pin(
+            self.db
+                .write(move |connection| wallet_index::db::insert(connection, &index)),
+        )
     }
 
     fn find_next<'a>(
@@ -20,12 +23,13 @@ impl WalletIndexStore for Storage {
         Box::pin(async move {
             // Above SQLite's range bounds nothing.
             let through = through.map(|through| int(through).unwrap_or(i64::MAX));
-            self.read(move |connection| {
-                wallet_index::db::find_next(connection, &network, through)?
-                    .map(uint)
-                    .transpose()
-            })
-            .await
+            self.db
+                .read(move |connection| {
+                    wallet_index::db::find_next(connection, &network, through)?
+                        .map(uint)
+                        .transpose()
+                })
+                .await
         })
     }
 
@@ -34,7 +38,10 @@ impl WalletIndexStore for Storage {
         network: &'a Network,
     ) -> Future<'a, anyhow::Result<Vec<WalletIndex>>> {
         let network = network.clone();
-        Box::pin(self.read(move |connection| wallet_index::db::find_all(connection, &network)))
+        Box::pin(
+            self.db
+                .read(move |connection| wallet_index::db::find_all(connection, &network)),
+        )
     }
 
     fn move_birthday<'a>(
@@ -44,7 +51,7 @@ impl WalletIndexStore for Storage {
     ) -> Future<'a, anyhow::Result<()>> {
         let index = index.clone();
         Box::pin(
-            self.write(move |connection| {
+            self.db.write(move |connection| {
                 wallet_index::db::move_birthday(connection, &index, birthday)
             }),
         )
@@ -57,7 +64,7 @@ impl WalletIndexStore for Storage {
         reason: Option<&'a str>,
     ) -> Future<'a, anyhow::Result<()>> {
         let (index, reason) = (index.clone(), reason.map(str::to_owned));
-        Box::pin(self.write(move |connection| {
+        Box::pin(self.db.write(move |connection| {
             wallet_index::db::set_state(
                 connection,
                 &index.address,

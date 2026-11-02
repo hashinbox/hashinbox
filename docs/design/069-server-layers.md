@@ -1,6 +1,6 @@
 # 069 — Server layers: db, models, usecase, api, main
 
-Status: proposal. Nothing moved yet.
+Status: done (all six steps). Deviations and answers: see "As built" at the end.
 
 ## Why
 
@@ -136,3 +136,30 @@ Stays where it is:
    `usecase/stats.rs`.
 6. `AppState` into `api/`; a check (script or test) that no module imports
    upward.
+
+## As built
+
+- Open questions: `schema/*.sql` stays at the repo root (`schema.rs` embeds it
+  from there); the wallet list keeps `tags` (JSON unchanged); the trait type is
+  `Stores`.
+- `Queue` keeps its `Db` private. A worker that writes other tables takes a
+  `Db` beside the `Queue` (`Expire`, `Prune`, `Round`); `Broadcast` takes only
+  a `Db`, `Index` only a `Queue`. `AppState` holds `db` and `queue`.
+- `Storage::keyed()` is gone: the one-model read (`wallet::db::find_all`) is
+  inline in the two handlers that need it and in `usecase::wallets::list`. The
+  list now reads the keyed wallets in the same snapshot as the rest (it was a
+  separate read before); the JSON is the same.
+- `usecase::trigger`: `Context` has no `actions`; `Triggers::decide` takes the
+  action as a closure over a `Decision` (action, network, `This`, the trigger
+  still deciding, keyed addresses) and returns `None` where the check does not
+  hold. The round worker builds the `Invocation` and runs `Actions` there.
+- `usecase::stats` has its own plain structs; `api/stats.rs` maps them into
+  the unchanged response shapes field by field.
+- `usecase::chain` returns the model rows (`Block`, `Transaction`, `Legs`);
+  `api/blocks.rs` turns them into its bodies with `TryFrom`.
+- `workers/broadcast/` and `workers/indexer/` are flattened into
+  `usecase/workers/{broadcast,expire,index}.rs`. `Expire` still uses the index
+  job's public `Target`.
+- `Db::migrate` takes `&[&'static str]` (the work runs on a blocking thread).
+- The upward-import check is `scripts/server-layers.py` (run by hand; not
+  wired into the tests).

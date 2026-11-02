@@ -2,7 +2,7 @@
 //! per noun, and one file per table of the schema (`schema/*.sql`): the diesel
 //! row, every statement that reads or writes it, and its conversions to and
 //! from `base`'s types. The storage traits are implemented on these in
-//! `crate::storage`.
+//! `crate::usecase::sdk` and `crate::usecase::tasks`.
 //!
 //! Each file reads top to bottom: the structs a model embeds, the model and
 //! its constructors, its collection, then `db`, the table's statements

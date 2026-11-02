@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use tasks::{Ack, Id, Job, Status, Store as _, Task, Topic, Worker};
 
-use crate::{models::task, storage::Storage, workers::trigger};
+use super::trigger;
+use crate::{db::Db, models::task, usecase::tasks::Queue};
 
 /// The job kind.
 pub(crate) const KIND: &str = "prune";
@@ -29,12 +30,13 @@ const KEEP: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Deletes the jobs that succeeded long enough ago.
 pub(crate) struct Prune {
-    storage: Storage,
+    db: Db,
+    queue: Queue,
 }
 
 impl Prune {
-    pub(crate) const fn new(storage: Storage) -> Self {
-        Self { storage }
+    pub(crate) const fn new(db: Db, queue: Queue) -> Self {
+        Self { db, queue }
     }
 
     /// Makes sure the prune job exists; a finished one starts over.
@@ -44,10 +46,10 @@ impl Prune {
             id: Id::from(KIND.to_owned()),
             ..Job::new(topic, KIND, serde_json::Value::Null)
         };
-        match self.storage.get(&job.id).await? {
-            None => self.storage.enqueue(job).await?,
+        match self.queue.get(&job.id).await? {
+            None => self.queue.enqueue(job).await?,
             Some(kept) if matches!(kept.status, Status::Done | Status::Failed) => {
-                self.storage.update(job).await?;
+                self.queue.update(job).await?;
             }
             Some(_) => {}
         }
@@ -69,7 +71,7 @@ impl Worker for Prune {
             return task.fail("now is above range");
         };
         let pruned = self
-            .storage
+            .db
             .write(move |connection| {
                 Ok(task::db::delete_succeeded_before(
                     connection, &RECURRING, before,

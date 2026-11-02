@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 
 use base::{Address, Future, InputStore, Inputs, Network};
 
-use super::Storage;
+use super::Stores;
 use crate::models::leg;
 
-impl InputStore for Storage {
+impl InputStore for Stores {
     fn find_unspent<'a>(&'a self, addresses: &'a [Address]) -> Future<'a, anyhow::Result<Inputs>> {
         let mut by_network: BTreeMap<Network, Vec<String>> = BTreeMap::new();
         for address in addresses {
@@ -16,7 +16,7 @@ impl InputStore for Storage {
                 .or_default()
                 .push(address.value.clone());
         }
-        Box::pin(self.read(move |connection| {
+        Box::pin(self.db.read(move |connection| {
             let mut inputs = Vec::new();
             for (network, values) in &by_network {
                 let values: Vec<&str> = values.iter().map(String::as_str).collect();

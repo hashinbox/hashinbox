@@ -196,7 +196,7 @@ impl Amount {
 }
 
 /// What a trigger does when its check passes: an action by name, with its
-/// own static input (`workers::trigger::actions`).
+/// own static input (`usecase::workers::trigger::actions`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Action {

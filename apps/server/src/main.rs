@@ -3,8 +3,9 @@
 //! registered here (the only module that names a chain crate), runs each
 //! network's indexer and the send queue, and serves the public HTTP API
 //! (`api`, which names no chain and no storage backend) beside the browser
-//! page (`ui`). The tables and their statements are `models`; the stores and
-//! reads on them are `storage`; the send queue is `workers`.
+//! page (`ui`). The pool is `db`, the schema files `schema`; the tables and
+//! their statements are `models`; the stores, the queue and the reads on
+//! them are `usecase`; the background jobs are `workers`.
 //!
 //! A network's stored `rpc_endpoints` row replaces its section's
 //! `endpoints` before the chain reads it, so a change made through the API
@@ -12,11 +13,11 @@
 
 mod api;
 mod config;
+mod db;
 mod models;
-mod state;
-mod storage;
+mod schema;
 mod ui;
-mod workers;
+mod usecase;
 
 #[cfg(test)]
 #[path = "../tests/mod.rs"]
@@ -24,10 +25,10 @@ mod tests;
 
 use std::{path::PathBuf, sync::Arc};
 
+use api::AppState;
 use config::{AnyError, Config};
 use payments::{Document, Payments};
 use serde_json::Value;
-use state::AppState;
 
 /// Every way the binary may be invoked; every refusal of an argument prints it.
 const USAGE: &str = "usage: payment-server serve <config.toml> \
@@ -69,7 +70,8 @@ async fn main() -> Result<(), AnyError> {
         }
         None => return Err(USAGE.into()),
         Some(Command::Migrate { config }) => {
-            Config::read(config).await?.storage.migrate().await?;
+            let db = Config::read(config).await?.storage.open()?;
+            db.migrate(&schema::ALL).await?;
             return Ok(());
         }
         Some(Command::Serve { config }) => config,
@@ -81,9 +83,10 @@ async fn main() -> Result<(), AnyError> {
         api_base: Config::api_base()?,
     });
 
-    let storage = config.storage.open()?;
-    let document = stored_endpoints(config.payments.clone(), &storage).await?;
-    let stores = Arc::new(storage.clone());
+    let db = config.storage.open()?;
+    let queue = usecase::tasks::Queue::new(db.clone());
+    let document = stored_endpoints(config.payments.clone(), &db).await?;
+    let stores = Arc::new(usecase::sdk::Stores::new(db.clone()));
     // Each chain's `Config` reads its own section of the payments document.
     let payments = Payments::builder()
         .with_chain::<chain_bitcoin::Config>("bitcoin")
@@ -102,26 +105,27 @@ async fn main() -> Result<(), AnyError> {
     // Every network's index job steps its indexer; at the tip it queues a
     // triggers job (locking the whole network), whose sends are broadcast
     // jobs (one topic per sender).
-    let index = workers::indexer::Index::new(payments.clone(), storage.clone());
+    let index = usecase::workers::index::Index::new(payments.clone(), queue.clone());
     index.start().await?;
     // Every network's expire job frees what pending transactions held.
-    let expire = workers::broadcast::Expire::new(payments.clone(), storage.clone());
+    let expire = usecase::workers::expire::Expire::new(payments.clone(), db.clone(), queue.clone());
     expire.start().await?;
     // One prune job deletes jobs that succeeded more than a day ago.
-    let prune = workers::prune::Prune::new(storage.clone());
+    let prune = usecase::workers::prune::Prune::new(db.clone(), queue.clone());
     prune.start().await?;
-    let executor = workers::executor::Executor::new(storage.clone())
+    let executor = usecase::workers::executor::Executor::new(queue.clone())
         .add(index, tasks::Retry::default())
         .add(expire, tasks::Retry::default())
         .add(prune, tasks::Retry::default())
         .add(
-            workers::broadcast::Broadcast::new(payments.clone(), storage.clone()),
+            usecase::workers::broadcast::Broadcast::new(payments.clone(), db.clone()),
             tasks::Retry::default(),
         )
         .add(
-            workers::trigger::Round::new(
+            usecase::workers::trigger::Round::new(
                 payments.clone(),
-                storage.clone(),
+                db.clone(),
+                queue.clone(),
                 logging::Logger::default(),
             ),
             tasks::Retry::default(),
@@ -129,7 +133,8 @@ async fn main() -> Result<(), AnyError> {
     let jobs = tokio::spawn(executor.run());
     let state = Arc::new(AppState {
         payments,
-        storage,
+        db,
+        queue,
         explorers: config.ui.explorers.clone(),
     });
     let router = api::router(state, &server)?.merge(face.routes()?);
@@ -149,14 +154,8 @@ async fn main() -> Result<(), AnyError> {
 /// stored row, matched on the section's `chain` and `network` text; a section
 /// with no stored row has its `endpoints` stored, so the stored rows are the
 /// one list every later change edits.
-async fn stored_endpoints(
-    mut document: Document,
-    storage: &storage::Storage,
-) -> anyhow::Result<Document> {
-    let stored = storage
-        .read(models::endpoint::db::find_all)
-        .await?
-        .documents();
+async fn stored_endpoints(mut document: Document, db: &db::Db) -> anyhow::Result<Document> {
+    let stored = db.read(models::endpoint::db::find_all).await?.documents();
     let mut seeds = Vec::new();
     for section in &mut document.networks {
         let (Some(Value::String(chain)), Some(Value::String(name))) =
@@ -172,13 +171,12 @@ async fn stored_endpoints(
             seeds.push((network, nodes));
         }
     }
-    storage
-        .write(move |connection| {
-            for (network, nodes) in &seeds {
-                models::endpoint::db::upsert(connection, network, nodes)?;
-            }
-            Ok(())
-        })
-        .await?;
+    db.write(move |connection| {
+        for (network, nodes) in &seeds {
+            models::endpoint::db::upsert(connection, network, nodes)?;
+        }
+        Ok(())
+    })
+    .await?;
     Ok(document)
 }

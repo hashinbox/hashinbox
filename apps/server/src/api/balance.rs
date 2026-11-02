@@ -13,8 +13,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody, asset_info, wallet_address};
 use crate::{
+    api::AppState,
     models::{Asset, wallet_index},
-    state::AppState,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -71,10 +71,10 @@ async fn balance(
     let Query(query) = query.map_err(Error::invalid_query)?;
     let address = wallet_address(&state.payments, &path.id)?;
     let info = asset_info(&state.payments, &address.network, &query.asset)?;
-    let total = state.storage.balance(&address, &info.asset).await?;
+    let total = crate::usecase::history::balance(&state.db, &address, &info.asset).await?;
     let network = address.network.clone();
     let indexed_through = state
-        .storage
+        .db
         .read(move |connection| wallet_index::db::find_all(connection, &network))
         .await?
         .into_iter()

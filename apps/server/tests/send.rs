@@ -10,14 +10,16 @@ use tasks::{Ack, Job, Status, Store, Task, Worker as _};
 
 use super::{Fake, Script, database, network, payments};
 use crate::{
+    db::Db,
     models::{transaction, transaction::Transaction},
-    storage::Storage,
-    workers::broadcast::{Broadcast, Payment, SendIntent},
+    usecase::workers::broadcast::{Broadcast, Payment, SendIntent},
+    usecase::{sdk::Stores, tasks::Queue},
 };
 
 /// A broadcast job of `amounts` from `from` over the scripted network.
 struct Fixture {
-    storage: Storage,
+    db: Db,
+    queue: Queue,
     script: Arc<Script>,
     worker: Broadcast,
     job: Job,
@@ -36,7 +38,8 @@ impl Fixture {
         answers: Vec<Result<(), TransactionErrorKind>>,
         fee: u64,
     ) -> Self {
-        let (storage, directory) = database().await;
+        let (db, directory) = database().await;
+        let queue = Queue::new(db.clone());
         let script = Arc::new(Script {
             answers: Mutex::new(answers.into()),
             fee,
@@ -46,7 +49,10 @@ impl Fixture {
             address: base::Address::new(network(), "sender"),
             script: script.clone(),
         };
-        storage.insert(&sender).await.expect("the wallet kept");
+        Stores::new(db.clone())
+            .insert(&sender)
+            .await
+            .expect("the wallet kept");
         let intent = SendIntent {
             chain: network().chain.to_string(),
             network: network().name,
@@ -61,12 +67,13 @@ impl Fixture {
                 .collect(),
         };
         let mut job = intent.job().expect("a job");
-        storage.enqueue(job.clone()).await.expect("a job");
+        queue.enqueue(job.clone()).await.expect("a job");
         job.status = Status::Running;
-        storage.update(job.clone()).await.expect("running");
+        queue.update(job.clone()).await.expect("running");
         Self {
-            worker: Broadcast::new(payments(&storage, script.clone()).await, storage.clone()),
-            storage,
+            worker: Broadcast::new(payments(&db, script.clone()).await, db.clone()),
+            db,
+            queue,
             script,
             job,
             _directory: directory,
@@ -76,19 +83,19 @@ impl Fixture {
     /// One run of the job as stored now.
     async fn run(&self) -> Ack {
         let job = self
-            .storage
+            .queue
             .get(&self.job.id)
             .await
             .expect("a read")
             .expect("the job");
-        let task = Task::new(job, Arc::new(self.storage.clone())).expect("a task");
+        let task = Task::new(job, Arc::new(self.queue.clone())).expect("a task");
         self.worker.run(task).await
     }
 
     /// Whether txid `txid` is recorded as pending.
     async fn recorded(&self, txid: &str) -> bool {
         let id = Transaction::id(&network(), txid).expect("an id");
-        self.storage
+        self.db
             .read(move |connection| Ok(transaction::db::find_pending(connection, &id)?.is_some()))
             .await
             .expect("a read")
@@ -97,7 +104,7 @@ impl Fixture {
     /// Forgets txid `txid`, as an expiry does.
     async fn forget(&self, txid: &str) {
         let id = Transaction::id(&network(), txid).expect("an id");
-        self.storage
+        self.db
             .write(move |connection| Ok(transaction::db::delete_by_id(connection, &id)?))
             .await
             .expect("a write");

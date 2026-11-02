@@ -30,12 +30,13 @@ fn network() -> Network {
 
 /// A new database file with every schema applied, and the directory that
 /// holds it.
-async fn database() -> (crate::storage::Storage, tempfile::TempDir) {
+async fn database() -> (crate::db::Db, tempfile::TempDir) {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let storage =
-        crate::storage::Storage::open(&directory.path().join("test.db")).expect("the file opens");
-    storage.migrate().await.expect("the schema applies");
-    (storage, directory)
+    let db = crate::db::Db::open(&directory.path().join("test.db")).expect("the file opens");
+    db.migrate(&crate::schema::ALL)
+        .await
+        .expect("the schema applies");
+    (db, directory)
 }
 
 /// What each broadcast answers, in order; the fee each built transaction
@@ -302,18 +303,18 @@ impl base::Config for Config {
     }
 }
 
-/// The payments container of the scripted network over `storage`.
-async fn payments(storage: &crate::storage::Storage, script: Arc<Script>) -> Arc<Payments> {
-    limited(storage, script, None).await
+/// The payments container of the scripted network over `db`.
+async fn payments(db: &crate::db::Db, script: Arc<Script>) -> Arc<Payments> {
+    limited(db, script, None).await
 }
 
 /// [`payments`], with a history limit of `max_history`.
 async fn limited(
-    storage: &crate::storage::Storage,
+    db: &crate::db::Db,
     script: Arc<Script>,
     max_history: Option<Duration>,
 ) -> Arc<Payments> {
-    let stores = Arc::new(storage.clone());
+    let stores = Arc::new(crate::usecase::sdk::Stores::new(db.clone()));
     let payments = Payments::builder()
         .with_network(Config(script, max_history))
         .with_storage(base::Storage {
