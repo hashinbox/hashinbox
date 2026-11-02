@@ -43,7 +43,7 @@ pub struct Config {
 }
 
 /// One allowlisted ERC-20 token and the decimals its contract must report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Token {
     /// The contract, written as canonical lowercase text.
@@ -51,6 +51,9 @@ pub struct Token {
     pub contract: alloy_primitives::Address,
     /// What its `decimals()` must report.
     pub decimals: u8,
+    /// Its display symbol, such as `USDC`; none: shown by its contract.
+    #[serde(default)]
+    pub ticker: Option<String>,
 }
 
 impl Config {
@@ -189,7 +192,10 @@ impl Config {
                 network: network.clone(),
                 id: hex::encode_prefixed(token.contract),
             };
-            AssetInfo::token(asset, token.decimals.into())
+            AssetInfo {
+                ticker: token.ticker.clone(),
+                ..AssetInfo::token(asset, token.decimals.into())
+            }
         });
         std::iter::once(ether).chain(tokens).collect()
     }

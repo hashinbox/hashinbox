@@ -124,6 +124,10 @@ impl Tokens {
     pub fn get(&self, asset: &base::Asset) -> Option<Token> {
         let mint = asset.id.parse().ok()?;
         let decimals = *self.0.get(&mint)?;
-        Some(Token { mint, decimals })
+        Some(Token {
+            mint,
+            decimals,
+            ticker: None,
+        })
     }
 }

@@ -52,6 +52,7 @@ use crate::state::AppState;
         (name = "transactions", description = "History, single transfers, and batches"),
         (name = "networks", description = "Configured networks, their indexing and RPC nodes"),
         (name = "triggers", description = "Triggers, their runs, and the tags they select by"),
+        (name = "jobs", description = "The job queue: indexing, expiry, trigger rounds, broadcasts"),
         (name = "health", description = "Readiness and indexing state"),
         (name = "openapi", description = "This document")
     )

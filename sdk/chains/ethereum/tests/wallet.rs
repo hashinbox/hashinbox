@@ -50,6 +50,7 @@ fn config() -> Config {
     config.tokens = vec![Token {
         contract: TOKEN.parse().unwrap(),
         decimals: 6,
+        ticker: None,
     }];
     config
 }

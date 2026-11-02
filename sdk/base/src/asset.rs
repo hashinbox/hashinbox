@@ -35,7 +35,8 @@ impl Asset {
 
 /// The one description of an asset: what its amounts are counted in and
 /// what a caller calls it. A chain declares it for its own currency (with a
-/// name and ticker) and for each token (by scale alone).
+/// name and ticker) and for each token (its scale, and a ticker when
+/// configured).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AssetInfo {
     /// The asset described.
@@ -44,7 +45,8 @@ pub struct AssetInfo {
     pub decimals: u32,
     /// Human-readable name, such as `Bitcoin`; `None` for a token.
     pub name: Option<String>,
-    /// Display symbol, such as `BTC`; `None` for a token.
+    /// Display symbol, such as `BTC` or `USDC`; `None` for a token configured
+    /// without one.
     pub ticker: Option<String>,
 }
 

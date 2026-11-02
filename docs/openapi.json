@@ -116,13 +116,99 @@
         ]
       }
     },
+    "/v1/jobs": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "List queued jobs",
+        "operationId": "list_jobs",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Only this kind (`index`, `expire`, `triggers`, `broadcast`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Only jobs in this state.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/JobState"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "At most this many, 1 to 1000; 100 by default.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The latest jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The queue is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/jobs/{id}": {
       "get": {
         "tags": [
-          "transactions"
+          "jobs"
         ],
         "summary": "Read a queued job",
-        "description": "The job's outcome and how many transactions it signed and the nodes accepted.",
+        "description": "The job's outcome, what it was given and what its worker has done; for a broadcast, how many transactions it signed and the nodes accepted.",
         "operationId": "read_job",
         "parameters": [
           {
@@ -1901,12 +1987,18 @@
       },
       "Job": {
         "type": "object",
-        "description": "`GET /v1/jobs/{id}`.",
+        "description": "One job of the queue.",
         "required": [
           "id",
           "kind",
+          "topic",
           "state",
+          "run_at",
+          "deadline",
+          "attempts",
           "reason",
+          "input",
+          "progress",
           "signed",
           "accepted"
         ],
@@ -1916,13 +2008,39 @@
             "description": "How many of them, in broadcast order, the nodes accepted.",
             "minimum": 0
           },
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Executions started since it was last fresh.",
+            "minimum": 0
+          },
+          "deadline": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Not started after this, Unix ms; always present.",
+            "minimum": 0
+          },
           "id": {
             "type": "string",
             "description": "The job id."
           },
+          "input": {
+            "type": "object",
+            "description": "What it was given."
+          },
           "kind": {
             "type": "string",
-            "description": "The job kind (`send`)."
+            "description": "The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`)."
+          },
+          "progress": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "What its worker has done so far; always present."
           },
           "reason": {
             "type": [
@@ -1931,14 +2049,40 @@
             ],
             "description": "Why it failed, or why its last attempt is being retried; always\npresent."
           },
+          "run_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Not started before this, Unix ms: the next run of a pending job.",
+            "minimum": 0
+          },
           "signed": {
             "type": "integer",
-            "description": "How many transactions it signed.",
+            "description": "A broadcast's transactions signed (0 for other kinds).",
             "minimum": 0
           },
           "state": {
             "$ref": "#/components/schemas/JobState",
             "description": "Where it is."
+          },
+          "topic": {
+            "type": "string",
+            "description": "What it locks: jobs whose topics conflict run one at a time, in id order."
+          }
+        }
+      },
+      "JobList": {
+        "type": "object",
+        "description": "`GET /v1/jobs`.",
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Job"
+            },
+            "description": "The jobs last written, latest first."
           }
         }
       },
@@ -2690,6 +2834,10 @@
     {
       "name": "triggers",
       "description": "Triggers, their runs, and the tags they select by"
+    },
+    {
+      "name": "jobs",
+      "description": "The job queue: indexing, expiry, trigger rounds, broadcasts"
     },
     {
       "name": "health",

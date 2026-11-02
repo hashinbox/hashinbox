@@ -40,7 +40,7 @@ pub struct Config {
 }
 
 /// One allowlisted SPL token and the decimals its mint must declare.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Token {
     /// The mint, written as canonical Base58.
@@ -48,6 +48,9 @@ pub struct Token {
     pub mint: solana_address::Address,
     /// What the mint must declare.
     pub decimals: u8,
+    /// Its display symbol, such as `USDC`; none: shown by its mint.
+    #[serde(default)]
+    pub ticker: Option<String>,
 }
 
 impl Config {
@@ -178,13 +181,16 @@ impl Config {
                 network: network.clone(),
                 id: token.mint.to_string(),
             };
-            AssetInfo::token(asset, token.decimals.into())
+            AssetInfo {
+                ticker: token.ticker.clone(),
+                ..AssetInfo::token(asset, token.decimals.into())
+            }
         });
         std::iter::once(sol).chain(tokens).collect()
     }
 
     fn mints(&self) -> Tokens {
-        Tokens::new(self.tokens.iter().copied())
+        Tokens::new(self.tokens.iter().cloned())
     }
 }
 

@@ -1,6 +1,5 @@
 import Add from '@mui/icons-material/Add';
 import Box from '@mui/material/Box';
-import Chip from '@mui/material/Chip';
 import IconButton from '@mui/material/IconButton';
 import List from '@mui/material/List';
 import ListItemButton from '@mui/material/ListItemButton';
@@ -83,16 +82,27 @@ export function Networks({ shell }: { shell: Shell }) {
                 <Typography noWrap sx={{ fontFamily: mono, fontSize: 13, flexGrow: 1 }}>
                   {nameOf(n)}
                 </Typography>
-                <Chip
-                  size="small"
-                  label={n.indexing.error ? 'retrying' : 'ready'}
-                  color={n.indexing.error ? 'warning' : 'success'}
+                <Box
+                  component="span"
+                  aria-label={n.indexing.error ? 'retrying' : 'ready'}
+                  sx={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    flex: 'none',
+                    bgcolor: n.indexing.error ? 'error.main' : 'success.main',
+                  }}
                 />
               </Stack>
               <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary' }}>
                 {n.nodes.length} node{n.nodes.length === 1 ? '' : 's'} · kept #
                 {n.indexing.last ?? '—'} · tip #{n.indexing.tip ?? '—'}
               </Typography>
+              {n.indexing.error && (
+                <Typography sx={{ fontFamily: mono, fontSize: 11, color: 'error.main' }}>
+                  {n.indexing.error}
+                </Typography>
+              )}
             </ListItemButton>
           ))}
           {networks.length === 0 && (

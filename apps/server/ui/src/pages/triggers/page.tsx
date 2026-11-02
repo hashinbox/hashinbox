@@ -8,7 +8,8 @@ import Stack from '@mui/material/Stack';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState } from 'react';
-import { call, client, type Trigger, type Wallet } from '@/api/client';
+import { call, client, type Listing, type Trigger, type Wallet } from '@/api/client';
+import { assetName } from '@/money';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { Editor } from './_components/editor';
@@ -34,9 +35,9 @@ function definitionOf(trigger: Trigger): Definition {
 }
 
 /** One line on what a trigger does. */
-function summary(trigger: Trigger): string {
+function summary(trigger: Trigger, listings: Listing[]): string {
   const send = definitionOf(trigger).action.input;
-  return `send ${send.asset === 'native' ? 'native' : send.asset.slice(0, 8) + '…'}`;
+  return `send ${assetName(listings, trigger.chain, trigger.network, send.asset)}`;
 }
 
 /** The triggers beside the one being edited. */
@@ -110,7 +111,7 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
                 />
               </Stack>
               <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary' }}>
-                {t.chain}/{t.network} · {summary(t)}
+                {t.chain}/{t.network} · {summary(t, shell.listings)}
               </Typography>
             </ListItemButton>
           ))}

@@ -10,11 +10,11 @@ export type Listing = Schemas['Listing'];
 export type Balance = Schemas['Balance'];
 export type Transaction = Schemas['Transaction'];
 export type TransactionPage = Schemas['TransactionPage'];
-export type Report = Schemas['Report'];
 export type ConfiguredNetwork = Schemas['ConfiguredNetwork'];
 export type Tag = Schemas['Tag'];
 export type Trigger = Schemas['Trigger'];
 export type TriggerRun = Schemas['TriggerRun'];
+export type Job = Schemas['Job'];
 
 /** Raised for any non-2xx answer; `message` is the server's own. */
 export class ApiError extends Error {
@@ -54,15 +54,6 @@ const baseUrl = settings.apiBase;
 
 export const client = createClient<paths>({ baseUrl });
 
-/**
- * The health report. `/health` answers 503 with the same body when the server
- * is not ready, which the typed client would treat as an error; a not-ready
- * report is still a report, so it is read directly.
- */
-export async function health(): Promise<Report> {
-  const response = await fetch(`${baseUrl}/health`, { headers: { Accept: 'application/json' } });
-  return (await response.json()) as Report;
-}
 client.use(auth);
 
 /** Unwraps an openapi-fetch result, turning an error body into an ApiError. */

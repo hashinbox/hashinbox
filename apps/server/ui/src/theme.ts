@@ -58,12 +58,7 @@ export function theme(mode: 'light' | 'dark'): Theme {
     components: {
       MuiCssBaseline: {
         styleOverrides: {
-          body: {
-            WebkitFontSmoothing: 'antialiased',
-            backgroundImage: `radial-gradient(${line} 1px, transparent 1px)`,
-            backgroundSize: '22px 22px',
-            backgroundAttachment: 'fixed',
-          },
+          body: { WebkitFontSmoothing: 'antialiased' },
           '::selection': { background: ink, color: paper },
         },
       },

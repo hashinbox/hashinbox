@@ -36,6 +36,19 @@ export function listingOf(wallet: Wallet, listings: Listing[]): Listing | undefi
   );
 }
 
+/** What `asset` of `chain/network` is called: its ticker, else its id shortened. */
+export function assetName(
+  listings: Listing[],
+  chain: string,
+  network: string,
+  asset: string,
+): string {
+  const listing = listings.find(
+    (l) => l.asset === asset && l.network.chain === chain && l.network.name === network,
+  );
+  return listing?.metadata.ticker ?? shorten(asset);
+}
+
 export function unitOf(wallet: Wallet, listings: Listing[]): string {
   return listingOf(wallet, listings)?.metadata.ticker ?? assetOf(wallet).toUpperCase();
 }

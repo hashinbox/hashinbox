@@ -23,6 +23,8 @@ export interface Choices {
   chain: string;
   network: string;
   assets: string[];
+  /** What an asset is called: its ticker, else its id shortened. */
+  name: (asset: string) => string;
   wallets: Wallet[];
   tags: string[];
 }
@@ -34,7 +36,7 @@ function indexes(choices: Choices): { id: string; label: string }[] {
     .flatMap((w) =>
       w.assets.map((asset) => ({
         id: indexId(choices.chain, choices.network, w.address, asset),
-        label: `${w.address.slice(0, 10)}… · ${asset}${w.keyed ? '' : ' · watch only'}`,
+        label: `${w.address.slice(0, 10)}… · ${choices.name(asset)}${w.keyed ? '' : ' · watch only'}`,
       })),
     );
 }
@@ -89,7 +91,7 @@ export function TargetPicker({
           <MenuItem value="">their own asset</MenuItem>
           {choices.assets.map((a) => (
             <MenuItem key={a} value={a}>
-              {a}
+              {choices.name(a)}
             </MenuItem>
           ))}
         </TextField>
@@ -125,7 +127,7 @@ export function TargetPicker({
             <MenuItem value="">any</MenuItem>
             {choices.assets.map((a) => (
               <MenuItem key={a} value={a}>
-                {a}
+                {choices.name(a)}
               </MenuItem>
             ))}
           </TextField>
@@ -183,7 +185,7 @@ function AmountPicker({
         >
           {choices.assets.map((a) => (
             <MenuItem key={a} value={a}>
-              {a}
+              {choices.name(a)}
             </MenuItem>
           ))}
         </TextField>
@@ -225,7 +227,7 @@ export function ActionPart({
       >
         {choices.assets.map((a) => (
           <MenuItem key={a} value={a}>
-            {a}
+            {choices.name(a)}
           </MenuItem>
         ))}
       </TextField>

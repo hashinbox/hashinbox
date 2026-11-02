@@ -13,33 +13,31 @@ import {
   ApiError,
   call,
   client,
-  health,
   setToken,
   whenUnauthorized,
   type Listing,
   type Wallet,
 } from '@/api/client';
-import { Networks, type Line } from '@/_components/networks';
 import { Toast, type Message } from '@/_components/toast';
 import { Docs } from '@/pages/docs/page';
+import { Jobs } from '@/pages/jobs/page';
 import { Networks as Configured } from '@/pages/networks/page';
 import { Triggers } from '@/pages/triggers/page';
 import { Wallets } from '@/pages/wallets/page';
 import { settings } from '@/settings';
 import { display } from '@/theme';
 
-type View = 'wallets' | 'triggers' | 'networks' | 'docs';
+type View = 'wallets' | 'triggers' | 'networks' | 'jobs' | 'docs';
 /** Whether the server wants a token: not asked yet, no, or yes. */
 type Door = 'unknown' | 'open' | 'locked';
 const TOKEN_KEY = 'tally.token';
-const VIEWS: View[] = ['wallets', 'triggers', 'networks', 'docs'];
+const VIEWS: View[] = ['wallets', 'triggers', 'networks', 'jobs', 'docs'];
 
 /** The tab named in the address, so a reload or a shared link lands on it. */
 function linked(): View {
   const named = window.location.hash.slice(1).split('/')[0];
   return VIEWS.find((v) => v === named) ?? 'wallets';
 }
-const BEAT_MS = 4000;
 
 /** Everything a page needs to talk back to the shell. */
 export interface Shell {
@@ -65,8 +63,6 @@ export function Layout() {
   const [selected, setSelected] = useState<string | null>(null);
   const [tags, setTags] = useState<Map<string, string[]>>(new Map());
   const [tagged, setTagged] = useState(0);
-  const [lines, setLines] = useState<Line[]>([]);
-  const [ready, setReady] = useState<boolean | null>(null);
   const [toast, setToast] = useState<Message | null>(null);
 
   const notify = useCallback((text: string, bad = false) => {
@@ -154,37 +150,6 @@ export function Layout() {
     };
   }, []);
 
-  // The ticker reads the public health report and needs no token.
-  useEffect(() => {
-    let live = true;
-    const beat = () =>
-      health()
-        .then((report) => {
-          if (!live) return;
-          setReady(report.ready);
-          setLines(
-            report.networks.map((n) => ({
-              name: `${n.network.chain}/${n.network.name}`,
-              state: n.indexing.error ? 'retrying' : 'ready',
-              height: n.indexing.last,
-              tip: n.indexing.tip,
-              error: n.indexing.error,
-            })),
-          );
-        })
-        .catch(() => {
-          if (!live) return;
-          setReady(false);
-          setLines([]);
-        });
-    void beat();
-    const timer = window.setInterval(() => void beat(), BEAT_MS);
-    return () => {
-      live = false;
-      window.clearInterval(timer);
-    };
-  }, []);
-
   const unlock = (value: string) => {
     try {
       sessionStorage.setItem(TOKEN_KEY, value);
@@ -230,11 +195,11 @@ export function Layout() {
               {open && <Tab value="wallets" label="Wallets" />}
               {open && <Tab value="triggers" label="Triggers" />}
               {open && <Tab value="networks" label="Networks" />}
+              {open && <Tab value="jobs" label="Jobs" />}
               <Tab value="docs" label="Docs" />
             </Tabs>
           )}
           <Box sx={{ flexGrow: 1 }} />
-          <Networks lines={lines} ready={ready} />
           {token && open && (
             <Button color="inherit" onClick={lock}>
               Lock
@@ -258,6 +223,7 @@ export function Layout() {
           )}
           {view === 'triggers' && <Triggers shell={shell} wallets={wallets} />}
           {view === 'networks' && <Configured shell={shell} />}
+          {view === 'jobs' && <Jobs shell={shell} />}
           {view === 'docs' && <Docs shell={shell} secured={token !== null} />}
         </Box>
       )}

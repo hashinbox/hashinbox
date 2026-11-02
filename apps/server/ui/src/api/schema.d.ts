@@ -64,6 +64,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List queued jobs */
+        get: operations["list_jobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/jobs/{id}": {
         parameters: {
             query?: never;
@@ -73,7 +90,7 @@ export interface paths {
         };
         /**
          * Read a queued job
-         * @description The job's outcome and how many transactions it signed and the nodes accepted.
+         * @description The job's outcome, what it was given and what its worker has done; for a broadcast, how many transactions it signed and the nodes accepted.
          */
         get: operations["read_job"];
         put?: never;
@@ -520,23 +537,49 @@ export interface components {
              */
             watched: number;
         };
-        /** @description `GET /v1/jobs/{id}`. */
+        /** @description One job of the queue. */
         Job: {
             /** @description How many of them, in broadcast order, the nodes accepted. */
             accepted: number;
+            /**
+             * Format: int32
+             * @description Executions started since it was last fresh.
+             */
+            attempts: number;
+            /**
+             * Format: int64
+             * @description Not started after this, Unix ms; always present.
+             */
+            deadline: number | null;
             /** @description The job id. */
             id: string;
-            /** @description The job kind (`send`). */
+            /** @description What it was given. */
+            input: Record<string, never>;
+            /** @description The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`). */
             kind: string;
+            /** @description What its worker has done so far; always present. */
+            progress: Record<string, never> | null;
             /**
              * @description Why it failed, or why its last attempt is being retried; always
              *     present.
              */
             reason: string | null;
-            /** @description How many transactions it signed. */
+            /**
+             * Format: int64
+             * @description Not started before this, Unix ms: the next run of a pending job.
+             */
+            run_at: number;
+            /** @description A broadcast's transactions signed (0 for other kinds). */
             signed: number;
             /** @description Where it is. */
             state: components["schemas"]["JobState"];
+            /** @description What it locks: jobs whose topics conflict run one at a time, in id order. */
+            topic: string;
+        };
+        /** @description `GET /v1/jobs`. */
+        JobList: {
+            /** @description The jobs last written, latest first. */
+            jobs: components["schemas"]["Job"][];
         };
         /**
          * @description Where a job is.
@@ -918,6 +961,60 @@ export interface operations {
             };
             /** @description Missing or invalid bearer token */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_jobs: {
+        parameters: {
+            query?: {
+                /** @description Only this kind (`index`, `expire`, `triggers`, `broadcast`). */
+                kind?: string;
+                /** @description Only jobs in this state. */
+                state?: components["schemas"]["JobState"];
+                /** @description At most this many, 1 to 1000; 100 by default. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The latest jobs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobList"];
+                };
+            };
+            /** @description Malformed query or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The queue is unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

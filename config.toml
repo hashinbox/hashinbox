@@ -14,7 +14,7 @@ network = 'sepolia'
 chain_id = 11155111
 endpoints = ['https://ethereum-sepolia-rpc.publicnode.com']
 # Circle's test USDC.
-tokens = [{ contract = '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238', decimals = 6 }]
+tokens = [{ contract = '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238', decimals = 6, ticker = 'USDC' }]
 
 [[payments.networks]]
 chain = 'solana'
@@ -22,4 +22,26 @@ network = 'devnet'
 genesis_hash = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'
 endpoints = ['https://api.devnet.solana.com']
 # Circle's test USDC.
-tokens = [{ mint = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', decimals = 6 }]
+tokens = [{ mint = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', decimals = 6, ticker = 'USDC' }]
+
+[[payments.networks]]
+chain = 'ethereum'
+network = 'mainnet'
+chain_id = 1
+endpoints = ['https://ethereum-rpc.publicnode.com']
+# Circle's USDC, Tether's USDT.
+tokens = [
+  { contract = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', decimals = 6, ticker = 'USDC' },
+  { contract = '0xdac17f958d2ee523a2206206994597c13d831ec7', decimals = 6, ticker = 'USDT' },
+]
+
+[[payments.networks]]
+chain = 'solana'
+network = 'mainnet'
+genesis_hash = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d'
+endpoints = ['https://api.mainnet-beta.solana.com']
+# Circle's USDC, Tether's USDT.
+tokens = [
+  { mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals = 6, ticker = 'USDC' },
+  { mint = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', decimals = 6, ticker = 'USDT' },
+]

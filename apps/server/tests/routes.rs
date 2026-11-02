@@ -163,6 +163,18 @@ async fn wallets_balance_history_and_sends() {
     let job = format!("/v1/jobs/{}", accepted["job"].as_str().unwrap_or_default());
     let (status, job) = call(&router, Method::GET, &job, None).await;
     assert_eq!((status, &job["state"]), (StatusCode::OK, &json!("pending")));
+    assert_eq!(job["kind"], json!("broadcast"));
+    let (status, listed) = call(
+        &router,
+        Method::GET,
+        "/v1/jobs?kind=broadcast&state=pending",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed["jobs"][0]["id"], job["id"]);
+    let (status, _) = call(&router, Method::GET, "/v1/jobs?limit=0", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let (status, assets) = call(&router, Method::GET, "/v1/assets", None).await;
     assert_eq!(status, StatusCode::OK);

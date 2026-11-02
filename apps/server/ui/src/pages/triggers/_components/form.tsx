@@ -17,6 +17,7 @@ import Typography from '@mui/material/Typography';
 import { useState, type ReactNode } from 'react';
 import type { Wallet } from '@/api/client';
 import type { Shell } from '@/layout';
+import { assetName } from '@/money';
 import { mono } from '@/theme';
 import { ActionPart, type Choices } from './action';
 import {
@@ -53,7 +54,8 @@ export function TriggerForm({ shell, wallets, tags, value: def, onChange, kept }
   const assets = shell.listings
     .filter((l) => l.network.chain === def.chain && l.network.name === def.network)
     .map((l) => l.asset);
-  const choices: Choices = { chain: def.chain, network: def.network, assets, wallets, tags };
+  const name = (asset: string) => assetName(shell.listings, def.chain, def.network, asset);
+  const choices: Choices = { chain: def.chain, network: def.network, assets, name, wallets, tags };
   const update = (patch: Partial<Definition>) => {
     onChange({ ...def, ...patch });
   };
@@ -89,6 +91,7 @@ export function TriggerForm({ shell, wallets, tags, value: def, onChange, kept }
         <SelectorPart
           def={def}
           assets={assets}
+          name={name}
           knownTags={tags}
           onChange={(selector) => update({ selector })}
         />
@@ -98,11 +101,16 @@ export function TriggerForm({ shell, wallets, tags, value: def, onChange, kept }
         title="Filter"
         hint="Which of them take part: each wallet is tested on its own; all compares must hold."
       >
-        <FilterPart def={def} assets={assets} onChange={(filter) => update({ filter })} />
+        <FilterPart
+          def={def}
+          assets={assets}
+          name={name}
+          onChange={(filter) => update({ filter })}
+        />
       </Section>
 
       <Section title="Check" hint="When it acts, over the wallets the filter kept. All must hold.">
-        <CheckPart def={def} assets={assets} onChange={(check) => update({ check })} />
+        <CheckPart def={def} assets={assets} name={name} onChange={(check) => update({ check })} />
       </Section>
 
       <Section title="Action" hint="What it sends.">
@@ -158,11 +166,13 @@ function Custom() {
 function SelectorPart({
   def,
   assets,
+  name,
   knownTags,
   onChange,
 }: {
   def: Definition;
   assets: string[];
+  name: (asset: string) => string;
   knownTags: string[];
   onChange: (selector: Definition['selector']) => void;
 }) {
@@ -193,7 +203,7 @@ function SelectorPart({
         <MenuItem value="">any</MenuItem>
         {assets.map((a) => (
           <MenuItem key={a} value={a}>
-            {a}
+            {name(a)}
           </MenuItem>
         ))}
       </TextField>
@@ -225,10 +235,12 @@ const BLANK: CompareForm = {
 function Compares({
   rows,
   assets,
+  name,
   onChange,
 }: {
   rows: CompareForm[];
   assets: string[];
+  name: (asset: string) => string;
   onChange: (rows: CompareForm[]) => void;
 }) {
   const set = (i: number, patch: Partial<CompareForm>) =>
@@ -247,7 +259,7 @@ function Compares({
           >
             {AGGREGATES.map((a) => (
               <MenuItem key={a} value={a}>
-                {a}
+                {name(a)}
               </MenuItem>
             ))}
           </TextField>
@@ -262,7 +274,7 @@ function Compares({
             <MenuItem value="">its asset</MenuItem>
             {assets.map((a) => (
               <MenuItem key={a} value={a}>
-                {a}
+                {name(a)}
               </MenuItem>
             ))}
           </TextField>
@@ -323,26 +335,35 @@ function Compares({
 function FilterPart({
   def,
   assets,
+  name,
   onChange,
 }: {
   def: Definition;
   assets: string[];
+  name: (asset: string) => string;
   onChange: (filter: Definition['filter']) => void;
 }) {
   const form = parseFilter(def.filter);
   if (!form) return <Custom />;
   return (
-    <Compares rows={form} assets={assets} onChange={(rows) => onChange(compileFilter(rows))} />
+    <Compares
+      rows={form}
+      assets={assets}
+      name={name}
+      onChange={(rows) => onChange(compileFilter(rows))}
+    />
   );
 }
 
 function CheckPart({
   def,
   assets,
+  name,
   onChange,
 }: {
   def: Definition;
   assets: string[];
+  name: (asset: string) => string;
   onChange: (check: Definition['check']) => void;
 }) {
   const form = parseCheck(def.check);
@@ -361,7 +382,12 @@ function CheckPart({
           sx={{ width: 200 }}
         />
       </Stack>
-      <Compares rows={form.compares} assets={assets} onChange={(compares) => set({ compares })} />
+      <Compares
+        rows={form.compares}
+        assets={assets}
+        name={name}
+        onChange={(compares) => set({ compares })}
+      />
     </Stack>
   );
 }

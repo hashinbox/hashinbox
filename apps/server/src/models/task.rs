@@ -126,6 +126,29 @@ pub(crate) mod db {
             .optional()
     }
 
+    /// The `limit` tasks last written, latest first, of `kind` and `status`
+    /// when given.
+    pub(crate) fn find_recent(
+        connection: &mut SqliteConnection,
+        kind: Option<&str>,
+        status: Option<i32>,
+        limit: i64,
+    ) -> QueryResult<Tasks> {
+        let mut query = q::table.into_boxed();
+        if let Some(kind) = kind {
+            query = query.filter(q::kind.eq(kind));
+        }
+        if let Some(status) = status {
+            query = query.filter(q::status.eq(status));
+        }
+        let tasks = query
+            .order((q::updated_at.desc(), q::id.desc()))
+            .limit(limit)
+            .select(Task::as_select())
+            .load(connection)?;
+        Ok(tasks.into())
+    }
+
     /// Every unfinished (pending or running) task, by id: what `next`
     /// weighs topics against.
     pub(crate) fn find_unfinished(connection: &mut SqliteConnection) -> QueryResult<Tasks> {

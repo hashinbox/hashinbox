@@ -1,22 +1,28 @@
-//! `GET /v1/jobs/{id}`: one queued job — where it is, why it failed, and how
-//! many transactions it signed and the nodes accepted.
+//! `/v1/jobs`: the job queue — every job, where it is, why it failed, what
+//! it was given and what its worker has done so far.
 
 use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State, rejection::QueryRejection},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody};
-use crate::{state::AppState, workers::broadcast};
+use crate::{models::task, state::AppState, workers::broadcast};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
-    OpenApiRouter::new().routes(routes!(read))
+    OpenApiRouter::new()
+        .routes(routes!(list))
+        .routes(routes!(read))
 }
+
+/// How many jobs `GET /v1/jobs` answers unless `limit` says otherwise.
+const LIMIT: i64 = 100;
 
 /// The job read.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
@@ -24,6 +30,18 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 struct JobPath {
     /// The id a send returned.
     id: String,
+}
+
+/// Which jobs `GET /v1/jobs` lists.
+#[derive(Clone, Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+struct ListQuery {
+    /// Only this kind (`index`, `expire`, `triggers`, `broadcast`).
+    kind: Option<String>,
+    /// Only jobs in this state.
+    state: Option<JobState>,
+    /// At most this many, 1 to 1000; 100 by default.
+    limit: Option<i64>,
 }
 
 /// Where a job is.
@@ -40,24 +58,128 @@ enum JobState {
     Failed,
 }
 
-/// `GET /v1/jobs/{id}`.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = Job)]
-struct ReadResponse {
+impl JobState {
+    const fn status(self) -> i32 {
+        match self {
+            Self::Pending => 0,
+            Self::Running => 1,
+            Self::Succeeded => 2,
+            Self::Failed => 3,
+        }
+    }
+}
+
+/// One job of the queue.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, utoipa::ToSchema)]
+struct Job {
     /// The job id.
     id: String,
-    /// The job kind (`send`).
+    /// The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`).
     kind: String,
+    /// What it locks: jobs whose topics conflict run one at a time, in id order.
+    topic: String,
     /// Where it is.
     state: JobState,
+    /// Not started before this, Unix ms: the next run of a pending job.
+    run_at: u64,
+    /// Not started after this, Unix ms; always present.
+    #[schema(required)]
+    deadline: Option<u64>,
+    /// Executions started since it was last fresh.
+    attempts: u32,
     /// Why it failed, or why its last attempt is being retried; always
     /// present.
     #[schema(required)]
     reason: Option<String>,
-    /// How many transactions it signed.
+    /// What it was given.
+    #[schema(value_type = Object)]
+    input: Value,
+    /// What its worker has done so far; always present.
+    #[schema(value_type = Option<Object>, required)]
+    progress: Option<Value>,
+    /// A broadcast's transactions signed (0 for other kinds).
     signed: usize,
     /// How many of them, in broadcast order, the nodes accepted.
     accepted: usize,
+}
+
+impl From<tasks::Job> for Job {
+    fn from(job: tasks::Job) -> Self {
+        let (signed, accepted) = broadcast::progress(job.state.as_ref());
+        Self {
+            id: job.id.to_string(),
+            kind: job.kind,
+            topic: job.topic.to_string(),
+            state: match job.status {
+                tasks::Status::Pending => JobState::Pending,
+                tasks::Status::Running => JobState::Running,
+                tasks::Status::Done => JobState::Succeeded,
+                tasks::Status::Failed => JobState::Failed,
+            },
+            run_at: job.run_at,
+            deadline: job.deadline,
+            attempts: job.attempts,
+            reason: job.reason,
+            input: job.input,
+            progress: job.state,
+            signed,
+            accepted,
+        }
+    }
+}
+
+/// `GET /v1/jobs`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = JobList)]
+struct ListResponse {
+    /// The jobs last written, latest first.
+    jobs: Vec<Job>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/jobs",
+    operation_id = "list_jobs",
+    summary = "List queued jobs",
+    params(ListQuery),
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "The latest jobs", body = ListResponse),
+        (status = 400, description = "Malformed query or limit", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 503, description = "The queue is unavailable", body = ErrorBody)
+    ),
+    tag = "jobs"
+)]
+async fn list(
+    State(state): State<Arc<AppState>>,
+    query: Result<Query<ListQuery>, QueryRejection>,
+) -> Result<Json<ListResponse>, Error> {
+    let Query(query) = query.map_err(Error::invalid_query)?;
+    let limit = query.limit.unwrap_or(LIMIT);
+    if !(1..=1_000).contains(&limit) {
+        return Err(Error::invalid_request(
+            "jobs limit must be between 1 and 1000",
+        ));
+    }
+    let status = query.state.map(JobState::status);
+    let rows = state
+        .storage
+        .read(move |connection| {
+            Ok(task::db::find_recent(
+                connection,
+                query.kind.as_deref(),
+                status,
+                limit,
+            )?)
+        })
+        .await?;
+    let jobs = rows
+        .into_iter()
+        .map(|row| tasks::Job::try_from(row).map(Job::from))
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(|error| Error::unavailable(format!("{error:#}")))?;
+    Ok(Json(ListResponse { jobs }))
 }
 
 #[utoipa::path(
@@ -65,38 +187,26 @@ struct ReadResponse {
     path = "/v1/jobs/{id}",
     operation_id = "read_job",
     summary = "Read a queued job",
-    description = "The job's outcome and how many transactions it signed and the nodes accepted.",
+    description = "The job's outcome, what it was given and what its worker has done; for a \
+        broadcast, how many transactions it signed and the nodes accepted.",
     params(JobPath),
     security(("bearerAuth" = [])),
     responses(
-        (status = 200, description = "The job", body = ReadResponse),
+        (status = 200, description = "The job", body = Job),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "Job is unknown", body = ErrorBody),
         (status = 503, description = "The queue is unavailable", body = ErrorBody)
     ),
-    tag = "transactions"
+    tag = "jobs"
 )]
 async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<JobPath>,
-) -> Result<Json<ReadResponse>, Error> {
+) -> Result<Json<Job>, Error> {
     let id = tasks::Id::from(path.id);
     let job = tasks::Store::get(&state.storage, &id)
         .await
         .map_err(|error| Error::unavailable(error.to_string()))?
         .ok_or_else(|| Error::not_found("job does not exist"))?;
-    let (signed, accepted) = broadcast::progress(job.state.as_ref());
-    Ok(Json(ReadResponse {
-        id: job.id.to_string(),
-        kind: job.kind,
-        state: match job.status {
-            tasks::Status::Pending => JobState::Pending,
-            tasks::Status::Running => JobState::Running,
-            tasks::Status::Done => JobState::Succeeded,
-            tasks::Status::Failed => JobState::Failed,
-        },
-        reason: job.reason,
-        signed,
-        accepted,
-    }))
+    Ok(Json(Job::from(job)))
 }
