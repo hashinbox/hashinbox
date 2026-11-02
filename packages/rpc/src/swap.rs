@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use crate::{Batch, BoxFuture, CallResult, Client, Error, Request, Statistics};
+use crate::{Batch, BoxFuture, CallError, CallResult, Client, Error, Request, Statistics};
 
 /// A client whose nodes can be replaced while every holder keeps the same
 /// handle.
@@ -81,7 +81,7 @@ impl Client for Swap {
         Box::pin(async move { transport.batch(batch).await })
     }
 
-    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), CallError>> {
         let transport = self.current();
         Box::pin(async move { transport.broadcast(request).await })
     }

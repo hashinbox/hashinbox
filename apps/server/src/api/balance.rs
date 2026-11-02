@@ -100,7 +100,7 @@ async fn balance(
         info.display(&total).map_err(unscalable)?.to_string()
     };
     Ok(Json(ReadResponse {
-        asset: Asset::new(&info),
+        asset: Asset::from(&info),
         amount,
         indexed_through,
         tip,

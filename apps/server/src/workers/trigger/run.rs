@@ -1,32 +1,14 @@
-//! A trigger's runs: started with their send jobs in one transaction,
-//! settled once every job finished and what it sent is confirmed.
+//! A trigger's runs settle once every job finished and what it sent is
+//! confirmed.
 
 use base::Network;
 use diesel::SqliteConnection;
-use tasks::Job;
+use tasks::{Job, Jobs, Status};
 
 use crate::{
-    models::{Task, TriggerRun, block, task, transaction, transaction::Transaction, trigger_run},
-    workers::send::Progress,
+    models::{TriggerRun, block, task, transaction, transaction::Transaction, trigger_run},
+    workers::broadcast::Progress,
 };
-
-/// Keeps `run` and its send `jobs` together: both or neither.
-///
-/// # Errors
-///
-/// When a write fails or a job's run time does not fit.
-pub(crate) fn start(
-    connection: &mut SqliteConnection,
-    run: &TriggerRun,
-    jobs: &[Job],
-    now: i64,
-) -> anyhow::Result<()> {
-    trigger_run::db::insert(connection, run)?;
-    for job in jobs {
-        task::db::upsert(connection, &Task::new(job)?, now)?;
-    }
-    Ok(())
-}
 
 /// Settles every run of `network`'s triggers that is done: every job
 /// finished, and every transaction a done job sent is in a live block at or
@@ -35,7 +17,7 @@ pub(crate) fn start(
 ///
 /// # Errors
 ///
-/// When a read or write fails, or a job's payload does not decode.
+/// When a read or write fails, or a job's state does not decode.
 pub(crate) fn settle(
     connection: &mut SqliteConnection,
     network: &Network,
@@ -63,24 +45,23 @@ fn is_done(
     run: &TriggerRun,
     confirmed: i64,
 ) -> anyhow::Result<bool> {
-    for id in &run.jobs.0 {
-        let Some(job) = task::db::find_by_id(connection, id)? else {
-            continue;
-        };
-        match job.state {
-            // Failed: definitively over.
-            3 => continue,
-            2 => {}
-            _ => return Ok(false),
-        }
-        let payload: serde_json::Value = serde_json::from_str(&job.payload)?;
-        let progress: Progress = payload
-            .get("progress")
-            .cloned()
+    let jobs: Jobs = task::db::find_by_ids(connection, &run.jobs.0)?
+        .into_iter()
+        .map(Job::try_from)
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into();
+    if !jobs.finished() {
+        return Ok(false);
+    }
+    // A failed job is definitively over; a done one waits for what it sent.
+    for job in jobs.iter().filter(|job| job.status == Status::Done) {
+        let progress: Progress = job
+            .state
+            .clone()
             .map(serde_json::from_value)
             .transpose()?
             .unwrap_or_default();
-        for txid in &progress.ids {
+        for txid in &progress.ids[..progress.sent.min(progress.ids.len())] {
             let id = Transaction::id(network, txid)?;
             if !transaction::db::is_confirmed(connection, &id, confirmed)? {
                 return Ok(false);

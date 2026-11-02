@@ -15,7 +15,6 @@ mod config;
 mod models;
 mod state;
 mod storage;
-mod trigger;
 mod ui;
 mod workers;
 
@@ -106,21 +105,30 @@ async fn main() -> Result<(), AnyError> {
             blocks,
             indexes: stores.clone(),
             inputs: stores.clone(),
-            transactions: stores.clone(),
             wallets: stores.clone(),
         })
         .build()
         .await?;
     let payments = Arc::new(payments);
     let indexers = payments.run();
-    // Sends are durable jobs, one lane per sender, run by one runner.
-    let runner = tasks::Runner::new(stores).executor(
-        workers::send::KIND,
-        Arc::new(workers::send::Sends::new(payments.clone())),
-    );
-    let jobs = tokio::spawn(async move { runner.run().await });
-    // Triggers decide on kept blocks and queue sends; the runner sends them.
-    let triggers = workers::triggers::Triggers::new(
+    // Broadcasts are durable jobs, one topic per sender; trigger jobs lock
+    // their whole network.
+    let executor = workers::executor::Executor::new(storage.clone())
+        .add(
+            workers::broadcast::Broadcast::new(payments.clone(), storage.clone()),
+            tasks::Retry::default(),
+        )
+        .add(
+            workers::trigger::Triggers::new(
+                payments.clone(),
+                storage.clone(),
+                logging::Logger::default(),
+            ),
+            tasks::Retry::default(),
+        );
+    let jobs = tokio::spawn(executor.run());
+    // Kept blocks queue trigger jobs.
+    let triggers = workers::trigger::Listen::new(
         payments.clone(),
         storage.clone(),
         logging::Logger::default(),

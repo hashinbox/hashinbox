@@ -2,6 +2,10 @@
 
 use std::sync::Arc;
 
+use ::rpc::{
+    BoxFuture, CallError, Cluster, Policy,
+    testing::{Reply, Script},
+};
 use base::{
     Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, Signer, TransactionErrorKind,
     TransactionState, Transfer, Wallet, WalletError, WalletErrorKind, WalletFactory as _,
@@ -9,10 +13,6 @@ use base::{
 use chain_solana::{Client, Config};
 use crypto::SecretBytes;
 use futures_executor::block_on;
-use json_rpc::{
-    BoxFuture, CallError, Cluster, Policy,
-    testing::{Reply, Script},
-};
 use serde_json::json;
 use solana_keypair::{Keypair, Signer as _};
 use solana_transaction::Transaction;
@@ -38,7 +38,7 @@ fn network() -> base::Network {
     base::Network::from(&config().native())
 }
 
-fn client(transport: impl json_rpc::Client + 'static) -> Client {
+fn client(transport: impl ::rpc::Client + 'static) -> Client {
     Client::new(Arc::new(transport), config().native())
 }
 

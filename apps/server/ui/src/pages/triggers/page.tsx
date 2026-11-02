@@ -35,7 +35,7 @@ function definitionOf(trigger: Trigger): Definition {
 
 /** One line on what a trigger does. */
 function summary(trigger: Trigger): string {
-  const { send } = definitionOf(trigger).action;
+  const send = definitionOf(trigger).action.input;
   return `send ${send.asset === 'native' ? 'native' : send.asset.slice(0, 8) + '…'}`;
 }
 

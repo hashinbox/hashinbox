@@ -1,4 +1,4 @@
-# json-rpc
+# rpc
 
 A JSON-RPC client over HTTP with timeouts, size limits, retry and failover.
 Chain code is written against the `Client` trait, so a test can substitute a
@@ -7,7 +7,7 @@ scripted node.
 ## Usage
 
 ```rust
-use json_rpc::{CallError, Client, Endpoint, Failover, Request, Retry};
+use rpc::{CallError, Client, Endpoint, Failover, Request, Retry};
 use serde_json::json;
 
 async fn block_count(rpc: &dyn Client) -> Result<u64, CallError> {
@@ -15,7 +15,7 @@ async fn block_count(rpc: &dyn Client) -> Result<u64, CallError> {
     Ok(raw.deserialize()?)
 }
 
-fn connect() -> Result<impl Client, json_rpc::Error> {
+fn connect() -> Result<impl Client, rpc::Error> {
     // The URL carries everything: userinfo becomes HTTP Basic, query keys stay,
     // and a `header.<Name>` parameter is sent as that header instead.
     let primary = Endpoint::new("https://user:pass@node.invalid/").connect()?;
@@ -38,7 +38,7 @@ request to every node exactly once and returns the first success.
 `Cluster::one` wraps a single node.
 
 ```rust
-use json_rpc::{BoxFuture, CallError, Client, Cluster, Http, Policy, Request};
+use rpc::{BoxFuture, CallError, Client, Cluster, Http, Policy, Request};
 use serde_json::json;
 
 /// The chain's tip reader: Bitcoin Core's block count.
@@ -59,7 +59,7 @@ async fn submit(nodes: Vec<Http>, signed: String) -> Result<String, CallError> {
 `Cluster::primary` is the primary's index in the order given, never an
 endpoint. `Debug` shows the node count and that index only.
 
-The `testing` feature adds `json_rpc::testing::Script`, a node double that
+The `testing` feature adds `rpc::testing::Script`, a node double that
 replies in order and asserts each method and its parameters. Enable it in
 `[dev-dependencies]` only.
 
@@ -74,9 +74,9 @@ broadcasts are forwarded, so a swapped `Cluster` still broadcasts.
 ```rust
 use std::sync::Arc;
 
-use json_rpc::{Client, Endpoint, Swap};
+use rpc::{Client, Endpoint, Swap};
 
-fn repoint() -> Result<(), json_rpc::Error> {
+fn repoint() -> Result<(), rpc::Error> {
     let first = Endpoint::new("http://127.0.0.1:8545").connect()?;
     let counters = vec![first.statistics()];
     let swap = Arc::new(Swap::new(Arc::new(first), counters));

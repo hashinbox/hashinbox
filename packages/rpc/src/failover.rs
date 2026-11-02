@@ -1,6 +1,9 @@
 use std::fmt;
 
-use crate::{Batch, BoxFuture, CallResult, Client, Error, ErrorKind, Repetition, Request};
+use crate::{
+    Batch, BoxFuture, CallError, CallResult, Client, Error, ErrorKind, Repetition, Request,
+    client::{narrow, widen},
+};
 
 /// Ordered failover across several inner clients, one per node.
 ///
@@ -105,7 +108,12 @@ impl<C: Client> Client for Failover<C> {
     /// The same ordered walk, broadcasting at each visited client: failover
     /// stays an ordered alternative, never a fan-out of its own, so
     /// [`Repetition::Forbidden`] work is broadcast by the first client only.
-    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
-        Box::pin(self.walk_request(request, C::broadcast))
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), CallError>> {
+        Box::pin(async move {
+            let send = |client: &'a C, request| -> BoxFuture<'a, _> {
+                Box::pin(async move { widen(client.broadcast(request).await) })
+            };
+            narrow(self.walk_request(request, send).await)
+        })
     }
 }

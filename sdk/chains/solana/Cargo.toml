@@ -10,7 +10,7 @@ readme = "README.md"
 anyhow.workspace = true
 base = { path = "../../base" }
 crypto = { path = "../../../packages/crypto" }
-json-rpc = { path = "../../../packages/json-rpc" }
+rpc = { path = "../../../packages/rpc" }
 base64 = "=0.22.1"
 bincode = "=1.3.3"
 bs58 = "=0.5.1"
@@ -31,8 +31,8 @@ futures-executor.workspace = true
 # The reference Ed25519 implementation Solana itself ships: tests assert that
 # `crypto::Ed25519` signs the same bytes. Production signing never links it.
 solana-keypair = "=3.1.2"
-# The scripted node double (`json_rpc::testing`): tests only.
-json-rpc = { path = "../../../packages/json-rpc", features = ["testing"] }
+# The scripted node double (`rpc::testing`): tests only.
+rpc = { path = "../../../packages/rpc", features = ["testing"] }
 
 [lints]
 workspace = true

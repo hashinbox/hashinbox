@@ -29,7 +29,7 @@ impl BlockStore for Storage {
         let network = network.clone();
         Box::pin(self.read(move |connection| {
             block::db::find_last(connection, &network)?
-                .map(|block| block.header())
+                .map(|block| BlockHeader::try_from(&block))
                 .transpose()
         }))
     }
@@ -86,7 +86,7 @@ fn keep(
         for transaction in &block.transactions {
             let legs = (0_u32..)
                 .zip(&transaction.legs)
-                .filter(|(_, leg)| applies(&pairs, leg.address(), leg_asset(leg)));
+                .filter(|(_, leg)| applies(&pairs, leg.address(), leg.asset()));
             let legs: Vec<_> = legs.collect();
             if legs.is_empty() {
                 continue;
@@ -110,31 +110,19 @@ fn keep(
         let Some(block) = block::db::find_live(connection, network, position)? else {
             continue;
         };
-        let header = block.header()?;
+        let header = BlockHeader::try_from(&block)?;
         if let Some(below) = block::db::find_below(connection, network, position)?
             && !below.is_parent_of(&header)
         {
             bail!("{network:?}: block {position} does not link onto the kept block below it");
         }
         if let Some(above) = block::db::find_above(connection, network, position)?
-            && !block.is_parent_of(&above.header()?)
+            && !block.is_parent_of(&BlockHeader::try_from(&above)?)
         {
             bail!("{network:?}: the kept block above {position} does not link onto it");
         }
     }
     Ok(kept)
-}
-
-/// The asset a leg moves.
-fn leg_asset(leg: &base::Leg) -> &base::Asset {
-    use base::Leg::{Burned, Fee, Minted, Received, Spent};
-    match leg {
-        Received { asset, .. }
-        | Spent { asset, .. }
-        | Burned { asset, .. }
-        | Minted { asset, .. }
-        | Fee { asset, .. } => asset,
-    }
 }
 
 /// Whether (`address`, `asset`) is one of `pairs`.

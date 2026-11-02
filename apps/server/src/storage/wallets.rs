@@ -29,7 +29,7 @@ impl WalletStore for Storage {
                 .await?;
             let mut wallets = Vec::with_capacity(rows.len());
             for row in rows {
-                let address = row.address();
+                let address = Address::from(&row);
                 row.curve()?;
                 let wallet = factories
                     .from_pk(&address.network, row.secret.0)

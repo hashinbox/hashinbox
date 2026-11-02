@@ -12,6 +12,7 @@ use std::{
 
 use crate::{
     Batch, BoxFuture, CallError, CallResult, Client, Error, ErrorKind, Request, Statistics,
+    client::{narrow, widen},
 };
 
 /// No node is waiting to be demoted.
@@ -185,13 +186,14 @@ impl<C: Client> Cluster<C> {
     /// failure wins over an error object, because a node whose outcome is
     /// unknown may have accepted what the others refused.
     async fn fan_out(&self, request: Request) -> Result<CallResult, Error> {
+        // Judged as calls: statistics and the winner rule read call outcomes.
         let sends = self
             .nodes()
             .map(|node| {
                 let request = request.clone();
                 Box::pin(async move {
                     node.statistics.begin();
-                    let outcome = node.client.broadcast(request).await;
+                    let outcome = widen(node.client.broadcast(request).await);
                     node.statistics.call(&outcome);
                     outcome
                 }) as BoxFuture<'_, _>
@@ -307,8 +309,8 @@ impl<C: Client> Client for Cluster<C> {
         Box::pin(self.unicast_batch(batch))
     }
 
-    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
-        Box::pin(self.fan_out(request))
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), CallError>> {
+        Box::pin(async move { narrow(self.fan_out(request).await) })
     }
 }
 

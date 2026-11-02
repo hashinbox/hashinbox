@@ -69,10 +69,7 @@ struct RpcNode {
 }
 
 impl RpcNode {
-    fn new(
-        index: usize,
-        (url, parts, bounds): (String, json_rpc::Parts, json_rpc::Bounds),
-    ) -> Self {
+    fn new(index: usize, (url, parts, bounds): (String, rpc::Parts, rpc::Bounds)) -> Self {
         Self {
             index,
             url,
@@ -418,12 +415,12 @@ fn install(
     let https = nodes
         .nodes()
         .iter()
-        .map(json_rpc::Endpoint::connect)
+        .map(rpc::Endpoint::connect)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| Error::invalid_request(error.to_string()))?;
-    let statistics = https.iter().map(json_rpc::Http::statistics).collect();
-    let failover = json_rpc::Failover::new(https)
-        .map_err(|error| Error::invalid_request(error.to_string()))?;
+    let statistics = https.iter().map(rpc::Http::statistics).collect();
+    let failover =
+        rpc::Failover::new(https).map_err(|error| Error::invalid_request(error.to_string()))?;
     client.replace(Arc::new(failover), statistics);
     let stats = state.payments.service(&network)?.indexer.stats();
     Ok(ConfiguredNetwork {

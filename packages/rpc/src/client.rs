@@ -2,7 +2,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 
 use serde_json::Value;
 
-use crate::{Call, CallResult, Error, ErrorKind};
+use crate::{Call, CallError, CallResult, Error, ErrorKind};
 
 /// Boxed `Send` future returned by [`Client`]; keeps the trait object-safe.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -21,14 +21,15 @@ pub trait Client: Send + Sync {
     /// Executes one batch under this implementation's policy.
     fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>>;
 
-    /// Executes one request at every node this client reaches, each node
-    /// exactly once: the deliberate multi-node path for submitting one signed
-    /// envelope. A single node is reached once, so the default is
-    /// [`Self::request`]. A decorator forwards this method rather than
-    /// inheriting the default, which would silently narrow a broadcast to one
-    /// node; [`crate::Cluster`] is the implementation that fans out.
-    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
-        self.request(request)
+    /// Sends `request` (a signed transaction) once to every node this client
+    /// reaches: success or failure only, since the transaction's id is known
+    /// before it is sent. A node's error object is [`CallError::Remote`]. A
+    /// single node is reached once, so the default is [`Self::request`]. A
+    /// decorator forwards this method rather than inheriting the default,
+    /// which would silently narrow a broadcast to one node;
+    /// [`crate::Cluster`] is the implementation that fans out.
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), CallError>> {
+        Box::pin(async move { narrow(self.request(request).await) })
     }
 }
 
@@ -42,8 +43,26 @@ impl<C: Client + ?Sized> Client for Arc<C> {
         (**self).batch(batch)
     }
 
-    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), CallError>> {
         (**self).broadcast(request)
+    }
+}
+
+/// A call's outcome as a broadcast's: the answer is dropped.
+pub(crate) fn narrow(outcome: Result<CallResult, Error>) -> Result<(), CallError> {
+    match outcome {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(failure)) => Err(CallError::Remote(failure)),
+        Err(error) => Err(CallError::Transport(error)),
+    }
+}
+
+/// A broadcast's outcome as a call's, for the layers that judge calls.
+pub(crate) fn widen(outcome: Result<(), CallError>) -> Result<CallResult, Error> {
+    match outcome {
+        Ok(()) => Ok(Ok(crate::RawJson(b"null".to_vec()))),
+        Err(CallError::Remote(failure)) => Ok(Err(failure)),
+        Err(CallError::Transport(error)) => Err(error),
     }
 }
 

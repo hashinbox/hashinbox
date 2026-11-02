@@ -16,14 +16,14 @@ alloy-primitives = { workspace = true, features = ["serde"] }
 alloy-sol-types.workspace = true
 alloy-rpc-types-eth = { version = "1.8", default-features = false, features = ["serde", "std"] }
 num-bigint.workspace = true
-json-rpc = { path = "../../../packages/json-rpc" }
+rpc = { path = "../../../packages/rpc" }
 serde_json = { workspace = true, features = ["raw_value"] }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 futures-executor.workspace = true
-# The scripted node double (`json_rpc::testing`): tests only, never a production link.
-json-rpc = { path = "../../../packages/json-rpc", features = ["testing"] }
+# The scripted node double (`rpc::testing`): tests only, never a production link.
+rpc = { path = "../../../packages/rpc", features = ["testing"] }
 
 [lints]
 workspace = true

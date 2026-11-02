@@ -5,11 +5,11 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Address, Asset, Assets, Birthday, Config, Enveloped, Handles, Network, Service, Stats, Storage,
+    Address, Asset, Assets, Birthday, Config, Handles, Network, Service, Stats, Storage,
     TransactionError, TransactionErrorKind, Wallet, WalletError, WalletErrorKind, WalletFactories,
 };
 use crypto::SecretBytes;
-use json_rpc::Swap;
+use rpc::Swap;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -172,7 +172,7 @@ impl Payments {
         self.service(network)?.wallets.factory.parse_address(text)
     }
 
-    /// Submits the exact signed `transaction` to every node of `network`.
+    /// Submits `transaction` (its exact signed bytes) to every node of `network`.
     ///
     /// # Errors
     ///
@@ -181,7 +181,7 @@ impl Payments {
     pub async fn broadcast(
         &self,
         network: &Network,
-        transaction: &(dyn Enveloped + Sync),
+        transaction: &base::Transaction,
     ) -> Result<(), TransactionError> {
         let service = self.services.get(network).ok_or_else(|| {
             TransactionError::new(
@@ -221,7 +221,7 @@ pub struct Builder {
     parsers: BTreeMap<String, Parser>,
     document: Option<Document>,
     networks: Vec<Box<dyn Config>>,
-    clients: BTreeMap<Network, Arc<dyn json_rpc::Client>>,
+    clients: BTreeMap<Network, Arc<dyn rpc::Client>>,
     storage: Option<Storage>,
 }
 
@@ -261,7 +261,7 @@ impl Builder {
     pub fn with_client(
         mut self,
         network: impl Into<Network>,
-        client: Arc<dyn json_rpc::Client>,
+        client: Arc<dyn rpc::Client>,
     ) -> Self {
         self.clients.insert(network.into(), client);
         self

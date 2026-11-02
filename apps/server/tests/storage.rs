@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use base::{
     Address, Asset, Block, BlockHash, BlockHeader, BlockNotify, BlockParent, BlockStore, Blocks,
-    Broadcaster, Builder, Chain, Coin, Decimal, Enveloped, Future, InputStore, Leg, Network,
-    Networked, Reward, Transaction, TransactionError, TransactionId, TransactionState,
-    TransactionStore, Wallet, WalletFactories, WalletFactory, WalletFactoryBroadcaster,
-    WalletIndex, WalletIndexStore, WalletStore,
+    Broadcaster, Builder, Chain, Coin, Decimal, Future, InputStore, Leg, Network, Networked,
+    Reward, Transaction, TransactionError, TransactionId, TransactionState, Wallet,
+    WalletFactories, WalletFactory, WalletFactoryBroadcaster, WalletIndex, WalletIndexStore,
+    WalletStore,
 };
 use crypto::{Curve, SecretBytes};
 
@@ -90,6 +90,7 @@ fn payment(
         order: Some(0),
         legs,
         bytes: txid.as_bytes().to_vec(),
+        expires: None,
     }
 }
 
@@ -482,8 +483,8 @@ async fn pending_transactions_are_kept_until_mined() {
     let mut pending = payment(&network, "p", "alice", 3, None);
     pending.state = TransactionState::Pending;
     pending.order = None;
-    TransactionStore::insert(&storage, &pending).await.unwrap();
-    TransactionStore::insert(&storage, &pending).await.unwrap();
+    record(&storage, &pending).await;
+    record(&storage, &pending).await;
     assert_eq!(history(&directory, &alice), ["p"]);
     assert_eq!(rows(&directory, "p").0, [None]);
     let mined = payment(&network, "p", "alice", 3, None);
@@ -527,6 +528,70 @@ struct Row {
     block: Option<String>,
 }
 
+/// Records `transaction` as pending, as the queued broadcaster does.
+async fn record(storage: &crate::storage::Storage, transaction: &Transaction) {
+    let transaction = transaction.clone();
+    storage
+        .write(move |connection| {
+            crate::models::transaction::db::insert_pending(connection, &transaction, 0)
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_pending_spend_holds_its_coin_until_it_expires() {
+    let (storage, _directory) = storage().await;
+    let network = network();
+    let alice = address(&network, "alice");
+    watch(&storage, &alice, 0).await;
+    let funding = payment(&network, "f", "alice", 5, None);
+    BlockStore::insert(
+        &storage,
+        &run(&network, vec![block(&network, 0, 0, vec![funding])]),
+    )
+    .await
+    .unwrap();
+    let unspent = |storage: crate::storage::Storage| {
+        let alice = alice.clone();
+        async move {
+            storage
+                .find_unspent(std::slice::from_ref(&alice))
+                .await
+                .unwrap()
+                .len()
+        }
+    };
+    assert_eq!(unspent(storage.clone()).await, 1);
+    let mut spend = pending(&network, "s", "bob", 5);
+    spend.legs.push(Leg::Spent {
+        address: alice.clone(),
+        asset: native(&network),
+        amount: Decimal::from(5_u64),
+        coin: Some(coin(&network, "f", 0)),
+    });
+    spend.expires = Some(100);
+    record(&storage, &spend).await;
+    assert_eq!(unspent(storage.clone()).await, 0);
+    let expired = |now| {
+        let (storage, network) = (storage.clone(), network.clone());
+        async move {
+            storage
+                .write(move |connection| {
+                    Ok(crate::models::transaction::db::expire(
+                        connection, &network, now,
+                    )?)
+                })
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(expired(99).await, 0);
+    assert_eq!(unspent(storage.clone()).await, 0);
+    assert_eq!(expired(100).await, 1);
+    assert_eq!(unspent(storage.clone()).await, 1);
+}
+
 fn pending(network: &Network, txid: &str, to: &str, amount: u64) -> Transaction {
     let mut transaction = payment(network, txid, to, amount, None);
     transaction.state = TransactionState::Pending;
@@ -540,9 +605,7 @@ async fn mining_upserts_the_pending_row_and_its_legs() {
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;
-    TransactionStore::insert(&storage, &pending(&network, "p", "alice", 3))
-        .await
-        .unwrap();
+    record(&storage, &pending(&network, "p", "alice", 3)).await;
     assert_eq!(rows(&directory, "p"), (vec![None], vec![None]));
     let mined = payment(&network, "p", "alice", 3, None);
     BlockStore::insert(
@@ -557,9 +620,7 @@ async fn mining_upserts_the_pending_row_and_its_legs() {
         (vec![block0.clone()], vec![block0.clone()])
     );
     // A pending insert after mining is a no-op.
-    TransactionStore::insert(&storage, &pending(&network, "p", "alice", 9))
-        .await
-        .unwrap();
+    record(&storage, &pending(&network, "p", "alice", 9)).await;
     assert_eq!(history(&directory, &alice), ["p"]);
     assert_eq!(rows(&directory, "p").0, [block0]);
 }
@@ -607,9 +668,7 @@ async fn pending_legs_never_count() {
     let network = network();
     let alice = address(&network, "alice");
     watch(&storage, &alice, 0).await;
-    TransactionStore::insert(&storage, &pending(&network, "p", "alice", 3))
-        .await
-        .unwrap();
+    record(&storage, &pending(&network, "p", "alice", 3)).await;
     assert_eq!(
         storage.balance(&alice, &native(&network)).await.unwrap(),
         Decimal::zero()
@@ -686,10 +745,7 @@ impl WalletFactory for Factory {
 struct Silent;
 
 impl Broadcaster for Silent {
-    fn broadcast<'a>(
-        &'a self,
-        _: &'a (dyn Enveloped + Sync),
-    ) -> Future<'a, Result<(), TransactionError>> {
+    fn broadcast<'a>(&'a self, _: &'a Transaction) -> Future<'a, Result<(), TransactionError>> {
         Box::pin(async { Ok(()) })
     }
 }

@@ -28,7 +28,7 @@ chain-ethereum = { path = "../../sdk/chains/ethereum" }
 chain-solana = { path = "../../sdk/chains/solana" }
 hex.workspace = true
 http-server = { path = "../../packages/http-server" }
-json-rpc = { path = "../../packages/json-rpc" }
+rpc = { path = "../../packages/rpc" }
 payments = { path = "../../sdk/payments", features = ["toml"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
@@ -54,7 +54,7 @@ bitcoin.workspace = true
 futures-executor.workspace = true
 http-body-util = "=0.1.4"
 # The scripted node behind a test network's client.
-json-rpc = { path = "../../packages/json-rpc", features = ["testing"] }
+rpc = { path = "../../packages/rpc", features = ["testing"] }
 reqwest.workspace = true
 sha2.workspace = true
 tempfile = "=3.27.0"

@@ -145,10 +145,10 @@ function AmountPicker({
   choices: Choices;
   onChange: (action: Action) => void;
 }) {
-  const form = parseAmount(action.send.amount);
+  const form = parseAmount(action.input.amount);
   if (!form) return <Alert severity="info">Amount: written by hand; edit it as JSON below.</Alert>;
   const set = (next: AmountForm) =>
-    onChange({ send: { ...action.send, amount: compileAmount(next) } });
+    onChange({ name: 'send', input: { ...action.input, amount: compileAmount(next) } });
   const tokens = choices.assets.filter((a) => a !== 'native');
   return (
     <Stack direction="row" spacing={1}>
@@ -211,8 +211,9 @@ export function ActionPart({
   choices: Choices;
   onChange: (action: Action) => void;
 }) {
-  const send = action.send;
-  const set = (patch: Partial<Action['send']>) => onChange({ send: { ...send, ...patch } });
+  const send = action.input;
+  const set = (patch: Partial<Action['input']>) =>
+    onChange({ name: 'send', input: { ...send, ...patch } });
   return (
     <Stack spacing={2}>
       <TextField

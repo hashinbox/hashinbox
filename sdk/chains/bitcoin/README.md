@@ -14,7 +14,7 @@ use base::{
     Asset, Broadcaster as _, BuilderExt as _, Chained as _, Config as _, Storage, WalletFactory as _,
 };
 use chain_bitcoin::{AddressType, Config, Network};
-use json_rpc::Endpoint;
+use rpc::Endpoint;
 
 /// `storage` is the application's stores; its `inputs` are the unspent
 /// outputs coin selection spends.
@@ -57,7 +57,7 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
   `interval_ms` milliseconds (default 30,000).
 - `client()` is the chain's own cluster over `endpoints`; `build(&storage,
   client)` verifies once that `client` serves the network and builds every
-  part over it. Pass a `json_rpc::Swap` and keep it to change nodes live.
+  part over it. Pass a `rpc::Swap` and keep it to change nodes live.
   Endpoints are needed only by `client()`.
 - Position and height are both the block height. `confirmation_depth`
   (1 to 1000, default 6) makes a block final once that many blocks, itself

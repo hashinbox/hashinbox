@@ -12,7 +12,6 @@ mod history;
 mod indexes;
 mod inputs;
 mod tasks;
-mod transactions;
 mod wallets;
 
 use std::{
@@ -105,7 +104,7 @@ impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for Pragmas {
 #[derive(Clone)]
 pub(crate) struct Storage {
     pool: Pool<ConnectionManager<SqliteConnection>>,
-    changes: broadcast::Sender<::tasks::Job>,
+    changes: broadcast::Sender<()>,
 }
 
 impl Storage {

@@ -24,24 +24,31 @@ remain the task's responsibility. This package knows no wallet or SDK types.
 
 ## Job queue
 
-`Store` is the durable queue contract; implementations live with the
-application (the server's SQLite queue over `schema/queue.sql`). It keeps
-`Job`s whole: `set` inserts or replaces one (payload wholesale) and publishes
-it to `changes`; `get` reads one; `next(now)` lists unfinished jobs due by
-`now`, by id. A job has a lane, a kind, a `State` (pending, running, done,
-failed), a JSON object `payload` (input plus whatever is saved) and `run_at`.
+Primitives for a durable queue (design 067); the caller composes them and may
+replace any.
 
-Every rule is the `Runner`'s (feature `runner`):
+- `Topic`: what a job locks, dot-separated segments (`n`, `n.w1`). Two
+  topics conflict when one is the other or a prefix of it at a dot; the
+  meaning of segments is the caller's.
+- `Job`: queue fields (`topic`, `kind`, `status`, `run_at`, `deadline`,
+  `attempts`, `reason`) and its worker's `input` (never changed) and `state`
+  (saved while running).
+- `Store`: `enqueue`, `update`, `get`, `next(now)` (due pending jobs with no
+  running or earlier unfinished job of a conflicting topic; never overtaken). Implementations live with the application; a store
+  returns running jobs to pending when it opens (single process).
+- `Changes`: a signal to ask `next` again.
+- `Jobs`: jobs in id order with the rules over many: `startable(now)` (what
+  `next` returns), `blocker(id)` (what holds a job back), `finished()`.
+- `Job::start` and `Job::settle`: the state machine, with `Retry` (attempts,
+  backoff × attempt; past the limit `attempts-exhausted: …`; past its
+  deadline a job fails `expired`).
 
-- A lane runs one job at a time, oldest first; there is no lease.
-- On start, running jobs return to pending (single process: they were left
-  by a dead worker), so executors must tolerate a rerun.
-- It wakes on a change, an ended execution or the earliest `run_at`/deadline.
-- Payload keys it owns: `attempts`, `reason` and optional `deadline` (ms; a
-  pending job at or past it fails as `expired`).
-- Executors get the `Job` and the store (to save: `set` the running job with
-  a new payload) and answer `Ack::Done`, `Fail(reason)` or `Retry(reason)`
-  (backoff × attempt; past the limit `attempts-exhausted: …`). An unknown kind
-  fails (`unknown-kind`), a panic fails (`panicked`).
+With feature `runner` (Tokio):
 
-`Handle::wait` waits for a job to finish using `get` and `changes`.
+- `Worker`: one kind; typed `Input` and `State`; `run(Task) -> Ack`. A
+  `Task` shows the job, saves its state and answers it (`ack`, `nack`,
+  `fail`). A worker must tolerate a rerun.
+- `Ticking`: another `Changes` plus a periodic tick, so retries fall due.
+
+The executor (which worker runs a job, how many at once, the loop) is the
+caller's.

@@ -41,7 +41,7 @@ The full configuration is in [apps/server](apps/server/README.md).
 | [sdk/payments](sdk/payments/README.md) | The configuration document and chain registration |
 | [packages/crypto](packages/crypto/README.md) | Keys and signing |
 | [packages/decimal](packages/decimal/README.md) | Exact decimal amounts |
-| [packages/json-rpc](packages/json-rpc/README.md) | JSON-RPC client with retry and failover |
+| [packages/rpc](packages/rpc/README.md) | JSON-RPC client with retry and failover |
 | [packages/http-server](packages/http-server/README.md) | Authenticated axum serving |
 | [docs/design](docs/design) | Design notes |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Ownership and dependency direction |

@@ -17,6 +17,8 @@ use crate::{KeyPair, Tokens, fee::Estimator, rpc::Client};
 #[derive(Clone)]
 pub struct Factory {
     pub(crate) rpc: Client,
+    /// How long a signed transaction counts as pending.
+    pub(crate) pending_ttl: std::time::Duration,
     pub(crate) tokens: Tokens,
     pub(crate) fees: Arc<Estimator>,
 }
@@ -53,6 +55,7 @@ impl base::WalletFactory for Factory {
         let network: Network = self.rpc.network().into();
         let builder = |contract| -> Box<dyn base::Builder> {
             Box::new(Builder {
+                pending_ttl: self.pending_ttl,
                 rpc: self.rpc.clone(),
                 fees: Arc::clone(&self.fees),
                 asset: asset.clone(),

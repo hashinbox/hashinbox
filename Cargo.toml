@@ -8,7 +8,7 @@ members = [
     "sdk/payments",
     "packages/decimal",
     "packages/crypto",
-    "packages/json-rpc",
+    "packages/rpc",
     "packages/http-server",
     "packages/logging",
     "packages/tasks",

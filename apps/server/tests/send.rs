@@ -1,42 +1,45 @@
-//! The send job over the scripted network: a crash after the bytes were
-//! saved resumes with them and never rebuilds; a refusal fails the job; an
-//! expired Solana-style blockhash fails it as `outcome-unknown`; a batch
-//! keeps its accepted prefix; a sender without a key fails.
+//! The broadcast job over the scripted network: it signs once, records its
+//! transactions as pending and broadcasts them; a rerun never builds again;
+//! a refusal forgets what is not sent; a sender short of funds sends
+//! nothing.
 
 use std::sync::{Arc, Mutex};
 
 use base::{TransactionErrorKind, WalletStore as _};
-use tasks::{Ack, Executor, Job, State, Store};
+use tasks::{Ack, Job, Status, Store, Task, Worker as _};
 
 use super::{Fake, Script, database, network, payments};
 use crate::{
+    models::{transaction, transaction::Transaction},
     storage::Storage,
-    workers::send::{Payment, SendIntent, Sends},
+    workers::broadcast::{Broadcast, Payment, SendIntent},
 };
 
-/// A send job of `amounts` from a keyed wallet, its executor and its queue.
+/// A broadcast job of `amounts` from `from` over the scripted network.
 struct Fixture {
-    queue: Arc<Storage>,
-    sends: Sends,
+    storage: Storage,
     script: Arc<Script>,
+    worker: Broadcast,
     job: Job,
     _directory: tempfile::TempDir,
 }
 
 impl Fixture {
     async fn new(amounts: &[&str], answers: Vec<Result<(), TransactionErrorKind>>) -> Self {
-        Self::of("sender", amounts, answers).await
+        Self::of("sender", amounts, answers, 0).await
     }
 
-    /// The job sends from `from`; only `sender` is keyed.
+    /// Only `sender` is keyed; each transaction pays `fee`.
     async fn of(
         from: &str,
         amounts: &[&str],
         answers: Vec<Result<(), TransactionErrorKind>>,
+        fee: u64,
     ) -> Self {
         let (storage, directory) = database().await;
         let script = Arc::new(Script {
             answers: Mutex::new(answers.into()),
+            fee,
             ..Script::default()
         });
         let sender = Fake {
@@ -57,27 +60,47 @@ impl Fixture {
                 })
                 .collect(),
         };
-        let mut job = intent.job();
-        job.state = State::Running;
-        storage.set(job.clone()).await.expect("a job");
+        let mut job = intent.job().expect("a job");
+        storage.enqueue(job.clone()).await.expect("a job");
+        job.status = Status::Running;
+        storage.update(job.clone()).await.expect("running");
         Self {
-            sends: Sends::new(payments(&storage, script.clone()).await),
-            queue: Arc::new(storage),
+            worker: Broadcast::new(payments(&storage, script.clone()).await, storage.clone()),
+            storage,
             script,
             job,
             _directory: directory,
         }
     }
 
-    /// One execution of the job as the store holds it now.
-    async fn execute(&self) -> Ack {
+    /// One run of the job as stored now.
+    async fn run(&self) -> Ack {
         let job = self
-            .queue
+            .storage
             .get(&self.job.id)
             .await
             .expect("a read")
             .expect("the job");
-        self.sends.execute(job, self.queue.clone()).await
+        let task = Task::new(job, Arc::new(self.storage.clone())).expect("a task");
+        self.worker.run(task).await
+    }
+
+    /// Whether txid `txid` is recorded as pending.
+    async fn recorded(&self, txid: &str) -> bool {
+        let id = Transaction::id(&network(), txid).expect("an id");
+        self.storage
+            .read(move |connection| Ok(transaction::db::find_pending(connection, &id)?.is_some()))
+            .await
+            .expect("a read")
+    }
+
+    /// Forgets txid `txid`, as an expiry does.
+    async fn forget(&self, txid: &str) {
+        let id = Transaction::id(&network(), txid).expect("an id");
+        self.storage
+            .write(move |connection| Ok(transaction::db::delete_by_id(connection, &id)?))
+            .await
+            .expect("a write");
     }
 
     fn built(&self) -> u8 {
@@ -87,67 +110,59 @@ impl Fixture {
     fn sent(&self) -> Vec<Vec<u8>> {
         self.script.sent.lock().expect("the log").clone()
     }
-
-    async fn progress(&self) -> (usize, usize) {
-        let job = self
-            .queue
-            .get(&self.job.id)
-            .await
-            .expect("a read")
-            .expect("the job");
-        crate::workers::send::progress(&job.payload)
-    }
 }
 
 #[tokio::test]
-async fn a_retry_resends_the_saved_bytes() {
+async fn it_records_then_broadcasts_each() {
+    let fixture = Fixture::new(&["1", "2"], Vec::new()).await;
+    assert_eq!(fixture.run().await, Ack::Done);
+    assert_eq!(fixture.built(), 2);
+    assert_eq!(fixture.sent(), [vec![1], vec![2]]);
+    assert!(fixture.recorded("1").await && fixture.recorded("2").await);
+}
+
+#[tokio::test]
+async fn a_retry_resends_the_recorded_bytes() {
     let fixture = Fixture::new(&["1"], vec![Err(TransactionErrorKind::Unavailable)]).await;
-    assert!(matches!(fixture.execute().await, Ack::Retry(_)));
-    assert_eq!(fixture.progress().await, (1, 0));
-    assert_eq!(fixture.execute().await, Ack::Done);
+    assert!(matches!(fixture.run().await, Ack::Retry(_)));
+    assert!(fixture.recorded("1").await);
+    assert_eq!(fixture.run().await, Ack::Done);
     assert_eq!(fixture.built(), 1);
     assert_eq!(fixture.sent(), [vec![1], vec![1]]);
 }
 
 #[tokio::test]
-async fn a_crash_after_saving_broadcasts_the_saved_bytes() {
-    let fixture = Fixture::new(&["1"], Vec::new()).await;
-    // A first run that saved its bytes and stopped before broadcasting them.
-    let mut job = fixture.job.clone();
-    job.payload["progress"] = serde_json::json!({ "signed": ["09"], "accepted": 0 });
-    fixture.queue.set(job).await.expect("saved");
-    assert_eq!(fixture.execute().await, Ack::Done);
-    assert_eq!(fixture.built(), 0);
-    assert_eq!(fixture.sent(), [vec![9]]);
-}
-
-#[tokio::test]
-async fn a_refusal_fails_the_job() {
-    let fixture = Fixture::new(&["1"], vec![Err(TransactionErrorKind::Rejected)]).await;
-    assert!(matches!(fixture.execute().await, Ack::Fail(reason) if reason.starts_with("refused")));
-}
-
-#[tokio::test]
-async fn an_expired_blockhash_is_an_unknown_outcome() {
-    let fixture = Fixture::new(&["1"], vec![Err(TransactionErrorKind::Expired)]).await;
-    assert_eq!(fixture.execute().await, Ack::Fail("outcome-unknown".into()));
-}
-
-#[tokio::test]
-async fn a_batch_keeps_its_accepted_prefix() {
+async fn a_refusal_forgets_what_is_not_sent() {
     let fixture = Fixture::new(
         &["1", "2"],
         vec![Ok(()), Err(TransactionErrorKind::Rejected)],
     )
     .await;
-    assert!(matches!(fixture.execute().await, Ack::Fail(_)));
-    assert_eq!(fixture.built(), 2);
-    assert_eq!(fixture.progress().await, (2, 1));
+    assert!(matches!(fixture.run().await, Ack::Fail(reason) if reason.starts_with("refused")));
+    assert!(fixture.recorded("1").await);
+    assert!(!fixture.recorded("2").await);
+}
+
+#[tokio::test]
+async fn a_rerun_of_a_forgotten_transaction_is_an_unknown_outcome() {
+    let fixture = Fixture::new(&["1"], vec![Err(TransactionErrorKind::Unavailable)]).await;
+    assert!(matches!(fixture.run().await, Ack::Retry(_)));
+    fixture.forget("1").await;
+    assert_eq!(fixture.run().await, Ack::Fail("outcome-unknown".into()));
+    assert_eq!(fixture.built(), 1);
+}
+
+#[tokio::test]
+async fn a_sender_short_of_funds_sends_nothing() {
+    let fixture = Fixture::of("sender", &["1"], Vec::new(), 5).await;
+    assert_eq!(fixture.run().await, Ack::Fail("insufficient-funds".into()));
+    assert!(!fixture.recorded("1").await);
+    assert!(fixture.sent().is_empty());
 }
 
 #[tokio::test]
 async fn a_sender_without_a_key_fails() {
-    let fixture = Fixture::of("stranger", &["1"], Vec::new()).await;
-    assert!(matches!(fixture.execute().await, Ack::Fail(reason) if reason.starts_with("invalid")));
+    let fixture = Fixture::of("stranger", &["1"], Vec::new(), 0).await;
+    assert!(matches!(fixture.run().await, Ack::Fail(reason) if reason.starts_with("invalid")));
     assert!(fixture.sent().is_empty());
 }

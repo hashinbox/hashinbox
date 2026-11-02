@@ -19,6 +19,8 @@ use crate::{
 /// signed transaction lands only until its blockhash expires (about a
 /// minute); then it fails to broadcast as `Expired`.
 pub(crate) struct Builder {
+    /// How long what it signs counts as pending.
+    pub(crate) pending_ttl: std::time::Duration,
     pub(crate) rpc: Client,
     /// The factory's estimator: its cached blockhash and signature price.
     pub(crate) fees: Arc<Estimator>,
@@ -113,7 +115,7 @@ impl base::Builder for Builder {
                     signed.push(transaction.into());
                 }
             }
-            Ok(Transactions(signed))
+            Ok(Transactions(signed).expiring(self.pending_ttl))
         })
     }
 }

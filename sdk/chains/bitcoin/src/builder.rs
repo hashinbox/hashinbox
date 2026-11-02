@@ -21,6 +21,8 @@ use crate::{
 /// sender, only when it is worth its own output (above dust after paying for
 /// itself); a smaller leftover is fee.
 pub(crate) struct Builder {
+    /// How long what it signs counts as pending.
+    pub(crate) pending_ttl: std::time::Duration,
     pub(crate) rpc: Client,
     pub(crate) inputs: Arc<dyn InputStore>,
     /// The factory's estimator, whose cached rate prices the fee.
@@ -163,7 +165,7 @@ impl base::Builder for Builder {
             )
             .map_err(TransactionError::failed)?;
             transaction.sign(&keys).map_err(TransactionError::failed)?;
-            Ok(Transactions(vec![transaction.into()]))
+            Ok(Transactions(vec![transaction.into()]).expiring(self.pending_ttl))
         })
     }
 }

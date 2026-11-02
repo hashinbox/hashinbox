@@ -46,8 +46,10 @@ export interface Send {
   amount: Amount;
 }
 
+/** An action by name with its own input; `send` is the one there is. */
 export interface Action {
-  send: Send;
+  name: 'send';
+  input: Send;
 }
 
 /** A trigger as written: the API's definition. */
@@ -334,7 +336,8 @@ export function blank(chain: string, network: string): Definition {
     filter: null,
     check: 'idle',
     action: {
-      send: {
+      name: 'send',
+      input: {
         source: { this: {} },
         asset: 'native',
         destination: { select: { ids: [] } },
@@ -388,7 +391,8 @@ export const TEMPLATES: Template[] = [
         filter: { compare: { of: { this: {} }, aggregate: 'sum', operator: 'above', value: FEE } },
         check: 'idle',
         action: {
-          send: {
+          name: 'send',
+          input: {
             source: { this: {} },
             asset: 'native',
             destination: chosen,
@@ -421,7 +425,8 @@ export const TEMPLATES: Template[] = [
           ],
         },
         action: {
-          send: {
+          name: 'send',
+          input: {
             source: { this: {} },
             asset: 'native',
             destination: chosen,
@@ -461,7 +466,8 @@ export const TEMPLATES: Template[] = [
         },
         check: 'idle',
         action: {
-          send: {
+          name: 'send',
+          input: {
             source: chosen,
             asset: 'native',
             destination: { this: {} },
@@ -482,7 +488,8 @@ export const TEMPLATES: Template[] = [
         },
         check: 'idle',
         action: {
-          send: {
+          name: 'send',
+          input: {
             source: { this: {} },
             asset: place.token,
             destination: chosen,
@@ -503,7 +510,8 @@ export const TEMPLATES: Template[] = [
         filter: null,
         check: { all: ['idle', { since: { seconds: 86400 } }] },
         action: {
-          send: {
+          name: 'send',
+          input: {
             source: { this: {} },
             asset: 'native',
             destination: chosen,

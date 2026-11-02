@@ -1,6 +1,6 @@
-//! The server's background work, one file each: the send queue (its job
-//! input and state, executor and lane rule) and the trigger loop. `main.rs`
-//! runs them.
+//! The server's background work: the queue's executor, the broadcast job,
+//! and triggers (the loop that queues them, and the triggers job). `main.rs` runs them.
 
-pub(crate) mod send;
-pub(crate) mod triggers;
+pub(crate) mod broadcast;
+pub(crate) mod executor;
+pub(crate) mod trigger;

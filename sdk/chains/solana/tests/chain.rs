@@ -6,9 +6,9 @@ use base::{
 };
 use std::sync::Arc;
 
+use ::rpc::testing::{Reply, Script};
 use chain_solana::{Chain, Client, Config};
 use futures_executor::block_on;
-use json_rpc::testing::{Reply, Script};
 use serde_json::{Value, json};
 
 const MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -222,7 +222,7 @@ fn a_listed_slot_that_turns_out_skipped_asks_for_a_retry() {
 #[test]
 fn a_chain_over_a_swap_follows_its_replacement() {
     let old = Script::new([]);
-    let swap = Arc::new(json_rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
+    let swap = Arc::new(::rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
     let config = config();
     let chain = config.chain(&Client::new(swap.clone(), config.native()));
     let tips = |script: &Script, produced: u64| {

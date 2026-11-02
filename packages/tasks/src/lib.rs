@@ -1,16 +1,18 @@
 #![doc = include_str!("../README.md")]
 
-mod handle;
-#[cfg(feature = "runner")]
-mod runner;
+mod jobs;
+mod rules;
 mod storage;
 mod task;
-
-pub use handle::Handle;
 #[cfg(feature = "runner")]
-pub use runner::{Ack, Executor, Runner, now};
-pub use storage::{Store, StoreError, StoreFuture};
-pub use task::{Id, Job, State};
+mod worker;
+
+pub use jobs::Jobs;
+pub use rules::{Ack, Retry};
+pub use storage::{Changes, Store, StoreError, StoreFuture};
+pub use task::{Id, Job, Status, Topic, now};
+#[cfg(feature = "runner")]
+pub use worker::{Task, Ticking, Worker};
 
 use std::{
     fmt,

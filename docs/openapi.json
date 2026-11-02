@@ -677,83 +677,6 @@
         ]
       }
     },
-    "/v1/triggers/preview": {
-      "post": {
-        "tags": [
-          "triggers"
-        ],
-        "summary": "Preview what a trigger would see now",
-        "description": "Without storing anything, at the last kept block: the wallet indexes the selector picks (fully indexed, with balances), which of them the filter keeps, whether the check holds over those for a trigger that never ran, and the transfers the action would make. Fees used are estimated.",
-        "operationId": "preview_trigger",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TriggerPreviewRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "What it would see",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TriggerPreview"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed body",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Network is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The store, node or estimator is unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
     "/v1/triggers/{id}": {
       "get": {
         "tags": [
@@ -2169,29 +2092,6 @@
           "reverted"
         ]
       },
-      "PlannedTransfer": {
-        "type": "object",
-        "description": "One transfer a run would make.",
-        "required": [
-          "from",
-          "to",
-          "amount"
-        ],
-        "properties": {
-          "amount": {
-            "type": "string",
-            "description": "Display units of the send's asset."
-          },
-          "from": {
-            "type": "string",
-            "description": "Sender address text."
-          },
-          "to": {
-            "type": "string",
-            "description": "Recipient address text."
-          }
-        }
-      },
       "Report": {
         "type": "object",
         "description": "The memory-only health snapshot of this process.",
@@ -2371,44 +2271,6 @@
           },
           "value": {
             "type": "string"
-          }
-        }
-      },
-      "Selected": {
-        "type": "object",
-        "description": "One wallet index a selector picked.",
-        "required": [
-          "wallet_id",
-          "address",
-          "asset",
-          "confirmed",
-          "pending",
-          "kept"
-        ],
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "Address text."
-          },
-          "asset": {
-            "type": "string",
-            "description": "Asset id."
-          },
-          "confirmed": {
-            "type": "string",
-            "description": "Confirmed balance in display units."
-          },
-          "kept": {
-            "type": "boolean",
-            "description": "Whether the filter keeps it (it is then `This` for check and action)."
-          },
-          "pending": {
-            "type": "string",
-            "description": "Not yet confirmed change in display units; negative when leaving."
-          },
-          "wallet_id": {
-            "type": "string",
-            "description": "`<chain>:<network>:<address>`, as the wallet routes take it."
           }
         }
       },
@@ -2601,7 +2463,7 @@
         "properties": {
           "action": {
             "type": "object",
-            "description": "What it does: `{\"send\": {\"source\": target, \"asset\": id,\n\"destination\": target, \"amount\": amount}}`."
+            "description": "What it does: `{\"name\": \"send\", \"input\": {\"source\": target, \"asset\":\nid, \"destination\": target, \"amount\": amount}}`."
           },
           "chain": {
             "type": "string",
@@ -2723,95 +2585,6 @@
             "description": "Triggers in id order."
           }
         }
-      },
-      "TriggerPreview": {
-        "type": "object",
-        "description": "What a trigger would see now.",
-        "required": [
-          "confirmed",
-          "selected",
-          "check",
-          "transfers",
-          "plan_error",
-          "unkeyed"
-        ],
-        "properties": {
-          "check": {
-            "type": "boolean",
-            "description": "Whether the check holds over the kept ones, for a trigger that never ran."
-          },
-          "confirmed": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The block position balances are read at; null before the first\nblock. Always present."
-          },
-          "plan_error": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why the action cannot be planned; null when it can. Always present."
-          },
-          "selected": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Selected"
-            },
-            "description": "What the selector picks, fully indexed, with balances, each marked\nkept or not by the filter."
-          },
-          "transfers": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/PlannedTransfer"
-            },
-            "description": "The transfers the action would make now; empty when nothing is due."
-          },
-          "unkeyed": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Senders of `transfers` this server holds no key for; a run refuses them."
-          }
-        }
-      },
-      "TriggerPreviewRequest": {
-        "type": "object",
-        "description": "`POST /v1/triggers/preview` body: a trigger, unsaved.",
-        "required": [
-          "chain",
-          "network",
-          "selector",
-          "check",
-          "action"
-        ],
-        "properties": {
-          "action": {
-            "type": "object"
-          },
-          "chain": {
-            "type": "string"
-          },
-          "check": {
-            "type": "object"
-          },
-          "filter": {
-            "type": [
-              "object",
-              "null"
-            ]
-          },
-          "network": {
-            "type": "string"
-          },
-          "selector": {
-            "type": "object"
-          }
-        },
-        "additionalProperties": false
       },
       "TriggerRun": {
         "type": "object",

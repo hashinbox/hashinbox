@@ -1,4 +1,10 @@
-use std::{collections::BTreeSet, error::Error as StdError, fmt, pin::Pin, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error as StdError,
+    fmt,
+    pin::Pin,
+    sync::Arc,
+};
 
 use crypto::{Curve, SecretBytes};
 use serde::{Deserialize, Serialize};
@@ -289,38 +295,27 @@ impl<B: Builder + ?Sized> BuilderExt for B {
     }
 }
 
-/// The only external effect in transaction submission: the exact signed
-/// bytes to every configured node.
+/// The only external effect in transaction submission: a signed
+/// transaction's exact bytes to every configured node.
+///
+/// The SDK does not track what is in flight. A caller that sends money:
+///
+/// 1. records the transaction (its legs, its `expires`) before broadcasting
+///    it, and counts its outgoing legs as spent from then on;
+/// 2. builds, records and broadcasts a sender's transactions one at a time,
+///    since coin selection and nonces see only what is recorded;
+/// 3. on `Rejected` or `Expired` forgets the record; on a transient error
+///    keeps it and broadcasts the same bytes again, never building anew;
+/// 4. forgets a record past its `expires`, freeing its funds.
 pub trait Broadcaster: Send + Sync {
-    /// Submits the exact envelope to every configured node.
+    /// Submits `transaction.bytes` to every configured node.
     ///
     /// # Errors
     ///
-    /// `Rejected` is definite (the node refused); `Expired` means the bytes
-    /// can no longer land and were not seen; `Unavailable`, `Unknown` and
-    /// `Timeout` are transient: retry with the same bytes.
-    fn broadcast<'a>(
-        &'a self,
-        transaction: &'a (dyn Enveloped + Sync),
-    ) -> Future<'a, Result<(), Error>>;
-}
-
-/// Anything carrying a signed transaction in its chain's own encoding.
-pub trait Enveloped {
-    /// The signed transaction, exactly as the chain's node accepts it.
-    fn envelope(&self) -> &[u8];
-}
-
-impl Enveloped for [u8] {
-    fn envelope(&self) -> &[u8] {
-        self
-    }
-}
-
-impl Enveloped for Vec<u8> {
-    fn envelope(&self) -> &[u8] {
-        self
-    }
+    /// `Rejected` when a node refused it (it will not land); `Expired` when
+    /// it can no longer land; `Unavailable` when no node answered (it may
+    /// have landed): broadcast the same bytes again.
+    fn broadcast<'a>(&'a self, transaction: &'a Transaction) -> Future<'a, Result<(), Error>>;
 }
 
 /// Transactions, in order.
@@ -328,6 +323,19 @@ impl Enveloped for Vec<u8> {
 pub struct Transactions(pub Vec<Transaction>);
 
 impl Transactions {
+    /// The same, each pending for `ttl` from now ([`Transaction::expires`]).
+    #[must_use]
+    pub fn expiring(mut self, ttl: std::time::Duration) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let at = u64::try_from(now.saturating_add(ttl).as_millis()).unwrap_or(u64::MAX);
+        for transaction in &mut self.0 {
+            transaction.expires = Some(at);
+        }
+        self
+    }
+
     /// Every leg with its transaction and index, in order.
     pub fn legs(&self) -> impl Iterator<Item = (&Id, u32, &Leg)> {
         self.0.iter().flat_map(|transaction| {
@@ -400,11 +408,25 @@ pub struct Transaction {
     pub legs: Vec<Leg>,
     /// The signed transaction in its chain's own encoding.
     pub bytes: Vec<u8>,
+    /// Unix ms after which a pending transaction stops holding its funds;
+    /// `None` once mined. A caller forgets a pending transaction past it
+    /// (see [`Broadcaster`]).
+    pub expires: Option<u64>,
 }
 
-impl Enveloped for Transaction {
-    fn envelope(&self) -> &[u8] {
-        &self.bytes
+impl Transaction {
+    /// Each (address, asset) it takes from, with what it takes net: the sum
+    /// of that pair's signed legs, negative (change coming back is netted
+    /// out). What a caller counts as spent while it is pending.
+    #[must_use]
+    pub fn debits(&self) -> BTreeMap<(Address, Asset), Decimal> {
+        let mut sums = BTreeMap::<(Address, Asset), Decimal>::new();
+        for leg in &self.legs {
+            let pair = (leg.address().clone(), leg.asset().clone());
+            *sums.entry(pair).or_insert_with(Decimal::zero) += leg.signed();
+        }
+        sums.retain(|_, sum| *sum < Decimal::zero());
+        sums
     }
 }
 
@@ -474,6 +496,44 @@ impl crate::Networked for Leg {
     }
 }
 
+impl Leg {
+    /// The asset it moves.
+    #[must_use]
+    pub const fn asset(&self) -> &Asset {
+        match self {
+            Self::Received { asset, .. }
+            | Self::Spent { asset, .. }
+            | Self::Burned { asset, .. }
+            | Self::Minted { asset, .. }
+            | Self::Fee { asset, .. } => asset,
+        }
+    }
+
+    /// Its atomic amount, unsigned.
+    #[must_use]
+    pub const fn amount(&self) -> &Decimal {
+        match self {
+            Self::Received { amount, .. }
+            | Self::Spent { amount, .. }
+            | Self::Burned { amount, .. }
+            | Self::Minted { amount, .. }
+            | Self::Fee { amount, .. } => amount,
+        }
+    }
+
+    /// What it does to its address's balance: credits (received, minted)
+    /// count up, debits (spent, burned, fees) down.
+    #[must_use]
+    pub fn signed(&self) -> Decimal {
+        match self {
+            Self::Received { amount, .. } | Self::Minted { amount, .. } => amount.clone(),
+            Self::Spent { amount, .. } | Self::Burned { amount, .. } | Self::Fee { amount, .. } => {
+                Decimal::zero() - amount.clone()
+            }
+        }
+    }
+}
+
 impl Addressed for Leg {
     fn address(&self) -> &Address {
         match self {
@@ -484,14 +544,4 @@ impl Addressed for Leg {
             | Self::Fee { address, .. } => address,
         }
     }
-}
-
-/// Where transactions are kept.
-pub trait Store: Send + Sync {
-    /// Keeps `transaction`, such as a pending one before broadcast.
-    ///
-    /// # Errors
-    ///
-    /// When the store cannot write.
-    fn insert<'a>(&'a self, transaction: &'a Transaction) -> Future<'a, anyhow::Result<()>>;
 }

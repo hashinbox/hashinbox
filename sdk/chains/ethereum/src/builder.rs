@@ -18,6 +18,8 @@ use crate::{
 /// first takes the node's pending nonce and each later one the next, so a
 /// sender's batch lands in order or not past its first gap.
 pub(crate) struct Builder {
+    /// How long what it signs counts as pending.
+    pub(crate) pending_ttl: std::time::Duration,
     pub(crate) rpc: Client,
     /// The factory's estimator: its cached fees and gas price every transfer.
     pub(crate) fees: Arc<Estimator>,
@@ -121,7 +123,7 @@ impl base::Builder for Builder {
                     .checked_add(1)
                     .ok_or_else(|| TransactionError::failed("Ethereum nonce is exhausted"))?;
             }
-            Ok(Transactions(signed))
+            Ok(Transactions(signed).expiring(self.pending_ttl))
         })
     }
 }

@@ -202,26 +202,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/triggers/preview": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Preview what a trigger would see now
-         * @description Without storing anything, at the last kept block: the wallet indexes the selector picks (fully indexed, with balances), which of them the filter keeps, whether the check holds over those for a trigger that never ran, and the transfers the action would make. Fees used are estimated.
-         */
-        post: operations["preview_trigger"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/triggers/{id}": {
         parameters: {
             query?: never;
@@ -625,15 +605,6 @@ export interface components {
          * @enum {string}
          */
         Outcome: "succeeded" | "reverted";
-        /** @description One transfer a run would make. */
-        PlannedTransfer: {
-            /** @description Display units of the send's asset. */
-            amount: string;
-            /** @description Sender address text. */
-            from: string;
-            /** @description Recipient address text. */
-            to: string;
-        };
         /** @description The memory-only health snapshot of this process. */
         Report: {
             /** @description Every configured network. */
@@ -703,21 +674,6 @@ export interface components {
             name: string;
             value: string;
         };
-        /** @description One wallet index a selector picked. */
-        Selected: {
-            /** @description Address text. */
-            address: string;
-            /** @description Asset id. */
-            asset: string;
-            /** @description Confirmed balance in display units. */
-            confirmed: string;
-            /** @description Whether the filter keeps it (it is then `This` for check and action). */
-            kept: boolean;
-            /** @description Not yet confirmed change in display units; negative when leaving. */
-            pending: string;
-            /** @description `<chain>:<network>:<address>`, as the wallet routes take it. */
-            wallet_id: string;
-        };
         /**
          * @description `POST /v1/wallets/{id}/transactions` body: an ordered send from the
          *     path's wallet in one asset.
@@ -783,8 +739,8 @@ export interface components {
         /** @description One trigger. */
         Trigger: {
             /**
-             * @description What it does: `{"send": {"source": target, "asset": id,
-             *     "destination": target, "amount": amount}}`.
+             * @description What it does: `{"name": "send", "input": {"source": target, "asset":
+             *     id, "destination": target, "amount": amount}}`.
              */
             action: Record<string, never>;
             /** @description Chain name, as `GET /v1/assets` lists it. */
@@ -843,37 +799,6 @@ export interface components {
         TriggerList: {
             /** @description Triggers in id order. */
             triggers: components["schemas"]["Trigger"][];
-        };
-        /** @description What a trigger would see now. */
-        TriggerPreview: {
-            /** @description Whether the check holds over the kept ones, for a trigger that never ran. */
-            check: boolean;
-            /**
-             * Format: int64
-             * @description The block position balances are read at; null before the first
-             *     block. Always present.
-             */
-            confirmed: number | null;
-            /** @description Why the action cannot be planned; null when it can. Always present. */
-            plan_error: string | null;
-            /**
-             * @description What the selector picks, fully indexed, with balances, each marked
-             *     kept or not by the filter.
-             */
-            selected: components["schemas"]["Selected"][];
-            /** @description The transfers the action would make now; empty when nothing is due. */
-            transfers: components["schemas"]["PlannedTransfer"][];
-            /** @description Senders of `transfers` this server holds no key for; a run refuses them. */
-            unkeyed: string[];
-        };
-        /** @description `POST /v1/triggers/preview` body: a trigger, unsaved. */
-        TriggerPreviewRequest: {
-            action: Record<string, never>;
-            chain: string;
-            check: Record<string, never>;
-            filter?: Record<string, never> | null;
-            network: string;
-            selector: Record<string, never>;
         };
         /** @description One run of a trigger. */
         TriggerRun: {
@@ -1416,66 +1341,6 @@ export interface operations {
                 };
             };
             /** @description The store is unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    preview_trigger: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TriggerPreviewRequest"];
-            };
-        };
-        responses: {
-            /** @description What it would see */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TriggerPreview"];
-                };
-            };
-            /** @description Malformed body */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Missing or invalid bearer token */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Network is not configured */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description The store, node or estimator is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

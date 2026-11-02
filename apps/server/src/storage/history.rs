@@ -28,14 +28,8 @@ impl Storage {
         asset: &Asset,
     ) -> anyhow::Result<Decimal> {
         let (address, asset) = (address.clone(), asset.clone());
-        self.read(move |connection| {
-            let mut total = Decimal::zero();
-            for leg in leg::db::find_live(connection, &address, &asset)? {
-                total += leg.signed()?;
-            }
-            Ok(total)
-        })
-        .await
+        self.read(move |connection| leg::db::find_live(connection, &address, &asset)?.sum())
+            .await
     }
 
     /// At most `limit` transactions of `address` in `asset` in live blocks,
@@ -67,12 +61,12 @@ impl Storage {
                     .block
                     .as_deref()
                     .context("a paged transaction is pending")?;
-                let header = block::db::get_by_id(connection, block)?.header()?;
+                let header = BlockHeader::try_from(&block::db::get_by_id(connection, block)?)?;
                 let legs = leg::db::find_for(connection, &row.id)?
                     .into_iter()
                     .filter(|leg| leg.address == address.value && leg.asset == asset.id)
                     .collect();
-                page.push((header, row.transaction(&address.network, legs)?));
+                page.push((header, row.transaction(legs)?));
             }
             Ok(page)
         })

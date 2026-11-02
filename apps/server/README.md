@@ -42,8 +42,8 @@ stops the start. `bearer_token_env` is optional only for a loopback `bind`.
 A network's stored `rpc_endpoints` row replaces its section's `endpoints` at
 startup (matched on the section's `chain` and `network` text).
 `PUT /v1/networks/{chain}/{network}/rpc` stores a list and moves every later call
-of the network to it at once (`json_rpc::Failover` behind the network's
-`json_rpc::Swap`), unverified; the chain verifies it on the next start.
+of the network to it at once (`rpc::Failover` behind the network's
+`rpc::Swap`), unverified; the chain verifies it on the next start.
 
 The server also serves a browser page at `/` (`[ui] brand`, `PAYMENT_UI_API_BASE`).
 The committed page (`ui/dist`) was built against the previous API and needs a

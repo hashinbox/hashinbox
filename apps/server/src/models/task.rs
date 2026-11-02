@@ -1,41 +1,79 @@
 //! `q`: one row per queued job for its whole life (`schema/queue.sql`). The
 //! statements behind `tasks::Store` (`crate::storage::tasks`).
 
+use anyhow::Context as _;
 use diesel::{prelude::*, sqlite::Sqlite};
+use tasks::{Id, Job, Status, Topic};
 
-use super::schema::q;
+use super::{int, schema::q, uint};
 
 /// One queued job, as read and written (the stamps are the statements').
-#[derive(Debug, Queryable, Selectable, Insertable)]
-#[diesel(table_name = q, check_for_backend(Sqlite))]
+#[derive(Debug, Queryable, Selectable, Insertable, AsChangeset)]
+#[diesel(table_name = q, check_for_backend(Sqlite), treat_none_as_null = true)]
 pub(crate) struct Task {
     pub(crate) id: String,
-    pub(crate) lane: String,
+    pub(crate) topic: String,
     pub(crate) kind: String,
-    pub(crate) state: i32,
-    pub(crate) payload: String,
+    pub(crate) status: i32,
     pub(crate) run_at: i64,
+    pub(crate) deadline: Option<i64>,
+    pub(crate) attempts: i32,
+    pub(crate) reason: Option<String>,
+    pub(crate) input: String,
+    pub(crate) state: Option<String>,
 }
 
-impl Task {
-    /// The row of `job`.
-    ///
-    /// # Errors
-    ///
-    /// When its run time is above SQLite's integer range.
-    pub(crate) fn new(job: &tasks::Job) -> anyhow::Result<Self> {
+/// The row of a job. Fails when a time or the attempts are above SQLite's
+/// integer range.
+impl TryFrom<&Job> for Task {
+    type Error = anyhow::Error;
+
+    fn try_from(job: &Job) -> anyhow::Result<Self> {
         Ok(Self {
             id: job.id.to_string(),
-            lane: job.lane.clone(),
+            topic: job.topic.to_string(),
             kind: job.kind.clone(),
-            state: match job.state {
-                tasks::State::Pending => 0,
-                tasks::State::Running => 1,
-                tasks::State::Done => 2,
-                tasks::State::Failed => 3,
+            status: match job.status {
+                Status::Pending => 0,
+                Status::Running => 1,
+                Status::Done => 2,
+                Status::Failed => 3,
             },
-            payload: job.payload.to_string(),
-            run_at: super::int(job.run_at)?,
+            run_at: int(job.run_at)?,
+            deadline: job.deadline.map(int).transpose()?,
+            attempts: i32::try_from(job.attempts).context("attempts are above range")?,
+            reason: job.reason.clone(),
+            input: job.input.to_string(),
+            state: job.state.as_ref().map(ToString::to_string),
+        })
+    }
+}
+
+/// A row as its job. Fails when a stored value does not read back.
+impl TryFrom<Task> for Job {
+    type Error = anyhow::Error;
+
+    fn try_from(row: Task) -> anyhow::Result<Self> {
+        Ok(Self {
+            id: Id::from(row.id),
+            topic: Topic::parse(&row.topic).context("stored topic")?,
+            kind: row.kind,
+            status: match row.status {
+                0 => Status::Pending,
+                1 => Status::Running,
+                2 => Status::Done,
+                _ => Status::Failed,
+            },
+            run_at: uint(row.run_at)?,
+            deadline: row.deadline.map(uint).transpose()?,
+            attempts: u32::try_from(row.attempts).context("stored attempts are negative")?,
+            reason: row.reason,
+            input: serde_json::from_str(&row.input).context("stored input")?,
+            state: row
+                .state
+                .map(|state| serde_json::from_str(&state))
+                .transpose()
+                .context("stored state")?,
         })
     }
 }
@@ -47,31 +85,33 @@ collection! {
 
 /// The `q` table's statements.
 pub(crate) mod db {
-    use diesel::{prelude::*, upsert::excluded};
+    use diesel::prelude::*;
 
     use super::{Task, Tasks};
     use crate::models::schema::q;
 
-    /// Inserts or replaces `task` (payload whole), stamped `now`.
-    pub(crate) fn upsert(
+    /// Inserts `task`, stamped `now`.
+    pub(crate) fn insert(
         connection: &mut SqliteConnection,
         task: &Task,
         now: i64,
     ) -> QueryResult<()> {
         diesel::insert_into(q::table)
             .values((task, q::created_at.eq(now), q::updated_at.eq(now)))
-            .on_conflict(q::id)
-            .do_update()
-            .set((
-                q::lane.eq(excluded(q::lane)),
-                q::kind.eq(excluded(q::kind)),
-                q::state.eq(excluded(q::state)),
-                q::payload.eq(excluded(q::payload)),
-                q::run_at.eq(excluded(q::run_at)),
-                q::updated_at.eq(excluded(q::updated_at)),
-            ))
             .execute(connection)
             .map(drop)
+    }
+
+    /// Replaces the stored `task` whole, stamped `now`; whether it was there.
+    pub(crate) fn update(
+        connection: &mut SqliteConnection,
+        task: &Task,
+        now: i64,
+    ) -> QueryResult<bool> {
+        diesel::update(q::table.find(&task.id))
+            .set((task, q::updated_at.eq(now)))
+            .execute(connection)
+            .map(|rows| rows > 0)
     }
 
     /// The task `id`, if any.
@@ -86,14 +126,34 @@ pub(crate) mod db {
             .optional()
     }
 
-    /// Unfinished tasks with `run_at <= now`, by id.
-    pub(crate) fn find_due(connection: &mut SqliteConnection, now: i64) -> QueryResult<Tasks> {
+    /// The tasks `ids`, by id; unknown ids are skipped.
+    pub(crate) fn find_by_ids(
+        connection: &mut SqliteConnection,
+        ids: &[String],
+    ) -> QueryResult<Tasks> {
         let tasks = q::table
-            .filter(q::state.eq_any([0, 1]))
-            .filter(q::run_at.le(now))
+            .filter(q::id.eq_any(ids))
             .order(q::id)
             .select(Task::as_select())
             .load(connection)?;
         Ok(tasks.into())
+    }
+
+    /// Every unfinished (pending or running) task, by id: what `next`
+    /// weighs topics against.
+    pub(crate) fn find_unfinished(connection: &mut SqliteConnection) -> QueryResult<Tasks> {
+        let tasks = q::table
+            .filter(q::status.eq_any([0, 1]))
+            .order(q::id)
+            .select(Task::as_select())
+            .load(connection)?;
+        Ok(tasks.into())
+    }
+
+    /// Every running task back to pending: what a dead process left.
+    pub(crate) fn recover(connection: &mut SqliteConnection, now: i64) -> QueryResult<usize> {
+        diesel::update(q::table.filter(q::status.eq(1)))
+            .set((q::status.eq(0), q::updated_at.eq(now)))
+            .execute(connection)
     }
 }

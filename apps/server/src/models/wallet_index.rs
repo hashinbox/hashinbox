@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use base::{Address, Addressed, Asset, Chain, Network, Networked};
+use base::{Address, Addressed, Asset, BlockHeader, Chain, Network, Networked};
 use diesel::{
     dsl::not,
     expression::BoxableExpression,
@@ -319,7 +319,7 @@ pub(crate) mod db {
                         id: row.asset,
                     },
                     birthday: uint(row.birthday)?,
-                    indexed_at: block.map(|block| block.header()).transpose()?,
+                    indexed_at: block.as_ref().map(BlockHeader::try_from).transpose()?,
                 })
             })
             .collect()

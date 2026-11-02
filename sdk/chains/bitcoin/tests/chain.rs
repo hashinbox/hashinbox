@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use ::rpc::testing::{Reply, Script};
 use base::{Addressed as _, Asset, Chained, Coin, Leg, TransactionId, TransactionState};
 use bitcoin::{
     Amount, BlockHash, Denomination, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
@@ -9,7 +10,6 @@ use bitcoin::{
 };
 use chain_bitcoin::{AddressType, Client, Config, KeyPair, Network};
 use crypto::SecretBytes;
-use json_rpc::testing::{Reply, Script};
 use serde_json::{Value, json};
 
 fn key_of(seed: u8) -> KeyPair {
@@ -291,7 +291,7 @@ async fn a_refetch_after_a_reorg_no_longer_holds_the_old_tip() {
 #[tokio::test]
 async fn a_chain_over_a_swap_follows_its_replacement() {
     let old = Script::new([Reply::ok("getblockcount", json!(10))]);
-    let swap = Arc::new(json_rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
+    let swap = Arc::new(::rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
     let rpc = Client::new(swap.clone(), Network::Regtest);
     let chain = Config::new(Network::Regtest, Vec::new())
         .chain(&rpc)

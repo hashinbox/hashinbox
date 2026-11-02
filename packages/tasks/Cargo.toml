@@ -4,17 +4,17 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-description = "Owned Tokio tasks and the durable job queue contract with its runner."
+description = "Owned Tokio tasks and durable job queue primitives."
 
 [features]
-# The Tokio runner (`tasks::Runner`) and `Handle::wait`.
-runner = ["dep:logging", "tokio/time", "tokio/macros"]
+# `Worker`, `Task` and `Ticking`.
+runner = ["tokio/time", "tokio/macros"]
 
 [dependencies]
 tokio = { version = "=1.49.0", default-features = false, features = ["rt", "sync"] }
 uuid.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-logging = { path = "../logging", optional = true }
 
 [lints]
 workspace = true

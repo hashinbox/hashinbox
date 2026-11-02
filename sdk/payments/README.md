@@ -2,7 +2,7 @@
 
 The container: every configured network built over the application's
 stores. Per network it keeps the `base::Service` its chain's `base::Config`
-built, and the `json_rpc::Swap` every part of that service reaches its nodes
+built, and the `rpc::Swap` every part of that service reaches its nodes
 through. It names no chain; every call is keyed by network.
 
 - `Document`: `{ networks: [{ chain, ..chain's own fields }] }`, read with
@@ -35,7 +35,7 @@ use serde::de::DeserializeOwned;
 async fn serve<C: Config + DeserializeOwned + 'static>(
     json: &str,
     storage: Storage,
-    other_nodes: Arc<dyn json_rpc::Client>,
+    other_nodes: Arc<dyn rpc::Client>,
 ) -> anyhow::Result<()> {
     let payments = Payments::builder()
         .with_chain::<C>("bitcoin")

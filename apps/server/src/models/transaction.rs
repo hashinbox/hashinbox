@@ -2,14 +2,14 @@
 //! mined in a kept block.
 
 use anyhow::Context as _;
-use base::{Address, Asset, Network, Reason, TransactionId, TransactionState};
+use base::{Address, Asset, Decimal, Network, Reason, TransactionId, TransactionState};
 use diesel::{
     prelude::*,
     sql_types::{BigInt, Text},
     sqlite::Sqlite,
 };
 
-use super::{Leg, LegFacts, int, key, leg, leg::Legs, schema::transactions, uint};
+use super::{Leg, Legs, int, key, leg, schema::transactions, uint};
 
 /// The `state` and `reason` columns of `state`.
 ///
@@ -55,21 +55,16 @@ pub(crate) fn decode_state(state: i32, reason: Option<&str>) -> anyhow::Result<T
 pub(crate) struct Transaction {
     pub(crate) id: String,
     pub(crate) block: Option<String>,
-    #[allow(
-        dead_code,
-        reason = "the whole row is selected; the network is the query's"
-    )]
     pub(crate) chain: String,
-    #[allow(
-        dead_code,
-        reason = "the whole row is selected; the network is the query's"
-    )]
     pub(crate) network: String,
     pub(crate) txid: String,
     pub(crate) order: Option<i64>,
     pub(crate) state: i32,
     pub(crate) reason: Option<String>,
     pub(crate) bytes: Vec<u8>,
+    #[allow(dead_code, reason = "the whole row is selected; kept as a record")]
+    pub(crate) sent_at: Option<i64>,
+    pub(crate) expires_at: Option<i64>,
 }
 
 impl Transaction {
@@ -81,29 +76,43 @@ impl Transaction {
     pub(crate) fn id(network: &Network, txid: &str) -> anyhow::Result<String> {
         key(&[network.chain.as_str(), &network.name, txid])
     }
+}
 
-    /// The transaction of this row with `legs` (its own, in order).
+impl Transaction {
+    /// The transaction this row was written from, with `legs` (its own, in
+    /// order).
     ///
     /// # Errors
     ///
     /// When a stored value does not decode.
-    pub(crate) fn transaction(
-        self,
-        network: &Network,
-        legs: Vec<LegFacts>,
-    ) -> anyhow::Result<base::Transaction> {
+    pub(crate) fn transaction(self, legs: Legs) -> anyhow::Result<base::Transaction> {
+        let network = Network::new(base::Chain::new(&self.chain), &self.network);
         Ok(base::Transaction {
             id: TransactionId::new(network.clone(), self.txid),
             state: decode_state(self.state, self.reason.as_deref())?,
             order: self.order.map(uint).transpose()?,
             legs: legs
                 .into_iter()
-                .map(|leg| leg.leg(network))
-                .collect::<anyhow::Result<Vec<base::Leg>>>()?,
+                .map(|leg| leg.leg(&network))
+                .collect::<anyhow::Result<Vec<_>>>()?,
             bytes: self.bytes,
+            expires: self.expires_at.map(uint).transpose()?,
         })
     }
 }
+
+/// An address cannot spend what a pending transaction takes, beyond what is
+/// in flight.
+#[derive(Debug)]
+pub(crate) struct Short;
+
+impl std::fmt::Display for Short {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("insufficient-funds")
+    }
+}
+
+impl std::error::Error for Short {}
 
 collection! {
     /// Transactions, in the order read.
@@ -127,6 +136,8 @@ pub(crate) mod db {
         state: i32,
         reason: Option<String>,
         bytes: &'a [u8],
+        sent_at: Option<i64>,
+        expires_at: Option<i64>,
     }
 
     /// One page of the transactions in live blocks with a leg of an address in
@@ -163,15 +174,20 @@ pub(crate) mod db {
             .map(Transactions::from)
     }
 
-    /// Keeps pending `transaction` with every leg (no block); a no-op when
-    /// its txid is kept, pending or mined.
+    /// Keeps pending `transaction`, recorded at `now`, with every leg (no
+    /// block); a no-op when its txid is kept, pending or mined. Its outgoing
+    /// legs count as spent until it is mined, deleted or expired.
     ///
     /// # Errors
     ///
-    /// When a value does not encode or the write fails.
+    /// [`Short`] when an address it takes from cannot spend what it takes,
+    /// beyond what is in flight (the caller's write must roll back: the row
+    /// is already inserted); when a value does not encode or the write
+    /// fails.
     pub(crate) fn insert_pending(
         connection: &mut SqliteConnection,
         transaction: &base::Transaction,
+        now: i64,
     ) -> anyhow::Result<()> {
         let (state, reason) = encode_state(&transaction.state)?;
         let network = &transaction.id.network;
@@ -186,12 +202,22 @@ pub(crate) mod db {
             state,
             reason,
             bytes: &transaction.bytes,
+            sent_at: Some(now),
+            expires_at: transaction.expires.map(int).transpose()?,
         };
         let added = diesel::insert_or_ignore_into(transactions::table)
             .values(&row)
             .execute(connection)?;
         if added == 0 {
             return Ok(());
+        }
+        // Checked before its own legs count; failing rolls the caller's
+        // write back.
+        for ((address, asset), takes) in transaction.debits() {
+            let spendable = leg::db::find_spendable(connection, &address, &asset)?;
+            if spendable.sum()? + takes < Decimal::zero() {
+                anyhow::bail!(Short);
+            }
         }
         let legs = (0_u32..)
             .zip(&transaction.legs)
@@ -227,6 +253,8 @@ pub(crate) mod db {
             state,
             reason,
             bytes: &transaction.bytes,
+            sent_at: None,
+            expires_at: None,
         };
         diesel::insert_into(transactions::table)
             .values(&row)
@@ -240,6 +268,51 @@ pub(crate) mod db {
             .collect::<anyhow::Result<Legs>>()?;
         leg::db::replace(connection, block, &id, &rows)?;
         Ok(())
+    }
+
+    /// The pending transaction `id`, if it is still pending.
+    pub(crate) fn find_pending(
+        connection: &mut SqliteConnection,
+        id: &str,
+    ) -> QueryResult<Option<Transaction>> {
+        transactions::table
+            .filter(transactions::id.eq(id))
+            .filter(transactions::block.is_null())
+            .select(Transaction::as_select())
+            .first(connection)
+            .optional()
+    }
+
+    /// Forgets pending transaction `id` and its legs (refused, expired):
+    /// its funds and coins are free again. A mined one is kept.
+    pub(crate) fn delete_by_id(connection: &mut SqliteConnection, id: &str) -> QueryResult<usize> {
+        leg::db::delete_for(connection, id)?;
+        diesel::delete(
+            transactions::table
+                .filter(transactions::id.eq(id))
+                .filter(transactions::block.is_null()),
+        )
+        .execute(connection)
+    }
+
+    /// Forgets every pending transaction of `network` past its expiry at
+    /// `now`, with its legs; how many.
+    pub(crate) fn expire(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        now: i64,
+    ) -> QueryResult<usize> {
+        let ids: Vec<String> = transactions::table
+            .filter(transactions::chain.eq(network.chain.as_str()))
+            .filter(transactions::network.eq(&network.name))
+            .filter(transactions::block.is_null())
+            .filter(transactions::expires_at.le(now))
+            .select(transactions::id)
+            .load(connection)?;
+        for id in &ids {
+            delete_by_id(connection, id)?;
+        }
+        Ok(ids.len())
     }
 
     /// Whether transaction `id` is mined in a live block at or below

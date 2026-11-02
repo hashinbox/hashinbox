@@ -9,7 +9,7 @@ and token transfers as EIP-1559 transactions.
 ```rust,no_run
 use base::{Asset, Broadcaster as _, BuilderExt as _, Chained as _, Config as _, Storage, WalletFactory as _};
 use chain_ethereum::{Config, Network};
-use json_rpc::Endpoint;
+use rpc::Endpoint;
 
 async fn ethereum(storage: Storage) -> anyhow::Result<()> {
     let config = Config::new(
@@ -58,7 +58,7 @@ tokens = [{ contract = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', decimals = 
   `interval_ms` milliseconds (default 12,000).
 - `client()` is the chain's own cluster over `endpoints`; `build(&storage,
   client)` verifies once that `client` serves the network and builds every
-  part over it. Pass a `json_rpc::Swap` and keep it to change nodes live.
+  part over it. Pass a `rpc::Swap` and keep it to change nodes live.
   Endpoints are needed only by `client()`.
 - Position and height are the block number. A block is confirmed once it is at
   or below the node's `finalized` block; a node that serves none yet (syncing,

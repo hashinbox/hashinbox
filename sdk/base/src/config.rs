@@ -4,8 +4,8 @@
 use std::{fmt, sync::Arc};
 
 use crate::{
-    Assets, BlockStore, Future, Indexer, InputStore, Network, TransactionStore,
-    WalletFactoryBroadcaster, WalletIndexStore, WalletStore,
+    Assets, BlockStore, Future, Indexer, InputStore, Network, WalletFactoryBroadcaster,
+    WalletIndexStore, WalletStore,
 };
 
 /// Every store the services need, supplied by the application.
@@ -17,8 +17,6 @@ pub struct Storage {
     pub indexes: Arc<dyn WalletIndexStore>,
     /// Unspent inputs, which UTXO wallets spend.
     pub inputs: Arc<dyn InputStore>,
-    /// Kept transactions.
-    pub transactions: Arc<dyn TransactionStore>,
     /// Keyed wallets.
     pub wallets: Arc<dyn WalletStore>,
 }
@@ -42,7 +40,7 @@ pub struct Service {
     pub storage: Storage,
     /// The node transport every part of the service reads and broadcasts
     /// through: the one passed to [`Config::build`].
-    pub client: Arc<dyn json_rpc::Client>,
+    pub client: Arc<dyn rpc::Client>,
 }
 
 impl fmt::Debug for Service {
@@ -64,11 +62,11 @@ pub trait Config: Send + Sync {
     /// # Errors
     ///
     /// No or invalid endpoints, or none reachable.
-    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn json_rpc::Client>>>;
+    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn rpc::Client>>>;
 
     /// Validates, verifies once that `client` serves this network, and
     /// builds the service over `storage`, every part of it reaching the
-    /// nodes through `client` (typically a [`json_rpc::Swap`] the caller
+    /// nodes through `client` (typically a [`rpc::Swap`] the caller
     /// keeps to change nodes live).
     ///
     /// # Errors
@@ -77,6 +75,6 @@ pub trait Config: Send + Sync {
     fn build<'a>(
         &'a self,
         storage: &'a Storage,
-        client: Arc<dyn json_rpc::Client>,
+        client: Arc<dyn rpc::Client>,
     ) -> Future<'a, anyhow::Result<Service>>;
 }

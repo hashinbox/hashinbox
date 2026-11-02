@@ -13,14 +13,18 @@ use diesel::{Connection as _, SqliteConnection, connection::SimpleConnection as 
 use crate::{
     models::{
         Json, Tag, Trigger, TriggerRun, Wallet, balance, int, tag, trigger,
-        trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Operator, Send, Target, This},
+        trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Operator, Target, This},
         trigger_run, wallet,
         wallet::db::IndexedSelector,
         wallet_index,
         wallet_index::{Selector, WalletIndexes},
         wallet_index_balance::{self, WalletIndexBalances},
     },
-    trigger::{Evaluation, Planned},
+    workers::broadcast::SendIntent,
+    workers::trigger::{
+        Context, Evaluation,
+        actions::{Action as _, SendInput, Transfer},
+    },
 };
 
 /// The confirmed tip of the test network.
@@ -762,7 +766,7 @@ fn triggers_and_their_runs_are_stored() {
         selector: Json(serde_json::from_str(r#"{"tag":"deposit"}"#).unwrap()),
         filter: None,
         check: Json(serde_json::from_str(r#""idle""#).unwrap()),
-        action: Json(serde_json::from_str(r#"{"send":{"source":{"this":{}},"asset":"native","destination":{"select":{"ids":["x"]}},"amount":{"balance":{}}}}"#).unwrap()),
+        action: Json(serde_json::from_str(r#"{"name":"send","input":{"source":{"this":{}},"asset":"native","destination":{"select":{"ids":["x"]}},"amount":{"balance":{}}}}"#).unwrap()),
         enabled: true,
         created_at: 1,
         updated_at: 1,
@@ -880,8 +884,8 @@ fn a_filter_keeps_each_index_on_its_own() {
     assert_eq!(kept.confirmed_at(), both.confirmed_at());
 }
 
-fn send(source: Target, destination: Target, amount: Amount) -> Send {
-    Send {
+fn send(source: Target, destination: Target, amount: Amount) -> SendInput {
+    SendInput {
         source,
         asset: "native".to_owned(),
         destination,
@@ -907,15 +911,29 @@ fn a_send_pays_per_source_or_per_destination() {
     // Many sources to one: everything less the fee, each source alone;
     // b's 50 sats do not cover its 100 sat fee, so it is skipped.
     let sweep = send(this(None), ids_of(&["b"]), Amount::Sub(balance(), fee()));
-    let plan = evaluation.plan(&sweep, &both).unwrap();
-    assert_eq!(
-        plan.transfers,
-        vec![Planned {
-            from: address("a"),
-            to: address("b"),
-            amount: decimal("590"),
-        }]
-    );
+    let keyed = [address("a"), address("b")].into_iter().collect();
+    // Each started job's sender and its (recipient, amount) transfers.
+    let mut plan = |send: &SendInput, this: &WalletIndexBalances| {
+        let mut context = Context::new(this.network(), this, &mut evaluation, &keyed);
+        Transfer.run(&mut context, &serde_json::to_value(send)?)?;
+        let sends = context.started().into_iter().map(|job| {
+            let intent: SendIntent = serde_json::from_value(job.input).unwrap();
+            let paid = intent
+                .transfers
+                .into_iter()
+                .map(|p| (p.to, p.amount))
+                .collect();
+            (intent.address, paid)
+        });
+        anyhow::Ok(sends.collect::<Vec<(String, Vec<(String, String)>)>>())
+    };
+    let sent = |from: &str, to: &str, amount: &str| {
+        vec![(
+            address(from).value,
+            vec![(address(to).value, amount.to_owned())],
+        )]
+    };
+    assert_eq!(plan(&sweep, &both).unwrap(), sent("a", "b", "590"));
 
     // One source to many: each destination's shortfall up to 100 sats.
     let shortfall = Amount::Max(
@@ -923,15 +941,7 @@ fn a_send_pays_per_source_or_per_destination() {
         Box::new(value("0")),
     );
     let fund = send(ids_of(&["a"]), this(None), shortfall);
-    let plan = evaluation.plan(&fund, &b).unwrap();
-    assert_eq!(
-        plan.transfers,
-        vec![Planned {
-            from: address("a"),
-            to: address("b"),
-            amount: decimal("50"),
-        }]
-    );
+    assert_eq!(plan(&fund, &b).unwrap(), sent("a", "b", "50"));
 
     // Many to many is refused.
     let tangled = send(
@@ -939,7 +949,7 @@ fn a_send_pays_per_source_or_per_destination() {
         ids_of(&["a", "b"]),
         Amount::Balance { of: this(None) },
     );
-    assert!(evaluation.plan(&tangled, &both).is_err());
+    assert!(plan(&tangled, &both).is_err());
 }
 
 /// A stored, enabled trigger `id` on the test network picking `selector`.
@@ -953,7 +963,7 @@ fn keep_trigger(connection: &mut SqliteConnection, id: &str, selector: Selector)
         check: Json(Logic::Leaf(Gate::Idle)),
         action: Json(
             serde_json::from_str(
-                r#"{"send":{"source":{"this":{}},"asset":"native","destination":{"select":{"ids":["x"]}},"amount":{"balance":{}}}}"#,
+                r#"{"name":"send","input":{"source":{"this":{}},"asset":"native","destination":{"select":{"ids":["x"]}},"amount":{"balance":{}}}}"#,
             )
             .unwrap(),
         ),
@@ -981,7 +991,11 @@ fn a_block_touches_the_triggers_selecting_what_it_changed() {
     keep_trigger(&mut connection, "tokens", asset("tok"));
     // Block 2 moved only a's native; block 1 a's native and token.
     let touched = |connection: &mut SqliteConnection, headers: &[base::BlockHeader]| {
-        crate::trigger::touched(connection, &network(), headers).unwrap()
+        let blocks: Vec<String> = headers
+            .iter()
+            .map(|header| crate::models::Block::id(&network(), &header.hash).unwrap())
+            .collect();
+        crate::workers::trigger::touched(connection, &network(), &blocks).unwrap()
     };
     assert_eq!(
         touched(&mut connection, &[header(2, 2)])
@@ -999,15 +1013,19 @@ fn a_block_touches_the_triggers_selecting_what_it_changed() {
     assert!(touched(&mut connection, &[header(5, 0xf5)]).is_empty());
 }
 
-/// A queued send job `id` in `state` that sent `txids`.
-fn job_row(id: &str, state: i32, txids: &[&str]) -> crate::models::Task {
+/// A queued send job `id` in `status` that sent `txids`.
+fn job_row(id: &str, status: i32, txids: &[&str]) -> crate::models::Task {
     crate::models::Task {
         id: id.to_owned(),
-        lane: "l".to_owned(),
+        topic: "l".to_owned(),
         kind: "send".to_owned(),
-        state,
-        payload: serde_json::json!({ "progress": { "ids": txids } }).to_string(),
+        status,
         run_at: 0,
+        deadline: None,
+        attempts: 1,
+        reason: None,
+        input: "{}".to_owned(),
+        state: Some(serde_json::json!({ "ids": txids, "sent": txids.len() }).to_string()),
     }
 }
 
@@ -1026,14 +1044,14 @@ fn a_run_settles_when_its_sends_are_done_and_confirmed() {
         (40, job_row("j4", 3, &["t9"]), true),
     ];
     for (started, job, _) in &cases {
-        crate::models::task::db::upsert(&mut connection, job, 0).unwrap();
+        crate::models::task::db::insert(&mut connection, job, 0).unwrap();
         let run = TriggerRun {
             jobs: Json(vec![job.id.clone()]),
             ..TriggerRun::new("sweep", *started)
         };
         trigger_run::db::insert(&mut connection, &run).unwrap();
     }
-    let settled = crate::trigger::run::settle(&mut connection, &network(), 99).unwrap();
+    let settled = crate::workers::trigger::settle(&mut connection, &network(), 99).unwrap();
     assert_eq!(settled, ["sweep", "sweep"]);
     let open = trigger_run::db::find_unsettled(&mut connection, &network()).unwrap();
     let open: Vec<i64> = open.iter().map(|run| run.started_at).collect();

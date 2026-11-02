@@ -67,14 +67,6 @@ impl Wallet {
         ])
     }
 
-    /// Its address.
-    pub(crate) fn address(&self) -> Address {
-        Address::new(
-            Network::new(Chain::new(&self.chain), &self.network),
-            &self.address,
-        )
-    }
-
     /// Its key's curve.
     ///
     /// # Errors
@@ -94,10 +86,20 @@ collection! {
     Wallets(Wallet)
 }
 
+/// A wallet row's address.
+impl From<&Wallet> for Address {
+    fn from(row: &Wallet) -> Self {
+        Self::new(
+            Network::new(Chain::new(&row.chain), &row.network),
+            &row.address,
+        )
+    }
+}
+
 impl Wallets {
     /// Their addresses, in order.
     pub(crate) fn addresses(&self) -> Vec<Address> {
-        self.iter().map(Wallet::address).collect()
+        self.iter().map(Address::from).collect()
     }
 }
 

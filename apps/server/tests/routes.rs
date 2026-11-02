@@ -59,6 +59,7 @@ fn paid(to: &str, amount: u64) -> Blocks {
             coin: None,
         }],
         bytes: vec![0],
+        expires: None,
     };
     let mut blocks = Blocks::new(network());
     assert!(blocks.push(Block {

@@ -12,7 +12,7 @@ use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody};
-use crate::{state::AppState, workers::send};
+use crate::{state::AppState, workers::broadcast};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(read))
@@ -30,7 +30,7 @@ struct JobPath {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 enum JobState {
-    /// Waiting for its turn on its lane.
+    /// Waiting for its turn.
     Pending,
     /// Executing.
     Running,
@@ -85,21 +85,17 @@ async fn read(
         .await
         .map_err(|error| Error::unavailable(error.to_string()))?
         .ok_or_else(|| Error::not_found("job does not exist"))?;
-    let (signed, accepted) = send::progress(&job.payload);
+    let (signed, accepted) = broadcast::progress(job.state.as_ref());
     Ok(Json(ReadResponse {
         id: job.id.to_string(),
         kind: job.kind,
-        state: match job.state {
-            tasks::State::Pending => JobState::Pending,
-            tasks::State::Running => JobState::Running,
-            tasks::State::Done => JobState::Succeeded,
-            tasks::State::Failed => JobState::Failed,
+        state: match job.status {
+            tasks::Status::Pending => JobState::Pending,
+            tasks::Status::Running => JobState::Running,
+            tasks::Status::Done => JobState::Succeeded,
+            tasks::Status::Failed => JobState::Failed,
         },
-        reason: job
-            .payload
-            .get("reason")
-            .and_then(|reason| reason.as_str())
-            .map(str::to_owned),
+        reason: job.reason,
         signed,
         accepted,
     }))

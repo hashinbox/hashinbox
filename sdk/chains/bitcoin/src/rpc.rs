@@ -1,15 +1,15 @@
-//! The Bitcoin Core calls this crate makes, over `json_rpc`, answered in
+//! The Bitcoin Core calls this crate makes, over `::rpc`, answered in
 //! `base` types.
 
 use std::sync::Arc;
 
+use ::rpc::{Batch, Call, CallResult, Failure, Request};
 use anyhow::{Context as _, bail, ensure};
 use base::{
     Block, BlockHash, BlockHeader, BlockParent, Blocks, Reason, Tips, TransactionError,
     TransactionErrorKind, Transactions,
 };
 use bitcoin::{Amount, Denomination, hashes::Hash as _, hex::DisplayHex as _};
-use json_rpc::{Batch, Call, CallResult, Failure, Request};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
@@ -31,14 +31,14 @@ const ALREADY_IN_CHAIN: i64 = -27;
 /// A Bitcoin Core client of one network; cheap to clone.
 #[derive(Clone)]
 pub struct Client {
-    transport: Arc<dyn json_rpc::Client>,
+    transport: Arc<dyn ::rpc::Client>,
     network: Network,
 }
 
 impl Client {
     /// A client of `network` over `transport`; [`Self::verify`] checks the node.
     #[must_use]
-    pub fn new(transport: Arc<dyn json_rpc::Client>, network: Network) -> Self {
+    pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
         Self { transport, network }
     }
 
@@ -148,9 +148,9 @@ impl Client {
     pub async fn send(&self, bytes: &[u8]) -> Result<(), TransactionError> {
         let request = Request::once("sendrawtransaction", json!([bytes.to_lower_hex_string()]));
         match self.transport.broadcast(request).await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(failure)) => refusal(&failure),
-            Err(error) => Err(TransactionError::new(
+            Ok(()) => Ok(()),
+            Err(::rpc::CallError::Remote(failure)) => refusal(&failure),
+            Err(::rpc::CallError::Transport(error)) => Err(TransactionError::new(
                 TransactionErrorKind::Unavailable,
                 format!("Bitcoin sendrawtransaction: {error}"),
             )),
@@ -284,8 +284,8 @@ struct WireBlock {
 impl base::Broadcaster for Client {
     fn broadcast<'a>(
         &'a self,
-        transaction: &'a (dyn base::Enveloped + Sync),
+        transaction: &'a base::Transaction,
     ) -> base::Future<'a, Result<(), TransactionError>> {
-        Box::pin(self.send(transaction.envelope()))
+        Box::pin(self.send(&transaction.bytes))
     }
 }

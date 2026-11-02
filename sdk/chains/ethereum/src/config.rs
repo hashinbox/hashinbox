@@ -2,12 +2,12 @@
 
 use std::{sync::Arc, time::Duration};
 
+use ::rpc::{Cluster, Endpoint, Policy, Retry};
 use alloy_primitives::hex;
 use anyhow::{Context as _, ensure};
 use base::{
     Asset, AssetInfo, Assets, Future, Indexer, Service, Storage, Timer, WalletFactoryBroadcaster,
 };
-use json_rpc::{Cluster, Endpoint, Policy, Retry};
 use serde::{Deserialize, Deserializer, de};
 
 use crate::{
@@ -35,6 +35,10 @@ pub struct Config {
     /// How long fetched fees price sends, in milliseconds; default 12,000.
     #[serde(default = "Config::default_fee_ttl_ms")]
     pub fee_ttl_ms: u64,
+    /// How long a broadcast transaction counts as pending before it is
+    /// given up on, in milliseconds; default 3_600_000 (one hour).
+    #[serde(default = "Config::default_pending_ttl_ms")]
+    pub pending_ttl_ms: u64,
     /// How often the indexer wakes, in milliseconds; default 12,000.
     #[serde(default = "Config::default_interval_ms")]
     pub interval_ms: u64,
@@ -63,12 +67,17 @@ impl Config {
             tokens: Vec::new(),
             limits: FeeLimits::default(),
             fee_ttl_ms: Self::default_fee_ttl_ms(),
+            pending_ttl_ms: Self::default_pending_ttl_ms(),
             interval_ms: Self::default_interval_ms(),
         }
     }
 
     const fn default_fee_ttl_ms() -> u64 {
         12_000
+    }
+
+    const fn default_pending_ttl_ms() -> u64 {
+        3_600_000
     }
 
     const fn default_interval_ms() -> u64 {
@@ -112,7 +121,7 @@ impl Config {
     }
 
     /// A cluster of the configured endpoints.
-    async fn cluster(&self) -> anyhow::Result<Arc<dyn json_rpc::Client>> {
+    async fn cluster(&self) -> anyhow::Result<Arc<dyn ::rpc::Client>> {
         ensure!(!self.endpoints.is_empty(), "Ethereum needs an endpoint");
         let nodes = self
             .endpoints
@@ -126,7 +135,7 @@ impl Config {
     }
 
     /// Validates, and a verified client over `transport`.
-    async fn open(&self, transport: Arc<dyn json_rpc::Client>) -> anyhow::Result<Client> {
+    async fn open(&self, transport: Arc<dyn ::rpc::Client>) -> anyhow::Result<Client> {
         self.validate()?;
         let client = Client::new(transport, self.native());
         client.verify().await?;
@@ -160,6 +169,7 @@ impl Config {
         );
         Factory {
             rpc: rpc.clone(),
+            pending_ttl: Duration::from_millis(self.pending_ttl_ms),
             tokens: self.contracts(),
             fees: Arc::new(fees),
         }
@@ -212,14 +222,14 @@ impl base::Config for Config {
         (&self.native()).into()
     }
 
-    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn json_rpc::Client>>> {
+    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn ::rpc::Client>>> {
         Box::pin(self.cluster())
     }
 
     fn build<'a>(
         &'a self,
         storage: &'a Storage,
-        client: Arc<dyn json_rpc::Client>,
+        client: Arc<dyn ::rpc::Client>,
     ) -> Future<'a, anyhow::Result<Service>> {
         Box::pin(async move {
             let rpc = self.open(Arc::clone(&client)).await?;

@@ -1,4 +1,4 @@
-//! The Ethereum JSON-RPC calls this crate makes, over `json_rpc`, answered in
+//! The Ethereum JSON-RPC calls this crate makes, over `::rpc`, answered in
 //! `base` types.
 
 use std::sync::{
@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use ::rpc::{Batch, Call, CallError, CallResult, Client as _, Failure, Request};
 use alloy_consensus::TxEip1559;
 use alloy_primitives::{B256, Bytes, U64, U256, hex, keccak256};
 use alloy_rpc_types_eth::Block as RpcBlock;
@@ -14,7 +15,6 @@ use base::{
     Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, Reason, Reward, Tips,
     TransactionError, TransactionErrorKind, Transactions,
 };
-use json_rpc::{Batch, Call, CallError, CallResult, Client as _, Failure, Request};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
@@ -35,7 +35,7 @@ type WireBlock = RpcBlock<Value>;
 pub struct Client(Arc<Inner>);
 
 struct Inner {
-    transport: Arc<dyn json_rpc::Client>,
+    transport: Arc<dyn ::rpc::Client>,
     network: Network,
     /// Set once the node refuses `eth_getBlockReceipts`: receipts then come
     /// one per transaction.
@@ -45,7 +45,7 @@ struct Inner {
 impl Client {
     /// A client of `network` over `transport`; [`Self::verify`] checks the node.
     #[must_use]
-    pub fn new(transport: Arc<dyn json_rpc::Client>, network: Network) -> Self {
+    pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
         Self(Arc::new(Inner {
             transport,
             network,
@@ -266,9 +266,9 @@ impl Client {
             json!([hex::encode_prefixed(bytes)]),
         );
         let failure = match self.0.transport.broadcast(request).await {
-            Ok(Ok(_)) => return Ok(()),
-            Ok(Err(failure)) => failure,
-            Err(error) => {
+            Ok(()) => return Ok(()),
+            Err(::rpc::CallError::Remote(failure)) => failure,
+            Err(::rpc::CallError::Transport(error)) => {
                 return Err(TransactionError::unavailable(format!(
                     "Ethereum eth_sendRawTransaction: {error}"
                 )));
@@ -366,15 +366,15 @@ impl Client {
 impl base::Broadcaster for Client {
     fn broadcast<'a>(
         &'a self,
-        transaction: &'a (dyn base::Enveloped + Sync),
+        transaction: &'a base::Transaction,
     ) -> base::Future<'a, Result<(), TransactionError>> {
-        Box::pin(self.send(transaction.envelope()))
+        Box::pin(self.send(&transaction.bytes))
     }
 }
 
-/// A node's height (`eth_blockNumber`): how a [`json_rpc::Cluster`] picks its
+/// A node's height (`eth_blockNumber`): how a [`::rpc::Cluster`] picks its
 /// primary.
-pub(crate) fn height(node: &json_rpc::Http) -> json_rpc::BoxFuture<'_, Result<u64, CallError>> {
+pub(crate) fn height(node: &::rpc::Http) -> ::rpc::BoxFuture<'_, Result<u64, CallError>> {
     Box::pin(async move {
         let raw = node
             .request(Request::new("eth_blockNumber", json!([])))

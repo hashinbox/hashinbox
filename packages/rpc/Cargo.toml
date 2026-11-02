@@ -1,5 +1,5 @@
 [package]
-name = "json-rpc"
+name = "rpc"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ readme = "README.md"
 
 [features]
 default = []
-# The scripted node double (`json_rpc::testing`). Off, the crate carries no
+# The scripted node double (`rpc::testing`). Off, the crate carries no
 # test scaffolding; it belongs in a `[dev-dependencies]` entry only.
 testing = []
 
@@ -24,7 +24,7 @@ url = "2"
 futures-executor.workspace = true
 # This package on itself: the only way Cargo offers to turn one of a crate's
 # own features on for its own integration tests.
-json-rpc = { path = ".", features = ["testing"] }
+rpc = { path = ".", features = ["testing"] }
 
 [lints]
 workspace = true

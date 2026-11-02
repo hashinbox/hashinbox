@@ -9,7 +9,7 @@ token transfers.
 ```rust,no_run
 use base::{Asset, Broadcaster as _, BuilderExt as _, Chained as _, Config as _, Storage, WalletFactory as _};
 use chain_solana::{Config, Network};
-use json_rpc::Endpoint;
+use rpc::Endpoint;
 
 async fn solana(storage: Storage) -> anyhow::Result<()> {
     let genesis = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d".parse()?;
@@ -59,7 +59,7 @@ tokens = [{ mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals = 6 
   `interval_ms` milliseconds (default 1,000).
 - `client()` is the chain's own cluster over `endpoints`; `build(&storage,
   client)` verifies once that `client` serves the network and builds every
-  part over it. Pass a `json_rpc::Swap` and keep it to change nodes live.
+  part over it. Pass a `rpc::Swap` and keep it to change nodes live.
   Endpoints are needed only by `client()`.
 - Position is the slot; a skipped slot holds no block. `Header.height` is the
   block height. Blocks are read at `confirmed` commitment; `Tips.produced` is

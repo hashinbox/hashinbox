@@ -16,11 +16,10 @@ import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Typography from '@mui/material/Typography';
 import { useState, type ReactNode } from 'react';
-import { call, client, type TriggerPreview, type Wallet } from '@/api/client';
+import type { Wallet } from '@/api/client';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { ActionPart, type Choices } from './action';
-import { Preview } from './preview';
 import {
   AGGREGATES,
   OPERATORS,
@@ -47,11 +46,10 @@ interface Props {
 
 /**
  * Any trigger, part by part: its id and network, target, filter, check and
- * action, with a JSON view for what the forms cannot show and a preview of
- * what it would do now. It holds no state of its own beyond that view.
+ * action, with a JSON view for what the forms cannot show. It holds no
+ * state of its own beyond that view.
  */
 export function TriggerForm({ shell, wallets, tags, value: def, onChange, kept }: Props) {
-  const [preview, setPreview] = useState<TriggerPreview | null>(null);
   const [json, setJson] = useState(false);
   const assets = shell.listings
     .filter((l) => l.network.chain === def.chain && l.network.name === def.network)
@@ -59,19 +57,6 @@ export function TriggerForm({ shell, wallets, tags, value: def, onChange, kept }
   const choices: Choices = { chain: def.chain, network: def.network, assets, wallets, tags };
   const update = (patch: Partial<Definition>) => {
     onChange({ ...def, ...patch });
-    setPreview(null);
-  };
-
-  const look = () => {
-    const body = {
-      chain: def.chain,
-      network: def.network,
-      selector: def.selector,
-      filter: def.filter,
-      check: def.check,
-      action: def.action,
-    } as never;
-    call(client.POST('/v1/triggers/preview', { body })).then(setPreview).catch(shell.fail);
   };
 
   return (
@@ -130,9 +115,6 @@ export function TriggerForm({ shell, wallets, tags, value: def, onChange, kept }
       </Section>
 
       <Stack direction="row" spacing={1.5} sx={{ mt: 1, mb: 2 }}>
-        <Button variant="outlined" onClick={look}>
-          Preview now
-        </Button>
         <Button color="inherit" onClick={() => setJson(!json)}>
           {json ? 'Hide JSON' : 'Edit as JSON'}
         </Button>
@@ -147,8 +129,6 @@ export function TriggerForm({ shell, wallets, tags, value: def, onChange, kept }
           }
         />
       </Collapse>
-
-      {preview && <Preview preview={preview} />}
     </Box>
   );
 }

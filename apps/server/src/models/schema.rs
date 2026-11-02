@@ -29,6 +29,8 @@ diesel::table! {
         state -> Integer,
         reason -> Nullable<Text>,
         bytes -> Binary,
+        sent_at -> Nullable<BigInt>,
+        expires_at -> Nullable<BigInt>,
     }
 }
 
@@ -73,11 +75,15 @@ diesel::table! {
 diesel::table! {
     q (id) {
         id -> Text,
-        lane -> Text,
+        topic -> Text,
         kind -> Text,
-        state -> Integer,
-        payload -> Text,
+        status -> Integer,
         run_at -> BigInt,
+        deadline -> Nullable<BigInt>,
+        attempts -> Integer,
+        reason -> Nullable<Text>,
+        input -> Text,
+        state -> Nullable<Text>,
         created_at -> BigInt,
         updated_at -> BigInt,
     }

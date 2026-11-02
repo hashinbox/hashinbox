@@ -58,7 +58,7 @@ async fn list(State(state): State<Arc<AppState>>) -> Json<ListResponse> {
         .map(|info| Listing {
             asset: info.asset.id.clone(),
             network: info.asset.network.clone().into(),
-            metadata: Asset::new(&info),
+            metadata: Asset::from(&info),
         })
         .collect();
     Json(ListResponse { assets })

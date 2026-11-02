@@ -16,13 +16,13 @@ const MOST: usize = 16;
 
 /// One configured RPC endpoint: the document a configuration file's
 /// `rpc.endpoints` holds — a URL, or an object with the URL and bounds —
-/// checked as `json_rpc::Endpoint` checks it.
+/// checked as `rpc::Endpoint` checks it.
 
 #[derive(Clone)]
 pub(crate) struct Endpoint {
     document: Value,
     /// The node the document describes.
-    endpoint: json_rpc::Endpoint,
+    endpoint: rpc::Endpoint,
     /// The URL's scheme, host and port; `unresolved` when it does not parse.
     origin: String,
 }
@@ -33,9 +33,9 @@ impl Endpoint {
     /// # Errors
     ///
     /// One that is neither a URL nor an endpoint object, or one
-    /// `json_rpc::Endpoint::validate` refuses.
+    /// `rpc::Endpoint::validate` refuses.
     pub(crate) fn new(document: Value) -> Result<Self, String> {
-        let endpoint: json_rpc::Endpoint = serde_json::from_value(document.clone())
+        let endpoint: rpc::Endpoint = serde_json::from_value(document.clone())
             .map_err(|_| "an RPC node is a URL or an object of url and bounds")?;
         endpoint.validate().map_err(|error| error.to_string())?;
         let origin = url::Url::parse(&endpoint.url).map_or_else(
@@ -49,9 +49,9 @@ impl Endpoint {
         })
     }
 
-    /// Its URL, the URL's parts ([`json_rpc::Endpoint::parts`]) and its bounds;
+    /// Its URL, the URL's parts ([`rpc::Endpoint::parts`]) and its bounds;
     /// `None` when its URL does not parse.
-    pub(crate) fn view(&self) -> Option<(String, json_rpc::Parts, json_rpc::Bounds)> {
+    pub(crate) fn view(&self) -> Option<(String, rpc::Parts, rpc::Bounds)> {
         Some((
             self.endpoint.url.clone(),
             self.endpoint.parts()?,
@@ -112,12 +112,12 @@ impl RpcEndpoints {
 
     /// Each one's parts and bounds, in failover order; one whose URL does
     /// not parse is left out.
-    pub(crate) fn views(&self) -> Vec<(String, json_rpc::Parts, json_rpc::Bounds)> {
+    pub(crate) fn views(&self) -> Vec<(String, rpc::Parts, rpc::Bounds)> {
         self.0.iter().filter_map(Endpoint::view).collect()
     }
 
     /// The nodes the documents describe, in failover order, for a transport.
-    pub(crate) fn nodes(&self) -> Vec<json_rpc::Endpoint> {
+    pub(crate) fn nodes(&self) -> Vec<rpc::Endpoint> {
         self.0
             .iter()
             .map(|endpoint| endpoint.endpoint.clone())

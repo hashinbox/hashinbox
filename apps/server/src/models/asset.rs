@@ -19,9 +19,9 @@ pub(crate) struct Asset {
     pub(crate) decimals: u32,
 }
 
-impl Asset {
-    /// The asset as its own chain declared it.
-    pub(crate) fn new(info: &base::AssetInfo) -> Self {
+/// The asset as its own chain declared it.
+impl From<&base::AssetInfo> for Asset {
+    fn from(info: &base::AssetInfo) -> Self {
         Self {
             chain: info.asset.network.chain.to_string(),
             id: info.asset.id.clone(),

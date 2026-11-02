@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, ops::Range};
 
 use anyhow::{Context as _, anyhow, ensure};
 use base::{
-    Addressed as _, Asset, Decimal, Enveloped, Leg, Networked as _, Output, Outputs, Reason,
-    Transacted, TransactionId, TransactionState,
+    Addressed as _, Asset, Decimal, Leg, Networked as _, Output, Outputs, Reason, Transacted,
+    TransactionId, TransactionState,
 };
 use crypto::PrivateKey as _;
 use serde::Deserialize;
@@ -125,6 +125,7 @@ impl Transaction {
             order,
             legs,
             bytes: Vec::new(),
+            expires: None,
         };
         Self { native, base }
     }
@@ -175,12 +176,6 @@ impl Transaction {
 impl Transacted for Transaction {
     fn txid(&self) -> &TransactionId {
         &self.base.id
-    }
-}
-
-impl Enveloped for Transaction {
-    fn envelope(&self) -> &[u8] {
-        &self.base.bytes
     }
 }
 

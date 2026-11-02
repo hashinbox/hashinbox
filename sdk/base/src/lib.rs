@@ -31,10 +31,9 @@ pub use indexer::{Birthday, DEFAULT_BATCH, Handle, Handles, Indexer, Indexers, N
 pub use inout::{Coin, Input, Inputs, Output, Outputs, Store as InputStore};
 pub use network::{Network, Networked};
 pub use transaction::{
-    Broadcaster, Builder, BuilderExt, Enveloped, Error as TransactionError,
-    ErrorKind as TransactionErrorKind, Future, Id as TransactionId, Leg, Reason, Signer,
-    State as TransactionState, Store as TransactionStore, Transacted, Transaction, Transactions,
-    Transfer,
+    Broadcaster, Builder, BuilderExt, Error as TransactionError, ErrorKind as TransactionErrorKind,
+    Future, Id as TransactionId, Leg, Reason, Signer, State as TransactionState, Transacted,
+    Transaction, Transactions, Transfer,
 };
 pub use wallet::{
     Error as WalletError, ErrorKind as WalletErrorKind, Factories as WalletFactories,

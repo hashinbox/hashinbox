@@ -3,7 +3,7 @@
 //! in a live block names it.
 
 use anyhow::Context as _;
-use base::{Address, Asset, Coin, Decimal, Input, Network, Reward, TransactionId};
+use base::{Address, Addressed as _, Asset, Coin, Decimal, Input, Network, Reward, TransactionId};
 use diesel::{
     prelude::*,
     sql_types::{BigInt, Text},
@@ -15,10 +15,13 @@ use super::{child, int, schema::leg, uint};
 /// The `kind` of a reward row.
 const REWARD: i32 = 5;
 
-/// What one leg moved: a `leg` row's own columns.
+/// One `leg` row: a transaction's leg, or a block's reward.
 #[derive(Clone, Debug, Queryable, Selectable, Insertable, QueryableByName)]
 #[diesel(table_name = leg, check_for_backend(Sqlite))]
-pub(crate) struct LegFacts {
+pub(crate) struct Leg {
+    pub(crate) id: String,
+    pub(crate) block: Option<String>,
+    pub(crate) transaction: Option<String>,
     pub(crate) leg_index: i64,
     pub(crate) kind: i32,
     pub(crate) address: String,
@@ -28,51 +31,63 @@ pub(crate) struct LegFacts {
     pub(crate) coin_index: Option<i64>,
 }
 
-impl LegFacts {
-    /// The facts of transaction leg `index`.
-    pub(crate) fn new(index: u32, leg: &base::Leg) -> Self {
-        let (kind, address, asset, amount, coin) = match leg {
-            base::Leg::Received {
-                address,
-                asset,
-                amount,
-                coin,
-            } => (0, address, asset, amount, coin.as_ref()),
-            base::Leg::Spent {
-                address,
-                asset,
-                amount,
-                coin,
-            } => (1, address, asset, amount, coin.as_ref()),
-            base::Leg::Burned {
-                address,
-                asset,
-                amount,
-            } => (2, address, asset, amount, None),
-            base::Leg::Minted {
-                address,
-                asset,
-                amount,
-            } => (3, address, asset, amount, None),
-            base::Leg::Fee {
-                address,
-                asset,
-                amount,
-            } => (4, address, asset, amount, None),
+impl Leg {
+    /// The row of leg `index` of transaction `transaction`, mined in
+    /// `block` or pending (`None`): id `"{transaction}.{index}"`.
+    ///
+    /// # Errors
+    ///
+    /// When an id part holds a dot.
+    pub(crate) fn new(
+        block: Option<&str>,
+        transaction: &str,
+        index: u32,
+        leg: &base::Leg,
+    ) -> anyhow::Result<Self> {
+        let (kind, coin) = match leg {
+            base::Leg::Received { coin, .. } => (0, coin.as_ref()),
+            base::Leg::Spent { coin, .. } => (1, coin.as_ref()),
+            base::Leg::Burned { .. } => (2, None),
+            base::Leg::Minted { .. } => (3, None),
+            base::Leg::Fee { .. } => (4, None),
         };
-        Self {
+        Ok(Self {
+            id: child(transaction, &[&index.to_string()])?,
+            block: block.map(str::to_owned),
+            transaction: Some(transaction.to_owned()),
             leg_index: i64::from(index),
             kind,
-            address: address.value.clone(),
-            asset: asset.id.clone(),
-            amount: amount.to_string(),
+            address: leg.address().value.clone(),
+            asset: leg.asset().id.clone(),
+            amount: leg.amount().to_string(),
             coin_txid: coin.map(|coin| coin.transaction.id.clone()),
             coin_index: coin.map(|coin| i64::from(coin.index)),
-        }
+        })
     }
 
-    /// What it adds to its address's balance: credits (received, minted, a
-    /// signed reward) count up, debits (spent, burned, fees) down.
+    /// The row of `reward` of block `block`: id `"{block}.reward.{index}"`.
+    ///
+    /// # Errors
+    ///
+    /// When its index is out of range or an id part holds a dot.
+    pub(crate) fn reward(block: &str, reward: &Reward) -> anyhow::Result<Self> {
+        let index = int(reward.index)?;
+        Ok(Self {
+            id: child(block, &["reward", &index.to_string()])?,
+            block: Some(block.to_owned()),
+            transaction: None,
+            leg_index: index,
+            kind: REWARD,
+            address: reward.address.value.clone(),
+            asset: reward.asset.id.clone(),
+            amount: reward.amount.to_string(),
+            coin_txid: None,
+            coin_index: None,
+        })
+    }
+
+    /// What it adds to its address's balance: [`base::Leg::signed`]'s rule,
+    /// and a reward's own sign.
     ///
     /// # Errors
     ///
@@ -88,8 +103,11 @@ impl LegFacts {
             _ => anyhow::bail!("a stored leg kind is unknown"),
         })
     }
+}
 
-    /// The transaction leg of these facts, of `network`.
+impl Leg {
+    /// The transaction leg this row was written from, of `network` (the row
+    /// holds none).
     ///
     /// # Errors
     ///
@@ -145,66 +163,21 @@ impl LegFacts {
     }
 }
 
-/// One `leg` row.
-#[derive(Clone, Debug, Queryable, Selectable, Insertable, QueryableByName)]
-#[diesel(table_name = leg, check_for_backend(Sqlite))]
-pub(crate) struct Leg {
-    pub(crate) id: String,
-    pub(crate) block: Option<String>,
-    pub(crate) transaction: Option<String>,
-    #[diesel(embed)]
-    pub(crate) facts: LegFacts,
-}
-
-impl Leg {
-    /// The row of leg `index` of transaction `transaction`, mined in
-    /// `block` or pending (`None`): id `"{transaction}.{index}"`.
-    ///
-    /// # Errors
-    ///
-    /// When the coin index is out of range or an id part holds a dot.
-    pub(crate) fn new(
-        block: Option<&str>,
-        transaction: &str,
-        index: u32,
-        leg: &base::Leg,
-    ) -> anyhow::Result<Self> {
-        let facts = LegFacts::new(index, leg);
-        Ok(Self {
-            id: child(transaction, &[&facts.leg_index.to_string()])?,
-            block: block.map(str::to_owned),
-            transaction: Some(transaction.to_owned()),
-            facts,
-        })
-    }
-
-    /// The row of `reward` of block `block`: id `"{block}.reward.{index}"`.
-    ///
-    /// # Errors
-    ///
-    /// When its index is out of range or an id part holds a dot.
-    pub(crate) fn reward(block: &str, reward: &Reward) -> anyhow::Result<Self> {
-        let index = int(reward.index)?;
-        Ok(Self {
-            id: child(block, &["reward", &index.to_string()])?,
-            block: Some(block.to_owned()),
-            transaction: None,
-            facts: LegFacts {
-                leg_index: index,
-                kind: REWARD,
-                address: reward.address.value.clone(),
-                asset: reward.asset.id.clone(),
-                amount: reward.amount.to_string(),
-                coin_txid: None,
-                coin_index: None,
-            },
-        })
-    }
-}
-
 collection! {
-    /// Legs, in the order written.
+    /// Legs, in the order read or written.
     Legs(Leg)
+}
+
+impl Legs {
+    /// What they add to their addresses' balances.
+    ///
+    /// # Errors
+    ///
+    /// When a stored amount or kind does not decode.
+    pub(crate) fn sum(&self) -> anyhow::Result<Decimal> {
+        self.iter()
+            .try_fold(Decimal::zero(), |sum, leg| Ok(sum + leg.signed()?))
+    }
 }
 
 /// The `leg` table's statements.
@@ -216,13 +189,14 @@ pub(crate) mod db {
     #[derive(QueryableByName)]
     struct Unspent {
         #[diesel(embed)]
-        leg: LegFacts,
+        leg: Leg,
         #[diesel(sql_type = BigInt)]
         height: i64,
     }
 
     /// The `Received` legs of an address with a coin, in live blocks, that no
-    /// `Spent` leg in a live block of the same network consumes.
+    /// `Spent` leg of the same network consumes, in a live block or in a
+    /// pending transaction (spent from broadcast on).
     const UNSPENT: &str = r#"
     SELECT l.*, b.height AS height FROM leg l
     JOIN block b ON b.id = l.block
@@ -234,6 +208,11 @@ pub(crate) mod db {
         SELECT 1 FROM leg s JOIN block sb ON sb.id = s.block
         WHERE s.kind = 1 AND s.coin_txid = l.coin_txid AND s.coin_index = l.coin_index
           AND sb.chain = b.chain AND sb.network = b.network AND sb.archived_at IS NULL)
+      AND NOT EXISTS (
+        SELECT 1 FROM leg s JOIN "transaction" st ON st.id = s."transaction"
+        WHERE s.kind = 1 AND s.coin_txid = l.coin_txid AND s.coin_index = l.coin_index
+          AND s.block IS NULL AND st.block IS NULL
+          AND st.chain = b.chain AND st.network = b.network)
     ORDER BY b.position, t."order", l.leg_index"#;
 
     /// The legs (rewards included) of an address in an asset, in live blocks.
@@ -241,6 +220,33 @@ pub(crate) mod db {
     SELECT l.* FROM leg l JOIN block b ON b.id = l.block
     WHERE b.chain = ?1 AND b.network = ?2 AND l.address = ?3 AND l.asset = ?4
       AND b.archived_at IS NULL";
+
+    /// What an address can spend of an asset: its legs in live blocks, and
+    /// its outgoing legs (spent, burned, fee) in pending transactions.
+    const SPENDABLE: &str = r#"
+    SELECT l.* FROM leg l JOIN block b ON b.id = l.block
+    WHERE b.chain = ?1 AND b.network = ?2 AND l.address = ?3 AND l.asset = ?4
+      AND b.archived_at IS NULL
+    UNION ALL
+    SELECT l.* FROM leg l JOIN "transaction" t ON t.id = l."transaction"
+    WHERE t.chain = ?1 AND t.network = ?2 AND l.address = ?3 AND l.asset = ?4
+      AND t.block IS NULL AND l.block IS NULL AND l.kind IN (1, 2, 4)"#;
+
+    /// The legs `address` can spend `asset` by: [`SPENDABLE`]. Their sum
+    /// is what it can spend now.
+    pub(crate) fn find_spendable(
+        connection: &mut SqliteConnection,
+        address: &Address,
+        asset: &Asset,
+    ) -> QueryResult<Legs> {
+        diesel::sql_query(SPENDABLE)
+            .bind::<Text, _>(address.network.chain.as_str())
+            .bind::<Text, _>(&address.network.name)
+            .bind::<Text, _>(&address.value)
+            .bind::<Text, _>(&asset.id)
+            .load::<Leg>(connection)
+            .map(Legs::from)
+    }
 
     /// Keeps `rows`; a leg already kept is kept once.
     pub(crate) fn insert(connection: &mut SqliteConnection, rows: &Legs) -> QueryResult<usize> {
@@ -267,16 +273,30 @@ pub(crate) mod db {
         insert(connection, rows)
     }
 
+    /// Deletes the legs of transaction `transaction` in no block (pending).
+    pub(crate) fn delete_for(
+        connection: &mut SqliteConnection,
+        transaction: &str,
+    ) -> QueryResult<usize> {
+        diesel::delete(
+            leg::table
+                .filter(leg::transaction.eq(transaction))
+                .filter(leg::block.is_null()),
+        )
+        .execute(connection)
+    }
+
     /// The legs of transaction `transaction`, in order.
     pub(crate) fn find_for(
         connection: &mut SqliteConnection,
         transaction: &str,
-    ) -> QueryResult<Vec<LegFacts>> {
+    ) -> QueryResult<Legs> {
         leg::table
             .filter(leg::transaction.eq(transaction))
             .order(leg::leg_index)
-            .select(LegFacts::as_select())
-            .load(connection)
+            .select(Leg::as_select())
+            .load::<Leg>(connection)
+            .map(Legs::from)
     }
 
     /// Every leg of `address` in `asset` in a live block, rewards included:
@@ -285,13 +305,14 @@ pub(crate) mod db {
         connection: &mut SqliteConnection,
         address: &Address,
         asset: &Asset,
-    ) -> QueryResult<Vec<LegFacts>> {
+    ) -> QueryResult<Legs> {
         diesel::sql_query(LIVE)
             .bind::<Text, _>(address.network.chain.as_str())
             .bind::<Text, _>(&address.network.name)
             .bind::<Text, _>(&address.value)
             .bind::<Text, _>(&asset.id)
-            .load(connection)
+            .load::<Leg>(connection)
+            .map(Legs::from)
     }
 
     /// Every unspent coin of `addresses` (all of `network`), as inputs, in

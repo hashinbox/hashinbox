@@ -85,7 +85,7 @@ pub(crate) use block::Block;
 pub(crate) use endpoint::RpcEndpoints;
 pub(crate) use indexing::Indexing;
 pub(crate) use json::Json;
-pub(crate) use leg::{Leg, LegFacts};
+pub(crate) use leg::{Leg, Legs};
 pub(crate) use network::Network;
 #[cfg_attr(
     not(test),

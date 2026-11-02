@@ -3,6 +3,10 @@
 
 use std::sync::Arc;
 
+use ::rpc::{
+    BoxFuture, CallError, Cluster, Policy,
+    testing::{Reply, Script},
+};
 use alloy_consensus::{Transaction as _, TxEnvelope};
 use alloy_eips::Decodable2718 as _;
 use alloy_primitives::{hex, keccak256};
@@ -14,10 +18,6 @@ use base::{
 use chain_ethereum::{Client, Config, Factory, Network, Token};
 use crypto::SecretBytes;
 use futures_executor::block_on;
-use json_rpc::{
-    BoxFuture, CallError, Cluster, Policy,
-    testing::{Reply, Script},
-};
 use num_bigint::BigUint;
 use serde_json::json;
 
@@ -37,7 +37,7 @@ sol! {
     function transfer(address recipient, uint256 amount) external returns (bool);
 }
 
-fn connect(transport: Arc<dyn json_rpc::Client>) -> Client {
+fn connect(transport: Arc<dyn ::rpc::Client>) -> Client {
     Client::new(transport, Network::new(1, "mainnet"))
 }
 
@@ -260,7 +260,7 @@ fn a_broadcast_reaches_every_node_once() {
         node.push([Reply::ok("eth_sendRawTransaction", json!(id))
             .expecting(json!([hex::encode_prefixed(&bytes)]))]);
     }
-    block_on(broadcaster.broadcast(&bytes)).unwrap();
+    block_on(broadcaster.broadcast(&signed(&bytes))).unwrap();
     for node in &nodes {
         node.exhausted();
     }
@@ -276,7 +276,7 @@ fn a_refusal_of_held_bytes_is_acceptance() {
         Reply::failure("eth_sendRawTransaction", -32_000, "nonce too low"),
         Reply::ok("eth_getTransactionByHash", json!({"hash": id})).expecting(json!([id])),
     ]);
-    block_on(broadcaster.broadcast(&bytes)).unwrap();
+    block_on(broadcaster.broadcast(&signed(&bytes))).unwrap();
 
     script.push([
         Reply::failure(
@@ -286,7 +286,7 @@ fn a_refusal_of_held_bytes_is_acceptance() {
         ),
         Reply::ok("eth_getTransactionByHash", json!(null)),
     ]);
-    let refused = block_on(broadcaster.broadcast(&bytes)).unwrap_err();
+    let refused = block_on(broadcaster.broadcast(&signed(&bytes))).unwrap_err();
     assert_eq!(refused.kind, TransactionErrorKind::Rejected);
     assert_eq!(refused.reason, Some(Reason::InsufficientFunds));
 
@@ -295,7 +295,7 @@ fn a_refusal_of_held_bytes_is_acceptance() {
         -32_603,
         "internal error",
     )]);
-    let unknown = block_on(broadcaster.broadcast(&bytes)).unwrap_err();
+    let unknown = block_on(broadcaster.broadcast(&signed(&bytes))).unwrap_err();
     assert_eq!(unknown.kind, TransactionErrorKind::Unavailable);
     script.exhausted();
 }
@@ -445,4 +445,17 @@ fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
         _ => None,
     });
     assert_eq!(paid, Some(fee), "the estimator's cached fees, no refresh");
+}
+
+/// A signed transaction of exactly `bytes`; broadcasting reads nothing else.
+fn signed(bytes: &[u8]) -> base::Transaction {
+    let network = base::Network::new(base::Chain::new("test"), "test");
+    base::Transaction {
+        id: base::TransactionId::new(network, "test"),
+        state: base::TransactionState::Pending,
+        order: None,
+        legs: Vec::new(),
+        bytes: bytes.to_vec(),
+        expires: None,
+    }
 }

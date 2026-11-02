@@ -1,6 +1,9 @@
 use std::{num::NonZeroU32, time::Duration};
 
-use crate::{Batch, BoxFuture, CallResult, Client, Error, Failure, Repetition, Request};
+use crate::{
+    Batch, BoxFuture, CallError, CallResult, Client, Error, Failure, Repetition, Request,
+    client::{narrow, widen},
+};
 
 /// Delay between two [`Retry`] attempts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,7 +187,12 @@ impl<C: Client> Client for Retry<C> {
 
     /// Repeats whole broadcasts under the same policy; [`Repetition::Forbidden`]
     /// work is broadcast once.
-    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
-        Box::pin(self.repeat_request(request, C::broadcast))
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), CallError>> {
+        Box::pin(async move {
+            let send = |client: &'a C, request| -> BoxFuture<'a, _> {
+                Box::pin(async move { widen(client.broadcast(request).await) })
+            };
+            narrow(self.repeat_request(request, send).await)
+        })
     }
 }

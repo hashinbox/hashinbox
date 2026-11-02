@@ -761,8 +761,8 @@ dependencies = [
  "anyhow",
  "crypto",
  "decimal",
- "json-rpc",
  "logging",
+ "rpc",
  "serde",
  "serde_json",
  "tokio",
@@ -1074,7 +1074,7 @@ dependencies = [
  "base",
  "bitcoin",
  "crypto",
- "json-rpc",
+ "rpc",
  "serde",
  "serde_json",
  "tokio",
@@ -1093,8 +1093,8 @@ dependencies = [
  "base",
  "crypto",
  "futures-executor",
- "json-rpc",
  "num-bigint",
+ "rpc",
  "serde",
  "serde_json",
 ]
@@ -1111,7 +1111,7 @@ dependencies = [
  "crypto",
  "futures-executor",
  "getrandom 0.3.4",
- "json-rpc",
+ "rpc",
  "serde",
  "serde_json",
  "solana-address 2.2.0",
@@ -2564,20 +2564,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "json-rpc"
-version = "0.1.0"
-dependencies = [
- "futures-executor",
- "json-rpc",
- "jsonrpsee",
- "logging",
- "serde",
- "serde_json",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "jsonrpsee"
 version = "0.24.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2966,11 +2952,11 @@ dependencies = [
  "hex",
  "http-body-util",
  "http-server",
- "json-rpc",
  "libsqlite3-sys",
  "logging",
  "payments",
  "reqwest",
+ "rpc",
  "serde",
  "serde_json",
  "sha2",
@@ -2992,7 +2978,7 @@ dependencies = [
  "anyhow",
  "base",
  "crypto",
- "json-rpc",
+ "rpc",
  "serde",
  "serde_json",
  "tokio",
@@ -3499,6 +3485,20 @@ checksum = "bb919243f34364b6bd2fc10ef797edbfa75f33c252e7998527479c6d6b47e1ec"
 dependencies = [
  "bytes",
  "rustc-hex",
+]
+
+[[package]]
+name = "rpc"
+version = "0.1.0"
+dependencies = [
+ "futures-executor",
+ "jsonrpsee",
+ "logging",
+ "rpc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -4464,7 +4464,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 name = "tasks"
 version = "0.1.0"
 dependencies = [
- "logging",
+ "serde",
  "serde_json",
  "tokio",
  "uuid",

@@ -38,32 +38,33 @@ pub(crate) struct Block {
     pub(crate) archived_at: Option<i64>,
 }
 
-impl Block {
-    /// The header it was written from.
-    ///
-    /// # Errors
-    ///
-    /// When a stored integer is negative.
-    pub(crate) fn header(&self) -> anyhow::Result<BlockHeader> {
-        let parent = match (self.parent_position, &self.parent_hash) {
+/// A row as the header it was written from. Fails when a stored integer is
+/// negative.
+impl TryFrom<&Block> for BlockHeader {
+    type Error = anyhow::Error;
+
+    fn try_from(row: &Block) -> anyhow::Result<Self> {
+        let parent = match (row.parent_position, &row.parent_hash) {
             (Some(position), Some(hash)) => Some(BlockParent {
                 position: uint(position)?,
                 hash: BlockHash(hash.clone()),
             }),
             _ => None,
         };
-        Ok(BlockHeader {
-            position: uint(self.position)?,
-            height: uint(self.height)?,
-            hash: BlockHash(self.hash.clone()),
+        Ok(Self {
+            position: uint(row.position)?,
+            height: uint(row.height)?,
+            hash: BlockHash(row.hash.clone()),
             parent,
-            timestamp: self.timestamp.map(uint).transpose()?,
+            timestamp: row.timestamp.map(uint).transpose()?,
         })
     }
+}
 
+impl Block {
     /// Whether this row is `header`'s block.
     pub(crate) fn is(&self, header: &BlockHeader) -> bool {
-        self.header().is_ok_and(|own| own == *header)
+        BlockHeader::try_from(self).is_ok_and(|own| own == *header)
     }
 
     /// Whether `header` names this block as its parent.

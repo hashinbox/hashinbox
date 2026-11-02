@@ -15,10 +15,10 @@ use std::{
 };
 
 use base::{
-    Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Enveloped,
-    Future, Indexer, Network, Networked, Service, Signer, Timer, Tips, Transaction,
-    TransactionError, TransactionErrorKind, TransactionId, TransactionState, Transactions,
-    Transfer, Wallet, WalletFactory, WalletFactoryBroadcaster,
+    Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Future,
+    Indexer, Network, Networked, Service, Signer, Timer, Tips, Transaction, TransactionError,
+    TransactionErrorKind, TransactionId, TransactionState, Transactions, Transfer, Wallet,
+    WalletFactory, WalletFactoryBroadcaster,
 };
 use crypto::{Curve, SecretBytes};
 use payments::Payments;
@@ -38,11 +38,13 @@ async fn database() -> (crate::storage::Storage, tempfile::TempDir) {
     (storage, directory)
 }
 
-/// What each broadcast answers, in order; how many transactions were built;
-/// and every broadcast envelope.
+/// What each broadcast answers, in order; the fee each built transaction
+/// pays (none when zero); how many transactions were built; and every
+/// broadcast envelope.
 #[derive(Default)]
 struct Script {
     answers: Mutex<VecDeque<Result<(), TransactionErrorKind>>>,
+    fee: u64,
     built: Mutex<u8>,
     sent: Mutex<Vec<Vec<u8>>>,
 }
@@ -85,9 +87,9 @@ impl Wallet for Fake {
 impl Broadcaster for Fake {
     fn broadcast<'a>(
         &'a self,
-        transaction: &'a (dyn Enveloped + Sync),
+        transaction: &'a Transaction,
     ) -> Future<'a, Result<(), TransactionError>> {
-        let bytes = transaction.envelope().to_vec();
+        let bytes = transaction.bytes.clone();
         Box::pin(async move {
             self.script.sent.lock().expect("the log").push(bytes);
             let answer = self
@@ -129,8 +131,17 @@ impl Builder for Build {
                     id: TransactionId::new(network(), built.to_string()),
                     state: TransactionState::Pending,
                     order: None,
-                    legs: Vec::new(),
+                    legs: if self.wallet.script.fee == 0 {
+                        Vec::new()
+                    } else {
+                        vec![base::Leg::Fee {
+                            address: self.wallet.address.clone(),
+                            asset: Asset::native(network()),
+                            amount: self.wallet.script.fee.into(),
+                        }]
+                    },
                     bytes: vec![*built],
+                    expires: None,
                 });
             }
             Ok(signed.into())
@@ -208,9 +219,9 @@ impl base::Config for Config {
         network()
     }
 
-    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn json_rpc::Client>>> {
+    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn rpc::Client>>> {
         Box::pin(async {
-            let client: Arc<dyn json_rpc::Client> = Arc::new(json_rpc::testing::Script::default());
+            let client: Arc<dyn rpc::Client> = Arc::new(rpc::testing::Script::default());
             Ok(client)
         })
     }
@@ -218,7 +229,7 @@ impl base::Config for Config {
     fn build<'a>(
         &'a self,
         storage: &'a base::Storage,
-        client: Arc<dyn json_rpc::Client>,
+        client: Arc<dyn rpc::Client>,
     ) -> Future<'a, anyhow::Result<Service>> {
         Box::pin(async move {
             let indexer = Indexer::new(
@@ -260,7 +271,6 @@ async fn payments(storage: &crate::storage::Storage, script: Arc<Script>) -> Arc
             blocks: stores.clone(),
             indexes: stores.clone(),
             inputs: stores.clone(),
-            transactions: stores.clone(),
             wallets: stores,
         })
         .build()

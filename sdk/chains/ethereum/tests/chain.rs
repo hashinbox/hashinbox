@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 
+use ::rpc::testing::{Reply, Script};
 use base::{Asset, Chained as _, Decimal, Leg, Reason, Reward, Tips, TransactionState};
 use chain_ethereum::{Chain, Client, Config, Network, Token};
 use futures_executor::block_on;
-use json_rpc::testing::{Reply, Script};
 use num_bigint::BigUint;
 use serde_json::{Value, json};
 
@@ -343,7 +343,7 @@ fn hex(text: &str) -> Vec<u8> {
 #[test]
 fn a_chain_over_a_swap_follows_its_replacement() {
     let old = Script::new([]);
-    let swap = Arc::new(json_rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
+    let swap = Arc::new(::rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
     let config = config();
     let chain = config.chain(&Client::new(swap.clone(), config.native()));
     let tips = |script: &Script, produced: &str| {

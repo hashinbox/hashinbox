@@ -2,6 +2,10 @@
 
 use std::sync::Arc;
 
+use ::rpc::{
+    Cluster, Policy,
+    testing::{Reply, Script},
+};
 use base::{
     Address, Asset, Broadcaster as _, BuilderExt as _, Coin, Future, Input, InputStore, Inputs,
     Leg, Reason, Signer, TransactionErrorKind, TransactionId, TransactionState, Transfer,
@@ -10,10 +14,6 @@ use base::{
 use bitcoin::{Transaction, consensus};
 use chain_bitcoin::{AddressType, Client, Config, Factory, Network};
 use crypto::SecretBytes;
-use json_rpc::{
-    Cluster, Policy,
-    testing::{Reply, Script},
-};
 use serde_json::json;
 
 /// One wallet's unspent outputs, as a store would answer.
@@ -233,11 +233,11 @@ async fn refuses_what_it_cannot_send() {
     assert!(empty.sign().await.is_err(), "no transfers");
 }
 
-fn probe(node: &Script) -> json_rpc::BoxFuture<'_, Result<u64, json_rpc::CallError>> {
-    use json_rpc::Client as _;
+fn probe(node: &Script) -> ::rpc::BoxFuture<'_, Result<u64, ::rpc::CallError>> {
+    use ::rpc::Client as _;
     Box::pin(async move {
         let reply = node
-            .request(json_rpc::Request::new("getblockcount", json!([])))
+            .request(::rpc::Request::new("getblockcount", json!([])))
             .await??;
         Ok(reply.deserialize()?)
     })
@@ -262,7 +262,10 @@ async fn broadcasts_exact_bytes_to_every_node() {
         .expect("cluster");
     let rpc = Client::new(Arc::new(cluster), Network::Regtest);
     let broadcaster = rpc;
-    broadcaster.broadcast(&bytes).await.expect("accepted");
+    broadcaster
+        .broadcast(&signed(&bytes))
+        .await
+        .expect("accepted");
     for node in &nodes {
         node.exhausted();
     }
@@ -285,7 +288,7 @@ async fn maps_node_refusals() {
         let script = Script::new([Reply::failure("sendrawtransaction", code, message)]);
         let rpc = Client::new(Arc::new(script), Network::Regtest);
         let broadcaster = rpc;
-        let outcome = broadcaster.broadcast(&hex_transaction()).await;
+        let outcome = broadcaster.broadcast(&signed(&hex_transaction())).await;
         match reason {
             None => assert_eq!(outcome, Ok(()), "{message}"),
             Some(reason) => {
@@ -299,7 +302,7 @@ async fn maps_node_refusals() {
     let rpc = Client::new(Arc::new(script), Network::Regtest);
     let broadcaster = rpc;
     let error = broadcaster
-        .broadcast(&hex_transaction())
+        .broadcast(&signed(&hex_transaction()))
         .await
         .expect_err("warming");
     assert_eq!(error.kind, TransactionErrorKind::Unavailable);
@@ -536,4 +539,17 @@ async fn a_sweep_of_balance_less_estimate_pays_the_estimate_without_change() {
         _ => None,
     });
     assert_eq!(paid, Some(fee));
+}
+
+/// A signed transaction of exactly `bytes`; broadcasting reads nothing else.
+fn signed(bytes: &[u8]) -> base::Transaction {
+    let network = base::Network::new(base::Chain::new("test"), "test");
+    base::Transaction {
+        id: base::TransactionId::new(network, "test"),
+        state: base::TransactionState::Pending,
+        order: None,
+        legs: Vec::new(),
+        bytes: bytes.to_vec(),
+        expires: None,
+    }
 }

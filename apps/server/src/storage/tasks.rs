@@ -1,7 +1,7 @@
-//! The job queue: `tasks::Store` on the one file. Every statement is the
-//! [`Task`] model's; a set is published after it is written.
+//! The job queue: `tasks::Store` and `tasks::Changes` on the one file. Every
+//! statement is the [`Task`] model's; a write is announced after it lands.
 
-use tasks::{Id, Job, State, Store, StoreError, StoreFuture};
+use tasks::{Changes, Id, Job, Jobs, Store, StoreError, StoreFuture};
 use tokio::sync::broadcast;
 
 use super::Storage;
@@ -12,52 +12,55 @@ fn backend(error: anyhow::Error) -> StoreError {
     StoreError::Backend(format!("{error:#}"))
 }
 
-fn int(value: u64) -> Result<i64, StoreError> {
-    i64::try_from(value).map_err(|_| StoreError::Invalid("time is above the storable range".into()))
-}
-
 fn row(job: &Job) -> Result<Task, StoreError> {
-    Task::new(job).map_err(|_| StoreError::Invalid("time is above the storable range".into()))
+    Task::try_from(job).map_err(|error| StoreError::Invalid(format!("{error:#}")))
 }
 
-fn job(row: Task) -> Result<Job, StoreError> {
-    let state = match row.state {
-        0 => State::Pending,
-        1 => State::Running,
-        2 => State::Done,
-        _ => State::Failed,
-    };
-    let payload = serde_json::from_str(&row.payload)
-        .map_err(|error| StoreError::Backend(format!("stored payload: {error}")))?;
-    Ok(Job {
-        id: Id::from(row.id),
-        lane: row.lane,
-        kind: row.kind,
-        state,
-        payload,
-        run_at: u64::try_from(row.run_at).unwrap_or(0),
-    })
+fn now() -> Result<i64, StoreError> {
+    i64::try_from(tasks::now()).map_err(|_| StoreError::Invalid("time is above range".into()))
 }
 
 impl Storage {
-    /// Tells the queue about `job`, written outside [`Store::set`] (with the
-    /// run that queued it).
-    pub(crate) fn announce(&self, job: Job) {
+    /// Tells the queue that jobs changed outside [`Store`] (written with the
+    /// run that queued them).
+    pub(crate) fn announce(&self) {
         // No subscriber is not an error.
-        let _ = self.changes.send(job);
+        let _ = self.changes.send(());
+    }
+
+    /// Every job a dead process left running back to pending. Run once on
+    /// start, before the queue runs.
+    ///
+    /// # Errors
+    ///
+    /// When the write fails.
+    pub(crate) async fn recover(&self) -> anyhow::Result<usize> {
+        let now = i64::try_from(tasks::now())?;
+        self.write(move |connection| Ok(task::db::recover(connection, now)?))
+            .await
     }
 }
 
 impl Store for Storage {
-    fn set(&self, job: Job) -> StoreFuture<'_, ()> {
+    fn enqueue(&self, job: Job) -> StoreFuture<'_, ()> {
         Box::pin(async move {
-            let row = row(&job)?;
-            let now = int(tasks::now())?;
-            self.write(move |connection| Ok(task::db::upsert(connection, &row, now)?))
+            let (row, now) = (row(&job)?, now()?);
+            self.write(move |connection| Ok(task::db::insert(connection, &row, now)?))
                 .await
                 .map_err(backend)?;
-            // No subscriber is not an error.
-            let _ = self.changes.send(job);
+            self.announce();
+            Ok(())
+        })
+    }
+
+    fn update(&self, job: Job) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let (row, now) = (row(&job)?, now()?);
+            let found = self.write(move |connection| Ok(task::db::update(connection, &row, now)?));
+            if !found.await.map_err(backend)? {
+                return Err(StoreError::Invalid(format!("job {} is unknown", job.id)));
+            }
+            self.announce();
             Ok(())
         })
     }
@@ -66,32 +69,51 @@ impl Store for Storage {
         let id = id.as_str().to_owned();
         Box::pin(async move {
             let row = self.read(move |connection| Ok(task::db::find_by_id(connection, &id)?));
-            row.await.map_err(backend)?.map(job).transpose()
+            row.await
+                .map_err(backend)?
+                .map(|row| Job::try_from(row).map_err(backend))
+                .transpose()
         })
     }
 
     fn next(&self, now: u64) -> StoreFuture<'_, Vec<Job>> {
         Box::pin(async move {
-            // Above the storable range means "everything".
-            let now = i64::try_from(now).unwrap_or(i64::MAX);
-            let rows = self.read(move |connection| Ok(task::db::find_due(connection, now)?));
-            rows.await.map_err(backend)?.into_iter().map(job).collect()
+            let rows = self.read(move |connection| Ok(task::db::find_unfinished(connection)?));
+            let jobs = rows
+                .await
+                .map_err(backend)?
+                .into_iter()
+                .map(|row| Job::try_from(row).map_err(backend))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Jobs::from(jobs)
+                .startable(now)
+                .into_iter()
+                .cloned()
+                .collect())
         })
     }
+}
 
-    fn changes(&self) -> broadcast::Receiver<Job> {
+impl Changes for Storage {
+    fn changes(&self) -> broadcast::Receiver<()> {
         self.changes.subscribe()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc, time::Duration};
+    use std::{num::NonZeroU32, time::Duration};
 
     use serde_json::json;
-    use tasks::{Ack, Executor, Handle, Runner};
+    use tasks::{Ack, Retry, Status, Task as Running, Worker};
+
+    use crate::workers::executor::Executor;
 
     use super::*;
+
+    fn topic(text: &str) -> tasks::Topic {
+        tasks::Topic::parse(text).unwrap()
+    }
 
     async fn queue() -> (tempfile::TempDir, Storage) {
         let directory = tempfile::tempdir().unwrap();
@@ -100,122 +122,166 @@ mod tests {
         (directory, storage)
     }
 
-    async fn wait(store: &Arc<dyn Store>, id: &Id) -> Job {
-        let handle = Handle::new(id.clone(), store.clone());
-        handle.wait(Duration::from_secs(5)).await.unwrap().unwrap()
+    /// The job `id` once finished, waiting at most five seconds.
+    async fn wait(store: &Storage, id: &Id) -> Job {
+        let mut changes = Changes::changes(store);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let job = store.get(id).await.unwrap().unwrap();
+            if job.status.is_finished() {
+                return job;
+            }
+            let _ = tokio::time::timeout_at(deadline, changes.recv()).await;
+            assert!(tokio::time::Instant::now() < deadline, "job did not finish");
+        }
     }
 
     #[tokio::test]
-    async fn set_replaces_the_payload_wholesale() {
+    async fn update_replaces_the_job_whole() {
         let (_directory, queue) = queue().await;
-        let mut job = Job::new("a", "k", json!({"x": 1, "y": 2}));
-        queue.set(job.clone()).await.unwrap();
-        job.payload = json!({"z": 3});
-        job.state = State::Running;
-        queue.set(job.clone()).await.unwrap();
+        let mut job = Job::new(topic("a"), "k", json!({"x": 1})).with_deadline(9);
+        queue.enqueue(job.clone()).await.unwrap();
+        job.state = Some(json!({"z": 3}));
+        job.status = Status::Running;
+        job.attempts = 1;
+        job.reason = Some("why".into());
+        queue.update(job.clone()).await.unwrap();
         assert_eq!(queue.get(&job.id).await.unwrap(), Some(job));
         assert_eq!(queue.get(&Id::new()).await.unwrap(), None);
+        assert!(
+            queue
+                .update(Job::new(topic("a"), "k", json!(null)))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
-    async fn every_set_is_published() {
+    async fn next_never_starts_a_conflicting_topic_or_overtakes() {
         let (_directory, queue) = queue().await;
-        let mut changes = queue.changes();
-        let mut job = Job::new("a", "k", json!({}));
-        queue.set(job.clone()).await.unwrap();
-        job.state = State::Done;
-        queue.set(job.clone()).await.unwrap();
-        assert_eq!(changes.recv().await.unwrap().state, State::Pending);
-        assert_eq!(changes.recv().await.unwrap(), job);
-    }
-
-    #[tokio::test]
-    async fn next_lists_due_unfinished_jobs_by_id() {
-        let (_directory, queue) = queue().await;
-        let due = Job::new("a", "k", json!({}));
-        let mut running = Job::new("b", "k", json!({}));
-        running.state = State::Running;
-        let mut later = Job::new("a", "k", json!({}));
-        later.run_at = 10;
-        let mut done = Job::new("c", "k", json!({}));
-        done.state = State::Done;
-        for job in [&due, &running, &later, &done] {
-            queue.set(job.clone()).await.unwrap();
+        // b w1, t1 (the whole network), b w1, b w1, b w2.
+        let jobs: Vec<Job> = ["n.w1", "n", "n.w1", "n.w1", "n.w2"]
+            .into_iter()
+            .map(|text| Job::new(topic(text), "k", json!({})))
+            .collect();
+        let later = Job::new(topic("m"), "k", json!({})).run_at(10);
+        for job in jobs.iter().chain([&later]) {
+            queue.enqueue(job.clone()).await.unwrap();
         }
-        let ids = |jobs: Vec<Job>| jobs.into_iter().map(|job| job.id).collect::<Vec<_>>();
-        let next = queue.next(5).await.unwrap();
-        assert_eq!(ids(next), [due.id.clone(), running.id.clone()]);
-        let all = queue.next(u64::MAX).await.unwrap();
-        assert_eq!(ids(all), [due.id, running.id, later.id]);
+        let next = |now| {
+            let queue = queue.clone();
+            async move {
+                let next = queue.next(now).await.unwrap();
+                next.into_iter().map(|job| job.id).collect::<Vec<_>>()
+            }
+        };
+        let finish = |job: &Job| {
+            let queue = queue.clone();
+            let job = Job {
+                status: Status::Done,
+                ..job.clone()
+            };
+            async move { queue.update(job).await.unwrap() }
+        };
+        assert_eq!(next(5).await, [jobs[0].id.clone()]);
+        assert_eq!(next(10).await, [jobs[0].id.clone(), later.id.clone()]);
+        // Running holds its topic as much as pending does.
+        let running = Job {
+            status: Status::Running,
+            ..jobs[0].clone()
+        };
+        queue.update(running).await.unwrap();
+        assert!(next(5).await.is_empty());
+        finish(&jobs[0]).await;
+        assert_eq!(next(5).await, [jobs[1].id.clone()]);
+        finish(&jobs[1]).await;
+        assert_eq!(next(5).await, [jobs[2].id.clone(), jobs[4].id.clone()]);
+        finish(&jobs[2]).await;
+        finish(&jobs[4]).await;
+        assert_eq!(next(5).await, [jobs[3].id.clone()]);
     }
 
-    /// Retries its first attempt, then saves `saved` and succeeds.
+    #[tokio::test]
+    async fn a_wildcard_locks_its_wallet_on_every_network() {
+        let (_directory, queue) = queue().await;
+        let jobs: Vec<Job> = ["n.w1", "*.w1", "m.w1", "m.w2"]
+            .into_iter()
+            .map(|text| Job::new(topic(text), "k", json!({})))
+            .collect();
+        for job in &jobs {
+            queue.enqueue(job.clone()).await.unwrap();
+        }
+        let ids = |next: Vec<Job>| next.into_iter().map(|job| job.id).collect::<Vec<_>>();
+        // `*.w1` waits for `n.w1`; `m.w1` waits behind it; `m.w2` is free.
+        assert_eq!(
+            ids(queue.next(0).await.unwrap()),
+            [jobs[0].id.clone(), jobs[3].id.clone()]
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_returns_running_jobs_to_pending() {
+        let (_directory, queue) = queue().await;
+        let job = Job::new(topic("a"), "k", json!({}));
+        queue.enqueue(job.clone()).await.unwrap();
+        queue
+            .update(Job {
+                status: Status::Running,
+                ..job.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(queue.recover().await.unwrap(), 1);
+        assert_eq!(
+            queue.get(&job.id).await.unwrap().unwrap().status,
+            Status::Pending
+        );
+    }
+
+    /// Retries its first attempt, then saves its state and succeeds.
     struct Saves;
 
-    impl Executor for Saves {
-        fn execute(
-            &self,
-            mut job: Job,
-            store: Arc<dyn Store>,
-        ) -> Pin<Box<dyn Future<Output = Ack> + Send>> {
-            Box::pin(async move {
-                if job.payload["attempts"] == 1 {
-                    return Ack::Retry("again".into());
-                }
-                job.payload["saved"] = true.into();
-                store
-                    .set(job)
-                    .await
-                    .map_or_else(|error| Ack::Fail(error.to_string()), |()| Ack::Done)
-            })
+    impl Worker for Saves {
+        const KIND: &'static str = "save";
+        type Input = serde_json::Value;
+        type State = bool;
+
+        async fn run(&self, mut task: Running<serde_json::Value, bool>) -> Ack {
+            if task.job().attempts == 1 {
+                return task.nack("again");
+            }
+            match task.save(true).await {
+                Ok(()) => task.ack(),
+                Err(error) => task.fail(error.to_string()),
+            }
         }
     }
 
-    fn runner(store: &Arc<dyn Store>) -> tokio::task::JoinHandle<()> {
-        let runner = Runner::new(store.clone())
-            .executor("save", Arc::new(Saves))
-            .attempts(NonZeroUsize::new(2).unwrap())
-            .backoff(Duration::from_millis(20));
-        tokio::spawn(async move { runner.run().await.unwrap() })
-    }
-
     #[tokio::test]
-    async fn the_runner_retries_saves_and_fails_unknown_kinds() {
+    async fn the_queue_retries_saves_fails_unknown_kinds_and_expires() {
         let (_directory, queue) = queue().await;
-        let store: Arc<dyn Store> = Arc::new(queue);
-        let running = runner(&store);
-        let job = Job::new("a", "save", json!({"x": 1}));
-        let unknown = Job::new("b", "nope", json!({}));
-        store.set(job.clone()).await.unwrap();
-        store.set(unknown.clone()).await.unwrap();
-        let done = wait(&store, &job.id).await;
-        assert_eq!(done.state, State::Done);
-        let expected = json!({"x": 1, "attempts": 2, "reason": "again", "saved": true});
-        assert_eq!(done.payload, expected);
-        let failed = wait(&store, &unknown.id).await;
-        assert_eq!(failed.state, State::Failed);
-        assert_eq!(failed.payload["reason"], "unknown-kind");
-        running.abort();
-    }
-
-    #[tokio::test]
-    async fn the_runner_recovers_expires_and_keeps_lane_order() {
-        let (_directory, queue) = queue().await;
-        let store: Arc<dyn Store> = Arc::new(queue);
-        // Left running by a dead process, on its second attempt: it succeeds.
-        let mut left = Job::new("a", "save", json!({"attempts": 1}));
-        left.state = State::Running;
-        let after = Job::new("a", "save", json!({"attempts": 1}));
-        let expired = Job::new("b", "save", json!({"deadline": 1}));
-        for job in [&left, &after, &expired] {
-            store.set(job.clone()).await.unwrap();
+        let job = Job::new(topic("a"), "save", json!({"x": 1}));
+        let unknown = Job::new(topic("b"), "nope", json!({}));
+        let expired = Job::new(topic("c"), "save", json!({})).with_deadline(1);
+        for job in [&job, &unknown, &expired] {
+            queue.enqueue(job.clone()).await.unwrap();
         }
-        let running = runner(&store);
-        let failed = wait(&store, &expired.id).await;
-        assert_eq!(failed.payload["reason"], "expired");
-        assert_eq!(wait(&store, &after.id).await.state, State::Done);
-        let first = wait(&store, &left.id).await;
-        assert_eq!(first.state, State::Done);
-        running.abort();
+        let retry = Retry {
+            attempts: NonZeroU32::new(2).unwrap(),
+            backoff: Duration::from_millis(20),
+        };
+        let executor = Executor::new(queue.clone()).add(Saves, retry);
+        let handle = tokio::spawn(executor.run());
+        let done = wait(&queue, &job.id).await;
+        assert_eq!((done.status, done.attempts), (Status::Done, 2));
+        assert_eq!(
+            (done.reason.as_deref(), done.state),
+            (Some("again"), Some(json!(true)))
+        );
+        let failed = wait(&queue, &unknown.id).await;
+        assert_eq!(failed.reason.as_deref(), Some("unknown-kind"));
+        let failed = wait(&queue, &expired.id).await;
+        assert_eq!(failed.reason.as_deref(), Some("expired"));
+        handle.abort();
     }
 }

@@ -11,13 +11,13 @@ anyhow.workspace = true
 base = { path = "../../base" }
 crypto = { path = "../../../packages/crypto" }
 bitcoin.workspace = true
-json-rpc = { path = "../../../packages/json-rpc" }
+rpc = { path = "../../../packages/rpc" }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-# The scripted node double (`json_rpc::testing`): tests only, never a production link.
-json-rpc = { path = "../../../packages/json-rpc", features = ["testing"] }
+# The scripted node double (`rpc::testing`): tests only, never a production link.
+rpc = { path = "../../../packages/rpc", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

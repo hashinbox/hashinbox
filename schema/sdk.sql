@@ -70,9 +70,12 @@ CREATE TABLE "transaction" (
     state   INTEGER NOT NULL,          -- 0 pending, 1 succeeded, 2 reverted.
     reason  TEXT,                      -- JSON Reason; reverted only.
     bytes   BLOB    NOT NULL,
+    sent_at    INTEGER,                -- Unix ms recorded as pending; NULL once mined.
+    expires_at INTEGER,                -- Unix ms it stops holding funds; NULL once mined.
     CHECK (id = chain || '.' || network || '.' || txid),
     CHECK (state IN (0, 1, 2)),
-    CHECK (state = 2 OR reason IS NULL)
+    CHECK (state = 2 OR reason IS NULL),
+    CHECK (block IS NULL OR (sent_at IS NULL AND expires_at IS NULL))
 );
 CREATE INDEX transaction_block ON "transaction" (block);
 

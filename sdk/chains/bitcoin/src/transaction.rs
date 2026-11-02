@@ -3,7 +3,7 @@
 //! block.
 
 use anyhow::{Context as _, bail};
-use base::{Asset, Enveloped, Inputs, Leg, Output, Transacted, TransactionId, TransactionState};
+use base::{Asset, Inputs, Leg, Output, Transacted, TransactionId, TransactionState};
 use bitcoin::{
     Amount, Denomination, EcdsaSighashType, OutPoint, Script, ScriptBuf, Sequence, TapSighashType,
     TxIn, TxOut, Witness, absolute, consensus,
@@ -138,6 +138,7 @@ impl Transaction {
             order,
             legs: legs(&native, &spent, network),
             bytes: consensus::serialize(&native),
+            expires: None,
         };
         Self {
             native,
@@ -222,12 +223,6 @@ impl Transaction {
 impl Transacted for Transaction {
     fn txid(&self) -> &TransactionId {
         &self.base.id
-    }
-}
-
-impl Enveloped for Transaction {
-    fn envelope(&self) -> &[u8] {
-        &self.base.bytes
     }
 }
 

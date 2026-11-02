@@ -1,10 +1,8 @@
 //! `/v1/triggers`: triggers (a selector, an optional filter, a check and an
-//! action on one network), their runs, and a preview of what a trigger
-//! would see now. The JSON forms of selector, filter, check and action are
-//! `crate::models::trigger`'s.
+//! action on one network) and their runs. The JSON forms of selector,
+//! filter, check and action are `crate::models::trigger`'s.
 
 use std::{
-    collections::BTreeMap,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -14,7 +12,6 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
     http::StatusCode,
 };
-use base::{Decimal, Networked as _};
 use diesel::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
@@ -29,7 +26,7 @@ use crate::{
         wallet_index::Selector,
     },
     state::AppState,
-    trigger::{self, Definition as Unsaved, Sources},
+    workers::trigger::actions::SendInput,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -37,7 +34,6 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(list, create))
         .routes(routes!(read, replace, delete))
         .routes(routes!(runs))
-        .routes(routes!(preview))
 }
 
 /// How many runs `GET /v1/triggers/{id}/runs` answers.
@@ -64,8 +60,8 @@ struct Trigger {
     /// `all`/`any`/`not`.
     #[schema(value_type = Object)]
     check: Logic<Gate>,
-    /// What it does: `{"send": {"source": target, "asset": id,
-    /// "destination": target, "amount": amount}}`.
+    /// What it does: `{"name": "send", "input": {"source": target, "asset":
+    /// id, "destination": target, "amount": amount}}`.
     #[schema(value_type = Object)]
     action: Action,
     /// Whether it runs.
@@ -164,74 +160,6 @@ struct TriggerRun {
 struct RunsResponse {
     /// The latest runs, latest first.
     runs: Vec<TriggerRun>,
-}
-
-/// `POST /v1/triggers/preview` body: a trigger, unsaved.
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
-#[schema(as = TriggerPreviewRequest)]
-#[serde(deny_unknown_fields)]
-struct PreviewRequest {
-    chain: String,
-    network: String,
-    #[schema(value_type = Object)]
-    selector: Selector,
-    #[serde(default)]
-    #[schema(value_type = Option<Object>)]
-    filter: Option<Logic<Filter>>,
-    #[schema(value_type = Object)]
-    check: Logic<Gate>,
-    #[schema(value_type = Object)]
-    action: Action,
-}
-
-/// One transfer a run would make.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-struct PlannedTransfer {
-    /// Sender address text.
-    from: String,
-    /// Recipient address text.
-    to: String,
-    /// Display units of the send's asset.
-    amount: String,
-}
-
-/// One wallet index a selector picked.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-struct Selected {
-    /// `<chain>:<network>:<address>`, as the wallet routes take it.
-    wallet_id: String,
-    /// Address text.
-    address: String,
-    /// Asset id.
-    asset: String,
-    /// Confirmed balance in display units.
-    confirmed: String,
-    /// Not yet confirmed change in display units; negative when leaving.
-    pending: String,
-    /// Whether the filter keeps it (it is then `This` for check and action).
-    kept: bool,
-}
-
-/// What a trigger would see now.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[schema(as = TriggerPreview)]
-struct PreviewResponse {
-    /// The block position balances are read at; null before the first
-    /// block. Always present.
-    #[schema(required)]
-    confirmed: Option<i64>,
-    /// What the selector picks, fully indexed, with balances, each marked
-    /// kept or not by the filter.
-    selected: Vec<Selected>,
-    /// Whether the check holds over the kept ones, for a trigger that never ran.
-    check: bool,
-    /// The transfers the action would make now; empty when nothing is due.
-    transfers: Vec<PlannedTransfer>,
-    /// Why the action cannot be planned; null when it can. Always present.
-    #[schema(required)]
-    plan_error: Option<String>,
-    /// Senders of `transfers` this server holds no key for; a run refuses them.
-    unkeyed: Vec<String>,
 }
 
 #[utoipa::path(
@@ -480,121 +408,6 @@ async fn runs(
     }))
 }
 
-#[utoipa::path(
-    post,
-    path = "/v1/triggers/preview",
-    operation_id = "preview_trigger",
-    summary = "Preview what a trigger would see now",
-    description = "Without storing anything, at the last kept block: the wallet indexes the \
-        selector picks (fully indexed, with balances), which of them the filter keeps, whether \
-        the check holds over those for a trigger that never ran, and the transfers the action \
-        would make. Fees used are estimated.",
-    request_body = PreviewRequest,
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "What it would see", body = PreviewResponse),
-        (status = 400, description = "Malformed body", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Network is not configured", body = ErrorBody),
-        (status = 503, description = "The store, node or estimator is unavailable",
-            body = ErrorBody)
-    ),
-    tag = "triggers"
-)]
-async fn preview(
-    State(state): State<Arc<AppState>>,
-    request: Result<Json<PreviewRequest>, JsonRejection>,
-) -> Result<Json<PreviewResponse>, Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
-    let network = base::Network::new(base::Chain::new(request.chain), request.network);
-    let service = state.payments.service(&network)?;
-    let infos: BTreeMap<String, base::AssetInfo> = service
-        .assets
-        .clone()
-        .into_iter()
-        .map(|info| (info.asset.id.clone(), info))
-        .collect();
-    let sources = Sources::new(
-        service.assets.clone(),
-        service.wallets.factory.fees(),
-        now()?,
-    );
-    let send_asset = {
-        let Action::Send(send) = &request.action;
-        send.asset.clone()
-    };
-    let definition = Unsaved {
-        selector: request.selector,
-        filter: request.filter,
-        check: request.check,
-        action: request.action,
-    };
-    let preview = state
-        .storage
-        .read(move |connection| trigger::preview(connection, &network, &definition, &sources))
-        .await?;
-    let display = |info: Option<&base::AssetInfo>, atomic: &Decimal| -> String {
-        let Some(info) = info else {
-            return atomic.to_string();
-        };
-        let negative = *atomic < Decimal::zero();
-        let magnitude = if negative {
-            Decimal::zero() - atomic.clone()
-        } else {
-            atomic.clone()
-        };
-        let shown = info
-            .display(&magnitude)
-            .map_or_else(|_| atomic.to_string(), |value| value.to_string());
-        if negative { format!("-{shown}") } else { shown }
-    };
-    let selected = preview
-        .selected
-        .values()
-        .map(|one| {
-            let info = infos.get(&one.index.asset.id);
-            let address = &one.index.address;
-            Selected {
-                wallet_id: format!(
-                    "{}:{}:{}",
-                    address.network().chain,
-                    address.network().name,
-                    address.value
-                ),
-                address: address.value.clone(),
-                asset: one.index.asset.id.clone(),
-                confirmed: display(info, &one.balance.confirmed),
-                pending: display(info, &one.balance.pending),
-                kept: preview.kept.contains_key(&one.index.id),
-            }
-        })
-        .collect();
-    let (transfers, plan_error) = match preview.plan {
-        Ok(plan) => (plan.transfers, None),
-        Err(error) => (Vec::new(), Some(error)),
-    };
-    let sent = infos.get(&send_asset);
-    Ok(Json(PreviewResponse {
-        confirmed: preview.confirmed,
-        selected,
-        check: preview.check,
-        transfers: transfers
-            .into_iter()
-            .map(|transfer| PlannedTransfer {
-                from: transfer.from.value,
-                to: transfer.to.value,
-                amount: display(sent, &transfer.amount),
-            })
-            .collect(),
-        plan_error,
-        unkeyed: preview
-            .unkeyed
-            .into_iter()
-            .map(|address| address.value)
-            .collect(),
-    }))
-}
-
 /// The row `definition` describes as trigger `id`.
 ///
 /// # Errors
@@ -622,7 +435,14 @@ fn row(
         definition.network.clone(),
     );
     state.payments.service(&network)?;
-    let Action::Send(send) = &definition.action;
+    if definition.action.name != "send" {
+        return Err(Error::invalid_request(format!(
+            "unknown action {}",
+            definition.action.name
+        )));
+    }
+    let send = SendInput::deserialize(&definition.action.input)
+        .map_err(|error| Error::invalid_request(format!("send input: {error}")))?;
     super::asset_info(&state.payments, &network, &send.asset)?;
     if matches!(
         (&send.source, &send.destination),

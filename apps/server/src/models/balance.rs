@@ -53,7 +53,7 @@ pub(crate) mod db {
     };
 
     use super::{Balance, Balances};
-    use crate::models::LegFacts;
+    use crate::models::Leg;
 
     /// The legs of wallet indexes `?1` (a JSON list of ids) of their network,
     /// in live blocks or pending, each marked confirmed when its block is at
@@ -77,7 +77,7 @@ pub(crate) mod db {
         #[diesel(sql_type = Bool)]
         confirmed: bool,
         #[diesel(embed)]
-        leg: LegFacts,
+        leg: Leg,
     }
 
     /// The balances of wallet indexes `ids` at confirmed tip `confirmed`;

@@ -10,7 +10,7 @@ readme = "README.md"
 anyhow.workspace = true
 crypto = { path = "../../packages/crypto" }
 decimal = { path = "../../packages/decimal" }
-json-rpc = { path = "../../packages/json-rpc" }
+rpc = { path = "../../packages/rpc" }
 logging = { path = "../../packages/logging" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

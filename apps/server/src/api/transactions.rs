@@ -21,7 +21,7 @@ use super::{Error, ErrorBody, asset_info, wallet_address};
 use crate::{
     models::Asset,
     state::AppState,
-    workers::send::{Payment, SendIntent},
+    workers::broadcast::{Payment, SendIntent},
 };
 
 /// Maximum transfers one send request accepts.
@@ -215,14 +215,14 @@ async fn history(
         };
         let mut movements = Vec::with_capacity(transaction.legs.len());
         for (index, leg) in (0_u32..).zip(transaction.legs) {
-            let (kind, amount) = match leg {
-                Leg::Received { amount, .. } => (MovementKind::Received, amount),
-                Leg::Spent { amount, .. } => (MovementKind::Spent, amount),
-                Leg::Burned { amount, .. } => (MovementKind::Burned, amount),
-                Leg::Minted { amount, .. } => (MovementKind::Minted, amount),
-                Leg::Fee { amount, .. } => (MovementKind::Fee, amount),
+            let kind = match leg {
+                Leg::Received { .. } => MovementKind::Received,
+                Leg::Spent { .. } => MovementKind::Spent,
+                Leg::Burned { .. } => MovementKind::Burned,
+                Leg::Minted { .. } => MovementKind::Minted,
+                Leg::Fee { .. } => MovementKind::Fee,
             };
-            let amount = info.display(&amount).map_err(|error| {
+            let amount = info.display(leg.amount()).map_err(|error| {
                 Error::unavailable(format!("indexed amount is not whole atomic units: {error}"))
             })?;
             movements.push(Movement {
@@ -245,7 +245,7 @@ async fn history(
         });
     }
     Ok(Json(HistoryResponse {
-        asset: Asset::new(&info),
+        asset: Asset::from(&info),
         transactions,
         next_cursor,
     }))
@@ -352,9 +352,11 @@ async fn send(
         asset: info.asset.id,
         transfers,
     };
-    let job = intent.job();
+    let job = intent
+        .job()
+        .map_err(|error| Error::invalid_request(error.to_string()))?;
     let id = job.id.to_string();
-    tasks::Store::set(&state.storage, job)
+    tasks::Store::enqueue(&state.storage, job)
         .await
         .map_err(|error| Error::unavailable(error.to_string()))?;
     Ok((StatusCode::ACCEPTED, Json(SendResponse { job: id })))

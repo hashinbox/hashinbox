@@ -3,27 +3,23 @@
 
 use std::collections::BTreeSet;
 
-use base::{BlockHeader, Network};
+use base::Network;
 use diesel::SqliteConnection;
 
-use crate::models::{Block, trigger, wallet_index, wallet_index::Selector};
+use crate::models::{trigger, wallet_index, wallet_index::Selector};
 
-/// The ids of `network`'s enabled triggers that `headers` (kept blocks of
-/// it) touched.
+/// The ids of `network`'s enabled triggers that `blocks` (ids of kept blocks
+/// of it, [`crate::models::Block::id`]) touched.
 ///
 /// # Errors
 ///
-/// When a read fails or a hash does not make an id.
+/// When a read fails.
 pub(crate) fn touched(
     connection: &mut SqliteConnection,
     network: &Network,
-    headers: &[BlockHeader],
+    blocks: &[String],
 ) -> anyhow::Result<BTreeSet<String>> {
-    let blocks = headers
-        .iter()
-        .map(|header| Block::id(network, &header.hash))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let indexes = wallet_index::db::find_touched(connection, &blocks)?;
+    let indexes = wallet_index::db::find_touched(connection, blocks)?;
     let mut triggers = BTreeSet::new();
     if indexes.is_empty() {
         return Ok(triggers);
