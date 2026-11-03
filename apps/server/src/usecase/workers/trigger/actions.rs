@@ -3,7 +3,7 @@
 //! input. Effects go through the invocation; starting jobs is the usual one,
 //! never an obligation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use anyhow::{Context as _, bail, ensure};
 use base::{Address, Decimal, Network};
@@ -30,8 +30,6 @@ pub(crate) struct Invocation<'a, 'c> {
     pub(crate) this: &'a Selection,
     /// The trigger deciding: amounts and targets, read at the decided block.
     pub(crate) trigger: &'a mut Trigger<'c>,
-    /// Addresses this server holds keys for.
-    pub(crate) keyed: &'a BTreeSet<Address>,
     started: Vec<Job>,
 }
 
@@ -40,13 +38,11 @@ impl<'a, 'c> Invocation<'a, 'c> {
         network: &'a Network,
         this: &'a Selection,
         trigger: &'a mut Trigger<'c>,
-        keyed: &'a BTreeSet<Address>,
     ) -> Self {
         Self {
             network,
             this,
             trigger,
-            keyed,
             started: Vec::new(),
         }
     }
@@ -199,7 +195,6 @@ impl Action for Transfer {
         let Some(other) = other.values().next() else {
             return Ok(());
         };
-        let other = &other.address;
         let mut by_sender: BTreeMap<Address, Vec<Payment>> = BTreeMap::new();
         for one in each.values() {
             let alone = each.only(one)?;
@@ -207,21 +202,23 @@ impl Action for Transfer {
             let Some(amount) = amount.filter(|amount| *amount > Decimal::zero()) else {
                 continue;
             };
-            let mine = one.address.clone();
             let (from, to) = if per_source {
-                (mine, other.clone())
+                (one, other)
             } else {
-                (other.clone(), mine)
+                (other, one)
             };
             ensure!(
-                invocation.keyed.contains(&from),
+                from.keyed,
                 "source {} is not keyed here",
-                from.value
+                from.address.value
             );
-            by_sender.entry(from).or_default().push(Payment {
-                to: to.value,
-                amount: amount.to_string(),
-            });
+            by_sender
+                .entry(from.address.clone())
+                .or_default()
+                .push(Payment {
+                    to: to.address.value.clone(),
+                    amount: amount.to_string(),
+                });
         }
         for (from, transfers) in by_sender {
             let intent = SendIntent {

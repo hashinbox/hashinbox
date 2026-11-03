@@ -14,7 +14,6 @@ import {
   client,
   type ChainBlock,
   type ChainTransaction,
-  type ChainView,
   type ConfiguredNetwork,
 } from '@/api/client';
 import { Address } from '@/_components/address';
@@ -31,11 +30,15 @@ const BEAT_MS = 4000;
 const BLOCKS = 30;
 /** One block's width in the strip: the cube and the line after it. */
 const SLOT = 124;
-const TONE: Record<ChainTransaction['state'], string> = {
-  pending: 'warning.main',
-  succeeded: 'success.main',
-  reverted: 'error.main',
-};
+/** By `state`: 0 pending, 1 succeeded, 2 reverted. */
+const STATE = ['pending', 'succeeded', 'reverted'];
+const TONE = ['warning.main', 'success.main', 'error.main'];
+
+/** The last blocks and the mempool, read side by side. */
+interface ChainView {
+  blocks: ChainBlock[];
+  mempool: ChainTransaction[];
+}
 
 /** The view read last, and which of its blocks the read before did not have. */
 interface Read {
@@ -63,13 +66,22 @@ export function Chain({
   const { chain, name } = network.network;
 
   const refresh = useCallback(() => {
-    call(
-      client.GET('/v1/networks/{chain}/{network}/blocks', {
-        params: { path: { chain, network: name }, query: { limit: BLOCKS } },
-      }),
-    )
-      .then((view) =>
+    const path = { chain, network: name };
+    Promise.all([
+      call(
+        client.GET('/v1/networks/{chain}/{network}/blocks', {
+          params: { path, query: { limit: BLOCKS } },
+        }),
+      ),
+      call(
+        client.GET('/v1/networks/{chain}/{network}/transactions', {
+          params: { path, query: { pending: true } },
+        }),
+      ),
+    ])
+      .then(([{ blocks }, { transactions: mempool }]) =>
         setRead((last) => {
+          const view = { blocks, mempool };
           const known = new Set(last?.view.blocks.map((b) => b.position));
           const fresh = new Set(
             last ? view.blocks.map((b) => b.position).filter((p) => !known.has(p)) : [],
@@ -207,7 +219,7 @@ export function Chain({
                 <TableCell rowSpan={span} sx={{ fontSize: 12, whiteSpace: 'nowrap' }}>
                   <Box
                     component="span"
-                    aria-label={tx.state}
+                    aria-label={STATE[tx.state]}
                     sx={{
                       display: 'inline-block',
                       mr: 1,
@@ -272,9 +284,10 @@ interface Transfer {
  * has an unknown side. Fees apart.
  */
 function transfersOf(legs: Leg[]): { transfers: Transfer[]; fees: Leg[] } {
-  const incoming = legs.filter((l) => l.kind === 'received' || l.kind === 'minted');
+  // kind: 0 received, 1 spent, 2 burned, 3 minted, 4 fee.
+  const incoming = legs.filter((l) => l.kind === 0 || l.kind === 3);
   const transfers: Transfer[] = [];
-  for (const out of legs.filter((l) => l.kind === 'spent' || l.kind === 'burned')) {
+  for (const out of legs.filter((l) => l.kind === 1 || l.kind === 2)) {
     const at = incoming.findIndex((l) => l.asset === out.asset && l.amount === out.amount);
     const to = at >= 0 ? (incoming.splice(at, 1)[0] ?? null) : null;
     transfers.push({
@@ -287,7 +300,7 @@ function transfersOf(legs: Leg[]): { transfers: Transfer[]; fees: Leg[] } {
   for (const l of incoming) {
     transfers.push({ from: null, to: l.address, asset: l.asset, amount: l.amount });
   }
-  return { transfers, fees: legs.filter((l) => l.kind === 'fee') };
+  return { transfers, fees: legs.filter((l) => l.kind === 4) };
 }
 
 /** An atomic amount of `asset`; an unlisted asset by its id. */
@@ -322,7 +335,7 @@ function Facts({ block }: { block: ChainBlock }) {
   return (
     <Typography sx={{ fontFamily: mono, fontSize: 12, color: 'text.secondary', mb: 1 }}>
       {shorten(block.hash)}
-      {block.timestamp !== null && (
+      {typeof block.timestamp === 'number' && (
         <>
           {' · '}
           <When at={block.timestamp * 1000} />

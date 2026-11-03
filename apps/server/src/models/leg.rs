@@ -4,15 +4,17 @@
 //! the index's running balance (`total`, design 072), in (`position`,
 //! `seq`) order.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::Context as _;
 use base::{Address, Addressed as _, Asset, Coin, Decimal, Input, Network, Reward, TransactionId};
 use diesel::{
     prelude::*,
-    sql_types::{BigInt, Text},
+    sql_types::{BigInt, Bool, Text},
     sqlite::Sqlite,
 };
 
-use super::{child, int, schema::leg, uint, wallet_index::WalletIndex};
+use super::{Json, child, int, schema::leg, uint, wallet_index::WalletIndex};
 
 /// The `kind` of a reward row.
 const REWARD: i32 = 5;
@@ -29,6 +31,7 @@ const REWARD: i32 = 5;
     Insertable,
     QueryableByName,
     serde::Serialize,
+    serde::Deserialize,
     utoipa::ToSchema,
 )]
 #[diesel(table_name = leg, check_for_backend(Sqlite))]
@@ -58,20 +61,23 @@ pub(crate) struct Leg {
     pub(crate) total: Option<String>,
 }
 
-impl Leg {
-    /// The row of leg `index` of transaction `transaction`, mined in
-    /// `block` or pending (`None`): id `"{transaction}.{index}"`. A mined
-    /// row gets its index, position, seq and total from [`db::insert_mined`].
-    ///
-    /// # Errors
-    ///
-    /// When an id part holds a dot.
-    pub(crate) fn new(
-        block: Option<&str>,
-        transaction: &str,
-        index: u32,
-        leg: &base::Leg,
-    ) -> anyhow::Result<Self> {
+/// Legs parsed from a JSON column (an array SQLite built).
+impl From<Json<Vec<Leg>>> for Vec<Leg> {
+    fn from(Json(legs): Json<Vec<Leg>>) -> Self {
+        legs
+    }
+}
+
+/// Leg `index` of transaction `transaction` (its id), pending: id
+/// `"{transaction}.{index}"`, no block, position, seq or total ([`Block`]
+/// mines it, [`block::db::save`] numbers it).
+///
+/// [`Block`]: super::Block
+/// [`block::db::save`]: super::block::db::save
+impl TryFrom<(&str, u32, &base::Leg)> for Leg {
+    type Error = anyhow::Error;
+
+    fn try_from((transaction, index, leg): (&str, u32, &base::Leg)) -> anyhow::Result<Self> {
         let (kind, coin) = match leg {
             base::Leg::Received { coin, .. } => (0, coin.as_ref()),
             base::Leg::Spent { coin, .. } => (1, coin.as_ref()),
@@ -81,7 +87,7 @@ impl Leg {
         };
         Ok(Self {
             id: child(transaction, &[&index.to_string()])?,
-            block: block.map(str::to_owned),
+            block: None,
             transaction: Some(transaction.to_owned()),
             leg_index: i64::from(index),
             kind,
@@ -96,14 +102,14 @@ impl Leg {
             total: None,
         })
     }
+}
 
-    /// The row of `reward` of block `block`: id `"{block}.reward.{index}"`.
-    /// It gets its index, position, seq and total from [`db::insert_mined`].
-    ///
-    /// # Errors
-    ///
-    /// When its index is out of range or an id part holds a dot.
-    pub(crate) fn reward(block: &str, reward: &Reward) -> anyhow::Result<Self> {
+/// `reward` of block `block` (its id): id `"{block}.reward.{index}"`, no
+/// position, seq or total yet.
+impl TryFrom<(&str, &Reward)> for Leg {
+    type Error = anyhow::Error;
+
+    fn try_from((block, reward): (&str, &Reward)) -> anyhow::Result<Self> {
         let index = int(reward.index)?;
         Ok(Self {
             id: child(block, &["reward", &index.to_string()])?,
@@ -122,7 +128,9 @@ impl Leg {
             total: None,
         })
     }
+}
 
+impl Leg {
     /// What it adds to its address's balance: [`base::Leg::signed`]'s rule,
     /// and a reward's own sign.
     ///
@@ -143,19 +151,6 @@ impl Leg {
 }
 
 impl Leg {
-    /// Its index's balance right after it: its `total`; zero for a pending
-    /// leg (none).
-    ///
-    /// # Errors
-    ///
-    /// When the stored total does not decode.
-    pub(crate) fn balance(&self) -> anyhow::Result<Decimal> {
-        self.total.as_deref().map_or_else(
-            || Ok(Decimal::zero()),
-            |total| total.parse().context("a stored total does not decode"),
-        )
-    }
-
     /// The transaction leg this row was written from, of `network` (the row
     /// holds none).
     ///
@@ -213,23 +208,6 @@ impl Leg {
     }
 }
 
-collection! {
-    /// Legs, in the order read or written.
-    Legs(Leg)
-}
-
-impl Legs {
-    /// What they add to their addresses' balances.
-    ///
-    /// # Errors
-    ///
-    /// When a stored amount or kind does not decode.
-    pub(crate) fn sum(&self) -> anyhow::Result<Decimal> {
-        self.iter()
-            .try_fold(Decimal::zero(), |sum, leg| Ok(sum + leg.signed()?))
-    }
-}
-
 /// The `leg` table's statements.
 pub(crate) mod db {
     #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
@@ -244,100 +222,138 @@ pub(crate) mod db {
         height: i64,
     }
 
-    /// The `Received` legs of an address with a coin, in live blocks, that no
-    /// `Spent` leg of the same network consumes, in a live block or in a
-    /// pending transaction (spent from broadcast on).
-    const UNSPENT: &str = r#"
-    SELECT l.*, b.height AS height FROM leg l
-    JOIN block b ON b.id = l.block
-    JOIN "transaction" t ON t.id = l."transaction"
-    WHERE b.chain = ?1 AND b.network = ?2
-      AND l.address IN (SELECT value FROM json_each(?3))
-      AND l.kind = 0 AND l.coin_txid IS NOT NULL AND b.archived_at IS NULL
-      AND NOT EXISTS (
-        SELECT 1 FROM leg s JOIN block sb ON sb.id = s.block
-        WHERE s.kind = 1 AND s.coin_txid = l.coin_txid AND s.coin_index = l.coin_index
-          AND sb.chain = b.chain AND sb.network = b.network AND sb.archived_at IS NULL)
-      AND NOT EXISTS (
-        SELECT 1 FROM leg s JOIN "transaction" st ON st.id = s."transaction"
-        WHERE s.kind = 1 AND s.coin_txid = l.coin_txid AND s.coin_index = l.coin_index
-          AND s.block IS NULL AND st.block IS NULL
-          AND st.chain = b.chain AND st.network = b.network)
-    ORDER BY b.position, t."order", l.leg_index"#;
-
-    /// A wallet index's last live mined leg at or below a position (one
-    /// seek on `leg_wallet_index`).
-    const LAST: &str = "
-    SELECT l.* FROM leg l JOIN block b ON b.id = l.block
-    WHERE l.wallet_index_id = ?1 AND l.position <= ?2 AND b.archived_at IS NULL
-    ORDER BY l.position DESC, l.seq DESC LIMIT 1";
-
-    /// The highest seq a wallet index has kept (0: none).
-    const SEQ: &str = "SELECT COALESCE(MAX(seq), 0) AS seq FROM leg WHERE wallet_index_id = ?1";
-
-    /// A wallet index's highest seq.
+    /// A row of [`find_running`]'s query.
     #[derive(QueryableByName)]
-    struct Seq {
+    struct Running {
+        #[diesel(sql_type = Text)]
+        id: String,
         #[diesel(sql_type = BigInt)]
         seq: i64,
+        #[diesel(sql_type = Text)]
+        total: String,
     }
 
-    /// An address's outgoing legs (spent, burned, fee) in an asset in
-    /// pending transactions.
-    /// Wallet index `index`'s last live mined leg at or below `through`
-    /// (`i64::MAX`: the last): its `total` is the index's balance there.
-    pub(crate) fn find_last(
+    /// A wallet index a pending transaction moves funds of: a row of
+    /// [`find_spending`]'s query.
+    #[derive(QueryableByName)]
+    pub(crate) struct Spending {
+        #[diesel(sql_type = Text)]
+        pub(crate) id: String,
+        /// Whether it is a kept index.
+        #[diesel(sql_type = Bool)]
+        pub(crate) ours: bool,
+        #[diesel(sql_type = Text)]
+        total: String,
+        #[diesel(sql_type = Text)]
+        pending_out: Json<Vec<String>>,
+    }
+
+    impl Spending {
+        /// Whether it can spend `takes` (signed: what a send takes is
+        /// negative): its balance now less what its pending sends take
+        /// stays at or above zero.
+        ///
+        /// # Errors
+        ///
+        /// When a stored amount does not decode.
+        pub(crate) fn can_spend(&self, takes: Decimal) -> anyhow::Result<bool> {
+            let now: Decimal = self
+                .total
+                .parse()
+                .context("a stored total does not decode")?;
+            let left = self.pending_out.0.iter().try_fold(now, |left, amount| {
+                let amount: Decimal = amount.parse().context("a stored amount does not decode")?;
+                anyhow::Ok(left - amount)
+            })?;
+            Ok(left + takes >= Decimal::zero())
+        }
+    }
+
+    /// At most `limit` live mined legs of wallet index `index` with a seq
+    /// below `before`, latest first.
+    pub(crate) fn find_page(
         connection: &mut SqliteConnection,
         index: &str,
-        through: i64,
-    ) -> QueryResult<Option<Leg>> {
-        diesel::sql_query(LAST)
-            .bind::<Text, _>(index)
-            .bind::<BigInt, _>(through)
-            .get_result(connection)
-            .optional()
+        before: i64,
+        limit: i64,
+    ) -> QueryResult<Vec<Leg>> {
+        // At most `?3` live mined legs of wallet index `?1` with a seq below
+        // `?2`, latest first (an index's seq grows with its live legs'
+        // positions).
+        diesel::sql_query(
+            "
+            SELECT
+                l.*
+            FROM leg l
+            JOIN block b ON b.id = l.block
+            WHERE l.wallet_index_id = ?1
+              AND l.seq < ?2
+              AND b.archived_at IS NULL
+            ORDER BY l.seq DESC
+            LIMIT ?3",
+        )
+        .bind::<Text, _>(index)
+        .bind::<BigInt, _>(before)
+        .bind::<BigInt, _>(limit)
+        .load(connection)
     }
 
-    /// Keeps mined `row` (of its block, at `position`) as the next leg of
-    /// wallet index `index`: its seq after the highest the index has kept,
-    /// its total the index's last live leg at or below `position` (legs of
-    /// the block written before it included) plus its amount. A seq the
-    /// index already holds is refused (`leg_seq`): two writers of one step
-    /// cannot both land.
+    /// Where each of wallet indexes `indexes` continues from at
+    /// `position`: its highest seq ever kept and its balance
+    /// there, by id.
     ///
     /// # Errors
     ///
-    /// When a stored or given amount does not decode, or a write fails.
-    pub(crate) fn insert_mined(
+    /// When the read fails or a stored total does not decode.
+    pub(crate) fn find_running(
         connection: &mut SqliteConnection,
-        mut row: Leg,
+        indexes: &BTreeSet<String>,
         position: i64,
-    ) -> anyhow::Result<()> {
-        let index = row.wallet_index_id.clone();
-        let index = index.as_str();
-        let before = match find_last(connection, index, position)? {
-            Some(last) => last.balance()?,
-            None => Decimal::zero(),
-        };
-        let total = before + row.signed()?;
-        let last: Seq = diesel::sql_query(SEQ)
-            .bind::<Text, _>(index)
-            .get_result(connection)?;
-        row.position = Some(position);
-        row.seq = Some(last.seq + 1);
-        row.total = Some(total.to_string());
-        diesel::insert_into(leg::table)
-            .values(&row)
-            .execute(connection)?;
-        Ok(())
+    ) -> anyhow::Result<BTreeMap<String, (i64, Decimal)>> {
+        // Where each wallet index of `?1` (a JSON list of ids) continues from
+        // at position `?2`: the highest seq it has ever kept (0: none) and the
+        // total of its last live mined leg at or below `?2` ('0': none).
+        let rows: Vec<Running> = diesel::sql_query(
+            "
+            SELECT
+                i.value AS id,
+                (
+                    SELECT COALESCE(MAX(seq), 0)
+                    FROM leg
+                    WHERE wallet_index_id = i.value
+                ) AS seq,
+                COALESCE((
+                    SELECT l.total
+                    FROM leg l
+                    JOIN block b ON b.id = l.block
+                    WHERE l.wallet_index_id = i.value
+                      AND l.position <= ?2
+                      AND b.archived_at IS NULL
+                    ORDER BY l.position DESC, l.seq DESC
+                    LIMIT 1
+                ), '0') AS total
+            FROM json_each(?1) i",
+        )
+        .bind::<Text, _>(serde_json::to_string(indexes)?)
+        .bind::<BigInt, _>(position)
+        .load(connection)?;
+        rows.into_iter()
+            .map(|row| {
+                let total = row
+                    .total
+                    .parse()
+                    .context("a stored total does not decode")?;
+                Ok((row.id, (row.seq, total)))
+            })
+            .collect()
     }
 
-    /// Deletes the legs of block `block` kept for `indexes` (a block kept
-    /// again writes them again).
+    /// Deletes the legs of block `block` kept for wallet indexes `indexes`
+    /// (a block kept again writes them again).
     pub(crate) fn delete_in(
         connection: &mut SqliteConnection,
         block: &str,
-        indexes: &[String],
+        indexes: &BTreeSet<String>,
     ) -> QueryResult<usize> {
         diesel::delete(
             leg::table
@@ -347,54 +363,58 @@ pub(crate) mod db {
         .execute(connection)
     }
 
-    /// Whether `address` can spend `takes` (signed: what a send takes is
-    /// negative) of `asset`: its index's balance now (zero without an
-    /// index: no mined leg is kept) less what its pending sends take stays
-    /// at or above zero.
+    /// Wallet indexes `indexes` as a pending transaction spends from them,
+    /// in id order.
     ///
     /// # Errors
     ///
-    /// When a read fails, a stored amount does not decode, or an id part
-    /// holds a dot.
-    pub(crate) fn can_spend(
+    /// When the read fails.
+    pub(crate) fn find_spending(
         connection: &mut SqliteConnection,
-        address: &Address,
-        asset: &Asset,
-        takes: Decimal,
-    ) -> anyhow::Result<bool> {
-        let index = WalletIndex::id(address, asset)?;
-        let now = match find_last(connection, &index, i64::MAX)? {
-            Some(last) => last.balance()?,
-            None => Decimal::zero(),
-        };
-        let pending = find_pending_out(connection, &index)?.sum()?;
-        Ok(now + pending + takes >= Decimal::zero())
+        indexes: Vec<&String>,
+    ) -> anyhow::Result<Vec<Spending>> {
+        // What each wallet index of `?1` (a JSON list of ids) spends from:
+        // whether it is kept, the total of its last live mined leg ('0': none),
+        // and the amounts of its pending outgoing legs (spent, burned, fee).
+        Ok(diesel::sql_query(
+            "
+            SELECT
+                i.value AS id,
+                EXISTS (
+                    SELECT 1
+                    FROM wallet_index
+                    WHERE id = i.value
+                ) AS ours,
+                COALESCE((
+                    SELECT l.total
+                    FROM leg l
+                    JOIN block b ON b.id = l.block
+                    WHERE l.wallet_index_id = i.value
+                      AND b.archived_at IS NULL
+                    ORDER BY l.position DESC, l.seq DESC
+                    LIMIT 1
+                ), '0') AS total,
+                COALESCE((
+                    SELECT json_group_array(l.amount)
+                    FROM leg l
+                    WHERE l.wallet_index_id = i.value
+                      AND l.block IS NULL
+                      AND l.kind IN (1, 2, 4)
+                ), '[]') AS pending_out
+            FROM json_each(?1) i",
+        )
+        .bind::<Text, _>(serde_json::to_string(&indexes)?)
+        .load(connection)?)
     }
 
-    /// The pending outgoing legs (spent, burned, fee) of wallet index
-    /// `index`: what its pending sends take until mined, refused or expired.
-    fn find_pending_out(connection: &mut SqliteConnection, index: &str) -> QueryResult<Legs> {
-        leg::table
-            .filter(leg::wallet_index_id.eq(index))
-            .filter(leg::block.is_null())
-            .filter(leg::kind.eq_any([1, 2, 4]))
-            .select(Leg::as_select())
-            .load::<Leg>(connection)
-            .map(Legs::from)
-    }
-
-    /// Keeps pending `rows`; a leg already kept is kept once.
-    pub(crate) fn insert(connection: &mut SqliteConnection, rows: &Legs) -> QueryResult<usize> {
-        // A kept leg is skipped; a row breaking a constraint is an error,
-        // never silently dropped (as `INSERT OR IGNORE` would).
-        // One statement per row: diesel has no batch upsert on SQLite.
-        rows.iter().try_fold(0, |added, row| {
-            diesel::insert_into(leg::table)
-                .values(row)
-                .on_conflict_do_nothing()
-                .execute(connection)
-                .map(|one| added + one)
-        })
+    /// Keeps `rows`, in one statement.
+    pub(crate) fn insert(connection: &mut SqliteConnection, rows: Vec<&Leg>) -> QueryResult<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        diesel::insert_into(leg::table)
+            .values(rows)
+            .execute(connection)
     }
 
     /// Deletes the legs of transaction `transaction` of any block but
@@ -412,35 +432,9 @@ pub(crate) mod db {
         .execute(connection)
     }
 
-    /// Deletes the legs of transaction `transaction` in no block (pending).
-    pub(crate) fn delete_for(
-        connection: &mut SqliteConnection,
-        transaction: &str,
-    ) -> QueryResult<usize> {
-        diesel::delete(
-            leg::table
-                .filter(leg::transaction.eq(transaction))
-                .filter(leg::block.is_null()),
-        )
-        .execute(connection)
-    }
-
     /// How many legs (movements and rewards) every network keeps.
     pub(crate) fn count(connection: &mut SqliteConnection) -> QueryResult<i64> {
         leg::table.count().get_result(connection)
-    }
-
-    /// The legs of transaction `transaction`, in order.
-    pub(crate) fn find_for(
-        connection: &mut SqliteConnection,
-        transaction: &str,
-    ) -> QueryResult<Legs> {
-        leg::table
-            .filter(leg::transaction.eq(transaction))
-            .order(leg::leg_index)
-            .select(Leg::as_select())
-            .load::<Leg>(connection)
-            .map(Legs::from)
     }
 
     /// Every unspent coin of `addresses` (all of `network`), as inputs, in
@@ -454,11 +448,52 @@ pub(crate) mod db {
         network: &Network,
         addresses: &[&str],
     ) -> anyhow::Result<Vec<Input>> {
-        let rows: Vec<Unspent> = diesel::sql_query(UNSPENT)
-            .bind::<Text, _>(network.chain.as_str())
-            .bind::<Text, _>(&network.name)
-            .bind::<Text, _>(serde_json::to_string(addresses)?)
-            .load(connection)?;
+        // The `Received` legs of an address with a coin, in live blocks, that no
+        // `Spent` leg of the same network consumes, in a live block or in a
+        // pending transaction (spent from broadcast on).
+        let rows: Vec<Unspent> = diesel::sql_query(
+            r#"
+            SELECT
+                l.*,
+                b.height AS height
+            FROM leg l
+            JOIN block b ON b.id = l.block
+            JOIN "transaction" t ON t.id = l."transaction"
+            WHERE b.chain = ?1
+              AND b.network = ?2
+              AND l.address IN (SELECT value FROM json_each(?3))
+              AND l.kind = 0
+              AND l.coin_txid IS NOT NULL
+              AND b.archived_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM leg s
+                  JOIN block sb ON sb.id = s.block
+                  WHERE s.kind = 1
+                    AND s.coin_txid = l.coin_txid
+                    AND s.coin_index = l.coin_index
+                    AND sb.chain = b.chain
+                    AND sb.network = b.network
+                    AND sb.archived_at IS NULL
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM leg s
+                  JOIN "transaction" st ON st.id = s."transaction"
+                  WHERE s.kind = 1
+                    AND s.coin_txid = l.coin_txid
+                    AND s.coin_index = l.coin_index
+                    AND s.block IS NULL
+                    AND st.block IS NULL
+                    AND st.chain = b.chain
+                    AND st.network = b.network
+              )
+            ORDER BY b.position, t."order", l.leg_index"#,
+        )
+        .bind::<Text, _>(network.chain.as_str())
+        .bind::<Text, _>(&network.name)
+        .bind::<Text, _>(serde_json::to_string(addresses)?)
+        .load(connection)?;
         rows.into_iter()
             .map(|row| {
                 let height = uint(row.height)?;

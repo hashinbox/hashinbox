@@ -1,17 +1,21 @@
 //! `transaction`: kept transactions, once per txid, pending (no block) or
 //! mined in a kept block.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Context as _;
-use base::{Address, Addressed as _, Asset, Network, Reason, TransactionId, TransactionState};
+use base::{Address, Asset, Decimal, Network, Reason, TransactionId, TransactionState};
 use diesel::{
     prelude::*,
-    sql_types::{BigInt, Text},
+    sql_types::{BigInt, Bool, Text},
     sqlite::Sqlite,
 };
 
-use super::{Leg, Legs, int, key, leg, schema::transactions, uint, wallet_index};
+use super::{
+    Json, Leg, int, key, leg,
+    schema::{self, transactions},
+    uint,
+};
 
 /// The `state` and `reason` columns of `state`.
 ///
@@ -51,22 +55,62 @@ pub(crate) fn decode_state(state: i32, reason: Option<&str>) -> anyhow::Result<T
     })
 }
 
-/// One `transaction` row.
-#[derive(Clone, Debug, Queryable, Selectable, QueryableByName)]
-#[diesel(table_name = transactions, check_for_backend(Sqlite))]
+/// A kept transaction: its `transaction` row and its kept legs. The API
+/// shows it as is. Read in one query: its legs come as a JSON array SQLite
+/// builds (`legs`).
+#[derive(
+    Clone,
+    Debug,
+    Insertable,
+    AsChangeset,
+    QueryableByName,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
+)]
+#[diesel(
+    table_name = transactions,
+    treat_none_as_null = true,
+    check_for_backend(Sqlite)
+)]
 pub(crate) struct Transaction {
+    /// `{chain}.{network}.{txid}`.
     pub(crate) id: String,
+    /// Its block; null while pending.
     pub(crate) block: Option<String>,
     pub(crate) chain: String,
     pub(crate) network: String,
+    /// Chain-native transaction id.
     pub(crate) txid: String,
+    /// Its position in its block; null while pending.
     pub(crate) order: Option<i64>,
+    /// 0 pending, 1 succeeded, 2 reverted.
     pub(crate) state: i32,
+    /// Why it reverted (JSON), when the chain said; null otherwise.
     pub(crate) reason: Option<String>,
+    /// The signed transaction in its chain's encoding; empty when read
+    /// nested in a block.
+    #[serde(skip)]
     pub(crate) bytes: Vec<u8>,
-    #[allow(dead_code, reason = "the whole row is selected; kept as a record")]
+    /// Unix ms it was recorded as pending; null once mined.
     pub(crate) sent_at: Option<i64>,
+    /// Unix ms it stops holding funds; null once mined.
     pub(crate) expires_at: Option<i64>,
+    /// Its kept legs, in order.
+    #[diesel(
+        skip_insertion,
+        skip_update,
+        sql_type = Text,
+        deserialize_as = Json<Vec<Leg>>
+    )]
+    pub(crate) legs: Vec<Leg>,
+}
+
+/// Transactions parsed from a JSON column (an array SQLite built).
+impl From<Json<Vec<Transaction>>> for Vec<Transaction> {
+    fn from(Json(transactions): Json<Vec<Transaction>>) -> Self {
+        transactions
+    }
 }
 
 impl Transaction {
@@ -78,27 +122,59 @@ impl Transaction {
     pub(crate) fn id(network: &Network, txid: &str) -> anyhow::Result<String> {
         key(&[network.chain.as_str(), &network.name, txid])
     }
-}
 
-impl Transaction {
-    /// The transaction this row was written from, with `legs` (its own, in
-    /// order).
+    /// Drops its legs of wallet indexes not in `ours` (index ids).
+    pub(crate) fn keep(&mut self, ours: &BTreeSet<String>) {
+        self.legs.retain(|leg| ours.contains(&leg.wallet_index_id));
+    }
+
+    /// The transaction it was written from, with its kept legs.
     ///
     /// # Errors
     ///
     /// When a stored value does not decode.
-    pub(crate) fn transaction(self, legs: Legs) -> anyhow::Result<base::Transaction> {
+    pub(crate) fn transaction(self) -> anyhow::Result<base::Transaction> {
         let network = Network::new(base::Chain::new(&self.chain), &self.network);
         Ok(base::Transaction {
             id: TransactionId::new(network.clone(), self.txid),
             state: decode_state(self.state, self.reason.as_deref())?,
             order: self.order.map(uint).transpose()?,
-            legs: legs
+            legs: self
+                .legs
                 .into_iter()
                 .map(|leg| leg.leg(&network))
                 .collect::<anyhow::Result<Vec<_>>>()?,
             bytes: self.bytes,
             expires: self.expires_at.map(uint).transpose()?,
+        })
+    }
+}
+
+/// `transaction` as kept pending, with every leg (no block).
+impl TryFrom<&base::Transaction> for Transaction {
+    type Error = anyhow::Error;
+
+    fn try_from(transaction: &base::Transaction) -> anyhow::Result<Self> {
+        let network = &transaction.id.network;
+        let id = Self::id(network, &transaction.id.id)?;
+        let legs = (0_u32..)
+            .zip(&transaction.legs)
+            .map(|(index, leg)| Leg::try_from((id.as_str(), index, leg)))
+            .collect::<anyhow::Result<_>>()?;
+        let (state, reason) = encode_state(&transaction.state)?;
+        Ok(Self {
+            id,
+            block: None,
+            chain: network.chain.to_string(),
+            network: network.name.clone(),
+            txid: transaction.id.id.clone(),
+            order: transaction.order.map(int).transpose()?,
+            state,
+            reason,
+            bytes: transaction.bytes.clone(),
+            sent_at: None,
+            expires_at: transaction.expires.map(int).transpose()?,
+            legs,
         })
     }
 }
@@ -116,314 +192,265 @@ impl std::fmt::Display for Short {
 
 impl std::error::Error for Short {}
 
-collection! {
-    /// Transactions, in the order read.
-    Transactions(Transaction)
-}
-
 /// The `transaction` table's statements.
 pub(crate) mod db {
     #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
     use super::*;
 
-    #[derive(Insertable, AsChangeset)]
-    #[diesel(table_name = transactions, treat_none_as_null = true)]
-    struct NewTransaction<'a> {
-        id: &'a str,
-        block: Option<&'a str>,
-        chain: &'a str,
-        network: &'a str,
-        txid: &'a str,
-        order: Option<i64>,
-        state: i32,
-        reason: Option<String>,
-        bytes: &'a [u8],
-        sent_at: Option<i64>,
-        expires_at: Option<i64>,
-    }
-
-    /// One page of the transactions in live blocks with a leg of an address in
-    /// an asset, after a (position, order, txid) key, in that order.
-    const PAGE: &str = r#"
-    SELECT t.* FROM "transaction" t
-    JOIN block b ON b.id = t.block
-    WHERE b.chain = ?1 AND b.network = ?2 AND b.archived_at IS NULL
-      AND EXISTS (SELECT 1 FROM leg l
-        WHERE l."transaction" = t.id AND l.address = ?3 AND l.asset = ?4)
-      AND (b.position, COALESCE(t."order", 0), t.txid) > (?5, ?6, ?7)
-    ORDER BY b.position, COALESCE(t."order", 0), t.txid
-    LIMIT ?8"#;
-
     /// At most `limit` transactions of `address` in `asset`, in live blocks,
-    /// after the (`position`, `order`, `txid`) key (see [`PAGE`]).
+    /// after the (`position`, `order`, `txid`) key, each with only its legs
+    /// of `address` in `asset`.
     pub(crate) fn find_page(
         connection: &mut SqliteConnection,
         address: &Address,
         asset: &Asset,
         after: (i64, i64, &str),
         limit: i64,
-    ) -> QueryResult<Transactions> {
-        diesel::sql_query(PAGE)
-            .bind::<Text, _>(address.network.chain.as_str())
-            .bind::<Text, _>(&address.network.name)
-            .bind::<Text, _>(&address.value)
-            .bind::<Text, _>(&asset.id)
-            .bind::<BigInt, _>(after.0)
-            .bind::<BigInt, _>(after.1)
-            .bind::<Text, _>(after.2)
-            .bind::<BigInt, _>(limit)
-            .load::<Transaction>(connection)
-            .map(Transactions::from)
+    ) -> QueryResult<Vec<Transaction>> {
+        // One page of the transactions in live blocks with a leg of an address
+        // in an asset, after a (position, order, txid) key, in that order, each
+        // with only those legs.
+        diesel::sql_query(
+            r#"
+            SELECT
+                t.*,
+                COALESCE((
+                    SELECT json_group_array(
+                        json(l.json)
+                        ORDER BY l.leg_index
+                    )
+                    FROM leg_json l
+                    WHERE l."transaction" = t.id
+                      AND l.address = ?3
+                      AND l.asset = ?4
+                ), '[]') AS legs
+            FROM "transaction" t
+            JOIN block b ON b.id = t.block
+            WHERE b.chain = ?1
+              AND b.network = ?2
+              AND b.archived_at IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM leg l
+                  WHERE l."transaction" = t.id
+                    AND l.address = ?3
+                    AND l.asset = ?4
+              )
+              AND (b.position, COALESCE(t."order", 0), t.txid) > (?5, ?6, ?7)
+            ORDER BY b.position, COALESCE(t."order", 0), t.txid
+            LIMIT ?8"#,
+        )
+        .bind::<Text, _>(address.network.chain.as_str())
+        .bind::<Text, _>(&address.network.name)
+        .bind::<Text, _>(&address.value)
+        .bind::<Text, _>(&asset.id)
+        .bind::<BigInt, _>(after.0)
+        .bind::<BigInt, _>(after.1)
+        .bind::<Text, _>(after.2)
+        .bind::<BigInt, _>(limit)
+        .load(connection)
     }
 
-    /// Keeps pending `transaction`, recorded at `now`, with every leg (no
-    /// block); a no-op when its txid is kept, pending or mined. Its outgoing
-    /// legs count as spent until it is mined, deleted or expired.
+    /// Keeps pending `transaction` with its legs of kept wallet indexes
+    /// (the others are dropped from it); a no-op when its txid is kept,
+    /// pending or mined. Its outgoing legs count as spent until it is mined,
+    /// deleted or expired.
     ///
     /// # Errors
     ///
-    /// [`Short`] when an address it takes from cannot spend what it takes,
-    /// beyond what is in flight (the caller's write must roll back: the row
-    /// is already inserted); when a value does not encode or the write
-    /// fails.
-    pub(crate) fn insert_pending(
+    /// [`Short`] when a wallet index it takes from (every leg counts, kept
+    /// or not) cannot spend what it takes, beyond what is in flight (the
+    /// caller's write must roll back: the row is already inserted); when a
+    /// value does not decode or the write fails.
+    pub(crate) fn save_pending(
         connection: &mut SqliteConnection,
-        transaction: &base::Transaction,
-        now: i64,
+        transaction: &mut Transaction,
     ) -> anyhow::Result<()> {
-        let (state, reason) = encode_state(&transaction.state)?;
-        let network = &transaction.id.network;
-        let id = Transaction::id(network, &transaction.id.id)?;
-        let row = NewTransaction {
-            id: &id,
-            block: None,
-            chain: network.chain.as_str(),
-            network: &network.name,
-            txid: &transaction.id.id,
-            order: transaction.order.map(int).transpose()?,
-            state,
-            reason,
-            bytes: &transaction.bytes,
-            sent_at: Some(now),
-            expires_at: transaction.expires.map(int).transpose()?,
-        };
         let added = diesel::insert_into(transactions::table)
-            .values(&row)
+            .values(&*transaction)
             .on_conflict_do_nothing()
             .execute(connection)?;
         if added == 0 {
             return Ok(());
         }
-        // Checked before its own legs count; failing rolls the caller's
-        // write back.
-        for ((address, asset), takes) in transaction.debits() {
-            if !leg::db::can_spend(connection, &address, &asset, takes)? {
+        // Checked before its own legs count, in one read over its indexes;
+        // failing rolls the caller's write back.
+        let mut takes = BTreeMap::<String, Decimal>::new();
+        for leg in &transaction.legs {
+            *takes
+                .entry(leg.wallet_index_id.clone())
+                .or_insert_with(Decimal::zero) += leg.signed()?;
+        }
+        let indexes = leg::db::find_spending(connection, takes.keys().collect())?;
+        for index in &indexes {
+            let takes = takes.get(&index.id).context("an index was not read")?;
+            if *takes < Decimal::zero() && !index.can_spend(takes.clone())? {
                 anyhow::bail!(Short);
             }
         }
-        // Only legs of indexed addresses are kept (a leg belongs to its
-        // index); a counterparty this server does not index leaves none.
-        let legs = (0_u32..)
-            .zip(&transaction.legs)
-            .map(|(index, leg)| Leg::new(None, &id, index, leg))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let ids: Vec<&str> = legs
-            .iter()
-            .map(|leg| leg.wallet_index_id.as_str())
-            .collect();
-        let indexed = wallet_index::db::find_ids_in(connection, &ids)?;
-        let legs: Legs = legs
+        // A counterparty this server does not index leaves no leg.
+        let ours = indexes
             .into_iter()
-            .filter(|leg| indexed.contains(&leg.wallet_index_id))
+            .filter(|index| index.ours)
+            .map(|index| index.id)
             .collect();
-        leg::db::insert(connection, &legs)?;
+        transaction.keep(&ours);
+        leg::db::insert(connection, transaction.legs.iter().collect())?;
         Ok(())
     }
 
-    /// Keeps the facts of `block` (kept as row `id`, at `position`) for the
-    /// indexes (address, asset) `pairs` it applies to, in 072's order: each
-    /// transaction with a leg of one, by order ([`upsert_mined`]), then
-    /// their rewards, by index; each leg the next of its index
-    /// ([`leg::db::insert_mined`]). Their legs already in the block (kept
-    /// before, revived) are written again.
+    /// Keeps mined `transaction`'s row: a pending or earlier mined row
+    /// takes its values, and its legs of no block or another block (pending,
+    /// or mined before a reorg) are deleted. Its own legs are the caller's.
     ///
     /// # Errors
     ///
-    /// When a value does not encode or decode, or a write fails.
-    pub(crate) fn insert_block(
+    /// When a write fails.
+    pub(crate) fn upsert(
         connection: &mut SqliteConnection,
-        block: &base::Block,
-        id: &str,
-        position: i64,
-        pairs: &BTreeSet<(String, String)>,
+        transaction: &Transaction,
     ) -> anyhow::Result<()> {
-        let applies = |address: &Address, asset: &Asset| {
-            pairs.contains(&(address.value.clone(), asset.id.clone()))
-        };
-        let network = &block.network;
-        let indexes = pairs
-            .iter()
-            .map(|(address, asset)| key(&[network.chain.as_str(), &network.name, address, asset]))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        leg::db::delete_in(connection, id, &indexes)?;
-        let mut transactions: Vec<_> = block.transactions.iter().collect();
-        transactions.sort_by_key(|transaction| transaction.order.unwrap_or(0));
-        for transaction in transactions {
-            let legs: Vec<_> = (0_u32..)
-                .zip(&transaction.legs)
-                .filter(|(_, leg)| applies(leg.address(), leg.asset()))
-                .collect();
-            if !legs.is_empty() {
-                upsert_mined(connection, id, position, transaction, legs)?;
-            }
-        }
-        let mut rewards: Vec<_> = block
-            .rewards
-            .iter()
-            .filter(|reward| applies(&reward.address, &reward.asset))
-            .collect();
-        rewards.sort_by_key(|reward| reward.index);
-        for reward in rewards {
-            leg::db::insert_mined(connection, Leg::reward(id, reward)?, position)?;
-        }
-        Ok(())
-    }
-
-    /// Keeps `transaction` as mined in block `block` (at `position`) with
-    /// `legs` (indexed legs of it, each the next of its index): the row
-    /// takes the mined values and its legs of no block or another block
-    /// (pending, or mined before a reorg) are deleted.
-    ///
-    /// # Errors
-    ///
-    /// When a value does not encode or a write fails.
-    fn upsert_mined<'l>(
-        connection: &mut SqliteConnection,
-        block: &str,
-        position: i64,
-        transaction: &base::Transaction,
-        legs: impl IntoIterator<Item = (u32, &'l base::Leg)>,
-    ) -> anyhow::Result<()> {
-        let (state, reason) = encode_state(&transaction.state)?;
-        let network = &transaction.id.network;
-        let id = Transaction::id(network, &transaction.id.id)?;
-        let row = NewTransaction {
-            id: &id,
-            block: Some(block),
-            chain: network.chain.as_str(),
-            network: &network.name,
-            txid: &transaction.id.id,
-            order: transaction.order.map(int).transpose()?,
-            state,
-            reason,
-            bytes: &transaction.bytes,
-            sent_at: None,
-            expires_at: None,
-        };
+        let block = transaction
+            .block
+            .as_deref()
+            .context("a mined transaction has no block")?;
         diesel::insert_into(transactions::table)
-            .values(&row)
+            .values(transaction)
             .on_conflict(transactions::id)
             .do_update()
-            .set(&row)
+            .set(transaction)
             .execute(connection)?;
-        leg::db::delete_moved(connection, block, &id)?;
-        for (index, leg) in legs {
-            leg::db::insert_mined(
-                connection,
-                Leg::new(Some(block), &id, index, leg)?,
-                position,
-            )?;
-        }
+        leg::db::delete_moved(connection, block, &transaction.id)?;
         Ok(())
     }
 
-    /// The pending transaction `id`, if it is still pending.
-    pub(crate) fn find_pending(
+    /// Transaction `id` with its kept legs, if kept ([`ONE`]).
+    pub(crate) fn get(
         connection: &mut SqliteConnection,
         id: &str,
     ) -> QueryResult<Option<Transaction>> {
-        transactions::table
-            .filter(transactions::id.eq(id))
-            .filter(transactions::block.is_null())
-            .select(Transaction::as_select())
-            .first(connection)
-            .optional()
-    }
-
-    /// The kept transactions of `blocks`, in block order.
-    pub(crate) fn find_in(
-        connection: &mut SqliteConnection,
-        blocks: &[&str],
-    ) -> QueryResult<Transactions> {
-        transactions::table
-            .filter(transactions::block.eq_any(blocks))
-            .order(transactions::order)
-            .select(Transaction::as_select())
-            .load(connection)
-            .map(Transactions::from)
+        // Transaction `?1` with its legs.
+        diesel::sql_query(
+            r#"
+            SELECT
+                t.*,
+                COALESCE((
+                    SELECT json_group_array(
+                        json(l.json)
+                        ORDER BY l.leg_index
+                    )
+                    FROM leg_json l
+                    WHERE l."transaction" = t.id
+                ), '[]') AS legs
+            FROM "transaction" t
+            WHERE t.id = ?1"#,
+        )
+        .bind::<Text, _>(id)
+        .get_result(connection)
+        .optional()
     }
 
     /// Of every network: how many transactions are kept mined in live
     /// blocks, how many of those reverted, and how many are pending.
     pub(crate) fn count(connection: &mut SqliteConnection) -> QueryResult<(i64, i64, i64)> {
         use crate::models::schema::block;
-        let mined = || {
-            transactions::table
-                .inner_join(block::table.on(block::id.nullable().eq(transactions::block)))
-                .filter(block::archived_at.is_null())
-        };
-        let all = mined().count().get_result(connection)?;
-        let reverted = mined()
-            .filter(transactions::state.eq(2))
-            .count()
-            .get_result(connection)?;
-        let pending = transactions::table
-            .filter(transactions::block.is_null())
-            .count()
-            .get_result(connection)?;
-        Ok((all, reverted, pending))
+        // A mined transaction joins its block only while that is live.
+        transactions::table
+            .left_join(
+                block::table.on(block::id
+                    .nullable()
+                    .eq(transactions::block)
+                    .and(block::archived_at.is_null())),
+            )
+            .select(diesel::dsl::sql::<(BigInt, BigInt, BigInt)>(
+                r#"
+                COUNT(block.id),
+                COALESCE(SUM(block.id IS NOT NULL AND "transaction".state = 2), 0),
+                COALESCE(SUM("transaction".block IS NULL), 0)"#,
+            ))
+            .get_result(connection)
     }
 
-    /// For every kept transaction of every network mined in a live block
-    /// stamped at or after `since`: that stamp (Unix seconds).
-    pub(crate) fn find_stamps_since(
+    /// How many kept transactions of every network are mined in live
+    /// blocks stamped in each hour from `since` (Unix seconds) on, as
+    /// (hour, count); hour 0 starts at `since`.
+    pub(crate) fn count_by_hour(
         connection: &mut SqliteConnection,
         since: i64,
-    ) -> QueryResult<Vec<i64>> {
+    ) -> QueryResult<Vec<(i64, i64)>> {
         use crate::models::schema::block;
         transactions::table
             .inner_join(block::table.on(block::id.nullable().eq(transactions::block)))
             .filter(block::archived_at.is_null())
             .filter(block::timestamp.ge(since))
-            .select(block::timestamp.assume_not_null())
+            .group_by(diesel::dsl::sql::<BigInt>("hour"))
+            .select((
+                diesel::dsl::sql::<BigInt>("(block.timestamp - ")
+                    .bind::<BigInt, _>(since)
+                    .sql(") / 3600 AS hour"),
+                diesel::dsl::count_star(),
+            ))
             .load(connection)
     }
 
-    /// The pending transactions of `network`, oldest sent first.
-    pub(crate) fn find_all_pending(
+    /// At most `limit` pending transactions of `network` with their legs,
+    /// oldest sent first.
+    pub(crate) fn find_by_network(
         connection: &mut SqliteConnection,
         network: &Network,
-    ) -> QueryResult<Transactions> {
-        transactions::table
-            .filter(transactions::chain.eq(network.chain.as_str()))
-            .filter(transactions::network.eq(&network.name))
-            .filter(transactions::block.is_null())
-            .order(transactions::sent_at)
-            .select(Transaction::as_select())
-            .load(connection)
-            .map(Transactions::from)
+        pending: bool,
+        limit: i64,
+    ) -> QueryResult<Vec<Transaction>> {
+        // At most `?4` transactions of a network with their legs: pending ones
+        // (`?3` true), oldest sent first, or mined ones in live blocks (`?3`
+        // false), latest first.
+        diesel::sql_query(
+            r#"
+            SELECT
+                t.*,
+                COALESCE((
+                    SELECT json_group_array(
+                        json(l.json)
+                        ORDER BY l.leg_index
+                    )
+                    FROM leg_json l
+                    WHERE l."transaction" = t.id
+                ), '[]') AS legs
+            FROM "transaction" t
+            LEFT JOIN block b ON b.id = t.block
+            WHERE t.chain = ?1
+              AND t.network = ?2
+              AND CASE
+                  WHEN ?3 THEN t.block IS NULL
+                  ELSE b.archived_at IS NULL AND t.block IS NOT NULL
+              END
+            ORDER BY
+                b.position DESC,
+                t."order" DESC,
+                t.sent_at
+            LIMIT ?4"#,
+        )
+        .bind::<Text, _>(network.chain.as_str())
+        .bind::<Text, _>(&network.name)
+        .bind::<Bool, _>(pending)
+        .bind::<BigInt, _>(limit)
+        .load(connection)
     }
 
-    /// Forgets pending transaction `id` and its legs (refused, expired):
-    /// its funds and coins are free again. A mined one is kept.
-    pub(crate) fn delete_by_id(connection: &mut SqliteConnection, id: &str) -> QueryResult<usize> {
-        leg::db::delete_for(connection, id)?;
-        diesel::delete(
-            transactions::table
-                .filter(transactions::id.eq(id))
-                .filter(transactions::block.is_null()),
-        )
-        .execute(connection)
+    /// Forgets the pending transactions `ids` and their legs (never sent,
+    /// refused): their funds and coins are free again. A mined one is kept.
+    pub(crate) fn delete_pending(
+        connection: &mut SqliteConnection,
+        ids: &[String],
+    ) -> QueryResult<usize> {
+        let pending = transactions::table
+            .filter(transactions::id.eq_any(ids))
+            .filter(transactions::block.is_null());
+        diesel::delete(schema::leg::table.filter(
+            schema::leg::transaction.eq_any(pending.clone().select(transactions::id.nullable())),
+        ))
+        .execute(connection)?;
+        diesel::delete(pending).execute(connection)
     }
 
     /// Forgets every pending transaction of `network` past its expiry at
@@ -433,16 +460,17 @@ pub(crate) mod db {
         network: &Network,
         now: i64,
     ) -> QueryResult<usize> {
-        let ids: Vec<String> = transactions::table
+        let expired = transactions::table
             .filter(transactions::chain.eq(network.chain.as_str()))
             .filter(transactions::network.eq(&network.name))
             .filter(transactions::block.is_null())
-            .filter(transactions::expires_at.le(now))
-            .select(transactions::id)
-            .load(connection)?;
-        for id in &ids {
-            delete_by_id(connection, id)?;
-        }
-        Ok(ids.len())
+            .filter(transactions::expires_at.le(now));
+        diesel::delete(
+            schema::leg::table.filter(
+                schema::leg::transaction.eq_any(expired.select(transactions::id.nullable())),
+            ),
+        )
+        .execute(connection)?;
+        diesel::delete(expired).execute(connection)
     }
 }

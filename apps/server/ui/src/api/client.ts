@@ -7,6 +7,7 @@ import type { components, paths } from './schema';
 export type Schemas = components['schemas'];
 export type Wallet = Schemas['Wallet'];
 export type WalletIndex = Schemas['WalletIndex'];
+export type Leg = Schemas['Leg'];
 export type Network = Schemas['Network'];
 export type Listing = Schemas['Listing'];
 export type Transaction = Schemas['Transaction'];
@@ -15,9 +16,8 @@ export type ConfiguredNetwork = Schemas['ConfiguredNetwork'];
 export type Trigger = Schemas['Trigger'];
 export type TriggerRun = Schemas['TriggerRun'];
 export type Job = Schemas['Job'];
-export type ChainView = Schemas['ChainView'];
-export type ChainBlock = Schemas['ChainBlock'];
-export type ChainTransaction = Schemas['ChainTransaction'];
+export type ChainBlock = Schemas['Block'];
+export type ChainTransaction = Schemas['Transaction'];
 
 /** Raised for any non-2xx answer; `message` is the server's own. */
 export class ApiError extends Error {

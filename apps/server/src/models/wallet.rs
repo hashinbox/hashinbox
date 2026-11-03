@@ -184,13 +184,6 @@ impl From<&Wallet> for Address {
     }
 }
 
-impl Wallets {
-    /// Their addresses, in order.
-    pub(crate) fn addresses(&self) -> Vec<Address> {
-        self.iter().map(Address::from).collect()
-    }
-}
-
 /// The `wallet` table's statements.
 #[allow(
     dead_code,
@@ -209,12 +202,12 @@ pub(crate) mod db {
 
     use super::{Json, Secret, Tips, Wallet, Wallets, is_tag};
     use crate::models::{
-        schema::{block, wallet, wallet_index},
-        wallet_index::{self as index, Selector, WalletIndex, db::IndexRow},
+        schema::wallet,
+        wallet_index::{Selector, WalletIndex, db::IndexRow},
     };
 
     /// One `wallet` row: a [`Wallet`] with its key, without its indexes.
-    #[derive(Queryable, Selectable)]
+    #[derive(Queryable, QueryableByName, Selectable)]
     #[diesel(table_name = wallet, check_for_backend(Sqlite))]
     struct Row {
         id: String,
@@ -248,128 +241,7 @@ pub(crate) mod db {
         rows.into_iter().map(Wallet::from).collect()
     }
 
-    /// Wallet `?2` left-joined to its indexes, each measured against its
-    /// network's entry in `?1` (JSON [`Tips`]: tip and final block): one row per index (one without index columns for a
-    /// wallet without indexes), by asset. Each balance is the total of the
-    /// index's last live mined leg (at or below the final block for the
-    /// confirmed one). No key is read.
-    const ONE: &str = r#"
-    WITH t AS (
-        SELECT
-            key AS network_id,
-            json_extract(value, '$.tip') AS tip,
-            json_extract(value, '$.confirmed') AS confirmed
-        FROM json_each(?1)
-    )
-    SELECT
-        w.id,
-        w.secret IS NOT NULL AS keyed,
-        w.tags,
-        wi.id AS index_id,
-        wi.wallet_id,
-        wi.asset,
-        wi.requested_from,
-        wi.birthday,
-        wi.indexed_at,
-        wi.state,
-        wi.reason,
-        w.chain,
-        w.network,
-        w.address,
-        b.position AS indexed_through,
-        CASE
-            WHEN b.position IS NULL OR t.tip IS NULL THEN NULL
-            ELSE MAX(t.tip - b.position, 0)
-        END AS behind_tip,
-        t.confirmed AS finality_at,
-        COALESCE((
-            SELECT l.total
-            FROM leg l
-            JOIN block lb ON lb.id = l.block
-            WHERE l.wallet_index_id = wi.id
-              AND lb.archived_at IS NULL
-            ORDER BY l.position DESC, l.seq DESC
-            LIMIT 1
-        ), '0') AS balance,
-        CASE
-            WHEN t.confirmed IS NULL THEN NULL
-            ELSE COALESCE((
-                SELECT l.total
-                FROM leg l
-                JOIN block lb ON lb.id = l.block
-                WHERE l.wallet_index_id = wi.id
-                  AND l.position <= t.confirmed
-                  AND lb.archived_at IS NULL
-                ORDER BY l.position DESC, l.seq DESC
-                LIMIT 1
-            ), '0')
-        END AS balance_confirmed
-    FROM wallet w
-    LEFT JOIN wallet_index wi ON wi.wallet_id = w.id
-    LEFT JOIN block b ON b.id = wi.indexed_at
-    LEFT JOIN t ON t.network_id = w.chain || '.' || w.network
-    WHERE w.id = ?2
-    ORDER BY w.id, wi.asset"#;
-
-    /// As [`ONE`], for at most `?3` wallets with an id after `?2`, by id.
-    const PAGE: &str = r#"
-    WITH t AS (
-        SELECT
-            key AS network_id,
-            json_extract(value, '$.tip') AS tip,
-            json_extract(value, '$.confirmed') AS confirmed
-        FROM json_each(?1)
-    )
-    SELECT
-        w.id,
-        w.secret IS NOT NULL AS keyed,
-        w.tags,
-        wi.id AS index_id,
-        wi.wallet_id,
-        wi.asset,
-        wi.requested_from,
-        wi.birthday,
-        wi.indexed_at,
-        wi.state,
-        wi.reason,
-        w.chain,
-        w.network,
-        w.address,
-        b.position AS indexed_through,
-        CASE
-            WHEN b.position IS NULL OR t.tip IS NULL THEN NULL
-            ELSE MAX(t.tip - b.position, 0)
-        END AS behind_tip,
-        t.confirmed AS finality_at,
-        COALESCE((
-            SELECT l.total
-            FROM leg l
-            JOIN block lb ON lb.id = l.block
-            WHERE l.wallet_index_id = wi.id
-              AND lb.archived_at IS NULL
-            ORDER BY l.position DESC, l.seq DESC
-            LIMIT 1
-        ), '0') AS balance,
-        CASE
-            WHEN t.confirmed IS NULL THEN NULL
-            ELSE COALESCE((
-                SELECT l.total
-                FROM leg l
-                JOIN block lb ON lb.id = l.block
-                WHERE l.wallet_index_id = wi.id
-                  AND l.position <= t.confirmed
-                  AND lb.archived_at IS NULL
-                ORDER BY l.position DESC, l.seq DESC
-                LIMIT 1
-            ), '0')
-        END AS balance_confirmed
-    FROM (SELECT * FROM wallet WHERE id > ?2 ORDER BY id LIMIT ?3) w
-    LEFT JOIN wallet_index wi ON wi.wallet_id = w.id
-    LEFT JOIN block b ON b.id = wi.indexed_at
-    LEFT JOIN t ON t.network_id = w.chain || '.' || w.network
-    ORDER BY w.id, wi.asset"#;
-
-    /// A row of [`ONE`] / [`PAGE`]: a wallet and one of its indexes.
+    /// A row of [`find_at_tip`] / [`list_at_tip`]: a wallet with its indexes.
     #[derive(QueryableByName)]
     struct AtTip {
         #[diesel(sql_type = Text)]
@@ -384,66 +256,140 @@ pub(crate) mod db {
         keyed: bool,
         #[diesel(sql_type = Text)]
         tags: Json<BTreeSet<String>>,
-        #[diesel(embed)]
-        index: Option<IndexRow>,
+        #[diesel(sql_type = Text)]
+        indexes: Json<BTreeMap<String, IndexRow>>,
     }
 
-    /// `rows` grouped by wallet, each index with its legs (one more query
-    /// over the indexes' ids).
-    fn group(connection: &mut SqliteConnection, rows: Vec<AtTip>) -> anyhow::Result<Wallets> {
-        let ids: Vec<&str> = rows
-            .iter()
-            .filter_map(|row| row.index.as_ref())
-            .map(IndexRow::id)
-            .collect();
-        let mut by_index = index::db::find_legs(connection, &ids)?;
-        let mut wallets: Vec<Wallet> = Vec::new();
-        for row in rows {
-            if wallets.last().is_none_or(|last| last.id != row.id) {
-                wallets.push(Wallet {
-                    id: row.id,
-                    chain: row.chain,
-                    network: row.network,
-                    address: row.address,
-                    keyed: row.keyed,
-                    tags: row.tags,
-                    indexes: BTreeMap::new(),
-                    curve: None,
-                    secret: Secret(None),
-                });
-            }
-            if let (Some(last), Some(index)) = (wallets.last_mut(), row.index) {
-                let mut index = WalletIndex::try_from(index)?;
-                index.legs = by_index.remove(&index.id).unwrap_or_default();
-                last.indexes.insert(index.asset.id.clone(), index);
-            }
+    /// The row as its wallet, without its key.
+    impl TryFrom<AtTip> for Wallet {
+        type Error = anyhow::Error;
+
+        fn try_from(row: AtTip) -> anyhow::Result<Self> {
+            let network = super::Network::new(super::Chain::new(&row.chain), &row.network);
+            let indexes = row
+                .indexes
+                .0
+                .into_iter()
+                .map(|(asset, index)| Ok((asset, WalletIndex::try_from((&network, index))?)))
+                .collect::<anyhow::Result<_>>()?;
+            Ok(Self {
+                id: row.id,
+                chain: row.chain,
+                network: row.network,
+                address: row.address,
+                keyed: row.keyed,
+                tags: row.tags,
+                indexes,
+                curve: None,
+                secret: Secret(None),
+            })
         }
-        Ok(wallets.into())
     }
 
     /// Wallet `id`, if kept, with its indexes measured against `tips` (each
-    /// network's indexer tip and confirmations) and their legs: one query
-    /// for the wallet and its indexes, one for their legs, grouped here.
-    /// Never its key.
+    /// network's indexer tip and confirmations) and their pending legs, in
+    /// one query. Never its key.
     ///
     /// # Errors
     ///
-    /// When a read fails or a stored value does not decode.
+    /// When the read fails or a stored value does not decode.
     pub(crate) fn find_at_tip(
         connection: &mut SqliteConnection,
         id: &str,
         tips: &Tips,
     ) -> anyhow::Result<Option<Wallet>> {
-        let rows: Vec<AtTip> = diesel::sql_query(ONE)
-            .bind::<Text, _>(serde_json::to_string(tips)?)
-            .bind::<Text, _>(id)
-            .load(connection)?;
-        Ok(group(connection, rows)?.0.pop())
+        // Wallet `?2` with its indexes as one JSON object by asset, each
+        // measured against its network's entry in `?1` (JSON [`Tips`]: tip and
+        // final block), with its pending legs. Each balance is the total of the
+        // index's last live mined leg (at or below the final block for the
+        // confirmed one). No key is read.
+        diesel::sql_query(
+            r#"
+            WITH t AS (
+                SELECT
+                    key AS network_id,
+                    json_extract(value, '$.tip') AS tip,
+                    json_extract(value, '$.confirmed') AS confirmed
+                FROM json_each(?1)
+            )
+            SELECT
+                w.id,
+                w.chain,
+                w.network,
+                w.address,
+                w.secret IS NOT NULL AS keyed,
+                w.tags,
+                COALESCE((
+                    SELECT json_group_object(
+                        wi.asset,
+                        json_object(
+                            'id', wi.id,
+                            'wallet_id', wi.wallet_id,
+                            'asset', wi.asset,
+                            'requested_from', wi.requested_from,
+                            'birthday', wi.birthday,
+                            'indexed_at', wi.indexed_at,
+                            'state', wi.state,
+                            'reason', wi.reason,
+                            'address', w.address,
+                            'indexed_through', b.position,
+                            'behind_tip', CASE
+                                WHEN b.position IS NULL OR t.tip IS NULL THEN NULL
+                                ELSE MAX(t.tip - b.position, 0)
+                            END,
+                            'finality_at', t.confirmed,
+                            'balance', COALESCE((
+                                SELECT l.total
+                                FROM leg l
+                                JOIN block lb ON lb.id = l.block
+                                WHERE l.wallet_index_id = wi.id
+                                  AND lb.archived_at IS NULL
+                                ORDER BY l.position DESC, l.seq DESC
+                                LIMIT 1
+                            ), '0'),
+                            'balance_confirmed', CASE
+                                WHEN t.confirmed IS NULL THEN NULL
+                                ELSE COALESCE((
+                                    SELECT l.total
+                                    FROM leg l
+                                    JOIN block lb ON lb.id = l.block
+                                    WHERE l.wallet_index_id = wi.id
+                                      AND l.position <= t.confirmed
+                                      AND lb.archived_at IS NULL
+                                    ORDER BY l.position DESC, l.seq DESC
+                                    LIMIT 1
+                                ), '0')
+                            END,
+                            'keyed', json(iif(w.secret IS NULL, 'false', 'true')),
+                            'legs', json(COALESCE((
+                                SELECT json_group_array(
+                                    json(l.json)
+                                    ORDER BY l.id
+                                )
+                                FROM leg_json l
+                                WHERE l.wallet_index_id = wi.id
+                                  AND l.block IS NULL
+                            ), '[]'))
+                        )
+                    )
+                    FROM wallet_index wi
+                    LEFT JOIN block b ON b.id = wi.indexed_at
+                    WHERE wi.wallet_id = w.id
+                ), '{}') AS indexes
+            FROM wallet w
+            LEFT JOIN t ON t.network_id = w.chain || '.' || w.network
+            WHERE w.id = ?2"#,
+        )
+        .bind::<Text, _>(serde_json::to_string(tips)?)
+        .bind::<Text, _>(id)
+        .get_result::<AtTip>(connection)
+        .optional()?
+        .map(Wallet::try_from)
+        .transpose()
     }
 
     /// At most `limit` wallets with an id after `after` (`""`: from the
-    /// first), by id, each as [`find_at_tip`]: one query for the page with
-    /// its indexes, one for their legs.
+    /// first), by id, each as [`find_at_tip`], in one query.
     ///
     /// # Errors
     ///
@@ -454,12 +400,93 @@ pub(crate) mod db {
         after: &str,
         limit: i64,
     ) -> anyhow::Result<Wallets> {
-        let rows: Vec<AtTip> = diesel::sql_query(PAGE)
-            .bind::<Text, _>(serde_json::to_string(tips)?)
-            .bind::<Text, _>(after)
-            .bind::<BigInt, _>(limit)
-            .load(connection)?;
-        group(connection, rows)
+        // As in [`find_at_tip`], for at most `?3` wallets with an id after `?2`, by id.
+        diesel::sql_query(
+            r#"
+            WITH t AS (
+                SELECT
+                    key AS network_id,
+                    json_extract(value, '$.tip') AS tip,
+                    json_extract(value, '$.confirmed') AS confirmed
+                FROM json_each(?1)
+            )
+            SELECT
+                w.id,
+                w.chain,
+                w.network,
+                w.address,
+                w.secret IS NOT NULL AS keyed,
+                w.tags,
+                COALESCE((
+                    SELECT json_group_object(
+                        wi.asset,
+                        json_object(
+                            'id', wi.id,
+                            'wallet_id', wi.wallet_id,
+                            'asset', wi.asset,
+                            'requested_from', wi.requested_from,
+                            'birthday', wi.birthday,
+                            'indexed_at', wi.indexed_at,
+                            'state', wi.state,
+                            'reason', wi.reason,
+                            'address', w.address,
+                            'indexed_through', b.position,
+                            'behind_tip', CASE
+                                WHEN b.position IS NULL OR t.tip IS NULL THEN NULL
+                                ELSE MAX(t.tip - b.position, 0)
+                            END,
+                            'finality_at', t.confirmed,
+                            'balance', COALESCE((
+                                SELECT l.total
+                                FROM leg l
+                                JOIN block lb ON lb.id = l.block
+                                WHERE l.wallet_index_id = wi.id
+                                  AND lb.archived_at IS NULL
+                                ORDER BY l.position DESC, l.seq DESC
+                                LIMIT 1
+                            ), '0'),
+                            'balance_confirmed', CASE
+                                WHEN t.confirmed IS NULL THEN NULL
+                                ELSE COALESCE((
+                                    SELECT l.total
+                                    FROM leg l
+                                    JOIN block lb ON lb.id = l.block
+                                    WHERE l.wallet_index_id = wi.id
+                                      AND l.position <= t.confirmed
+                                      AND lb.archived_at IS NULL
+                                    ORDER BY l.position DESC, l.seq DESC
+                                    LIMIT 1
+                                ), '0')
+                            END,
+                            'keyed', json(iif(w.secret IS NULL, 'false', 'true')),
+                            'legs', json(COALESCE((
+                                SELECT json_group_array(
+                                    json(l.json)
+                                    ORDER BY l.id
+                                )
+                                FROM leg_json l
+                                WHERE l.wallet_index_id = wi.id
+                                  AND l.block IS NULL
+                            ), '[]'))
+                        )
+                    )
+                    FROM wallet_index wi
+                    LEFT JOIN block b ON b.id = wi.indexed_at
+                    WHERE wi.wallet_id = w.id
+                ), '{}') AS indexes
+            FROM wallet w
+            LEFT JOIN t ON t.network_id = w.chain || '.' || w.network
+            WHERE w.id > ?2
+            ORDER BY w.id
+            LIMIT ?3"#,
+        )
+        .bind::<Text, _>(serde_json::to_string(tips)?)
+        .bind::<Text, _>(after)
+        .bind::<BigInt, _>(limit)
+        .load::<AtTip>(connection)?
+        .into_iter()
+        .map(Wallet::try_from)
+        .collect()
     }
 
     /// What [`find_indexed`] picks; each part set narrows it.
@@ -474,24 +501,51 @@ pub(crate) mod db {
         pub(crate) selector: Option<&'a Selector>,
     }
 
-    /// A new row, or the key of a kept watch-only row; a kept key stays.
-    const INSERT: &str = "
-    INSERT INTO wallet (id, chain, network, address, curve, secret) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-    ON CONFLICT (id) DO UPDATE SET curve = excluded.curve, secret = excluded.secret
-    WHERE wallet.secret IS NULL AND excluded.secret IS NOT NULL";
-
     /// Keeps `wallet` without its tags: a new row, or, for a kept
     /// watch-only row, its key (its tags and indexes stay); a kept key stays.
-    /// How many rows changed (0 or 1).
-    pub(crate) fn insert(connection: &mut SqliteConnection, wallet: &Wallet) -> QueryResult<usize> {
-        diesel::sql_query(INSERT)
+    /// Whether the row is new.
+    pub(crate) fn insert(connection: &mut SqliteConnection, wallet: &Wallet) -> QueryResult<bool> {
+        let secret = wallet.secret.0.as_ref().map(|key| key.as_bytes());
+        // A new row; nothing when its id is kept.
+        let created = diesel::sql_query(
+            "
+            INSERT INTO wallet (
+                id,
+                chain,
+                network,
+                address,
+                curve,
+                secret
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT (id) DO NOTHING",
+        )
+        .bind::<Text, _>(&wallet.id)
+        .bind::<Text, _>(&wallet.chain)
+        .bind::<Text, _>(&wallet.network)
+        .bind::<Text, _>(&wallet.address)
+        .bind::<Nullable<Text>, _>(wallet.curve.as_deref())
+        .bind::<Nullable<Binary>, _>(secret)
+        .execute(connection)?
+            > 0;
+        if !created {
+            // The key `?2`, `?3` (if any) of kept watch-only row `?1`; a kept key
+            // stays.
+            diesel::sql_query(
+                "
+                UPDATE wallet
+                SET curve = ?2,
+                    secret = ?3
+                WHERE id = ?1
+                  AND secret IS NULL
+                  AND ?3 IS NOT NULL",
+            )
             .bind::<Text, _>(&wallet.id)
-            .bind::<Text, _>(&wallet.chain)
-            .bind::<Text, _>(&wallet.network)
-            .bind::<Text, _>(&wallet.address)
             .bind::<Nullable<Text>, _>(wallet.curve.as_deref())
-            .bind::<Nullable<Binary>, _>(wallet.secret.0.as_ref().map(|key| key.as_bytes()))
-            .execute(connection)
+            .bind::<Nullable<Binary>, _>(secret)
+            .execute(connection)?;
+        }
+        Ok(created)
     }
 
     /// The wallet `id`, if kept.
@@ -526,6 +580,14 @@ pub(crate) mod db {
         Ok(wallets(rows))
     }
 
+    /// Whether wallet `id` is kept with its key.
+    pub(crate) fn is_keyed(connection: &mut SqliteConnection, id: &str) -> QueryResult<bool> {
+        diesel::select(diesel::dsl::exists(
+            wallet::table.find(id).filter(wallet::secret.is_not_null()),
+        ))
+        .get_result(connection)
+    }
+
     /// How many wallets of every network keep their key.
     pub(crate) fn count_keyed(connection: &mut SqliteConnection) -> QueryResult<i64> {
         wallet::table
@@ -545,7 +607,11 @@ pub(crate) mod db {
     /// tags (their index).
     pub(crate) fn find_tags(connection: &mut SqliteConnection) -> QueryResult<Vec<String>> {
         let rows: Vec<InUse> = diesel::sql_query(
-            "SELECT DISTINCT j.value AS tag FROM wallet w, json_each(w.tags) j ORDER BY tag",
+            "
+            SELECT DISTINCT
+                j.value AS tag
+            FROM wallet w, json_each(w.tags) j
+            ORDER BY tag",
         )
         .load(connection)?;
         Ok(rows.into_iter().map(|row| row.tag).collect())
@@ -597,35 +663,49 @@ pub(crate) mod db {
         connection: &mut SqliteConnection,
         selector: IndexedSelector<'_>,
     ) -> QueryResult<Wallets> {
-        let mut indexes = wallet_index::table.into_boxed();
-        if let Some(confirmed) = selector.confirmed {
-            let mut live = block::table
-                .filter(block::archived_at.is_null())
-                .filter(block::position.ge(confirmed))
-                .select(block::id.nullable())
-                .into_boxed();
-            if let Some(network) = selector.network {
-                live = live
-                    .filter(block::chain.eq(network.chain.as_str().to_owned()))
-                    .filter(block::network.eq(network.name.clone()));
-            }
-            indexes = indexes.filter(wallet_index::indexed_at.eq_any(live));
-        }
-        if let Some(selector) = selector.selector {
-            indexes = indexes.filter(selector.predicate());
-        }
-        let mut wallets = wallet::table
-            .filter(wallet::id.eq_any(indexes.select(wallet_index::wallet_id)))
-            .into_boxed();
+        let mut binds = Vec::new();
+        let picked = selector
+            .selector
+            .map_or_else(|| "1".to_owned(), |one| one.sql(&mut binds));
+        let network = if selector.network.is_some() {
+            "w.chain = ? AND w.network = ?"
+        } else {
+            "1"
+        };
+        let indexed = if selector.confirmed.is_some() {
+            "b.archived_at IS NULL AND b.position >= ?"
+        } else {
+            "1"
+        };
+        let mut query = diesel::sql_query(format!(
+            "
+            SELECT
+                w.*
+            FROM wallet w
+            WHERE ({network})
+              AND EXISTS (
+                  SELECT 1
+                  FROM wallet_index wi
+                  LEFT JOIN block b ON b.id = wi.indexed_at
+                  WHERE wi.wallet_id = w.id
+                    AND ({indexed})
+                    AND ({picked})
+              )
+            ORDER BY w.id"
+        ))
+        .into_boxed();
         if let Some(network) = selector.network {
-            wallets = wallets
-                .filter(wallet::chain.eq(network.chain.as_str().to_owned()))
-                .filter(wallet::network.eq(network.name.clone()));
+            query = query
+                .bind::<Text, _>(network.chain.as_str().to_owned())
+                .bind::<Text, _>(network.name.clone());
         }
-        let rows = wallets
-            .order(wallet::id)
-            .select(Row::as_select())
-            .load(connection)?;
+        if let Some(confirmed) = selector.confirmed {
+            query = query.bind::<BigInt, _>(confirmed);
+        }
+        for value in binds {
+            query = query.bind::<Text, _>(value);
+        }
+        let rows: Vec<Row> = query.load(connection)?;
         Ok(super::db::wallets(rows))
     }
 

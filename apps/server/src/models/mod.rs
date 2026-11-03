@@ -80,7 +80,7 @@ pub(crate) use endpoint::RpcEndpoints;
 pub(crate) use explorer::{Explorer, Explorers};
 pub(crate) use indexing::Indexing;
 pub(crate) use json::Json;
-pub(crate) use leg::{Leg, Legs};
+pub(crate) use leg::Leg;
 pub(crate) use network::Network;
 pub(crate) use task::Task;
 

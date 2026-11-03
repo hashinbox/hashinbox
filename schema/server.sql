@@ -30,6 +30,8 @@ CREATE TABLE "trigger" (
     enabled    INTEGER NOT NULL CHECK (enabled IN (0, 1)),
     created_at INTEGER NOT NULL, -- Unix ms.
     updated_at INTEGER NOT NULL, -- Unix ms.
+    -- Its latest run, set in the write that records it; NULL: never run.
+    last_run   TEXT    REFERENCES trigger_run (id) ON DELETE SET NULL,
     CHECK (length(id) BETWEEN 1 AND 64 AND id NOT GLOB '*[^a-z0-9-]*')
 );
 CREATE INDEX trigger_network ON "trigger" (chain, network);

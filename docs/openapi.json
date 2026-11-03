@@ -417,7 +417,7 @@
         "tags": [
           "networks"
         ],
-        "summary": "List a network's last kept blocks and its pending transactions",
+        "summary": "List a network's last kept blocks",
         "operationId": "list_blocks",
         "parameters": [
           {
@@ -451,11 +451,11 @@
         ],
         "responses": {
           "200": {
-            "description": "The last blocks and the mempool",
+            "description": "The last blocks",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ChainView"
+                  "$ref": "#/components/schemas/BlockList"
                 }
               }
             }
@@ -552,7 +552,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ChainBlock"
+                  "$ref": "#/components/schemas/Block"
                 }
               }
             }
@@ -963,6 +963,111 @@
           },
           "404": {
             "description": "The network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/networks/{chain}/{network}/transactions": {
+      "get": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "List a network's pending or mined transactions",
+        "operationId": "list_network_transactions",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pending",
+            "in": "query",
+            "description": "Pending ones (true, the default), oldest sent first; or mined ones in\nlive blocks (false), latest first.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "At most this many, 1 to 500; 100 by default.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The transactions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkTransactions"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1988,6 +2093,106 @@
         ]
       }
     },
+    "/v1/wallets/{id}/indexes/{asset}/legs": {
+      "get": {
+        "tags": [
+          "wallets"
+        ],
+        "summary": "List an index's mined legs",
+        "description": "The index's legs in live blocks, latest first, each with the balance right after it. Its pending legs are on the index itself.",
+        "operationId": "list_wallet_index_legs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "`{chain}.{network}.{address}`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "asset",
+            "in": "path",
+            "description": "The asset id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "`next_cursor` of the previous page (a `seq`); absent for the first\npage.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of legs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LegPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed wallet ID, query or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/wallets/{id}/tags/{tag}": {
       "put": {
         "tags": [
@@ -2152,7 +2357,7 @@
           "transactions"
         ],
         "summary": "Read one page of a wallet's history",
-        "description": "The wallet's transactions in `asset`, in chain order, with only its own movements of that asset; a fee is shown where this address paid it in the native asset. Block rewards count in the balance but are not transactions.",
+        "description": "The wallet's transactions in `asset`, in chain order, with only its own legs of that asset; a fee is shown where this address paid it in the native asset. Block rewards count in the balance but are not transactions.",
         "operationId": "read_wallet_transactions",
         "parameters": [
           {
@@ -2423,60 +2628,71 @@
       },
       "Block": {
         "type": "object",
-        "description": "The block a transaction was mined in.",
+        "description": "A kept block: its `block` row, its kept transactions in block order and\nits kept rewards. The API shows it as is. Read whole in one query: its\nchildren come as JSON arrays SQLite builds (`transactions`, `rewards`).",
         "required": [
+          "id",
+          "chain",
+          "network",
           "position",
           "height",
           "hash",
-          "timestamp"
+          "transactions",
+          "rewards"
         ],
         "properties": {
-          "hash": {
-            "type": "string",
-            "description": "Block hash, hexadecimal, in the chain's native byte order."
-          },
-          "height": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Produced-block count.",
-            "minimum": 0
-          },
-          "position": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Native position (Bitcoin/Ethereum height, Solana slot).",
-            "minimum": 0
-          },
-          "timestamp": {
+          "archived_at": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Unix seconds, when the chain reports one; always present.",
-            "minimum": 0
-          }
-        }
-      },
-      "ChainBlock": {
-        "type": "object",
-        "description": "One kept block.",
-        "required": [
-          "position",
-          "hash",
-          "timestamp",
-          "transactions"
-        ],
-        "properties": {
+            "description": "Unix ms a reorg archived it; null while live."
+          },
+          "chain": {
+            "type": "string"
+          },
           "hash": {
             "type": "string",
             "description": "Block hash, hexadecimal."
           },
+          "height": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Produced-block count."
+          },
+          "id": {
+            "type": "string",
+            "description": "`{chain}.{network}.{hash}`."
+          },
+          "network": {
+            "type": "string"
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its parent's id, once that is kept."
+          },
+          "parent_position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Its parent's position; null for genesis."
+          },
           "position": {
             "type": "integer",
             "format": "int64",
-            "description": "Native position (height or slot).",
-            "minimum": 0
+            "description": "Native position (height or slot)."
+          },
+          "rewards": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Leg"
+            },
+            "description": "Its kept rewards, in order."
           },
           "timestamp": {
             "type": [
@@ -2484,15 +2700,30 @@
               "null"
             ],
             "format": "int64",
-            "description": "Unix seconds, when reported; always present.",
-            "minimum": 0
+            "description": "Unix seconds, when reported."
           },
           "transactions": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ChainTransaction"
+              "$ref": "#/components/schemas/Transaction"
             },
             "description": "Its kept transactions, in block order."
+          }
+        }
+      },
+      "BlockList": {
+        "type": "object",
+        "description": "`GET /v1/networks/{chain}/{network}/blocks`.",
+        "required": [
+          "blocks"
+        ],
+        "properties": {
+          "blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Block"
+            },
+            "description": "The last kept blocks, latest first."
           }
         }
       },
@@ -2524,52 +2755,6 @@
           }
         }
       },
-      "ChainLeg": {
-        "type": "object",
-        "description": "One kept leg: an indexed address's movement in a transaction.",
-        "required": [
-          "address",
-          "asset",
-          "kind",
-          "amount"
-        ],
-        "properties": {
-          "address": {
-            "type": "string"
-          },
-          "amount": {
-            "type": "string",
-            "description": "Exact atomic decimal."
-          },
-          "asset": {
-            "type": "string",
-            "description": "Asset id of the network."
-          },
-          "kind": {
-            "$ref": "#/components/schemas/ChainLegKind"
-          }
-        }
-      },
-      "ChainLegKind": {
-        "type": "string",
-        "description": "What a leg did to its address.",
-        "enum": [
-          "received",
-          "spent",
-          "burned",
-          "minted",
-          "fee"
-        ]
-      },
-      "ChainState": {
-        "type": "string",
-        "description": "Where a transaction is.",
-        "enum": [
-          "pending",
-          "succeeded",
-          "reverted"
-        ]
-      },
       "ChainTip": {
         "type": "object",
         "description": "`GET /v1/networks/{chain}/{network}/tip`.",
@@ -2592,73 +2777,6 @@
             "format": "int64",
             "description": "Unix seconds, when reported; always present.",
             "minimum": 0
-          }
-        }
-      },
-      "ChainTransaction": {
-        "type": "object",
-        "description": "One kept transaction.",
-        "required": [
-          "txid",
-          "order",
-          "state",
-          "expires_at",
-          "legs"
-        ],
-        "properties": {
-          "expires_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Unix ms it stops holding funds; always present, null once mined."
-          },
-          "legs": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ChainLeg"
-            },
-            "description": "The kept legs, in order."
-          },
-          "order": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Position in its block; always present, null while pending."
-          },
-          "state": {
-            "$ref": "#/components/schemas/ChainState"
-          },
-          "txid": {
-            "type": "string",
-            "description": "Chain-native transaction id."
-          }
-        }
-      },
-      "ChainView": {
-        "type": "object",
-        "description": "`GET /v1/networks/{chain}/{network}/blocks`.",
-        "required": [
-          "blocks",
-          "mempool"
-        ],
-        "properties": {
-          "blocks": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ChainBlock"
-            },
-            "description": "The last kept blocks, latest first."
-          },
-          "mempool": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ChainTransaction"
-            },
-            "description": "The pending transactions, oldest sent first."
           }
         }
       },
@@ -3039,7 +3157,8 @@
           "kind",
           "address",
           "asset",
-          "amount"
+          "amount",
+          "wallet_index_id"
         ],
         "properties": {
           "address": {
@@ -3115,11 +3234,33 @@
             "description": "Its transaction; null for a reward."
           },
           "wallet_index_id": {
+            "type": "string",
+            "description": "The wallet index it is kept for: its address's index in its asset."
+          }
+        }
+      },
+      "LegPage": {
+        "type": "object",
+        "description": "`GET /v1/wallets/{id}/indexes/{asset}/legs`: a page of mined legs.",
+        "required": [
+          "legs",
+          "next_cursor"
+        ],
+        "properties": {
+          "legs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Leg"
+            },
+            "description": "Live mined legs, latest first, each with the balance after it\n(`total`)."
+          },
+          "next_cursor": {
             "type": [
-              "string",
+              "integer",
               "null"
             ],
-            "description": "The wallet index it is kept for; `None` while pending."
+            "format": "int64",
+            "description": "Pass as `before` for the next page; null on the last page. Always\npresent."
           }
         }
       },
@@ -3145,42 +3286,6 @@
             "description": "The chain and network this asset's wallets live on."
           }
         }
-      },
-      "Movement": {
-        "type": "object",
-        "description": "One movement of the wallet's asset inside a transaction.",
-        "required": [
-          "index",
-          "kind",
-          "amount"
-        ],
-        "properties": {
-          "amount": {
-            "type": "string",
-            "description": "Exact decimal in display units."
-          },
-          "index": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Its order among the movements shown.",
-            "minimum": 0
-          },
-          "kind": {
-            "$ref": "#/components/schemas/MovementKind",
-            "description": "What it did."
-          }
-        }
-      },
-      "MovementKind": {
-        "type": "string",
-        "description": "What a movement did to the wallet.",
-        "enum": [
-          "received",
-          "spent",
-          "burned",
-          "minted",
-          "fee"
-        ]
       },
       "Network": {
         "type": "object",
@@ -3255,13 +3360,21 @@
         },
         "additionalProperties": false
       },
-      "Outcome": {
-        "type": "string",
-        "description": "How a mined transaction executed.",
-        "enum": [
-          "succeeded",
-          "reverted"
-        ]
+      "NetworkTransactions": {
+        "type": "object",
+        "description": "`GET /v1/networks/{chain}/{network}/transactions`.",
+        "required": [
+          "transactions"
+        ],
+        "properties": {
+          "transactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Transaction"
+            },
+            "description": "The transactions, with their legs."
+          }
+        }
       },
       "Report": {
         "type": "object",
@@ -3640,40 +3753,79 @@
       },
       "Transaction": {
         "type": "object",
-        "description": "One transaction of a wallet's history.",
+        "description": "A kept transaction: its `transaction` row and its kept legs. The API\nshows it as is. Read in one query: its legs come as a JSON array SQLite\nbuilds (`legs`).",
         "required": [
-          "transaction_id",
-          "block",
-          "outcome",
-          "reason",
-          "movements"
+          "id",
+          "chain",
+          "network",
+          "txid",
+          "state",
+          "legs"
         ],
         "properties": {
           "block": {
-            "$ref": "#/components/schemas/Block",
-            "description": "The block it was mined in."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its block; null while pending."
           },
-          "movements": {
+          "chain": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms it stops holding funds; null once mined."
+          },
+          "id": {
+            "type": "string",
+            "description": "`{chain}.{network}.{txid}`."
+          },
+          "legs": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Movement"
+              "$ref": "#/components/schemas/Leg"
             },
-            "description": "The wallet's movements of the asset."
+            "description": "Its kept legs, in order."
           },
-          "outcome": {
-            "$ref": "#/components/schemas/Outcome",
-            "description": "How it executed."
+          "network": {
+            "type": "string"
+          },
+          "order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Its position in its block; null while pending."
           },
           "reason": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Why it reverted, as the chain reported it; always present."
+            "description": "Why it reverted (JSON), when the chain said; null otherwise."
           },
-          "transaction_id": {
+          "sent_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms it was recorded as pending; null once mined."
+          },
+          "state": {
+            "type": "integer",
+            "format": "int32",
+            "description": "0 pending, 1 succeeded, 2 reverted."
+          },
+          "txid": {
             "type": "string",
-            "description": "Chain-native transaction ID."
+            "description": "Chain-native transaction id."
           }
         }
       },
@@ -3702,7 +3854,7 @@
             "items": {
               "$ref": "#/components/schemas/Transaction"
             },
-            "description": "At most `limit` transactions in kept blocks, in chain order. Kept\nblocks reach the produced tip, so the last ones may still be taken\nback by a reorg."
+            "description": "At most `limit` transactions in kept blocks, in chain order, each\nwith only the wallet's legs of the asset (atomic amounts; a mined\nleg's `position` is its block's). Kept blocks reach the produced\ntip, so the last ones may still be taken back by a reorg."
           }
         }
       },
@@ -3966,7 +4118,7 @@
       },
       "WalletIndex": {
         "type": "object",
-        "description": "One asset of one wallet being indexed, as every read answers it (the\nAPI shows it as is): its columns, how far it is indexed against its\nnetwork's tip, its balances, and (from the wallet reads) its legs. All\ncomputed in SQL ([`index_columns`]); amounts are exact atomic decimal\ntext, never summed. Positions are native (height or slot).",
+        "description": "One asset of one wallet being indexed, as every read answers it (the\nAPI shows it as is): its columns, how far it is indexed against its\nnetwork's tip, its balances and its pending legs. All computed in SQL\n(`db::BY_IDS`); amounts are exact atomic decimal text, never summed.\nPositions are native (height or slot).",
         "required": [
           "id",
           "wallet_id",
@@ -4031,7 +4183,7 @@
             "items": {
               "$ref": "#/components/schemas/Leg"
             },
-            "description": "Its legs in (position, seq) order, pending ones (no block, no total)\nlast; read by the wallet reads only, empty otherwise."
+            "description": "Its pending legs (no block, no total), by id; its mined ones are\npaged by `leg::db::find_page`."
           },
           "reason": {
             "type": [

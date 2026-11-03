@@ -78,16 +78,22 @@ pub(crate) struct Stats {
     pub(crate) server: Vec<ServerHour>,
 }
 
-/// The `HOURS` hours ending with the one `now` (Unix seconds) falls in: the
-/// first one's start, and the hour of `stamp` among them.
-fn window(now: i64) -> (i64, impl Fn(i64) -> Option<usize>) {
-    let first = (now / HOUR + 1 - HOURS as i64) * HOUR;
-    let hour = move |stamp: i64| {
-        usize::try_from((stamp - first).div_euclid(HOUR))
-            .ok()
-            .filter(|hour| *hour < HOURS)
-    };
-    (first, hour)
+/// The start (Unix seconds) of the first of the `HOURS` hours ending with
+/// the one `now` falls in.
+fn first_hour(now: i64) -> i64 {
+    (now / HOUR + 1 - HOURS as i64) * HOUR
+}
+
+/// The `HOURS` hours from `first` on, each `T` from its start.
+fn hours<T>(first: i64, hour: impl Fn(i64) -> T) -> Vec<T> {
+    (0..HOURS as i64).map(|i| hour(first + i * HOUR)).collect()
+}
+
+/// Hour `hour` (counted from the first) of `hours`, if among them.
+fn at<T>(hours: &mut [T], hour: i64) -> Option<&mut T> {
+    usize::try_from(hour)
+        .ok()
+        .and_then(|hour| hours.get_mut(hour))
 }
 
 /// The store's stats, with this server's time `clock` (Unix seconds).
@@ -115,42 +121,38 @@ pub(crate) async fn read(db: &Db, clock: i64) -> anyhow::Result<Stats> {
         // Chain time ends at the newest kept block: a skewed clock or a
         // lagging indexer leaves no empty hours.
         let newest = block::db::find_newest_stamp(connection)?.unwrap_or(clock);
-        let (first, hour) = window(newest);
-        let mut chain: Vec<ChainHour> = (0..HOURS)
-            .map(|i| ChainHour {
-                start: first + i as i64 * HOUR,
-                ..ChainHour::default()
-            })
-            .collect();
-        for stamp in block::db::find_stamps_since(connection, first)? {
-            if let Some(i) = hour(stamp) {
-                chain[i].blocks += 1;
+        let first = first_hour(newest);
+        let mut chain = hours(first, |start| ChainHour {
+            start,
+            ..ChainHour::default()
+        });
+        for (hour, n) in block::db::count_by_hour(connection, first)? {
+            if let Some(one) = at(&mut chain, hour) {
+                one.blocks = count(n);
             }
         }
-        for stamp in transaction::db::find_stamps_since(connection, first)? {
-            if let Some(i) = hour(stamp) {
-                chain[i].transactions += 1;
+        for (hour, n) in transaction::db::count_by_hour(connection, first)? {
+            if let Some(one) = at(&mut chain, hour) {
+                one.transactions = count(n);
             }
         }
 
-        let (first, hour) = window(clock);
-        let mut server: Vec<ServerHour> = (0..HOURS)
-            .map(|i| ServerHour {
-                start: first + i as i64 * HOUR,
-                ..ServerHour::default()
-            })
-            .collect();
-        for (status, at) in task::db::find_finished_since(connection, first * 1_000)? {
-            if let Some(i) = hour(at / 1_000) {
+        let first = first_hour(clock);
+        let mut server = hours(first, |start| ServerHour {
+            start,
+            ..ServerHour::default()
+        });
+        for (hour, status, n) in task::db::count_finished_by_hour(connection, first)? {
+            if let Some(one) = at(&mut server, hour) {
                 match status {
-                    2 => server[i].succeeded += 1,
-                    _ => server[i].failed += 1,
+                    2 => one.succeeded = count(n),
+                    _ => one.failed = count(n),
                 }
             }
         }
-        for at in trigger_run::db::find_starts_since(connection, first * 1_000)? {
-            if let Some(i) = hour(at / 1_000) {
-                server[i].runs += 1;
+        for (hour, n) in trigger_run::db::count_by_hour(connection, first)? {
+            if let Some(one) = at(&mut server, hour) {
+                one.runs = count(n);
             }
         }
 

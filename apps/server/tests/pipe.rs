@@ -807,28 +807,22 @@ fn triggers_and_their_runs_are_stored() {
     assert!(trigger::db::insert(&mut connection, &trigger).is_err());
     let found = trigger::db::find_enabled(&mut connection, &network()).unwrap();
     assert_eq!(found.len(), 1);
-    assert_eq!(found[0].selector, trigger.selector);
-    assert_eq!(found[0].filter, None);
-    assert_eq!(found[0].check, trigger.check);
+    assert_eq!(found[0].0.selector, trigger.selector);
+    assert_eq!(found[0].0.filter, None);
+    assert_eq!(found[0].0.check, trigger.check);
+    assert!(found[0].1.is_none(), "never run");
 
-    assert!(
-        trigger_run::db::find_last(&mut connection, "sweep")
-            .unwrap()
-            .is_none()
-    );
     start_run(&mut connection, "sweep", 10).unwrap();
     start_run(&mut connection, "sweep", 20).unwrap();
-    let last = trigger_run::db::find_last(&mut connection, "sweep")
-        .unwrap()
-        .unwrap();
-    assert_eq!(last.started_at, 20);
+    let found = trigger::db::find_enabled(&mut connection, &network()).unwrap();
+    assert_eq!(found[0].1.as_ref().map(|run| run.started_at), Some(20));
     assert!(start_run(&mut connection, "missing", 10).is_err());
 
     assert_eq!(trigger::db::delete(&mut connection, "sweep").unwrap(), 1);
     assert!(
-        trigger_run::db::find_last(&mut connection, "sweep")
+        trigger_run::db::find_recent(&mut connection, "sweep", 10)
             .unwrap()
-            .is_none()
+            .is_empty()
     );
 }
 
@@ -926,6 +920,12 @@ fn ids_of(names: &[&str]) -> Target {
 #[test]
 fn a_send_pays_per_source_or_per_destination() {
     let (_directory, runtime, mut connection) = seeded();
+    // Only a keyed source sends.
+    for name in ["a", "b"] {
+        let key = crypto::SecretBytes::new(vec![1]);
+        let keyed = Wallet::new(&address(name), crypto::Curve::Secp256k1, key).unwrap();
+        wallet::db::insert(&mut connection, &keyed).unwrap();
+    }
     let both = selection(&mut connection, &[id("a", "native"), id("b", "native")]);
     let b = selection(&mut connection, &[id("b", "native")]);
     let mut evaluation = open(&mut connection, &runtime, fees("100"), None);
@@ -935,10 +935,9 @@ fn a_send_pays_per_source_or_per_destination() {
     // Many sources to one: everything less the fee, each source alone;
     // b's 50 sats do not cover its 100 sat fee, so it is skipped.
     let sweep = send(this(None), ids_of(&["b"]), Amount::Sub(balance(), fee()));
-    let keyed = [address("a"), address("b")].into_iter().collect();
     // Each started job's sender and its (recipient, amount) transfers.
     let mut plan = |send: &SendInput, this: &Selection| {
-        let mut invocation = Invocation::new(this.network(), this, &mut evaluation, &keyed);
+        let mut invocation = Invocation::new(this.network(), this, &mut evaluation);
         Transfer.run(&mut invocation, &serde_json::to_value(send)?)?;
         let sends = invocation.started().into_iter().map(|job| {
             let intent: SendIntent = serde_json::from_value(job.input).unwrap();

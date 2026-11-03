@@ -51,11 +51,11 @@ struct CreateRequest {
 /// The index a route acts on.
 #[derive(Clone, Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Path)]
-struct IndexPath {
+pub(super) struct IndexPath {
     /// `{chain}.{network}.{address}`.
-    id: String,
+    pub(super) id: String,
     /// The asset id.
-    asset: String,
+    pub(super) asset: String,
 }
 
 /// `PATCH /v1/wallets/{id}/indexes/{asset}` body.
@@ -106,18 +106,15 @@ async fn create(
         .and_then(|wallet| Ok((wallet.clone(), models::child(&wallet, &[&asset.id])?)))
         .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
     let tips = models::wallet::Tips::from_stats(state.payments.stats());
-    let (id, at) = (index_id.clone(), tips.clone());
-    let (kept, index) = state
+    let at = tips.clone();
+    let Some(mut wallet) = state
         .db
-        .read(move |connection| {
-            let kept = models::wallet::db::find_by_id(connection, &wallet_id)?.is_some();
-            Ok((kept, wallet_index::db::find_at_tip(connection, &id, &at)?))
-        })
-        .await?;
-    if !kept {
+        .read(move |connection| models::wallet::db::find_at_tip(connection, &wallet_id, &at))
+        .await?
+    else {
         return Err(Error::not_found("wallet is unknown"));
-    }
-    if let Some(index) = index {
+    };
+    if let Some(index) = wallet.indexes.remove(&asset.id) {
         return Ok((StatusCode::OK, Json(index)));
     }
     let birthday = match request.start {
@@ -159,9 +156,12 @@ async fn create(
     })
     .await
     .map_err(anyhow::Error::from)??;
+    let network = address.network;
     let created = state
         .db
-        .read(move |connection| wallet_index::db::find_at_tip(connection, &index_id, &tips))
+        .read(move |connection| {
+            wallet_index::db::find_at_tip(connection, &network, &index_id, &tips)
+        })
         .await?
         .ok_or_else(|| Error::not_found("no such index"))?;
     Ok((StatusCode::CREATED, Json(created)))
@@ -214,7 +214,7 @@ async fn update(
                 index_state,
                 None,
             )?;
-            wallet_index::db::find_at_tip(connection, &id, &tips)
+            wallet_index::db::find_at_tip(connection, &address.network, &id, &tips)
         })
         .await?
         .map(Json)

@@ -7,19 +7,15 @@
 //! A leaf that refers to something unknown (an index not fully indexed, an
 //! asset without balances) is `false`; a read error stays an error.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context as _, bail, ensure};
-use base::{Address, Assets, Decimal, FeeEstimator, Network, Networked as _};
+use base::{Assets, Decimal, FeeEstimator, Network, Networked as _};
 use diesel::SqliteConnection;
 
 use crate::models::{
     self, TriggerRun, block, trigger,
     trigger::{Action, Aggregate, Amount, Compare, Filter, Gate, Logic, Target},
-    trigger_run, wallet,
     wallet_index::{self, Selection},
 };
 
@@ -228,14 +224,13 @@ impl<'a> Trigger<'a> {
     }
 }
 
-/// Every enabled trigger of one network, at its last kept block, with the
-/// addresses this server holds keys for.
+/// Every enabled trigger of one network, at its last kept block.
 pub(crate) struct Triggers {
     network: Network,
     /// The last kept block's position; `None` before the first block.
     last: Option<i64>,
-    keyed: BTreeSet<Address>,
-    all: Vec<models::Trigger>,
+    /// Each with its latest run.
+    all: Vec<(models::Trigger, Option<TriggerRun>)>,
 }
 
 impl Triggers {
@@ -250,20 +245,12 @@ impl Triggers {
     ) -> anyhow::Result<Self> {
         let last = block::db::find_last(connection, network)?.map(|block| block.position);
         let all = match last {
-            Some(_) => trigger::db::find_enabled(connection, network)?
-                .iter()
-                .cloned()
-                .collect(),
+            Some(_) => trigger::db::find_enabled(connection, network)?,
             None => Vec::new(),
         };
-        let keyed = wallet::db::find_keyed(connection)?
-            .addresses()
-            .into_iter()
-            .collect();
         Ok(Self {
             network: network.clone(),
             last,
-            keyed,
             all,
         })
     }
@@ -281,23 +268,20 @@ impl Triggers {
             return Vec::new();
         };
         let mut decided = Vec::with_capacity(self.all.len());
-        for row in &self.all {
-            let outcome = trigger_run::db::find_last(connection, &row.id)
-                .map_err(anyhow::Error::from)
-                .and_then(|run| {
-                    let mut trigger = Trigger::new(row.clone(), connection, context.clone(), run);
-                    let Some(this) = trigger.decide(&self.network, last)? else {
-                        return Ok(None);
-                    };
-                    act(Decision {
-                        action: &row.action.0,
-                        network: &self.network,
-                        this: &this,
-                        trigger: &mut trigger,
-                        keyed: &self.keyed,
-                    })
-                    .map(Some)
-                });
+        for (row, run) in &self.all {
+            let mut trigger = Trigger::new(row.clone(), connection, context.clone(), run.clone());
+            let outcome = trigger.decide(&self.network, last).and_then(|this| {
+                let Some(this) = this else {
+                    return Ok(None);
+                };
+                act(Decision {
+                    action: &row.action.0,
+                    network: &self.network,
+                    this: &this,
+                    trigger: &mut trigger,
+                })
+                .map(Some)
+            });
             decided.push((row.id.clone(), outcome));
         }
         decided
@@ -314,6 +298,4 @@ pub(crate) struct Decision<'a, 'c> {
     pub(crate) this: &'a Selection,
     /// The trigger still deciding: amounts and targets read at the same block.
     pub(crate) trigger: &'a mut Trigger<'c>,
-    /// Addresses this server holds keys for.
-    pub(crate) keyed: &'a BTreeSet<Address>,
 }

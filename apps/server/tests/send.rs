@@ -96,7 +96,9 @@ impl Fixture {
     async fn recorded(&self, txid: &str) -> bool {
         let id = Transaction::id(&network(), txid).expect("an id");
         self.db
-            .read(move |connection| Ok(transaction::db::find_pending(connection, &id)?.is_some()))
+            .read(move |connection| {
+                Ok(transaction::db::get(connection, &id)?.is_some_and(|kept| kept.block.is_none()))
+            })
             .await
             .expect("a read")
     }
@@ -105,7 +107,7 @@ impl Fixture {
     async fn forget(&self, txid: &str) {
         let id = Transaction::id(&network(), txid).expect("an id");
         self.db
-            .write(move |connection| Ok(transaction::db::delete_by_id(connection, &id)?))
+            .write(move |connection| Ok(transaction::db::delete_pending(connection, &[id])?))
             .await
             .expect("a write");
     }

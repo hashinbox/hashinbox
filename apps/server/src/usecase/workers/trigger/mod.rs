@@ -99,12 +99,8 @@ impl Worker for Round {
                 .read(move |connection| {
                     let triggers = Triggers::new(connection, &deciding)?;
                     Ok(triggers.decide(connection, &context, |decision| {
-                        let mut invocation = Invocation::new(
-                            decision.network,
-                            decision.this,
-                            decision.trigger,
-                            decision.keyed,
-                        );
+                        let mut invocation =
+                            Invocation::new(decision.network, decision.this, decision.trigger);
                         let action = decision.action;
                         actions.run(&action.name, &action.input, &mut invocation)?;
                         Ok(invocation.started())

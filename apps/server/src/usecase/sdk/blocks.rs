@@ -1,14 +1,16 @@
-//! `base::BlockStore` on the `block`, `transaction` and `wallet_index`
-//! models.
+//! `base::BlockStore` on the `block` and `wallet_index` models.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{bail, ensure};
 use base::{Block as BaseBlock, BlockHeader, BlockStore, Blocks, Future, Network, Networked as _};
 use diesel::SqliteConnection;
 
 use super::Stores;
-use crate::models::{block, int, transaction, wallet_index};
+use crate::models::{Block, block, int, wallet_index};
 
 impl BlockStore for Stores {
     fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>> {
@@ -53,59 +55,56 @@ impl BlockStore for Stores {
     }
 }
 
-/// Keeps `run` ([`BlockStore::insert`]); the headers of the blocks it added
-/// or kept facts or progress for.
+/// Keeps `run` ([`BlockStore::insert`]): each block with its facts, checked
+/// against the live blocks around the run, read once and kept current as
+/// the run is written. A block conflicting with a kept one, or added
+/// without linking to its live neighbours, fails the write: blocks are
+/// never skipped, a gap fails loudly.
 fn keep(
     connection: &mut SqliteConnection,
     network: &Network,
     run: &[BaseBlock],
-) -> anyhow::Result<Vec<BlockHeader>> {
-    let mut kept = Vec::new();
+) -> anyhow::Result<()> {
+    let positions = run
+        .iter()
+        .map(|base| int(base.header.position))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let (Some(&lowest), Some(&highest)) = (positions.iter().min(), positions.iter().max()) else {
+        return Ok(());
+    };
+    let mut live: BTreeMap<i64, Block> =
+        block::db::find_around(connection, network, lowest, highest)?
+            .into_iter()
+            .map(|block| (block.position, block))
+            .collect();
     let mut added = Vec::new();
-    for block in run {
-        ensure!(block.network == *network, "a block is not of {network:?}");
-        let header = &block.header;
-        let position = int(header.position)?;
-        let id = match block::db::find_live(connection, network, position)? {
-            Some(held) if held.is(header) => held.id.clone(),
+    for (base, position) in run.iter().zip(positions) {
+        ensure!(base.network == *network, "a block is not of {network:?}");
+        match live.get(&position) {
+            Some(held) if held.is(&base.header) => {}
             Some(_) => bail!("{network:?}: block {position} conflicts with the kept one"),
-            None => {
-                let id = block::db::insert(connection, network, header)?;
-                added.push(position);
-                kept.push(header.clone());
-                id
-            }
-        };
-        let parent = block::db::find_below(connection, network, position)?
-            .filter(|below| below.is_parent_of(header))
-            .map(|below| below.id);
-        let pairs =
-            wallet_index::db::find_applying(connection, network, position, parent.as_deref())?;
-        if pairs.is_empty() {
-            continue;
+            None => added.push(position),
         }
-        transaction::db::insert_block(connection, block, &id, position, &pairs)?;
-        wallet_index::db::advance(connection, network, &pairs, &id)?;
-        if kept.last() != Some(header) {
-            kept.push(header.clone());
-        }
+        let mut block = Block::try_from(base)?;
+        block::db::save(connection, &mut block)?;
+        live.insert(position, block);
     }
     // Every added block must link to its live neighbours.
     for position in added {
-        let Some(block) = block::db::find_live(connection, network, position)? else {
+        let Some(block) = live.get(&position) else {
             continue;
         };
-        let header = BlockHeader::try_from(&block)?;
-        if let Some(below) = block::db::find_below(connection, network, position)?
+        let header = BlockHeader::try_from(block)?;
+        if let Some((_, below)) = live.range(..position).next_back()
             && !below.is_parent_of(&header)
         {
             bail!("{network:?}: block {position} does not link onto the kept block below it");
         }
-        if let Some(above) = block::db::find_above(connection, network, position)?
-            && !block.is_parent_of(&BlockHeader::try_from(&above)?)
+        if let Some((_, above)) = live.range(position + 1..).next()
+            && !block.is_parent_of(&BlockHeader::try_from(above)?)
         {
             bail!("{network:?}: the kept block above {position} does not link onto it");
         }
     }
-    Ok(kept)
+    Ok(())
 }

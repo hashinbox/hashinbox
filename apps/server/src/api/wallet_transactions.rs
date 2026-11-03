@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use axum::{
     Json,
     extract::{
@@ -12,7 +13,7 @@ use axum::{
     },
     http::StatusCode,
 };
-use base::{Decimal, Leg, TransactionState};
+use base::Decimal;
 use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -20,7 +21,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::{Error, ErrorBody, asset_info, wallet_address};
 use crate::{
     api::AppState,
-    models::Asset,
+    models::{Asset, transaction::Transaction},
     usecase::workers::broadcast::{Payment, SendIntent},
 };
 
@@ -58,82 +59,16 @@ fn native() -> String {
     "native".to_owned()
 }
 
-/// The block a transaction was mined in.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-struct Block {
-    /// Native position (Bitcoin/Ethereum height, Solana slot).
-    position: u64,
-    /// Produced-block count.
-    height: u64,
-    /// Block hash, hexadecimal, in the chain's native byte order.
-    hash: String,
-    /// Unix seconds, when the chain reports one; always present.
-    #[schema(required)]
-    timestamp: Option<u64>,
-}
-
-/// How a mined transaction executed.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
-enum Outcome {
-    /// Executed.
-    Succeeded,
-    /// Mined but failed; only its fee moved.
-    Reverted,
-}
-
-/// What a movement did to the wallet.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
-enum MovementKind {
-    /// Value arrived.
-    Received,
-    /// Value left.
-    Spent,
-    /// Value destroyed.
-    Burned,
-    /// Value created.
-    Minted,
-    /// The fee it paid.
-    Fee,
-}
-
-/// One movement of the wallet's asset inside a transaction.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-struct Movement {
-    /// Its order among the movements shown.
-    index: u32,
-    /// What it did.
-    kind: MovementKind,
-    /// Exact decimal in display units.
-    amount: String,
-}
-
-/// One transaction of a wallet's history.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-struct Transaction {
-    /// Chain-native transaction ID.
-    transaction_id: String,
-    /// The block it was mined in.
-    block: Block,
-    /// How it executed.
-    outcome: Outcome,
-    /// Why it reverted, as the chain reported it; always present.
-    #[schema(required)]
-    reason: Option<String>,
-    /// The wallet's movements of the asset.
-    movements: Vec<Movement>,
-}
-
 /// One page of `GET /v1/wallets/{id}/transactions`.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = TransactionPage)]
 struct HistoryResponse {
     /// The asset.
     asset: Asset,
-    /// At most `limit` transactions in kept blocks, in chain order. Kept
-    /// blocks reach the produced tip, so the last ones may still be taken
-    /// back by a reorg.
+    /// At most `limit` transactions in kept blocks, in chain order, each
+    /// with only the wallet's legs of the asset (atomic amounts; a mined
+    /// leg's `position` is its block's). Kept blocks reach the produced
+    /// tip, so the last ones may still be taken back by a reorg.
     transactions: Vec<Transaction>,
     /// Opaque cursor of the next page; null on a short page. Always present.
     #[schema(required)]
@@ -146,7 +81,7 @@ struct HistoryResponse {
     operation_id = "read_wallet_transactions",
     summary = "Read one page of a wallet's history",
     description = "The wallet's transactions in `asset`, in chain order, with only its own \
-        movements of that asset; a fee is shown where this address paid it in the native \
+        legs of that asset; a fee is shown where this address paid it in the native \
         asset. Block rewards count in the balance but are not transactions.",
     params(WalletPath, HistoryQuery),
     security(("bearerAuth" = [])),
@@ -192,60 +127,24 @@ async fn history(
     let page =
         crate::usecase::history::history(&state.db, &address, &info.asset, after, query.limit)
             .await?;
-    let next_cursor = (page.len() == query.limit)
-        .then(|| page.last())
-        .flatten()
-        .map(|(header, transaction)| {
-            format!(
-                "{}:{}:{}",
-                header.position,
-                transaction.order.unwrap_or(0),
-                transaction.id.id
-            )
-        });
-    let mut transactions = Vec::with_capacity(page.len());
-    for (header, transaction) in page {
-        let (outcome, reason) = match transaction.state {
-            TransactionState::Reverted(reason) => (
-                Outcome::Reverted,
-                reason.map(|reason| format!("{reason:?}")),
-            ),
-            TransactionState::Pending | TransactionState::Succeeded => (Outcome::Succeeded, None),
-        };
-        let mut movements = Vec::with_capacity(transaction.legs.len());
-        for (index, leg) in (0_u32..).zip(transaction.legs) {
-            let kind = match leg {
-                Leg::Received { .. } => MovementKind::Received,
-                Leg::Spent { .. } => MovementKind::Spent,
-                Leg::Burned { .. } => MovementKind::Burned,
-                Leg::Minted { .. } => MovementKind::Minted,
-                Leg::Fee { .. } => MovementKind::Fee,
-            };
-            let amount = info.display(leg.amount()).map_err(|error| {
-                Error::unavailable(format!("indexed amount is not whole atomic units: {error}"))
-            })?;
-            movements.push(Movement {
-                index,
-                kind,
-                amount: amount.to_string(),
-            });
+    let next_cursor = match page.last().filter(|_| page.len() == query.limit) {
+        Some(last) => {
+            let position = last
+                .legs
+                .first()
+                .and_then(|leg| leg.position)
+                .context("a paged transaction has no mined leg")?;
+            Some(format!(
+                "{position}:{}:{}",
+                last.order.unwrap_or(0),
+                last.txid
+            ))
         }
-        transactions.push(Transaction {
-            transaction_id: transaction.id.id,
-            block: Block {
-                position: header.position,
-                height: header.height,
-                hash: hex::encode(&header.hash.0),
-                timestamp: header.timestamp,
-            },
-            outcome,
-            reason,
-            movements,
-        });
-    }
+        None => None,
+    };
     Ok(Json(HistoryResponse {
         asset: Asset::from(&info),
-        transactions,
+        transactions: page,
         next_cursor,
     }))
 }
@@ -318,11 +217,12 @@ async fn send(
     }
     let address = wallet_address(&state.payments, &path.id)?;
     let info = asset_info(&state.payments, &address.network, &request.asset)?;
+    let id = crate::models::Wallet::id(&address)
+        .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
     if !state
         .db
-        .read(|connection| Ok(crate::models::wallet::db::find_keyed(connection)?.addresses()))
+        .read(move |connection| Ok(crate::models::wallet::db::is_keyed(connection, &id)?))
         .await?
-        .contains(&address)
     {
         return Err(Error::unprocessable("the wallet holds no key here"));
     }

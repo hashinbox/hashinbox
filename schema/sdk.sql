@@ -129,6 +129,30 @@ CREATE UNIQUE INDEX leg_seq ON leg (wallet_index_id, seq);
 CREATE INDEX leg_transaction ON leg ("transaction");
 CREATE INDEX leg_coin ON leg (coin_txid, coin_index) WHERE coin_txid IS NOT NULL;
 
+-- A leg with its JSON as the `Leg` model serializes it: what reads that
+-- nest legs (a transaction's, a block's rewards, an index's pending ones)
+-- aggregate, filtered and ordered by the leg columns.
+CREATE VIEW leg_json AS
+SELECT
+    l.*,
+    json_object(
+        'id', l.id,
+        'block', l.block,
+        'transaction', l."transaction",
+        'leg_index', l.leg_index,
+        'kind', l.kind,
+        'address', l.address,
+        'asset', l.asset,
+        'amount', l.amount,
+        'coin_txid', l.coin_txid,
+        'coin_index', l.coin_index,
+        'wallet_index_id', l.wallet_index_id,
+        'position', l.position,
+        'seq', l.seq,
+        'total', l.total
+    ) AS json
+FROM leg l;
+
 -- Every address the server knows on a network, keyed or watch-only: its
 -- key's curve and bytes (both NULL: watch-only, no key kept), and its tags
 -- (pipes' labels), a JSON list kept sorted, each once, each [a-z0-9-]{1,64}.

@@ -90,15 +90,16 @@ export interface Effect {
   fee: bigint;
 }
 
-/** Folds a transaction's movements, all of this wallet in this asset. */
-export function effect(tx: Transaction, decimals: number): Effect {
+/** Folds a transaction's legs (atomic), all of this wallet in this asset. */
+export function effect(tx: Transaction): Effect {
   let credit = 0n;
   let debit = 0n;
   let fee = 0n;
-  for (const m of tx.movements) {
-    const amount = atomic(m.amount, decimals);
-    if (m.kind === 'received' || m.kind === 'minted') credit += amount;
-    else if (m.kind === 'fee') fee += amount;
+  // kind: 0 received, 1 spent, 2 burned, 3 minted, 4 fee.
+  for (const leg of tx.legs) {
+    const amount = BigInt(leg.amount);
+    if (leg.kind === 0 || leg.kind === 3) credit += amount;
+    else if (leg.kind === 4) fee += amount;
     else debit += amount;
   }
   return { credit, debit, net: credit - debit - fee, fee };

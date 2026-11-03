@@ -4,18 +4,20 @@
 //! request and response bodies live in its resource file.
 
 mod assets;
-mod blocks;
 mod health;
 mod jobs;
+mod network_blocks;
+mod network_transactions;
 mod networks;
 mod networks_tip;
 mod openapi;
 mod state;
 mod stats;
-mod transactions;
 mod triggers;
+mod wallet_index_legs;
 mod wallet_indexes;
 mod wallet_tags;
+mod wallet_transactions;
 mod wallets;
 
 use std::sync::Arc;
@@ -107,10 +109,12 @@ fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
         .merge(assets::routes())
         .merge(wallets::routes())
         .merge(wallet_indexes::routes())
-        .merge(transactions::routes())
+        .merge(wallet_index_legs::routes())
+        .merge(wallet_transactions::routes())
         .merge(jobs::routes())
         .merge(networks::routes())
-        .merge(blocks::routes())
+        .merge(network_blocks::routes())
+        .merge(network_transactions::routes())
         .merge(networks_tip::routes())
         .merge(stats::routes())
         .merge(triggers::routes())

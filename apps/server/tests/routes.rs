@@ -199,8 +199,8 @@ async fn wallets_balance_history_and_sends() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{history}");
-    assert_eq!(history["transactions"][0]["transaction_id"], "t0");
-    assert_eq!(history["transactions"][0]["movements"][0]["amount"], "1.5");
+    assert_eq!(history["transactions"][0]["txid"], "t0");
+    assert_eq!(history["transactions"][0]["legs"][0]["amount"], "150000000");
     assert_eq!(history["next_cursor"], "0:0:t0");
 
     let send = json!({ "transfers": [{ "destination": "bob", "amount": "0.1" }] });

@@ -152,16 +152,26 @@ pub(crate) mod db {
             .load(connection)
     }
 
-    /// The status and last write (Unix ms) of every job that finished
-    /// (succeeded or failed) at or after `since`.
-    pub(crate) fn find_finished_since(
+    /// How many jobs finished (succeeded or failed) in each hour from
+    /// `since` (Unix seconds) on, by their last write, as (hour, status,
+    /// count); hour 0 starts at `since`.
+    pub(crate) fn count_finished_by_hour(
         connection: &mut SqliteConnection,
         since: i64,
-    ) -> QueryResult<Vec<(i32, i64)>> {
+    ) -> QueryResult<Vec<(i64, i32, i64)>> {
+        use diesel::{
+            dsl::sql,
+            sql_types::{BigInt, Integer},
+        };
         q::table
             .filter(q::status.eq_any([2, 3]))
-            .filter(q::updated_at.ge(since))
-            .select((q::status, q::updated_at))
+            .filter(q::updated_at.ge(since * 1_000))
+            .group_by(sql::<(BigInt, Integer)>("hour, status"))
+            .select(
+                sql::<(BigInt, Integer, BigInt)>("(updated_at / 1000 - ")
+                    .bind::<BigInt, _>(since)
+                    .sql(") / 3600 AS hour, status, COUNT(*)"),
+            )
             .load(connection)
     }
 

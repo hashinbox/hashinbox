@@ -17,7 +17,7 @@ import TableRow from '@mui/material/TableRow';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
-import { call, client, type Transaction, type Wallet as Account } from '@/api/client';
+import { call, client, type Leg, type Transaction, type Wallet as Account } from '@/api/client';
 import { Address } from '@/_components/address';
 import { Currency } from '@/_components/currency';
 import { format } from '@/_components/format';
@@ -42,6 +42,8 @@ import { WatchDialog } from './watch';
 import { haltOf, progressOf } from './watching';
 
 const PAGE = 100;
+/** A leg's `kind`: 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward. */
+const KIND = ['received', 'spent', 'burned', 'minted', 'fee', 'reward'];
 
 /** The wallet's balance in its asset, in atomic units, as `GET /v1/wallets/{id}` reports it. */
 function amountOf(wallet: Account): string {
@@ -95,6 +97,8 @@ export function Wallet({
   const [fresh, setFresh] = useState<Account | null>(null);
   const [rows, setRows] = useState<Transaction[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
+  const [legs, setLegs] = useState<Leg[]>([]);
+  const [before, setBefore] = useState<number | null>(null);
   const [watchOpen, setWatchOpen] = useState(false);
   const [tagOpen, setTagOpen] = useState(false);
 
@@ -113,6 +117,13 @@ export function Wallet({
         setCursor(page.next_cursor ?? null);
       })
       .catch(shell.fail);
+    const index = { path: { id: wallet.id, asset: assetOf(wallet) } };
+    call(client.GET('/v1/wallets/{id}/indexes/{asset}/legs', { params: index }))
+      .then((page) => {
+        setLegs(page.legs);
+        setBefore(page.next_cursor ?? null);
+      })
+      .catch(shell.fail);
   }, [wallet, shell.fail]);
 
   useEffect(refresh, [refresh]);
@@ -127,6 +138,17 @@ export function Wallet({
       .then((page) => {
         setRows((current) => [...current, ...page.transactions]);
         setCursor(page.next_cursor ?? null);
+      })
+      .catch(shell.fail);
+  };
+
+  const olderLegs = () => {
+    if (before === null) return;
+    const params = { path: { id: wallet.id, asset: assetOf(wallet) }, query: { before } };
+    call(client.GET('/v1/wallets/{id}/indexes/{asset}/legs', { params }))
+      .then((page) => {
+        setLegs((current) => [...current, ...page.legs]);
+        setBefore(page.next_cursor ?? null);
       })
       .catch(shell.fail);
   };
@@ -250,7 +272,7 @@ export function Wallet({
             ) : (
               rows.map((tx) => (
                 <Row
-                  key={tx.transaction_id}
+                  key={tx.txid}
                   wallet={wallet}
                   tx={tx}
                   decimals={decimals}
@@ -264,6 +286,55 @@ export function Wallet({
       </TableContainer>
       {cursor && (
         <Button onClick={older} sx={{ mt: 1.5 }}>
+          Older
+        </Button>
+      )}
+
+      <Typography variant="h3" component="h3" sx={{ mt: 3.5, mb: 1 }}>
+        Movements
+      </Typography>
+      <TableContainer>
+        <Table>
+          <TableHead>
+            <TableRow>
+              <TableCell>Block</TableCell>
+              <TableCell>Kind</TableCell>
+              <TableCell>Amount</TableCell>
+              <TableCell>Balance</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {legs.length === 0 ? (
+              <EmptyRow columns={4} message="No movements yet." />
+            ) : (
+              legs.map((leg) => (
+                <TableRow key={leg.id} hover>
+                  <TableCell sx={figures}>{leg.position}</TableCell>
+                  <TableCell>{KIND[leg.kind]}</TableCell>
+                  <TableCell sx={figures}>
+                    <Money
+                      amount={[1, 2, 4].includes(leg.kind) ? `-${leg.amount}` : leg.amount}
+                      decimals={decimals}
+                      display={display}
+                      ticker={unit}
+                    />
+                  </TableCell>
+                  <TableCell sx={figures}>
+                    <Money
+                      amount={leg.total ?? '0'}
+                      decimals={decimals}
+                      display={display}
+                      ticker={unit}
+                    />
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </TableContainer>
+      {before !== null && (
+        <Button onClick={olderLegs} sx={{ mt: 1.5 }}>
           Older
         </Button>
       )}
@@ -375,13 +446,15 @@ function Row({
   display: number | null;
   unit: string;
 }) {
-  const e = effect(tx, decimals);
-  const block = ['networks', wallet.chain, wallet.network, 'blocks', String(tx.block.position)];
+  const e = effect(tx);
+  // A mined leg's position is its block's.
+  const position = tx.legs[0]?.position ?? null;
+  const block = ['networks', wallet.chain, wallet.network, 'blocks', String(position)];
   return (
     <TableRow hover>
       <TableCell sx={{ ...figures, fontSize: 12, whiteSpace: 'nowrap' }}>
-        <Tx value={tx.transaction_id} network={networkOf(wallet)} />
-        {tx.outcome === 'reverted' && (
+        <Tx value={tx.txid} network={networkOf(wallet)} />
+        {tx.state === 2 && (
           <Box component="small" sx={{ color: 'error.main', ml: 1 }} title={tx.reason ?? undefined}>
             reverted
           </Box>
@@ -396,7 +469,7 @@ function Row({
             go(block);
           }}
         >
-          {tx.block.position}
+          {position}
         </Link>
       </TableCell>
       <TableCell sx={figures}>

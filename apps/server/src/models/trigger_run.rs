@@ -33,20 +33,28 @@ pub(crate) mod db {
     use diesel::prelude::*;
 
     use super::TriggerRun;
-    use crate::models::schema::trigger_run;
+    use crate::models::schema::{trigger_run, triggers};
 
-    /// When (Unix ms) every run started at or after `since` started.
-    pub(crate) fn find_starts_since(
+    /// How many runs started in each hour from `since` (Unix seconds) on,
+    /// as (hour, count); hour 0 starts at `since`.
+    pub(crate) fn count_by_hour(
         connection: &mut SqliteConnection,
         since: i64,
-    ) -> QueryResult<Vec<i64>> {
+    ) -> QueryResult<Vec<(i64, i64)>> {
+        use diesel::{dsl::sql, sql_types::BigInt};
         trigger_run::table
-            .filter(trigger_run::started_at.ge(since))
-            .select(trigger_run::started_at)
+            .filter(trigger_run::started_at.ge(since * 1_000))
+            .group_by(sql::<BigInt>("hour"))
+            .select((
+                sql::<BigInt>("(started_at / 1000 - ")
+                    .bind::<BigInt, _>(since)
+                    .sql(") / 3600 AS hour"),
+                diesel::dsl::count_star(),
+            ))
             .load(connection)
     }
 
-    /// Stores `run`.
+    /// Stores `run` as its trigger's latest.
     ///
     /// # Errors
     ///
@@ -58,20 +66,10 @@ pub(crate) mod db {
     ) -> QueryResult<usize> {
         diesel::insert_into(trigger_run::table)
             .values(run)
+            .execute(connection)?;
+        diesel::update(triggers::table.find(&run.trigger))
+            .set(triggers::last_run.eq(&run.id))
             .execute(connection)
-    }
-
-    /// The latest run of `trigger`.
-    pub(crate) fn find_last(
-        connection: &mut SqliteConnection,
-        trigger: &str,
-    ) -> QueryResult<Option<TriggerRun>> {
-        trigger_run::table
-            .filter(trigger_run::trigger.eq(trigger))
-            .order(trigger_run::started_at.desc())
-            .select(TriggerRun::as_select())
-            .first(connection)
-            .optional()
     }
 
     /// The latest `limit` runs of `trigger`, latest first.

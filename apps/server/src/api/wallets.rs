@@ -112,10 +112,9 @@ async fn create(
     let (created, wallet) = state
         .db
         .write(move |connection| {
-            let kept = models::wallet::db::find_by_id(connection, &row.id)?.is_some();
-            models::wallet::db::insert(connection, &row)?;
+            let created = models::wallet::db::insert(connection, &row)?;
             let wallet = models::wallet::db::find_at_tip(connection, &row.id, &tips)?;
-            Ok((!kept, wallet))
+            Ok((created, wallet))
         })
         .await?;
     let wallet = wallet.ok_or_else(|| Error::not_found("wallet is unknown"))?;

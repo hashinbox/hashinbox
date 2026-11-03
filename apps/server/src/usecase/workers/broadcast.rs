@@ -29,7 +29,7 @@ use tasks::{Ack, Job, Task, Topic, Worker};
 
 use crate::{
     db::Db,
-    models::{Task as Row, leg, task, transaction, transaction::Transaction},
+    models::{Task as Row, task, transaction, transaction::Transaction},
 };
 
 /// The job kind.
@@ -155,8 +155,10 @@ impl Broadcast {
             .db
             .write(move |connection| {
                 // A short one rolls the write back: nothing recorded.
-                for transaction in signed.iter() {
-                    transaction::db::insert_pending(connection, transaction, now)?;
+                for signed in signed.iter() {
+                    let mut pending = Transaction::try_from(signed)?;
+                    pending.sent_at = Some(now);
+                    transaction::db::save_pending(connection, &mut pending)?;
                 }
                 task::db::update(connection, &row, now)?;
                 Ok(())
@@ -178,11 +180,10 @@ impl Broadcast {
         let id = Transaction::id(network, txid)?;
         self.db
             .read(move |connection| {
-                let Some(row) = transaction::db::find_pending(connection, &id)? else {
-                    return Ok(None);
-                };
-                let legs = leg::db::find_for(connection, &id)?;
-                Ok(Some(row.transaction(legs)?))
+                transaction::db::get(connection, &id)?
+                    .filter(|kept| kept.block.is_none())
+                    .map(Transaction::transaction)
+                    .transpose()
             })
             .await
     }
@@ -195,13 +196,9 @@ impl Broadcast {
             .map(|txid| Transaction::id(network, txid))
             .collect::<anyhow::Result<Vec<_>>>()?;
         self.db
-            .write(move |connection| {
-                for id in &ids {
-                    transaction::db::delete_by_id(connection, id)?;
-                }
-                Ok(())
-            })
-            .await
+            .write(move |connection| Ok(transaction::db::delete_pending(connection, &ids)?))
+            .await?;
+        Ok(())
     }
 }
 

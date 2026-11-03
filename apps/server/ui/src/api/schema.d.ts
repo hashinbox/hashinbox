@@ -148,7 +148,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List a network's last kept blocks and its pending transactions */
+        /** List a network's last kept blocks */
         get: operations["list_blocks"];
         put?: never;
         post?: never;
@@ -247,6 +247,23 @@ export interface paths {
          * @description `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends.
          */
         get: operations["search_tip"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/networks/{chain}/{network}/transactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List a network's pending or mined transactions */
+        get: operations["list_network_transactions"];
         put?: never;
         post?: never;
         delete?: never;
@@ -440,6 +457,26 @@ export interface paths {
         patch: operations["update_wallet_index"];
         trace?: never;
     };
+    "/v1/wallets/{id}/indexes/{asset}/legs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List an index's mined legs
+         * @description The index's legs in live blocks, latest first, each with the balance right after it. Its pending legs are on the index itself.
+         */
+        get: operations["list_wallet_index_legs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/wallets/{id}/tags/{tag}": {
         parameters: {
             query?: never;
@@ -473,7 +510,7 @@ export interface paths {
         };
         /**
          * Read one page of a wallet's history
-         * @description The wallet's transactions in `asset`, in chain order, with only its own movements of that asset; a fee is shown where this address paid it in the native asset. Block rewards count in the balance but are not transactions.
+         * @description The wallet's transactions in `asset`, in chain order, with only its own legs of that asset; a fee is shown where this address paid it in the native asset. Block rewards count in the balance but are not transactions.
          */
         get: operations["read_wallet_transactions"];
         put?: never;
@@ -518,42 +555,54 @@ export interface components {
             /** @description Assets in network, then id, order. */
             assets: components["schemas"]["Listing"][];
         };
-        /** @description The block a transaction was mined in. */
+        /**
+         * @description A kept block: its `block` row, its kept transactions in block order and
+         *     its kept rewards. The API shows it as is. Read whole in one query: its
+         *     children come as JSON arrays SQLite builds (`transactions`, `rewards`).
+         */
         Block: {
-            /** @description Block hash, hexadecimal, in the chain's native byte order. */
+            /**
+             * Format: int64
+             * @description Unix ms a reorg archived it; null while live.
+             */
+            archived_at?: number | null;
+            chain: string;
+            /** @description Block hash, hexadecimal. */
             hash: string;
             /**
              * Format: int64
              * @description Produced-block count.
              */
             height: number;
+            /** @description `{chain}.{network}.{hash}`. */
+            id: string;
+            network: string;
+            /** @description Its parent's id, once that is kept. */
+            parent?: string | null;
             /**
              * Format: int64
-             * @description Native position (Bitcoin/Ethereum height, Solana slot).
+             * @description Its parent's position; null for genesis.
              */
-            position: number;
-            /**
-             * Format: int64
-             * @description Unix seconds, when the chain reports one; always present.
-             */
-            timestamp: number | null;
-        };
-        /** @description One kept block. */
-        ChainBlock: {
-            /** @description Block hash, hexadecimal. */
-            hash: string;
+            parent_position?: number | null;
             /**
              * Format: int64
              * @description Native position (height or slot).
              */
             position: number;
+            /** @description Its kept rewards, in order. */
+            rewards: components["schemas"]["Leg"][];
             /**
              * Format: int64
-             * @description Unix seconds, when reported; always present.
+             * @description Unix seconds, when reported.
              */
-            timestamp: number | null;
+            timestamp?: number | null;
             /** @description Its kept transactions, in block order. */
-            transactions: components["schemas"]["ChainTransaction"][];
+            transactions: components["schemas"]["Transaction"][];
+        };
+        /** @description `GET /v1/networks/{chain}/{network}/blocks`. */
+        BlockList: {
+            /** @description The last kept blocks, latest first. */
+            blocks: components["schemas"]["Block"][];
         };
         /** @description One hour of chain time, across every network. */
         ChainHour: {
@@ -573,25 +622,6 @@ export interface components {
              */
             transactions: number;
         };
-        /** @description One kept leg: an indexed address's movement in a transaction. */
-        ChainLeg: {
-            address: string;
-            /** @description Exact atomic decimal. */
-            amount: string;
-            /** @description Asset id of the network. */
-            asset: string;
-            kind: components["schemas"]["ChainLegKind"];
-        };
-        /**
-         * @description What a leg did to its address.
-         * @enum {string}
-         */
-        ChainLegKind: "received" | "spent" | "burned" | "minted" | "fee";
-        /**
-         * @description Where a transaction is.
-         * @enum {string}
-         */
-        ChainState: "pending" | "succeeded" | "reverted";
         /** @description `GET /v1/networks/{chain}/{network}/tip`. */
         ChainTip: {
             /**
@@ -604,31 +634,6 @@ export interface components {
              * @description Unix seconds, when reported; always present.
              */
             timestamp: number | null;
-        };
-        /** @description One kept transaction. */
-        ChainTransaction: {
-            /**
-             * Format: int64
-             * @description Unix ms it stops holding funds; always present, null once mined.
-             */
-            expires_at: number | null;
-            /** @description The kept legs, in order. */
-            legs: components["schemas"]["ChainLeg"][];
-            /**
-             * Format: int64
-             * @description Position in its block; always present, null while pending.
-             */
-            order: number | null;
-            state: components["schemas"]["ChainState"];
-            /** @description Chain-native transaction id. */
-            txid: string;
-        };
-        /** @description `GET /v1/networks/{chain}/{network}/blocks`. */
-        ChainView: {
-            /** @description The last kept blocks, latest first. */
-            blocks: components["schemas"]["ChainBlock"][];
-            /** @description The pending transactions, oldest sent first. */
-            mempool: components["schemas"]["ChainTransaction"][];
         };
         /** @description One configured network, its indexing, and its nodes. */
         ConfiguredNetwork: {
@@ -846,8 +851,22 @@ export interface components {
             total?: string | null;
             /** @description Its transaction; null for a reward. */
             transaction?: string | null;
-            /** @description The wallet index it is kept for; `None` while pending. */
-            wallet_index_id?: string | null;
+            /** @description The wallet index it is kept for: its address's index in its asset. */
+            wallet_index_id: string;
+        };
+        /** @description `GET /v1/wallets/{id}/indexes/{asset}/legs`: a page of mined legs. */
+        LegPage: {
+            /**
+             * @description Live mined legs, latest first, each with the balance after it
+             *     (`total`).
+             */
+            legs: components["schemas"]["Leg"][];
+            /**
+             * Format: int64
+             * @description Pass as `before` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: number | null;
         };
         /** @description One configured asset: its id, where its wallets live, and what they hold. */
         Listing: {
@@ -861,23 +880,6 @@ export interface components {
             /** @description The chain and network this asset's wallets live on. */
             network: components["schemas"]["Network"];
         };
-        /** @description One movement of the wallet's asset inside a transaction. */
-        Movement: {
-            /** @description Exact decimal in display units. */
-            amount: string;
-            /**
-             * Format: int32
-             * @description Its order among the movements shown.
-             */
-            index: number;
-            /** @description What it did. */
-            kind: components["schemas"]["MovementKind"];
-        };
-        /**
-         * @description What a movement did to the wallet.
-         * @enum {string}
-         */
-        MovementKind: "received" | "spent" | "burned" | "minted" | "fee";
         /**
          * @description The chain and network a wallet, address, or transaction belongs to. It
          *     always ships as one nested object, never as two sibling fields.
@@ -906,11 +908,11 @@ export interface components {
             endpoint: components["schemas"]["RpcEndpoint"];
             network: string;
         };
-        /**
-         * @description How a mined transaction executed.
-         * @enum {string}
-         */
-        Outcome: "succeeded" | "reverted";
+        /** @description `GET /v1/networks/{chain}/{network}/transactions`. */
+        NetworkTransactions: {
+            /** @description The transactions, with their legs. */
+            transactions: components["schemas"]["Transaction"][];
+        };
         /** @description The memory-only health snapshot of this process. */
         Report: {
             /** @description Every configured network. */
@@ -1093,18 +1095,44 @@ export interface components {
              */
             tags: string[];
         };
-        /** @description One transaction of a wallet's history. */
+        /**
+         * @description A kept transaction: its `transaction` row and its kept legs. The API
+         *     shows it as is. Read in one query: its legs come as a JSON array SQLite
+         *     builds (`legs`).
+         */
         Transaction: {
-            /** @description The block it was mined in. */
-            block: components["schemas"]["Block"];
-            /** @description The wallet's movements of the asset. */
-            movements: components["schemas"]["Movement"][];
-            /** @description How it executed. */
-            outcome: components["schemas"]["Outcome"];
-            /** @description Why it reverted, as the chain reported it; always present. */
-            reason: string | null;
-            /** @description Chain-native transaction ID. */
-            transaction_id: string;
+            /** @description Its block; null while pending. */
+            block?: string | null;
+            chain: string;
+            /**
+             * Format: int64
+             * @description Unix ms it stops holding funds; null once mined.
+             */
+            expires_at?: number | null;
+            /** @description `{chain}.{network}.{txid}`. */
+            id: string;
+            /** @description Its kept legs, in order. */
+            legs: components["schemas"]["Leg"][];
+            network: string;
+            /**
+             * Format: int64
+             * @description Its position in its block; null while pending.
+             */
+            order?: number | null;
+            /** @description Why it reverted (JSON), when the chain said; null otherwise. */
+            reason?: string | null;
+            /**
+             * Format: int64
+             * @description Unix ms it was recorded as pending; null once mined.
+             */
+            sent_at?: number | null;
+            /**
+             * Format: int32
+             * @description 0 pending, 1 succeeded, 2 reverted.
+             */
+            state: number;
+            /** @description Chain-native transaction id. */
+            txid: string;
         };
         /** @description One page of `GET /v1/wallets/{id}/transactions`. */
         TransactionPage: {
@@ -1113,9 +1141,10 @@ export interface components {
             /** @description Opaque cursor of the next page; null on a short page. Always present. */
             next_cursor: string | null;
             /**
-             * @description At most `limit` transactions in kept blocks, in chain order. Kept
-             *     blocks reach the produced tip, so the last ones may still be taken
-             *     back by a reorg.
+             * @description At most `limit` transactions in kept blocks, in chain order, each
+             *     with only the wallet's legs of the asset (atomic amounts; a mined
+             *     leg's `position` is its block's). Kept blocks reach the produced
+             *     tip, so the last ones may still be taken back by a reorg.
              */
             transactions: components["schemas"]["Transaction"][];
         };
@@ -1240,9 +1269,9 @@ export interface components {
         /**
          * @description One asset of one wallet being indexed, as every read answers it (the
          *     API shows it as is): its columns, how far it is indexed against its
-         *     network's tip, its balances, and (from the wallet reads) its legs. All
-         *     computed in SQL ([`index_columns`]); amounts are exact atomic decimal
-         *     text, never summed. Positions are native (height or slot).
+         *     network's tip, its balances and its pending legs. All computed in SQL
+         *     (`db::BY_IDS`); amounts are exact atomic decimal text, never summed.
+         *     Positions are native (height or slot).
          */
         WalletIndex: {
             /** @description The asset id. */
@@ -1281,8 +1310,8 @@ export interface components {
              */
             indexed_through?: number | null;
             /**
-             * @description Its legs in (position, seq) order, pending ones (no block, no total)
-             *     last; read by the wallet reads only, empty otherwise.
+             * @description Its pending legs (no block, no total), by id; its mined ones are
+             *     paged by `leg::db::find_page`.
              */
             legs: components["schemas"]["Leg"][];
             /** @description Why it is `no_data`; null otherwise. */
@@ -1625,13 +1654,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The last blocks and the mempool */
+            /** @description The last blocks */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ChainView"];
+                    "application/json": components["schemas"]["BlockList"];
                 };
             };
             /** @description Malformed query or limit */
@@ -1694,7 +1723,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ChainBlock"];
+                    "application/json": components["schemas"]["Block"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -1977,6 +2006,75 @@ export interface operations {
             };
             /** @description The network is not configured */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_network_transactions: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Pending ones (true, the default), oldest sent first; or mined ones in
+                 *     live blocks (false), latest first.
+                 */
+                pending?: boolean;
+                /** @description At most this many, 1 to 500; 100 by default. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The transactions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkTransactions"];
+                };
+            };
+            /** @description Malformed query or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The network is not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2732,6 +2830,66 @@ export interface operations {
             };
             /** @description No such index */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_wallet_index_legs: {
+        parameters: {
+            query?: {
+                /**
+                 * @description `next_cursor` of the previous page (a `seq`); absent for the first
+                 *     page.
+                 */
+                before?: number;
+                /** @description Page size, 1 to 200. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description `{chain}.{network}.{address}`. */
+                id: string;
+                /** @description The asset id. */
+                asset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of legs */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegPage"];
+                };
+            };
+            /** @description Malformed wallet ID, query or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

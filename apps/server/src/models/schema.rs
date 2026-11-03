@@ -117,6 +117,7 @@ diesel::table! {
         enabled -> Bool,
         created_at -> BigInt,
         updated_at -> BigInt,
+        last_run -> Nullable<Text>,
     }
 }
 

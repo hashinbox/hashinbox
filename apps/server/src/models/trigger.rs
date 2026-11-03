@@ -434,10 +434,13 @@ collection! {
 )]
 pub(crate) mod db {
     use base::Network;
-    use diesel::prelude::*;
+    use diesel::{prelude::*, sql_types::BigInt};
 
     use super::{Trigger, Triggers};
-    use crate::models::schema::triggers;
+    use crate::models::{
+        TriggerRun,
+        schema::{trigger_run, triggers},
+    };
 
     /// Stores `trigger`; an existing id is refused.
     pub(crate) fn insert(
@@ -451,12 +454,11 @@ pub(crate) mod db {
 
     /// How many triggers are kept, and how many of them are enabled.
     pub(crate) fn count(connection: &mut SqliteConnection) -> QueryResult<(i64, i64)> {
-        let all = triggers::table.count().get_result(connection)?;
-        let enabled = triggers::table
-            .filter(triggers::enabled.eq(true))
-            .count()
-            .get_result(connection)?;
-        Ok((all, enabled))
+        triggers::table
+            .select(diesel::dsl::sql::<(BigInt, BigInt)>(
+                "COUNT(*), COALESCE(SUM(enabled), 0)",
+            ))
+            .get_result(connection)
     }
 
     /// The trigger `id`.
@@ -496,19 +498,19 @@ pub(crate) mod db {
             .execute(connection)
     }
 
-    /// The enabled triggers of `network`, by id.
+    /// The enabled triggers of `network`, by id, each with its latest run.
     pub(crate) fn find_enabled(
         connection: &mut SqliteConnection,
         network: &Network,
-    ) -> QueryResult<Triggers> {
-        let triggers = triggers::table
+    ) -> QueryResult<Vec<(Trigger, Option<TriggerRun>)>> {
+        triggers::table
+            .left_join(trigger_run::table.on(trigger_run::id.nullable().eq(triggers::last_run)))
             .filter(triggers::chain.eq(network.chain.as_str()))
             .filter(triggers::network.eq(&network.name))
             .filter(triggers::enabled.eq(true))
             .order(triggers::id)
-            .select(Trigger::as_select())
-            .load(connection)?;
-        Ok(triggers.into())
+            .select((Trigger::as_select(), Option::<TriggerRun>::as_select()))
+            .load(connection)
     }
 
     /// Removes trigger `id` and its runs; how many triggers went (0 or 1).
