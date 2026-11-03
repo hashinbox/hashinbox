@@ -55,6 +55,20 @@ pub trait Factory: Send + Sync {
     )]
     fn from_pk(&self, secret: SecretBytes) -> Future<'_, anyhow::Result<Arc<dyn Wallet>>>;
 
+    /// The wallet of `text`, a raw private key in the chain's own import
+    /// format (Ethereum hex, Solana Base58 secret or keypair, Bitcoin WIF),
+    /// built as [`Factory::from_pk`] builds it.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidSecret`] when `text` is not a key in that
+    /// format. The message quotes nothing back.
+    #[allow(
+        clippy::wrong_self_convention,
+        reason = "constructs a wallet from a private key's text; the factory is the receiver"
+    )]
+    fn from_pk_text(&self, text: &str) -> Future<'_, anyhow::Result<Arc<dyn Wallet>>>;
+
     /// The canonical [`Address`] of `text` in this factory's network, without
     /// I/O or a key; accepts every textual form the chain defines.
     ///
@@ -86,6 +100,10 @@ impl<F: Factory + ?Sized> Factory for Box<F> {
 
     fn from_pk(&self, secret: SecretBytes) -> Future<'_, anyhow::Result<Arc<dyn Wallet>>> {
         (**self).from_pk(secret)
+    }
+
+    fn from_pk_text(&self, text: &str) -> Future<'_, anyhow::Result<Arc<dyn Wallet>>> {
+        (**self).from_pk_text(text)
     }
 
     fn parse_address(&self, text: &str) -> anyhow::Result<Address> {

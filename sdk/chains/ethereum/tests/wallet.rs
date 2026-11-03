@@ -461,3 +461,22 @@ fn signed(bytes: &[u8]) -> base::Transaction {
         expires: None,
     }
 }
+
+#[test]
+fn a_hex_key_imports_with_or_without_its_prefix() {
+    let factory = factory(&Script::new([]));
+    let text = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+    let address = "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23";
+    for text in [format!("0x{text}"), text.to_uppercase()] {
+        let wallet = block_on(factory.from_pk_text(&text)).unwrap();
+        assert_eq!(wallet.address().value, address);
+    }
+    for bad in ["", "0x01", "zz", &"0".repeat(66)] {
+        let error = block_on(factory.from_pk_text(bad)).err().unwrap();
+        assert_eq!(
+            error.downcast_ref::<base::WalletError>().map(|e| e.kind),
+            Some(base::WalletErrorKind::InvalidSecret),
+            "{bad:?}"
+        );
+    }
+}

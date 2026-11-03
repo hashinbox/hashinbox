@@ -2948,6 +2948,7 @@ dependencies = [
  "crypto",
  "diesel",
  "futures-executor",
+ "futures-util",
  "hex",
  "http-body-util",
  "http-server",

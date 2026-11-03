@@ -263,7 +263,7 @@ impl Triggers {
                 .collect(),
             None => Vec::new(),
         };
-        let keyed = wallet::db::find_all(connection)?
+        let keyed = wallet::db::find_keyed(connection)?
             .addresses()
             .into_iter()
             .collect();

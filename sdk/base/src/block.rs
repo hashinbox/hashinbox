@@ -362,7 +362,19 @@ pub trait Dated: Chained {
     }
 
     /// The last block at or before `time` (Unix seconds); `None` when `time`
-    /// is before the chain's first block.
+    /// is before the chain's first block: [`Dated::search`] without progress.
+    ///
+    /// # Errors
+    ///
+    /// As [`Dated::search`].
+    fn position_at(&self, time: u64) -> Future<'_, anyhow::Result<Option<Stamp>>> {
+        Box::pin(async move { self.search(time, &|_| {}).await })
+    }
+
+    /// The last block at or before `time` (Unix seconds); `None` when `time`
+    /// is before the chain's first block. `progress` sees the range the
+    /// answer is in: the chain's first block and its tip, then after each
+    /// step, narrower or the same.
     ///
     /// A binary search over positions `0..=tip`: about `log2(tip)`
     /// [`Dated::time`] reads. Positions without a block are stepped over.
@@ -373,35 +385,84 @@ pub trait Dated: Chained {
     ///
     /// When the node cannot answer, a block carries no time, or more than
     /// a thousand positions in a row hold no block.
-    fn position_at(&self, time: u64) -> Future<'_, anyhow::Result<Option<Stamp>>> {
+    fn search<'a>(
+        &'a self,
+        time: u64,
+        progress: &'a (dyn Fn(Probe) + Send + Sync),
+    ) -> Future<'a, anyhow::Result<Option<Stamp>>> {
         Box::pin(async move {
             let tip = self.tip().await?;
             if tip.timestamp <= time {
                 return Ok(Some(tip));
             }
-            let Some(first) = produced(self, 0, tip.position).await? else {
+            let start = first_timed(self, tip.position).await?;
+            let Some(first) = produced(self, start, tip.position).await? else {
                 return Ok(None);
             };
             if first.timestamp > time {
                 return Ok(None);
             }
-            // `low` is at or before `time`; the block at `high` is after it.
-            let (mut low, mut high) = (first, tip.position);
-            while high - low.position > 1 {
-                let middle = low.position + (high - low.position) / 2;
-                match produced(self, middle, high - 1).await? {
-                    None => high = middle,
+            // `low` is at or before `time`, `high` after it; no position from
+            // `end` on holds a block at or before it.
+            let (mut low, mut high, mut end) = (first, tip, tip.position);
+            progress(Probe { low, high });
+            while end - low.position > 1 {
+                let middle = low.position + (end - low.position) / 2;
+                match produced(self, middle, end - 1).await? {
+                    None => end = middle,
                     Some(stamp) if stamp.timestamp <= time => low = stamp,
-                    Some(stamp) => high = stamp.position,
+                    Some(stamp) => (high, end) = (stamp, stamp.position),
                 }
+                progress(Probe { low, high });
             }
             Ok(Some(low))
         })
     }
 }
 
+/// One step of [`Dated::search`]: the block it looks for is at or after
+/// `low` and before `high`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Probe {
+    /// A produced block at or before the time asked for.
+    pub low: Stamp,
+    /// A produced block after it.
+    pub high: Stamp,
+}
+
 /// The first produced block in `start..=end`, stepping over at most
 /// [`SKIP_LIMIT`] empty positions.
+/// The first position whose time the node serves: 0, or the first past
+/// what it pruned. Pruning removes a prefix, so "served" flips once; the tip
+/// is taken as served.
+///
+/// # Errors
+///
+/// A failed read other than [`NotServed`].
+async fn first_timed<C: Dated + ?Sized>(chain: &C, tip: u64) -> anyhow::Result<u64> {
+    async fn served<C: Dated + ?Sized>(chain: &C, position: u64) -> anyhow::Result<bool> {
+        match chain.time(position).await {
+            Ok(_) => Ok(true),
+            Err(error) if NotServed::find(&error).is_some() => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+    if served(chain, 0).await? {
+        return Ok(0);
+    }
+    // `low` is not served, `high` is.
+    let (mut low, mut high) = (0, tip);
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if served(chain, middle).await? {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    Ok(high)
+}
+
 async fn produced<C: Dated + ?Sized>(
     chain: &C,
     start: u64,
@@ -621,5 +682,69 @@ mod tests {
         assert_eq!(at(119).await, Some(18));
         assert_eq!(at(500).await, Some(20));
         assert_eq!(chain.tip().await.unwrap().position, 20);
+    }
+
+    /// [`Even`] whose node no longer serves positions below 7.
+    struct Pruned(Even);
+
+    impl Networked for Pruned {
+        fn network(&self) -> &Network {
+            self.0.network()
+        }
+    }
+
+    impl Chained for Pruned {
+        fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
+            self.0.tips()
+        }
+
+        fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
+            if position < 7 {
+                return Box::pin(async move { Err(NotServed { position }.into()) });
+            }
+            self.0.block(position)
+        }
+    }
+
+    impl Dated for Pruned {}
+
+    #[tokio::test]
+    async fn search_starts_at_the_first_served_block() {
+        let chain = Pruned(Even(Network::new(Chain::from_static("test"), "even")));
+        let at = |time| {
+            let chain = &chain;
+            async move { chain.position_at(time).await.unwrap().map(|h| h.position) }
+        };
+        // Pruned below 7: the first block it serves is 8.
+        assert_eq!(at(105).await, None);
+        assert_eq!(at(108).await, Some(8));
+        assert_eq!(at(113).await, Some(12));
+    }
+
+    #[tokio::test]
+    async fn search_tells_each_narrowing_range() {
+        let chain = Even(Network::new(Chain::from_static("test"), "even"));
+        let probes = std::sync::Mutex::new(Vec::new());
+        let found = chain
+            .search(107, &|probe| probes.lock().unwrap().push(probe))
+            .await
+            .unwrap();
+        assert_eq!(found.map(|stamp| stamp.position), Some(6));
+        let probes = probes.into_inner().unwrap();
+        let ranges: Vec<_> = probes
+            .iter()
+            .map(|probe| (probe.low.position, probe.high.position))
+            .collect();
+        assert_eq!(ranges.first(), Some(&(0, 20)));
+        assert_eq!(ranges.last(), Some(&(6, 8)));
+        for pair in ranges.windows(2) {
+            assert!(
+                pair[1].0 >= pair[0].0 && pair[1].1 <= pair[0].1,
+                "{ranges:?}"
+            );
+        }
+        for probe in &probes {
+            assert!(probe.low.timestamp <= 107 && probe.high.timestamp > 107);
+        }
     }
 }

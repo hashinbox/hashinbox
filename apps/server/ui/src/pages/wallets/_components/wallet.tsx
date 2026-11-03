@@ -123,12 +123,18 @@ export function Wallet({
 
   /** Pauses every index of the wallet, or resumes them when one is stopped. */
   const toggle = () => {
-    const params = { params: { path: { id: wallet.id } } };
-    call(
-      halt
-        ? client.POST('/v1/wallets/{id}/resume', params)
-        : client.POST('/v1/wallets/{id}/pause', params),
+    const index_state = halt ? 'indexing' : 'paused';
+    Promise.all(
+      wallet.indexes.map(({ asset }) =>
+        call(
+          client.PATCH('/v1/wallets/{id}/indexes/{asset}', {
+            params: { path: { id: wallet.id, asset } },
+            body: { index_state },
+          }),
+        ),
+      ),
     )
+      .then(() => call(client.GET('/v1/wallets/{id}', { params: { path: { id: wallet.id } } })))
       .then((changed) => {
         shell.notify(halt ? 'Indexing resumed.' : 'Indexing paused.');
         onWatched(changed);

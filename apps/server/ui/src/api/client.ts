@@ -12,7 +12,6 @@ export type Balance = Schemas['Balance'];
 export type Transaction = Schemas['Transaction'];
 export type TransactionPage = Schemas['TransactionPage'];
 export type ConfiguredNetwork = Schemas['ConfiguredNetwork'];
-export type Tag = Schemas['Tag'];
 export type Trigger = Schemas['Trigger'];
 export type TriggerRun = Schemas['TriggerRun'];
 export type Job = Schemas['Job'];
@@ -71,6 +70,55 @@ export async function call<T>(
       ? error.message
       : `${response.status} ${response.statusText}`;
   throw new ApiError(response.status, message);
+}
+
+/** One server-sent event: its name and its JSON data. */
+export interface StreamEvent {
+  event: string;
+  data: unknown;
+}
+
+/**
+ * Reads the `text/event-stream` at `path` with this tab's token, handing each
+ * event to `onEvent`; resolves when the server ends the stream. Not
+ * EventSource: it cannot send the bearer header.
+ */
+export async function events(
+  path: string,
+  onEvent: (event: StreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const headers = new Headers({ Accept: 'text/event-stream' });
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const response = await fetch(`${baseUrl}${path}`, { headers, ...(signal && { signal }) });
+  if (response.status === 401 && token) onUnauthorized?.();
+  if (!response.ok || !response.body) {
+    const body: unknown = await response.json().catch(() => null);
+    const message =
+      body && typeof body === 'object' && 'message' in body && typeof body.message === 'string'
+        ? body.message
+        : `${response.status} ${response.statusText}`;
+    throw new ApiError(response.status, message);
+  }
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    buffer += value;
+    // An event ends at a blank line; its `data:` lines join with newlines.
+    for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
+      const lines = buffer.slice(0, end).split('\n');
+      buffer = buffer.slice(end + 2);
+      const event =
+        lines
+          .find((l) => l.startsWith('event:'))
+          ?.slice(6)
+          .trim() ?? 'message';
+      const data = lines.filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trimStart());
+      if (data.length > 0) onEvent({ event, data: JSON.parse(data.join('\n')) as unknown });
+    }
+  }
 }
 
 /** The server's own OpenAPI document; public, so it needs no token. */

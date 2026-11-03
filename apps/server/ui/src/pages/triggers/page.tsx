@@ -58,7 +58,7 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
   useEffect(refresh, [refresh]);
   useEffect(() => {
     call(client.GET('/v1/wallets/tags'))
-      .then((list) => setTags([...new Set(list.tags.map((t) => t.tag))].sort()))
+      .then((list) => setTags(list.tags))
       .catch(shell.fail);
   }, [shell.fail]);
 

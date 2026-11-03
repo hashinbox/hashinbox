@@ -1,8 +1,9 @@
 -- The payment server's own table, executed with schema/sdk.sql on the same
 -- new file by the caller (`payment-server migrate`). No migrations.
 --
--- Wallets are the SDK's `wallet` rows; the server keeps no wallet table of
--- its own. It may read the SDK's tables; it writes only its own.
+-- Wallets are the SDK's `wallet` rows, their tags included; the server keeps
+-- no wallet table of its own. It may read the SDK's tables; it writes only
+-- its own, and a wallet's tags.
 
 -- One row per network: its RPC endpoint documents in failover order, as one
 -- JSON list. Seeded from the configuration file once, replaced by verified
@@ -13,22 +14,6 @@ CREATE TABLE rpc_endpoints (
     nodes   TEXT NOT NULL,
     PRIMARY KEY (chain, network)
 ) WITHOUT ROWID;
-
-
--- One tag on an address of a network (keyed or watch-only alike): a label
--- that only selects the address's wallet indexes (pipes).
--- id: "{chain}.{network}.{address}.{tag}"; a tag is [a-z0-9-]{1,64}.
-CREATE TABLE tag (
-    id      TEXT NOT NULL PRIMARY KEY,
-    chain   TEXT NOT NULL,
-    network TEXT NOT NULL,
-    address TEXT NOT NULL,
-    tag     TEXT NOT NULL,
-    CHECK (id = chain || '.' || network || '.' || address || '.' || tag),
-    CHECK (length(tag) BETWEEN 1 AND 64 AND tag NOT GLOB '*[^a-z0-9-]*')
-);
-CREATE INDEX tag_address ON tag (chain, network, address);
-CREATE INDEX tag_tag ON tag (chain, network, tag);
 
 
 -- One trigger (pipes): its selector, filter, check and action as JSON, the

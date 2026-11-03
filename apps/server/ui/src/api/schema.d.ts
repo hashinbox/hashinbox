@@ -235,6 +235,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/networks/{chain}/{network}/tip/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Find a network's last block at or before a time, streaming the search
+         * @description `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends.
+         */
+        get: operations["search_tip"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/stats": {
         parameters: {
             query?: never;
@@ -329,8 +349,8 @@ export interface paths {
         get: operations["list_wallets"];
         put?: never;
         /**
-         * Generate a wallet, or watch an address, in one configured network
-         * @description Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start. A generated wallet with empty `assets` is kept unwatched. A `start` older than the network's `max_history_days` is refused.
+         * Import a wallet's key, watch an address, or generate a wallet, in one configured network
+         * @description With `secret`, imports a raw private key and keeps it; with `address` too, the key must derive that address. With `address` alone, watches it without its key. With neither, generates a key and keeps it; retrying makes another wallet. The wallet is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept answers its wallet as is (200), except that importing the key of a watch-only wallet keeps the key; its tags and indexes stay.
          */
         post: operations["create_wallet"];
         delete?: never;
@@ -346,7 +366,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List every tag */
+        /** List the tags in use */
         get: operations["list_tags"];
         put?: never;
         post?: never;
@@ -396,7 +416,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/wallets/{id}/pause": {
+    "/v1/wallets/{id}/indexes": {
         parameters: {
             query?: never;
             header?: never;
@@ -406,17 +426,17 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Pause indexing every asset of a wallet
-         * @description Its indexes are skipped: no facts are kept for blocks while paused. Resume backfills what they missed.
+         * Index a wallet in an asset
+         * @description Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next indexing step picks it). An asset already indexed keeps its first start (200). A `start` older than the network's `max_history_days` is refused; one the node no longer serves moves forward to the first block it serves before indexing begins.
          */
-        post: operations["pause_wallet"];
+        post: operations["create_wallet_index"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/v1/wallets/{id}/resume": {
+    "/v1/wallets/{id}/indexes/{asset}": {
         parameters: {
             query?: never;
             header?: never;
@@ -425,15 +445,19 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        post?: never;
         /**
-         * Resume indexing every asset of a wallet
-         * @description From `paused` or `no_data` (clearing its reason): each index continues from its last indexed block, backfilling what it missed.
+         * Stop indexing a wallet in an asset
+         * @description Forgets the index and its progress: its balance and history are no longer read. Creating it again starts from its new start.
          */
-        post: operations["resume_wallet"];
-        delete?: never;
+        delete: operations["delete_wallet_index"];
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Pause or resume a wallet's index
+         * @description `paused`: skipped, no facts kept for blocks while paused; what is kept stays. `indexing`: from `paused` or `no_data` (clearing its reason), it continues from its last indexed block, backfilling what it missed.
+         */
+        patch: operations["update_wallet_index"];
         trace?: never;
     };
     "/v1/wallets/{id}/tags/{tag}": {
@@ -445,12 +469,15 @@ export interface paths {
         };
         get?: never;
         /**
-         * Tag an address
-         * @description Tags the address; tagging twice keeps one tag. Any address of a configured network can be tagged, keyed or not.
+         * Tag a wallet
+         * @description Tags the wallet, keyed or watch-only; tagging twice keeps one tag.
          */
         put: operations["add_wallet_tag"];
         post?: never;
-        /** Untag an address */
+        /**
+         * Untag a wallet
+         * @description Removes the tag from the wallet.
+         */
         delete: operations["remove_wallet_tag"];
         options?: never;
         head?: never;
@@ -667,31 +694,38 @@ export interface components {
             nodes: components["schemas"]["RpcNode"][];
         };
         /**
-         * @description `POST /v1/wallets` body: generate a wallet in one network, or watch an
-         *     address in it without its key.
+         * @description `POST /v1/wallets` body: a wallet in one network, created without
+         *     indexes. With `secret`, its key is imported and kept; else with
+         *     `address`, the address is watched without a key; with neither, a new key
+         *     is generated and kept.
          */
         CreateWallet: {
             /**
-             * @description Address text in any form the chain accepts. Present: watch this
-             *     address without its key. Absent: generate a new wallet.
+             * @description Address text in any form the chain accepts; with `secret`, the
+             *     address the key must derive.
              */
             address?: string;
-            /**
-             * @description The asset ids to index it in; absent means `["native"]`. Empty
-             *     generates a wallet without watching it yet (watch it later by posting
-             *     its address); an address needs at least one.
-             */
-            assets?: string[];
             /** @description Chain name, as `GET /v1/assets` lists it. */
             chain: string;
             /** @description Network name, as `GET /v1/assets` lists it. */
             network: string;
             /**
-             * @description Where indexing begins: `"fresh"` for the chain's tip, or the native
-             *     position to index from, no older than the network's
-             *     `max_history_days`. Absent means `"fresh"`.
+             * @description A raw private key in the chain's import format: Ethereum hex, Solana
+             *     Base58 secret or keypair, Bitcoin WIF.
              */
-            start?: components["schemas"]["Start"];
+            secret?: string;
+        };
+        /** @description `POST /v1/wallets/{id}/indexes` body. */
+        CreateWalletIndex: {
+            /** @description The asset id to index the wallet in. */
+            asset: string;
+            /**
+             * Format: int64
+             * @description The native position to index from, no older than the network's
+             *     `max_history_days`. Absent: from the chain's tip, as a generated
+             *     wallet (it has no past) must be.
+             */
+            start?: number;
         };
         /** @description A node with its own bounds. */
         DetailedEndpoint: {
@@ -723,11 +757,6 @@ export interface components {
             /** @description A transaction's page; `{tx}` is replaced by the transaction id. */
             transaction: string;
         };
-        /**
-         * @description The `"fresh"` literal of a `Start`.
-         * @enum {string}
-         */
-        Fresh: "fresh";
         /**
          * @description Whether an asset of a wallet is indexed.
          * @enum {string}
@@ -1009,8 +1038,6 @@ export interface components {
              */
             succeeded: number;
         };
-        /** @description A wallet's birthday on the wire: `"fresh"` or a native position. */
-        Start: components["schemas"]["Fresh"] | number;
         /** @description `GET /v1/stats`. */
         Stats: {
             /**
@@ -1078,17 +1105,13 @@ export interface components {
              */
             wallets: number;
         };
-        /** @description One tag on one address. */
-        Tag: {
-            /** @description The tag: 1 to 64 of `[a-z0-9-]`. */
-            tag: string;
-            /** @description `<chain>:<network>:<address>`, as the wallet routes take it. */
-            wallet_id: string;
-        };
         /** @description `GET /v1/wallets/tags`. */
         TagList: {
-            /** @description Every tag, by network, address, then tag. */
-            tags: components["schemas"]["Tag"][];
+            /**
+             * @description Every tag in use on any wallet, sorted, each once. A wallet's own
+             *     tags are on it (`GET /v1/wallets`).
+             */
+            tags: string[];
         };
         /** @description One transaction of a wallet's history. */
         Transaction: {
@@ -1201,6 +1224,15 @@ export interface components {
         TriggerRunList: {
             /** @description The latest runs, latest first. */
             runs: components["schemas"]["TriggerRun"][];
+        };
+        /** @description `PATCH /v1/wallets/{id}/indexes/{asset}` body. */
+        UpdateWalletIndex: {
+            /**
+             * @description `paused`: skipped, no facts kept for blocks while paused; `indexing`:
+             *     resumed from `paused` or `no_data` (clearing its reason), backfilling
+             *     what it missed. `no_data` is the indexer's to set.
+             */
+            index_state: components["schemas"]["IndexState"];
         };
         /** @description One wallet's public metadata; never its key. */
         Wallet: {
@@ -1885,6 +1917,64 @@ export interface operations {
             };
         };
     };
+    search_tip: {
+        parameters: {
+            query: {
+                /**
+                 * @description RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: find the last
+                 *     block at or before it.
+                 */
+                at: string;
+            };
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The search's events */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            /** @description Malformed `at` */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The network is not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     read_stats: {
         parameters: {
             query?: never;
@@ -2283,7 +2373,16 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Wallet generated or address watched */
+            /** @description The address was already kept: its wallet */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Wallet"];
+                };
+            };
+            /** @description Wallet created */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -2292,7 +2391,7 @@ export interface operations {
                     "application/json": components["schemas"]["Wallet"];
                 };
             };
-            /** @description Malformed body or address text, or a start older than the network's history limit */
+            /** @description Malformed body, address or key, or a key that derives another address */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2310,7 +2409,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Network or asset is not configured */
+            /** @description Network is not configured */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2319,7 +2418,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Generation, the node or the store is unavailable */
+            /** @description Generation or the store is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -2492,7 +2591,7 @@ export interface operations {
             };
         };
     };
-    pause_wallet: {
+    create_wallet_index: {
         parameters: {
             query?: never;
             header?: never;
@@ -2502,18 +2601,31 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateWalletIndex"];
+            };
+        };
         responses: {
-            /** @description The wallet, paused */
+            /** @description The asset was already indexed: its index */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Wallet"];
+                    "application/json": components["schemas"]["WalletIndexProgress"];
                 };
             };
-            /** @description Malformed wallet ID */
+            /** @description The index */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WalletIndexProgress"];
+                };
+            };
+            /** @description Malformed body or wallet ID, or a start older than the network's history limit */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2531,7 +2643,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Wallet is unknown */
+            /** @description Wallet is unknown, or the asset is not configured */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2540,7 +2652,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description The wallet store is unavailable */
+            /** @description The node or the store is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -2551,26 +2663,26 @@ export interface operations {
             };
         };
     };
-    resume_wallet: {
+    delete_wallet_index: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /** @description `<chain>:<network>:<address>`, as a create call returned it. */
+                /** @description `<chain>:<network>:<address>`. */
                 id: string;
+                /** @description The asset id. */
+                asset: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description The wallet, indexing */
-            200: {
+            /** @description Deleted */
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["Wallet"];
-                };
+                content?: never;
             };
             /** @description Malformed wallet ID */
             400: {
@@ -2590,7 +2702,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Wallet is unknown */
+            /** @description No such index */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2599,7 +2711,72 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description The wallet store is unavailable */
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    update_wallet_index: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `<chain>:<network>:<address>`. */
+                id: string;
+                /** @description The asset id. */
+                asset: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateWalletIndex"];
+            };
+        };
+        responses: {
+            /** @description The index */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WalletIndexProgress"];
+                };
+            };
+            /** @description Malformed body or wallet ID, or `no_data` asked for */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such index */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -2649,7 +2826,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Network is not configured */
+            /** @description Wallet is unknown, or network not configured */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2708,7 +2885,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description No such tag, or network not configured */
+            /** @description No such wallet or tag, or network not configured */
             404: {
                 headers: {
                     [name: string]: unknown;

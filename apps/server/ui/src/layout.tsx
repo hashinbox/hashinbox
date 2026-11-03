@@ -125,10 +125,9 @@ export function Layout() {
     Promise.all([
       call(client.GET('/v1/assets')),
       call(client.GET('/v1/wallets')),
-      call(client.GET('/v1/wallets/tags')),
       call(client.GET('/v1/networks')),
     ])
-      .then(([assets, list, all, configured]) => {
+      .then(([assets, list, configured]) => {
         if (!live) return;
         const byNetwork = new Map<string, Explorer>();
         for (const n of configured.networks)
@@ -136,10 +135,7 @@ export function Layout() {
         setExplorers(byNetwork);
         setListings(assets.assets);
         setWallets(list.wallets);
-        const byWallet = new Map<string, string[]>();
-        for (const t of all.tags)
-          byWallet.set(t.wallet_id, [...(byWallet.get(t.wallet_id) ?? []), t.tag]);
-        setTags(byWallet);
+        setTags(new Map(list.wallets.map((w) => [w.id, w.tags])));
       })
       .catch((error: unknown) => {
         if (live) fail(error);

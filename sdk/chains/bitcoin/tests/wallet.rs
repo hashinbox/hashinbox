@@ -553,3 +553,33 @@ fn signed(bytes: &[u8]) -> base::Transaction {
         expires: None,
     }
 }
+
+#[tokio::test]
+async fn a_compressed_wif_of_its_network_imports() {
+    let factory = factory(&Script::default(), AddressType::SegwitV0, Vec::new());
+    let wif = |compressed, network| {
+        bitcoin::PrivateKey {
+            compressed,
+            network,
+            inner: bitcoin::secp256k1::SecretKey::from_slice(&[7; 32]).unwrap(),
+        }
+        .to_wif()
+    };
+    let wallet = factory
+        .from_pk_text(&wif(true, bitcoin::NetworkKind::Test))
+        .await
+        .unwrap();
+    assert_eq!(wallet.private_key().1.as_bytes(), [7; 32]);
+    for bad in [
+        wif(false, bitcoin::NetworkKind::Test),
+        wif(true, bitcoin::NetworkKind::Main),
+        "not a key".to_owned(),
+    ] {
+        let error = factory.from_pk_text(&bad).await.err().unwrap();
+        assert_eq!(
+            kind(&error),
+            Some(WalletErrorKind::InvalidSecret),
+            "{bad:?}"
+        );
+    }
+}

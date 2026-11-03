@@ -55,17 +55,16 @@ diesel::table! {
         chain -> Text,
         network -> Text,
         address -> Text,
-        curve -> Text,
-        secret -> Binary,
+        curve -> Nullable<Text>,
+        secret -> Nullable<Binary>,
+        tags -> Text,
     }
 }
 
 diesel::table! {
     wallet_index (id) {
         id -> Text,
-        chain -> Text,
-        network -> Text,
-        address -> Text,
+        wallet_id -> Text,
         asset -> Text,
         requested_from -> BigInt,
         birthday -> BigInt,
@@ -101,17 +100,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    tag (id) {
-        id -> Text,
-        chain -> Text,
-        network -> Text,
-        address -> Text,
-        #[sql_name = "tag"]
-        name -> Text,
-    }
-}
-
-diesel::table! {
     #[sql_name = "trigger"]
     triggers (id) {
         id -> Text,
@@ -141,13 +129,14 @@ diesel::joinable!(transactions -> block (block));
 diesel::joinable!(trigger_run -> triggers (trigger));
 diesel::joinable!(leg -> transactions (transaction));
 diesel::joinable!(wallet_index -> block (indexed_at));
+diesel::joinable!(wallet_index -> wallet (wallet_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     block,
     transactions,
     leg,
+    wallet,
     wallet_index,
-    tag,
     triggers,
     trigger_run
 );

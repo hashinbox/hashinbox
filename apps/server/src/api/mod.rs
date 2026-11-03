@@ -12,10 +12,11 @@ mod networks;
 mod openapi;
 mod state;
 mod stats;
-mod tags;
 mod tip;
 mod transactions;
 mod triggers;
+mod wallet_indexes;
+mod wallet_tags;
 mod wallets;
 
 use std::sync::Arc;
@@ -106,6 +107,7 @@ fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::with_openapi(Contract::openapi())
         .merge(assets::routes())
         .merge(wallets::routes())
+        .merge(wallet_indexes::routes())
         .merge(balance::routes())
         .merge(transactions::routes())
         .merge(jobs::routes())
@@ -114,7 +116,7 @@ fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
         .merge(tip::routes())
         .merge(stats::routes())
         .merge(triggers::routes())
-        .merge(tags::routes())
+        .merge(wallet_tags::routes())
 }
 
 fn public_routes() -> OpenApiRouter<Arc<AppState>> {

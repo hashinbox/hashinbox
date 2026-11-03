@@ -484,3 +484,28 @@ fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
     });
     assert_eq!(paid, Some(fee), "the estimator's cached prices, no refresh");
 }
+
+#[test]
+fn a_base58_secret_or_keypair_imports() {
+    let factory = config().factory(&client(Script::new([])));
+    let keypair = Keypair::new_from_array(SEED);
+    for text in [keypair.to_base58_string(), bs58::encode(SEED).into_string()] {
+        let wallet = block_on(factory.from_pk_text(&text)).unwrap();
+        assert_eq!(wallet.address().value, keypair.pubkey().to_string());
+        assert_eq!(wallet.private_key().1.as_bytes(), SEED);
+    }
+    let mut forged = keypair.to_bytes();
+    forged[63] ^= 1;
+    for bad in [
+        String::new(),
+        "0OIl".to_owned(),
+        bs58::encode(forged).into_string(),
+    ] {
+        let error = block_on(factory.from_pk_text(&bad)).err().unwrap();
+        assert_eq!(
+            error.downcast_ref::<WalletError>().map(|e| e.kind),
+            Some(WalletErrorKind::InvalidSecret),
+            "{bad:?}"
+        );
+    }
+}

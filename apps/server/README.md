@@ -56,14 +56,21 @@ committed copy. `GET /health` and `GET /openapi.json` need no token.
 
 - `GET /v1/assets`: every configured asset (`payments.assets()`): its network, its
   id (`native` or a token's) and metadata.
-- `POST /v1/wallets` `{chain, network, address?, assets?, start?}`: without
-  `address`, generates a wallet and keeps its key (`payments.generate`); with it,
-  watches the address without a key. Then indexes it in each asset id of `assets`
-  (default `["native"]`) from `start` (`"fresh"`, the default, or a native
-  position). HTTP accepts no private keys. A wallet's ID is
-  `<chain>:<network>:<address>`.
-- `GET /v1/wallets`, `GET /v1/wallets/{id}`: keyed wallets and watched addresses,
-  with their watched asset ids.
+- `POST /v1/wallets` `{chain, network, secret?, address?}`: with `secret` (a raw
+  private key: Ethereum hex, Solana Base58, Bitcoin WIF), imports and keeps it
+  (with `address` too, the key must derive it); with `address` alone, watches it
+  without a key; with neither, generates a key and keeps it. No indexes yet; an
+  address already kept answers its wallet (`200`), a watched one gaining its key.
+  A wallet's ID is `<chain>:<network>:<address>`.
+- `POST /v1/wallets/{id}/indexes` `{asset, start?}`: indexes the wallet in the
+  asset from `start` (a native position within `max_history_days`; absent: the
+  tip); `PATCH /v1/wallets/{id}/indexes/{asset}` `{index_state}` pauses or
+  resumes it; `DELETE` forgets it.
+- `GET /v1/wallets`, `GET /v1/wallets/{id}`: every wallet (keyed or watch-only),
+  its tags and indexed asset ids.
+- `GET /v1/networks/{chain}/{network}/tip/search?at=`: `text/event-stream` of the
+  block-by-time search: `probe` events as the range narrows, then `found` or
+  `error`.
 - `GET /v1/wallets/{id}/balance?asset=`: the signed sum of the address's legs
   (received and minted less spent, burned and fees) and rewards in the asset over
   every live block, in display units, with the position the address is indexed

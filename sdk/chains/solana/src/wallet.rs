@@ -6,7 +6,7 @@ use base::{
     Address, Addressed, Asset, Future, Network, Networked, Signer, TransactionError,
     TransactionErrorKind, WalletError, WalletErrorKind,
 };
-use crypto::{Curve, SecretBytes};
+use crypto::{Curve, Ed25519, PrivateKey as _, SecretBytes};
 
 use crate::builder::Builder;
 use crate::{KeyPair, Tokens, fee::Estimator, rpc::Client};
@@ -39,6 +39,13 @@ impl base::WalletFactory for Factory {
             });
             Ok(wallet)
         })
+    }
+
+    /// Base58 of the 32-byte secret, or of the 64-byte keypair (the secret,
+    /// then its public key, which must match).
+    fn from_pk_text(&self, text: &str) -> Future<'_, anyhow::Result<Arc<dyn base::Wallet>>> {
+        let secret = base58_key(text);
+        Box::pin(async move { self.from_pk(secret?).await })
     }
 
     /// Canonical Base58 of 32 bytes, Solana's only textual form. An
@@ -111,5 +118,30 @@ impl base::Wallet for Wallet {
 
     fn private_key(&self) -> (Curve, SecretBytes) {
         (Curve::Ed25519, self.key.secret())
+    }
+}
+
+/// The 32-byte secret of `text`: Base58 of the secret, or of the keypair
+/// (the secret, then its public key, which must match).
+fn base58_key(text: &str) -> Result<SecretBytes, WalletError> {
+    let invalid = |message: &str| WalletError::new(WalletErrorKind::InvalidSecret, message);
+    let form = "a Solana key is Base58 of a 32-byte secret or a 64-byte keypair";
+    let bytes = SecretBytes::new(
+        bs58::decode(text.trim())
+            .into_vec()
+            .map_err(|_| invalid(form))?,
+    );
+    match bytes.as_bytes().len() {
+        32 => Ok(bytes),
+        64 => {
+            let (secret, public) = bytes.as_bytes().split_at(32);
+            let key = Ed25519::from_bytes(secret)
+                .map_err(|_| invalid("the keypair's secret is not an Ed25519 seed"))?;
+            if key.public_key() != public {
+                return Err(invalid("the keypair's public half is not its secret's"));
+            }
+            Ok(SecretBytes::new(secret))
+        }
+        _ => Err(invalid(form)),
     }
 }

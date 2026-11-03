@@ -19,7 +19,7 @@ pub use asset::{Asset, AssetInfo, Assets};
 pub use block::{
     Block, Blocks, Chained, Dated, Hash as BlockHash, Header as BlockHeader,
     Listener as BlockListener, NotServed, Notify as BlockNotify, Notifying, Parent as BlockParent,
-    Reward, Stamp as BlockStamp, Store as BlockStore, Tips,
+    Probe as BlockProbe, Reward, Stamp as BlockStamp, Store as BlockStore, Tips,
 };
 pub use cache::Cache;
 pub use chain::Chain;

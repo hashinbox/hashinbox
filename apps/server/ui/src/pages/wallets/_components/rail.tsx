@@ -17,8 +17,6 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
-import FormControlLabel from '@mui/material/FormControlLabel';
-import Switch from '@mui/material/Switch';
 import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Decimal from 'decimal.js';
@@ -29,7 +27,7 @@ import type { Shell } from '@/layout';
 import { assetOf, networkChoices, unitOf } from '@/money';
 import { mono } from '@/theme';
 import { WatchFields } from './watch';
-import { WATCH_NOTHING, haltOf, watchBody, type Watching } from './watching';
+import { WATCH_NOTHING, haltOf, watch, type Watching } from './watching';
 import { NetworkSelect } from '@/_components/network-select';
 
 interface Props {
@@ -325,120 +323,163 @@ function networksOf(shell: Shell): string[] {
   return [...new Set(shell.listings.map((l) => `${l.network.chain}/${l.network.name}`))];
 }
 
+/** How the wallet of step 1 is made. */
+type Kind = 'generate' | 'secret' | 'address';
+
+const ABOUT: Record<Kind, string> = {
+  generate: 'Generates a key and keeps it on this server.',
+  secret: 'Imports a raw private key (Ethereum hex, Solana Base58, Bitcoin WIF) and keeps it here.',
+  address: 'Watches an existing address; its key is not kept here, so it cannot send.',
+};
+
+/** Adds a wallet in two steps: (1) the wallet, (2) what it is indexed in, from when. */
 function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
-  const [mode, setMode] = useState<'generate' | 'watch'>('generate');
+  const [kind, setKind] = useState<Kind>('generate');
   const [network, setNetwork] = useState('');
-  const [address, setAddress] = useState('');
-  const [watchNow, setWatchNow] = useState(true);
-  const [watching, setWatching] = useState<Watching>({ ...WATCH_NOTHING, assets: ['native'] });
+  const [text, setText] = useState('');
   const [tags, setTags] = useState<string[]>([]);
+  // The wallet step 1 made; step 2 indexes it.
+  const [made, setMade] = useState<Wallet | null>(null);
+  const [watching, setWatching] = useState<Watching>({ ...WATCH_NOTHING, assets: ['native'] });
   const [busy, setBusy] = useState(false);
   const chosen = network || (networksOf(shell)[0] ?? '');
   const [chain = '', name = ''] = chosen.split('/');
   const offered = shell.listings.filter(
     (l) => l.network.chain === chain && l.network.name === name,
   );
-  const watches = mode === 'watch' || watchNow;
-  const ready =
-    (mode === 'generate' || address.trim() !== '') && (!watches || watching.assets.length > 0);
+  const ready = made ? watching.assets.length > 0 : kind === 'generate' || text.trim() !== '';
 
-  const reset = () => {
-    setAddress('');
-    setWatching({ ...WATCH_NOTHING, assets: ['native'] });
+  const finish = (wallet: Wallet) => {
+    setText('');
     setTags([]);
+    setMade(null);
+    setWatching({ ...WATCH_NOTHING, assets: ['native'] });
+    onDone(wallet);
+  };
+
+  /** Step 1: makes the wallet and tags it. */
+  const make = async () => {
+    const key = text.trim();
+    // With neither a key nor an address, the server generates the key.
+    const body = {
+      chain,
+      network: name,
+      ...(kind === 'secret' && { secret: key }),
+      ...(kind === 'address' && { address: key }),
+    };
+    const wallet = await call(client.POST('/v1/wallets', { body }));
+    for (const tag of tags) {
+      const params = { path: { id: wallet.id, tag } };
+      await call(client.PUT('/v1/wallets/{id}/tags/{tag}', { params }));
+    }
+    setText('');
+    setMade(wallet);
+  };
+
+  /** Step 2: indexes it. */
+  const index = async (wallet: Wallet) => {
+    finish(
+      await watch(wallet.id, kind === 'generate' ? { ...watching, start: 'fresh' } : watching),
+    );
   };
 
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="xs">
+    <Dialog open={open} onClose={made ? () => finish(made) : onClose} fullWidth maxWidth="xs">
       <Box
         component="form"
         onSubmit={(event: SubmitEvent<HTMLFormElement>) => {
           event.preventDefault();
           setBusy(true);
-          const body = {
-            chain,
-            network: name,
-            ...(mode === 'watch' ? { address: address.trim() } : {}),
-            ...(watches ? watchBody(watching) : { assets: [] }),
-          };
-          call(client.POST('/v1/wallets', { body }))
-            .then(async (wallet) => {
-              for (const tag of tags) {
-                const params = { path: { id: wallet.id, tag } };
-                await call(client.PUT('/v1/wallets/{id}/tags/{tag}', { params }));
-              }
-              reset();
-              onDone(wallet);
-            })
-            .catch(shell.fail)
-            .finally(() => setBusy(false));
+          (made ? index(made) : make()).catch(shell.fail).finally(() => setBusy(false));
         }}
       >
-        <DialogTitle variant="h3">New wallet</DialogTitle>
+        <DialogTitle variant="h3">
+          Add wallet{' '}
+          <Typography component="span" color="text.secondary" sx={{ fontSize: 13 }}>
+            {made ? '2/2 · Indexing' : '1/2 · Wallet'}
+          </Typography>
+        </DialogTitle>
         <DialogContent>
-          <Stack spacing={2} sx={{ mt: 1 }}>
-            <ToggleButtonGroup
-              exclusive
-              fullWidth
-              size="small"
-              value={mode}
-              onChange={(_, next: 'generate' | 'watch' | null) => next && setMode(next)}
-            >
-              <ToggleButton value="generate">Generate a wallet</ToggleButton>
-              <ToggleButton value="watch">Add an address</ToggleButton>
-            </ToggleButtonGroup>
-            <DialogContentText sx={{ fontSize: 13 }}>
-              {mode === 'generate'
-                ? 'Generates a key and keeps it on this server.'
-                : 'Watches an existing address; its key is not kept here, so it cannot send.'}
-            </DialogContentText>
-            <NetworkSelect
-              value={chosen}
-              networks={networkChoices(shell.listings)}
-              onChange={(value) => {
-                setNetwork(value);
-                setWatching({ ...watching, assets: ['native'] });
-              }}
-              required
-            />
-            {mode === 'watch' && (
-              <TextField
-                label="Address"
-                value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                slotProps={{ htmlInput: { spellCheck: false } }}
+          {made ? (
+            <Stack spacing={2} sx={{ mt: 1 }}>
+              <DialogContentText sx={{ fontSize: 13 }}>
+                <Box component="span" sx={{ fontFamily: mono }}>
+                  {middle(made.address)}
+                </Box>{' '}
+                is kept. Index it in its assets to see balances and history.
+              </DialogContentText>
+              <WatchFields
+                offered={offered}
+                value={watching}
+                onChange={setWatching}
+                freshOnly={kind === 'generate'}
+              />
+            </Stack>
+          ) : (
+            <Stack spacing={2} sx={{ mt: 1 }}>
+              <NetworkSelect
+                value={chosen}
+                networks={networkChoices(shell.listings)}
+                onChange={(value) => {
+                  setNetwork(value);
+                  setWatching({ ...watching, assets: ['native'] });
+                }}
                 required
               />
-            )}
-            {mode === 'generate' && (
-              <FormControlLabel
-                control={
-                  <Switch checked={watchNow} onChange={(e) => setWatchNow(e.target.checked)} />
-                }
-                label={watchNow ? 'Watch it now' : 'Do not watch yet (watch it later)'}
-              />
-            )}
-            {watches && <WatchFields offered={offered} value={watching} onChange={setWatching} />}
-            <Autocomplete
-              multiple
-              freeSolo
-              options={[]}
-              value={tags}
-              onChange={(_, next) =>
-                setTags(next.map((t) => t.trim().toLowerCase()).filter((t) => t !== ''))
-              }
-              renderInput={(params) => (
-                <TextField {...params} label="Tags (optional)" placeholder="deposit" />
+              <ToggleButtonGroup
+                exclusive
+                fullWidth
+                size="small"
+                value={kind}
+                onChange={(_, next: Kind | null) => {
+                  if (!next) return;
+                  setKind(next);
+                  setText('');
+                }}
+              >
+                <ToggleButton value="generate">Generate</ToggleButton>
+                <ToggleButton value="secret">Private key</ToggleButton>
+                <ToggleButton value="address">Address</ToggleButton>
+              </ToggleButtonGroup>
+              <DialogContentText sx={{ fontSize: 13 }}>{ABOUT[kind]}</DialogContentText>
+              {kind !== 'generate' && (
+                <TextField
+                  label={kind === 'secret' ? 'Private key' : 'Address'}
+                  type={kind === 'secret' ? 'password' : 'text'}
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  autoComplete="off"
+                  slotProps={{ htmlInput: { spellCheck: false } }}
+                  required
+                />
               )}
-            />
-          </Stack>
+              <Autocomplete
+                multiple
+                freeSolo
+                options={[]}
+                value={tags}
+                onChange={(_, next) =>
+                  setTags(next.map((t) => t.trim().toLowerCase()).filter((t) => t !== ''))
+                }
+                renderInput={(params) => (
+                  <TextField {...params} label="Tags (optional)" placeholder="deposit" />
+                )}
+              />
+            </Stack>
+          )}
         </DialogContent>
         <DialogActions>
-          <Button color="inherit" onClick={onClose}>
-            Cancel
-          </Button>
+          {made ? (
+            <Button color="inherit" onClick={() => finish(made)}>
+              Later
+            </Button>
+          ) : (
+            <Button color="inherit" onClick={onClose}>
+              Cancel
+            </Button>
+          )}
           <Button type="submit" variant="contained" loading={busy} disabled={!ready}>
-            {mode === 'generate' ? 'Generate' : 'Add'}
+            {made ? 'Index' : 'Next'}
           </Button>
         </DialogActions>
       </Box>

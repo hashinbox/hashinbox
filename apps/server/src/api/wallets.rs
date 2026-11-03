@@ -1,20 +1,16 @@
-//! `/v1/wallets` and `/v1/wallets/{id}`: generate or watch, list and read
-//! wallets. A wallet is an address: keyed (generated here, its key kept in
-//! the `wallet` table) or watch-only, with the assets it is indexed in and
-//! how far each is indexed; pause and resume its indexing.
+//! `/v1/wallets` and `/v1/wallets/{id}`: generate, import or watch, list and
+//! read wallets (`wallet_indexes` indexes them). A wallet is an address:
+//! keyed (its key kept in its `wallet` row) or watch-only, with the assets it
+//! is indexed in and how far each is indexed.
 
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
     http::StatusCode,
 };
-use base::{Birthday, Chain, WalletIndexState};
+use base::{Chain, WalletIndexState};
 use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -22,15 +18,13 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::{Error, ErrorBody, asset_info, balance::amount, wallet_address};
 use crate::{
     api::AppState,
-    models::{Network, wallet_index},
+    models::{self, Network, wallet::Indexed},
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
         .routes(routes!(create, list))
         .routes(routes!(read))
-        .routes(routes!(pause))
-        .routes(routes!(resume))
 }
 
 /// One wallet's public metadata; never its key.
@@ -50,13 +44,36 @@ struct Wallet {
     indexes: Vec<Progress>,
 }
 
+impl Wallet {
+    /// `indexed`, against its network's indexer `stats`.
+    fn new(indexed: Indexed, stats: Option<&base::Stats>) -> Self {
+        let address = base::Address::from(&indexed.wallet);
+        let indexes: Vec<Progress> = indexed
+            .indexes
+            .into_iter()
+            .map(|index| Progress::new(index, stats))
+            .collect();
+        Self {
+            id: format!(
+                "{}:{}:{}",
+                address.network.chain, address.network.name, address.value
+            ),
+            network: address.network.into(),
+            address: address.value,
+            keyed: indexed.wallet.keyed(),
+            assets: indexes.iter().map(|index| index.asset.clone()).collect(),
+            indexes,
+        }
+    }
+}
+
 /// How far one asset of a wallet is indexed. Complete when `index_state`
 /// is `indexing` and `index_behind_tip` is 0; permanent up to
 /// `min(indexed_at, finality_at)`; history shortened when `indexed_from` is
 /// above `index_requested_from`. Positions are native (height or slot).
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[schema(as = WalletIndexProgress)]
-struct Progress {
+pub(super) struct Progress {
     /// The asset id.
     asset: String,
     index_state: IndexState,
@@ -83,7 +100,7 @@ struct Progress {
 
 impl Progress {
     /// `index`, against its network's indexer `stats`.
-    fn new(index: base::WalletIndex, stats: Option<&base::Stats>) -> Self {
+    pub(super) fn new(index: base::WalletIndex, stats: Option<&base::Stats>) -> Self {
         let tip = stats.and_then(|stats| stats.tip);
         let next = index.next().unwrap_or(u64::MAX);
         Self {
@@ -102,7 +119,7 @@ impl Progress {
 /// Whether an asset of a wallet is indexed.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-enum IndexState {
+pub(super) enum IndexState {
     /// Indexed.
     Indexing,
     /// Skipped until resumed; resumed, it backfills what it missed.
@@ -122,9 +139,11 @@ impl From<WalletIndexState> for IndexState {
     }
 }
 
-/// `POST /v1/wallets` body: generate a wallet in one network, or watch an
-/// address in it without its key.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+/// `POST /v1/wallets` body: a wallet in one network, created without
+/// indexes. With `secret`, its key is imported and kept; else with
+/// `address`, the address is watched without a key; with neither, a new key
+/// is generated and kept.
+#[derive(Deserialize, utoipa::ToSchema)]
 #[schema(as = CreateWallet)]
 #[serde(deny_unknown_fields)]
 struct CreateRequest {
@@ -132,63 +151,39 @@ struct CreateRequest {
     chain: String,
     /// Network name, as `GET /v1/assets` lists it.
     network: String,
-    /// Address text in any form the chain accepts. Present: watch this
-    /// address without its key. Absent: generate a new wallet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// A raw private key in the chain's import format: Ethereum hex, Solana
+    /// Base58 secret or keypair, Bitcoin WIF.
+    #[serde(default)]
+    #[schema(nullable = false)]
+    secret: Option<String>,
+    /// Address text in any form the chain accepts; with `secret`, the
+    /// address the key must derive.
+    #[serde(default)]
     #[schema(nullable = false)]
     address: Option<String>,
-    /// The asset ids to index it in; absent means `["native"]`. Empty
-    /// generates a wallet without watching it yet (watch it later by posting
-    /// its address); an address needs at least one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    assets: Option<Vec<String>>,
-    /// Where indexing begins: `"fresh"` for the chain's tip, or the native
-    /// position to index from, no older than the network's
-    /// `max_history_days`. Absent means `"fresh"`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    start: Option<Start>,
-}
-
-/// A wallet's birthday on the wire: `"fresh"` or a native position.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(untagged)]
-enum Start {
-    /// Index from the chain's tip.
-    Fresh(Fresh),
-    /// Index from this native position.
-    At(u64),
-}
-
-/// The `"fresh"` literal of a `Start`.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(rename_all = "lowercase")]
-enum Fresh {
-    /// The address has never been used.
-    Fresh,
 }
 
 #[utoipa::path(
     post,
     path = "/v1/wallets",
     operation_id = "create_wallet",
-    summary = "Generate a wallet, or watch an address, in one configured network",
-    description = "Without `address`, generates a wallet and stores it with its key; keys never \
-        leave the server and HTTP accepts none. Retrying creates another wallet. With \
-        `address`, watches that address without its key. Either way the address is then \
-        indexed in every asset of `assets` from `start`; watching an asset already watched \
-        keeps its first start. A generated wallet with empty `assets` is kept unwatched. A \
-        `start` older than the network's `max_history_days` is refused.",
+    summary = "Import a wallet's key, watch an address, or generate a wallet, in one configured network",
+    description = "With `secret`, imports a raw private key and keeps it; with `address` too, \
+        the key must derive that address. With `address` alone, watches it without its key. \
+        With neither, generates a key and keeps it; retrying makes another wallet. The wallet \
+        is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept \
+        answers its wallet as is (200), except that importing the key of a watch-only wallet \
+        keeps the key; its tags and indexes stay.",
     request_body = CreateRequest,
     security(("bearerAuth" = [])),
     responses(
-        (status = 201, description = "Wallet generated or address watched", body = Wallet),
-        (status = 400, description = "Malformed body or address text, or a start older than \
-            the network's history limit", body = ErrorBody),
+        (status = 201, description = "Wallet created", body = Wallet),
+        (status = 200, description = "The address was already kept: its wallet", body = Wallet),
+        (status = 400, description = "Malformed body, address or key, or a key that derives \
+            another address", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Network or asset is not configured", body = ErrorBody),
-        (status = 503, description = "Generation, the node or the store is unavailable",
+        (status = 404, description = "Network is not configured", body = ErrorBody),
+        (status = 503, description = "Generation or the store is unavailable",
             body = ErrorBody)
     ),
     tag = "wallets"
@@ -199,87 +194,43 @@ async fn create(
 ) -> Result<(StatusCode, Json<Wallet>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let network = base::Network::new(Chain::new(request.chain), request.network);
-    let ids = request.assets.unwrap_or_else(|| vec!["native".to_owned()]);
-    // A generated wallet may wait unwatched; a watched address needs an asset.
-    if ids.is_empty() && request.address.is_some() {
-        return Err(Error::invalid_request("watching an address needs an asset"));
-    }
-    let assets = ids
-        .iter()
-        .map(|id| asset_info(&state.payments, &network, id).map(|info| info.asset))
-        .collect::<Result<Vec<_>, _>>()?;
-    if let Some(Start::At(position)) = request.start {
-        within_history(&state, &network, position).await?;
-    }
-    // The key is kept before anything is watched: an interrupted creation
-    // leaves an unwatched wallet, never a watched address without its key.
-    let (address, keyed) = match &request.address {
-        Some(text) => (state.payments.parse(&network, text)?, false),
-        None => {
-            let (wallet, _) = state.payments.generate(&network).await?;
-            (wallet.address().clone(), true)
+    let factory = &state.payments.service(&network)?.wallets.factory;
+    let given = request
+        .address
+        .map(|text| factory.parse_address(&text))
+        .transpose()?;
+    let row = if let Some(secret) = request.secret {
+        let wallet = factory.from_pk_text(&secret).await?;
+        if let Some(given) = given.filter(|given| given != wallet.address()) {
+            return Err(Error::invalid_request(format!(
+                "the key derives {}, not {}",
+                wallet.address().value,
+                given.value
+            )));
         }
-    };
-    let birthday = match request.start {
-        None | Some(Start::Fresh(Fresh::Fresh)) => Birthday::Fresh,
-        Some(Start::At(position)) => Birthday::At(position),
-    };
-    // `Indexer::watch` borrows the address as `&dyn Addressed`, which is not
-    // `Sync`, so its future is not `Send`: it runs on a blocking thread.
-    let (payments, watched, runtime) = (
-        state.payments.clone(),
-        address.clone(),
-        tokio::runtime::Handle::current(),
-    );
-    tokio::task::spawn_blocking(move || {
-        runtime.block_on(async {
-            for asset in &assets {
-                payments.watch(&watched, asset, birthday).await?;
-            }
-            anyhow::Ok(())
-        })
-    })
-    .await
-    .map_err(anyhow::Error::from)??;
-    let mut wallet = wallet(&state, address).await?;
-    wallet.keyed |= keyed;
-    Ok((StatusCode::CREATED, Json(wallet)))
-}
-
-/// Refuses `position` as a start in `network` when it is older than the
-/// network's history limit; accepts it when the network has no limit or
-/// cannot find blocks by time.
-///
-/// # Errors
-///
-/// Invalid request for a start too old; the node's failure.
-async fn within_history(
-    state: &AppState,
-    network: &base::Network,
-    position: u64,
-) -> Result<(), Error> {
-    let service = state.payments.service(network)?;
-    let (Some(dated), Some(limit)) = (&service.dated, service.max_history) else {
-        return Ok(());
-    };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let Some(earliest) = dated
-        .position_at(now.saturating_sub(limit).as_secs())
-        .await?
-    else {
-        return Ok(());
-    };
-    if position < earliest.position {
-        return Err(Error::invalid_request(format!(
-            "start {position} is older than this network's history limit of {} days: start at \
-             {} or later",
-            limit.as_secs() / 86_400,
-            earliest.position
-        )));
+        models::Wallet::try_from(&*wallet)
+    } else if let Some(address) = given {
+        models::Wallet::from_address(&address)
+    } else {
+        let wallet = factory.from_pk(factory.generate().await?).await?;
+        models::Wallet::try_from(&*wallet)
     }
-    Ok(())
+    .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
+    let address = base::Address::from(&row);
+    let created = state
+        .db
+        .write(move |connection| {
+            let kept = models::wallet::db::find_by_id(connection, &row.id)?.is_some();
+            models::wallet::db::insert(connection, &row)?;
+            Ok(!kept)
+        })
+        .await?;
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(wallet(&state, &address).await?)))
 }
 
 /// One listed wallet: its public metadata, tags and balances.
@@ -319,40 +270,25 @@ struct ListResponse {
     tag = "wallets"
 )]
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, Error> {
-    let networks = state.payments.networks().cloned().collect();
-    let entries = crate::usecase::wallets::list(&state.db, networks).await?;
+    let entries = crate::usecase::wallets::list(&state.db).await?;
     let stats = state.payments.stats();
     let mut wallets = Vec::with_capacity(entries.len());
     for entry in entries {
+        let indexed = entry.wallet;
         // An asset the server no longer configures has no display units.
-        let balances = entry
+        let balances = indexed
             .indexes
             .iter()
+            .zip(entry.balances)
             .filter_map(|(index, balance)| {
                 let info = asset_info(&state.payments, &index.asset.network, &index.asset.id);
-                let total = balance.clone()?;
-                Some(amount(&info.ok()?, total).map(|text| (index.asset.id.clone(), text)))
+                Some(amount(&info.ok()?, balance?).map(|text| (index.asset.id.clone(), text)))
             })
             .collect::<Result<_, _>>()?;
-        let progress = entry.progress.into_iter().map(|index| {
-            let stats = stats.get(&index.address.network);
-            Progress::new(index, stats)
-        });
-        let address = &entry.address;
+        let stats = stats.get(&base::Address::from(&indexed.wallet).network);
         wallets.push(Listed {
-            wallet: Wallet {
-                id: id(address),
-                network: address.network.clone().into(),
-                address: address.value.clone(),
-                keyed: entry.keyed,
-                assets: entry
-                    .indexes
-                    .into_iter()
-                    .map(|(index, _)| index.asset.id)
-                    .collect(),
-                indexes: progress.collect(),
-            },
-            tags: entry.tags,
+            tags: indexed.wallet.tags.0.iter().cloned().collect(),
+            wallet: Wallet::new(indexed, stats),
             balances,
         });
     }
@@ -362,9 +298,9 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, 
 /// The wallet a route reads.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
 #[into_params(parameter_in = Path)]
-struct WalletPath {
+pub(super) struct WalletPath {
     /// `<chain>:<network>:<address>`, as a create call returned it.
-    id: String,
+    pub(super) id: String,
 }
 
 #[utoipa::path(
@@ -390,120 +326,27 @@ async fn read(
     Path(path): Path<WalletPath>,
 ) -> Result<Json<Wallet>, Error> {
     let address = wallet_address(&state.payments, &path.id)?;
-    Ok(Json(wallet(&state, address).await?))
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/wallets/{id}/pause",
-    operation_id = "pause_wallet",
-    summary = "Pause indexing every asset of a wallet",
-    description = "Its indexes are skipped: no facts are kept for blocks while paused. Resume \
-        backfills what they missed.",
-    params(WalletPath),
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "The wallet, paused", body = Wallet),
-        (status = 400, description = "Malformed wallet ID", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Wallet is unknown", body = ErrorBody),
-        (status = 503, description = "The wallet store is unavailable", body = ErrorBody)
-    ),
-    tag = "wallets"
-)]
-async fn pause(
-    State(state): State<Arc<AppState>>,
-    Path(path): Path<WalletPath>,
-) -> Result<Json<Wallet>, Error> {
-    set_state(&state, &path.id, WalletIndexState::Paused).await
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/wallets/{id}/resume",
-    operation_id = "resume_wallet",
-    summary = "Resume indexing every asset of a wallet",
-    description = "From `paused` or `no_data` (clearing its reason): each index continues from \
-        its last indexed block, backfilling what it missed.",
-    params(WalletPath),
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "The wallet, indexing", body = Wallet),
-        (status = 400, description = "Malformed wallet ID", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Wallet is unknown", body = ErrorBody),
-        (status = 503, description = "The wallet store is unavailable", body = ErrorBody)
-    ),
-    tag = "wallets"
-)]
-async fn resume(
-    State(state): State<Arc<AppState>>,
-    Path(path): Path<WalletPath>,
-) -> Result<Json<Wallet>, Error> {
-    set_state(&state, &path.id, WalletIndexState::Indexing).await
-}
-
-/// Sets every index of wallet `id` to `index_state`, clearing its reason.
-async fn set_state(
-    state: &AppState,
-    id: &str,
-    index_state: WalletIndexState,
-) -> Result<Json<Wallet>, Error> {
-    let address = wallet_address(&state.payments, id)?;
-    let target = address.clone();
-    state
-        .db
-        .write(move |connection| {
-            wallet_index::db::set_state(connection, &target, None, index_state, None)?;
-            Ok(())
-        })
-        .await?;
-    Ok(Json(wallet(state, address).await?))
+    Ok(Json(wallet(&state, &address).await?))
 }
 
 /// The wallet of `address`, with how far each of its assets is indexed.
 ///
 /// # Errors
 ///
-/// Not found when it is neither keyed nor watched; the store's failure.
-async fn wallet(state: &AppState, address: base::Address) -> Result<Wallet, Error> {
-    let keyed = state
+/// Not found when it is not kept; the store's failure.
+async fn wallet(state: &AppState, address: &base::Address) -> Result<Wallet, Error> {
+    let id = models::Wallet::id(address)
+        .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
+    let indexed = state
         .db
-        .read(|connection| Ok(crate::models::wallet::db::find_all(connection)?.addresses()))
+        .read(move |connection| models::wallet::db::find_with_indexes(connection, Some(&id)))
         .await?
-        .contains(&address);
-    let network = address.network.clone();
-    let indexes = state
-        .db
-        .read(move |connection| wallet_index::db::find_all(connection, &network))
-        .await?;
+        .pop()
+        .ok_or_else(|| Error::not_found("wallet is unknown"))?;
     let stats = state
         .payments
         .service(&address.network)
         .ok()
         .map(|service| service.indexer.stats());
-    let indexes: Vec<_> = indexes
-        .into_iter()
-        .filter(|index| index.address == address)
-        .map(|index| Progress::new(index, stats.as_ref()))
-        .collect();
-    if !keyed && indexes.is_empty() {
-        return Err(Error::not_found("wallet is unknown"));
-    }
-    Ok(Wallet {
-        id: id(&address),
-        network: address.network.clone().into(),
-        address: address.value,
-        keyed,
-        assets: indexes.iter().map(|index| index.asset.clone()).collect(),
-        indexes,
-    })
-}
-
-/// The wallet ID of `address`.
-fn id(address: &base::Address) -> String {
-    format!(
-        "{}:{}:{}",
-        address.network.chain, address.network.name, address.value
-    )
+    Ok(Wallet::new(indexed, stats.as_ref()))
 }

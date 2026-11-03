@@ -106,40 +106,45 @@ CREATE INDEX leg_address ON leg (address, asset);
 CREATE INDEX leg_transaction ON leg ("transaction");
 CREATE INDEX leg_coin ON leg (coin_txid, coin_index) WHERE coin_txid IS NOT NULL;
 
--- A keyed wallet: its address and its key's curve and bytes.
+-- Every address the server knows on a network, keyed or watch-only: its
+-- key's curve and bytes (both NULL: watch-only, no key kept), and its tags
+-- (pipes' labels), a JSON list kept sorted, each once, each [a-z0-9-]{1,64}.
 -- id: "{chain}.{network}.{address}".
 CREATE TABLE wallet (
     id      TEXT NOT NULL PRIMARY KEY,
     chain   TEXT NOT NULL,
     network TEXT NOT NULL,
     address TEXT NOT NULL,
-    curve   TEXT NOT NULL,
-    secret  BLOB NOT NULL,
+    curve   TEXT,            -- NULL: watch-only (no key kept)
+    secret  BLOB,            -- NULL: watch-only
+    tags    TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
     CHECK (id = chain || '.' || network || '.' || address),
-    CHECK (curve IN ('secp256k1', 'ed25519'))
+    CHECK ((curve IS NULL) = (secret IS NULL)),
+    CHECK (curve IS NULL OR curve IN ('secp256k1', 'ed25519'))
 );
+CREATE INDEX wallet_network ON wallet (chain, network);
+-- Tag reads (the tags in use, the tag selectors) scan this, not the rows.
+CREATE INDEX wallet_tags ON wallet (tags);
 
--- One asset of one address being indexed (keyed or watch-only, so no wallet
--- FK): facts are kept for every live block from birthday through
+-- One asset of one wallet being indexed; its chain, network and address are
+-- the wallet's. Facts are kept for every live block from birthday through
 -- indexed_at, with no gaps. NULL indexed_at: nothing scanned yet.
 -- requested_from: the start asked for; birthday moves past it, before the
 -- first scan, to the first block the node serves.
 -- state: 0 indexing, 1 paused, 2 no_data (the node no longer serves a block
 -- it needs; reason says which). Only indexing indexes are scanned.
--- id: "{chain}.{network}.{address}.{asset}".
+-- id: "{wallet_id}.{asset}".
 CREATE TABLE wallet_index (
     id             TEXT    NOT NULL PRIMARY KEY,
-    chain          TEXT    NOT NULL,
-    network        TEXT    NOT NULL,
-    address        TEXT    NOT NULL,
+    wallet_id      TEXT    NOT NULL REFERENCES wallet (id) ON DELETE CASCADE,
     asset          TEXT    NOT NULL,
     requested_from INTEGER NOT NULL,
     birthday       INTEGER NOT NULL,
     indexed_at     TEXT    REFERENCES block (id),
     state          INTEGER NOT NULL,
     reason         TEXT,
-    CHECK (id = chain || '.' || network || '.' || address || '.' || asset),
+    CHECK (id = wallet_id || '.' || asset),
     CHECK (state IN (0, 1, 2))
 );
-CREATE INDEX wallet_index_network ON wallet_index (chain, network);
+CREATE INDEX wallet_index_wallet ON wallet_index (wallet_id);
 CREATE INDEX wallet_index_progress ON wallet_index (indexed_at);

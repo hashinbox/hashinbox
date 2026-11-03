@@ -170,6 +170,11 @@ impl WalletFactory for Factory {
         })
     }
 
+    /// The key text is the address text.
+    fn from_pk_text(&self, text: &str) -> Future<'_, anyhow::Result<Arc<dyn Wallet>>> {
+        self.from_pk(SecretBytes::new(text.as_bytes()))
+    }
+
     fn parse_address(&self, text: &str) -> anyhow::Result<Address> {
         Ok(Address::new(network(), text))
     }

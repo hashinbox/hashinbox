@@ -320,7 +320,7 @@ async fn send(
     let info = asset_info(&state.payments, &address.network, &request.asset)?;
     if !state
         .db
-        .read(|connection| Ok(crate::models::wallet::db::find_all(connection)?.addresses()))
+        .read(|connection| Ok(crate::models::wallet::db::find_keyed(connection)?.addresses()))
         .await?
         .contains(&address)
     {

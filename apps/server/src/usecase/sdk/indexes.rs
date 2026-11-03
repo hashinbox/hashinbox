@@ -1,17 +1,18 @@
-//! `WalletIndexStore` on the `wallet_index` model.
+//! `WalletIndexStore` on the `wallet_index` model; an index's wallet is kept
+//! with it (watch-only when its key is not kept).
 
 use base::{Future, Network, WalletIndex, WalletIndexState, WalletIndexStore};
 
 use super::Stores;
-use crate::models::{int, uint, wallet_index};
+use crate::models::{Wallet, int, uint, wallet, wallet_index};
 
 impl WalletIndexStore for Stores {
     fn insert<'a>(&'a self, index: &'a WalletIndex) -> Future<'a, anyhow::Result<()>> {
         let index = index.clone();
-        Box::pin(
-            self.db
-                .write(move |connection| wallet_index::db::insert(connection, &index)),
-        )
+        Box::pin(self.db.write(move |connection| {
+            wallet::db::insert(connection, &Wallet::from_address(&index.address)?)?;
+            wallet_index::db::insert(connection, &index)
+        }))
     }
 
     fn find_next<'a>(

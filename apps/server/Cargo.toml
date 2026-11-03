@@ -26,6 +26,8 @@ crypto = { path = "../../packages/crypto" }
 chain-bitcoin = { path = "../../sdk/chains/bitcoin" }
 chain-ethereum = { path = "../../sdk/chains/ethereum" }
 chain-solana = { path = "../../sdk/chains/solana" }
+# The stream of `GET .../tip/search` (axum's SSE takes a `Stream`).
+futures-util = { version = "0.3", default-features = false }
 hex.workspace = true
 # Parses the RFC 3339 time `GET .../tip?at=` finds a block by.
 jiff = { version = "=0.2.35", default-features = false, features = ["std"] }

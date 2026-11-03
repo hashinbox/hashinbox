@@ -1,5 +1,5 @@
 // What a wallet is watched in, from when, and how far it is indexed.
-import type { Wallet } from '@/api/client';
+import { call, client, type Wallet } from '@/api/client';
 
 /** What to watch: the assets, and where indexing begins (its birthday). */
 export interface Watching {
@@ -12,15 +12,20 @@ export interface Watching {
 
 export const WATCH_NOTHING: Watching = { assets: [], start: 'fresh', from: '' };
 
-/** The request fields `watching` makes: assets and start. */
-export function watchBody(watching: Watching): { assets: string[]; start?: 'fresh' | number } {
+/** Indexes wallet `id` in each asset of `watching` from its start; the wallet after. */
+export async function watch(id: string, watching: Watching): Promise<Wallet> {
   const from = Number(watching.from);
-  return {
-    assets: watching.assets,
-    ...(watching.start === 'at' && Number.isInteger(from) && from >= 0
-      ? { start: from }
-      : { start: 'fresh' as const }),
-  };
+  // No start: from the chain's tip.
+  const at = watching.start === 'at' && Number.isInteger(from) && from >= 0;
+  const params = { path: { id } };
+  for (const asset of watching.assets)
+    await call(
+      client.POST('/v1/wallets/{id}/indexes', {
+        params,
+        body: { asset, ...(at && { start: from }) },
+      }),
+    );
+  return call(client.GET('/v1/wallets/{id}', { params }));
 }
 
 /** How far one asset of a wallet is indexed. */

@@ -44,7 +44,8 @@ impl IntoIterator for Balances {
     }
 }
 
-/// The balance statements (over `wallet_index`, `leg`, `block` and `transaction`).
+/// The balance statements (over `wallet_index`, `wallet`, `leg`, `block` and
+/// `transaction`).
 pub(crate) mod db {
     use anyhow::{Context as _, ensure};
     use diesel::{
@@ -55,18 +56,20 @@ pub(crate) mod db {
     use super::{Balance, Balances};
     use crate::models::Leg;
 
-    /// The legs of wallet indexes `?1` (a JSON list of ids) of their network,
+    /// The legs of wallet indexes `?1` (a JSON list of ids) of their wallet's
+    /// address and network,
     /// in live blocks or pending, each marked confirmed when its block is at
     /// or below position `?2`.
     const LEGS: &str = r#"
     SELECT wi.id AS index_id, COALESCE(b.position <= ?2, 0) AS confirmed, l.*
     FROM wallet_index wi
-    JOIN leg l ON l.address = wi.address AND l.asset = wi.asset
+    JOIN wallet w ON w.id = wi.wallet_id
+    JOIN leg l ON l.address = w.address AND l.asset = wi.asset
     LEFT JOIN block b ON b.id = l.block
     LEFT JOIN "transaction" t ON t.id = l."transaction"
     WHERE wi.id IN (SELECT value FROM json_each(?1))
-      AND COALESCE(b.chain, t.chain) = wi.chain
-      AND COALESCE(b.network, t.network) = wi.network
+      AND COALESCE(b.chain, t.chain) = w.chain
+      AND COALESCE(b.network, t.network) = w.network
       AND (l.block IS NULL OR b.archived_at IS NULL)"#;
 
     /// A leg with the wallet index it counts for.

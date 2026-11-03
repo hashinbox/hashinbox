@@ -60,11 +60,6 @@ mod json;
 pub(crate) mod leg;
 mod network;
 pub(crate) mod schema;
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "playground: wired by the pipe evaluator later")
-)]
-pub(crate) mod tag;
 pub(crate) mod task;
 pub(crate) mod transaction;
 #[cfg_attr(
@@ -89,14 +84,6 @@ pub(crate) use indexing::Indexing;
 pub(crate) use json::Json;
 pub(crate) use leg::{Leg, Legs};
 pub(crate) use network::Network;
-#[cfg_attr(
-    not(test),
-    allow(
-        unused_imports,
-        reason = "playground: wired by the pipe evaluator later"
-    )
-)]
-pub(crate) use tag::Tag;
 pub(crate) use task::Task;
 
 #[cfg_attr(

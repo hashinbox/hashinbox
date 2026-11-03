@@ -41,6 +41,25 @@ impl base::WalletFactory for Factory {
         })
     }
 
+    /// 64 hexadecimal digits, `0x` optional.
+    fn from_pk_text(&self, text: &str) -> Future<'_, anyhow::Result<Arc<dyn base::Wallet>>> {
+        let text = text.trim();
+        let digits = text
+            .strip_prefix("0x")
+            .or_else(|| text.strip_prefix("0X"))
+            .unwrap_or(text);
+        let secret = SecretBytes::from_hex(digits)
+            .ok()
+            .filter(|secret| secret.as_bytes().len() == 32)
+            .ok_or_else(|| {
+                WalletError::new(
+                    WalletErrorKind::InvalidSecret,
+                    "an Ethereum key is 64 hexadecimal digits, 0x optional",
+                )
+            });
+        Box::pin(async move { self.from_pk(secret?).await })
+    }
+
     /// Any-case `0x` hex; mixed case must carry a valid EIP-55 checksum.
     /// Returns canonical lowercase text.
     fn parse_address(&self, text: &str) -> anyhow::Result<Address> {

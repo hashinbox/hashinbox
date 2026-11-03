@@ -5,7 +5,7 @@
 
 use crate::{
     db::Db,
-    models::{block, leg, tag, task, transaction, trigger, trigger_run, wallet, wallet_index},
+    models::{block, leg, task, transaction, trigger, trigger_run, wallet, wallet_index},
 };
 
 /// How many hours a series covers, the current one last.
@@ -155,9 +155,9 @@ pub(crate) async fn read(db: &Db, clock: i64) -> anyhow::Result<Stats> {
         }
 
         Ok(Stats {
-            wallets: count(wallet::db::count(connection)?),
-            addresses: wallet_index::db::count_addresses(connection)? as u64,
-            tags: count(tag::db::count(connection)?),
+            wallets: count(wallet::db::count_keyed(connection)?),
+            addresses: count(wallet_index::db::count_addresses(connection)?),
+            tags: count(wallet::db::count_tags(connection)?),
             blocks: count(blocks),
             reorged: count(reorged),
             transactions: count(transactions),

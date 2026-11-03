@@ -55,6 +55,12 @@ impl base::WalletFactory for Factory {
         })
     }
 
+    /// WIF of a compressed key of this network.
+    fn from_pk_text(&self, text: &str) -> Future<'_, anyhow::Result<Arc<dyn base::Wallet>>> {
+        let secret = wif(text, self.native());
+        Box::pin(async move { self.from_pk(secret?).await })
+    }
+
     /// Any-case text of an address of this network; returns canonical text.
     fn parse_address(&self, text: &str) -> anyhow::Result<Address> {
         Ok(self.address(text)?.into())
@@ -112,4 +118,20 @@ impl base::Wallet for Wallet {
     fn private_key(&self) -> (Curve, SecretBytes) {
         (Curve::Secp256k1, self.key.secret())
     }
+}
+
+/// The 32-byte secret of `text`: WIF of a compressed key of `network`.
+fn wif(text: &str, network: Native) -> Result<SecretBytes, WalletError> {
+    let invalid = |message: &str| WalletError::new(WalletErrorKind::InvalidSecret, message);
+    let key =
+        bitcoin::PrivateKey::from_wif(text.trim()).map_err(|_| invalid("a Bitcoin key is WIF"))?;
+    if !key.compressed {
+        return Err(invalid(
+            "an uncompressed WIF key derives no SegWit or Taproot address",
+        ));
+    }
+    if key.network != bitcoin::NetworkKind::from(network.native()) {
+        return Err(invalid("the WIF key is of another network"));
+    }
+    Ok(SecretBytes::new(key.inner.secret_bytes()))
 }

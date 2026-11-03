@@ -893,6 +893,92 @@
         ]
       }
     },
+    "/v1/networks/{chain}/{network}/tip/search": {
+      "get": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "Find a network's last block at or before a time, streaming the search",
+        "description": "`text/event-stream`, read from the node: `event: probe` with `{\"low\":{\"position\",\"timestamp\"},\"high\":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{\"position\",\"timestamp\"}`, or `event: error` with `{\"message\"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends.",
+        "operationId": "search_tip",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "at",
+            "in": "query",
+            "description": "RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: find the last\nblock at or before it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The search's events",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed `at`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/stats": {
       "get": {
         "tags": [
@@ -1389,8 +1475,8 @@
         "tags": [
           "wallets"
         ],
-        "summary": "Generate a wallet, or watch an address, in one configured network",
-        "description": "Without `address`, generates a wallet and stores it with its key; keys never leave the server and HTTP accepts none. Retrying creates another wallet. With `address`, watches that address without its key. Either way the address is then indexed in every asset of `assets` from `start`; watching an asset already watched keeps its first start. A generated wallet with empty `assets` is kept unwatched. A `start` older than the network's `max_history_days` is refused.",
+        "summary": "Import a wallet's key, watch an address, or generate a wallet, in one configured network",
+        "description": "With `secret`, imports a raw private key and keeps it; with `address` too, the key must derive that address. With `address` alone, watches it without its key. With neither, generates a key and keeps it; retrying makes another wallet. The wallet is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept answers its wallet as is (200), except that importing the key of a watch-only wallet keeps the key; its tags and indexes stay.",
         "operationId": "create_wallet",
         "requestBody": {
           "content": {
@@ -1403,8 +1489,18 @@
           "required": true
         },
         "responses": {
+          "200": {
+            "description": "The address was already kept: its wallet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Wallet"
+                }
+              }
+            }
+          },
           "201": {
-            "description": "Wallet generated or address watched",
+            "description": "Wallet created",
             "content": {
               "application/json": {
                 "schema": {
@@ -1414,7 +1510,7 @@
             }
           },
           "400": {
-            "description": "Malformed body or address text, or a start older than the network's history limit",
+            "description": "Malformed body, address or key, or a key that derives another address",
             "content": {
               "application/json": {
                 "schema": {
@@ -1434,7 +1530,7 @@
             }
           },
           "404": {
-            "description": "Network or asset is not configured",
+            "description": "Network is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -1444,7 +1540,7 @@
             }
           },
           "503": {
-            "description": "Generation, the node or the store is unavailable",
+            "description": "Generation or the store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1466,7 +1562,7 @@
         "tags": [
           "triggers"
         ],
-        "summary": "List every tag",
+        "summary": "List the tags in use",
         "operationId": "list_tags",
         "responses": {
           "200": {
@@ -1673,14 +1769,14 @@
         ]
       }
     },
-    "/v1/wallets/{id}/pause": {
+    "/v1/wallets/{id}/indexes": {
       "post": {
         "tags": [
           "wallets"
         ],
-        "summary": "Pause indexing every asset of a wallet",
-        "description": "Its indexes are skipped: no facts are kept for blocks while paused. Resume backfills what they missed.",
-        "operationId": "pause_wallet",
+        "summary": "Index a wallet in an asset",
+        "description": "Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next indexing step picks it). An asset already indexed keeps its first start (200). A `start` older than the network's `max_history_days` is refused; one the node no longer serves moves forward to the first block it serves before indexing begins.",
+        "operationId": "create_wallet_index",
         "parameters": [
           {
             "name": "id",
@@ -1692,19 +1788,39 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWalletIndex"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
-            "description": "The wallet, paused",
+            "description": "The asset was already indexed: its index",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Wallet"
+                  "$ref": "#/components/schemas/WalletIndexProgress"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The index",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletIndexProgress"
                 }
               }
             }
           },
           "400": {
-            "description": "Malformed wallet ID",
+            "description": "Malformed body or wallet ID, or a start older than the network's history limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -1724,7 +1840,7 @@
             }
           },
           "404": {
-            "description": "Wallet is unknown",
+            "description": "Wallet is unknown, or the asset is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -1734,7 +1850,7 @@
             }
           },
           "503": {
-            "description": "The wallet store is unavailable",
+            "description": "The node or the store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1751,19 +1867,28 @@
         ]
       }
     },
-    "/v1/wallets/{id}/resume": {
-      "post": {
+    "/v1/wallets/{id}/indexes/{asset}": {
+      "delete": {
         "tags": [
           "wallets"
         ],
-        "summary": "Resume indexing every asset of a wallet",
-        "description": "From `paused` or `no_data` (clearing its reason): each index continues from its last indexed block, backfilling what it missed.",
-        "operationId": "resume_wallet",
+        "summary": "Stop indexing a wallet in an asset",
+        "description": "Forgets the index and its progress: its balance and history are no longer read. Creating it again starts from its new start.",
+        "operationId": "delete_wallet_index",
         "parameters": [
           {
             "name": "id",
             "in": "path",
-            "description": "`<chain>:<network>:<address>`, as a create call returned it.",
+            "description": "`<chain>:<network>:<address>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "asset",
+            "in": "path",
+            "description": "The asset id.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1771,15 +1896,8 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "The wallet, indexing",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Wallet"
-                }
-              }
-            }
+          "204": {
+            "description": "Deleted"
           },
           "400": {
             "description": "Malformed wallet ID",
@@ -1802,7 +1920,7 @@
             }
           },
           "404": {
-            "description": "Wallet is unknown",
+            "description": "No such index",
             "content": {
               "application/json": {
                 "schema": {
@@ -1812,7 +1930,102 @@
             }
           },
           "503": {
-            "description": "The wallet store is unavailable",
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "wallets"
+        ],
+        "summary": "Pause or resume a wallet's index",
+        "description": "`paused`: skipped, no facts kept for blocks while paused; what is kept stays. `indexing`: from `paused` or `no_data` (clearing its reason), it continues from its last indexed block, backfilling what it missed.",
+        "operationId": "update_wallet_index",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "`<chain>:<network>:<address>`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "asset",
+            "in": "path",
+            "description": "The asset id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateWalletIndex"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The index",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletIndexProgress"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body or wallet ID, or `no_data` asked for",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such index",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1834,8 +2047,8 @@
         "tags": [
           "triggers"
         ],
-        "summary": "Tag an address",
-        "description": "Tags the address; tagging twice keeps one tag. Any address of a configured network can be tagged, keyed or not.",
+        "summary": "Tag a wallet",
+        "description": "Tags the wallet, keyed or watch-only; tagging twice keeps one tag.",
         "operationId": "add_wallet_tag",
         "parameters": [
           {
@@ -1882,7 +2095,7 @@
             }
           },
           "404": {
-            "description": "Network is not configured",
+            "description": "Wallet is unknown, or network not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -1912,7 +2125,8 @@
         "tags": [
           "triggers"
         ],
-        "summary": "Untag an address",
+        "summary": "Untag a wallet",
+        "description": "Removes the tag from the wallet.",
         "operationId": "remove_wallet_tag",
         "parameters": [
           {
@@ -1959,7 +2173,7 @@
             }
           },
           "404": {
-            "description": "No such tag, or network not configured",
+            "description": "No such wallet or tag, or network not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -2589,7 +2803,7 @@
       },
       "CreateWallet": {
         "type": "object",
-        "description": "`POST /v1/wallets` body: generate a wallet in one network, or watch an\naddress in it without its key.",
+        "description": "`POST /v1/wallets` body: a wallet in one network, created without\nindexes. With `secret`, its key is imported and kept; else with\n`address`, the address is watched without a key; with neither, a new key\nis generated and kept.",
         "required": [
           "chain",
           "network"
@@ -2597,14 +2811,7 @@
         "properties": {
           "address": {
             "type": "string",
-            "description": "Address text in any form the chain accepts. Present: watch this\naddress without its key. Absent: generate a new wallet."
-          },
-          "assets": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "The asset ids to index it in; absent means `[\"native\"]`. Empty\ngenerates a wallet without watching it yet (watch it later by posting\nits address); an address needs at least one."
+            "description": "Address text in any form the chain accepts; with `secret`, the\naddress the key must derive."
           },
           "chain": {
             "type": "string",
@@ -2614,9 +2821,29 @@
             "type": "string",
             "description": "Network name, as `GET /v1/assets` lists it."
           },
+          "secret": {
+            "type": "string",
+            "description": "A raw private key in the chain's import format: Ethereum hex, Solana\nBase58 secret or keypair, Bitcoin WIF."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateWalletIndex": {
+        "type": "object",
+        "description": "`POST /v1/wallets/{id}/indexes` body.",
+        "required": [
+          "asset"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "The asset id to index the wallet in."
+          },
           "start": {
-            "$ref": "#/components/schemas/Start",
-            "description": "Where indexing begins: `\"fresh\"` for the chain's tip, or the native\nposition to index from, no older than the network's\n`max_history_days`. Absent means `\"fresh\"`."
+            "type": "integer",
+            "format": "int64",
+            "description": "The native position to index from, no older than the network's\n`max_history_days`. Absent: from the chain's tip, as a generated\nwallet (it has no past) must be.",
+            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -2678,13 +2905,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "Fresh": {
-        "type": "string",
-        "description": "The `\"fresh\"` literal of a `Start`.",
-        "enum": [
-          "fresh"
-        ]
       },
       "IndexState": {
         "type": "string",
@@ -3329,21 +3549,6 @@
           }
         }
       },
-      "Start": {
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/Fresh",
-            "description": "Index from the chain's tip."
-          },
-          {
-            "type": "integer",
-            "format": "int64",
-            "description": "Index from this native position.",
-            "minimum": 0
-          }
-        ],
-        "description": "A wallet's birthday on the wire: `\"fresh\"` or a native position."
-      },
       "Stats": {
         "type": "object",
         "description": "`GET /v1/stats`.",
@@ -3450,24 +3655,6 @@
           }
         }
       },
-      "Tag": {
-        "type": "object",
-        "description": "One tag on one address.",
-        "required": [
-          "wallet_id",
-          "tag"
-        ],
-        "properties": {
-          "tag": {
-            "type": "string",
-            "description": "The tag: 1 to 64 of `[a-z0-9-]`."
-          },
-          "wallet_id": {
-            "type": "string",
-            "description": "`<chain>:<network>:<address>`, as the wallet routes take it."
-          }
-        }
-      },
       "TagList": {
         "type": "object",
         "description": "`GET /v1/wallets/tags`.",
@@ -3478,9 +3665,9 @@
           "tags": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Tag"
+              "type": "string"
             },
-            "description": "Every tag, by network, address, then tag."
+            "description": "Every tag in use on any wallet, sorted, each once. A wallet's own\ntags are on it (`GET /v1/wallets`)."
           }
         }
       },
@@ -3745,6 +3932,20 @@
             "description": "The latest runs, latest first."
           }
         }
+      },
+      "UpdateWalletIndex": {
+        "type": "object",
+        "description": "`PATCH /v1/wallets/{id}/indexes/{asset}` body.",
+        "required": [
+          "index_state"
+        ],
+        "properties": {
+          "index_state": {
+            "$ref": "#/components/schemas/IndexState",
+            "description": "`paused`: skipped, no facts kept for blocks while paused; `indexing`:\nresumed from `paused` or `no_data` (clearing its reason), backfilling\nwhat it missed. `no_data` is the indexer's to set."
+          }
+        },
+        "additionalProperties": false
       },
       "Wallet": {
         "type": "object",

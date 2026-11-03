@@ -12,7 +12,7 @@ use diesel::{Connection as _, SqliteConnection, connection::SimpleConnection as 
 
 use crate::{
     models::{
-        Json, Tag, Trigger, TriggerRun, Wallet, balance, int, tag, trigger,
+        Json, Trigger, TriggerRun, Wallet, balance, int, trigger,
         trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Operator, Target, This},
         trigger_run, wallet,
         wallet::db::IndexedSelector,
@@ -43,6 +43,7 @@ fn network() -> Network {
 /// `bitcoin.other`. Indexes (`bitcoin.regtest.{address}.{asset}`):
 /// a, b fully indexed in native and `tok`; c `tok` full, native behind; d
 /// never indexed; e through an archived block; `bitcoin.other.a.native` full.
+/// Every indexed address is a watch-only wallet.
 /// a native: received 1000 (block 1), spent 300 + fee 10 (block 2), reward 5
 /// above the tip (block 3); b native: reward 50 (block 0); a tok: 2^200.
 const SEED: &str = "
@@ -53,16 +54,23 @@ INSERT INTO block (id, chain, network, position, height, hash, archived_at) VALU
  ('bitcoin.regtest.03','bitcoin','regtest',3,3,x'03',NULL),
  ('bitcoin.regtest.f5','bitcoin','regtest',5,5,x'f5',1),
  ('bitcoin.other.03','bitcoin','other',3,3,x'03',NULL);
-INSERT INTO wallet_index (id, chain, network, address, asset, requested_from, birthday, indexed_at, state) VALUES
- ('bitcoin.regtest.a.native','bitcoin','regtest','a','native',0,0,'bitcoin.regtest.03',0),
- ('bitcoin.regtest.b.native','bitcoin','regtest','b','native',0,0,'bitcoin.regtest.02',0),
- ('bitcoin.regtest.c.native','bitcoin','regtest','c','native',0,0,'bitcoin.regtest.01',0),
- ('bitcoin.regtest.d.native','bitcoin','regtest','d','native',0,0,NULL,0),
- ('bitcoin.regtest.e.native','bitcoin','regtest','e','native',0,0,'bitcoin.regtest.f5',0),
- ('bitcoin.regtest.a.tok','bitcoin','regtest','a','tok',0,0,'bitcoin.regtest.03',0),
- ('bitcoin.regtest.b.tok','bitcoin','regtest','b','tok',0,0,'bitcoin.regtest.03',0),
- ('bitcoin.regtest.c.tok','bitcoin','regtest','c','tok',0,0,'bitcoin.regtest.03',0),
- ('bitcoin.other.a.native','bitcoin','other','a','native',0,0,'bitcoin.other.03',0);
+INSERT INTO wallet (id, chain, network, address) VALUES
+ ('bitcoin.regtest.a','bitcoin','regtest','a'),
+ ('bitcoin.regtest.b','bitcoin','regtest','b'),
+ ('bitcoin.regtest.c','bitcoin','regtest','c'),
+ ('bitcoin.regtest.d','bitcoin','regtest','d'),
+ ('bitcoin.regtest.e','bitcoin','regtest','e'),
+ ('bitcoin.other.a','bitcoin','other','a');
+INSERT INTO wallet_index (id, wallet_id, asset, requested_from, birthday, indexed_at, state) VALUES
+ ('bitcoin.regtest.a.native','bitcoin.regtest.a','native',0,0,'bitcoin.regtest.03',0),
+ ('bitcoin.regtest.b.native','bitcoin.regtest.b','native',0,0,'bitcoin.regtest.02',0),
+ ('bitcoin.regtest.c.native','bitcoin.regtest.c','native',0,0,'bitcoin.regtest.01',0),
+ ('bitcoin.regtest.d.native','bitcoin.regtest.d','native',0,0,NULL,0),
+ ('bitcoin.regtest.e.native','bitcoin.regtest.e','native',0,0,'bitcoin.regtest.f5',0),
+ ('bitcoin.regtest.a.tok','bitcoin.regtest.a','tok',0,0,'bitcoin.regtest.03',0),
+ ('bitcoin.regtest.b.tok','bitcoin.regtest.b','tok',0,0,'bitcoin.regtest.03',0),
+ ('bitcoin.regtest.c.tok','bitcoin.regtest.c','tok',0,0,'bitcoin.regtest.03',0),
+ ('bitcoin.other.a.native','bitcoin.other.a','native',0,0,'bitcoin.other.03',0);
 INSERT INTO \"transaction\" (id, block, chain, network, txid, \"order\", state, bytes) VALUES
  ('bitcoin.regtest.t1','bitcoin.regtest.01','bitcoin','regtest','t1',0,1,x''),
  ('bitcoin.regtest.t2','bitcoin.regtest.02','bitcoin','regtest','t2',0,1,x''),
@@ -96,12 +104,24 @@ fn seeded() -> (tempfile::TempDir, tokio::runtime::Runtime, SqliteConnection) {
     (directory, runtime, connection)
 }
 
+/// Tags the wallet of `address`, kept watch-only first when it is not;
+/// whether its tags changed.
 fn tag_with(
     connection: &mut SqliteConnection,
     address: &Address,
     name: &str,
-) -> anyhow::Result<usize> {
-    Ok(tag::db::insert(connection, &Tag::new(address, name)?)?)
+) -> anyhow::Result<bool> {
+    wallet::db::insert(connection, &Wallet::from_address(address)?)?;
+    wallet::db::set_tag(connection, &Wallet::id(address)?, name, true)?
+        .ok_or_else(|| anyhow::anyhow!("the wallet is kept"))
+}
+
+/// The tags of the wallet of `address`.
+fn tags_of(connection: &mut SqliteConnection, address: &Address) -> Vec<String> {
+    wallet::db::find_by_id(connection, &Wallet::id(address).unwrap())
+        .unwrap()
+        .map(|wallet| wallet.tags.0.into_iter().collect())
+        .unwrap_or_default()
 }
 
 fn start_run(
@@ -146,31 +166,25 @@ fn decimal(text: &str) -> Decimal {
 fn tags_are_kept_once_listed_and_removed() {
     let (_directory, _runtime, mut connection) = seeded();
     let a = address("a");
-    tag_with(&mut connection, &a, "hot").unwrap();
-    tag_with(&mut connection, &a, "hot").unwrap();
+    assert!(tag_with(&mut connection, &a, "hot").unwrap());
+    assert!(!tag_with(&mut connection, &a, "hot").unwrap());
     tag_with(&mut connection, &a, "deposit-1").unwrap();
+    assert_eq!(tags_of(&mut connection, &a), ["deposit-1", "hot"]);
+    let id = Wallet::id(&a).unwrap();
     assert_eq!(
-        tag::db::find_by_address(&mut connection, &a)
-            .unwrap()
-            .names(),
-        ["deposit-1", "hot"]
+        wallet::db::set_tag(&mut connection, &id, "hot", false).unwrap(),
+        Some(true)
     );
+    assert_eq!(tags_of(&mut connection, &a), ["deposit-1"]);
     assert_eq!(
-        tag::db::delete(&mut connection, &Tag::id(&a, "hot").unwrap()).unwrap(),
-        1
-    );
-    assert_eq!(
-        tag::db::find_by_address(&mut connection, &a)
-            .unwrap()
-            .names(),
-        ["deposit-1"]
+        wallet::db::set_tag(&mut connection, "bitcoin.regtest.nobody", "hot", true).unwrap(),
+        None
     );
     for bad in ["", "Hot", "a.b", "a_b", &"x".repeat(65)] {
         assert!(tag_with(&mut connection, &a, bad).is_err(), "{bad:?}");
     }
-    // The schema refuses a bad tag written around the model.
-    let raw = "INSERT INTO tag (id, chain, network, address, tag) \
-               VALUES ('bitcoin.regtest.a.Hot','bitcoin','regtest','a','Hot');";
+    // The schema refuses tags that are not JSON, written around the model.
+    let raw = "UPDATE wallet SET tags = 'hot' WHERE id = 'bitcoin.regtest.a';";
     assert!(connection.batch_execute(raw).is_err());
 }
 
@@ -832,7 +846,7 @@ fn wallets_are_found_through_their_indexes() {
     // z has no index; every other wallet has one.
     assert_eq!(
         find(c, IndexedSelector::default()),
-        ["a", "a", "b", "c", "d"]
+        ["a", "a", "b", "c", "d", "e"]
     );
     let indexed = IndexedSelector {
         network: Some(&regtest),
