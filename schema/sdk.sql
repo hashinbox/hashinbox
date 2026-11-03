@@ -83,6 +83,19 @@ CREATE INDEX transaction_block ON "transaction" (block);
 -- with no transaction; signed). A pending transaction's legs have no block;
 -- only legs of a live block count (balances, unspent coins). Address and
 -- asset are of the transaction's or block's network.
+-- A mined leg is kept for the wallet index it applies to (and goes with
+-- it), and carries its block's position, its `seq` and `total`: the
+-- index's balance right after it, the previous live mined leg's total plus
+-- its signed amount (design 072). `seq` is 1 + the highest the index has
+-- ever kept (archived legs included, so never reused, and unique: a second
+-- writer of the same step is refused); within a block it follows
+-- transaction order, then leg index, rewards after the transactions. An
+-- index's legs order by (position, seq); its balance at a position is the
+-- total of its last live leg at or below it (none: 0). Written in that
+-- order as blocks are kept, in one write transaction; a block kept again
+-- (revived, or re-applied to an index) has its legs written again from the
+-- live chain below it. A pending leg has none of these: it is read by
+-- address until mined.
 -- id: "{transaction}.{leg_index}", or "{block}.reward.{leg_index}".
 CREATE TABLE leg (
     id            TEXT    NOT NULL PRIMARY KEY,
@@ -95,14 +108,24 @@ CREATE TABLE leg (
     amount        TEXT    NOT NULL, -- Exact atomic decimal.
     coin_txid     TEXT,             -- The UTXO created (received) or consumed (spent).
     coin_index    INTEGER,
+    wallet_index_id TEXT NOT NULL REFERENCES wallet_index (id) ON DELETE CASCADE,
+    position      INTEGER,          -- The block's; NULL while pending.
+    seq           INTEGER,          -- Per index, never reused; NULL while pending.
+    total         TEXT,             -- Exact decimal, signed; NULL while pending.
     CHECK (block IS NOT NULL OR "transaction" IS NOT NULL),
     CHECK (kind BETWEEN 0 AND 5),
     CHECK (("transaction" IS NULL) = (kind = 5)),
     CHECK (id = COALESCE("transaction", block || '.reward') || '.' || leg_index),
     CHECK ((coin_txid IS NULL) = (coin_index IS NULL)),
-    CHECK (coin_txid IS NULL OR kind IN (0, 1))
+    CHECK (coin_txid IS NULL OR kind IN (0, 1)),
+    CHECK ((block IS NULL) = (total IS NULL)),
+    CHECK ((block IS NULL) = (position IS NULL)
+        AND (block IS NULL) = (seq IS NULL))
 );
 CREATE INDEX leg_address ON leg (address, asset);
+-- An index's last live leg at or below a position: one seek.
+CREATE INDEX leg_wallet_index ON leg (wallet_index_id, position, seq);
+CREATE UNIQUE INDEX leg_seq ON leg (wallet_index_id, seq);
 CREATE INDEX leg_transaction ON leg ("transaction");
 CREATE INDEX leg_coin ON leg (coin_txid, coin_index) WHERE coin_txid IS NOT NULL;
 
@@ -148,3 +171,4 @@ CREATE TABLE wallet_index (
 );
 CREATE INDEX wallet_index_wallet ON wallet_index (wallet_id);
 CREATE INDEX wallet_index_progress ON wallet_index (indexed_at);
+

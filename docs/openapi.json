@@ -1431,8 +1431,32 @@
           "wallets"
         ],
         "summary": "List the wallets",
-        "description": "Every keyed wallet and watched address, in wallet ID order, with its tags and its balance in each indexed asset.",
+        "description": "Keyed wallets and watched addresses, a page in wallet ID order, each with its tags and its indexes: their balances (exact atomic units), progress and legs.",
         "operationId": "list_wallets",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page (the last wallet id); absent for\nthe first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 1000.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "maximum": 1000,
+              "minimum": 1
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Wallets in ID order",
@@ -1440,6 +1464,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/WalletList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1615,7 +1649,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "`<chain>:<network>:<address>`, as a create call returned it.",
+            "description": "`{chain}.{network}.{address}`, as a create call returned it.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1681,94 +1715,6 @@
         ]
       }
     },
-    "/v1/wallets/{id}/balance": {
-      "get": {
-        "tags": [
-          "wallets"
-        ],
-        "summary": "Read a wallet's balance in one asset",
-        "description": "The total of every indexed movement of the address in `asset` over every kept block (unconfirmed ones included), in display units, with how far the address is indexed and the chain's tip. A watch-only address reads the same way.",
-        "operationId": "read_wallet_balance",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "`<chain>:<network>:<address>`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "asset",
-            "in": "query",
-            "description": "An asset id of the wallet's network (`GET /v1/assets`); default\n`native`.",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "native"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The wallet's balance",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Balance"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed wallet ID or query",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Network or asset is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The store is unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
     "/v1/wallets/{id}/indexes": {
       "post": {
         "tags": [
@@ -1781,7 +1727,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "`<chain>:<network>:<address>`, as a create call returned it.",
+            "description": "`{chain}.{network}.{address}`, as a create call returned it.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1804,7 +1750,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/WalletIndexProgress"
+                  "$ref": "#/components/schemas/WalletIndex"
                 }
               }
             }
@@ -1814,7 +1760,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/WalletIndexProgress"
+                  "$ref": "#/components/schemas/WalletIndex"
                 }
               }
             }
@@ -1879,7 +1825,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "`<chain>:<network>:<address>`.",
+            "description": "`{chain}.{network}.{address}`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1957,7 +1903,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "`<chain>:<network>:<address>`.",
+            "description": "`{chain}.{network}.{address}`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -1989,7 +1935,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/WalletIndexProgress"
+                  "$ref": "#/components/schemas/WalletIndex"
                 }
               }
             }
@@ -2054,7 +2000,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "`<chain>:<network>:<address>`.",
+            "description": "`{chain}.{network}.{address}`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2132,7 +2078,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "`<chain>:<network>:<address>`.",
+            "description": "`{chain}.{network}.{address}`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2212,7 +2158,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "`<chain>:<network>:<address>`.",
+            "description": "`{chain}.{network}.{address}`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2319,7 +2265,7 @@
           {
             "name": "id",
             "in": "path",
-            "description": "`<chain>:<network>:<address>`.",
+            "description": "`{chain}.{network}.{address}`.",
             "required": true,
             "schema": {
               "type": "string"
@@ -2472,44 +2418,6 @@
               "$ref": "#/components/schemas/Listing"
             },
             "description": "Assets in network, then id, order."
-          }
-        }
-      },
-      "Balance": {
-        "type": "object",
-        "description": "A wallet's balance in one asset over every block kept so far.\n\nBlocks are kept up to the chain's produced tip, so `amount` includes\nblocks the chain may still take back; a reorg archives them and the\namount follows.",
-        "required": [
-          "asset",
-          "amount",
-          "indexed_through",
-          "tip"
-        ],
-        "properties": {
-          "amount": {
-            "type": "string",
-            "description": "Exact display units, e.g. `12.5`; negative, e.g. `-0.5`, when indexed\ndebits exceed indexed credits (history before the start is unknown)."
-          },
-          "asset": {
-            "$ref": "#/components/schemas/Asset",
-            "description": "The asset."
-          },
-          "indexed_through": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Native position the address is indexed through in this asset; null\nbefore its first block or when it is not watched in it. Always present.",
-            "minimum": 0
-          },
-          "tip": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The chain's produced tip at the indexer's last step; null before the\nfirst. Always present.",
-            "minimum": 0
           }
         }
       },
@@ -2908,7 +2816,7 @@
       },
       "IndexState": {
         "type": "string",
-        "description": "Whether an asset of a wallet is indexed.",
+        "description": "Whether an index is scanned.",
         "enum": [
           "indexing",
           "paused",
@@ -3122,39 +3030,98 @@
           "failed"
         ]
       },
-      "ListedWallet": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/Wallet"
-          },
-          {
-            "type": "object",
-            "required": [
-              "tags",
-              "balances"
-            ],
-            "properties": {
-              "balances": {
-                "type": "object",
-                "description": "By asset id, its balance in each indexed asset this server configures:\nexact display units, as `GET /v1/wallets/{id}/balance` reports `amount`.",
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "propertyNames": {
-                  "type": "string"
-                }
-              },
-              "tags": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "description": "Its tags, by name."
-              }
-            }
-          }
+      "Leg": {
+        "type": "object",
+        "description": "One `leg` row: a transaction's leg, or a block's reward; the API shows\nit as is.",
+        "required": [
+          "id",
+          "leg_index",
+          "kind",
+          "address",
+          "asset",
+          "amount"
         ],
-        "description": "One listed wallet: its public metadata, tags and balances."
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "string",
+            "description": "Exact atomic decimal text."
+          },
+          "asset": {
+            "type": "string"
+          },
+          "block": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its block; null while pending."
+          },
+          "coin_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "coin_txid": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "integer",
+            "format": "int32",
+            "description": "0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward."
+          },
+          "leg_index": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Its block's position; `None` while pending."
+          },
+          "seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Its index's leg sequence: 1 + the highest the index has kept,\nunique per index; `None` while pending."
+          },
+          "total": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its index's balance right after it; `None` while pending."
+          },
+          "transaction": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its transaction; null for a reward."
+          },
+          "wallet_index_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The wallet index it is kept for; `None` while pending."
+          }
+        }
       },
       "Listing": {
         "type": "object",
@@ -3760,7 +3727,7 @@
       },
       "Trigger": {
         "type": "object",
-        "description": "One trigger.",
+        "description": "One `trigger` row; the API shows it as is.",
         "required": [
           "id",
           "chain",
@@ -3949,13 +3916,14 @@
       },
       "Wallet": {
         "type": "object",
-        "description": "One wallet's public metadata; never its key.",
+        "description": "One wallet, as the API shows it: an address, whether its key is kept,\nits tags, and its indexes (each with its balances, progress and legs;\nread by [`db::find_at_tip`] and [`db::list_at_tip`], empty from the other\nreads). The key (`curve`, `secret`) is never serialized, and the API\nreads leave it out. No `Debug`: it may hold the key.",
         "required": [
           "id",
+          "chain",
           "network",
           "address",
           "keyed",
-          "assets",
+          "tags",
           "indexes"
         ],
         "properties": {
@@ -3963,51 +3931,80 @@
             "type": "string",
             "description": "Canonical address text."
           },
-          "assets": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "The asset ids it is indexed in."
+          "chain": {
+            "type": "string"
           },
           "id": {
             "type": "string",
-            "description": "`<chain>:<network>:<address>`: what every wallet route takes."
+            "description": "`{chain}.{network}.{address}`: what every wallet route takes."
           },
           "indexes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/WalletIndexProgress"
+            "type": "object",
+            "description": "Its indexes by asset id (`native` or the token id).",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/WalletIndex"
             },
-            "description": "How far each asset is indexed, in asset id order."
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "keyed": {
             "type": "boolean",
             "description": "Whether this server holds its key and can send from it."
           },
           "network": {
-            "$ref": "#/components/schemas/Network",
-            "description": "The wallet's chain and network."
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Its tags, sorted, each once, each [`is_tag`]."
           }
         }
       },
-      "WalletIndexProgress": {
+      "WalletIndex": {
         "type": "object",
-        "description": "How far one asset of a wallet is indexed. Complete when `index_state`\nis `indexing` and `index_behind_tip` is 0; permanent up to\n`min(indexed_at, finality_at)`; history shortened when `indexed_from` is\nabove `index_requested_from`. Positions are native (height or slot).",
+        "description": "One asset of one wallet being indexed, as every read answers it (the\nAPI shows it as is): its columns, how far it is indexed against its\nnetwork's tip, its balances, and (from the wallet reads) its legs. All\ncomputed in SQL ([`index_columns`]); amounts are exact atomic decimal\ntext, never summed. Positions are native (height or slot).",
         "required": [
+          "id",
+          "wallet_id",
           "asset",
-          "index_state",
-          "index_reason",
-          "index_requested_from",
-          "indexed_from",
-          "indexed_at",
-          "finality_at",
-          "index_behind_tip"
+          "state",
+          "requested_from",
+          "birthday",
+          "balance",
+          "legs"
         ],
         "properties": {
           "asset": {
             "type": "string",
             "description": "The asset id."
+          },
+          "balance": {
+            "type": "string",
+            "description": "Its last live mined leg's total, any block: `0` without one;\nnegative when indexed debits exceed indexed credits (history before\nthe start is unknown)."
+          },
+          "balance_confirmed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The same at or below `finality_at`; null when that is unknown."
+          },
+          "behind_tip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Blocks between `indexed_through` and the network's produced tip;\nnull before the first block or without a tip."
+          },
+          "birthday": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The start indexed from: the one asked for, or the first block the\nnode served when it no longer served that one."
           },
           "finality_at": {
             "type": [
@@ -4015,62 +4012,67 @@
               "null"
             ],
             "format": "int64",
-            "description": "The network's final (confirmed) block at its indexer's last step;\nnull before its first. Always present.",
-            "minimum": 0
+            "description": "The network's final (confirmed) block the read was given; null when\nunknown."
           },
-          "index_behind_tip": {
+          "id": {
+            "type": "string",
+            "description": "`{wallet_id}.{asset}`."
+          },
+          "indexed_through": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Blocks between the last indexed and the network's produced tip at\nits indexer's last step; null before its first. Always present.",
-            "minimum": 0
+            "description": "The last block indexed; null before the first."
           },
-          "index_reason": {
+          "legs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Leg"
+            },
+            "description": "Its legs in (position, seq) order, pending ones (no block, no total)\nlast; read by the wallet reads only, empty otherwise."
+          },
+          "reason": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Why it is `no_data`; null otherwise. Always present."
+            "description": "Why it is `no_data`; null otherwise."
           },
-          "index_requested_from": {
+          "requested_from": {
             "type": "integer",
             "format": "int64",
-            "description": "The start asked for.",
-            "minimum": 0
+            "description": "The start asked for."
           },
-          "index_state": {
+          "state": {
             "$ref": "#/components/schemas/IndexState"
           },
-          "indexed_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The last block indexed; null before the first. Always present.",
-            "minimum": 0
-          },
-          "indexed_from": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The start indexed from: the one asked for, or the first block the\nnode served when it no longer served that one.",
-            "minimum": 0
+          "wallet_id": {
+            "type": "string",
+            "description": "`{chain}.{network}.{address}`."
           }
         }
       },
       "WalletList": {
         "type": "object",
-        "description": "`GET /v1/wallets`: the wallets.",
+        "description": "`GET /v1/wallets`: a page of wallets.",
         "required": [
-          "wallets"
+          "wallets",
+          "next_cursor"
         ],
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
+          },
           "wallets": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ListedWallet"
+              "$ref": "#/components/schemas/Wallet"
             },
             "description": "Wallets in ID order."
           }

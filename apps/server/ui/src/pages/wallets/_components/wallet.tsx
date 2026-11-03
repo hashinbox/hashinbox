@@ -17,7 +17,7 @@ import TableRow from '@mui/material/TableRow';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
-import { call, client, type Balance, type Transaction, type Wallet as Account } from '@/api/client';
+import { call, client, type Transaction, type Wallet as Account } from '@/api/client';
 import { Address } from '@/_components/address';
 import { Currency } from '@/_components/currency';
 import { format } from '@/_components/format';
@@ -25,7 +25,16 @@ import { Money } from '@/_components/money';
 import { EmptyRow } from '@/_components/table';
 import { Transaction as Tx } from '@/_components/transaction';
 import type { Shell } from '@/layout';
-import { assetName, assetOf, decimalsOf, displayOf, effect, unitOf } from '@/money';
+import {
+  assetName,
+  assetOf,
+  assetsOf,
+  decimalsOf,
+  displayOf,
+  effect,
+  networkOf,
+  unitOf,
+} from '@/money';
 import { go, href } from '@/route';
 import { mono } from '@/theme';
 import { Send } from './send';
@@ -34,24 +43,32 @@ import { haltOf, progressOf } from './watching';
 
 const PAGE = 100;
 
-/** What a balance says about the history behind it. */
-function claimOf(balance: Balance): { text: string; color: string } {
-  if (balance.amount.startsWith('-')) {
+/** The wallet's balance in its asset, in atomic units, as `GET /v1/wallets/{id}` reports it. */
+function amountOf(wallet: Account): string {
+  return wallet.indexes[assetOf(wallet)]?.balance ?? '0';
+}
+
+/** What a wallet's balance says about the history behind it. */
+function claimOf(wallet: Account): { text: string; color: string } {
+  if (amountOf(wallet).startsWith('-')) {
     return {
       text: 'More left this address than ever reached it: credits are missing.',
       color: 'error.main',
     };
   }
-  if (balance.indexed_through == null) {
+  const index = wallet.indexes[assetOf(wallet)];
+  const through = index?.indexed_through;
+  if (through == null) {
     return { text: 'Not indexed yet.', color: 'warning.main' };
   }
-  if (balance.tip != null && balance.indexed_through < balance.tip) {
+  const behind = index?.behind_tip ?? 0;
+  if (behind > 0) {
     return {
-      text: `Indexed through ${balance.indexed_through} of ${balance.tip}; later movements are not counted yet.`,
+      text: `Indexed through ${through} of ${through + behind}; later movements are not counted yet.`,
       color: 'warning.main',
     };
   }
-  return { text: `Indexed through ${balance.indexed_through}.`, color: 'text.secondary' };
+  return { text: `Indexed through ${through}.`, color: 'text.secondary' };
 }
 
 const figures = { fontFamily: mono, fontWeight: 300, fontVariantNumeric: 'tabular-nums' } as const;
@@ -75,7 +92,7 @@ export function Wallet({
   const decimals = decimalsOf(wallet, shell.listings);
   const unit = unitOf(wallet, shell.listings);
   const display = displayOf(wallet, shell.listings);
-  const [balance, setBalance] = useState<Balance | null>(null);
+  const [fresh, setFresh] = useState<Account | null>(null);
   const [rows, setRows] = useState<Transaction[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [watchOpen, setWatchOpen] = useState(false);
@@ -83,12 +100,8 @@ export function Wallet({
 
   const refresh = useCallback(() => {
     const id = { path: { id: wallet.id } };
-    call(
-      client.GET('/v1/wallets/{id}/balance', {
-        params: { ...id, query: { asset: assetOf(wallet) } },
-      }),
-    )
-      .then(setBalance)
+    call(client.GET('/v1/wallets/{id}', { params: id }))
+      .then(setFresh)
       .catch(shell.fail);
     call(
       client.GET('/v1/wallets/{id}/transactions', {
@@ -118,14 +131,14 @@ export function Wallet({
       .catch(shell.fail);
   };
 
-  const claim = balance ? claimOf(balance) : null;
+  const claim = fresh ? claimOf(fresh) : null;
   const halt = haltOf(wallet);
 
   /** Pauses every index of the wallet, or resumes them when one is stopped. */
   const toggle = () => {
     const index_state = halt ? 'indexing' : 'paused';
     Promise.all(
-      wallet.indexes.map(({ asset }) =>
+      Object.values(wallet.indexes).map(({ asset }) =>
         call(
           client.PATCH('/v1/wallets/{id}/indexes/{asset}', {
             params: { path: { id: wallet.id, asset } },
@@ -156,25 +169,20 @@ export function Wallet({
           </Box>
           <Box sx={{ minWidth: 0 }}>
             <Box sx={{ fontSize: 15 }}>
-              <Address value={wallet.address} network={wallet.network} trim={false} />
+              <Address value={wallet.address} network={networkOf(wallet)} trim={false} />
             </Box>
             <Typography
               variant="overline"
               component="p"
               sx={{ whiteSpace: 'nowrap', lineHeight: 1.6 }}
             >
-              {wallet.network.chain}/{wallet.network.name}
-              {wallet.assets.length === 0 && ' · not watched'}
+              {wallet.chain}/{wallet.network}
+              {assetsOf(wallet).length === 0 && ' · not watched'}
               {!wallet.keyed && ' · watch only'}
             </Typography>
-            {wallet.indexes.map((index) => {
+            {Object.values(wallet.indexes).map((index) => {
               const progress = progressOf(index);
-              const name = assetName(
-                shell.listings,
-                wallet.network.chain,
-                wallet.network.name,
-                index.asset,
-              );
+              const name = assetName(shell.listings, wallet.chain, wallet.network, index.asset);
               return (
                 <Typography key={index.asset} sx={{ fontSize: 11, color: progress.color }}>
                   {name}: {progress.text}
@@ -197,17 +205,17 @@ export function Wallet({
             title={claim?.text}
             sx={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}
           >
-            {balance ? format(balance.amount, { display }) : '—'}{' '}
+            {fresh ? format(amountOf(fresh), { decimals, display }) : '—'}{' '}
             <Box component="span" sx={{ fontSize: '0.6em', color: 'text.secondary' }}>
               {unit}
             </Box>
           </Typography>
           <ButtonGroup size="small" variant="outlined" aria-label="Wallet actions">
             <Button onClick={() => setWatchOpen(true)}>
-              {wallet.assets.length === 0 ? 'Watch' : 'Watch more'}
+              {assetsOf(wallet).length === 0 ? 'Watch' : 'Watch more'}
             </Button>
             <Button onClick={() => setTagOpen(true)}>Add tag</Button>
-            {wallet.indexes.length > 0 && (
+            {assetsOf(wallet).length > 0 && (
               <Button onClick={toggle}>{halt ? 'Resume' : 'Pause'}</Button>
             )}
           </ButtonGroup>
@@ -266,7 +274,7 @@ export function Wallet({
         onClose={() => setWatchOpen(false)}
         onDone={(watched) => {
           setWatchOpen(false);
-          shell.notify(`Watching ${watched.assets.join(', ')}.`);
+          shell.notify(`Watching ${assetsOf(watched).join(', ')}.`);
           onWatched(watched);
         }}
       />
@@ -368,12 +376,11 @@ function Row({
   unit: string;
 }) {
   const e = effect(tx, decimals);
-  const { chain, name } = wallet.network;
-  const block = ['networks', chain, name, 'blocks', String(tx.block.position)];
+  const block = ['networks', wallet.chain, wallet.network, 'blocks', String(tx.block.position)];
   return (
     <TableRow hover>
       <TableCell sx={{ ...figures, fontSize: 12, whiteSpace: 'nowrap' }}>
-        <Tx value={tx.transaction_id} network={wallet.network} />
+        <Tx value={tx.transaction_id} network={networkOf(wallet)} />
         {tx.outcome === 'reverted' && (
           <Box component="small" sx={{ color: 'error.main', ml: 1 }} title={tx.reason ?? undefined}>
             reverted

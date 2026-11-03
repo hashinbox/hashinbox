@@ -1,6 +1,6 @@
 // Exact amounts. The API sends decimal strings in display units; nothing here
 // ever goes through a float.
-import type { Listing, Transaction, Wallet } from '@/api/client';
+import type { Listing, Network, Transaction, Wallet } from '@/api/client';
 import { shorten } from '@/_components/trim';
 
 /** Display text to atomic units, given the asset's decimals. */
@@ -23,17 +23,27 @@ export function format(value: bigint, decimals: number): string {
   return `${negative ? '−' : ''}${whole}${fraction ? `.${fraction}` : ''}`;
 }
 
+/** The asset ids the wallet is indexed in. */
+export function assetsOf(wallet: Wallet): string[] {
+  return Object.keys(wallet.indexes);
+}
+
 /** The wallet's first indexed asset: the asset this UI reads and sends. */
 export function assetOf(wallet: Wallet): string {
-  return wallet.assets[0] ?? 'native';
+  return assetsOf(wallet)[0] ?? 'native';
+}
+
+/** The wallet's chain and network as one object. */
+export function networkOf(wallet: Wallet): Network {
+  return { chain: wallet.chain, name: wallet.network };
 }
 
 export function listingOf(wallet: Wallet, listings: Listing[]): Listing | undefined {
   return listings.find(
     (l) =>
       l.asset === assetOf(wallet) &&
-      l.network.chain === wallet.network.chain &&
-      l.network.name === wallet.network.name,
+      l.network.chain === wallet.chain &&
+      l.network.name === wallet.network,
   );
 }
 

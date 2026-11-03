@@ -344,7 +344,7 @@ export interface paths {
         };
         /**
          * List the wallets
-         * @description Every keyed wallet and watched address, in wallet ID order, with its tags and its balance in each indexed asset.
+         * @description Keyed wallets and watched addresses, a page in wallet ID order, each with its tags and its indexes: their balances (exact atomic units), progress and legs.
          */
         get: operations["list_wallets"];
         put?: never;
@@ -388,26 +388,6 @@ export interface paths {
          * @description The wallet's network, canonical address, whether it is keyed, the assets it is indexed in and how far each is; never its key.
          */
         get: operations["read_wallet"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/wallets/{id}/balance": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Read a wallet's balance in one asset
-         * @description The total of every indexed movement of the address in `asset` over every kept block (unconfirmed ones included), in display units, with how far the address is indexed and the chain's tip. A watch-only address reads the same way.
-         */
-        get: operations["read_wallet_balance"];
         put?: never;
         post?: never;
         delete?: never;
@@ -537,34 +517,6 @@ export interface components {
         AssetList: {
             /** @description Assets in network, then id, order. */
             assets: components["schemas"]["Listing"][];
-        };
-        /**
-         * @description A wallet's balance in one asset over every block kept so far.
-         *
-         *     Blocks are kept up to the chain's produced tip, so `amount` includes
-         *     blocks the chain may still take back; a reorg archives them and the
-         *     amount follows.
-         */
-        Balance: {
-            /**
-             * @description Exact display units, e.g. `12.5`; negative, e.g. `-0.5`, when indexed
-             *     debits exceed indexed credits (history before the start is unknown).
-             */
-            amount: string;
-            /** @description The asset. */
-            asset: components["schemas"]["Asset"];
-            /**
-             * Format: int64
-             * @description Native position the address is indexed through in this asset; null
-             *     before its first block or when it is not watched in it. Always present.
-             */
-            indexed_through: number | null;
-            /**
-             * Format: int64
-             * @description The chain's produced tip at the indexer's last step; null before the
-             *     first. Always present.
-             */
-            tip: number | null;
         };
         /** @description The block a transaction was mined in. */
         Block: {
@@ -758,7 +710,7 @@ export interface components {
             transaction: string;
         };
         /**
-         * @description Whether an asset of a wallet is indexed.
+         * @description Whether an index is scanned.
          * @enum {string}
          */
         IndexState: "indexing" | "paused" | "no_data";
@@ -857,17 +809,45 @@ export interface components {
          * @enum {string}
          */
         JobState: "pending" | "running" | "succeeded" | "failed";
-        /** @description One listed wallet: its public metadata, tags and balances. */
-        ListedWallet: components["schemas"]["Wallet"] & {
+        /**
+         * @description One `leg` row: a transaction's leg, or a block's reward; the API shows
+         *     it as is.
+         */
+        Leg: {
+            address: string;
+            /** @description Exact atomic decimal text. */
+            amount: string;
+            asset: string;
+            /** @description Its block; null while pending. */
+            block?: string | null;
+            /** Format: int64 */
+            coin_index?: number | null;
+            coin_txid?: string | null;
+            id: string;
             /**
-             * @description By asset id, its balance in each indexed asset this server configures:
-             *     exact display units, as `GET /v1/wallets/{id}/balance` reports `amount`.
+             * Format: int32
+             * @description 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward.
              */
-            balances: {
-                [key: string]: string;
-            };
-            /** @description Its tags, by name. */
-            tags: string[];
+            kind: number;
+            /** Format: int64 */
+            leg_index: number;
+            /**
+             * Format: int64
+             * @description Its block's position; `None` while pending.
+             */
+            position?: number | null;
+            /**
+             * Format: int64
+             * @description Its index's leg sequence: 1 + the highest the index has kept,
+             *     unique per index; `None` while pending.
+             */
+            seq?: number | null;
+            /** @description Its index's balance right after it; `None` while pending. */
+            total?: string | null;
+            /** @description Its transaction; null for a reward. */
+            transaction?: string | null;
+            /** @description The wallet index it is kept for; `None` while pending. */
+            wallet_index_id?: string | null;
         };
         /** @description One configured asset: its id, where its wallets live, and what they hold. */
         Listing: {
@@ -1146,7 +1126,7 @@ export interface components {
             /** @description Recipient address text, as the wallet's chain writes it. */
             destination: string;
         };
-        /** @description One trigger. */
+        /** @description One `trigger` row; the API shows it as is. */
         Trigger: {
             /**
              * @description What it does: `{"name": "send", "input": {"source": target, "asset":
@@ -1234,66 +1214,97 @@ export interface components {
              */
             index_state: components["schemas"]["IndexState"];
         };
-        /** @description One wallet's public metadata; never its key. */
+        /**
+         * @description One wallet, as the API shows it: an address, whether its key is kept,
+         *     its tags, and its indexes (each with its balances, progress and legs;
+         *     read by [`db::find_at_tip`] and [`db::list_at_tip`], empty from the other
+         *     reads). The key (`curve`, `secret`) is never serialized, and the API
+         *     reads leave it out. No `Debug`: it may hold the key.
+         */
         Wallet: {
             /** @description Canonical address text. */
             address: string;
-            /** @description The asset ids it is indexed in. */
-            assets: string[];
-            /** @description `<chain>:<network>:<address>`: what every wallet route takes. */
+            chain: string;
+            /** @description `{chain}.{network}.{address}`: what every wallet route takes. */
             id: string;
-            /** @description How far each asset is indexed, in asset id order. */
-            indexes: components["schemas"]["WalletIndexProgress"][];
+            /** @description Its indexes by asset id (`native` or the token id). */
+            indexes: {
+                [key: string]: components["schemas"]["WalletIndex"];
+            };
             /** @description Whether this server holds its key and can send from it. */
             keyed: boolean;
-            /** @description The wallet's chain and network. */
-            network: components["schemas"]["Network"];
+            network: string;
+            /** @description Its tags, sorted, each once, each [`is_tag`]. */
+            tags: string[];
         };
         /**
-         * @description How far one asset of a wallet is indexed. Complete when `index_state`
-         *     is `indexing` and `index_behind_tip` is 0; permanent up to
-         *     `min(indexed_at, finality_at)`; history shortened when `indexed_from` is
-         *     above `index_requested_from`. Positions are native (height or slot).
+         * @description One asset of one wallet being indexed, as every read answers it (the
+         *     API shows it as is): its columns, how far it is indexed against its
+         *     network's tip, its balances, and (from the wallet reads) its legs. All
+         *     computed in SQL ([`index_columns`]); amounts are exact atomic decimal
+         *     text, never summed. Positions are native (height or slot).
          */
-        WalletIndexProgress: {
+        WalletIndex: {
             /** @description The asset id. */
             asset: string;
             /**
-             * Format: int64
-             * @description The network's final (confirmed) block at its indexer's last step;
-             *     null before its first. Always present.
+             * @description Its last live mined leg's total, any block: `0` without one;
+             *     negative when indexed debits exceed indexed credits (history before
+             *     the start is unknown).
              */
-            finality_at: number | null;
+            balance: string;
+            /** @description The same at or below `finality_at`; null when that is unknown. */
+            balance_confirmed?: string | null;
             /**
              * Format: int64
-             * @description Blocks between the last indexed and the network's produced tip at
-             *     its indexer's last step; null before its first. Always present.
+             * @description Blocks between `indexed_through` and the network's produced tip;
+             *     null before the first block or without a tip.
              */
-            index_behind_tip: number | null;
-            /** @description Why it is `no_data`; null otherwise. Always present. */
-            index_reason: string | null;
-            /**
-             * Format: int64
-             * @description The start asked for.
-             */
-            index_requested_from: number;
-            index_state: components["schemas"]["IndexState"];
-            /**
-             * Format: int64
-             * @description The last block indexed; null before the first. Always present.
-             */
-            indexed_at: number | null;
+            behind_tip?: number | null;
             /**
              * Format: int64
              * @description The start indexed from: the one asked for, or the first block the
              *     node served when it no longer served that one.
              */
-            indexed_from: number;
+            birthday: number;
+            /**
+             * Format: int64
+             * @description The network's final (confirmed) block the read was given; null when
+             *     unknown.
+             */
+            finality_at?: number | null;
+            /** @description `{wallet_id}.{asset}`. */
+            id: string;
+            /**
+             * Format: int64
+             * @description The last block indexed; null before the first.
+             */
+            indexed_through?: number | null;
+            /**
+             * @description Its legs in (position, seq) order, pending ones (no block, no total)
+             *     last; read by the wallet reads only, empty otherwise.
+             */
+            legs: components["schemas"]["Leg"][];
+            /** @description Why it is `no_data`; null otherwise. */
+            reason?: string | null;
+            /**
+             * Format: int64
+             * @description The start asked for.
+             */
+            requested_from: number;
+            state: components["schemas"]["IndexState"];
+            /** @description `{chain}.{network}.{address}`. */
+            wallet_id: string;
         };
-        /** @description `GET /v1/wallets`: the wallets. */
+        /** @description `GET /v1/wallets`: a page of wallets. */
         WalletList: {
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
             /** @description Wallets in ID order. */
-            wallets: components["schemas"]["ListedWallet"][];
+            wallets: components["schemas"]["Wallet"][];
         };
     };
     responses: never;
@@ -2324,7 +2335,15 @@ export interface operations {
     };
     list_wallets: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description `next_cursor` of the previous page (the last wallet id); absent for
+                 *     the first page.
+                 */
+                cursor?: string;
+                /** @description Page size, 1 to 1000. */
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -2338,6 +2357,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WalletList"];
+                };
+            };
+            /** @description Malformed query or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2472,7 +2500,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description `<chain>:<network>:<address>`, as a create call returned it. */
+                /** @description `{chain}.{network}.{address}`, as a create call returned it. */
                 id: string;
             };
             cookie?: never;
@@ -2526,77 +2554,12 @@ export interface operations {
             };
         };
     };
-    read_wallet_balance: {
-        parameters: {
-            query?: {
-                /**
-                 * @description An asset id of the wallet's network (`GET /v1/assets`); default
-                 *     `native`.
-                 */
-                asset?: string;
-            };
-            header?: never;
-            path: {
-                /** @description `<chain>:<network>:<address>`. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The wallet's balance */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Balance"];
-                };
-            };
-            /** @description Malformed wallet ID or query */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Missing or invalid bearer token */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Network or asset is not configured */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description The store is unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
     create_wallet_index: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                /** @description `<chain>:<network>:<address>`, as a create call returned it. */
+                /** @description `{chain}.{network}.{address}`, as a create call returned it. */
                 id: string;
             };
             cookie?: never;
@@ -2613,7 +2576,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WalletIndexProgress"];
+                    "application/json": components["schemas"]["WalletIndex"];
                 };
             };
             /** @description The index */
@@ -2622,7 +2585,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WalletIndexProgress"];
+                    "application/json": components["schemas"]["WalletIndex"];
                 };
             };
             /** @description Malformed body or wallet ID, or a start older than the network's history limit */
@@ -2668,7 +2631,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description `<chain>:<network>:<address>`. */
+                /** @description `{chain}.{network}.{address}`. */
                 id: string;
                 /** @description The asset id. */
                 asset: string;
@@ -2727,7 +2690,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description `<chain>:<network>:<address>`. */
+                /** @description `{chain}.{network}.{address}`. */
                 id: string;
                 /** @description The asset id. */
                 asset: string;
@@ -2746,7 +2709,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WalletIndexProgress"];
+                    "application/json": components["schemas"]["WalletIndex"];
                 };
             };
             /** @description Malformed body or wallet ID, or `no_data` asked for */
@@ -2792,7 +2755,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description `<chain>:<network>:<address>`. */
+                /** @description `{chain}.{network}.{address}`. */
                 id: string;
                 /** @description 1 to 64 of `[a-z0-9-]`. */
                 tag: string;
@@ -2851,7 +2814,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description `<chain>:<network>:<address>`. */
+                /** @description `{chain}.{network}.{address}`. */
                 id: string;
                 /** @description 1 to 64 of `[a-z0-9-]`. */
                 tag: string;
@@ -2917,7 +2880,7 @@ export interface operations {
             };
             header?: never;
             path: {
-                /** @description `<chain>:<network>:<address>`. */
+                /** @description `{chain}.{network}.{address}`. */
                 id: string;
             };
             cookie?: never;
@@ -2976,7 +2939,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description `<chain>:<network>:<address>`. */
+                /** @description `{chain}.{network}.{address}`. */
                 id: string;
             };
             cookie?: never;

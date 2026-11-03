@@ -104,9 +104,9 @@ export function indexes(
   choices: Choices,
 ): { id: string; label: string; address: string; ticker: string; keyed: boolean }[] {
   return choices.wallets
-    .filter((w) => w.network.chain === choices.chain && w.network.name === choices.network)
+    .filter((w) => w.chain === choices.chain && w.network === choices.network)
     .flatMap((w) =>
-      w.assets.map((asset) => ({
+      Object.keys(w.indexes).map((asset) => ({
         id: indexId(choices.chain, choices.network, w.address, asset),
         label: `${w.address.slice(0, 10)}… · ${choices.name(asset)}${w.keyed ? '' : ' · watch only'}`,
         address: w.address,

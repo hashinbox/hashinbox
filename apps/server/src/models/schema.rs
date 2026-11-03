@@ -46,6 +46,10 @@ diesel::table! {
         amount -> Text,
         coin_txid -> Nullable<Text>,
         coin_index -> Nullable<BigInt>,
+        wallet_index_id -> Text,
+        position -> Nullable<BigInt>,
+        seq -> Nullable<BigInt>,
+        total -> Nullable<Text>,
     }
 }
 
@@ -128,6 +132,7 @@ diesel::table! {
 diesel::joinable!(transactions -> block (block));
 diesel::joinable!(trigger_run -> triggers (trigger));
 diesel::joinable!(leg -> transactions (transaction));
+diesel::joinable!(leg -> block (block));
 diesel::joinable!(wallet_index -> block (indexed_at));
 diesel::joinable!(wallet_index -> wallet (wallet_id));
 

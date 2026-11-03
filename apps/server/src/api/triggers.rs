@@ -21,7 +21,7 @@ use super::{Error, ErrorBody};
 use crate::{
     api::AppState,
     models::{
-        self,
+        self, Trigger,
         trigger::{self as triggers, Action, Filter, Gate, Logic},
         trigger_run,
         wallet_index::Selector,
@@ -38,59 +38,6 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 
 /// How many runs `GET /v1/triggers/{id}/runs` answers.
 const RUNS: i64 = 50;
-
-/// One trigger.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-struct Trigger {
-    /// Its slug: 1 to 64 of `[a-z0-9-]`.
-    id: String,
-    /// Chain name, as `GET /v1/assets` lists it.
-    chain: String,
-    /// Network name, as `GET /v1/assets` lists it.
-    network: String,
-    /// The batch it was created in: every trigger of one create shares it.
-    group: String,
-    /// Which wallet indexes it acts on: `{"ids": […]}`, `{"asset": "…"}`,
-    /// `{"tag": "…"}`, `{"untagged": {}}`, `{"all": […]}`, `{"any": […]}`, `{"not": …}`.
-    #[schema(value_type = Object)]
-    selector: Selector,
-    /// Which of them it acts on: compares under `all`/`any`/`not`; null:
-    /// every one.
-    #[schema(value_type = Option<Object>)]
-    filter: Option<Logic<Filter>>,
-    /// When it acts: `{"since": {"seconds": …}}` and compares under
-    /// `all`/`any`/`not`.
-    #[schema(value_type = Object)]
-    check: Logic<Gate>,
-    /// What it does: `{"name": "send", "input": {"source": target, "asset":
-    /// id, "destination": target, "amount": amount}}`.
-    #[schema(value_type = Object)]
-    action: Action,
-    /// Whether it runs.
-    enabled: bool,
-    /// Unix ms.
-    created_at: i64,
-    /// Unix ms.
-    updated_at: i64,
-}
-
-impl From<models::Trigger> for Trigger {
-    fn from(row: models::Trigger) -> Self {
-        Self {
-            id: row.id,
-            chain: row.chain,
-            network: row.network,
-            group: row.group_id,
-            selector: row.selector.0,
-            filter: row.filter.map(|filter| filter.0),
-            check: row.check.0,
-            action: row.action.0,
-            enabled: row.enabled,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-        }
-    }
-}
 
 /// A trigger as written: in a `POST` (with `id`) or as a `PUT` body.
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
@@ -181,7 +128,7 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, 
         .read(|connection| Ok(triggers::db::find_all(connection)?))
         .await?;
     Ok(Json(ListResponse {
-        triggers: triggers.into_iter().map(Trigger::from).collect(),
+        triggers: triggers.into_iter().collect(),
     }))
 }
 
@@ -261,12 +208,7 @@ async fn create(
             "a trigger with id {taken} exists"
         )));
     }
-    Ok((
-        StatusCode::CREATED,
-        Json(ListResponse {
-            triggers: rows.into_iter().map(Trigger::from).collect(),
-        }),
-    ))
+    Ok((StatusCode::CREATED, Json(ListResponse { triggers: rows })))
 }
 
 #[utoipa::path(
@@ -294,7 +236,7 @@ async fn read(
         .read(move |connection| Ok(triggers::db::get_by_id(connection, &id).optional()?))
         .await?
         .ok_or_else(|| Error::not_found("no such trigger"))?;
-    Ok(Json(row.into()))
+    Ok(Json(row))
 }
 
 #[utoipa::path(
@@ -350,7 +292,7 @@ async fn replace(
     if changed == 0 {
         return Err(Error::not_found("no such trigger"));
     }
-    Ok(Json(row.into()))
+    Ok(Json(row))
 }
 
 #[utoipa::path(

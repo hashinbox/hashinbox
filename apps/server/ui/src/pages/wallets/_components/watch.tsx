@@ -139,9 +139,9 @@ export function WatchDialog({
   const [busy, setBusy] = useState(false);
   const offered = shell.listings.filter(
     (l) =>
-      l.network.chain === wallet.network.chain &&
-      l.network.name === wallet.network.name &&
-      !wallet.assets.includes(l.asset),
+      l.network.chain === wallet.chain &&
+      l.network.name === wallet.network &&
+      !(l.asset in wallet.indexes),
   );
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="xs">

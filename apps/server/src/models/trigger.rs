@@ -344,19 +344,36 @@ impl<L> From<Logic<L>> for Form<L> {
     }
 }
 
-/// One `trigger` row.
-#[derive(Clone, Debug, Queryable, Selectable, Insertable)]
+/// One `trigger` row; the API shows it as is.
+#[derive(Clone, Debug, Queryable, Selectable, Insertable, Serialize, utoipa::ToSchema)]
 #[diesel(table_name = triggers, check_for_backend(Sqlite))]
 pub(crate) struct Trigger {
+    /// Its slug: 1 to 64 of `[a-z0-9-]`.
     pub(crate) id: String,
+    /// Chain name, as `GET /v1/assets` lists it.
     pub(crate) chain: String,
+    /// Network name, as `GET /v1/assets` lists it.
     pub(crate) network: String,
-    /// The batch it was created in: the triggers created together share it.
+    /// The batch it was created in: every trigger of one create shares it.
+    #[serde(rename = "group")]
     pub(crate) group_id: String,
+    /// Which wallet indexes it acts on: `{"ids": […]}`, `{"asset": "…"}`,
+    /// `{"tag": "…"}`, `{"untagged": {}}`, `{"all": […]}`, `{"any": […]}`, `{"not": …}`.
+    #[schema(value_type = Object)]
     pub(crate) selector: Json<Selector>,
+    /// Which of them it acts on: compares under `all`/`any`/`not`; null:
+    /// every one.
+    #[schema(value_type = Option<Object>)]
     pub(crate) filter: Option<Json<Logic<Filter>>>,
+    /// When it acts: `{"since": {"seconds": …}}` and compares under
+    /// `all`/`any`/`not`.
+    #[schema(value_type = Object)]
     pub(crate) check: Json<Logic<Gate>>,
+    /// What it does: `{"name": "send", "input": {"source": target, "asset":
+    /// id, "destination": target, "amount": amount}}`.
+    #[schema(value_type = Object)]
     pub(crate) action: Json<Action>,
+    /// Whether it runs.
     pub(crate) enabled: bool,
     /// Unix ms.
     pub(crate) created_at: i64,

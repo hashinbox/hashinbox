@@ -370,6 +370,6 @@ async fn send(
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
 #[into_params(parameter_in = Path)]
 struct WalletPath {
-    /// `<chain>:<network>:<address>`.
+    /// `{chain}.{network}.{address}`.
     id: String,
 }

@@ -1,15 +1,14 @@
-//! `base::BlockStore` on the `block`, `transaction`,
-//! `leg` and `wallet_index` models.
+//! `base::BlockStore` on the `block`, `transaction` and `wallet_index`
+//! models.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, ensure};
-use base::Addressed as _;
 use base::{Block as BaseBlock, BlockHeader, BlockStore, Blocks, Future, Network, Networked as _};
 use diesel::SqliteConnection;
 
 use super::Stores;
-use crate::models::{Leg, block, int, leg, transaction, wallet_index};
+use crate::models::{block, int, transaction, wallet_index};
 
 impl BlockStore for Stores {
     fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>> {
@@ -85,23 +84,7 @@ fn keep(
         if pairs.is_empty() {
             continue;
         }
-        for transaction in &block.transactions {
-            let legs = (0_u32..)
-                .zip(&transaction.legs)
-                .filter(|(_, leg)| applies(&pairs, leg.address(), leg.asset()));
-            let legs: Vec<_> = legs.collect();
-            if legs.is_empty() {
-                continue;
-            }
-            transaction::db::upsert_mined(connection, &id, transaction, legs)?;
-        }
-        let rewards = block
-            .rewards
-            .iter()
-            .filter(|reward| applies(&pairs, &reward.address, &reward.asset))
-            .map(|reward| Leg::reward(&id, reward))
-            .collect::<anyhow::Result<leg::Legs>>()?;
-        leg::db::insert(connection, &rewards)?;
+        transaction::db::insert_block(connection, block, &id, position, &pairs)?;
         wallet_index::db::advance(connection, network, &pairs, &id)?;
         if kept.last() != Some(header) {
             kept.push(header.clone());
@@ -125,13 +108,4 @@ fn keep(
         }
     }
     Ok(kept)
-}
-
-/// Whether (`address`, `asset`) is one of `pairs`.
-fn applies(
-    pairs: &std::collections::BTreeSet<(String, String)>,
-    address: &base::Address,
-    asset: &base::Asset,
-) -> bool {
-    pairs.contains(&(address.value.clone(), asset.id.clone()))
 }

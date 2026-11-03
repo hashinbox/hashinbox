@@ -18,13 +18,13 @@ use serde::Deserialize;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{
-    Error, ErrorBody, asset_info, wallet_address,
-    wallets::{IndexState, Progress, WalletPath},
-};
+use super::{Error, ErrorBody, asset_info, wallet_address, wallets::WalletPath};
 use crate::{
     api::AppState,
-    models::{self, wallet_index},
+    models::{
+        self, wallet_index,
+        wallet_index::{IndexState, WalletIndex},
+    },
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -52,7 +52,7 @@ struct CreateRequest {
 #[derive(Clone, Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Path)]
 struct IndexPath {
-    /// `<chain>:<network>:<address>`.
+    /// `{chain}.{network}.{address}`.
     id: String,
     /// The asset id.
     asset: String,
@@ -82,9 +82,9 @@ struct UpdateRequest {
     request_body = CreateRequest,
     security(("bearerAuth" = [])),
     responses(
-        (status = 201, description = "The index", body = Progress),
+        (status = 201, description = "The index", body = WalletIndex),
         (status = 200, description = "The asset was already indexed: its index",
-            body = Progress),
+            body = WalletIndex),
         (status = 400, description = "Malformed body or wallet ID, or a start older than the \
             network's history limit", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
@@ -98,12 +98,27 @@ async fn create(
     State(state): State<Arc<AppState>>,
     Path(path): Path<WalletPath>,
     request: Result<Json<CreateRequest>, JsonRejection>,
-) -> Result<(StatusCode, Json<Progress>), Error> {
+) -> Result<(StatusCode, Json<WalletIndex>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let address = wallet_address(&state.payments, &path.id)?;
     let asset = asset_info(&state.payments, &address.network, &request.asset)?.asset;
-    if let Some(kept) = index(&state, &address, &asset.id).await? {
-        return Ok((StatusCode::OK, Json(kept)));
+    let (wallet_id, index_id) = models::Wallet::id(&address)
+        .and_then(|wallet| Ok((wallet.clone(), models::child(&wallet, &[&asset.id])?)))
+        .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
+    let tips = models::wallet::Tips::from_stats(state.payments.stats());
+    let (id, at) = (index_id.clone(), tips.clone());
+    let (kept, index) = state
+        .db
+        .read(move |connection| {
+            let kept = models::wallet::db::find_by_id(connection, &wallet_id)?.is_some();
+            Ok((kept, wallet_index::db::find_at_tip(connection, &id, &at)?))
+        })
+        .await?;
+    if !kept {
+        return Err(Error::not_found("wallet is unknown"));
+    }
+    if let Some(index) = index {
+        return Ok((StatusCode::OK, Json(index)));
     }
     let birthday = match request.start {
         None => Birthday::Fresh,
@@ -144,7 +159,9 @@ async fn create(
     })
     .await
     .map_err(anyhow::Error::from)??;
-    let created = index(&state, &address, &request.asset)
+    let created = state
+        .db
+        .read(move |connection| wallet_index::db::find_at_tip(connection, &index_id, &tips))
         .await?
         .ok_or_else(|| Error::not_found("no such index"))?;
     Ok((StatusCode::CREATED, Json(created)))
@@ -162,7 +179,7 @@ async fn create(
     request_body = UpdateRequest,
     security(("bearerAuth" = [])),
     responses(
-        (status = 200, description = "The index", body = Progress),
+        (status = 200, description = "The index", body = WalletIndex),
         (status = 400, description = "Malformed body or wallet ID, or `no_data` asked for",
             body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
@@ -175,7 +192,7 @@ async fn update(
     State(state): State<Arc<AppState>>,
     Path(path): Path<IndexPath>,
     request: Result<Json<UpdateRequest>, JsonRejection>,
-) -> Result<Json<Progress>, Error> {
+) -> Result<Json<WalletIndex>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let index_state = match request.index_state {
         IndexState::Indexing => WalletIndexState::Indexing,
@@ -183,14 +200,22 @@ async fn update(
         IndexState::NoData => return Err(Error::invalid_request("no_data is the indexer's")),
     };
     let address = wallet_address(&state.payments, &path.id)?;
-    let (target, asset) = (address.clone(), path.asset.clone());
+    let id = models::Wallet::id(&address)
+        .and_then(|wallet| models::child(&wallet, &[&path.asset]))
+        .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
+    let tips = models::wallet::Tips::from_stats(state.payments.stats());
     state
         .db
         .write(move |connection| {
-            wallet_index::db::set_state(connection, &target, Some(&asset), index_state, None)
+            wallet_index::db::set_state(
+                connection,
+                &address,
+                Some(&path.asset),
+                index_state,
+                None,
+            )?;
+            wallet_index::db::find_at_tip(connection, &id, &tips)
         })
-        .await?;
-    index(&state, &address, &path.asset)
         .await?
         .map(Json)
         .ok_or_else(|| Error::not_found("no such index"))
@@ -230,34 +255,4 @@ async fn remove(
         return Err(Error::not_found("no such index"));
     }
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// The index of `asset` of the wallet of `address`, if any.
-///
-/// # Errors
-///
-/// Not found when the wallet is not kept; the store's failure.
-async fn index(
-    state: &AppState,
-    address: &base::Address,
-    asset: &str,
-) -> Result<Option<Progress>, Error> {
-    let id = models::Wallet::id(address)
-        .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
-    let wallet = state
-        .db
-        .read(move |connection| models::wallet::db::find_with_indexes(connection, Some(&id)))
-        .await?
-        .pop()
-        .ok_or_else(|| Error::not_found("wallet is unknown"))?;
-    let stats = state
-        .payments
-        .service(&address.network)
-        .ok()
-        .map(|service| service.indexer.stats());
-    Ok(wallet
-        .indexes
-        .into_iter()
-        .find(|index| index.asset.id == asset)
-        .map(|index| Progress::new(index, stats.as_ref())))
 }

@@ -12,13 +12,12 @@ use diesel::{Connection as _, SqliteConnection, connection::SimpleConnection as 
 
 use crate::{
     models::{
-        Json, Trigger, TriggerRun, Wallet, balance, int, trigger,
+        Json, Trigger, TriggerRun, Wallet, int, trigger,
         trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Operator, Target, This},
         trigger_run, wallet,
         wallet::db::IndexedSelector,
         wallet_index,
-        wallet_index::{Selector, WalletIndexes},
-        wallet_index_balance::{self, WalletIndexBalances},
+        wallet_index::{Selection, Selector},
     },
     usecase::{
         trigger::{Context, Trigger as Deciding},
@@ -46,6 +45,8 @@ fn network() -> Network {
 /// Every indexed address is a watch-only wallet.
 /// a native: received 1000 (block 1), spent 300 + fee 10 (block 2), reward 5
 /// above the tip (block 3); b native: reward 50 (block 0); a tok: 2^200.
+/// Mined legs carry their index, position, seq and running total, as the
+/// store writes.
 const SEED: &str = "
 INSERT INTO block (id, chain, network, position, height, hash, archived_at) VALUES
  ('bitcoin.regtest.00','bitcoin','regtest',0,0,x'00',NULL),
@@ -75,15 +76,23 @@ INSERT INTO \"transaction\" (id, block, chain, network, txid, \"order\", state, 
  ('bitcoin.regtest.t1','bitcoin.regtest.01','bitcoin','regtest','t1',0,1,x''),
  ('bitcoin.regtest.t2','bitcoin.regtest.02','bitcoin','regtest','t2',0,1,x''),
  ('bitcoin.regtest.t3','bitcoin.regtest.f5','bitcoin','regtest','t3',0,1,x'');
-INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, amount) VALUES
- ('bitcoin.regtest.t1.0','bitcoin.regtest.01','bitcoin.regtest.t1',0,0,'a','native','1000'),
+INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, amount,
+  wallet_index_id, position, seq, total) VALUES
+ ('bitcoin.regtest.t1.0','bitcoin.regtest.01','bitcoin.regtest.t1',0,0,'a','native','1000',
+  'bitcoin.regtest.a.native',1,1,'1000'),
  ('bitcoin.regtest.t1.1','bitcoin.regtest.01','bitcoin.regtest.t1',1,0,'a','tok',
+  '1606938044258990275541962092341162602522202993782792835301376','bitcoin.regtest.a.tok',1,1,
   '1606938044258990275541962092341162602522202993782792835301376'),
- ('bitcoin.regtest.t2.0','bitcoin.regtest.02','bitcoin.regtest.t2',0,1,'a','native','300'),
- ('bitcoin.regtest.t2.1','bitcoin.regtest.02','bitcoin.regtest.t2',1,4,'a','native','10'),
- ('bitcoin.regtest.t3.0','bitcoin.regtest.f5','bitcoin.regtest.t3',0,0,'a','native','7777'),
- ('bitcoin.regtest.03.reward.0','bitcoin.regtest.03',NULL,0,5,'a','native','5'),
- ('bitcoin.regtest.00.reward.0','bitcoin.regtest.00',NULL,0,5,'b','native','50');
+ ('bitcoin.regtest.t2.0','bitcoin.regtest.02','bitcoin.regtest.t2',0,1,'a','native','300',
+  'bitcoin.regtest.a.native',2,2,'700'),
+ ('bitcoin.regtest.t2.1','bitcoin.regtest.02','bitcoin.regtest.t2',1,4,'a','native','10',
+  'bitcoin.regtest.a.native',2,3,'690'),
+ ('bitcoin.regtest.t3.0','bitcoin.regtest.f5','bitcoin.regtest.t3',0,0,'a','native','7777',
+  'bitcoin.regtest.a.native',5,5,'8467'),
+ ('bitcoin.regtest.03.reward.0','bitcoin.regtest.03',NULL,0,5,'a','native','5',
+  'bitcoin.regtest.a.native',3,4,'695'),
+ ('bitcoin.regtest.00.reward.0','bitcoin.regtest.00',NULL,0,5,'b','native','50',
+  'bitcoin.regtest.b.native',0,1,'50');
 ";
 
 /// A migrated, seeded temp file, a runtime for fee estimates, and a raw
@@ -145,9 +154,7 @@ fn id(address: &str, asset: &str) -> String {
 fn ids(selector: &Selector, connection: &mut SqliteConnection) -> Vec<String> {
     wallet_index::db::select(connection, &network(), selector, 2)
         .unwrap()
-        .into_iter()
-        .map(|row| row.id)
-        .collect()
+        .ids()
 }
 
 fn tag(name: &str) -> Selector {
@@ -300,19 +307,21 @@ fn balances_are_confirmed_exact_and_folded() {
         id("a", "tok"),
         id("b", "tok"),
     ];
-    let refs: Vec<&str> = all.iter().map(String::as_str).collect();
-    let balances = balance::db::find_by_ids(&mut connection, &refs, 2).unwrap();
+    let balances = wallet_index::db::find_by_ids(&mut connection, &network(), &all, 2).unwrap();
     // The reward at block 3 and the archived block's leg are not counted.
-    assert_eq!(balances[&id("a", "native")].confirmed, decimal("690"));
-    assert_eq!(balances[&id("b", "native")].confirmed, decimal("50"));
+    assert_eq!(confirmed(&balances, &id("a", "native")), decimal("690"));
+    assert_eq!(confirmed(&balances, &id("b", "native")), decimal("50"));
     assert_eq!(
-        balances[&id("a", "tok")].confirmed,
+        confirmed(&balances, &id("a", "tok")),
         decimal("1606938044258990275541962092341162602522202993782792835301376")
     );
-    assert_eq!(balances[&id("b", "tok")].confirmed, Decimal::zero());
-    let later = balance::db::find_by_ids(&mut connection, &refs[..1], 3).unwrap();
-    assert_eq!(later[&id("a", "native")].confirmed, decimal("695"));
-    assert_eq!(balances[&id("a", "native")].spendable, decimal("690"));
+    assert_eq!(confirmed(&balances, &id("b", "tok")), Decimal::zero());
+    let later = wallet_index::db::find_by_ids(&mut connection, &network(), &all[..1], 3).unwrap();
+    assert_eq!(confirmed(&later, &id("a", "native")), decimal("695"));
+    assert_eq!(
+        balances[&id("a", "native")].spendable().unwrap(),
+        decimal("690")
+    );
 }
 
 #[test]
@@ -324,24 +333,27 @@ fn a_pending_send_is_taken_off_what_its_sender_can_spend() {
             "INSERT INTO \"transaction\" (id, block, chain, network, txid, state, bytes, \
                sent_at, expires_at) \
              VALUES ('bitcoin.regtest.p',NULL,'bitcoin','regtest','p',0,x'',1,9); \
-             INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, amount) \
-             VALUES ('bitcoin.regtest.p.0',NULL,'bitcoin.regtest.p',0,1,'a','native','100'), \
-                    ('bitcoin.regtest.p.1',NULL,'bitcoin.regtest.p',1,4,'a','native','5'), \
-                    ('bitcoin.regtest.p.2',NULL,'bitcoin.regtest.p',2,0,'b','native','100');",
+             INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, amount, \
+               wallet_index_id) \
+             VALUES ('bitcoin.regtest.p.0',NULL,'bitcoin.regtest.p',0,1,'a','native','100', \
+                       'bitcoin.regtest.a.native'), \
+                    ('bitcoin.regtest.p.1',NULL,'bitcoin.regtest.p',1,4,'a','native','5', \
+                       'bitcoin.regtest.a.native'), \
+                    ('bitcoin.regtest.p.2',NULL,'bitcoin.regtest.p',2,0,'b','native','100', \
+                       'bitcoin.regtest.b.native');",
         )
         .unwrap();
     let ids = [id("a", "native"), id("b", "native")];
-    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let balances = balance::db::find_by_ids(&mut connection, &refs, 2).unwrap();
+    let balances = wallet_index::db::find_by_ids(&mut connection, &network(), &ids, 2).unwrap();
     let a = &balances[&id("a", "native")];
     assert_eq!(
-        (a.confirmed.clone(), a.spendable.clone()),
+        (confirmed(&balances, &a.id), a.spendable().unwrap()),
         (decimal("690"), decimal("585"))
     );
     // What arrives counts once mined.
     let b = &balances[&id("b", "native")];
     assert_eq!(
-        (b.confirmed.clone(), b.spendable.clone()),
+        (confirmed(&balances, &b.id), b.spendable().unwrap()),
         (decimal("50"), decimal("50"))
     );
 }
@@ -426,7 +438,7 @@ fn run(started_at: i64) -> TriggerRun {
 fn compares(
     evaluation: &mut Deciding<'_>,
     compare: &Compare,
-    this: &WalletIndexBalances,
+    this: &Selection,
 ) -> anyhow::Result<bool> {
     evaluation.check(&Logic::Leaf(Gate::Compare(compare.clone())), this)
 }
@@ -434,7 +446,7 @@ fn compares(
 fn checks(
     evaluation: &mut Deciding<'_>,
     check: &Logic<Gate>,
-    this: &WalletIndexBalances,
+    this: &Selection,
 ) -> anyhow::Result<bool> {
     evaluation.check(check, this)
 }
@@ -460,13 +472,17 @@ fn value(text: &str) -> Amount {
 
 /// The kept wallet indexes `ids` with their balances at the tip, as Select
 /// would hand them on (fully indexed or not).
-fn selection(connection: &mut SqliteConnection, ids: &[String]) -> WalletIndexBalances {
-    let indexes: WalletIndexes = wallet_index::db::find_every(connection)
-        .unwrap()
-        .into_iter()
-        .filter(|index| ids.contains(&index.id))
-        .collect();
-    wallet_index_balance::db::with_balances(connection, &network(), indexes, int(TIP).unwrap())
+fn selection(connection: &mut SqliteConnection, ids: &[String]) -> Selection {
+    wallet_index::db::find_by_ids(connection, &network(), ids, int(TIP).unwrap()).unwrap()
+}
+
+/// The balance of index `id` of `selection` at its final block.
+fn confirmed(selection: &Selection, id: &str) -> Decimal {
+    selection[id]
+        .balance_confirmed
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
         .unwrap()
 }
 
@@ -475,9 +491,9 @@ fn aggregates_and_operators() {
     let (_directory, runtime, mut connection) = seeded();
     let both = selection(&mut connection, &[id("a", "native"), id("b", "native")]);
     let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
-    let empty = WalletIndexBalances::new(network(), int(TIP).unwrap());
+    let empty = Selection::new(network(), int(TIP).unwrap());
     let native = || Target::Select(asset("native"));
-    let mut holds = |of: Target, aggregate, operator, amount, on: &WalletIndexBalances| {
+    let mut holds = |of: Target, aggregate, operator, amount, on: &Selection| {
         compares(
             &mut evaluation,
             &compare(of, aggregate, operator, amount),
@@ -725,7 +741,7 @@ fn logic_stops_early_and_errors_stay_errors() {
 #[test]
 fn since_reads_the_last_run() {
     let (_directory, runtime, mut connection) = seeded();
-    let empty = WalletIndexBalances::new(network(), int(TIP).unwrap());
+    let empty = Selection::new(network(), int(TIP).unwrap());
     let since = |seconds| Logic::Leaf(Gate::Since { seconds });
     // now is 100 000 ms.
     for (started_at, passes) in [(40_001, false), (40_000, true)] {
@@ -921,7 +937,7 @@ fn a_send_pays_per_source_or_per_destination() {
     let sweep = send(this(None), ids_of(&["b"]), Amount::Sub(balance(), fee()));
     let keyed = [address("a"), address("b")].into_iter().collect();
     // Each started job's sender and its (recipient, amount) transfers.
-    let mut plan = |send: &SendInput, this: &WalletIndexBalances| {
+    let mut plan = |send: &SendInput, this: &Selection| {
         let mut invocation = Invocation::new(this.network(), this, &mut evaluation, &keyed);
         Transfer.run(&mut invocation, &serde_json::to_value(send)?)?;
         let sends = invocation.started().into_iter().map(|job| {

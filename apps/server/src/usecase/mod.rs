@@ -10,5 +10,4 @@ pub(crate) mod sdk;
 pub(crate) mod stats;
 pub(crate) mod tasks;
 pub(crate) mod trigger;
-pub(crate) mod wallets;
 pub(crate) mod workers;

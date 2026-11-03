@@ -4,7 +4,6 @@
 //! request and response bodies live in its resource file.
 
 mod assets;
-mod balance;
 mod blocks;
 mod health;
 mod jobs;
@@ -108,7 +107,6 @@ fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
         .merge(assets::routes())
         .merge(wallets::routes())
         .merge(wallet_indexes::routes())
-        .merge(balance::routes())
         .merge(transactions::routes())
         .merge(jobs::routes())
         .merge(networks::routes())
@@ -232,18 +230,18 @@ impl From<anyhow::Error> for Error {
     }
 }
 
-/// The address a wallet ID (`<chain>:<network>:<address>`) names, parsed by
+/// The address a wallet ID (`{chain}.{network}.{address}`, the model id) names, parsed by
 /// its network's chain.
 ///
 /// # Errors
 ///
 /// A 400 for a malformed ID or address; a 404 for an unconfigured network.
 fn wallet_address(payments: &payments::Payments, id: &str) -> Result<base::Address, Error> {
-    let mut parts = id.splitn(3, ':');
+    let mut parts = id.splitn(3, '.');
     let (Some(chain), Some(network), Some(text)) = (parts.next(), parts.next(), parts.next())
     else {
         return Err(Error::invalid_request(
-            "wallet ID must be <chain>:<network>:<address>",
+            "wallet ID must be {chain}.{network}.{address}",
         ));
     };
     let network = base::Network::new(base::Chain::new(chain), network);

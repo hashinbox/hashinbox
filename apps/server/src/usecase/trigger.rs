@@ -20,7 +20,7 @@ use crate::models::{
     self, TriggerRun, block, trigger,
     trigger::{Action, Aggregate, Amount, Compare, Filter, Gate, Logic, Target},
     trigger_run, wallet,
-    wallet_index_balance::{self, WalletIndexBalances},
+    wallet_index::{self, Selection},
 };
 
 /// What every trigger of a round decides with, besides the connection.
@@ -45,7 +45,7 @@ pub(crate) struct Trigger<'a> {
     run: Option<TriggerRun>,
     /// What targets named, by (`This` ids, target JSON); `None`: not fully
     /// indexed.
-    targets: BTreeMap<(Vec<String>, String), Option<WalletIndexBalances>>,
+    targets: BTreeMap<(Vec<String>, String), Option<Selection>>,
 }
 
 impl<'a> Trigger<'a> {
@@ -72,14 +72,9 @@ impl<'a> Trigger<'a> {
     /// # Errors
     ///
     /// When a read or the fee estimate fails.
-    fn decide(
-        &mut self,
-        network: &Network,
-        last: i64,
-    ) -> anyhow::Result<Option<WalletIndexBalances>> {
+    fn decide(&mut self, network: &Network, last: i64) -> anyhow::Result<Option<Selection>> {
         let row = self.row.clone();
-        let selected =
-            wallet_index_balance::db::select(self.connection, network, &row.selector.0, last)?;
+        let selected = wallet_index::db::select(self.connection, network, &row.selector.0, last)?;
         let kept = match &row.filter {
             Some(filter) => self.filter(&filter.0, &selected)?,
             None => selected,
@@ -92,11 +87,7 @@ impl<'a> Trigger<'a> {
     /// # Errors
     ///
     /// The first read error.
-    pub(crate) fn check(
-        &mut self,
-        check: &Logic<Gate>,
-        this: &WalletIndexBalances,
-    ) -> anyhow::Result<bool> {
+    pub(crate) fn check(&mut self, check: &Logic<Gate>, this: &Selection) -> anyhow::Result<bool> {
         check.eval(&mut |gate| self.gate(gate, this))
     }
 
@@ -109,8 +100,8 @@ impl<'a> Trigger<'a> {
     pub(crate) fn filter(
         &mut self,
         filter: &Logic<Filter>,
-        this: &WalletIndexBalances,
-    ) -> anyhow::Result<WalletIndexBalances> {
+        this: &Selection,
+    ) -> anyhow::Result<Selection> {
         let mut kept = this.emptied();
         for one in this.values() {
             let alone = this.only(one)?;
@@ -122,7 +113,7 @@ impl<'a> Trigger<'a> {
     }
 
     /// A check leaf: a compare, or a test of the latest run (none: passes).
-    fn gate(&mut self, gate: &Gate, this: &WalletIndexBalances) -> anyhow::Result<bool> {
+    fn gate(&mut self, gate: &Gate, this: &Selection) -> anyhow::Result<bool> {
         Ok(match (gate, &self.run) {
             (Gate::Compare(compare), _) => self.compare(compare, this)?,
             (_, None) => true,
@@ -137,7 +128,7 @@ impl<'a> Trigger<'a> {
     }
 
     /// Whether the aggregate of what `compare` refers to compares as it says.
-    fn compare(&mut self, compare: &Compare, this: &WalletIndexBalances) -> anyhow::Result<bool> {
+    fn compare(&mut self, compare: &Compare, this: &Selection) -> anyhow::Result<bool> {
         let Some(indexes) = self.target(&compare.of, this)? else {
             return Ok(false);
         };
@@ -155,11 +146,11 @@ impl<'a> Trigger<'a> {
             .of
             .asset()
             .map(str::to_owned)
-            .or_else(|| this.values().next().map(|one| one.index.asset.id.clone()));
+            .or_else(|| this.values().next().map(|one| one.asset.id.clone()));
         let Some(asset) = asset else {
             return Ok(false);
         };
-        let balances = indexes.spendable();
+        let balances = indexes.spendable()?.into_iter();
         let left = match compare.aggregate {
             Aggregate::Min => balances.min(),
             Aggregate::Max => balances.max(),
@@ -176,7 +167,7 @@ impl<'a> Trigger<'a> {
     pub(crate) fn amount(
         &mut self,
         amount: &Amount,
-        this: &WalletIndexBalances,
+        this: &Selection,
         asset: &str,
     ) -> anyhow::Result<Option<Decimal>> {
         let (a, b, combine): (_, _, fn(Decimal, Decimal) -> Decimal) = match amount {
@@ -194,7 +185,9 @@ impl<'a> Trigger<'a> {
             }
             Amount::Balance { of } => {
                 let indexes = self.target(of, this)?;
-                return Ok(indexes.map(|indexes| indexes.spendable().sum()));
+                return indexes
+                    .map(|indexes| Ok(indexes.spendable()?.into_iter().sum()))
+                    .transpose();
             }
             Amount::Fee { of } => {
                 let Some(indexes) = self.target(of, this)? else {
@@ -223,13 +216,13 @@ impl<'a> Trigger<'a> {
     pub(crate) fn target(
         &mut self,
         target: &Target,
-        this: &WalletIndexBalances,
-    ) -> anyhow::Result<Option<WalletIndexBalances>> {
+        this: &Selection,
+    ) -> anyhow::Result<Option<Selection>> {
         let key = (this.ids(), serde_json::to_string(target)?);
         if let Some(found) = self.targets.get(&key) {
             return Ok(found.clone());
         }
-        let found = wallet_index_balance::db::find_by_target(self.connection, this, target)?;
+        let found = wallet_index::db::find_by_target(self.connection, this, target)?;
         self.targets.insert(key, found.clone());
         Ok(found)
     }
@@ -318,7 +311,7 @@ pub(crate) struct Decision<'a, 'c> {
     /// The trigger's network.
     pub(crate) network: &'a Network,
     /// The wallet indexes its filter kept (`This`), with balances.
-    pub(crate) this: &'a WalletIndexBalances,
+    pub(crate) this: &'a Selection,
     /// The trigger still deciding: amounts and targets read at the same block.
     pub(crate) trigger: &'a mut Trigger<'c>,
     /// Addresses this server holds keys for.

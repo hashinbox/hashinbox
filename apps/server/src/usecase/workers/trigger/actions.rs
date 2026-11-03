@@ -14,7 +14,7 @@ use tasks::Job;
 use crate::{
     models::{
         trigger::{Amount, Target},
-        wallet_index_balance::WalletIndexBalances,
+        wallet_index::Selection,
     },
     usecase::{
         trigger::Trigger,
@@ -27,7 +27,7 @@ pub(crate) struct Invocation<'a, 'c> {
     /// The trigger's network.
     pub(crate) network: &'a Network,
     /// The wallet indexes it fired on (`This`), with balances.
-    pub(crate) this: &'a WalletIndexBalances,
+    pub(crate) this: &'a Selection,
     /// The trigger deciding: amounts and targets, read at the decided block.
     pub(crate) trigger: &'a mut Trigger<'c>,
     /// Addresses this server holds keys for.
@@ -38,7 +38,7 @@ pub(crate) struct Invocation<'a, 'c> {
 impl<'a, 'c> Invocation<'a, 'c> {
     pub(crate) const fn new(
         network: &'a Network,
-        this: &'a WalletIndexBalances,
+        this: &'a Selection,
         trigger: &'a mut Trigger<'c>,
         keyed: &'a BTreeSet<Address>,
     ) -> Self {
@@ -178,7 +178,7 @@ impl Action for Transfer {
             bail!("a destination is not fully indexed");
         };
         ensure!(
-            sources.values().all(|one| one.index.asset.id == send.asset),
+            sources.values().all(|one| one.asset.id == send.asset),
             "a source is not in the sent asset"
         );
         ensure!(
@@ -199,7 +199,7 @@ impl Action for Transfer {
         let Some(other) = other.values().next() else {
             return Ok(());
         };
-        let other = &other.index.address;
+        let other = &other.address;
         let mut by_sender: BTreeMap<Address, Vec<Payment>> = BTreeMap::new();
         for one in each.values() {
             let alone = each.only(one)?;
@@ -207,7 +207,7 @@ impl Action for Transfer {
             let Some(amount) = amount.filter(|amount| *amount > Decimal::zero()) else {
                 continue;
             };
-            let mine = one.index.address.clone();
+            let mine = one.address.clone();
             let (from, to) = if per_source {
                 (mine, other.clone())
             } else {

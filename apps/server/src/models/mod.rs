@@ -51,7 +51,6 @@ macro_rules! collection {
 }
 
 mod asset;
-pub(crate) mod balance;
 pub(crate) mod block;
 pub(crate) mod endpoint;
 pub(crate) mod explorer;
@@ -74,7 +73,6 @@ pub(crate) mod trigger;
 pub(crate) mod trigger_run;
 pub(crate) mod wallet;
 pub(crate) mod wallet_index;
-pub(crate) mod wallet_index_balance;
 
 pub(crate) use asset::Asset;
 pub(crate) use block::Block;

@@ -16,7 +16,6 @@ import {
   setToken,
   whenUnauthorized,
   type Listing,
-  type ListedWallet,
   type Wallet,
 } from '@/api/client';
 import { Toast, type Message } from '@/_components/toast';
@@ -58,12 +57,25 @@ function stored(): string | null {
   }
 }
 
+/** Every wallet, page by page. */
+async function allWallets(): Promise<Wallet[]> {
+  const wallets: Wallet[] = [];
+  let cursor: string | undefined;
+  do {
+    const query = { limit: 1000, ...(cursor !== undefined && { cursor }) };
+    const page = await call(client.GET('/v1/wallets', { params: { query } }));
+    wallets.push(...page.wallets);
+    cursor = page.next_cursor ?? undefined;
+  } while (cursor !== undefined);
+  return wallets;
+}
+
 export function Layout() {
   const [token, setSession] = useState<string | null>(stored);
   const [door, setDoor] = useState<Door>('unknown');
   const [view, setView] = useState<View>(linked);
   const [listings, setListings] = useState<Listing[]>([]);
-  const [wallets, setWallets] = useState<ListedWallet[]>([]);
+  const [wallets, setWallets] = useState<Wallet[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [tags, setTags] = useState<Map<string, string[]>>(new Map());
   const [tagged, setTagged] = useState(0);
@@ -122,11 +134,7 @@ export function Layout() {
   useEffect(() => {
     if (door !== 'open') return;
     let live = true;
-    Promise.all([
-      call(client.GET('/v1/assets')),
-      call(client.GET('/v1/wallets')),
-      call(client.GET('/v1/networks')),
-    ])
+    Promise.all([call(client.GET('/v1/assets')), allWallets(), call(client.GET('/v1/networks'))])
       .then(([assets, list, configured]) => {
         if (!live) return;
         const byNetwork = new Map<string, Explorer>();
@@ -134,8 +142,8 @@ export function Layout() {
           if (n.explorer) byNetwork.set(`${n.network.chain}/${n.network.name}`, n.explorer);
         setExplorers(byNetwork);
         setListings(assets.assets);
-        setWallets(list.wallets);
-        setTags(new Map(list.wallets.map((w) => [w.id, w.tags])));
+        setWallets(list);
+        setTags(new Map(list.map((w) => [w.id, w.tags])));
       })
       .catch((error: unknown) => {
         if (live) fail(error);
@@ -160,11 +168,9 @@ export function Layout() {
     setSession(value);
   };
 
-  // Added, or watched in more assets: replaces the listed one with the same id
-  // until the reload brings its tags and balances.
+  // Added, or watched in more assets: replaces the listed one with the same id.
   const added = (wallet: Wallet) => {
-    const listed = { ...wallet, tags: [], balances: {} };
-    setWallets((list) => [...list.filter((w) => w.id !== wallet.id), listed]);
+    setWallets((list) => [...list.filter((w) => w.id !== wallet.id), wallet]);
     setSelected(wallet.id);
     go(['wallets']);
     setTagged((n) => n + 1);

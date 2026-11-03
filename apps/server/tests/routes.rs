@@ -132,23 +132,23 @@ async fn wallets_balance_history_and_sends() {
     let (status, generated) = create(json!({})).await;
     assert_eq!(status, StatusCode::CREATED, "{generated}");
     assert_eq!(generated["keyed"], true);
-    assert_eq!(generated["assets"], json!([]));
+    assert_eq!(generated["indexes"], json!({}));
     let generated_id = generated["id"].as_str().unwrap_or_default().to_owned();
     let (status, index_of) = index(&generated_id, Value::Null).await;
     assert_eq!(status, StatusCode::CREATED, "{index_of}");
     assert_eq!(index_of["asset"], "native");
     let (status, watched) = create(json!({ "address": "alice" })).await;
     assert_eq!(status, StatusCode::CREATED, "{watched}");
-    assert_eq!(watched["id"], "bitcoin:regtest:alice");
+    assert_eq!(watched["id"], "bitcoin.regtest.alice");
     assert_eq!(watched["keyed"], false);
-    assert_eq!(watched["indexes"], json!([]));
-    let (status, index_of) = index("bitcoin:regtest:alice", json!(0)).await;
+    assert_eq!(watched["indexes"], json!({}));
+    let (status, index_of) = index("bitcoin.regtest.alice", json!(0)).await;
     assert_eq!(status, StatusCode::CREATED, "{index_of}");
-    assert_eq!(index_of["index_requested_from"], 0);
+    assert_eq!(index_of["requested_from"], 0);
     // Asked again, the index keeps its first start.
-    let (status, index_of) = index("bitcoin:regtest:alice", json!(3)).await;
+    let (status, index_of) = index("bitcoin.regtest.alice", json!(3)).await;
     assert_eq!(
-        (status, &index_of["index_requested_from"]),
+        (status, &index_of["requested_from"]),
         (StatusCode::OK, &json!(0))
     );
     let (status, list) = call(&router, Method::GET, "/v1/wallets", None).await;
@@ -161,20 +161,20 @@ async fn wallets_balance_history_and_sends() {
     )
     .await
     .expect("block 0 kept");
-    let (status, balance) = call(
+    let (status, alice) = call(
         &router,
         Method::GET,
-        "/v1/wallets/bitcoin:regtest:alice/balance",
+        "/v1/wallets/bitcoin.regtest.alice",
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{balance}");
-    assert_eq!(balance["amount"], "1.5");
-    assert_eq!(balance["indexed_through"], 0);
+    assert_eq!(status, StatusCode::OK, "{alice}");
+    assert_eq!(alice["indexes"]["native"]["balance"], "150000000");
+    assert_eq!(alice["indexes"]["native"]["indexed_through"], 0);
     let (status, _) = call(
         &router,
         Method::PUT,
-        "/v1/wallets/bitcoin:regtest:alice/tags/vip",
+        "/v1/wallets/bitcoin.regtest.alice/tags/vip",
         None,
     )
     .await;
@@ -183,18 +183,18 @@ async fn wallets_balance_history_and_sends() {
     assert_eq!(status, StatusCode::OK);
     let alice = list["wallets"]
         .as_array()
-        .and_then(|wallets| wallets.iter().find(|w| w["id"] == "bitcoin:regtest:alice"))
+        .and_then(|wallets| wallets.iter().find(|w| w["id"] == "bitcoin.regtest.alice"))
         .cloned()
         .unwrap_or_default();
     assert_eq!(alice["tags"], json!(["vip"]), "{list}");
     let (_, tags) = call(&router, Method::GET, "/v1/wallets/tags", None).await;
     assert_eq!(tags, json!({ "tags": ["vip"] }));
-    assert_eq!(alice["balances"], json!({ "native": "1.5" }), "{list}");
-    assert_eq!(generated["tags"], Value::Null);
+    assert_eq!(alice["indexes"]["native"]["balance"], "150000000", "{list}");
+    assert_eq!(generated["tags"], json!([]));
     let (status, history) = call(
         &router,
         Method::GET,
-        "/v1/wallets/bitcoin:regtest:alice/transactions?limit=1",
+        "/v1/wallets/bitcoin.regtest.alice/transactions?limit=1",
         None,
     )
     .await;
@@ -202,20 +202,12 @@ async fn wallets_balance_history_and_sends() {
     assert_eq!(history["transactions"][0]["transaction_id"], "t0");
     assert_eq!(history["transactions"][0]["movements"][0]["amount"], "1.5");
     assert_eq!(history["next_cursor"], "0:0:t0");
-    let (status, _) = call(
-        &router,
-        Method::GET,
-        "/v1/wallets/bitcoin:regtest:alice/balance?asset=usdc",
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
 
     let send = json!({ "transfers": [{ "destination": "bob", "amount": "0.1" }] });
     let (status, _) = call(
         &router,
         Method::POST,
-        "/v1/wallets/bitcoin:regtest:alice/transactions",
+        "/v1/wallets/bitcoin.regtest.alice/transactions",
         Some(send.clone()),
     )
     .await;
@@ -295,7 +287,7 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let watch = |start: u64| json!({ "asset": "native", "start": start });
-    let indexes = "/v1/wallets/bitcoin:regtest:alice/indexes";
+    let indexes = "/v1/wallets/bitcoin.regtest.alice/indexes";
 
     // Block 70 is about 30 days old.
     let (status, error) = call(&router, Method::POST, indexes, Some(watch(60))).await;
@@ -304,13 +296,13 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
     let (status, index) = call(&router, Method::POST, indexes, Some(watch(80))).await;
     assert_eq!(status, StatusCode::CREATED, "{index}");
     assert_eq!(index["asset"], "native");
-    assert_eq!(index["index_state"], "indexing");
-    assert_eq!(index["index_reason"], Value::Null);
+    assert_eq!(index["state"], "indexing");
+    assert_eq!(index["reason"], Value::Null);
     assert_eq!(
-        (&index["index_requested_from"], &index["indexed_from"]),
+        (&index["requested_from"], &index["birthday"]),
         (&json!(80), &json!(80))
     );
-    assert_eq!(index["indexed_at"], Value::Null);
+    assert_eq!(index["indexed_through"], Value::Null);
     let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
     assert_eq!(networks["networks"][0]["max_history_days"], 30);
     // Block p is 100 - p days old: 50.5 days ago is after block 49.
@@ -333,30 +325,30 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
     let (status, _) = text(&router, "/v1/networks/bitcoin/regtest/tip/search?at=soon").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    let uri = "/v1/wallets/bitcoin:regtest:alice";
+    let uri = "/v1/wallets/bitcoin.regtest.alice";
     let native = format!("{uri}/indexes/native");
     let state = |index_state: &str| Some(json!({ "index_state": index_state }));
     let (status, paused) = call(&router, Method::PATCH, &native, state("paused")).await;
     assert_eq!(status, StatusCode::OK, "{paused}");
-    assert_eq!(paused["index_state"], "paused");
+    assert_eq!(paused["state"], "paused");
     let (_, list) = call(&router, Method::GET, "/v1/wallets", None).await;
     assert_eq!(
-        list["wallets"][0]["indexes"][0]["index_state"], "paused",
+        list["wallets"][0]["indexes"]["native"]["state"], "paused",
         "{list}"
     );
     let (status, resumed) = call(&router, Method::PATCH, &native, state("indexing")).await;
     assert_eq!(status, StatusCode::OK, "{resumed}");
     let (_, read) = call(&router, Method::GET, uri, None).await;
-    assert_eq!(read["indexes"][0]["index_state"], "indexing", "{read}");
+    assert_eq!(read["indexes"]["native"]["state"], "indexing", "{read}");
     let (status, _) = call(&router, Method::PATCH, &native, state("no_data")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let nobody = "/v1/wallets/bitcoin:regtest:nobody/indexes/native";
+    let nobody = "/v1/wallets/bitcoin.regtest.nobody/indexes/native";
     let (status, _) = call(&router, Method::PATCH, nobody, state("paused")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = call(&router, Method::DELETE, &native, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, read) = call(&router, Method::GET, uri, None).await;
-    assert_eq!(read["indexes"], json!([]), "{read}");
+    assert_eq!(read["indexes"], json!({}), "{read}");
     let (status, _) = call(&router, Method::DELETE, &native, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
@@ -392,9 +384,9 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
     assert_eq!(status, StatusCode::CREATED, "{bob}");
     assert_eq!(
         (&bob["id"], &bob["keyed"]),
-        (&json!("bitcoin:regtest:bob"), &json!(true))
+        (&json!("bitcoin.regtest.bob"), &json!(true))
     );
-    assert_eq!(bob["assets"], json!([]));
+    assert_eq!(bob["indexes"], json!({}));
     let (status, error) = create(json!({ "secret": "carol", "address": "dave" })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
     assert!(error.to_string().contains("derives carol"), "{error}");
@@ -412,7 +404,7 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         (status, &erin["keyed"]),
         (StatusCode::CREATED, &json!(false))
     );
-    let erin_uri = "/v1/wallets/bitcoin:regtest:erin";
+    let erin_uri = "/v1/wallets/bitcoin.regtest.erin";
     let (status, _) = call(&router, Method::PUT, &format!("{erin_uri}/tags/vip"), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, index) = call(
@@ -423,12 +415,12 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{index}");
-    assert_eq!(index["index_requested_from"], 5);
+    assert_eq!(index["requested_from"], 5);
     let (status, erin) = create(json!({ "secret": "erin", "address": "erin" })).await;
     assert_eq!(status, StatusCode::OK, "{erin}");
     assert_eq!(
-        (&erin["keyed"], &erin["assets"]),
-        (&json!(true), &json!(["native"]))
+        (&erin["keyed"], &erin["indexes"]["native"]["asset"]),
+        (&json!(true), &json!("native"))
     );
     // Watching a keyed address answers it as is.
     let (status, erin) = create(json!({ "address": "erin" })).await;
@@ -436,7 +428,7 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
     let (_, list) = call(&router, Method::GET, "/v1/wallets", None).await;
     let listed = list["wallets"]
         .as_array()
-        .and_then(|wallets| wallets.iter().find(|w| w["id"] == "bitcoin:regtest:erin"))
+        .and_then(|wallets| wallets.iter().find(|w| w["id"] == "bitcoin.regtest.erin"))
         .cloned()
         .unwrap_or_default();
     assert_eq!(listed["tags"], json!(["vip"]), "{list}");
@@ -460,7 +452,7 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
     assert_eq!(tags, json!({ "tags": [] }));
 
     // Indexes need a kept wallet and an asset.
-    let unknown = "/v1/wallets/bitcoin:regtest:nobody";
+    let unknown = "/v1/wallets/bitcoin.regtest.nobody";
     let fresh = json!({ "asset": "native" });
     let (status, _) = call(
         &router,

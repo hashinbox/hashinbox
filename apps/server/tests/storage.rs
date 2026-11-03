@@ -22,6 +22,17 @@ async fn storage() -> (Stores, Db, tempfile::TempDir) {
     (Stores::new(db.clone()), db, directory)
 }
 
+/// The signed balance of `address` in `asset` over every live block, as the
+/// balance route reads it.
+async fn balance(db: &Db, address: &Address, asset: &Asset) -> anyhow::Result<Decimal> {
+    let id = crate::models::wallet_index::WalletIndex::id(address, asset)?;
+    db.read(move |connection| {
+        let last = crate::models::leg::db::find_last(connection, &id, i64::MAX)?;
+        last.map_or_else(|| Ok(Decimal::zero()), |leg| leg.balance())
+    })
+    .await
+}
+
 fn network() -> Network {
     Network::new(Chain::new("bitcoin"), "regtest")
 }
@@ -644,9 +655,7 @@ async fn a_reorged_transaction_moves_to_its_new_block() {
     // Archived and not re-mined: not shown, not counted.
     assert!(history(&directory, &alice).is_empty());
     assert_eq!(
-        crate::usecase::history::balance(&db, &alice, &native(&network))
-            .await
-            .unwrap(),
+        balance(&db, &alice, &native(&network)).await.unwrap(),
         Decimal::zero()
     );
     let mut branch = block(&network, 1, 1, vec![mined.clone()]);
@@ -658,9 +667,7 @@ async fn a_reorged_transaction_moves_to_its_new_block() {
     assert_eq!(rows(&directory, "m"), (vec![moved.clone()], vec![moved]));
     assert_eq!(history(&directory, &alice), ["m"]);
     assert_eq!(
-        crate::usecase::history::balance(&db, &alice, &native(&network))
-            .await
-            .unwrap(),
+        balance(&db, &alice, &native(&network)).await.unwrap(),
         Decimal::from(4_u64)
     );
 }
@@ -673,9 +680,7 @@ async fn pending_legs_never_count() {
     watch(&storage, &alice, 0).await;
     record(&db, &pending(&network, "p", "alice", 3)).await;
     assert_eq!(
-        crate::usecase::history::balance(&db, &alice, &native(&network))
-            .await
-            .unwrap(),
+        balance(&db, &alice, &native(&network)).await.unwrap(),
         Decimal::zero()
     );
     assert!(
@@ -827,9 +832,7 @@ async fn balance_and_history_read_live_blocks_only() {
     let blocks = run(&network, vec![paid, block(&network, 1, 0, vec![spent])]);
     BlockStore::insert(&storage, &blocks).await.unwrap();
     assert_eq!(
-        crate::usecase::history::balance(&db, &alice, &asset)
-            .await
-            .unwrap(),
+        balance(&db, &alice, &asset).await.unwrap(),
         Decimal::from(3)
     );
 
@@ -850,9 +853,7 @@ async fn balance_and_history_read_live_blocks_only() {
 
     BlockStore::delete(&storage, &network, 1).await.unwrap();
     assert_eq!(
-        crate::usecase::history::balance(&db, &alice, &asset)
-            .await
-            .unwrap(),
+        balance(&db, &alice, &asset).await.unwrap(),
         Decimal::from(6)
     );
     assert_eq!(
@@ -864,9 +865,7 @@ async fn balance_and_history_read_live_blocks_only() {
     );
     let other = address(&other(), "alice");
     assert_eq!(
-        crate::usecase::history::balance(&db, &other, &native(&other.network))
-            .await
-            .unwrap(),
+        balance(&db, &other, &native(&other.network)).await.unwrap(),
         Decimal::zero()
     );
 }
@@ -886,7 +885,7 @@ fn raw(directory: &tempfile::TempDir) -> diesel::SqliteConnection {
 async fn the_database_refuses_a_parent_that_is_not_stored() {
     use diesel::connection::SimpleConnection as _;
     let (storage, _db, directory) = storage().await;
-    BlockStore::insert(&storage, &empty(&network(), 0, 0, 0))
+    BlockStore::insert(&storage, &empty(&crate::tests::network(), 0, 0, 0))
         .await
         .unwrap();
     let mut connection = raw(&directory);
@@ -977,4 +976,475 @@ async fn ids_are_dotted_natural_keys() {
         reason: None,
     };
     assert!(WalletIndexStore::insert(&storage, &dotted).await.is_err());
+}
+
+/// A transaction `txid` at `order` in its block with `legs`.
+fn mined(network: &Network, txid: &str, order: u64, legs: Vec<Leg>) -> Transaction {
+    Transaction {
+        id: TransactionId::new(network.clone(), txid),
+        state: TransactionState::Succeeded,
+        order: Some(order),
+        legs,
+        bytes: txid.as_bytes().to_vec(),
+        expires: None,
+    }
+}
+
+/// A send of `amount` from `from` to `to`, spending `coin`, paying `fee`.
+fn send(network: &Network, from: &str, to: &str, amount: u64, fee: u64, spent: Coin) -> Vec<Leg> {
+    vec![
+        Leg::Spent {
+            address: address(network, from),
+            asset: native(network),
+            amount: Decimal::from(amount),
+            coin: Some(spent),
+        },
+        Leg::Received {
+            address: address(network, to),
+            asset: native(network),
+            amount: Decimal::from(amount),
+            coin: None,
+        },
+        Leg::Fee {
+            address: address(network, from),
+            asset: native(network),
+            amount: Decimal::from(fee),
+        },
+    ]
+}
+
+/// The guard of design 072: recomputes every live mined leg's running total
+/// from the amounts, per index, in its order (position, transaction order,
+/// leg index, rewards last; not the stored seq), checks each stored
+/// total and index, and checks every balance read against the
+/// recomputation: now (the balance route's read) and at each position up
+/// to `tip` (the balance model, the wallet read).
+async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip: i64) {
+    use diesel::{
+        RunQueryDsl as _,
+        sql_types::{BigInt, Integer, Text},
+    };
+    #[derive(diesel::QueryableByName)]
+    struct Mined {
+        #[diesel(sql_type = Text)]
+        address: String,
+        #[diesel(sql_type = Text)]
+        wallet_index_id: String,
+        #[diesel(sql_type = BigInt)]
+        position: i64,
+        #[diesel(sql_type = Integer)]
+        kind: i32,
+        #[diesel(sql_type = Text)]
+        amount: String,
+        #[diesel(sql_type = Text)]
+        total: String,
+    }
+    let rows: Vec<Mined> = diesel::sql_query(
+        r#"SELECT l.address, l.wallet_index_id, l.position, l.kind, l.amount, l.total FROM leg l
+        JOIN block b ON b.id = l.block LEFT JOIN "transaction" t ON t.id = l."transaction"
+        WHERE b.archived_at IS NULL AND l.asset = 'native'
+        ORDER BY l.wallet_index_id, b.position, l."transaction" IS NULL, t."order", l.leg_index"#,
+    )
+    .load(&mut raw(directory))
+    .unwrap();
+    assert!(!rows.is_empty());
+    let mut running = std::collections::BTreeMap::<String, Decimal>::new();
+    // (address, position, balance right after the leg), in order.
+    let mut steps = Vec::new();
+    for row in rows {
+        assert_eq!(
+            row.wallet_index_id,
+            format!("bitcoin.regtest.{}.native", row.address)
+        );
+        let amount: Decimal = row.amount.parse().unwrap();
+        let sum = running
+            .entry(row.address.clone())
+            .or_insert_with(Decimal::zero);
+        *sum = match row.kind {
+            0 | 3 | 5 => sum.clone() + amount,
+            _ => sum.clone() - amount,
+        };
+        assert_eq!(
+            row.total.parse::<Decimal>().unwrap(),
+            *sum,
+            "{}",
+            row.address
+        );
+        steps.push((row.address, row.position, sum.clone()));
+    }
+    let at = |name: &str, through: i64| {
+        steps
+            .iter()
+            .rfind(|(address, position, _)| address == name && *position <= through)
+            .map_or_else(Decimal::zero, |(_, _, sum)| sum.clone())
+    };
+    let network = network();
+    for name in names {
+        let now = balance(db, &address(&network, name), &native(&network))
+            .await
+            .unwrap();
+        assert_eq!(now, at(name, i64::MAX), "{name} now");
+    }
+    // The wallet read at the tip, final block `through`: its balances, and
+    // its mined legs' totals in (position, seq) order.
+    for through in 0..=tip {
+        let mut tips = crate::models::wallet::Tips::default();
+        tips.0.insert(
+            "bitcoin.regtest".to_owned(),
+            crate::models::wallet::Tip {
+                tip: Some(u64::try_from(tip).unwrap()),
+                confirmed: Some(u64::try_from(through).unwrap()),
+            },
+        );
+        let found = db
+            .read(move |connection| {
+                crate::models::wallet::db::list_at_tip(connection, &tips, "", 100)
+            })
+            .await
+            .unwrap();
+        assert_eq!(found.len(), names.len());
+        for one in found.iter() {
+            let index = &one.indexes["native"];
+            assert_eq!(index.finality_at, Some(through));
+            let parse = |text: &str| text.parse::<Decimal>().unwrap();
+            assert_eq!(parse(&index.balance), at(&one.address, i64::MAX));
+            let confirmed = index.balance_confirmed.as_deref().map(parse);
+            assert_eq!(confirmed, Some(at(&one.address, through)), "at {through}");
+            let shown: Vec<Decimal> = index
+                .legs
+                .iter()
+                .filter_map(|leg| leg.total.as_deref().map(parse))
+                .collect();
+            let recomputed: Vec<Decimal> = steps
+                .iter()
+                .filter(|(address, _, _)| *address == one.address)
+                .map(|(_, _, sum)| sum.clone())
+                .collect();
+            assert_eq!(shown, recomputed, "{} legs", one.address);
+        }
+    }
+    let ids: Vec<String> = names
+        .iter()
+        .map(|name| format!("bitcoin.regtest.{name}.native"))
+        .collect();
+    for through in 0..=tip {
+        let ids = ids.clone();
+        let balances = db
+            .read(move |connection| {
+                crate::models::wallet_index::db::find_by_ids(
+                    connection,
+                    &crate::tests::network(),
+                    &ids,
+                    through,
+                )
+            })
+            .await
+            .unwrap();
+        for name in names {
+            let id = format!("bitcoin.regtest.{name}.native");
+            let confirmed = balances[&id]
+                .balance_confirmed
+                .as_deref()
+                .map(|total| total.parse::<Decimal>().unwrap());
+            assert_eq!(confirmed, Some(at(name, through)), "{name} at {through}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn running_totals_match_the_amounts_through_reorgs_and_sends() {
+    let (storage, db, directory) = storage().await;
+    let network = network();
+    let names = ["alice", "bob", "carol"];
+    for name in names {
+        watch(&storage, &address(&network, name), 0).await;
+    }
+    let reward = |index, name, amount| Reward {
+        index,
+        address: address(&network, name),
+        asset: native(&network),
+        amount: Decimal::from(amount),
+    };
+    // Block 0: several indexes, two transactions, rewards (out of index order).
+    let mut first = block(
+        &network,
+        0,
+        0,
+        vec![
+            mined(
+                &network,
+                "f2",
+                1,
+                payment(&network, "f2", "bob", 7, None).legs,
+            ),
+            mined(
+                &network,
+                "f1",
+                0,
+                payment(&network, "f1", "alice", 10, None).legs,
+            ),
+        ],
+    );
+    first.rewards = vec![
+        reward(1, "alice", 2),
+        reward(0, "alice", 3),
+        reward(2, "carol", 50),
+    ];
+    let second = block(
+        &network,
+        1,
+        0,
+        vec![mined(
+            &network,
+            "s",
+            0,
+            send(&network, "alice", "bob", 4, 1, coin(&network, "f1", 0)),
+        )],
+    );
+    BlockStore::insert(&storage, &run(&network, vec![first, second]))
+        .await
+        .unwrap();
+    totals_hold(&db, &directory, &names, 1).await;
+
+    // A pending send, later mined with another fee; one that expires.
+    let mut pending_p = mined(
+        &network,
+        "p",
+        0,
+        send(&network, "alice", "carol", 2, 1, coin(&network, "f2", 0)),
+    );
+    pending_p.state = TransactionState::Pending;
+    pending_p.order = None;
+    record(&db, &pending_p).await;
+    let mut pending_q = mined(
+        &network,
+        "q",
+        0,
+        send(&network, "alice", "bob", 1, 1, coin(&network, "s", 1)),
+    );
+    pending_q.state = TransactionState::Pending;
+    pending_q.order = None;
+    pending_q.expires = Some(100);
+    record(&db, &pending_q).await;
+    let spendable = |db: Db| async move {
+        db.read(|connection| {
+            crate::models::wallet_index::db::find_by_ids(
+                connection,
+                &crate::tests::network(),
+                &["bitcoin.regtest.alice.native".to_owned()],
+                1,
+            )
+        })
+        .await
+        .unwrap()["bitcoin.regtest.alice.native"]
+            .spendable()
+            .unwrap()
+    };
+    // 10 + 3 + 2 - 4 - 1, less 2 + 1 and 1 + 1 pending.
+    assert_eq!(spendable(db.clone()).await, Decimal::from(5));
+    let expired = {
+        let network = network.clone();
+        db.write(move |connection| {
+            Ok(crate::models::transaction::db::expire(
+                connection, &network, 100,
+            )?)
+        })
+        .await
+        .unwrap()
+    };
+    assert_eq!(expired, 1);
+    assert_eq!(spendable(db.clone()).await, Decimal::from(7));
+    let p_fee_2 = mined(
+        &network,
+        "p",
+        0,
+        send(&network, "alice", "carol", 2, 2, coin(&network, "f2", 0)),
+    );
+    let third = block(&network, 2, 0, vec![p_fee_2.clone()]);
+    BlockStore::insert(&storage, &run(&network, vec![third.clone()]))
+        .await
+        .unwrap();
+    assert_eq!(spendable(db.clone()).await, Decimal::from(10));
+    totals_hold(&db, &directory, &names, 2).await;
+
+    // A reorg: block 2 archived; a branch mines p again (fee 3) one block later.
+    BlockStore::delete(&storage, &network, 2).await.unwrap();
+    totals_hold(&db, &directory, &names, 2).await;
+    let mut branch = block(
+        &network,
+        2,
+        1,
+        vec![mined(
+            &network,
+            "b2",
+            0,
+            payment(&network, "b2", "carol", 9, None).legs,
+        )],
+    );
+    branch.header.parent = header(2, 0).parent;
+    let p_fee_3 = mined(
+        &network,
+        "p",
+        1,
+        send(&network, "alice", "carol", 2, 3, coin(&network, "f2", 0)),
+    );
+    let mut branch_next = block(&network, 3, 1, vec![p_fee_3]);
+    branch_next.rewards = vec![reward(0, "bob", 1)];
+    BlockStore::insert(&storage, &run(&network, vec![branch, branch_next]))
+        .await
+        .unwrap();
+    totals_hold(&db, &directory, &names, 3).await;
+
+    // The branch archived and block 2 revived (its hash again), then a new 3.
+    BlockStore::delete(&storage, &network, 2).await.unwrap();
+    let mut fourth = block(
+        &network,
+        3,
+        0,
+        vec![mined(
+            &network,
+            "g",
+            0,
+            payment(&network, "g", "bob", 6, None).legs,
+        )],
+    );
+    fourth.rewards = vec![reward(0, "alice", 1)];
+    BlockStore::insert(&storage, &run(&network, vec![third, fourth]))
+        .await
+        .unwrap();
+    totals_hold(&db, &directory, &names, 3).await;
+    // A second writer of an index's step is refused: its seq is taken.
+    let taken = r#"INSERT INTO leg (id, block, "transaction", leg_index, kind, address, asset,
+        amount, wallet_index_id, position, seq, total)
+        SELECT 'bitcoin.regtest.dup.0', block, "transaction", 9, kind, address, asset, amount,
+          wallet_index_id, position, seq, total
+        FROM leg WHERE wallet_index_id = 'bitcoin.regtest.alice.native' LIMIT 1"#;
+    assert!(diesel::RunQueryDsl::execute(diesel::sql_query(taken), &mut raw(&directory)).is_err());
+    assert_eq!(
+        balance(&db, &address(&network, "alice"), &native(&network))
+            .await
+            .unwrap(),
+        // 10 + 3 + 2 - 4 - 1 - 2 - 2 + 1.
+        Decimal::from(7)
+    );
+}
+
+/// A pending send of `amount` from alice to bob paying `fee`, expiring at
+/// `expires`.
+fn pending_send(
+    network: &Network,
+    txid: &str,
+    amount: u64,
+    fee: u64,
+    expires: Option<u64>,
+) -> Transaction {
+    let spent = coin(network, "f", u32::try_from(amount).unwrap());
+    let mut transaction = mined(
+        network,
+        txid,
+        0,
+        send(network, "alice", "bob", amount, fee, spent),
+    );
+    transaction.state = TransactionState::Pending;
+    transaction.order = None;
+    transaction.expires = expires;
+    transaction
+}
+
+/// Two pending sends of one index: (a) both mined in one block, out of
+/// list order; (b) mined in two blocks; (c) one mined, one expired. The
+/// totals hold and spendable (total less pending outgoing) follows.
+#[tokio::test]
+async fn two_pending_sends_of_one_index_land_in_the_totals() {
+    let network = network();
+    let names = ["alice", "bob"];
+    let alice = "bitcoin.regtest.alice.native";
+    for case in ['a', 'b', 'c'] {
+        let (storage, db, directory) = storage().await;
+        for name in names {
+            watch(&storage, &address(&network, name), 0).await;
+        }
+        let funding = payment(&network, "f", "alice", 20, None);
+        BlockStore::insert(
+            &storage,
+            &run(&network, vec![block(&network, 0, 0, vec![funding])]),
+        )
+        .await
+        .unwrap();
+        record(&db, &pending_send(&network, "p1", 3, 1, None)).await;
+        record(&db, &pending_send(&network, "p2", 5, 1, Some(100))).await;
+        let spendable = |db: Db| async move {
+            db.read(|connection| {
+                crate::models::wallet_index::db::find_by_ids(
+                    connection,
+                    &crate::tests::network(),
+                    &[alice.to_owned()],
+                    9,
+                )
+            })
+            .await
+            .unwrap()[alice]
+                .spendable()
+                .unwrap()
+        };
+        // 20 less 3 + 1 and 5 + 1 pending.
+        assert_eq!(spendable(db.clone()).await, Decimal::from(10), "{case}");
+        // Mined, each pays 2.
+        let p1 = mined(
+            &network,
+            "p1",
+            1,
+            pending_send(&network, "p1", 3, 2, None).legs,
+        );
+        let p2 = mined(
+            &network,
+            "p2",
+            0,
+            pending_send(&network, "p2", 5, 2, None).legs,
+        );
+        match case {
+            'a' => {
+                // p2 is first in the block though listed second.
+                let both = block(&network, 1, 0, vec![p1, p2]);
+                BlockStore::insert(&storage, &run(&network, vec![both]))
+                    .await
+                    .unwrap();
+                totals_hold(&db, &directory, &names, 1).await;
+                assert_eq!(spendable(db.clone()).await, Decimal::from(8), "{case}");
+            }
+            'b' => {
+                let first = block(&network, 1, 0, vec![p1]);
+                BlockStore::insert(&storage, &run(&network, vec![first]))
+                    .await
+                    .unwrap();
+                totals_hold(&db, &directory, &names, 1).await;
+                // 20 - 5, less 5 + 1 pending.
+                assert_eq!(spendable(db.clone()).await, Decimal::from(9), "{case}");
+                let second = block(&network, 2, 0, vec![p2]);
+                BlockStore::insert(&storage, &run(&network, vec![second]))
+                    .await
+                    .unwrap();
+                totals_hold(&db, &directory, &names, 2).await;
+                assert_eq!(spendable(db.clone()).await, Decimal::from(8), "{case}");
+            }
+            _ => {
+                let first = block(&network, 1, 0, vec![p1]);
+                BlockStore::insert(&storage, &run(&network, vec![first]))
+                    .await
+                    .unwrap();
+                let network = network.clone();
+                let expired = db
+                    .write(move |connection| {
+                        Ok(crate::models::transaction::db::expire(
+                            connection, &network, 100,
+                        )?)
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(expired, 1);
+                totals_hold(&db, &directory, &names, 1).await;
+                assert_eq!(spendable(db.clone()).await, Decimal::from(15), "{case}");
+            }
+        }
+    }
 }

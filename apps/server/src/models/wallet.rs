@@ -1,14 +1,15 @@
 //! `wallet`: every address the server knows on a network, keyed (its key's
-//! curve and bytes kept) or watch-only, and its tags.
+//! curve and bytes kept) or watch-only, its tags, and (read at a tip) its
+//! indexes with their balances, progress and legs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::bail;
 use base::{Address, Chain, Network};
 use crypto::{Curve, SecretBytes};
-use diesel::{prelude::*, sqlite::Sqlite};
+use serde::Serialize;
 
-use super::{Json, key, schema::wallet};
+use super::{Json, key, wallet_index::WalletIndex};
 
 /// Key bytes, zeroized on drop; `None` for a watch-only wallet.
 pub(crate) struct Secret(pub(crate) Option<SecretBytes>);
@@ -19,21 +20,65 @@ impl From<Option<Vec<u8>>> for Secret {
     }
 }
 
-/// One wallet: an address, its key when kept, its tags. No `Debug`: it may
-/// hold the key.
-#[derive(Queryable, Selectable)]
-#[diesel(table_name = wallet, check_for_backend(Sqlite))]
+/// One wallet, as the API shows it: an address, whether its key is kept,
+/// its tags, and its indexes (each with its balances, progress and legs;
+/// read by [`db::find_at_tip`] and [`db::list_at_tip`], empty from the other
+/// reads). The key (`curve`, `secret`) is never serialized, and the API
+/// reads leave it out. No `Debug`: it may hold the key.
+#[derive(Serialize, utoipa::ToSchema)]
 pub(crate) struct Wallet {
+    /// `{chain}.{network}.{address}`: what every wallet route takes.
     pub(crate) id: String,
     pub(crate) chain: String,
     pub(crate) network: String,
+    /// Canonical address text.
     pub(crate) address: String,
-    /// `None` exactly when `secret` is.
-    pub(crate) curve: Option<String>,
-    #[diesel(deserialize_as = Option<Vec<u8>>)]
-    pub(crate) secret: Secret,
-    /// Sorted, each once, each [`is_tag`].
+    /// Whether this server holds its key and can send from it.
+    pub(crate) keyed: bool,
+    /// Its tags, sorted, each once, each [`is_tag`].
+    #[schema(value_type = Vec<String>)]
     pub(crate) tags: Json<BTreeSet<String>>,
+    /// Its indexes by asset id (`native` or the token id).
+    pub(crate) indexes: BTreeMap<String, WalletIndex>,
+    /// `None` exactly when `secret` is.
+    #[serde(skip)]
+    pub(crate) curve: Option<String>,
+    #[serde(skip)]
+    pub(crate) secret: Secret,
+}
+
+/// A network's indexer tip, as of its last step, and its final
+/// (confirmed) position: what a read measures progress and confirmed
+/// balances against. Either may be unknown.
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct Tip {
+    pub(crate) tip: Option<u64>,
+    pub(crate) confirmed: Option<u64>,
+}
+
+/// Each network's [`Tip`], by `{chain}.{network}`. A network missing here
+/// reads with no tip: null progress against it, `balance` over every live
+/// block, null `balance_confirmed`.
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct Tips(pub(crate) BTreeMap<String, Tip>);
+
+impl Tips {
+    /// From each network's indexer `stats` (as `Payments::stats` gives
+    /// them): its tip and its confirmed position.
+    pub(crate) fn from_stats(stats: BTreeMap<Network, base::Stats>) -> Self {
+        Self(
+            stats
+                .into_iter()
+                .map(|(network, stats)| {
+                    let tip = Tip {
+                        tip: stats.tip,
+                        confirmed: stats.confirmed,
+                    };
+                    (format!("{}.{}", network.chain, network.name), tip)
+                })
+                .collect(),
+        )
+    }
 }
 
 /// Whether `tag` is a tag: 1 to 64 of `[a-z0-9-]`.
@@ -60,6 +105,7 @@ impl Wallet {
             Curve::Ed25519 => "ed25519",
         };
         Ok(Self {
+            keyed: true,
             curve: Some(curve.to_owned()),
             secret: Secret(Some(secret)),
             ..Self::from_address(address)?
@@ -77,9 +123,11 @@ impl Wallet {
             chain: address.network.chain.as_str().to_owned(),
             network: address.network.name.clone(),
             address: address.value.clone(),
+            keyed: false,
+            tags: Json(BTreeSet::new()),
+            indexes: BTreeMap::new(),
             curve: None,
             secret: Secret(None),
-            tags: Json(BTreeSet::new()),
         })
     }
 
@@ -94,11 +142,6 @@ impl Wallet {
             &address.network.name,
             &address.value,
         ])
-    }
-
-    /// Whether its key is kept: it can send.
-    pub(crate) const fn keyed(&self) -> bool {
-        self.secret.0.is_some()
     }
 
     /// Its key's curve; `None` for a watch-only wallet.
@@ -124,12 +167,6 @@ impl TryFrom<&dyn base::Wallet> for Wallet {
         let (curve, secret) = wallet.private_key();
         Self::new(wallet.address(), curve, secret)
     }
-}
-
-/// A wallet with how far each of its indexes is indexed, in asset order.
-pub(crate) struct Indexed {
-    pub(crate) wallet: Wallet,
-    pub(crate) indexes: Vec<base::WalletIndex>,
 }
 
 collection! {
@@ -160,19 +197,270 @@ impl Wallets {
     reason = "the table's whole API; not every statement has a caller yet"
 )]
 pub(crate) mod db {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use anyhow::ensure;
     use diesel::{
         dsl::sql,
         prelude::*,
-        sql_types::{BigInt, Binary, Nullable, Text},
+        sql_types::{BigInt, Binary, Bool, Nullable, Text},
+        sqlite::Sqlite,
     };
 
-    use super::{Indexed, Json, Wallet, Wallets, is_tag};
+    use super::{Json, Secret, Tips, Wallet, Wallets, is_tag};
     use crate::models::{
-        Block,
         schema::{block, wallet, wallet_index},
-        wallet_index::{Selector, db::Row},
+        wallet_index::{self as index, Selector, WalletIndex, db::IndexRow},
     };
+
+    /// One `wallet` row: a [`Wallet`] with its key, without its indexes.
+    #[derive(Queryable, Selectable)]
+    #[diesel(table_name = wallet, check_for_backend(Sqlite))]
+    struct Row {
+        id: String,
+        chain: String,
+        network: String,
+        address: String,
+        curve: Option<String>,
+        #[diesel(deserialize_as = Option<Vec<u8>>)]
+        secret: Secret,
+        tags: Json<BTreeSet<String>>,
+    }
+
+    impl From<Row> for Wallet {
+        fn from(row: Row) -> Self {
+            Self {
+                id: row.id,
+                chain: row.chain,
+                network: row.network,
+                address: row.address,
+                keyed: row.secret.0.is_some(),
+                tags: row.tags,
+                indexes: BTreeMap::new(),
+                curve: row.curve,
+                secret: row.secret,
+            }
+        }
+    }
+
+    /// `rows` as wallets, indexes not read.
+    fn wallets(rows: Vec<Row>) -> Wallets {
+        rows.into_iter().map(Wallet::from).collect()
+    }
+
+    /// Wallet `?2` left-joined to its indexes, each measured against its
+    /// network's entry in `?1` (JSON [`Tips`]: tip and final block): one row per index (one without index columns for a
+    /// wallet without indexes), by asset. Each balance is the total of the
+    /// index's last live mined leg (at or below the final block for the
+    /// confirmed one). No key is read.
+    const ONE: &str = r#"
+    WITH t AS (
+        SELECT
+            key AS network_id,
+            json_extract(value, '$.tip') AS tip,
+            json_extract(value, '$.confirmed') AS confirmed
+        FROM json_each(?1)
+    )
+    SELECT
+        w.id,
+        w.secret IS NOT NULL AS keyed,
+        w.tags,
+        wi.id AS index_id,
+        wi.wallet_id,
+        wi.asset,
+        wi.requested_from,
+        wi.birthday,
+        wi.indexed_at,
+        wi.state,
+        wi.reason,
+        w.chain,
+        w.network,
+        w.address,
+        b.position AS indexed_through,
+        CASE
+            WHEN b.position IS NULL OR t.tip IS NULL THEN NULL
+            ELSE MAX(t.tip - b.position, 0)
+        END AS behind_tip,
+        t.confirmed AS finality_at,
+        COALESCE((
+            SELECT l.total
+            FROM leg l
+            JOIN block lb ON lb.id = l.block
+            WHERE l.wallet_index_id = wi.id
+              AND lb.archived_at IS NULL
+            ORDER BY l.position DESC, l.seq DESC
+            LIMIT 1
+        ), '0') AS balance,
+        CASE
+            WHEN t.confirmed IS NULL THEN NULL
+            ELSE COALESCE((
+                SELECT l.total
+                FROM leg l
+                JOIN block lb ON lb.id = l.block
+                WHERE l.wallet_index_id = wi.id
+                  AND l.position <= t.confirmed
+                  AND lb.archived_at IS NULL
+                ORDER BY l.position DESC, l.seq DESC
+                LIMIT 1
+            ), '0')
+        END AS balance_confirmed
+    FROM wallet w
+    LEFT JOIN wallet_index wi ON wi.wallet_id = w.id
+    LEFT JOIN block b ON b.id = wi.indexed_at
+    LEFT JOIN t ON t.network_id = w.chain || '.' || w.network
+    WHERE w.id = ?2
+    ORDER BY w.id, wi.asset"#;
+
+    /// As [`ONE`], for at most `?3` wallets with an id after `?2`, by id.
+    const PAGE: &str = r#"
+    WITH t AS (
+        SELECT
+            key AS network_id,
+            json_extract(value, '$.tip') AS tip,
+            json_extract(value, '$.confirmed') AS confirmed
+        FROM json_each(?1)
+    )
+    SELECT
+        w.id,
+        w.secret IS NOT NULL AS keyed,
+        w.tags,
+        wi.id AS index_id,
+        wi.wallet_id,
+        wi.asset,
+        wi.requested_from,
+        wi.birthday,
+        wi.indexed_at,
+        wi.state,
+        wi.reason,
+        w.chain,
+        w.network,
+        w.address,
+        b.position AS indexed_through,
+        CASE
+            WHEN b.position IS NULL OR t.tip IS NULL THEN NULL
+            ELSE MAX(t.tip - b.position, 0)
+        END AS behind_tip,
+        t.confirmed AS finality_at,
+        COALESCE((
+            SELECT l.total
+            FROM leg l
+            JOIN block lb ON lb.id = l.block
+            WHERE l.wallet_index_id = wi.id
+              AND lb.archived_at IS NULL
+            ORDER BY l.position DESC, l.seq DESC
+            LIMIT 1
+        ), '0') AS balance,
+        CASE
+            WHEN t.confirmed IS NULL THEN NULL
+            ELSE COALESCE((
+                SELECT l.total
+                FROM leg l
+                JOIN block lb ON lb.id = l.block
+                WHERE l.wallet_index_id = wi.id
+                  AND l.position <= t.confirmed
+                  AND lb.archived_at IS NULL
+                ORDER BY l.position DESC, l.seq DESC
+                LIMIT 1
+            ), '0')
+        END AS balance_confirmed
+    FROM (SELECT * FROM wallet WHERE id > ?2 ORDER BY id LIMIT ?3) w
+    LEFT JOIN wallet_index wi ON wi.wallet_id = w.id
+    LEFT JOIN block b ON b.id = wi.indexed_at
+    LEFT JOIN t ON t.network_id = w.chain || '.' || w.network
+    ORDER BY w.id, wi.asset"#;
+
+    /// A row of [`ONE`] / [`PAGE`]: a wallet and one of its indexes.
+    #[derive(QueryableByName)]
+    struct AtTip {
+        #[diesel(sql_type = Text)]
+        id: String,
+        #[diesel(sql_type = Text)]
+        chain: String,
+        #[diesel(sql_type = Text)]
+        network: String,
+        #[diesel(sql_type = Text)]
+        address: String,
+        #[diesel(sql_type = Bool)]
+        keyed: bool,
+        #[diesel(sql_type = Text)]
+        tags: Json<BTreeSet<String>>,
+        #[diesel(embed)]
+        index: Option<IndexRow>,
+    }
+
+    /// `rows` grouped by wallet, each index with its legs (one more query
+    /// over the indexes' ids).
+    fn group(connection: &mut SqliteConnection, rows: Vec<AtTip>) -> anyhow::Result<Wallets> {
+        let ids: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| row.index.as_ref())
+            .map(IndexRow::id)
+            .collect();
+        let mut by_index = index::db::find_legs(connection, &ids)?;
+        let mut wallets: Vec<Wallet> = Vec::new();
+        for row in rows {
+            if wallets.last().is_none_or(|last| last.id != row.id) {
+                wallets.push(Wallet {
+                    id: row.id,
+                    chain: row.chain,
+                    network: row.network,
+                    address: row.address,
+                    keyed: row.keyed,
+                    tags: row.tags,
+                    indexes: BTreeMap::new(),
+                    curve: None,
+                    secret: Secret(None),
+                });
+            }
+            if let (Some(last), Some(index)) = (wallets.last_mut(), row.index) {
+                let mut index = WalletIndex::try_from(index)?;
+                index.legs = by_index.remove(&index.id).unwrap_or_default();
+                last.indexes.insert(index.asset.id.clone(), index);
+            }
+        }
+        Ok(wallets.into())
+    }
+
+    /// Wallet `id`, if kept, with its indexes measured against `tips` (each
+    /// network's indexer tip and confirmations) and their legs: one query
+    /// for the wallet and its indexes, one for their legs, grouped here.
+    /// Never its key.
+    ///
+    /// # Errors
+    ///
+    /// When a read fails or a stored value does not decode.
+    pub(crate) fn find_at_tip(
+        connection: &mut SqliteConnection,
+        id: &str,
+        tips: &Tips,
+    ) -> anyhow::Result<Option<Wallet>> {
+        let rows: Vec<AtTip> = diesel::sql_query(ONE)
+            .bind::<Text, _>(serde_json::to_string(tips)?)
+            .bind::<Text, _>(id)
+            .load(connection)?;
+        Ok(group(connection, rows)?.0.pop())
+    }
+
+    /// At most `limit` wallets with an id after `after` (`""`: from the
+    /// first), by id, each as [`find_at_tip`]: one query for the page with
+    /// its indexes, one for their legs.
+    ///
+    /// # Errors
+    ///
+    /// As [`find_at_tip`].
+    pub(crate) fn list_at_tip(
+        connection: &mut SqliteConnection,
+        tips: &Tips,
+        after: &str,
+        limit: i64,
+    ) -> anyhow::Result<Wallets> {
+        let rows: Vec<AtTip> = diesel::sql_query(PAGE)
+            .bind::<Text, _>(serde_json::to_string(tips)?)
+            .bind::<Text, _>(after)
+            .bind::<BigInt, _>(limit)
+            .load(connection)?;
+        group(connection, rows)
+    }
 
     /// What [`find_indexed`] picks; each part set narrows it.
     #[derive(Clone, Copy, Debug, Default)]
@@ -211,68 +499,31 @@ pub(crate) mod db {
         connection: &mut SqliteConnection,
         id: &str,
     ) -> QueryResult<Option<Wallet>> {
-        wallet::table
+        let row: Option<Row> = wallet::table
             .find(id)
-            .select(Wallet::as_select())
+            .select(Row::as_select())
             .first(connection)
-            .optional()
+            .optional()?;
+        Ok(row.map(Wallet::from))
     }
 
-    /// The wallet `id` (`None`: every wallet, by id), each with its indexes
-    /// and the block each is indexed through: one query.
-    ///
-    /// # Errors
-    ///
-    /// When the read fails or a stored value does not decode.
-    pub(crate) fn find_with_indexes(
-        connection: &mut SqliteConnection,
-        id: Option<&str>,
-    ) -> anyhow::Result<Vec<Indexed>> {
-        let mut query = wallet::table
-            .left_join(wallet_index::table.left_join(block::table))
-            .select((
-                Wallet::as_select(),
-                Option::<Row>::as_select(),
-                Option::<Block>::as_select(),
-            ))
-            .order((wallet::id, wallet_index::asset))
-            .into_boxed();
-        if let Some(id) = id {
-            query = query.filter(wallet::id.eq(id.to_owned()));
-        }
-        let mut wallets: Vec<Indexed> = Vec::new();
-        for (row, index, block) in query.load::<(Wallet, Option<Row>, Option<Block>)>(connection)? {
-            if wallets.last().is_none_or(|last| last.wallet.id != row.id) {
-                wallets.push(Indexed {
-                    wallet: row,
-                    indexes: Vec::new(),
-                });
-            }
-            if let (Some(last), Some(index)) = (wallets.last_mut(), index) {
-                let address = base::Address::from(&last.wallet);
-                last.indexes.push(index.progress(address, block.as_ref())?);
-            }
-        }
-        Ok(wallets)
-    }
-
-    /// Every kept wallet, keyed or not.
+    /// Every kept wallet, keyed or not, indexes not read.
     pub(crate) fn find_all(connection: &mut SqliteConnection) -> QueryResult<Wallets> {
-        let wallets = wallet::table
+        let rows = wallet::table
             .order(wallet::id)
-            .select(Wallet::as_select())
+            .select(Row::as_select())
             .load(connection)?;
-        Ok(wallets.into())
+        Ok(wallets(rows))
     }
 
-    /// Every wallet whose key is kept.
+    /// Every wallet whose key is kept, indexes not read.
     pub(crate) fn find_keyed(connection: &mut SqliteConnection) -> QueryResult<Wallets> {
-        let wallets = wallet::table
+        let rows = wallet::table
             .filter(wallet::secret.is_not_null())
             .order(wallet::id)
-            .select(Wallet::as_select())
+            .select(Row::as_select())
             .load(connection)?;
-        Ok(wallets.into())
+        Ok(wallets(rows))
     }
 
     /// How many wallets of every network keep their key.
@@ -371,11 +622,11 @@ pub(crate) mod db {
                 .filter(wallet::chain.eq(network.chain.as_str().to_owned()))
                 .filter(wallet::network.eq(network.name.clone()));
         }
-        let wallets = wallets
+        let rows = wallets
             .order(wallet::id)
-            .select(Wallet::as_select())
+            .select(Row::as_select())
             .load(connection)?;
-        Ok(wallets.into())
+        Ok(super::db::wallets(rows))
     }
 
     /// Forgets the wallet `id` and its indexes; how many wallets went (0 or 1).

@@ -29,28 +29,28 @@ export async function watch(id: string, watching: Watching): Promise<Wallet> {
 }
 
 /** How far one asset of a wallet is indexed. */
-type Progress = Wallet['indexes'][number];
+type Progress = Wallet['indexes'][string];
 
 /** One index's state, compactly; `color` marks anything but plain indexing. */
 export function progressOf(index: Progress): { text: string; color: string } {
   const shortened =
-    index.indexed_from > index.index_requested_from
-      ? ` · history from #${index.indexed_from} (asked #${index.index_requested_from})`
+    index.birthday > index.requested_from
+      ? ` · history from #${index.birthday} (asked #${index.requested_from})`
       : '';
-  if (index.index_state === 'no_data') {
-    return { text: `no data: ${index.index_reason ?? 'unknown'}${shortened}`, color: 'error.main' };
+  if (index.state === 'no_data') {
+    return { text: `no data: ${index.reason ?? 'unknown'}${shortened}`, color: 'error.main' };
   }
-  if (index.index_state === 'paused') {
+  if (index.state === 'paused') {
     return { text: `paused${shortened}`, color: 'warning.main' };
   }
-  const behind = index.index_behind_tip === null ? '' : ` · ${index.index_behind_tip} behind`;
-  const final = index.finality_at === null ? '' : ` · final at #${index.finality_at}`;
+  const behind = index.behind_tip == null ? '' : ` · ${index.behind_tip} behind`;
+  const final = index.finality_at == null ? '' : ` · final at #${index.finality_at}`;
   return { text: `indexing${behind}${final}${shortened}`, color: 'text.secondary' };
 }
 
 /** What stopped the wallet's indexing, `no data` over `paused`; null when nothing did. */
 export function haltOf(wallet: Wallet): { text: string; color: string } | null {
-  const states = wallet.indexes.map((index) => index.index_state);
+  const states = Object.values(wallet.indexes).map((index) => index.state);
   if (states.includes('no_data')) return { text: 'no data', color: 'error.main' };
   if (states.includes('paused')) return { text: 'paused', color: 'warning.main' };
   return null;

@@ -1,12 +1,11 @@
-//! An address's balance and its mined transactions with their legs, over
-//! live blocks, on the `leg`, `transaction` and `block` models. Each read is
-//! one snapshot.
+//! An address's mined transactions with their legs, over live blocks, on
+//! the `leg`, `transaction` and `block` models. Each read is one snapshot.
 //!
 //! The store records no confirmation: these answer every live block, up to
 //! the produced tip, and the caller states how far that is.
 
 use anyhow::Context as _;
-use base::{Address, Asset, BlockHeader, Decimal};
+use base::{Address, Asset, BlockHeader};
 
 use crate::{
     db::Db,
@@ -16,19 +15,6 @@ use crate::{
 /// Where a history page starts: after this transaction's
 /// (block position, order in block, txid).
 pub(crate) type After = (u64, u64, String);
-
-/// The signed atomic balance of `address` in `asset` over every live
-/// block: credits (received, minted) less debits (spent, burned, fees),
-/// plus signed rewards (reward legs).
-///
-/// # Errors
-///
-/// The read, or a stored amount that does not decode.
-pub(crate) async fn balance(db: &Db, address: &Address, asset: &Asset) -> anyhow::Result<Decimal> {
-    let (address, asset) = (address.clone(), asset.clone());
-    db.read(move |connection| leg::db::find_live(connection, &address, &asset)?.sum())
-        .await
-}
 
 /// At most `limit` transactions of `address` in `asset` in live blocks,
 /// after `after`, in chain order, each with its block and only the legs

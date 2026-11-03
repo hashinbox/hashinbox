@@ -1,15 +1,17 @@
 //! `transaction`: kept transactions, once per txid, pending (no block) or
 //! mined in a kept block.
 
+use std::collections::BTreeSet;
+
 use anyhow::Context as _;
-use base::{Address, Asset, Decimal, Network, Reason, TransactionId, TransactionState};
+use base::{Address, Addressed as _, Asset, Network, Reason, TransactionId, TransactionState};
 use diesel::{
     prelude::*,
     sql_types::{BigInt, Text},
     sqlite::Sqlite,
 };
 
-use super::{Leg, Legs, int, key, leg, schema::transactions, uint};
+use super::{Leg, Legs, int, key, leg, schema::transactions, uint, wallet_index};
 
 /// The `state` and `reason` columns of `state`.
 ///
@@ -205,8 +207,9 @@ pub(crate) mod db {
             sent_at: Some(now),
             expires_at: transaction.expires.map(int).transpose()?,
         };
-        let added = diesel::insert_or_ignore_into(transactions::table)
+        let added = diesel::insert_into(transactions::table)
             .values(&row)
+            .on_conflict_do_nothing()
             .execute(connection)?;
         if added == 0 {
             return Ok(());
@@ -214,29 +217,90 @@ pub(crate) mod db {
         // Checked before its own legs count; failing rolls the caller's
         // write back.
         for ((address, asset), takes) in transaction.debits() {
-            let spendable = leg::db::find_spendable(connection, &address, &asset)?;
-            if spendable.sum()? + takes < Decimal::zero() {
+            if !leg::db::can_spend(connection, &address, &asset, takes)? {
                 anyhow::bail!(Short);
             }
         }
+        // Only legs of indexed addresses are kept (a leg belongs to its
+        // index); a counterparty this server does not index leaves none.
         let legs = (0_u32..)
             .zip(&transaction.legs)
             .map(|(index, leg)| Leg::new(None, &id, index, leg))
-            .collect::<anyhow::Result<Legs>>()?;
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let ids: Vec<&str> = legs
+            .iter()
+            .map(|leg| leg.wallet_index_id.as_str())
+            .collect();
+        let indexed = wallet_index::db::find_ids_in(connection, &ids)?;
+        let legs: Legs = legs
+            .into_iter()
+            .filter(|leg| indexed.contains(&leg.wallet_index_id))
+            .collect();
         leg::db::insert(connection, &legs)?;
         Ok(())
     }
 
-    /// Keeps `transaction` as mined in block `block` with `legs` (indexed
-    /// legs of it): the row takes the mined values and its legs of no block
-    /// or another block (pending, or mined before a reorg) are replaced.
+    /// Keeps the facts of `block` (kept as row `id`, at `position`) for the
+    /// indexes (address, asset) `pairs` it applies to, in 072's order: each
+    /// transaction with a leg of one, by order ([`upsert_mined`]), then
+    /// their rewards, by index; each leg the next of its index
+    /// ([`leg::db::insert_mined`]). Their legs already in the block (kept
+    /// before, revived) are written again.
+    ///
+    /// # Errors
+    ///
+    /// When a value does not encode or decode, or a write fails.
+    pub(crate) fn insert_block(
+        connection: &mut SqliteConnection,
+        block: &base::Block,
+        id: &str,
+        position: i64,
+        pairs: &BTreeSet<(String, String)>,
+    ) -> anyhow::Result<()> {
+        let applies = |address: &Address, asset: &Asset| {
+            pairs.contains(&(address.value.clone(), asset.id.clone()))
+        };
+        let network = &block.network;
+        let indexes = pairs
+            .iter()
+            .map(|(address, asset)| key(&[network.chain.as_str(), &network.name, address, asset]))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        leg::db::delete_in(connection, id, &indexes)?;
+        let mut transactions: Vec<_> = block.transactions.iter().collect();
+        transactions.sort_by_key(|transaction| transaction.order.unwrap_or(0));
+        for transaction in transactions {
+            let legs: Vec<_> = (0_u32..)
+                .zip(&transaction.legs)
+                .filter(|(_, leg)| applies(leg.address(), leg.asset()))
+                .collect();
+            if !legs.is_empty() {
+                upsert_mined(connection, id, position, transaction, legs)?;
+            }
+        }
+        let mut rewards: Vec<_> = block
+            .rewards
+            .iter()
+            .filter(|reward| applies(&reward.address, &reward.asset))
+            .collect();
+        rewards.sort_by_key(|reward| reward.index);
+        for reward in rewards {
+            leg::db::insert_mined(connection, Leg::reward(id, reward)?, position)?;
+        }
+        Ok(())
+    }
+
+    /// Keeps `transaction` as mined in block `block` (at `position`) with
+    /// `legs` (indexed legs of it, each the next of its index): the row
+    /// takes the mined values and its legs of no block or another block
+    /// (pending, or mined before a reorg) are deleted.
     ///
     /// # Errors
     ///
     /// When a value does not encode or a write fails.
-    pub(crate) fn upsert_mined<'l>(
+    fn upsert_mined<'l>(
         connection: &mut SqliteConnection,
         block: &str,
+        position: i64,
         transaction: &base::Transaction,
         legs: impl IntoIterator<Item = (u32, &'l base::Leg)>,
     ) -> anyhow::Result<()> {
@@ -262,11 +326,14 @@ pub(crate) mod db {
             .do_update()
             .set(&row)
             .execute(connection)?;
-        let rows = legs
-            .into_iter()
-            .map(|(index, leg)| Leg::new(Some(block), &id, index, leg))
-            .collect::<anyhow::Result<Legs>>()?;
-        leg::db::replace(connection, block, &id, &rows)?;
+        leg::db::delete_moved(connection, block, &id)?;
+        for (index, leg) in legs {
+            leg::db::insert_mined(
+                connection,
+                Leg::new(Some(block), &id, index, leg)?,
+                position,
+            )?;
+        }
         Ok(())
     }
 

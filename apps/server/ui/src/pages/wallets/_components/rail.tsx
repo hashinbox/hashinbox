@@ -21,10 +21,10 @@ import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Decimal from 'decimal.js';
 import { useState, type SubmitEvent } from 'react';
-import { call, client, type ListedWallet, type Wallet } from '@/api/client';
+import { call, client, type Wallet } from '@/api/client';
 import { Currency } from '@/_components/currency';
 import type { Shell } from '@/layout';
-import { assetOf, networkChoices, unitOf } from '@/money';
+import { assetOf, decimalsOf, networkChoices, unitOf } from '@/money';
 import { mono } from '@/theme';
 import { WatchFields } from './watch';
 import { WATCH_NOTHING, haltOf, watch, type Watching } from './watching';
@@ -32,7 +32,7 @@ import { NetworkSelect } from '@/_components/network-select';
 
 interface Props {
   shell: Shell;
-  wallets: ListedWallet[];
+  wallets: Wallet[];
   selected: string | null;
   onSelect: (id: string) => void;
   onAdded: (wallet: Wallet) => void;
@@ -75,11 +75,11 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
   const [filtering, setFiltering] = useState(false);
   const [filters, setFilters] = useState<Filter[]>([]);
 
-  const matches = (w: ListedWallet, f: Filter): boolean => {
+  const matches = (w: Wallet, f: Filter): boolean => {
     const tagged = tags.get(w.id) ?? [];
     switch (f.group) {
       case 'network':
-        return `${w.network.chain}/${w.network.name}` === f.value;
+        return `${w.chain}/${w.network}` === f.value;
       case 'currency':
         return unitOf(w, shell.listings) === f.value;
       case 'kind':
@@ -87,8 +87,14 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
       case 'tag':
         return f.value === '' ? tagged.length === 0 : tagged.includes(f.value);
       case 'balance':
-        // In the wallet's currency; none indexed reads as zero.
-        return passes(new Decimal(w.balances[assetOf(w)] ?? '0'), f.value);
+        // In the wallet's currency (atomic units over its decimals); none
+        // indexed reads as zero.
+        return passes(
+          new Decimal(w.indexes[assetOf(w)]?.balance ?? '0').div(
+            new Decimal(10).pow(decimalsOf(w, shell.listings)),
+          ),
+          f.value,
+        );
       case 'address': {
         const needle = f.value.toLowerCase();
         return w.address.toLowerCase().includes(needle) || w.id.toLowerCase().includes(needle);
@@ -104,7 +110,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
   );
   const sorted = (values: string[]) => [...new Set(values)].sort();
   const options: Filter[] = [
-    ...sorted(wallets.map((w) => `${w.network.chain}/${w.network.name}`)).map((n) => ({
+    ...sorted(wallets.map((w) => `${w.chain}/${w.network}`)).map((n) => ({
       group: 'network' as const,
       value: n,
       label: n,
@@ -279,7 +285,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
                 {middle(w.address)}
               </Typography>
               <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary' }}>
-                {unitOf(w, shell.listings)} · {w.network.chain}/{w.network.name}
+                {unitOf(w, shell.listings)} · {w.chain}/{w.network}
                 {!w.keyed && ' · watch only'}
                 {(tags.get(w.id) ?? []).map((t) => ` · #${t}`).join('')}
                 <Halted wallet={w} />
@@ -488,7 +494,7 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
 }
 
 /** ` · paused` or ` · no data`, colored, once the wallet's indexing stopped. */
-function Halted({ wallet }: { wallet: ListedWallet }) {
+function Halted({ wallet }: { wallet: Wallet }) {
   const halt = haltOf(wallet);
   return (
     halt && (

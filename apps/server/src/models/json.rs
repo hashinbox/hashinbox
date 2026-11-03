@@ -23,6 +23,13 @@ impl<T: Serialize + Debug> ToSql<Text, Sqlite> for Json<T> {
     }
 }
 
+/// Serialized as the value itself.
+impl<T: Serialize> Serialize for Json<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
 impl<T: DeserializeOwned> FromSql<Text, Sqlite> for Json<T> {
     fn from_sql(value: SqliteValue<'_, '_, '_>) -> deserialize::Result<Self> {
         let text = <String as FromSql<Text, Sqlite>>::from_sql(value)?;

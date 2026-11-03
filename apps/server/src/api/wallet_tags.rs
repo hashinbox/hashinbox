@@ -38,7 +38,7 @@ struct ListResponse {
 #[derive(Clone, Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Path)]
 struct TagPath {
-    /// `<chain>:<network>:<address>`.
+    /// `{chain}.{network}.{address}`.
     id: String,
     /// 1 to 64 of `[a-z0-9-]`.
     tag: String,
