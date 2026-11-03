@@ -118,3 +118,25 @@ fn generated_keys_export_and_reimport() {
     let again = Secp256k1Ecdsa::from_bytes(key.to_bytes().as_bytes()).expect("imports");
     assert_eq!(key.compressed_public_key(), again.compressed_public_key());
 }
+
+#[test]
+fn ed25519_keypair_and_base58_import() {
+    let key = Ed25519::from_bytes(&[7; 32]).unwrap();
+    let mut pair = [7_u8; 64];
+    pair[32..].copy_from_slice(&key.public_key());
+    let text = bs58::encode(pair).into_string();
+    let decoded = crypto::SecretBytes::from_base58(&format!(" {text}\n")).unwrap();
+    let imported = Ed25519::from_keypair(decoded.as_bytes()).unwrap();
+    assert_eq!(imported.public_key(), key.public_key());
+
+    pair[63] ^= 1;
+    assert!(
+        Ed25519::from_keypair(&pair).is_err(),
+        "a foreign public half"
+    );
+    assert!(Ed25519::from_keypair(&pair[..32]).is_err(), "not 64 bytes");
+    assert!(
+        crypto::SecretBytes::from_base58("0OIl").is_err(),
+        "not Base58"
+    );
+}

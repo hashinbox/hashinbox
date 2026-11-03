@@ -7,6 +7,7 @@ description = "Zeroized secp256k1 and Ed25519 keys with ECDSA, BIP-340 Schnorr a
 readme = "README.md"
 
 [dependencies]
+bs58 = "=0.5.1"
 ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
 hex.workspace = true
 k256.workspace = true

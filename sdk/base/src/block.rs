@@ -395,8 +395,15 @@ pub trait Dated: Chained {
             if tip.timestamp <= time {
                 return Ok(Some(tip));
             }
-            let start = first_timed(self, tip.position).await?;
-            let Some(first) = produced(self, start, tip.position).await? else {
+            let (start, time_there) = first_timed(self, tip.position).await?;
+            let first = match time_there {
+                Some(timestamp) => Some(Stamp {
+                    position: start,
+                    timestamp,
+                }),
+                None => produced(self, start, tip.position).await?,
+            };
+            let Some(first) = first else {
                 return Ok(None);
             };
             if first.timestamp > time {
@@ -432,35 +439,39 @@ pub struct Probe {
 
 /// The first produced block in `start..=end`, stepping over at most
 /// [`SKIP_LIMIT`] empty positions.
-/// The first position whose time the node serves: 0, or the first past
-/// what it pruned. Pruning removes a prefix, so "served" flips once; the tip
-/// is taken as served.
+/// The first position whose time the node serves (0, or the first past
+/// what it pruned), with the time read there when that read was made
+/// (`None`: no block there, or not read). Pruning removes a prefix, so
+/// "served" flips once; the tip is taken as served.
 ///
 /// # Errors
 ///
 /// A failed read other than [`NotServed`].
-async fn first_timed<C: Dated + ?Sized>(chain: &C, tip: u64) -> anyhow::Result<u64> {
-    async fn served<C: Dated + ?Sized>(chain: &C, position: u64) -> anyhow::Result<bool> {
+async fn first_timed<C: Dated + ?Sized>(chain: &C, tip: u64) -> anyhow::Result<(u64, Option<u64>)> {
+    /// `None`: not served; else the time there (`None`: no block).
+    async fn read<C: Dated + ?Sized>(
+        chain: &C,
+        position: u64,
+    ) -> anyhow::Result<Option<Option<u64>>> {
         match chain.time(position).await {
-            Ok(_) => Ok(true),
-            Err(error) if NotServed::find(&error).is_some() => Ok(false),
+            Ok(time) => Ok(Some(time)),
+            Err(error) if NotServed::find(&error).is_some() => Ok(None),
             Err(error) => Err(error),
         }
     }
-    if served(chain, 0).await? {
-        return Ok(0);
+    if let Some(time) = read(chain, 0).await? {
+        return Ok((0, time));
     }
     // `low` is not served, `high` is.
-    let (mut low, mut high) = (0, tip);
+    let (mut low, mut high, mut time_high) = (0, tip, None);
     while high - low > 1 {
         let middle = low + (high - low) / 2;
-        if served(chain, middle).await? {
-            high = middle;
-        } else {
-            low = middle;
+        match read(chain, middle).await? {
+            Some(time) => (high, time_high) = (middle, time),
+            None => low = middle,
         }
     }
-    Ok(high)
+    Ok((high, time_high))
 }
 
 async fn produced<C: Dated + ?Sized>(

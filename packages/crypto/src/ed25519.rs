@@ -31,6 +31,28 @@ impl PrivateKey for Ed25519 {
 }
 
 impl Ed25519 {
+    /// Imports a 64-byte keypair: the 32-byte secret, then its 32-byte public
+    /// key, which must be the secret's own.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidKey`](crate::ErrorKind::InvalidKey) for another
+    /// length, or a public half that is not the secret's.
+    pub fn from_keypair(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() != 2 * KEY_LENGTH {
+            return Err(invalid_key());
+        }
+        let (secret, public) = bytes.split_at(KEY_LENGTH);
+        let key = Self::from_bytes(secret)?;
+        if key.public_key() != public {
+            return Err(Error::new(
+                crate::ErrorKind::InvalidKey,
+                "the keypair's public half is not its secret's",
+            ));
+        }
+        Ok(key)
+    }
+
     /// The 32-byte public key.
     #[must_use]
     pub fn public_key(&self) -> [u8; 32] {

@@ -36,6 +36,28 @@ impl SecretBytes {
     }
 }
 
+impl SecretBytes {
+    /// Decodes Base58 text (the Bitcoin alphabet, no checksum), surrounding
+    /// whitespace ignored. The caller checks the length its key format
+    /// requires.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidKey`](crate::ErrorKind::InvalidKey) for text that
+    /// is not Base58. The message quotes nothing back.
+    pub fn from_base58(text: &str) -> Result<Self, crate::Error> {
+        bs58::decode(text.trim())
+            .into_vec()
+            .map(Self::new)
+            .map_err(|_| {
+                crate::Error::new(
+                    crate::ErrorKind::InvalidKey,
+                    "secret key text is not Base58",
+                )
+            })
+    }
+}
+
 impl fmt::Debug for SecretBytes {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SecretBytes(..)")

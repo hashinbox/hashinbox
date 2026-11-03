@@ -126,22 +126,12 @@ impl base::Wallet for Wallet {
 fn base58_key(text: &str) -> Result<SecretBytes, WalletError> {
     let invalid = |message: &str| WalletError::new(WalletErrorKind::InvalidSecret, message);
     let form = "a Solana key is Base58 of a 32-byte secret or a 64-byte keypair";
-    let bytes = SecretBytes::new(
-        bs58::decode(text.trim())
-            .into_vec()
-            .map_err(|_| invalid(form))?,
-    );
+    let bytes = SecretBytes::from_base58(text).map_err(|_| invalid(form))?;
     match bytes.as_bytes().len() {
         32 => Ok(bytes),
-        64 => {
-            let (secret, public) = bytes.as_bytes().split_at(32);
-            let key = Ed25519::from_bytes(secret)
-                .map_err(|_| invalid("the keypair's secret is not an Ed25519 seed"))?;
-            if key.public_key() != public {
-                return Err(invalid("the keypair's public half is not its secret's"));
-            }
-            Ok(SecretBytes::new(secret))
-        }
+        64 => Ed25519::from_keypair(bytes.as_bytes())
+            .map(|key| key.to_bytes())
+            .map_err(|_| invalid("the keypair's public half is not its secret's")),
         _ => Err(invalid(form)),
     }
 }
