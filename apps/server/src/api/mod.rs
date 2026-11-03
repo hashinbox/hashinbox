@@ -8,10 +8,10 @@ mod blocks;
 mod health;
 mod jobs;
 mod networks;
+mod networks_tip;
 mod openapi;
 mod state;
 mod stats;
-mod tip;
 mod transactions;
 mod triggers;
 mod wallet_indexes;
@@ -111,7 +111,7 @@ fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
         .merge(jobs::routes())
         .merge(networks::routes())
         .merge(blocks::routes())
-        .merge(tip::routes())
+        .merge(networks_tip::routes())
         .merge(stats::routes())
         .merge(triggers::routes())
         .merge(wallet_tags::routes())
