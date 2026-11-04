@@ -21,14 +21,15 @@ import { AddNodes } from './_components/add';
 const BEAT_MS = 4000;
 
 /** `chain/network`. */
-function nameOf(n: Pick<ConfiguredNetwork, 'network'>): string {
-  return `${n.network.chain}/${n.network.name}`;
+function nameOf(n: Pick<ConfiguredNetwork, 'chain' | 'network'>): string {
+  return `${n.chain}/${n.network}`;
 }
 
 /** Where a network's indexing is: live at the tip, catching up, idle (nothing to index), or failing. */
 function syncOf(n: ConfiguredNetwork): { label: string; color: string; live: boolean } {
-  const { index_error: error, indexed: last, tip_live: tip } = n;
-  if (error) return { label: 'Retrying after an error', color: 'error.main', live: false };
+  const { tip_live: tip, index_job_reason: reason } = n;
+  const last = n.index?.indexed;
+  if (reason) return { label: 'Retrying after an error', color: 'error.main', live: false };
   if (last == null || tip == null)
     return { label: 'Idle: no address to index', color: 'text.disabled', live: false };
   if (tip - last > 1)
@@ -105,7 +106,7 @@ export function Networks({ shell }: { shell: Shell }) {
             <ListItemButton
               key={nameOf(n)}
               selected={current !== null && nameOf(n) === nameOf(current)}
-              onClick={() => go(['networks', n.network.chain, n.network.name])}
+              onClick={() => go(['networks', n.chain, n.network])}
               sx={{ py: 1.25, px: 1, display: 'block' }}
             >
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
@@ -119,7 +120,7 @@ export function Networks({ shell }: { shell: Shell }) {
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                 <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary', flexGrow: 1 }}>
                   {n.endpoints.length} node{n.endpoints.length === 1 ? '' : 's'} · indexed #
-                  {n.indexed ?? '—'} · tip #{n.tip_live ?? '—'}
+                  {n.index?.indexed ?? '—'} · tip #{n.tip_live ?? '—'}
                 </Typography>
                 <Tooltip title="Settings">
                   <IconButton
@@ -127,7 +128,7 @@ export function Networks({ shell }: { shell: Shell }) {
                     aria-label={`${nameOf(n)} settings`}
                     onClick={(e) => {
                       e.stopPropagation();
-                      go(['networks', n.network.chain, n.network.name, 'settings']);
+                      go(['networks', n.chain, n.network, 'settings']);
                     }}
                     sx={{
                       p: 0.25,
@@ -142,9 +143,9 @@ export function Networks({ shell }: { shell: Shell }) {
                   </IconButton>
                 </Tooltip>
               </Stack>
-              {n.index_error && (
+              {n.index_job_reason && (
                 <Typography sx={{ fontFamily: mono, fontSize: 11, color: 'error.main' }}>
-                  {n.index_error}
+                  {n.index_job_reason}
                 </Typography>
               )}
             </ListItemButton>
@@ -167,7 +168,7 @@ export function Networks({ shell }: { shell: Shell }) {
             network={current}
             picked={page === 'blocks' && position ? Number(position) : null}
             onPick={(picked) => {
-              const at = ['networks', current.network.chain, current.network.name];
+              const at = ['networks', current.chain, current.network];
               go(picked === null ? [...at, 'mempool'] : [...at, 'blocks', String(picked)]);
             }}
           />
@@ -186,7 +187,9 @@ export function Networks({ shell }: { shell: Shell }) {
         onClose={() => setAdding(false)}
         onAdded={(changed) => {
           setAdding(false);
-          shell.notify(`Nodes added to ${changed.map(nameOf).join(', ')}; in use now.`);
+          shell.notify(
+            `Nodes added to ${changed.map((c) => `${c.network.chain}/${c.network.name}`).join(', ')}; in use now.`,
+          );
           refresh();
         }}
       />

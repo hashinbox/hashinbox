@@ -136,15 +136,18 @@ impl Db {
         Ok(Self { pool })
     }
 
-    /// Creates the schema (`apps/server/init.sql`) in one write on this
-    /// (new) file.
+    /// Creates the schema (`apps/server/init.sql`) and its starting rows
+    /// (`apps/server/seed.sql`) in one write on this (new) file.
     ///
     /// # Errors
     ///
-    /// When the schema does not apply.
+    /// When the schema or the rows do not apply.
     pub(crate) async fn migrate(&self) -> anyhow::Result<()> {
-        self.write(|connection| Ok(connection.batch_execute(include_str!("../init.sql"))?))
-            .await
+        self.write(|connection| {
+            connection.batch_execute(include_str!("../init.sql"))?;
+            Ok(connection.batch_execute(include_str!("../seed.sql"))?)
+        })
+        .await
     }
 
     /// Runs `work` in one `BEGIN IMMEDIATE` transaction on a blocking thread;

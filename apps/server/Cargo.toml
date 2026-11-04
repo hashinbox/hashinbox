@@ -18,7 +18,7 @@ solana-node = []
 # The trigger loop reports refusals through an injected sink.
 logging = { path = "../../packages/logging" }
 anyhow.workspace = true
-clap.workspace = true
+clap = { workspace = true, features = ["env"] }
 axum = "0.8"
 base = { path = "../../sdk/base" }
 base64 = "=0.22.1"
@@ -33,7 +33,7 @@ hex.workspace = true
 jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
 http-server = { path = "../../packages/http-server" }
 rpc = { path = "../../packages/rpc" }
-payments = { path = "../../sdk/payments", features = ["toml"] }
+payments = { path = "../../sdk/payments" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 # The one SQLite file: every table's model (`src/models`) and the SDK storage
@@ -43,8 +43,6 @@ libsqlite3-sys.workspace = true
 # The job queue contract and runner; its SQLite store is `src/usecase/tasks.rs`.
 tasks = { path = "../../packages/tasks", features = ["runner"] }
 tokio = { workspace = true, features = ["fs", "net", "process", "rt", "signal", "sync", "time"] }
-# The server's own configuration file, when its path ends in `.toml`.
-toml = "=0.9.12"
 # One UUIDv7 per trigger batch: its group id.
 uuid.workspace = true
 utoipa = { version = "=5.5.0", features = ["axum_extras"] }

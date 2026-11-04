@@ -24,7 +24,7 @@ function typed(text: string | undefined): string | null {
 }
 
 function name(n: ConfiguredNetwork): string {
-  return `${n.network.chain}/${n.network.name}`;
+  return `${n.chain}/${n.network}`;
 }
 
 /**
@@ -46,7 +46,7 @@ export function AddNodes({
   onAdded: (changed: Schemas['NetworkEndpoints'][]) => void;
 }) {
   const offered = PROVIDERS.filter((p) =>
-    networks.some((n) => baseFor(p, n.network.chain, n.network.name) !== undefined),
+    networks.some((n) => baseFor(p, n.chain, n.network) !== undefined),
   );
   const [providerName, setProvider] = useState('');
   const [key, setKey] = useState('');
@@ -58,7 +58,7 @@ export function AddNodes({
   const provider = offered.find((p) => p.name === providerName) ?? offered[0];
   const served = provider
     ? networks.flatMap((n) => {
-        const base = baseFor(provider, n.network.chain, n.network.name);
+        const base = baseFor(provider, n.chain, n.network);
         return base === undefined ? [] : [{ network: n, base }];
       })
     : [];
@@ -86,8 +86,8 @@ export function AddNodes({
   const submit = () => {
     const body = {
       nodes: nodes.map(({ network, url }) => ({
-        chain: network.network.chain,
-        network: network.network.name,
+        chain: network.chain,
+        network: network.network,
         endpoint: url,
       })),
     };
@@ -252,9 +252,7 @@ export function AddNode({
 
   const submit = () => {
     const body = {
-      nodes: [
-        { chain: network.network.chain, network: network.network.name, endpoint: url.trim() },
-      ],
+      nodes: [{ chain: network.chain, network: network.network, endpoint: url.trim() }],
     };
     setBusy(true);
     setProblem(null);

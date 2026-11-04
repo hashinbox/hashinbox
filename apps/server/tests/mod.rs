@@ -33,8 +33,27 @@ fn network() -> Network {
 async fn database() -> (crate::db::Db, tempfile::TempDir) {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let db = crate::db::Db::open(&directory.path().join("test.db")).expect("the file opens");
-    db.migrate().await.expect("the schema applies");
+    migrate(&db).await.expect("the schema applies");
     (db, directory)
+}
+
+/// Applies the schema and seed to `db`, then adds the test network: its
+/// `network`, native `network_asset` and `network_index` rows.
+async fn migrate(db: &crate::db::Db) -> anyhow::Result<()> {
+    use diesel::connection::SimpleConnection as _;
+
+    db.migrate().await?;
+    db.write(|connection| {
+        Ok(connection.batch_execute(
+            "
+            INSERT INTO network (chain, network, testnet, enabled, block_time_ms, confirmations)
+            VALUES ('bitcoin', 'regtest', 1, 1, 600000, 0);
+            INSERT INTO network_asset (chain, network, asset, kind, ticker, decimals)
+            VALUES ('bitcoin', 'regtest', 'native', 'native', 'BTC', 8);
+            INSERT INTO network_index (chain, network) VALUES ('bitcoin', 'regtest');",
+        )?)
+    })
+    .await
 }
 
 /// What each broadcast answers, in order; the fee each built transaction

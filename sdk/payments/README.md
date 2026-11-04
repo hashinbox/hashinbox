@@ -5,12 +5,10 @@ stores. Per network it keeps the `base::Service` its chain's `base::Config`
 built, and the `rpc::Swap` every part of that service reaches its nodes
 through. It names no chain; every call is keyed by network.
 
-- `Document`: `{ networks: [{ chain, ..chain's own fields }] }`, read with
-  `from_json`, `from_toml` (feature `toml`) or `from_value`. Each chain's
-  section carries its own `interval_ms` (the indexer's wake period).
-- `Payments::builder()`: `with_chain::<C: base::Config>(name)` registers the
-  type that reads sections whose `chain` is `name`; `with_config(document)`;
-  `with_network(config)` adds one in code; `with_client(network, client)`
+- `Payments::builder()`: `with_chain::<C>(chain)` registers the chain's
+  `base::Config`, built from a `base::NetworkConfig` (`C: TryFrom<&NetworkConfig>`);
+  `with_network_config(config)` adds a network its chain builds;
+  `with_network(config)` adds a chain's own config; `with_client(network, client)`
   reaches that network through `client` instead of the chain's own
   `Config::client()`; `with_storage(base::Storage)` (required). `build()`
   wraps each network's transport in a `Swap` and builds the service over it.
@@ -28,19 +26,21 @@ through. It names no chain; every call is keyed by network.
 ```rust
 use std::sync::Arc;
 
-use base::{Config, Storage};
-use payments::{Document, Payments};
-use serde::de::DeserializeOwned;
+use base::{Chain, Config, NetworkConfig, Storage};
+use payments::Payments;
 
-/// `C` reads one chain's section.
-async fn serve<C: Config + DeserializeOwned + 'static>(
-    json: &str,
+/// `C` builds `network`'s chain's configuration.
+async fn serve<C>(
+    network: NetworkConfig,
     storage: Storage,
     other_nodes: Arc<dyn rpc::Client>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    C: Config + for<'a> TryFrom<&'a NetworkConfig, Error = anyhow::Error> + 'static,
+{
     let payments = Payments::builder()
-        .with_chain::<C>("bitcoin")
-        .with_config(Document::from_json(json)?)
+        .with_chain::<C>(Chain::from_static("bitcoin"))
+        .with_network_config(network)
         .with_storage(storage)
         .build()
         .await?;

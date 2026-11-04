@@ -139,7 +139,11 @@ export function Layout() {
         if (!live) return;
         const byNetwork = new Map<string, Explorer>();
         for (const n of configured.networks)
-          if (n.explorer) byNetwork.set(`${n.network.chain}/${n.network.name}`, n.explorer);
+          if (n.explorer_address && n.explorer_transaction)
+            byNetwork.set(`${n.chain}/${n.network}`, {
+              address: n.explorer_address,
+              transaction: n.explorer_transaction,
+            });
         setExplorers(byNetwork);
         setListings(assets.assets);
         setWallets(list);

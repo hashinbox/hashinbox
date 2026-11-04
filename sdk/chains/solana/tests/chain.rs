@@ -19,13 +19,17 @@ fn base58(byte: u8, length: usize) -> String {
 }
 
 fn config() -> Config {
-    serde_json::from_value(json!({
-        "network": "localnet",
-        "genesis_hash": base58(9, 32),
-        "endpoints": ["http://127.0.0.1:8899"],
-        "tokens": [{ "mint": MINT, "decimals": 6 }],
-    }))
-    .unwrap()
+    let genesis_hash = base58(9, 32).parse().unwrap();
+    let endpoints = vec![::rpc::Endpoint::new("http://127.0.0.1:8899")];
+    let network = chain_solana::Network::new(genesis_hash, "localnet");
+    let mut config = Config::new(network, endpoints);
+    config.tokens = vec![chain_solana::Token {
+        mint: MINT.parse().unwrap(),
+        decimals: 6,
+        ticker: None,
+        display_decimals: None,
+    }];
+    config
 }
 
 fn chain(script: &Script) -> Chain {

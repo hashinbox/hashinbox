@@ -1,14 +1,15 @@
-//! `GET /health`: readiness and every network's indexing, from memory.
+//! `GET /health`: readiness and every indexed network's `network_index` row.
 
 use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     api::AppState,
-    models::{Indexing, NetworkName},
+    models::{NetworkIndex, NetworkName, network_index, task},
+    usecase::workers::index,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -16,21 +17,21 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 }
 
 /// One network's indexing.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 struct NetworkHealth {
     /// The indexed chain and network.
     network: NetworkName,
-    /// What its indexer did since the process started.
-    indexing: Indexing,
+    /// What its indexer last wrote.
+    indexing: NetworkIndex,
 }
 
-/// The memory-only health snapshot of this process.
+/// The health of every indexed network.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = Report)]
 struct ReadResponse {
-    /// At least one network, and none whose last step failed.
+    /// At least one network, and no index job failing.
     ready: bool,
-    /// Every configured network.
+    /// Every indexed network.
     networks: Vec<NetworkHealth>,
 }
 
@@ -38,9 +39,10 @@ struct ReadResponse {
     get,
     path = "/health",
     operation_id = "read_health",
-    summary = "Read readiness and network health from memory",
-    description = "Public memory-only readiness: ready when at least one network is configured \
-        and no network's last indexing step failed. No RPC or storage reads.",
+    summary = "Read readiness and every indexed network's indexing",
+    description = "Public readiness: ready when at least one network is indexed and no \
+        index job is failing (failed, or going again with a `reason`). Reads the \
+        `network_index` rows and the job queue; no RPC.",
     responses(
         (status = 200, description = "Ready", body = ReadResponse),
         (status = 503, description = "Not ready", body = ReadResponse)
@@ -48,19 +50,23 @@ struct ReadResponse {
     tag = "health"
 )]
 async fn read(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadResponse>) {
-    let networks: Vec<_> = state
-        .payments
-        .stats()
+    let read = state
+        .db
+        .read(|connection| {
+            let indexes = network_index::db::find_all(connection)?;
+            let failing = task::db::count_failing(connection, index::KIND)?;
+            Ok((indexes, failing))
+        })
+        .await;
+    let (indexes, failing) = read.unwrap_or_default();
+    let networks: Vec<_> = indexes
         .into_iter()
-        .map(|(network, stats)| NetworkHealth {
+        .map(|(network, indexing)| NetworkHealth {
             network: network.into(),
-            indexing: stats.into(),
+            indexing,
         })
         .collect();
-    let ready = !networks.is_empty()
-        && networks
-            .iter()
-            .all(|network| network.indexing.error.is_none());
+    let ready = !networks.is_empty() && failing == 0;
     let status = if ready {
         StatusCode::OK
     } else {

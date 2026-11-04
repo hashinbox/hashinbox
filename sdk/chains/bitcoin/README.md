@@ -50,6 +50,12 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
 }
 ```
 
+`Config::try_from(&base::NetworkConfig)` builds it from a stored network: the
+network by name, endpoints, BTC's display decimals, `confirmation_depth`
+(`confirmations + 1`), `max_history`, and from `settings` the knobs
+`address_type`, `fee_target_blocks`, `fee_floor`, `fee_ttl_ms`,
+`pending_ttl_ms`, `interval_ms` (each absent one its default).
+
 ## Notes
 
 - `Config` implements `base::Config`: `build(&storage, client)` validates,

@@ -17,6 +17,9 @@ pub enum Ack {
     /// Succeeded for now; run again at this Unix ms, as fresh: attempts and
     /// reason cleared. A job that never ends (a poller) answers this.
     Again(u64),
+    /// Not done; run again at this Unix ms as fresh, keeping why: a job
+    /// that never ends (a poller) whose run failed. Never runs out.
+    AgainBecause(u64, String),
 }
 
 /// How retries go: at most `attempts` executions, a retry after attempt `n`
@@ -72,6 +75,12 @@ impl Job {
                 self.run_at = at;
                 self.attempts = 0;
                 self.reason = None;
+            }
+            Ack::AgainBecause(at, reason) => {
+                self.status = Status::Pending;
+                self.run_at = at;
+                self.attempts = 0;
+                self.reason = Some(reason);
             }
             Ack::Retry(reason) => {
                 let wait = retry.backoff.saturating_mul(self.attempts);
@@ -129,8 +138,25 @@ mod tests {
             .start(110)
             .settle(Ack::Again(500), &retry(), 120);
         assert_eq!(
-            (polled.status, polled.run_at, polled.attempts, polled.reason),
+            (
+                polled.status,
+                polled.run_at,
+                polled.attempts,
+                polled.reason.clone()
+            ),
             (Status::Pending, 500, 0, None)
+        );
+        let stuck = polled
+            .start(500)
+            .settle(Ack::AgainBecause(900, "down".into()), &retry(), 510);
+        assert_eq!(
+            (
+                stuck.status,
+                stuck.run_at,
+                stuck.attempts,
+                stuck.reason.as_deref()
+            ),
+            (Status::Pending, 900, 0, Some("down"))
         );
         let exhausted = again
             .start(110)

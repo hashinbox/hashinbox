@@ -110,6 +110,13 @@ impl<I, S: Serialize> Task<I, S> {
     pub fn again(self, at: u64) -> Ack {
         Ack::Again(at)
     }
+
+    /// Not done; runs again at `at` (Unix ms) as fresh, `reason` kept on
+    /// the job until a run ends otherwise.
+    #[must_use]
+    pub fn again_because(self, at: u64, reason: impl Into<String>) -> Ack {
+        Ack::AgainBecause(at, reason.into())
+    }
 }
 
 /// Another [`Changes`]' signal, plus one every `period`: a retry falls due

@@ -53,11 +53,11 @@ macro_rules! collection {
 mod asset;
 pub(crate) mod block;
 pub(crate) mod endpoint;
-pub(crate) mod explorer;
-mod indexing;
 mod json;
 pub(crate) mod leg;
 pub(crate) mod network;
+pub(crate) mod network_asset;
+pub(crate) mod network_index;
 pub(crate) mod schema;
 pub(crate) mod task;
 pub(crate) mod transaction;
@@ -70,11 +70,11 @@ pub(crate) mod wallet_index_selector;
 pub(crate) use asset::Asset;
 pub(crate) use block::Block;
 pub(crate) use endpoint::{RpcEndpoints, RpcNode};
-pub(crate) use explorer::{Explorer, Explorers};
-pub(crate) use indexing::Indexing;
 pub(crate) use json::Json;
 pub(crate) use leg::Leg;
 pub(crate) use network::{Network, NetworkName};
+pub(crate) use network_asset::NetworkAsset;
+pub(crate) use network_index::NetworkIndex;
 pub(crate) use task::Task;
 
 #[cfg_attr(

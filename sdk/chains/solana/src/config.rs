@@ -4,8 +4,11 @@ use std::{sync::Arc, time::Duration};
 
 use ::rpc::{Cluster, Endpoint, Policy, Retry};
 use anyhow::{Context as _, ensure};
-use base::{Asset, AssetInfo, Assets, Future, Indexer, Service, Storage, WalletFactoryBroadcaster};
-use serde::{Deserialize, Deserializer, de};
+use base::{
+    Asset, AssetInfo, AssetKind, Assets, Future, Indexer, Service, Storage,
+    WalletFactoryBroadcaster,
+};
+use serde::Deserialize;
 
 use crate::{
     Chain, Client, Factory, GenesisHash, Network, SOL_DECIMALS, SOL_NAME, SOL_TICKER, Tokens,
@@ -13,9 +16,8 @@ use crate::{
 };
 
 /// Everything one Solana cluster needs; built in code with [`Config::new`]
-/// or read from any `serde` format.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// or from a [`base::NetworkConfig`].
+#[derive(Clone, Debug)]
 pub struct Config {
     /// The stable application name of the cluster, such as `mainnet-beta`.
     pub network: String,
@@ -24,46 +26,55 @@ pub struct Config {
     /// The nodes: reads go to one, submissions to all.
     pub endpoints: Vec<Endpoint>,
     /// Allowlisted SPL tokens: the only tokens indexed and sent.
-    #[serde(default)]
     pub tokens: Vec<Token>,
     /// Fractional digits a view shows of the native currency; none: all.
-    #[serde(default)]
     pub display_decimals: Option<u32>,
     /// How long a fetched blockhash and fee price sends, in milliseconds;
     /// default 5,000.
-    #[serde(default = "Config::default_fee_ttl_ms")]
     pub fee_ttl_ms: u64,
     /// How long a broadcast transaction counts as pending before it is
     /// given up on, in milliseconds; default 120_000 (two minutes, past a blockhash's life).
-    #[serde(default = "Config::default_pending_ttl_ms")]
     pub pending_ttl_ms: u64,
     /// How often the indexer wakes, in milliseconds; default 1,000.
-    #[serde(default = "Config::default_interval_ms")]
     pub interval_ms: u64,
-    /// How old, in days, a watch's start may be: about what history the
-    /// nodes keep; none: no limit.
-    #[serde(default)]
-    pub max_history_days: Option<u32>,
+    /// How old a watch's start may be: about what history the nodes keep;
+    /// none: no limit.
+    pub max_history: Option<Duration>,
     /// Slots a block needs below the tip to count as confirmed: the
     /// confirmed position is `tip - confirmations`; default 32.
-    #[serde(default = "Config::default_confirmations")]
     pub confirmations: u64,
 }
 
+/// The knobs a [`base::NetworkConfig`]'s `settings` may set: `fee_ttl_ms`,
+/// `pending_ttl_ms`, `interval_ms`; an absent one keeps its default.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Settings {
+    fee_ttl_ms: u64,
+    pending_ttl_ms: u64,
+    interval_ms: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            fee_ttl_ms: 5_000,
+            pending_ttl_ms: 120_000,
+            interval_ms: 1_000,
+        }
+    }
+}
+
 /// One allowlisted SPL token and the decimals its mint must declare.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
-    /// The mint, written as canonical Base58.
-    #[serde(deserialize_with = "mint")]
+    /// The mint.
     pub mint: solana_address::Address,
     /// What the mint must declare.
     pub decimals: u8,
     /// Its display symbol, such as `USDC`; none: shown by its mint.
-    #[serde(default)]
     pub ticker: Option<String>,
     /// Fractional digits a view shows; none: all.
-    #[serde(default)]
     pub display_decimals: Option<u32>,
 }
 
@@ -71,34 +82,19 @@ impl Config {
     /// `network` over `endpoints`, with no tokens.
     #[must_use]
     pub fn new(network: Network, endpoints: Vec<Endpoint>) -> Self {
+        let settings = Settings::default();
         Self {
             network: network.slug,
             genesis_hash: network.genesis_hash,
             endpoints,
             tokens: Vec::new(),
             display_decimals: None,
-            fee_ttl_ms: Self::default_fee_ttl_ms(),
-            pending_ttl_ms: Self::default_pending_ttl_ms(),
-            interval_ms: Self::default_interval_ms(),
-            max_history_days: None,
-            confirmations: Self::default_confirmations(),
+            fee_ttl_ms: settings.fee_ttl_ms,
+            pending_ttl_ms: settings.pending_ttl_ms,
+            interval_ms: settings.interval_ms,
+            max_history: None,
+            confirmations: 32,
         }
-    }
-
-    const fn default_confirmations() -> u64 {
-        32
-    }
-
-    const fn default_fee_ttl_ms() -> u64 {
-        5_000
-    }
-
-    const fn default_pending_ttl_ms() -> u64 {
-        120_000
-    }
-
-    const fn default_interval_ms() -> u64 {
-        1_000
     }
 
     /// The configured network.
@@ -218,15 +214,65 @@ impl Config {
 }
 
 /// A mint written as canonical Base58.
-fn mint<'de, D: Deserializer<'de>>(deserializer: D) -> Result<solana_address::Address, D::Error> {
-    let text = String::deserialize(deserializer)?;
+fn mint(text: &str) -> anyhow::Result<solana_address::Address> {
     let mint = text
         .parse::<solana_address::Address>()
-        .map_err(|error| de::Error::custom(format!("token mint: {error}")))?;
-    if mint.to_string() != text {
-        return Err(de::Error::custom("token mint must be canonical Base58"));
-    }
+        .map_err(|error| anyhow::anyhow!("token mint {text}: {error}"))?;
+    ensure!(
+        mint.to_string() == text,
+        "token mint must be canonical Base58"
+    );
     Ok(mint)
+}
+
+impl TryFrom<&base::NetworkConfig> for Config {
+    type Error = anyhow::Error;
+
+    /// Its genesis hash (`chain_id`), endpoints and assets, and its knobs
+    /// from `settings`.
+    fn try_from(config: &base::NetworkConfig) -> anyhow::Result<Self> {
+        let settings = Settings::deserialize(&config.settings).context("Solana settings")?;
+        let genesis = config
+            .chain_id
+            .as_deref()
+            .context("Solana needs a chain_id")?;
+        let mut tokens = Vec::new();
+        let mut display_decimals = None;
+        for asset in &config.assets {
+            if asset.kind == AssetKind::Native {
+                ensure!(asset.decimals == SOL_DECIMALS, "SOL has 9 decimals");
+                display_decimals = asset.display_decimals;
+                continue;
+            }
+            let address = asset
+                .contract
+                .as_deref()
+                .context("a token needs its mint")?;
+            tokens.push(Token {
+                mint: mint(address)?,
+                decimals: u8::try_from(asset.decimals).context("token decimals")?,
+                ticker: Some(asset.ticker.clone()),
+                display_decimals: asset.display_decimals,
+            });
+        }
+        let built = Self {
+            network: config.network.name.clone(),
+            genesis_hash: genesis.parse().context("Solana genesis hash")?,
+            endpoints: config.endpoints.clone(),
+            tokens,
+            display_decimals,
+            fee_ttl_ms: settings.fee_ttl_ms,
+            pending_ttl_ms: settings.pending_ttl_ms,
+            interval_ms: settings.interval_ms,
+            max_history: config.max_history,
+            confirmations: config.confirmations,
+        };
+        ensure!(
+            base::Config::network(&built) == config.network,
+            "not a Solana network"
+        );
+        Ok(built)
+    }
 }
 
 impl base::Config for Config {
@@ -263,9 +309,7 @@ impl base::Config for Config {
                 storage: storage.clone(),
                 client,
                 dated: Some(chain),
-                max_history: self
-                    .max_history_days
-                    .map(|days| Duration::from_secs(u64::from(days) * 86_400)),
+                max_history: self.max_history,
                 confirmations: self.confirmations,
             })
         })

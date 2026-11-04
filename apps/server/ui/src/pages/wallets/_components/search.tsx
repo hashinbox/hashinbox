@@ -60,7 +60,7 @@ export function SearchDialog({
     call(client.GET('/v1/networks'))
       .then((list) => {
         const days = list.networks.find(
-          (n) => n.network.chain === network.chain && n.network.name === network.name,
+          (n) => n.chain === network.chain && n.network === network.name,
         )?.max_history_days;
         if (live)
           setEarliest(days === undefined || days === null ? null : Date.now() - days * 86_400_000);

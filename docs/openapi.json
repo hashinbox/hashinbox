@@ -20,8 +20,8 @@
         "tags": [
           "health"
         ],
-        "summary": "Read readiness and network health from memory",
-        "description": "Public memory-only readiness: ready when at least one network is configured and no network's last indexing step failed. No RPC or storage reads.",
+        "summary": "Read readiness and every indexed network's indexing",
+        "description": "Public readiness: ready when at least one network is indexed and no index job is failing (failed, or going again with a `reason`). Reads the `network_index` rows and the job queue; no RPC.",
         "operationId": "read_health",
         "responses": {
           "200": {
@@ -305,12 +305,12 @@
         "tags": [
           "networks"
         ],
-        "summary": "List every configured network, its indexing, its live tip and its RPC nodes",
-        "description": "Every network the configuration names: its stored row (the indexer's last read of the node), its nodes, each URL parsed, and its configuration. `tip_live` asks every network's node at once, each for at most 2 s; one that fails keeps the stored `tip` and says why in `tip_error`.",
+        "summary": "List every network, its assets, its RPC nodes, its indexing and its live tip",
+        "description": "Every stored network: its row, its assets, its nodes (each URL parsed) and its `index` row (null: not indexed), and why its index job last failed (`index_job_reason`). `tip_live` asks every running network's node at once, each for at most 2 s; one that fails keeps the stored `tip` and says why in `tip_error`.",
         "operationId": "list_networks",
         "responses": {
           "200": {
-            "description": "Every configured network",
+            "description": "Every network",
             "content": {
               "application/json": {
                 "schema": {
@@ -2985,38 +2985,60 @@
       },
       "ConfiguredNetwork": {
         "type": "object",
-        "description": "One configured network: its stored row and nodes, the node's tip now,\nand its configuration.",
+        "description": "One network as stored: its `network` row, its `network_asset` rows, its\n`network_endpoint` nodes and its `network_index` row (`None`: not\nindexed); and the node's tip asked now (`tip_live`, the stored `tip`\nuntil a caller that asked sets it; `tip_error`, why asking failed).",
         "required": [
+          "chain",
           "network",
-          "tip",
-          "confirmed",
-          "indexed",
-          "checked_at",
-          "tip_live",
-          "tip_error",
-          "index_error",
+          "chain_id",
+          "testnet",
+          "enabled",
+          "block_time_ms",
+          "confirmations",
+          "max_history_days",
+          "explorer_address",
+          "explorer_transaction",
+          "settings",
+          "assets",
           "endpoints",
-          "explorer",
-          "max_history_days"
+          "index",
+          "index_job_reason",
+          "tip_live",
+          "tip_error"
         ],
         "properties": {
-          "checked_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetworkAsset"
+            },
+            "description": "Its native currency and tokens."
+          },
+          "block_time_ms": {
+            "type": "integer",
             "format": "int64",
-            "description": "Unix ms of the indexer's last read whose tip moved; always present.",
+            "description": "The chain's block (slot) time, in milliseconds.",
             "minimum": 0
           },
-          "confirmed": {
+          "chain": {
+            "type": "string",
+            "description": "Chain name."
+          },
+          "chain_id": {
             "type": [
-              "integer",
+              "string",
               "null"
             ],
+            "description": "The chain's own id of the network (Ethereum chain id, Solana genesis\nhash); always present, null where the name is enough."
+          },
+          "confirmations": {
+            "type": "integer",
             "format": "int64",
-            "description": "`tip - confirmations`; always present.",
+            "description": "Positions below the tip before a block counts as confirmed.",
             "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the server starts indexing it."
           },
           "endpoints": {
             "type": "array",
@@ -3025,32 +3047,37 @@
             },
             "description": "Its nodes in failover order."
           },
-          "explorer": {
+          "explorer_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An address's explorer page, `{address}` filled in; always present,\nnull: none."
+          },
+          "explorer_transaction": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A transaction's explorer page, `{tx}` filled in; always present,\nnull: none."
+          },
+          "index": {
             "oneOf": [
               {
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/Explorer",
-                "description": "Its block explorer links; always present, null when none is configured."
+                "$ref": "#/components/schemas/NetworkIndex",
+                "description": "Its indexing; always present, null: not indexed."
               }
             ]
           },
-          "index_error": {
+          "index_job_reason": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The indexer's last failure since the process started, cleared by the\nnext kept block; always present."
-          },
-          "indexed": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The last kept block; always present, null: none yet.",
-            "minimum": 0
+            "description": "Why its index job's last run failed (the job's `reason`), cleared by\nthe next run that does not; always present, null: none."
           },
           "max_history_days": {
             "type": [
@@ -3058,20 +3085,20 @@
               "null"
             ],
             "format": "int64",
-            "description": "How old, in days, a wallet's start may be; null: no limit. Always\npresent.",
+            "description": "How old, in days, a wallet's start may be; always present, null: no\nlimit.",
             "minimum": 0
           },
           "network": {
-            "$ref": "#/components/schemas/Network"
+            "type": "string",
+            "description": "Network name."
           },
-          "tip": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The node's newest block at the indexer's last read; always present,\nnull before the first.",
-            "minimum": 0
+          "settings": {
+            "type": "object",
+            "description": "The chain's own knobs; an absent key is the chain's default."
+          },
+          "testnet": {
+            "type": "boolean",
+            "description": "Whether its coins are test coins."
           },
           "tip_error": {
             "type": [
@@ -3086,7 +3113,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "The node's newest block, asked now; `tip` when that failed. Always\npresent.",
+            "description": "The node's newest block, asked now; the stored `tip` when that\nfailed. Always present.",
             "minimum": 0
           }
         }
@@ -3177,25 +3204,6 @@
           }
         }
       },
-      "Explorer": {
-        "type": "object",
-        "description": "One network's explorer links.",
-        "required": [
-          "address",
-          "transaction"
-        ],
-        "properties": {
-          "address": {
-            "type": "string",
-            "description": "An address's page; `{address}` is replaced by the address."
-          },
-          "transaction": {
-            "type": "string",
-            "description": "A transaction's page; `{tx}` is replaced by the transaction id."
-          }
-        },
-        "additionalProperties": false
-      },
       "IndexState": {
         "type": "string",
         "description": "Whether an index is scanned.",
@@ -3204,70 +3212,6 @@
           "paused",
           "no_data"
         ]
-      },
-      "Indexing": {
-        "type": "object",
-        "description": "One network's indexing health, from memory.",
-        "required": [
-          "blocks",
-          "last",
-          "tip",
-          "reorgs",
-          "watched",
-          "failures",
-          "error"
-        ],
-        "properties": {
-          "blocks": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Blocks kept.",
-            "minimum": 0
-          },
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The last failure, cleared by the next kept block; always present."
-          },
-          "failures": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Failed steps.",
-            "minimum": 0
-          },
-          "last": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Native position of the last block kept; always present.",
-            "minimum": 0
-          },
-          "reorgs": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Kept blocks archived because the chain took them back.",
-            "minimum": 0
-          },
-          "tip": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The chain's produced tip at the last step; always present.",
-            "minimum": 0
-          },
-          "watched": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Watches added.",
-            "minimum": 0
-          }
-        }
       },
       "Job": {
         "type": "object",
@@ -3617,6 +3561,61 @@
           }
         }
       },
+      "NetworkAsset": {
+        "type": "object",
+        "description": "One asset of a network: its native currency or a token.",
+        "required": [
+          "asset",
+          "kind",
+          "contract",
+          "ticker",
+          "decimals",
+          "display_decimals"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "`native`, or the token's contract (mint)."
+          },
+          "contract": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The token's contract (mint); always present, null for the native\ncurrency."
+          },
+          "decimals": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Fractional digits between the display unit and the atomic unit.",
+            "minimum": 0
+          },
+          "display_decimals": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Fractional digits a view shows; always present, null: all.",
+            "minimum": 0
+          },
+          "kind": {
+            "$ref": "#/components/schemas/NetworkAssetKind"
+          },
+          "ticker": {
+            "type": "string",
+            "description": "Display symbol."
+          }
+        }
+      },
+      "NetworkAssetKind": {
+        "type": "string",
+        "description": "What a network asset is.",
+        "enum": [
+          "native",
+          "contract"
+        ]
+      },
       "NetworkEndpoints": {
         "type": "object",
         "description": "A network's nodes.",
@@ -3662,8 +3661,8 @@
         ],
         "properties": {
           "indexing": {
-            "$ref": "#/components/schemas/Indexing",
-            "description": "What its indexer did since the process started."
+            "$ref": "#/components/schemas/NetworkIndex",
+            "description": "What its indexer last wrote."
           },
           "network": {
             "$ref": "#/components/schemas/Network",
@@ -3671,9 +3670,85 @@
           }
         }
       },
+      "NetworkIndex": {
+        "type": "object",
+        "description": "One network's indexing as its indexer last wrote it; the counters since\nthe row was made, across restarts.",
+        "required": [
+          "tip",
+          "confirmed",
+          "indexed",
+          "checked_at",
+          "blocks",
+          "reorgs",
+          "watched",
+          "failures"
+        ],
+        "properties": {
+          "blocks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Blocks kept.",
+            "minimum": 0
+          },
+          "checked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms of the indexer's last read whose tip moved; always present.",
+            "minimum": 0
+          },
+          "confirmed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`tip - confirmations`; always present.",
+            "minimum": 0
+          },
+          "failures": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Failed steps; why the last failed is the index job's `reason`.",
+            "minimum": 0
+          },
+          "indexed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The last kept block; always present, null: none yet.",
+            "minimum": 0
+          },
+          "reorgs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Kept blocks archived because the chain took them back.",
+            "minimum": 0
+          },
+          "tip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The node's newest block at the indexer's last read; always present,\nnull before the first.",
+            "minimum": 0
+          },
+          "watched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Watches added.",
+            "minimum": 0
+          }
+        }
+      },
       "NetworkList": {
         "type": "object",
-        "description": "Every configured network.",
+        "description": "Every stored network.",
         "required": [
           "networks"
         ],
@@ -3734,7 +3809,7 @@
       },
       "Report": {
         "type": "object",
-        "description": "The memory-only health snapshot of this process.",
+        "description": "The health of every indexed network.",
         "required": [
           "ready",
           "networks"
@@ -3745,11 +3820,11 @@
             "items": {
               "$ref": "#/components/schemas/NetworkHealth"
             },
-            "description": "Every configured network."
+            "description": "Every indexed network."
           },
           "ready": {
             "type": "boolean",
-            "description": "At least one network, and none whose last step failed."
+            "description": "At least one network, and no index job failing."
           }
         }
       },

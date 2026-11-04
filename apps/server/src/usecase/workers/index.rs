@@ -1,8 +1,10 @@
-//! The index job: one per network, never finished. Each run steps the
-//! network's indexer (`base::Indexer::next`), keeps its tip, confirmed
-//! position (`tip - confirmations`, the network's setting) and last kept
-//! block in the `network` row once the node answered a tip, and asks to run
-//! again: at once while behind, one interval later once at the tip.
+//! The index job: one per `network_index` row, never finished. Each run
+//! steps the network's indexer (`base::Indexer::next`), writes each step to
+//! the row (tip, confirmed position `tip - confirmations`, last kept block,
+//! and what the counters grew by since the last write), and asks to run
+//! again: at once while behind, one interval later once at the tip. A failed
+//! step runs again an interval later with its error as the job's `reason`;
+//! the next run that does not fail clears it.
 //!
 //! At the tip it queues a triggers job: every trigger decides each interval,
 //! never on a chain still catching up.
@@ -11,9 +13,13 @@
 //! runs beside triggers and broadcasts; each of them reads or writes in one
 //! transaction.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
-use base::{Chain, Network, Next};
+use base::{Chain, Network, Next, Stats};
 use payments::Payments;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -35,30 +41,30 @@ pub(crate) struct Target {
     pub(crate) network: String,
 }
 
-/// Steps every network's indexer.
+/// Steps every indexed network's indexer.
 pub(crate) struct Index {
     payments: Arc<Payments>,
     db: Db,
     queue: Queue,
+    /// Each indexer's stats as last written: a step writes what grew since.
+    saved: Mutex<BTreeMap<Network, Stats>>,
 }
 
 impl Index {
-    pub(crate) const fn new(payments: Arc<Payments>, db: Db, queue: Queue) -> Self {
+    pub(crate) fn new(payments: Arc<Payments>, db: Db, queue: Queue) -> Self {
         Self {
             payments,
             db,
             queue,
+            saved: Mutex::default(),
         }
     }
 
-    /// Makes sure every network has its `network` row and its index job,
-    /// pending now; a finished one (a Retry ran out) starts over.
+    /// Makes sure every `network_index` row has its index job, pending now;
+    /// a finished one (a Retry ran out) starts over.
     pub(crate) async fn start(&self) -> anyhow::Result<()> {
-        for network in self.payments.networks() {
-            let row = network.clone();
-            self.db
-                .write(move |connection| models::network::db::create(connection, &row))
-                .await?;
+        let indexed = self.db.read(models::network_index::db::find_all).await?;
+        for network in indexed.keys() {
             let target = Target {
                 chain: network.chain.as_str().to_owned(),
                 network: network.name.clone(),
@@ -67,7 +73,7 @@ impl Index {
             let topic = Topic::new([format!("index:{name}")])
                 .ok_or_else(|| anyhow::anyhow!("the network does not make a topic"))?;
             let job = Job {
-                id: Id::from(format!("index.{}.{}", target.chain, target.network)),
+                id: job_id(&target.chain, &target.network),
                 ..Job::new(topic, KIND, json!(target))
             };
             match self.queue.get(&job.id).await? {
@@ -87,11 +93,11 @@ impl Worker for Index {
     type Input = Target;
     type State = ();
 
-    /// Up to [`STEPS`] steps of the indexer, each followed by its `network`
-    /// row. At the tip it queues a triggers job and runs again an interval
-    /// later; still behind, it runs again at once. A failed step (in the
-    /// indexer's stats) or row write waits an interval and tries again: the
-    /// job never ends.
+    /// Up to [`STEPS`] steps of the indexer, each written to its
+    /// `network_index` row. At the tip it queues a triggers job and runs again an interval
+    /// later; still behind, it runs again at once. A failed step or row
+    /// write waits an interval and tries again, its error the job's
+    /// `reason`: the job never ends.
     async fn run(&self, task: Task<Target, ()>) -> Ack {
         let target = task.input().clone();
         let network = Network::new(Chain::new(&target.chain), &target.network);
@@ -104,27 +110,18 @@ impl Worker for Index {
         let later = now.saturating_add(millis(indexer.interval()));
         for _ in 0..STEPS {
             let next = indexer.next().await;
-            let (stats, at) = (indexer.stats(), network.clone());
-            if let Some(tip) = stats.tip {
-                let indexed = stats.last.map(|last| last.position);
-                let saved = self
-                    .db
-                    .write(move |connection| {
-                        let confirmed = tip.saturating_sub(confirmations);
-                        models::network::db::save(
-                            connection,
-                            &at,
-                            tip,
-                            confirmed,
-                            indexed,
-                            tasks::now(),
-                        )
-                    })
-                    .await;
-                if saved.is_err() {
-                    return task.again(later);
-                }
+            let after = indexer.stats();
+            let before = self.saved().get(&network).cloned().unwrap_or_default();
+            let step = models::NetworkIndex::step(&before, &after, confirmations, tasks::now());
+            let at = network.clone();
+            let saved = self
+                .db
+                .write(move |connection| models::network_index::db::save(connection, &at, &step))
+                .await;
+            if let Err(error) = saved {
+                return task.again_because(later, format!("{error:#}"));
             }
+            self.saved().insert(network.clone(), after);
             match next {
                 Ok(Next::Indexed(_) | Next::Reorged(_)) => {}
                 Ok(Next::Idle) => {
@@ -138,11 +135,22 @@ impl Worker for Index {
                     }
                     return task.again(later);
                 }
-                Err(_) => return task.again(later),
+                Err(error) => return task.again_because(later, format!("{error:#}")),
             }
         }
         task.again(now)
     }
+}
+
+impl Index {
+    fn saved(&self) -> std::sync::MutexGuard<'_, BTreeMap<Network, Stats>> {
+        self.saved.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The index job of `chain`'s `network`: one per network.
+pub(crate) fn job_id(chain: &str, network: &str) -> Id {
+    Id::from(format!("index.{chain}.{network}"))
 }
 
 fn millis(duration: Duration) -> u64 {

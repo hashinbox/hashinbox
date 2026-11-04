@@ -1,12 +1,72 @@
 //! [`Config`]: a chain's configuration of one network, built into a
-//! [`Service`] over the application's [`Storage`].
+//! [`Service`] over the application's [`Storage`]; and [`NetworkConfig`],
+//! the chain-neutral description each chain builds its `Config` from.
 
 use std::{fmt, sync::Arc, time::Duration};
+
+use serde_json::Value;
 
 use crate::{
     Assets, BlockStore, Dated, Future, Indexer, InputStore, Network, WalletFactoryBroadcaster,
     WalletIndexStore, WalletStore,
 };
+
+/// One network as an application stores it, whatever its chain: the facts
+/// every chain has, its assets and endpoints, and `settings`, the chain's
+/// own knobs. Each chain crate builds its `Config` from it
+/// (`TryFrom<&NetworkConfig>`), reading every absent knob as its default.
+#[derive(Clone, Debug)]
+pub struct NetworkConfig {
+    /// The chain and network name.
+    pub network: Network,
+    /// The chain's own identity of the network (Ethereum chain id, Solana
+    /// genesis hash); `None` where the name is enough.
+    pub chain_id: Option<String>,
+    /// Whether its coins are worthless test coins.
+    pub testnet: bool,
+    /// The chain's block (or slot) time.
+    pub block_time: Duration,
+    /// Positions a block needs below the tip to count as confirmed.
+    pub confirmations: u64,
+    /// How old a watch's start may be; `None`: no limit.
+    pub max_history: Option<Duration>,
+    /// An address's explorer page, `{address}` filled in; `None`: none.
+    pub explorer_address: Option<String>,
+    /// A transaction's explorer page, `{tx}` filled in; `None`: none.
+    pub explorer_transaction: Option<String>,
+    /// The chain's own knobs (fee limits, poll interval, ...): a JSON object.
+    pub settings: Value,
+    /// The native currency and every token.
+    pub assets: Vec<AssetConfig>,
+    /// The nodes, in failover order.
+    pub endpoints: Vec<rpc::Endpoint>,
+}
+
+/// One asset of a [`NetworkConfig`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetConfig {
+    /// The asset id: `native`, or the token's contract (mint).
+    pub asset: String,
+    /// The network's own currency, or a token.
+    pub kind: AssetKind,
+    /// The token's contract (mint); `None` for the native currency.
+    pub contract: Option<String>,
+    /// Display symbol, such as `ETH` or `USDC`.
+    pub ticker: String,
+    /// Fractional digits between the display unit and the atomic unit.
+    pub decimals: u32,
+    /// Fractional digits a view shows; `None`: all.
+    pub display_decimals: Option<u32>,
+}
+
+/// What an [`AssetConfig`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssetKind {
+    /// The network's own currency.
+    Native,
+    /// A token, by its contract (mint).
+    Contract,
+}
 
 /// Every store the services need, supplied by the application.
 #[derive(Clone)]

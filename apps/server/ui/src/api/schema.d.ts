@@ -12,8 +12,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Read readiness and network health from memory
-         * @description Public memory-only readiness: ready when at least one network is configured and no network's last indexing step failed. No RPC or storage reads.
+         * Read readiness and every indexed network's indexing
+         * @description Public readiness: ready when at least one network is indexed and no index job is failing (failed, or going again with a `reason`). Reads the `network_index` rows and the job queue; no RPC.
          */
         get: operations["read_health"];
         put?: never;
@@ -109,8 +109,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List every configured network, its indexing, its live tip and its RPC nodes
-         * @description Every network the configuration names: its stored row (the indexer's last read of the node), its nodes, each URL parsed, and its configuration. `tip_live` asks every network's node at once, each for at most 2 s; one that fails keeps the stored `tip` and says why in `tip_error`.
+         * List every network, its assets, its RPC nodes, its indexing and its live tip
+         * @description Every stored network: its row, its assets, its nodes (each URL parsed) and its `index` row (null: not indexed), and why its index job last failed (`index_job_reason`). `tip_live` asks every running network's node at once, each for at most 2 s; one that fails keeps the stored `tip` and says why in `tip_error`.
          */
         get: operations["list_networks"];
         put?: never;
@@ -641,52 +641,69 @@ export interface components {
             transactions: number;
         };
         /**
-         * @description One configured network: its stored row and nodes, the node's tip now,
-         *     and its configuration.
+         * @description One network as stored: its `network` row, its `network_asset` rows, its
+         *     `network_endpoint` nodes and its `network_index` row (`None`: not
+         *     indexed); and the node's tip asked now (`tip_live`, the stored `tip`
+         *     until a caller that asked sets it; `tip_error`, why asking failed).
          */
         ConfiguredNetwork: {
+            /** @description Its native currency and tokens. */
+            assets: components["schemas"]["NetworkAsset"][];
             /**
              * Format: int64
-             * @description Unix ms of the indexer's last read whose tip moved; always present.
+             * @description The chain's block (slot) time, in milliseconds.
              */
-            checked_at: number | null;
+            block_time_ms: number;
+            /** @description Chain name. */
+            chain: string;
+            /**
+             * @description The chain's own id of the network (Ethereum chain id, Solana genesis
+             *     hash); always present, null where the name is enough.
+             */
+            chain_id: string | null;
             /**
              * Format: int64
-             * @description `tip - confirmations`; always present.
+             * @description Positions below the tip before a block counts as confirmed.
              */
-            confirmed: number | null;
+            confirmations: number;
+            /** @description Whether the server starts indexing it. */
+            enabled: boolean;
             /** @description Its nodes in failover order. */
             endpoints: components["schemas"]["RpcNode"][];
-            explorer: null | components["schemas"]["Explorer"];
             /**
-             * @description The indexer's last failure since the process started, cleared by the
-             *     next kept block; always present.
+             * @description An address's explorer page, `{address}` filled in; always present,
+             *     null: none.
              */
-            index_error: string | null;
+            explorer_address: string | null;
+            /**
+             * @description A transaction's explorer page, `{tx}` filled in; always present,
+             *     null: none.
+             */
+            explorer_transaction: string | null;
+            index: null | components["schemas"]["NetworkIndex"];
+            /**
+             * @description Why its index job's last run failed (the job's `reason`), cleared by
+             *     the next run that does not; always present, null: none.
+             */
+            index_job_reason: string | null;
             /**
              * Format: int64
-             * @description The last kept block; always present, null: none yet.
-             */
-            indexed: number | null;
-            /**
-             * Format: int64
-             * @description How old, in days, a wallet's start may be; null: no limit. Always
-             *     present.
+             * @description How old, in days, a wallet's start may be; always present, null: no
+             *     limit.
              */
             max_history_days: number | null;
-            network: components["schemas"]["Network"];
-            /**
-             * Format: int64
-             * @description The node's newest block at the indexer's last read; always present,
-             *     null before the first.
-             */
-            tip: number | null;
+            /** @description Network name. */
+            network: string;
+            /** @description The chain's own knobs; an absent key is the chain's default. */
+            settings: Record<string, never>;
+            /** @description Whether its coins are test coins. */
+            testnet: boolean;
             /** @description Why asking the node failed; always present, null when it answered. */
             tip_error: string | null;
             /**
              * Format: int64
-             * @description The node's newest block, asked now; `tip` when that failed. Always
-             *     present.
+             * @description The node's newest block, asked now; the stored `tip` when that
+             *     failed. Always present.
              */
             tip_live: number | null;
         };
@@ -747,53 +764,11 @@ export interface components {
             /** @description What went wrong. */
             message: string;
         };
-        /** @description One network's explorer links. */
-        Explorer: {
-            /** @description An address's page; `{address}` is replaced by the address. */
-            address: string;
-            /** @description A transaction's page; `{tx}` is replaced by the transaction id. */
-            transaction: string;
-        };
         /**
          * @description Whether an index is scanned.
          * @enum {string}
          */
         IndexState: "indexing" | "paused" | "no_data";
-        /** @description One network's indexing health, from memory. */
-        Indexing: {
-            /**
-             * Format: int64
-             * @description Blocks kept.
-             */
-            blocks: number;
-            /** @description The last failure, cleared by the next kept block; always present. */
-            error: string | null;
-            /**
-             * Format: int64
-             * @description Failed steps.
-             */
-            failures: number;
-            /**
-             * Format: int64
-             * @description Native position of the last block kept; always present.
-             */
-            last: number | null;
-            /**
-             * Format: int64
-             * @description Kept blocks archived because the chain took them back.
-             */
-            reorgs: number;
-            /**
-             * Format: int64
-             * @description The chain's produced tip at the last step; always present.
-             */
-            tip: number | null;
-            /**
-             * Format: int64
-             * @description Watches added.
-             */
-            watched: number;
-        };
         /** @description One job of the queue. */
         Job: {
             /** @description How many of them, in broadcast order, the nodes accepted. */
@@ -956,6 +931,34 @@ export interface components {
             /** @description Configured network name, e.g. `regtest`. */
             name: string;
         };
+        /** @description One asset of a network: its native currency or a token. */
+        NetworkAsset: {
+            /** @description `native`, or the token's contract (mint). */
+            asset: string;
+            /**
+             * @description The token's contract (mint); always present, null for the native
+             *     currency.
+             */
+            contract: string | null;
+            /**
+             * Format: int32
+             * @description Fractional digits between the display unit and the atomic unit.
+             */
+            decimals: number;
+            /**
+             * Format: int32
+             * @description Fractional digits a view shows; always present, null: all.
+             */
+            display_decimals: number | null;
+            kind: components["schemas"]["NetworkAssetKind"];
+            /** @description Display symbol. */
+            ticker: string;
+        };
+        /**
+         * @description What a network asset is.
+         * @enum {string}
+         */
+        NetworkAssetKind: "native" | "contract";
         /** @description A network's nodes. */
         NetworkEndpoints: {
             /** @description Its nodes in failover order. */
@@ -969,12 +972,59 @@ export interface components {
         };
         /** @description One network's indexing. */
         NetworkHealth: {
-            /** @description What its indexer did since the process started. */
-            indexing: components["schemas"]["Indexing"];
+            /** @description What its indexer last wrote. */
+            indexing: components["schemas"]["NetworkIndex"];
             /** @description The indexed chain and network. */
             network: components["schemas"]["Network"];
         };
-        /** @description Every configured network. */
+        /**
+         * @description One network's indexing as its indexer last wrote it; the counters since
+         *     the row was made, across restarts.
+         */
+        NetworkIndex: {
+            /**
+             * Format: int64
+             * @description Blocks kept.
+             */
+            blocks: number;
+            /**
+             * Format: int64
+             * @description Unix ms of the indexer's last read whose tip moved; always present.
+             */
+            checked_at: number | null;
+            /**
+             * Format: int64
+             * @description `tip - confirmations`; always present.
+             */
+            confirmed: number | null;
+            /**
+             * Format: int64
+             * @description Failed steps; why the last failed is the index job's `reason`.
+             */
+            failures: number;
+            /**
+             * Format: int64
+             * @description The last kept block; always present, null: none yet.
+             */
+            indexed: number | null;
+            /**
+             * Format: int64
+             * @description Kept blocks archived because the chain took them back.
+             */
+            reorgs: number;
+            /**
+             * Format: int64
+             * @description The node's newest block at the indexer's last read; always present,
+             *     null before the first.
+             */
+            tip: number | null;
+            /**
+             * Format: int64
+             * @description Watches added.
+             */
+            watched: number;
+        };
+        /** @description Every stored network. */
         NetworkList: {
             /** @description Networks in chain, then name, order. */
             networks: components["schemas"]["ConfiguredNetwork"][];
@@ -995,11 +1045,11 @@ export interface components {
             /** @description The transactions, with their legs. */
             transactions: components["schemas"]["Transaction"][];
         };
-        /** @description The memory-only health snapshot of this process. */
+        /** @description The health of every indexed network. */
         Report: {
-            /** @description Every configured network. */
+            /** @description Every indexed network. */
             networks: components["schemas"]["NetworkHealth"][];
-            /** @description At least one network, and none whose last step failed. */
+            /** @description At least one network, and no index job failing. */
             ready: boolean;
         };
         /** @description `POST /v1/networks/endpoints` body. */
@@ -1654,7 +1704,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Every configured network */
+            /** @description Every network */
             200: {
                 headers: {
                     [name: string]: unknown;

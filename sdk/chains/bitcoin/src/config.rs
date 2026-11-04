@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use ::rpc::{BoxFuture, CallError, Client as _, Cluster, Endpoint, Http, Policy, Request};
 use anyhow::{Context as _, ensure};
 use base::{
-    Asset, AssetInfo, Cache, Future, Indexer, InputStore, Service, Storage,
+    Asset, AssetInfo, AssetKind, Cache, Future, Indexer, InputStore, Service, Storage,
     WalletFactoryBroadcaster,
 };
 use serde::Deserialize;
@@ -15,9 +15,9 @@ use crate::{AddressType, Chain, Factory};
 use crate::{BTC_DECIMALS, BTC_NAME, BTC_TICKER, Network};
 use crate::{FeeRate, fee::Fees, rpc::Client};
 
-/// Everything one Bitcoin network needs.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Everything one Bitcoin network needs; built in code with [`Config::new`]
+/// or from a [`base::NetworkConfig`].
+#[derive(Clone, Debug)]
 pub struct Config {
     /// The network.
     pub network: Network,
@@ -26,80 +26,78 @@ pub struct Config {
     /// Blocks a block needs on top of it, itself included, to be final;
     /// 1 to 1000, default 6. Bitcoin has no finality of its own. Also the
     /// service's `confirmations`: `confirmation_depth - 1`.
-    #[serde(default = "Config::default_confirmation_depth")]
     pub confirmation_depth: u64,
     /// P2WPKH (default) or `taproot`.
-    #[serde(default)]
     pub address_type: AddressType,
     /// Confirmation target of the node's fee estimate, in blocks; default 6.
-    #[serde(default = "Config::default_fee_target_blocks")]
     pub fee_target_blocks: u16,
     /// The lowest fee rate sent, in satoshis per 1,000 virtual bytes; also
     /// the rate when the node cannot estimate. Default 1,000 (Core's minimum
     /// relay rate).
-    #[serde(default = "Config::default_fee_floor")]
     pub fee_floor: u64,
     /// How long a fetched fee rate prices sends, in milliseconds; default
     /// 60,000.
-    #[serde(default = "Config::default_fee_ttl_ms")]
     pub fee_ttl_ms: u64,
     /// How long a broadcast transaction counts as pending before it is
     /// given up on, in milliseconds; default 259_200_000 (3 days).
-    #[serde(default = "Config::default_pending_ttl_ms")]
     pub pending_ttl_ms: u64,
     /// How often the indexer wakes, in milliseconds; default 30,000.
-    #[serde(default = "Config::default_interval_ms")]
     pub interval_ms: u64,
     /// Fractional digits a view shows of the native currency; none: all.
-    #[serde(default)]
     pub display_decimals: Option<u32>,
-    /// How old, in days, a watch's start may be: about what history the
-    /// nodes keep; none: no limit.
-    #[serde(default)]
-    pub max_history_days: Option<u32>,
+    /// How old a watch's start may be: about what history the nodes keep;
+    /// none: no limit.
+    pub max_history: Option<Duration>,
+}
+
+/// The knobs a [`base::NetworkConfig`]'s `settings` may set:
+/// `address_type`, `fee_target_blocks`, `fee_floor`, `fee_ttl_ms`,
+/// `pending_ttl_ms`, `interval_ms`; an absent one keeps its default.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Settings {
+    address_type: AddressType,
+    fee_target_blocks: u16,
+    fee_floor: u64,
+    fee_ttl_ms: u64,
+    pending_ttl_ms: u64,
+    interval_ms: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            address_type: AddressType::default(),
+            fee_target_blocks: 6,
+            fee_floor: 1_000,
+            fee_ttl_ms: 60_000,
+            pending_ttl_ms: 259_200_000,
+            interval_ms: 30_000,
+        }
+    }
 }
 
 impl Config {
     /// The defaults around the two required values.
     #[must_use]
     pub fn new(network: Network, endpoints: Vec<Endpoint>) -> Self {
+        Self::with(network, endpoints, Settings::default())
+    }
+
+    fn with(network: Network, endpoints: Vec<Endpoint>, settings: Settings) -> Self {
         Self {
             network,
             endpoints,
-            confirmation_depth: Self::default_confirmation_depth(),
-            address_type: AddressType::default(),
-            fee_target_blocks: Self::default_fee_target_blocks(),
-            fee_floor: Self::default_fee_floor(),
-            fee_ttl_ms: Self::default_fee_ttl_ms(),
-            pending_ttl_ms: Self::default_pending_ttl_ms(),
-            interval_ms: Self::default_interval_ms(),
-            max_history_days: None,
+            confirmation_depth: 6,
+            address_type: settings.address_type,
+            fee_target_blocks: settings.fee_target_blocks,
+            fee_floor: settings.fee_floor,
+            fee_ttl_ms: settings.fee_ttl_ms,
+            pending_ttl_ms: settings.pending_ttl_ms,
+            interval_ms: settings.interval_ms,
+            max_history: None,
             display_decimals: None,
         }
-    }
-
-    const fn default_interval_ms() -> u64 {
-        30_000
-    }
-
-    const fn default_confirmation_depth() -> u64 {
-        6
-    }
-
-    const fn default_fee_target_blocks() -> u16 {
-        6
-    }
-
-    const fn default_fee_ttl_ms() -> u64 {
-        60_000
-    }
-
-    const fn default_pending_ttl_ms() -> u64 {
-        259_200_000
-    }
-
-    const fn default_fee_floor() -> u64 {
-        1_000
     }
 
     /// Rejects the value on its own, without I/O.
@@ -199,6 +197,32 @@ impl Config {
     }
 }
 
+impl TryFrom<&base::NetworkConfig> for Config {
+    type Error = anyhow::Error;
+
+    /// Its network (by name), endpoints and native display, its
+    /// `confirmation_depth` (`confirmations + 1`), and its knobs from
+    /// `settings`.
+    fn try_from(config: &base::NetworkConfig) -> anyhow::Result<Self> {
+        let settings = Settings::deserialize(&config.settings).context("Bitcoin settings")?;
+        let network =
+            Network::deserialize(json!(config.network.name)).context("Bitcoin network")?;
+        let mut built = Self::with(network, config.endpoints.clone(), settings);
+        built.confirmation_depth = config.confirmations.saturating_add(1);
+        built.max_history = config.max_history;
+        for asset in &config.assets {
+            ensure!(asset.kind == AssetKind::Native, "Bitcoin has no tokens");
+            ensure!(asset.decimals == BTC_DECIMALS, "BTC has 8 decimals");
+            built.display_decimals = asset.display_decimals;
+        }
+        ensure!(
+            base::Config::network(&built) == config.network,
+            "not a Bitcoin network"
+        );
+        Ok(built)
+    }
+}
+
 impl base::Config for Config {
     fn network(&self) -> base::Network {
         self.network.into()
@@ -233,9 +257,7 @@ impl base::Config for Config {
                 storage: storage.clone(),
                 client,
                 dated: Some(chain),
-                max_history: self
-                    .max_history_days
-                    .map(|days| Duration::from_secs(u64::from(days) * 86_400)),
+                max_history: self.max_history,
                 confirmations: self.confirmation_depth.saturating_sub(1),
             })
         })

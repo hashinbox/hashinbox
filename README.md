@@ -8,37 +8,29 @@ from restarts and reorgs.
 ## Run the server
 
 ```bash
-cat > payments.toml <<'TOML'
-bind = '127.0.0.1:3000'
-bearer_token_env = 'PAYMENT_API_TOKEN'
-
-[chains.ethereum]
-network = 'anvil'
-chain_id = 31337
-rpc.endpoints = ['http://127.0.0.1:8545']
-TOML
-
-anvil --host 127.0.0.1 --chain-id 31337 --hardfork cancun --timestamp 0 &
+# Once: the database with the seeded test and main networks (apps/server/seed.sql).
+cargo run --locked -p payment-server -- migrate
 
 export PAYMENT_API_TOKEN='replace-me'
-cargo run --locked -p payment-server -- ./payments.toml
+cargo run --locked -p payment-server -- serve --bind 127.0.0.1:3000 \
+  --bearer-token-env PAYMENT_API_TOKEN
 
 curl -H "Authorization: Bearer $PAYMENT_API_TOKEN" http://127.0.0.1:3000/v1/assets
 ```
 
-The full configuration is in [apps/server](apps/server/README.md).
+Flags and the network tables are in [apps/server](apps/server/README.md).
 
 ## Folders
 
 | Folder | What it holds |
 | --- | --- |
-| [apps/server](apps/server/README.md) | The executable: configuration, storage, supervision and the HTTP API |
+| [apps/server](apps/server/README.md) | The executable: storage, supervision and the HTTP API |
 | [sdk/base](sdk/base/README.md) | Chain-neutral values and the signing and broadcast traits |
 | [sdk/chains/bitcoin](sdk/chains/bitcoin/README.md) | Bitcoin: RPC, blocks, UTXO wallets, sending |
 | [sdk/chains/ethereum](sdk/chains/ethereum/README.md) | Ethereum: RPC, blocks, ETH and ERC-20 wallets, sending |
 | [sdk/chains/solana](sdk/chains/solana/README.md) | Solana: RPC, blocks, SOL and SPL wallets, SOL sending |
 | [sdk/indexing](sdk/indexing/README.md) | Watches, block synchronization and the store contracts |
-| [sdk/payments](sdk/payments/README.md) | The configuration document and chain registration |
+| [sdk/payments](sdk/payments/README.md) | The network container and chain registration |
 | [packages/crypto](packages/crypto/README.md) | Keys and signing |
 | [packages/decimal](packages/decimal/README.md) | Exact decimal amounts |
 | [packages/rpc](packages/rpc/README.md) | JSON-RPC client with retry and failover |

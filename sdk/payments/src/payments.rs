@@ -5,24 +5,22 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Address, Asset, Assets, Birthday, Config, Network, Service, Stats, Storage, TransactionError,
-    TransactionErrorKind, Wallet, WalletError, WalletErrorKind, WalletFactories,
+    Address, Asset, Assets, Birthday, Chain, Config, Network, NetworkConfig, Service, Stats,
+    Storage, TransactionError, TransactionErrorKind, Wallet, WalletError, WalletErrorKind,
+    WalletFactories,
 };
 use crypto::SecretBytes;
 use rpc::Swap;
-use serde::de::DeserializeOwned;
-use serde_json::Value;
 
-use crate::Document;
-
-/// Builds a registered chain's configuration from its section.
-type Parser = Box<dyn Fn(Value) -> anyhow::Result<Box<dyn Config>> + Send + Sync>;
+/// Builds a registered chain's configuration from a [`NetworkConfig`].
+type Parser = Box<dyn Fn(&NetworkConfig) -> anyhow::Result<Box<dyn Config>> + Send + Sync>;
 
 /// Every configured network's [`Service`], and the swappable transport it
 /// reaches its nodes through; every call is keyed by network.
 ///
 /// It names no chain: the application registers each chain's configuration
-/// with [`Builder::with_chain`], or hands configurations in with
+/// with [`Builder::with_chain`] and hands [`NetworkConfig`]s in with
+/// [`Builder::with_network_config`], or chain configurations with
 /// [`Builder::with_network`].
 pub struct Payments {
     services: BTreeMap<Network, Service>,
@@ -207,33 +205,30 @@ impl fmt::Debug for Payments {
 /// network.
 #[derive(Default)]
 pub struct Builder {
-    parsers: BTreeMap<String, Parser>,
-    document: Option<Document>,
+    parsers: BTreeMap<Chain, Parser>,
+    configs: Vec<NetworkConfig>,
     networks: Vec<Box<dyn Config>>,
     clients: BTreeMap<Network, Arc<dyn rpc::Client>>,
     storage: Option<Storage>,
 }
 
 impl Builder {
-    /// Reads the document's sections whose `chain` is `name` as `C`.
-    /// Registering a name again replaces the earlier chain.
+    /// Builds every [`NetworkConfig`] of `chain` as `C`. Registering a chain
+    /// again replaces the earlier one.
     #[must_use]
-    pub fn with_chain<C: Config + DeserializeOwned + 'static>(
-        mut self,
-        name: impl Into<String>,
-    ) -> Self {
-        self.parsers.insert(
-            name.into(),
-            Box::new(|section| Ok(Box::new(serde_json::from_value::<C>(section)?))),
-        );
+    pub fn with_chain<C>(mut self, chain: Chain) -> Self
+    where
+        C: Config + for<'a> TryFrom<&'a NetworkConfig, Error = anyhow::Error> + 'static,
+    {
+        self.parsers
+            .insert(chain, Box::new(|config| Ok(Box::new(C::try_from(config)?))));
         self
     }
 
-    /// The configuration document: its networks, read by the registered
-    /// chains.
+    /// One more network, built by its registered chain.
     #[must_use]
-    pub fn with_config(mut self, document: Document) -> Self {
-        self.document = Some(document);
+    pub fn with_network_config(mut self, config: NetworkConfig) -> Self {
+        self.configs.push(config);
         self
     }
 
@@ -263,29 +258,30 @@ impl Builder {
         self
     }
 
-    /// Reads every section, then builds each network over a [`Swap`] of its
-    /// given client or the chain's own.
+    /// Builds every [`NetworkConfig`] by its chain, then each network over a
+    /// [`Swap`] of its given client or the chain's own.
     ///
     /// # Errors
     ///
-    /// No storage, a section of an unregistered chain or that does not
-    /// decode, a network configured twice, a client for a network with no
+    /// No storage, a network of an unregistered chain or whose settings do
+    /// not decode, a network configured twice, a client for a network with no
     /// configuration, or a network whose configuration is invalid or whose
     /// nodes do not connect.
     pub async fn build(self) -> anyhow::Result<Payments> {
         let storage = self.storage.context("payments needs with_storage")?;
 
         let mut configs = Vec::new();
-        for (chain, section) in self
-            .document
-            .as_ref()
-            .map_or(Ok(Vec::new()), Document::sections)?
-        {
-            let parse = self.parsers.get(&chain).with_context(|| {
-                let known = self.parsers.keys().cloned().collect::<Vec<_>>();
-                format!("no chain {chain:?} is registered; registered: {known:?}")
+        for config in &self.configs {
+            let network = &config.network;
+            let parse = self.parsers.get(&network.chain).with_context(|| {
+                let known = self.parsers.keys().collect::<Vec<_>>();
+                format!(
+                    "no chain {} is registered; registered: {known:?}",
+                    network.chain
+                )
             })?;
-            configs.push(parse(section).with_context(|| chain.clone())?);
+            let label = format!("{}/{}", network.chain, network.name);
+            configs.push(parse(config).context(label)?);
         }
         configs.extend(self.networks);
         let mut given = self.clients;
@@ -330,7 +326,10 @@ impl fmt::Debug for Builder {
         formatter
             .debug_struct("Builder")
             .field("chains", &self.parsers.keys().collect::<Vec<_>>())
-            .field("document", &self.document)
+            .field(
+                "configs",
+                &self.configs.iter().map(|c| &c.network).collect::<Vec<_>>(),
+            )
             .field("networks", &self.networks.len())
             .field("clients", &self.clients.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()

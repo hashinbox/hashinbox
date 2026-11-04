@@ -43,14 +43,11 @@ async fn solana(storage: Storage) -> anyhow::Result<()> {
 }
 ```
 
-A configuration document carries the same fields:
-
-```toml
-network = 'mainnet-beta'
-genesis_hash = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d'
-endpoints = ['http://127.0.0.1:8899']
-tokens = [{ mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals = 6 }]
-```
+`Config::try_from(&base::NetworkConfig)` builds it from a stored network:
+the genesis hash (`chain_id`), endpoints, assets (SOL's display decimals, the
+`contract` mints), `confirmations`, `max_history`, and from `settings` the
+knobs `fee_ttl_ms`, `pending_ttl_ms`, `interval_ms` (each absent one its
+default).
 
 ## Notes
 

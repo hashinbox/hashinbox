@@ -32,12 +32,12 @@ export function Nodes({
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<Node | null>(null);
   const node = network.endpoints[picked] ?? network.endpoints[0] ?? null;
-  const name = `${network.network.chain}/${network.network.name}`;
+  const name = `${network.chain}/${network.network}`;
 
   const remove = (target: Node) => {
     setRemoving(null);
     const params = {
-      path: { chain: network.network.chain, network: network.network.name, index: target.index },
+      path: { chain: network.chain, network: network.network, index: target.index },
     };
     call(client.DELETE('/v1/networks/{chain}/{network}/endpoints/{index}', { params }))
       .then(() => {
@@ -60,7 +60,7 @@ export function Nodes({
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 3, maxWidth: 720 }}>
         Calls go to the first node and fail over in order. A change is stored and used at once.
-        {network.index_error && ` Last indexing error: ${network.index_error}`}
+        {network.index_job_reason && ` Index job's last run failed: ${network.index_job_reason}`}
       </Typography>
       <Box
         sx={{

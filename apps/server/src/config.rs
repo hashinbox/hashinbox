@@ -1,110 +1,88 @@
-//! The server's configuration document: HTTP binding, storage, the payments
-//! networks. An RPC endpoint is its URL, credentials included.
-//!
-//! A `.toml` path is read as TOML, anything else as JSON. The `payments`
-//! section is `payments::Document`, which this module never looks inside:
-//! `crate::chains` says which chain owns which section name.
+//! The command line: what the server needs before it can open the database
+//! (its file, its binding, its token and the page's brand), each flag with
+//! an environment fallback. Everything else is in the database.
 
 use std::{
     env,
     error::Error,
     net::SocketAddr,
-    path::{self, Path, PathBuf},
+    path::{self, PathBuf},
 };
 
 use anyhow::{Context as _, ensure};
-use serde::Deserialize;
 
 use crate::db::Db;
 
 pub(crate) type AnyError = Box<dyn Error + Send + Sync>;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Config {
+/// The command line.
+#[derive(clap::Parser)]
+#[command(name = "payment-server", args_conflicts_with_subcommands = true)]
+pub(crate) struct Cli {
+    /// Print the OpenAPI document instead of serving, so a typed client can
+    /// be generated without a node, a database, or a bound port.
+    #[arg(long)]
+    pub(crate) openapi: bool,
+    #[command(subcommand)]
+    pub(crate) command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+pub(crate) enum Command {
+    /// Run the server.
+    Serve(Serve),
+    /// Create the schema and its starting networks in a new database file.
+    Migrate(Storage),
+}
+
+/// The database file.
+#[derive(clap::Args)]
+pub(crate) struct Storage {
+    /// The SQLite file; a relative path resolves against the working
+    /// directory.
+    #[arg(long, env = "PAYMENT_DB", default_value = ".data/payment.db")]
+    db: PathBuf,
+}
+
+/// `serve`'s flags.
+#[derive(clap::Args)]
+pub(crate) struct Serve {
+    #[command(flatten)]
+    pub(crate) storage: Storage,
+    /// The address the API listens on.
+    #[arg(long, env = "PAYMENT_BIND", default_value = "127.0.0.1:8080")]
     pub(crate) bind: SocketAddr,
     /// The variable holding the API token; absent means no authorization,
     /// which only a loopback `bind` accepts.
-    #[serde(default)]
+    #[arg(long, env = "PAYMENT_BEARER_TOKEN_ENV")]
     bearer_token_env: Option<String>,
-    #[serde(default)]
+    /// TLS is terminated by a proxy in front, so a non-loopback `bind` is
+    /// accepted.
+    #[arg(long, env = "PAYMENT_TLS_TERMINATED_UPSTREAM")]
     tls_terminated_upstream: bool,
-    #[serde(default)]
-    pub(crate) storage: Storage,
-    /// Every network, each section naming its `chain`.
-    #[serde(default)]
-    pub(crate) payments: payments::Document,
-    /// How the browser page presents itself; every key is optional.
-    #[serde(default)]
-    pub(crate) ui: Ui,
-}
-
-/// The `"storage"` section: `{"path": ...}`, defaulting to `payment.db`;
-/// a relative path resolves against the working directory.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Storage {
-    path: PathBuf,
-}
-
-impl Default for Storage {
-    fn default() -> Self {
-        Self {
-            path: PathBuf::from("payment.db"),
-        }
-    }
+    /// The name in the page's top bar; the page has its own default.
+    #[arg(long, env = "PAYMENT_UI_BRAND")]
+    pub(crate) brand: Option<String>,
 }
 
 impl Storage {
-    /// Opens the configured file as one pool; applies no schema.
+    /// Opens the file as one pool; applies no schema.
     ///
     /// # Errors
     ///
     /// When the path does not resolve or the pool does not open.
     pub(crate) fn open(&self) -> anyhow::Result<Db> {
         ensure!(
-            !self.path.as_os_str().is_empty(),
+            !self.db.as_os_str().is_empty(),
             "storage path must not be empty"
         );
-        let path = path::absolute(&self.path)
+        let path = path::absolute(&self.db)
             .context("storage path is not resolvable against the working directory")?;
         Db::open(&path)
     }
 }
 
-/// The `[ui]` section: what the page shows that is the deployment's choice.
-#[derive(Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Ui {
-    /// The name in the top bar; the page has its own default.
-    pub(crate) brand: Option<String>,
-    /// Block explorer links, by chain, then network.
-    #[serde(default)]
-    pub(crate) explorers: crate::models::Explorers,
-}
-
-impl Config {
-    pub(crate) async fn read(path: impl AsRef<Path>) -> Result<Self, AnyError> {
-        let path = path.as_ref();
-        let text = tokio::fs::read_to_string(path).await?;
-        let config: Self = if path
-            .extension()
-            .is_some_and(|extension| extension == "toml")
-        {
-            toml::from_str(&text)?
-        } else {
-            serde_json::from_str(&text)?
-        };
-        if config
-            .bearer_token_env
-            .as_deref()
-            .is_some_and(|name| name.trim().is_empty())
-        {
-            return Err("bearer-token environment name must not be empty".into());
-        }
-        Ok(config)
-    }
-
+impl Serve {
     /// Where the browser page sends its API calls, from `PAYMENT_UI_API_BASE`.
     /// Unset or empty means the page's own origin, which is right whenever
     /// this server serves the page; set it when a proxy or another origin
@@ -122,7 +100,8 @@ impl Config {
     }
 
     pub(crate) fn server(&self) -> Result<http_server::Config, AnyError> {
-        let token = match &self.bearer_token_env {
+        let token = match self.bearer_token_env.as_deref().map(str::trim) {
+            Some("") => return Err("bearer-token environment name must not be empty".into()),
             Some(name) => Some(http_server::BearerToken::new(env::var(name)?)?),
             None => None,
         };

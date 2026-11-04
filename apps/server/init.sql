@@ -14,7 +14,7 @@
 -- archives it (a reorg): `archived_at` is set, nothing is deleted, and every
 -- read joins live blocks only, so archived facts leave balances, history and
 -- unspent outputs. Confirmation is a read (position <= the network's
--- `network` confirmed position).
+-- `network_index` confirmed position).
 --
 -- Mined facts (transactions and legs, rewards included) are kept only for
 -- (address, asset) pairs with a wallet_index the block applies to
@@ -217,27 +217,13 @@ CREATE TABLE wallet_index (
 CREATE INDEX wallet_index_wallet ON wallet_index (wallet_id);
 CREATE INDEX wallet_index_progress ON wallet_index (indexed_at);
 
--- Each configured network (the server writes one row per network at start)
--- and its indexer as of its last step that read the node's tip (written from
--- the indexer's stats; NULL until then): `tip`, the node's newest block;
--- `confirmed`, `tip - confirmations` (the network's setting, applied at
--- write); `indexed`, the last kept block (NULL: none yet); `checked_at`,
--- Unix ms of the last step whose tip moved.
-CREATE TABLE network (
-    chain      TEXT    NOT NULL,
-    network    TEXT    NOT NULL,
-    tip        INTEGER,
-    confirmed  INTEGER,
-    indexed    INTEGER,
-    checked_at INTEGER,
-    PRIMARY KEY (chain, network)
-);
+
 
 -- A wallet index with its wallet's network and address, whether its key is
 -- kept, the position it is indexed through and how far that is behind its
 -- network's indexer tip, and the indexer's confirmed position
--- (`finality_at`). Its balances, NULL while that is unknown (no `network`
--- confirmed position): `balance`, `balance_received`, `balance_sent`, the totals of its
+-- (`finality_at`). Its balances, NULL while that is unknown (no
+-- `network_index` confirmed position): `balance`, `balance_received`, `balance_sent`, the totals of its
 -- last live mined leg at or below `finality_at` (`c`; '0': none);
 -- `balance_spendable`, `balance` less its pending outgoing legs (spent,
 -- burned, fee; no block). `balance_pending`: the total of its newest live
@@ -275,7 +261,7 @@ SELECT
 FROM wallet_index wi
 JOIN wallet w ON w.id = wi.wallet_id
 LEFT JOIN block b ON b.id = wi.indexed_at
-LEFT JOIN network i ON i.chain = w.chain
+LEFT JOIN network_index i ON i.chain = w.chain
     AND i.network = w.network
 LEFT JOIN leg c ON c.id = (
     SELECT l.id
@@ -304,29 +290,78 @@ LEFT JOIN leg n ON n.id = (
 -- no wallet table of its own. It may read the SDK's tables; it writes only
 -- its own, and a wallet's tags.
 
+-- One row per network the server knows: what does not change while it
+-- runs. `chain_id`, the chain's own id of it (Ethereum chain id, Solana
+-- genesis hash; NULL where the name is enough). `block_time_ms`, the chain's
+-- block (slot) time. `confirmations`, positions below the tip before a block
+-- counts as confirmed. `max_history_days`, how old a wallet's start may be
+-- (NULL: no limit). `explorer_address` / `explorer_transaction`, page URLs
+-- with `{address}` / `{tx}` filled in (NULL: none). `settings`, the chain's
+-- own knobs as a JSON object (fee limits, poll interval, ...); an absent key
+-- is the chain's default. Seeded by `seed.sql`.
+CREATE TABLE network (
+    chain                TEXT    NOT NULL,
+    network              TEXT    NOT NULL,
+    chain_id             TEXT,
+    testnet              INTEGER NOT NULL,
+    enabled              INTEGER NOT NULL,
+    block_time_ms        INTEGER NOT NULL,
+    confirmations        INTEGER NOT NULL,
+    max_history_days     INTEGER,
+    explorer_address     TEXT,
+    explorer_transaction TEXT,
+    settings             TEXT    NOT NULL DEFAULT '{}',
+    PRIMARY KEY (chain, network)
+);
+
+-- Every asset of a network: its native currency (`kind` 'native', `asset`
+-- 'native', no contract) and its tokens (`kind` 'contract', `asset` the
+-- contract or mint). `display_decimals`: fractional digits a view shows
+-- (NULL: all).
+CREATE TABLE network_asset (
+    chain            TEXT    NOT NULL,
+    network          TEXT    NOT NULL,
+    asset            TEXT    NOT NULL,
+    kind             TEXT    NOT NULL,
+    contract         TEXT,
+    ticker           TEXT    NOT NULL,
+    decimals         INTEGER NOT NULL,
+    display_decimals INTEGER,
+    PRIMARY KEY (chain, network, asset),
+    FOREIGN KEY (chain, network) REFERENCES network (chain, network)
+);
+
+-- What each network's indexer last wrote (one row per network it runs; the
+-- server indexes exactly these, and adds one per `enabled` network at start):
+-- `tip`, the node's newest block; `confirmed`, `tip - confirmations`;
+-- `indexed`, the last kept block (NULL: none yet); `checked_at`, Unix ms of
+-- the last step whose tip moved. `blocks` (kept), `reorgs`, `watched` and
+-- `failures` count since the row was made. Why a step failed is the index
+-- job's `q.reason`.
+CREATE TABLE network_index (
+    chain      TEXT    NOT NULL,
+    network    TEXT    NOT NULL,
+    tip        INTEGER,
+    confirmed  INTEGER,
+    indexed    INTEGER,
+    checked_at INTEGER,
+    blocks     INTEGER NOT NULL DEFAULT 0,
+    reorgs     INTEGER NOT NULL DEFAULT 0,
+    watched    INTEGER NOT NULL DEFAULT 0,
+    failures   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chain, network),
+    FOREIGN KEY (chain, network) REFERENCES network (chain, network)
+);
+
 -- One row per network: its RPC endpoint documents in failover order, as one
--- JSON list. Seeded from the configuration file once, replaced by verified
--- edits.
+-- JSON list. Seeded by `seed.sql`, replaced by verified edits.
 CREATE TABLE network_endpoint (
     chain   TEXT NOT NULL,
     network TEXT NOT NULL,
     nodes   TEXT NOT NULL,
-    PRIMARY KEY (chain, network)
+    PRIMARY KEY (chain, network),
+    FOREIGN KEY (chain, network) REFERENCES network (chain, network)
 ) WITHOUT ROWID;
-
--- Each `network` row with its endpoint documents (`nodes`; NULL: none stored).
-CREATE VIEW network_with_endpoints AS
-SELECT
-    n.chain,
-    n.network,
-    n.tip,
-    n.confirmed,
-    n.indexed,
-    n.checked_at,
-    e.nodes
-FROM network n
-LEFT JOIN network_endpoint e ON e.chain = n.chain
-    AND e.network = n.network;
 
 -- One trigger (pipes): its selector, filter, check and action as JSON, the
 -- types of `apps/server/src/models/trigger.rs`. id: its slug, chosen at creation.

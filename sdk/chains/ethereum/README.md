@@ -42,14 +42,11 @@ async fn ethereum(storage: Storage) -> anyhow::Result<()> {
 }
 ```
 
-A configuration document carries the same fields:
-
-```toml
-network = 'mainnet'
-chain_id = 1
-endpoints = ['https://node.invalid/v3/KEY']
-tokens = [{ contract = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', decimals = 6 }]
-```
+`Config::try_from(&base::NetworkConfig)` builds it from a stored network:
+`chain_id`, endpoints, assets (ether's display decimals, the `contract`
+tokens), `confirmations`, `max_history`, and from `settings` the knobs
+`limits`, `fee_ttl_ms`, `pending_ttl_ms`, `interval_ms` (each absent one its
+default).
 
 ## Notes
 

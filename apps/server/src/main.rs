@@ -1,15 +1,12 @@
-//! Payment server process: reads one configuration document, opens the one
-//! SQLite file, builds `payments::Payments` over its stores with every chain
-//! registered here (the only module that names a chain crate), runs each
-//! network's indexer and the send queue, and serves the public HTTP API
-//! (`api`, which names no chain and no storage backend) beside the browser
-//! page (`ui`). The pool is `db`, the schema files `schema`; the tables and
-//! their statements are `models`; the stores, the queue and the reads on
-//! them are `usecase`; the background jobs are `workers`.
-//!
-//! A network's stored `network_endpoint` row replaces its section's
-//! `endpoints` before the chain reads it, so a change made through the API
-//! survives a restart; a section with no row seeds it on the first start.
+//! Payment server process: reads its command line (`config`), opens the
+//! one SQLite file, builds `payments::Payments` over its stores from the
+//! `network` rows that have a `network_index` row (each `enabled` network
+//! gets one at start), with every chain registered here (the only module
+//! that names a chain crate), runs each of those networks' indexer and the
+//! send queue, and serves the public HTTP API (`api`, which names no chain
+//! and no storage backend) beside the browser page (`ui`). The pool is `db`;
+//! the tables and their statements are `models`; the stores, the queue and
+//! the reads on them are `usecase`; the background jobs are `workers`.
 
 mod api;
 mod config;
@@ -22,76 +19,49 @@ mod usecase;
 #[path = "../tests/mod.rs"]
 mod tests;
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use api::AppState;
-use config::{AnyError, Config};
-use payments::{Document, Payments};
-use serde_json::Value;
-
-/// Every way the binary may be invoked; every refusal of an argument prints it.
-const USAGE: &str = "usage: payment-server serve <config.toml> \
-                     | payment-server migrate <config.toml> | payment-server --openapi";
-
-/// The command line.
-#[derive(clap::Parser)]
-#[command(name = "payment-server", args_conflicts_with_subcommands = true)]
-struct Cli {
-    /// Print the OpenAPI document instead of serving, so a typed client can
-    /// be generated without a node, a database, or a bound port.
-    #[arg(long)]
-    openapi: bool,
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(clap::Subcommand)]
-enum Command {
-    /// Run the server.
-    Serve {
-        /// The configuration document.
-        config: PathBuf,
-    },
-    /// Execute the schema on the configured (new) database file.
-    Migrate {
-        /// The configuration document.
-        config: PathBuf,
-    },
-}
+use config::{AnyError, Cli, Command};
+use payments::Payments;
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
     let cli = <Cli as clap::Parser>::parse();
-    let path = match cli.command {
+    let config = match cli.command {
         _ if cli.openapi => {
             println!("{}", serde_json::to_string_pretty(&api::openapi())?);
             return Ok(());
         }
-        None => return Err(USAGE.into()),
-        Some(Command::Migrate { config }) => {
-            let db = Config::read(config).await?.storage.open()?;
-            db.migrate().await?;
+        None => {
+            return Err("usage: payment-server serve | migrate | --openapi (see --help)".into());
+        }
+        Some(Command::Migrate(storage)) => {
+            storage.open()?.migrate().await?;
             return Ok(());
         }
-        Some(Command::Serve { config }) => config,
+        Some(Command::Serve(serve)) => serve,
     };
-    let config = Config::read(path).await?;
     let server = config.server()?;
     let face = ui::Settings::from_params(ui::SettingsParams {
-        brand: config.ui.brand.clone(),
-        api_base: Config::api_base()?,
+        brand: config.brand.clone(),
+        api_base: config::Serve::api_base()?,
     });
 
     let db = config.storage.open()?;
     let queue = usecase::tasks::Queue::new(db.clone());
-    let document = stored_endpoints(config.payments.clone(), &db).await?;
     let stores = Arc::new(usecase::sdk::Stores::new(db.clone()));
-    // Each chain's `Config` reads its own section of the payments document.
-    let payments = Payments::builder()
-        .with_chain::<chain_bitcoin::Config>("bitcoin")
-        .with_chain::<chain_ethereum::Config>("ethereum")
-        .with_chain::<chain_solana::Config>("solana")
-        .with_config(document)
+    // Every network with a `network_index` row, each built by its chain.
+    db.write(models::network_index::db::create_enabled).await?;
+    let networks = db.read(models::network::db::find_all).await?;
+    let mut builder = Payments::builder()
+        .with_chain::<chain_bitcoin::Config>(chain_bitcoin::CHAIN_NAME)
+        .with_chain::<chain_ethereum::Config>(chain_ethereum::CHAIN_NAME)
+        .with_chain::<chain_solana::Config>(chain_solana::CHAIN_NAME);
+    for network in networks.iter().filter(|network| network.index.is_some()) {
+        builder = builder.with_network_config(network.into());
+    }
+    let payments = builder
         .with_storage(base::Storage {
             blocks: stores.clone(),
             indexes: stores.clone(),
@@ -134,7 +104,6 @@ async fn main() -> Result<(), AnyError> {
         payments,
         db,
         queue,
-        explorers: config.ui.explorers.clone(),
     });
     let router = api::router(state, &server)?.merge(face.routes()?);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
@@ -147,35 +116,4 @@ async fn main() -> Result<(), AnyError> {
         .await;
     jobs.abort();
     Ok(served?)
-}
-
-/// `document` with each section's `endpoints` replaced by its network's
-/// stored row, matched on the section's `chain` and `network` text; a section
-/// with no stored row has its `endpoints` stored, so the stored rows are the
-/// one list every later change edits.
-async fn stored_endpoints(mut document: Document, db: &db::Db) -> anyhow::Result<Document> {
-    let stored = db.read(models::endpoint::db::find_all).await?.documents();
-    let mut seeds = Vec::new();
-    for section in &mut document.networks {
-        let (Some(Value::String(chain)), Some(Value::String(name))) =
-            (section.get("chain"), section.get("network"))
-        else {
-            continue;
-        };
-        let network = base::Network::new(base::Chain::new(chain), name);
-        if let Some(nodes) = stored.get(&network) {
-            section.insert("endpoints".to_owned(), Value::Array(nodes.clone()));
-        } else if let Some(Value::Array(nodes)) = section.get("endpoints") {
-            let nodes = models::RpcEndpoints::new(nodes.clone()).map_err(anyhow::Error::msg)?;
-            seeds.push((network, nodes));
-        }
-    }
-    db.write(move |connection| {
-        for (network, nodes) in &seeds {
-            models::endpoint::db::upsert(connection, network, nodes)?;
-        }
-        Ok(())
-    })
-    .await?;
-    Ok(document)
 }

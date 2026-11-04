@@ -104,7 +104,6 @@ async fn wallets_balance_legs_and_sends() {
         payments,
         db: db.clone(),
         queue: crate::usecase::tasks::Queue::new(db.clone()),
-        explorers: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -265,7 +264,7 @@ async fn wallets_balance_legs_and_sends() {
     let network = &networks["networks"][0];
     assert_eq!(network["endpoints"], json!([]));
     assert_eq!(
-        (&network["tip"], &network["tip_live"]),
+        (&network["index"]["tip"], &network["tip_live"]),
         (&Value::Null, &Value::Null)
     );
     assert!(network["tip_error"].is_string(), "{network}");
@@ -319,7 +318,6 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
         payments,
         db: db.clone(),
         queue: crate::usecase::tasks::Queue::new(db.clone()),
-        explorers: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -353,6 +351,12 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
         (&json!(80), &json!(80))
     );
     assert_eq!(index["indexed_through"], Value::Null);
+    db.write(|connection| {
+        use diesel::connection::SimpleConnection as _;
+        Ok(connection.batch_execute("UPDATE network SET max_history_days = 30")?)
+    })
+    .await
+    .unwrap();
     let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
     assert_eq!(networks["networks"][0]["max_history_days"], 30);
     assert_eq!(networks["networks"][0]["tip_live"], 100);
@@ -412,7 +416,6 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         payments,
         db: db.clone(),
         queue: crate::usecase::tasks::Queue::new(db.clone()),
-        explorers: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -552,4 +555,55 @@ async fn a_network_asset_icon_is_served_and_an_unknown_one_is_not() {
         .await
         .expect("a response");
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready() {
+    use diesel::connection::SimpleConnection as _;
+    use tasks::{Retry, Store as _, Task, Worker as _};
+
+    use crate::usecase::workers::index::{Index, job_id};
+
+    let (db, _directory) = database().await;
+    let payments = payments(&db, Arc::new(Script::default())).await;
+    let queue = crate::usecase::tasks::Queue::new(db.clone());
+    let worker = Index::new(payments.clone(), db.clone(), queue.clone());
+    worker.start().await.expect("the index job");
+    // The block store fails, so every indexer step does.
+    db.write(|connection| Ok(connection.batch_execute("DROP TABLE block")?))
+        .await
+        .expect("dropped");
+    let id = job_id("bitcoin", "regtest");
+    let job = queue.get(&id).await.expect("a read").expect("the job");
+    let job = job.start(tasks::now());
+    queue.update(job.clone()).await.expect("running");
+    let task = Task::new(job, Arc::new(queue.clone())).expect("a task");
+    let ack = worker.run(task).await;
+    let ran = queue.get(&id).await.expect("a read").expect("the job");
+    let settled = ran.settle(ack, &Retry::default(), tasks::now());
+    queue.update(settled).await.expect("settled");
+    let job = queue.get(&id).await.expect("a read").expect("the job");
+    let reason = job.reason.clone().unwrap_or_default();
+    assert!(reason.contains("no such table: block"), "{job:?}");
+    assert_eq!(job.status, tasks::Status::Pending);
+
+    let state = Arc::new(AppState {
+        payments,
+        db: db.clone(),
+        queue,
+    });
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("an address"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        None,
+        http_server::RequestLimits::default(),
+    );
+    let router = api::router(state, &config).expect("a router");
+    let (status, health) = call(&router, Method::GET, "/health", None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{health}");
+    assert_eq!(health["ready"], json!(false));
+    assert_eq!(health["networks"][0]["indexing"]["failures"], json!(1));
+    let (status, networks) = call(&router, Method::GET, "/v1/networks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(networks["networks"][0]["index_job_reason"], json!(reason));
 }

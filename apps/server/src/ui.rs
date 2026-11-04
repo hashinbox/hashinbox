@@ -32,7 +32,7 @@ pub(crate) struct Settings {
 
 /// The values a [`Settings`] is built from.
 pub(crate) struct SettingsParams {
-    /// The name in the top bar, from the configuration's `[ui]` section.
+    /// The name in the top bar (`--brand`).
     pub(crate) brand: Option<String>,
     /// Where the page sends its API calls; empty means its own origin.
     pub(crate) api_base: String,

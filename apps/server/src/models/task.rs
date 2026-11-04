@@ -149,6 +149,17 @@ pub(crate) mod db {
         .execute(connection)
     }
 
+    /// How many jobs of `kind` are failing: failed, or not succeeded with
+    /// a `reason` (their last run asked to go again because of it).
+    pub(crate) fn count_failing(connection: &mut SqliteConnection, kind: &str) -> QueryResult<i64> {
+        q::table
+            .filter(q::kind.eq(kind))
+            .filter(q::status.ne(2))
+            .filter(q::reason.is_not_null())
+            .count()
+            .get_result(connection)
+    }
+
     /// How many jobs are in each status, as (status, count).
     pub(crate) fn count_by_status(
         connection: &mut SqliteConnection,

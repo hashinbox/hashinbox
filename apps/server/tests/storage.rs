@@ -21,7 +21,7 @@ use crate::{
 async fn storage() -> (Stores, Db, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let db = crate::db::Db::open(&directory.path().join("test.db")).unwrap();
-    db.migrate().await.unwrap();
+    crate::tests::migrate(&db).await.unwrap();
     (Stores::new(db.clone()), db, directory)
 }
 
@@ -575,10 +575,19 @@ struct Row {
     block: Option<String>,
 }
 
+/// An indexer step at `tip`, confirmed through `confirmed`.
+fn step(tip: u64, confirmed: u64) -> crate::models::NetworkIndex {
+    crate::models::NetworkIndex {
+        tip: Some(tip),
+        confirmed: Some(confirmed),
+        ..Default::default()
+    }
+}
+
 /// The indexer row at `tip`, every block confirmed: what spend checks read.
 async fn confirm(db: &Db, tip: u64) {
     db.write(move |connection| {
-        crate::models::network::db::save(connection, &network(), tip, tip, None, 0)
+        crate::models::network_index::db::save(connection, &network(), &step(tip, tip))
     })
     .await
     .unwrap();
@@ -1139,7 +1148,11 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
         let (found, legs) = db
             .write(move |connection| {
                 let network = crate::tests::network();
-                crate::models::network::db::save(connection, &network, tip, confirmed, None, 0)?;
+                crate::models::network_index::db::save(
+                    connection,
+                    &network,
+                    &step(tip, confirmed),
+                )?;
                 let found = crate::models::wallet::db::find_page(
                     connection,
                     Page {
@@ -1805,33 +1818,34 @@ async fn blocks_and_transactions_read_with_their_children() {
 }
 
 #[tokio::test]
-async fn the_network_row_is_fresh_only_when_its_tip_moves() {
+async fn the_network_index_is_fresh_only_when_its_tip_moves_and_counts_up() {
     use diesel::{QueryDsl as _, RunQueryDsl as _};
 
-    use crate::models::{
-        network::db::{create, save},
-        schema::network,
-    };
+    use crate::models::{NetworkIndex, network_index::db::save, schema::network_index};
     let (_storage, db, _directory) = storage().await;
     let rows = db
         .write(|connection| {
             let network = network();
-            // The start's row: nothing read yet.
-            create(connection, &network)?;
             let mut rows = Vec::new();
             for (tip, indexed, now) in [(10, Some(4), 1), (10, None, 2), (12, None, 3)] {
-                save(
-                    connection,
-                    &network,
-                    tip,
-                    tip.saturating_sub(6),
+                let step = NetworkIndex {
+                    tip: Some(tip),
+                    confirmed: Some(tip.saturating_sub(6)),
                     indexed,
-                    now,
-                )?;
+                    checked_at: Some(now),
+                    blocks: 1,
+                    ..Default::default()
+                };
+                save(connection, &network, &step)?;
                 rows.push(
-                    network::table
-                        .select((network::confirmed, network::indexed, network::checked_at))
-                        .first::<(Option<i64>, Option<i64>, Option<i64>)>(connection)?,
+                    network_index::table
+                        .select((
+                            network_index::confirmed,
+                            network_index::indexed,
+                            network_index::checked_at,
+                            network_index::blocks,
+                        ))
+                        .first::<(Option<i64>, Option<i64>, Option<i64>, i64)>(connection)?,
                 );
             }
             Ok(rows)
@@ -1841,9 +1855,9 @@ async fn the_network_row_is_fresh_only_when_its_tip_moves() {
     assert_eq!(
         rows,
         [
-            (Some(4), Some(4), Some(1)),
-            (Some(4), Some(4), Some(1)),
-            (Some(6), Some(4), Some(3))
+            (Some(4), Some(4), Some(1), 1),
+            (Some(4), Some(4), Some(1), 2),
+            (Some(6), Some(4), Some(3), 3)
         ]
     );
 }

@@ -1,50 +1,37 @@
 # payment-server
 
-The one executable of the workspace: it reads a configuration file, builds
-`payments::Payments` over one SQLite file with the Bitcoin, Ethereum and Solana
-chains registered, runs every network's indexer and the send queue, and serves
-the wallet HTTP API. It is a binary with no library.
+The one executable of the workspace: it opens one SQLite file, builds
+`payments::Payments` from its network tables with the Bitcoin, Ethereum and
+Solana chains registered, runs every indexed network's indexer and the send
+queue, and serves the wallet HTTP API. It is a binary with no library.
 
 ## Usage
 
 ```bash
+cargo run --locked -p payment-server -- migrate   # once: create the database
 export PAYMENT_API_TOKEN='replace-me'
-cargo run --locked -p payment-server -- migrate ./payments.toml  # once: create the database
-cargo run --locked -p payment-server -- serve ./payments.toml
+cargo run --locked -p payment-server -- serve --bearer-token-env PAYMENT_API_TOKEN
 ```
 
-`migrate` executes `init.sql` on the configured (new) file; there are no migrations. `serve` only opens it.
+Flags, each with an environment fallback: `--db` (`PAYMENT_DB`, default
+`.data/payment.db`), `--bind` (`PAYMENT_BIND`, default `127.0.0.1:8080`),
+`--bearer-token-env` (`PAYMENT_BEARER_TOKEN_ENV`: the variable holding the API
+token; optional only for a loopback bind), `--tls-terminated-upstream`
+(`PAYMENT_TLS_TERMINATED_UPSTREAM`), `--brand` (`PAYMENT_UI_BRAND`).
 
-```toml
-# payments.toml (a `.toml` path is read as TOML, anything else as JSON)
-bind = '127.0.0.1:8080'
-bearer_token_env = 'PAYMENT_API_TOKEN'   # the variable that holds the API token
-storage = { path = 'payment.db' }        # optional, this is the default
+`migrate` executes `init.sql` then `seed.sql` on the (new) file; there are no
+migrations. `serve` only opens it. Networks are rows: `network` (facts and
+`settings`, the chain's own knobs as JSON), `network_asset`, `network_endpoint`
+(see `seed.sql`). The server indexes exactly the networks with a
+`network_index` row and adds one for every `enabled` network at start; each is
+built by its chain (`TryFrom<&base::NetworkConfig>`), and one that fails
+verification stops the start.
 
-[[payments.networks]]
-chain = 'bitcoin'
-network = 'regtest'
-endpoints = ['http://user:password@127.0.0.1:18443']
-
-[[payments.networks]]
-chain = 'ethereum'
-network = 'mainnet'
-chain_id = 1
-endpoints = ['https://node.invalid/v3/KEY']
-```
-
-`payments` is `payments::Document`: one section per network, its `chain` naming
-the chain `src/main.rs` registers; the rest is that chain's own `Config` (see the
-chain's README). Every network is built at startup; one that fails verification
-stops the start. `bearer_token_env` is optional only for a loopback `bind`.
-
-A network's stored `rpc_endpoints` row replaces its section's `endpoints` at
-startup (matched on the section's `chain` and `network` text).
 `PUT /v1/networks/{chain}/{network}/rpc` stores a list and moves every later call
 of the network to it at once (`rpc::Failover` behind the network's
 `rpc::Swap`), unverified; the chain verifies it on the next start.
 
-The server also serves a browser page at `/` (`[ui] brand`, `PAYMENT_UI_API_BASE`).
+The server also serves a browser page at `/` (`--brand`, `PAYMENT_UI_API_BASE`).
 The committed page (`ui/dist`) was built against the previous API and needs a
 rebuild for the routes below.
 
@@ -80,9 +67,10 @@ committed copy. `GET /health` and `GET /openapi.json` need no token.
 - `POST /v1/wallets/{id}/transactions` `{asset?, transfers}`: enqueues one send
   job (one lane per sender) and answers `202 {job}`; a watch-only wallet is `422`.
 - `GET /v1/jobs/{id}`: the job's state, reason, and signed/accepted counts.
-- `GET /v1/networks`: every network's indexer stats and stored nodes' origins.
-- `GET /health`: every network's indexer stats; ready (`200`) when at least one
-  network is configured and none's last step failed, else `503`.
+- `GET /v1/networks`: every `network` row with its `assets`, `endpoints`,
+  `index` (its `network_index` row) and the node's tip asked now.
+- `GET /health`: every `network_index` row; ready (`200`) when at least one
+  network is indexed and none's last step failed, else `503`.
 
 ## Layout
 
@@ -90,18 +78,18 @@ Layers, bottom up: `models`, `usecase`, `api`, `main`; `db` beside
 them. Nothing imports upward (docs/design/069-server-layers.md;
 `scripts/server-layers.py` checks it).
 
-- `src/main.rs`: composition (stored nodes into the document, `base::Storage` from
+- `src/main.rs`: composition (network rows into the `payments` builder, `base::Storage` from
   `usecase::sdk::Stores`, the `payments` builder, the executor with the
   index, expire, triggers and broadcast jobs, HTTP) and shutdown (the executor
   stops after HTTP drains; unfinished jobs resume on the next start).
-  `src/main.rs` is the only file that names a chain crate; `src/config.rs` reads
-  the file; `src/ui.rs` serves the page.
+  `src/main.rs` is the only file that names a chain crate; `src/config.rs` is
+  the command line; `src/ui.rs` serves the page.
 - `src/db.rs`: the SQLite pool, its pragmas, read and write transactions, and
-  `migrate`, which runs the embedded `init.sql`.
+  `migrate`, which runs the embedded `init.sql` and `seed.sql`.
 - `src/api/`: one file per resource; `mod.rs` assembles the router and OpenAPI root
   and holds the shared `Error`; `state.rs` is the handler state.
 - `src/models/`: one file per table (diesel row and its SQL) and the shared wire
-  shapes (`asset`, `network`, `indexing`).
+  shapes (`asset`, `network`).
 - `src/usecase/`: `sdk/` (every `base` store on the models), `tasks.rs` (the
   job queue), `trigger.rs` (a trigger's decision), the multi-model reads
   (`history.rs`, `wallets.rs`, `chain.rs`, `stats.rs`), and `workers/`: the
@@ -122,4 +110,4 @@ them. Nothing imports upward (docs/design/069-server-layers.md;
 - Generated keys persist directly in SQLite; no encryption or passphrase. Keys
   never appear in API responses, logs or Debug.
 - The server speaks plain HTTP. A `bind` that is not loopback is refused unless
-  `tls_terminated_upstream = true`.
+  `--tls-terminated-upstream`.

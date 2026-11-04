@@ -85,10 +85,43 @@ diesel::table! {
         chain -> Text,
         #[sql_name = "network"]
         name -> Text,
+        chain_id -> Nullable<Text>,
+        testnet -> Bool,
+        enabled -> Bool,
+        block_time_ms -> BigInt,
+        confirmations -> BigInt,
+        max_history_days -> Nullable<BigInt>,
+        explorer_address -> Nullable<Text>,
+        explorer_transaction -> Nullable<Text>,
+        settings -> Text,
+    }
+}
+
+diesel::table! {
+    network_asset (chain, network, asset) {
+        chain -> Text,
+        network -> Text,
+        asset -> Text,
+        kind -> Text,
+        contract -> Nullable<Text>,
+        ticker -> Text,
+        decimals -> BigInt,
+        display_decimals -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    network_index (chain, network) {
+        chain -> Text,
+        network -> Text,
         tip -> Nullable<BigInt>,
         confirmed -> Nullable<BigInt>,
         indexed -> Nullable<BigInt>,
         checked_at -> Nullable<BigInt>,
+        blocks -> BigInt,
+        reorgs -> BigInt,
+        watched -> BigInt,
+        failures -> BigInt,
     }
 }
 
@@ -159,20 +192,6 @@ diesel::table! {
         chain -> Text,
         network -> Text,
         nodes -> Text,
-    }
-}
-
-diesel::table! {
-    /// Read-only view `network_with_endpoints`: a `network` row and its
-    /// endpoint documents.
-    network_with_endpoints (chain, network) {
-        chain -> Text,
-        network -> Text,
-        tip -> Nullable<BigInt>,
-        confirmed -> Nullable<BigInt>,
-        indexed -> Nullable<BigInt>,
-        checked_at -> Nullable<BigInt>,
-        nodes -> Nullable<Text>,
     }
 }
 

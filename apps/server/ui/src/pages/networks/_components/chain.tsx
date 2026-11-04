@@ -63,7 +63,7 @@ export function Chain({
   onPick: (picked: number | null) => void;
 }) {
   const [read, setRead] = useState<Read | null>(null);
-  const { chain, name } = network.network;
+  const { chain, network: name } = network;
 
   const refresh = useCallback(() => {
     const path = { chain, network: name };
@@ -135,11 +135,11 @@ export function Chain({
   return (
     <Box component="article" sx={{ minWidth: 0 }}>
       <Typography variant="body2" color="text.secondary" sx={{ fontFamily: mono, mb: 1 }}>
-        indexed #{network.indexed ?? '—'}
-        {network.indexed != null &&
+        indexed #{network.index?.indexed ?? '—'}
+        {network.index?.indexed != null &&
           network.tip_live != null &&
-          ` · ${String(Math.max(network.tip_live - network.indexed, 0))} behind`}
-        {' · '}confirmed #{network.confirmed ?? '—'}
+          ` · ${String(Math.max(network.tip_live - network.index.indexed, 0))} behind`}
+        {' · '}confirmed #{network.index?.confirmed ?? '—'}
       </Typography>
       <Box
         sx={{
@@ -221,7 +221,7 @@ export function Chain({
                   —
                 </Box>
               ) : (
-                <Address value={address} network={network.network} />
+                <Address value={address} network={{ chain, name }} />
               );
             const head = (
               <>
@@ -238,7 +238,7 @@ export function Chain({
                       bgcolor: TONE[tx.state],
                     }}
                   />
-                  <Transaction value={tx.txid} network={network.network} />
+                  <Transaction value={tx.txid} network={{ chain, name }} />
                 </TableCell>
                 <TableCell rowSpan={span} sx={{ fontFamily: mono, fontSize: 12 }}>
                   {tx.order ?? '—'}

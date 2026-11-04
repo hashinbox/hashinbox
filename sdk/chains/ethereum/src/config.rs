@@ -5,8 +5,11 @@ use std::{sync::Arc, time::Duration};
 use ::rpc::{Cluster, Endpoint, Policy, Retry};
 use alloy_primitives::hex;
 use anyhow::{Context as _, ensure};
-use base::{Asset, AssetInfo, Assets, Future, Indexer, Service, Storage, WalletFactoryBroadcaster};
-use serde::{Deserialize, Deserializer, de};
+use base::{
+    Asset, AssetInfo, AssetKind, Assets, Future, Indexer, Service, Storage,
+    WalletFactoryBroadcaster,
+};
+use serde::Deserialize;
 
 use crate::{
     Chain, Client, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Factory, FeeLimits, Network, Tokens,
@@ -14,9 +17,8 @@ use crate::{
 };
 
 /// Everything one Ethereum network needs; built in code with
-/// [`Config::new`] or read from any `serde` format.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// [`Config::new`] or from a [`base::NetworkConfig`].
+#[derive(Clone, Debug)]
 pub struct Config {
     /// The stable application name of the network, such as `mainnet`.
     pub network: String,
@@ -25,48 +27,59 @@ pub struct Config {
     /// The nodes: reads go to one, submissions to all.
     pub endpoints: Vec<Endpoint>,
     /// Allowlisted ERC-20 tokens: the only tokens indexed and sent.
-    #[serde(default)]
     pub tokens: Vec<Token>,
     /// Fractional digits a view shows of the native currency; none: all.
-    #[serde(default)]
     pub display_decimals: Option<u32>,
     /// Ceilings on the fees a transaction is built under.
-    #[serde(default)]
     pub limits: FeeLimits,
     /// How long fetched fees price sends, in milliseconds; default 12,000.
-    #[serde(default = "Config::default_fee_ttl_ms")]
     pub fee_ttl_ms: u64,
     /// How long a broadcast transaction counts as pending before it is
     /// given up on, in milliseconds; default 3_600_000 (one hour).
-    #[serde(default = "Config::default_pending_ttl_ms")]
     pub pending_ttl_ms: u64,
     /// How often the indexer wakes, in milliseconds; default 12,000.
-    #[serde(default = "Config::default_interval_ms")]
     pub interval_ms: u64,
-    /// How old, in days, a watch's start may be: about what history the
-    /// nodes keep; none: no limit.
-    #[serde(default)]
-    pub max_history_days: Option<u32>,
+    /// How old a watch's start may be: about what history the nodes keep;
+    /// none: no limit.
+    pub max_history: Option<Duration>,
     /// Blocks a block needs below the tip to count as confirmed: the
     /// confirmed position is `tip - confirmations`; default 12.
-    #[serde(default = "Config::default_confirmations")]
     pub confirmations: u64,
 }
 
+/// The knobs a [`base::NetworkConfig`]'s `settings` may set: `limits`,
+/// `fee_ttl_ms`, `pending_ttl_ms`, `interval_ms`; an absent one keeps its
+/// default.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Settings {
+    limits: FeeLimits,
+    fee_ttl_ms: u64,
+    pending_ttl_ms: u64,
+    interval_ms: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            limits: FeeLimits::default(),
+            fee_ttl_ms: 12_000,
+            pending_ttl_ms: 3_600_000,
+            interval_ms: 12_000,
+        }
+    }
+}
+
 /// One allowlisted ERC-20 token and the decimals its contract must report.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
-    /// The contract, written as canonical lowercase text.
-    #[serde(deserialize_with = "contract")]
+    /// The contract.
     pub contract: alloy_primitives::Address,
     /// What its `decimals()` must report.
     pub decimals: u8,
     /// Its display symbol, such as `USDC`; none: shown by its contract.
-    #[serde(default)]
     pub ticker: Option<String>,
     /// Fractional digits a view shows; none: all.
-    #[serde(default)]
     pub display_decimals: Option<u32>,
 }
 
@@ -75,35 +88,20 @@ impl Config {
     /// tracing on.
     #[must_use]
     pub fn new(network: Network, endpoints: Vec<Endpoint>) -> Self {
+        let settings = Settings::default();
         Self {
             network: network.slug,
             chain_id: network.chain_id,
             endpoints,
             tokens: Vec::new(),
             display_decimals: None,
-            limits: FeeLimits::default(),
-            fee_ttl_ms: Self::default_fee_ttl_ms(),
-            pending_ttl_ms: Self::default_pending_ttl_ms(),
-            interval_ms: Self::default_interval_ms(),
-            max_history_days: None,
-            confirmations: Self::default_confirmations(),
+            limits: settings.limits,
+            fee_ttl_ms: settings.fee_ttl_ms,
+            pending_ttl_ms: settings.pending_ttl_ms,
+            interval_ms: settings.interval_ms,
+            max_history: None,
+            confirmations: 12,
         }
-    }
-
-    const fn default_confirmations() -> u64 {
-        12
-    }
-
-    const fn default_fee_ttl_ms() -> u64 {
-        12_000
-    }
-
-    const fn default_pending_ttl_ms() -> u64 {
-        3_600_000
-    }
-
-    const fn default_interval_ms() -> u64 {
-        12_000
     }
 
     /// The configured network.
@@ -229,19 +227,66 @@ impl Config {
 }
 
 /// A contract written as canonical lowercase text.
-fn contract<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<alloy_primitives::Address, D::Error> {
-    let text = String::deserialize(deserializer)?;
+fn contract(text: &str) -> anyhow::Result<alloy_primitives::Address> {
     let contract = text
         .parse::<alloy_primitives::Address>()
-        .map_err(|error| de::Error::custom(format!("token contract: {error}")))?;
-    if hex::encode_prefixed(contract) != text {
-        return Err(de::Error::custom(
-            "token contract must be canonical lowercase",
-        ));
-    }
+        .with_context(|| format!("token contract {text}"))?;
+    ensure!(
+        hex::encode_prefixed(contract) == text,
+        "token contract must be canonical lowercase"
+    );
     Ok(contract)
+}
+
+impl TryFrom<&base::NetworkConfig> for Config {
+    type Error = anyhow::Error;
+
+    /// Its chain ID, endpoints, assets and limits, and its knobs from
+    /// `settings`.
+    fn try_from(config: &base::NetworkConfig) -> anyhow::Result<Self> {
+        let settings = Settings::deserialize(&config.settings).context("Ethereum settings")?;
+        let chain_id = config
+            .chain_id
+            .as_deref()
+            .context("Ethereum needs a chain_id")?;
+        let mut tokens = Vec::new();
+        let mut display_decimals = None;
+        for asset in &config.assets {
+            if asset.kind == AssetKind::Native {
+                ensure!(asset.decimals == ETH_DECIMALS, "ether has 18 decimals");
+                display_decimals = asset.display_decimals;
+                continue;
+            }
+            let address = asset
+                .contract
+                .as_deref()
+                .context("a token needs its contract")?;
+            tokens.push(Token {
+                contract: contract(address)?,
+                decimals: u8::try_from(asset.decimals).context("token decimals")?,
+                ticker: Some(asset.ticker.clone()),
+                display_decimals: asset.display_decimals,
+            });
+        }
+        let built = Self {
+            network: config.network.name.clone(),
+            chain_id: chain_id.parse().context("Ethereum chain_id")?,
+            endpoints: config.endpoints.clone(),
+            tokens,
+            display_decimals,
+            limits: settings.limits,
+            fee_ttl_ms: settings.fee_ttl_ms,
+            pending_ttl_ms: settings.pending_ttl_ms,
+            interval_ms: settings.interval_ms,
+            max_history: config.max_history,
+            confirmations: config.confirmations,
+        };
+        ensure!(
+            base::Config::network(&built) == config.network,
+            "not an Ethereum network"
+        );
+        Ok(built)
+    }
 }
 
 impl base::Config for Config {
@@ -278,9 +323,7 @@ impl base::Config for Config {
                 storage: storage.clone(),
                 client,
                 dated: Some(chain),
-                max_history: self
-                    .max_history_days
-                    .map(|days| Duration::from_secs(u64::from(days) * 86_400)),
+                max_history: self.max_history,
                 confirmations: self.confirmations,
             })
         })

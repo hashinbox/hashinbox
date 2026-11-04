@@ -1,6 +1,5 @@
 //! Every network's RPC endpoints, in the server's `network_endpoint` table
-//! of the one database file: the primary source; the configuration file is
-//! the fallback for a network with no row.
+//! of the one database file (seeded by `seed.sql`).
 
 use std::{collections::BTreeMap, fmt};
 
@@ -203,9 +202,7 @@ impl fmt::Debug for RpcEndpoints {
     }
 }
 
-/// Every network's endpoints: the stored rows, and the configuration file's
-/// for a network the database holds none of. The database is the source of
-/// truth; the file is the fallback, never an override.
+/// Every network's stored endpoints.
 pub(crate) struct NetworkEndpoints(BTreeMap<Network, RpcEndpoints>);
 
 impl NetworkEndpoints {
