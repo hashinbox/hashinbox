@@ -344,6 +344,7 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
   const [network, setNetwork] = useState('');
   const [text, setText] = useState('');
   const [tags, setTags] = useState<string[]>([]);
+  const [externalId, setExternalId] = useState('');
   // The wallet step 1 made; step 2 indexes it.
   const [made, setMade] = useState<Wallet | null>(null);
   const [watching, setWatching] = useState<Watching>({ ...WATCH_NOTHING, assets: ['native'] });
@@ -358,6 +359,7 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
   const finish = (wallet: Wallet) => {
     setText('');
     setTags([]);
+    setExternalId('');
     setMade(null);
     setWatching({ ...WATCH_NOTHING, assets: ['native'] });
     onDone(wallet);
@@ -372,6 +374,7 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
       network: name,
       ...(kind === 'secret' && { secret: key }),
       ...(kind === 'address' && { address: key }),
+      ...(externalId.trim() !== '' && { external_id: externalId.trim() }),
     };
     const wallet = await call(client.POST('/v1/wallets', { body }));
     for (const tag of tags) {
@@ -470,6 +473,14 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
                 renderInput={(params) => (
                   <TextField {...params} label="Tags (optional)" placeholder="deposit" />
                 )}
+              />
+              <TextField
+                label="External ID (optional)"
+                placeholder="Your customer or account ID"
+                value={externalId}
+                onChange={(e) => setExternalId(e.target.value)}
+                autoComplete="off"
+                slotProps={{ htmlInput: { maxLength: 128, spellCheck: false } }}
               />
             </Stack>
           )}

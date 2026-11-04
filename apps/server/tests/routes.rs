@@ -441,6 +441,38 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         (&json!("bitcoin.regtest.bob"), &json!(true))
     );
     assert_eq!(bob["indexes"], json!({}));
+    assert_eq!(bob["external_id"], Value::Null, "{bob}");
+
+    // An external id is kept trimmed, read back, set once and never replaced.
+    let (status, frank) = create(json!({ "address": "frank", "external_id": " cus-1 " })).await;
+    assert_eq!(
+        (status, &frank["external_id"]),
+        (StatusCode::CREATED, &json!("cus-1"))
+    );
+    let frank_uri = "/v1/wallets/bitcoin.regtest.frank";
+    let (_, read) = call(&router, Method::GET, frank_uri, None).await;
+    assert_eq!(read["external_id"], "cus-1", "{read}");
+    let (status, frank) = create(json!({ "address": "frank", "external_id": "cus-2" })).await;
+    assert_eq!(
+        (status, &frank["external_id"]),
+        (StatusCode::OK, &json!("cus-1"))
+    );
+    let (_, bob) = create(json!({ "address": "bob", "external_id": "cus-3" })).await;
+    assert_eq!(bob["external_id"], "cus-3", "{bob}");
+    for external_id in [String::new(), "  ".to_owned(), "x".repeat(129)] {
+        let (status, error) =
+            create(json!({ "address": "gina", "external_id": external_id })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    }
+    let (status, _) = call(
+        &router,
+        Method::GET,
+        "/v1/wallets/bitcoin.regtest.gina",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
     let (status, error) = create(json!({ "secret": "carol", "address": "dave" })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
     assert!(error.to_string().contains("derives carol"), "{error}");

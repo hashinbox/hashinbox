@@ -64,6 +64,7 @@ diesel::table! {
         curve -> Nullable<Text>,
         secret -> Nullable<Binary>,
         tags -> Text,
+        external_id -> Nullable<Text>,
     }
 }
 

@@ -186,6 +186,8 @@ CREATE TABLE wallet (
     curve   TEXT,            -- NULL: watch-only (no key kept)
     secret  BLOB,            -- NULL: watch-only
     tags    TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+    -- The caller's own reference (e.g. their customer id); not unique.
+    external_id TEXT CHECK (external_id IS NULL OR length(external_id) BETWEEN 1 AND 128),
     CHECK (id = chain || '.' || network || '.' || address),
     CHECK ((curve IS NULL) = (secret IS NULL)),
     CHECK (curve IS NULL OR curve IN ('secp256k1', 'ed25519'))

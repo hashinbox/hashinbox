@@ -375,7 +375,7 @@ export interface paths {
         put?: never;
         /**
          * Import a wallet's key, watch an address, or generate a wallet, in one configured network
-         * @description With `secret`, imports a raw private key and keeps it; with `address` too, the key must derive that address. With `address` alone, watches it without its key. With neither, generates a key and keeps it; retrying makes another wallet. The wallet is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept answers its wallet as is (200), except that importing the key of a watch-only wallet keeps the key; its tags and indexes stay.
+         * @description With `secret`, imports a raw private key and keeps it; with `address` too, the key must derive that address. With `address` alone, watches it without its key. With neither, generates a key and keeps it; retrying makes another wallet. The wallet is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept answers its wallet as is (200), except that importing the key of a watch-only wallet keeps the key, and an `external_id` is kept on a wallet that has none (a kept one stays); its tags and indexes stay.
          */
         post: operations["create_wallet"];
         delete?: never;
@@ -721,6 +721,11 @@ export interface components {
             address?: string;
             /** @description Chain name, as `GET /v1/assets` lists it. */
             chain: string;
+            /**
+             * @description Your own reference for the wallet (e.g. your customer id), 1 to 128
+             *     characters once trimmed; not unique.
+             */
+            external_id?: string;
             /** @description Network name, as `GET /v1/assets` lists it. */
             network: string;
             /**
@@ -1397,6 +1402,11 @@ export interface components {
             /** @description Canonical address text. */
             address: string;
             chain: string;
+            /**
+             * @description The caller's own reference for it (e.g. their customer id), 1 to 128
+             *     characters; not unique. Null when none was given.
+             */
+            external_id: string | null;
             /** @description `{chain}.{network}.{address}`: what every wallet route takes. */
             id: string;
             /** @description Its indexes by asset id (`native` or the token id). */
@@ -2811,7 +2821,7 @@ export interface operations {
                     "application/json": components["schemas"]["Wallet"];
                 };
             };
-            /** @description Malformed body, address or key, or a key that derives another address */
+            /** @description Malformed body, address, key or external ID, or a key that derives another address */
             400: {
                 headers: {
                     [name: string]: unknown;

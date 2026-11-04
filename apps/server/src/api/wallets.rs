@@ -54,6 +54,31 @@ struct CreateRequest {
     #[serde(default)]
     #[schema(nullable = false)]
     address: Option<String>,
+    /// Your own reference for the wallet (e.g. your customer id), 1 to 128
+    /// characters once trimmed; not unique.
+    #[serde(default)]
+    #[schema(nullable = false, min_length = 1, max_length = 128)]
+    external_id: Option<String>,
+}
+
+impl CreateRequest {
+    /// `external_id` trimmed, if given.
+    ///
+    /// # Errors
+    ///
+    /// When it is empty once trimmed or longer than 128 characters.
+    fn external_id(&self) -> Result<Option<String>, Error> {
+        let Some(text) = &self.external_id else {
+            return Ok(None);
+        };
+        let text = text.trim();
+        if !(1..=128).contains(&text.chars().count()) {
+            return Err(Error::invalid_request(
+                "external_id must be 1 to 128 characters once trimmed",
+            ));
+        }
+        Ok(Some(text.to_owned()))
+    }
 }
 
 #[utoipa::path(
@@ -66,14 +91,15 @@ struct CreateRequest {
         With neither, generates a key and keeps it; retrying makes another wallet. The wallet \
         is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept \
         answers its wallet as is (200), except that importing the key of a watch-only wallet \
-        keeps the key; its tags and indexes stay.",
+        keeps the key, and an `external_id` is kept on a wallet that has none (a \
+        kept one stays); its tags and indexes stay.",
     request_body = CreateRequest,
     security(("bearerAuth" = [])),
     responses(
         (status = 201, description = "Wallet created", body = Wallet),
         (status = 200, description = "The address was already kept: its wallet", body = Wallet),
-        (status = 400, description = "Malformed body, address or key, or a key that derives \
-            another address", body = ErrorBody),
+        (status = 400, description = "Malformed body, address, key or external ID, or a key \
+            that derives another address", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "Network is not configured", body = ErrorBody),
         (status = 503, description = "Generation or the store is unavailable",
@@ -86,13 +112,14 @@ async fn create(
     request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Wallet>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
+    let external_id = request.external_id()?;
     let network = base::Network::new(Chain::new(request.chain), request.network);
     let factory = &state.payments.service(&network)?.wallets.factory;
     let given = request
         .address
         .map(|text| factory.parse_address(&text))
         .transpose()?;
-    let row = if let Some(secret) = request.secret {
+    let mut row = if let Some(secret) = request.secret {
         let wallet = factory.from_pk_text(&secret).await?;
         if let Some(given) = given.filter(|given| given != wallet.address()) {
             return Err(Error::invalid_request(format!(
@@ -109,6 +136,7 @@ async fn create(
         models::Wallet::try_from(&*wallet)
     }
     .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
+    row.external_id = external_id;
     let (created, wallet) = state
         .db
         .write(move |connection| {

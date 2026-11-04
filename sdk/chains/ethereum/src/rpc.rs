@@ -108,8 +108,9 @@ impl Client {
     /// # Errors
     ///
     /// A node failure, a block the node does not hold yet, a block or
-    /// receipts it keeps no history for ([`NotServed`], EIP-4444), or a run
-    /// that does not link (the chain moved mid-fetch; retry).
+    /// receipts it keeps no history for ([`NotServed`], EIP-4444; `null`
+    /// receipts of a finalized block count as pruned), or a run that does
+    /// not link (the chain moved mid-fetch; retry).
     pub async fn blocks(&self, start: u64, end: u64, tokens: &Tokens) -> anyhow::Result<Blocks> {
         let network = self.network();
         let mut run = Blocks::new(network.into());
@@ -139,11 +140,15 @@ impl Client {
         }
         let receipts = self.receipts(&wires).await?;
         for (wire, receipts) in wires.into_iter().zip(receipts) {
-            // Receipts not served yet: the run ends before this block.
+            let height = wire.number();
+            // No receipts for a block the node has: not ready yet near the
+            // tip (the run ends before it), pruned at or below finalized.
             let Some(receipts) = receipts else {
+                if height <= self.tips().await?.confirmed {
+                    return Err(NotServed { position: height }.into());
+                }
                 break;
             };
-            let height = wire.number();
             let block = block(wire, &receipts, network, tokens)
                 .with_context(|| format!("Ethereum block {height}"))?;
             if !run.push(block) {

@@ -38,6 +38,10 @@ pub(crate) struct Wallet {
     /// Its tags, sorted, each once, each [`is_tag`].
     #[schema(value_type = Vec<String>)]
     pub(crate) tags: Json<BTreeSet<String>>,
+    /// The caller's own reference for it (e.g. their customer id), 1 to 128
+    /// characters; not unique. Null when none was given.
+    #[schema(required)]
+    pub(crate) external_id: Option<String>,
     /// Its indexes by asset id (`native` or the token id).
     pub(crate) indexes: BTreeMap<String, WalletIndex>,
     /// `None` exactly when `secret` is.
@@ -91,6 +95,7 @@ impl Wallet {
             address: address.value.clone(),
             keyed: false,
             tags: Json(BTreeSet::new()),
+            external_id: None,
             indexes: BTreeMap::new(),
             curve: None,
             secret: Secret(None),
@@ -194,6 +199,7 @@ pub(crate) mod db {
         #[diesel(deserialize_as = Option<Vec<u8>>)]
         secret: Secret,
         tags: Json<BTreeSet<String>>,
+        external_id: Option<String>,
     }
 
     impl From<Row> for Wallet {
@@ -205,6 +211,7 @@ pub(crate) mod db {
                 address: row.address,
                 keyed: row.secret.0.is_some(),
                 tags: row.tags,
+                external_id: row.external_id,
                 indexes: BTreeMap::new(),
                 curve: row.curve,
                 secret: row.secret,
@@ -227,6 +234,8 @@ pub(crate) mod db {
         keyed: bool,
         #[diesel(sql_type = Text)]
         tags: Json<BTreeSet<String>>,
+        #[diesel(sql_type = Nullable<Text>)]
+        external_id: Option<String>,
         #[diesel(sql_type = Text)]
         indexes: Json<BTreeMap<String, IndexRow>>,
     }
@@ -250,6 +259,7 @@ pub(crate) mod db {
                 address: row.address,
                 keyed: row.keyed,
                 tags: row.tags,
+                external_id: row.external_id,
                 indexes,
                 curve: None,
                 secret: Secret(None),
@@ -278,6 +288,7 @@ pub(crate) mod db {
                 w.address,
                 w.secret IS NOT NULL AS keyed,
                 w.tags,
+                w.external_id,
                 COALESCE((
                     SELECT json_group_object(
                         wi.asset,
@@ -335,6 +346,7 @@ pub(crate) mod db {
                 w.address,
                 w.secret IS NOT NULL AS keyed,
                 w.tags,
+                w.external_id,
                 COALESCE((
                     SELECT json_group_object(
                         wi.asset,
@@ -375,8 +387,9 @@ pub(crate) mod db {
         .collect()
     }
 
-    /// Keeps `wallet` without its tags: a new row, or, for a kept
-    /// watch-only row, its key (its tags and indexes stay); a kept key stays.
+    /// Keeps `wallet` without its tags: a new row, or, for a kept row, its
+    /// key if it was watch-only and its `external_id` if it had none (its
+    /// tags and indexes stay); a kept key or `external_id` stays.
     /// Whether the row is new.
     pub(crate) fn insert(connection: &mut SqliteConnection, wallet: &Wallet) -> QueryResult<bool> {
         let secret = wallet.secret.0.as_ref().map(|key| key.as_bytes());
@@ -389,9 +402,10 @@ pub(crate) mod db {
                 network,
                 address,
                 curve,
-                secret
+                secret,
+                external_id
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT (id) DO NOTHING",
         )
         .bind::<Text, _>(&wallet.id)
@@ -400,6 +414,7 @@ pub(crate) mod db {
         .bind::<Text, _>(&wallet.address)
         .bind::<Nullable<Text>, _>(wallet.curve.as_deref())
         .bind::<Nullable<Binary>, _>(secret)
+        .bind::<Nullable<Text>, _>(wallet.external_id.as_deref())
         .execute(connection)?
             > 0;
         if !created {
@@ -417,6 +432,19 @@ pub(crate) mod db {
             .bind::<Text, _>(&wallet.id)
             .bind::<Nullable<Text>, _>(wallet.curve.as_deref())
             .bind::<Nullable<Binary>, _>(secret)
+            .execute(connection)?;
+            // The external id `?2` (if any) of kept row `?1` that has none; a
+            // kept one stays.
+            diesel::sql_query(
+                "
+                UPDATE wallet
+                SET external_id = ?2
+                WHERE id = ?1
+                  AND external_id IS NULL
+                  AND ?2 IS NOT NULL",
+            )
+            .bind::<Text, _>(&wallet.id)
+            .bind::<Nullable<Text>, _>(wallet.external_id.as_deref())
             .execute(connection)?;
         }
         Ok(created)

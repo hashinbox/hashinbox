@@ -25,19 +25,25 @@ function nameOf(n: Pick<ConfiguredNetwork, 'chain' | 'network'>): string {
   return `${n.chain}/${n.network}`;
 }
 
-/** Where a network's indexing is: live at the tip, catching up, idle (nothing to index), or failing. */
+/**
+ * Where a network's indexing is: green while it is indexed (an index row, a
+ * readable node, no failing job), amber while catching up, red on a failing
+ * job or an unreadable node, grey when the network is not indexed at all.
+ */
 function syncOf(n: ConfiguredNetwork): { label: string; color: string; live: boolean } {
   const { tip_live: tip, index_job_reason: reason } = n;
   const last = n.index?.indexed;
   if (reason) return { label: 'Retrying after an error', color: 'error.main', live: false };
-  if (last == null || tip == null)
-    return { label: 'Idle: no address to index', color: 'text.disabled', live: false };
-  if (tip - last > 1)
+  if (n.tip_error)
+    return { label: `Node unreadable: ${n.tip_error}`, color: 'error.main', live: false };
+  if (!n.index) return { label: 'Not indexed', color: 'text.disabled', live: false };
+  if (last != null && tip != null && tip - last > 1)
     return {
       label: `Catching up: ${String(tip - last)} behind`,
       color: 'warning.main',
       live: false,
     };
+  if (last == null) return { label: 'Indexing: no address yet', color: 'success.main', live: true };
   return { label: 'Live at the tip', color: 'success.main', live: true };
 }
 

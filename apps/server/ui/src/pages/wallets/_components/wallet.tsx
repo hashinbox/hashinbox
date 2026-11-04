@@ -194,6 +194,11 @@ export function Wallet({
               {assetsOf(wallet).length === 0 && ' · not watched'}
               {!wallet.keyed && ' · watch only'}
             </Typography>
+            {wallet.external_id && (
+              <Typography sx={{ fontSize: 11, color: 'text.secondary' }}>
+                External ID: {wallet.external_id}
+              </Typography>
+            )}
             {Object.values(wallet.indexes).map((index) => {
               const progress = progressOf(index);
               const name = assetName(shell.listings, wallet.chain, wallet.network, index.asset);

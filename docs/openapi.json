@@ -1901,7 +1901,7 @@
           "wallets"
         ],
         "summary": "Import a wallet's key, watch an address, or generate a wallet, in one configured network",
-        "description": "With `secret`, imports a raw private key and keeps it; with `address` too, the key must derive that address. With `address` alone, watches it without its key. With neither, generates a key and keeps it; retrying makes another wallet. The wallet is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept answers its wallet as is (200), except that importing the key of a watch-only wallet keeps the key; its tags and indexes stay.",
+        "description": "With `secret`, imports a raw private key and keeps it; with `address` too, the key must derive that address. With `address` alone, watches it without its key. With neither, generates a key and keeps it; retrying makes another wallet. The wallet is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept answers its wallet as is (200), except that importing the key of a watch-only wallet keeps the key, and an `external_id` is kept on a wallet that has none (a kept one stays); its tags and indexes stay.",
         "operationId": "create_wallet",
         "requestBody": {
           "content": {
@@ -1935,7 +1935,7 @@
             }
           },
           "400": {
-            "description": "Malformed body, address or key, or a key that derives another address",
+            "description": "Malformed body, address, key or external ID, or a key that derives another address",
             "content": {
               "application/json": {
                 "schema": {
@@ -3133,6 +3133,12 @@
           "chain": {
             "type": "string",
             "description": "Chain name, as `GET /v1/assets` lists it."
+          },
+          "external_id": {
+            "type": "string",
+            "description": "Your own reference for the wallet (e.g. your customer id), 1 to 128\ncharacters once trimmed; not unique.",
+            "maxLength": 128,
+            "minLength": 1
           },
           "network": {
             "type": "string",
@@ -4526,6 +4532,7 @@
           "address",
           "keyed",
           "tags",
+          "external_id",
           "indexes"
         ],
         "properties": {
@@ -4535,6 +4542,13 @@
           },
           "chain": {
             "type": "string"
+          },
+          "external_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The caller's own reference for it (e.g. their customer id), 1 to 128\ncharacters; not unique. Null when none was given."
           },
           "id": {
             "type": "string",
