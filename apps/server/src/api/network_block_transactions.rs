@@ -60,7 +60,7 @@ async fn list(
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
     let Query(index) = index.map_err(Error::invalid_query)?;
-    let (network, position) = path.at(&state.payments)?;
+    let (network, position) = path.at()?;
     let page = index.page("transactions", transaction::parse_key)?;
     let limit = page.limit;
     let transactions = state

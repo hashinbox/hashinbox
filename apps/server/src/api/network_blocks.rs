@@ -85,9 +85,8 @@ pub(super) struct BlockPath {
 
 impl BlockPath {
     /// The network, when configured (a 404 when not), and the position.
-    pub(super) fn at(&self, payments: &payments::Payments) -> Result<(base::Network, i64), Error> {
+    pub(super) fn at(&self) -> Result<(base::Network, i64), Error> {
         let network = base::Network::new(base::Chain::new(&self.chain), self.network.clone());
-        payments.service(&network)?;
         let position =
             int(self.position).map_err(|error| Error::invalid_request(error.to_string()))?;
         Ok((network, position))
@@ -113,7 +112,7 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<BlockPath>,
 ) -> Result<Json<Block>, Error> {
-    let (network, position) = path.at(&state.payments)?;
+    let (network, position) = path.at()?;
     state
         .db
         .read(move |connection| Ok(block::db::find_by_position(connection, &network, position)?))
