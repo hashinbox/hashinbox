@@ -429,7 +429,7 @@ function WalletLine({
   wallet,
   short = false,
 }: {
-  wallet: { address: string; ticker: string; keyed: boolean };
+  wallet: { address: string; chain: string; ticker: string; keyed: boolean };
   short?: boolean;
 }) {
   const a = wallet.address;
@@ -440,7 +440,7 @@ function WalletLine({
       sx={{ display: 'inline-flex', alignItems: 'center', gap: 1, minWidth: 0 }}
     >
       <Box component="span" sx={{ display: 'flex', fontSize: 15 }}>
-        <Currency ticker={wallet.ticker} label={false} />
+        <Currency chain={wallet.chain} ticker={wallet.ticker} label={false} />
       </Box>
       <Box component="span" sx={{ fontFamily: mono, fontSize: 12.5 }} title={a}>
         {a.length > cut * 2 + 1 ? `${a.slice(0, cut)}…${a.slice(-cut + 2)}` : a}

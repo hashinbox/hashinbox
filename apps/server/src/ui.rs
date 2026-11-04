@@ -4,31 +4,18 @@
 //! generated from the OpenAPI document, with the bearer token the operator
 //! types into it, so nothing here names a wallet, a chain or a store.
 
-use axum::{
-    Router,
-    extract::Path,
-    http::{
-        StatusCode,
-        header::{CONTENT_TYPE, HeaderValue},
-    },
-    response::{Html, IntoResponse},
-    routing::get,
-};
+use axum::Router;
+use http_server::{Cache, Embedded, Mount, Root};
 use serde::Serialize;
 
-// `npm run build` in `ui/` writes these; they are committed so that building
-// the server never needs Node. The styles travel inside the script.
-const PAGE: &str = include_str!("../ui/dist/index.html");
-const SCRIPT: &str = include_str!("../ui/dist/app.js");
-/// Each currency's symbol, `assets/currencies/<ticker>.svg`, ticker in
-/// lowercase: black on transparent, for any view to show beside an amount.
-const CURRENCIES: [(&str, &str); 5] = [
-    ("btc.svg", include_str!("../assets/currencies/btc.svg")),
-    ("eth.svg", include_str!("../assets/currencies/eth.svg")),
-    ("sol.svg", include_str!("../assets/currencies/sol.svg")),
-    ("usdc.svg", include_str!("../assets/currencies/usdc.svg")),
-    ("usdt.svg", include_str!("../assets/currencies/usdt.svg")),
-];
+/// Every file the server serves, by URL path: `ui/dist/` (written by
+/// `npm run build` in `ui/` and committed, so building the server never needs
+/// Node) at `/ui/…`, and `assets/` at `/assets/…` — a network asset's icon is
+/// `/assets/crypto/<chain>.svg` (a native coin) or
+/// `/assets/crypto/<chain>_<asset>.svg` (a token), lowercase. Listed by
+/// `build.rs`.
+const FILES: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/files.rs"));
+
 /// The element the page reads its settings from; its body is replaced whole,
 /// whatever whitespace the build left inside it.
 const OPEN: &str = r#"<script id="settings" type="application/json">"#;
@@ -71,41 +58,31 @@ impl Settings {
 impl Settings {
     /// The page with these settings written into its settings element.
     fn page(&self) -> Result<String, &'static str> {
-        let body = PAGE
+        let (_, page) = FILES
+            .iter()
+            .find(|(url, _)| *url == "/ui/index.html")
+            .ok_or("the UI is not built")?;
+        let page = std::str::from_utf8(page).map_err(|_| "index.html is not UTF-8")?;
+        let body = page
             .find(OPEN)
             .ok_or("index.html has no settings element")?
             + OPEN.len();
         let end = body
-            + PAGE[body..]
+            + page[body..]
                 .find("</script>")
                 .ok_or("the settings element is unclosed")?;
-        Ok(format!("{}{}{}", &PAGE[..body], self.json(), &PAGE[end..]))
+        Ok(format!("{}{}{}", &page[..body], self.json(), &page[end..]))
     }
 
-    /// `GET /`, `GET /ui/...` and the script the page loads. The settings are written into
-    /// the page once, here, so the page never has to be rebuilt to change them.
+    /// `GET /` and every page path (`/ui/networks/...`, which the page
+    /// reads) answer the page; an embedded file answers itself, and assets
+    /// (icons) are cached a year. The settings are written into the page once,
+    /// here, so the page never has to be rebuilt to change them.
     pub(crate) fn routes(&self) -> Result<Router, &'static str> {
-        let page: &'static str = self.page()?.leak();
-        let script = || async {
-            let media = HeaderValue::from_static("text/javascript; charset=utf-8");
-            ([(CONTENT_TYPE, media)], SCRIPT)
-        };
-        Ok(Router::new()
-            .route("/", get(move || async move { Html(page) }))
-            // Every page path (`/ui/networks/...`) is the page; it reads the path.
-            .route("/ui", get(move || async move { Html(page) }))
-            .route("/ui/{*path}", get(move || async move { Html(page) }))
-            .route("/ui/app.js", get(script))
-            .route("/assets/currencies/{file}", get(currency)))
+        let ui = Mount::new("/ui", Embedded(FILES))
+            .fallback(self.page()?)
+            .root(Root::Page);
+        let assets = Mount::new("/assets", Embedded(FILES)).cache(Cache::Immutable);
+        Ok(ui.router().merge(assets.router()))
     }
-}
-
-/// `GET /assets/currencies/{file}`: a currency's symbol, or 404.
-async fn currency(Path(file): Path<String>) -> impl IntoResponse {
-    let media = HeaderValue::from_static("image/svg+xml");
-    CURRENCIES
-        .iter()
-        .find(|(name, _)| *name == file)
-        .map(|(_, svg)| ([(CONTENT_TYPE, media)], *svg))
-        .ok_or(StatusCode::NOT_FOUND)
 }

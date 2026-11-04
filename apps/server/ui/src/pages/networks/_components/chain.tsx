@@ -333,6 +333,7 @@ function Amount({
   return (
     <Money
       amount={amount}
+      chain={chain}
       ticker={listing.metadata.ticker}
       decimals={listing.metadata.decimals}
       display={listing.metadata.display_decimals}

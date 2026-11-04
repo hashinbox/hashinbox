@@ -107,6 +107,7 @@ export function Wallet({
   const money = {
     decimals: listing?.decimals ?? 0,
     display: listing?.display_decimals ?? null,
+    chain: wallet.chain,
     ticker: assetName(shell.listings, wallet.chain, wallet.network, asset),
   };
   const [legs, setLegs] = useState<Movement[]>([]);
@@ -178,7 +179,7 @@ export function Wallet({
           sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}
         >
           <Box sx={{ display: 'flex', fontSize: 22 }}>
-            <Currency ticker={unit} label={false} />
+            <Currency chain={wallet.chain} ticker={unit} label={false} />
           </Box>
           <Box sx={{ minWidth: 0 }}>
             <Box sx={{ fontSize: 15 }}>

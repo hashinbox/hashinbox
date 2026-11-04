@@ -278,7 +278,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
             sx={{ gap: 1.5, py: 1.25, px: 1 }}
           >
             <Box sx={{ display: 'flex', fontSize: 22, flex: 'none' }}>
-              <Currency ticker={unitOf(w, shell.listings)} label={false} />
+              <Currency chain={w.chain} ticker={unitOf(w, shell.listings)} label={false} />
             </Box>
             <Box sx={{ minWidth: 0, flexGrow: 1 }}>
               <Typography noWrap sx={{ fontFamily: mono, fontSize: 12.5 }}>

@@ -1,7 +1,8 @@
 //! The routes over the scripted network and a real SQLite file: create
 //! (generate, import, watch), index (create, pause, resume, delete), tag,
 //! list and read wallets; balance and legs of indexed blocks; a send
-//! enqueued and read back as a job; assets, networks and health.
+//! enqueued and read back as a job; assets, networks and health; the network
+//! asset icons.
 
 use std::sync::Arc;
 
@@ -523,4 +524,32 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_network_asset_icon_is_served_and_an_unknown_one_is_not() {
+    let router = crate::ui::Settings::from_params(crate::ui::SettingsParams {
+        brand: None,
+        api_base: String::new(),
+    })
+    .routes()
+    .expect("ui routes");
+    let get = |uri: &str| {
+        Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("a request")
+    };
+    let found = router
+        .clone()
+        .oneshot(get("/assets/crypto/eth_usdc.svg"))
+        .await
+        .expect("a response");
+    assert_eq!(found.status(), StatusCode::OK);
+    assert_eq!(found.headers()["content-type"], "image/svg+xml");
+    let missing = router
+        .oneshot(get("/assets/crypto/eth_doge.svg"))
+        .await
+        .expect("a response");
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }

@@ -19,7 +19,7 @@ function Name({ choice }: { choice: NetworkChoice }) {
       sx={{ display: 'inline-flex', alignItems: 'center', gap: 1, lineHeight: 'inherit' }}
     >
       <Box component="span" sx={{ display: 'flex', fontSize: 15 }}>
-        {choice.ticker ? <Currency ticker={choice.ticker} label={false} /> : null}
+        {choice.ticker ? <Currency chain={chain} ticker={choice.ticker} label={false} /> : null}
       </Box>
       <span>{chain}</span>
       <Box component="span" sx={{ color: 'text.secondary' }}>
