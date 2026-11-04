@@ -62,7 +62,7 @@ async function allWallets(): Promise<Wallet[]> {
   const wallets: Wallet[] = [];
   let cursor: string | undefined;
   do {
-    const query = { limit: 1000, ...(cursor !== undefined && { cursor }) };
+    const query = { limit: 500, ...(cursor !== undefined && { cursor }) };
     const page = await call(client.GET('/v1/wallets', { params: { query } }));
     wallets.push(...page.wallets);
     cursor = page.next_cursor ?? undefined;

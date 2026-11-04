@@ -1,6 +1,4 @@
-//! `/v1/networks/{chain}/{network}/blocks`: a network's last kept blocks with
-//! the kept transactions in them. Only transactions of indexed addresses are
-//! kept.
+//! `/v1/networks/{chain}/{network}/blocks`: a network's last kept blocks.
 
 use std::sync::Arc;
 
@@ -12,9 +10,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody};
+use super::{Error, ErrorBody, IndexParams, networks::NetworkPath};
 use crate::{
     api::AppState,
+    db::Paged as _,
     models::{Block, block, int},
 };
 
@@ -24,45 +23,16 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(read))
 }
 
-/// How many blocks `GET .../blocks` answers unless `limit` says otherwise.
-const LIMIT: i64 = 20;
-
-/// The network read.
-#[derive(Clone, Debug, Deserialize, IntoParams)]
-#[into_params(parameter_in = Path)]
-pub(super) struct BlocksPath {
-    /// Chain name, as `GET /v1/networks` lists it.
-    pub(super) chain: String,
-    /// Network name, as `GET /v1/networks` lists it.
-    pub(super) network: String,
-}
-
-/// The block read.
-#[derive(Clone, Debug, Deserialize, IntoParams)]
-#[into_params(parameter_in = Path)]
-struct BlockPath {
-    /// Chain name, as `GET /v1/networks` lists it.
-    chain: String,
-    /// Network name, as `GET /v1/networks` lists it.
-    network: String,
-    /// Native position (height or slot).
-    position: u64,
-}
-
-/// How many blocks.
-#[derive(Clone, Debug, Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
-struct BlocksQuery {
-    /// At most this many, 1 to 100; 20 by default.
-    limit: Option<i64>,
-}
-
-/// `GET /v1/networks/{chain}/{network}/blocks`.
+/// `GET /v1/networks/{chain}/{network}/blocks`: a page of blocks.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = BlockList)]
 struct ListResponse {
-    /// The last kept blocks, latest first.
+    /// Live kept blocks, latest first.
     blocks: Vec<Block>,
+    /// Pass as `cursor` for the next page; null on the last page. Always
+    /// present.
+    #[schema(required)]
+    next_cursor: Option<String>,
 }
 
 #[utoipa::path(
@@ -70,11 +40,12 @@ struct ListResponse {
     path = "/v1/networks/{chain}/{network}/blocks",
     operation_id = "list_blocks",
     summary = "List a network's last kept blocks",
-    params(BlocksPath, BlocksQuery),
+    description = "Live kept blocks, latest first, a page at a time.",
+    params(NetworkPath, IndexParams),
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The last blocks", body = ListResponse),
-        (status = 400, description = "Malformed query or limit", body = ErrorBody),
+        (status = 400, description = "Malformed query, cursor, or limit", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "The network is not configured", body = ErrorBody),
         (status = 503, description = "The store is unavailable", body = ErrorBody)
@@ -83,30 +54,51 @@ struct ListResponse {
 )]
 async fn list(
     State(state): State<Arc<AppState>>,
-    Path(path): Path<BlocksPath>,
-    query: Result<Query<BlocksQuery>, QueryRejection>,
+    Path(path): Path<NetworkPath>,
+    index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    let Query(query) = query.map_err(Error::invalid_query)?;
-    let limit = query.limit.unwrap_or(LIMIT);
-    if !(1..=100).contains(&limit) {
-        return Err(Error::invalid_request(
-            "blocks limit must be between 1 and 100",
-        ));
-    }
-    let network = base::Network::new(base::Chain::new(path.chain), path.network);
-    state.payments.service(&network)?;
+    let Query(index) = index.map_err(Error::invalid_query)?;
+    let page = index.page("blocks", |cursor| cursor.parse().ok())?;
+    let limit = page.limit;
+    let network = path.network(&state.payments)?;
     let blocks = state
         .db
-        .read(move |connection| Ok(block::db::find_latest(connection, &network, limit)?))
+        .read(move |connection| Ok(block::db::find_page(connection, &network, page)?))
         .await?;
-    Ok(Json(ListResponse { blocks }))
+    Ok(Json(ListResponse {
+        next_cursor: blocks.cursor(limit),
+        blocks,
+    }))
+}
+
+/// One block of a network.
+#[derive(Clone, Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Path)]
+pub(super) struct BlockPath {
+    /// Chain name, as `GET /v1/networks` lists it.
+    chain: String,
+    /// Network name, as `GET /v1/networks` lists it.
+    network: String,
+    /// Native position (height or slot).
+    position: u64,
+}
+
+impl BlockPath {
+    /// The network, when configured (a 404 when not), and the position.
+    pub(super) fn at(&self, payments: &payments::Payments) -> Result<(base::Network, i64), Error> {
+        let network = base::Network::new(base::Chain::new(&self.chain), self.network.clone());
+        payments.service(&network)?;
+        let position =
+            int(self.position).map_err(|error| Error::invalid_request(error.to_string()))?;
+        Ok((network, position))
+    }
 }
 
 #[utoipa::path(
     get,
     path = "/v1/networks/{chain}/{network}/blocks/{position}",
     operation_id = "read_block",
-    summary = "Read one kept block of a network, with its kept transactions",
+    summary = "Read one kept block of a network",
     params(BlockPath),
     security(("bearerAuth" = [])),
     responses(
@@ -121,14 +113,11 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<BlockPath>,
 ) -> Result<Json<Block>, Error> {
-    let network = base::Network::new(base::Chain::new(path.chain), path.network);
-    state.payments.service(&network)?;
-    let position = int(path.position).map_err(|error| Error::invalid_request(error.to_string()))?;
-    let found = state
+    let (network, position) = path.at(&state.payments)?;
+    state
         .db
-        .read(move |connection| Ok(block::db::find_at(connection, &network, position)?))
-        .await?;
-    found
+        .read(move |connection| Ok(block::db::find_by_position(connection, &network, position)?))
+        .await?
         .map(Json)
         .ok_or_else(|| Error::not_found("no live block is kept at this position"))
 }

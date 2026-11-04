@@ -9,8 +9,8 @@
 -- Blocks are kept up to the produced tip. A block is live until the indexer
 -- archives it (a reorg): `archived_at` is set, nothing is deleted, and every
 -- read joins live blocks only, so archived facts leave balances, history and
--- unspent outputs. Confirmation is a read (position <= the chain's confirmed
--- tip); nothing about it is stored.
+-- unspent outputs. Confirmation is a read (position <= the network's
+-- `network` confirmed position).
 --
 -- Mined facts (transactions and legs, rewards included) are kept only for
 -- (address, asset) pairs with a wallet_index the block applies to
@@ -86,7 +86,9 @@ CREATE INDEX transaction_block ON "transaction" (block);
 -- A mined leg is kept for the wallet index it applies to (and goes with
 -- it), and carries its block's position, its `seq` and `total`: the
 -- index's balance right after it, the previous live mined leg's total plus
--- its signed amount (design 072). `seq` is 1 + the highest the index has
+-- its signed amount (design 072), and `total_received` / `total_sent`:
+-- what has come in (received, minted, reward) and gone out (spent,
+-- burned, fee) so far, so `total = total_received - total_sent`. `seq` is 1 + the highest the index has
 -- ever kept (archived legs included, so never reused, and unique: a second
 -- writer of the same step is refused); within a block it follows
 -- transaction order, then leg index, rewards after the transactions. An
@@ -112,13 +114,17 @@ CREATE TABLE leg (
     position      INTEGER,          -- The block's; NULL while pending.
     seq           INTEGER,          -- Per index, never reused; NULL while pending.
     total         TEXT,             -- Exact decimal, signed; NULL while pending.
+    total_received TEXT,            -- Exact decimal; NULL while pending.
+    total_sent    TEXT,             -- Exact decimal; NULL while pending.
     CHECK (block IS NOT NULL OR "transaction" IS NOT NULL),
     CHECK (kind BETWEEN 0 AND 5),
     CHECK (("transaction" IS NULL) = (kind = 5)),
     CHECK (id = COALESCE("transaction", block || '.reward') || '.' || leg_index),
     CHECK ((coin_txid IS NULL) = (coin_index IS NULL)),
     CHECK (coin_txid IS NULL OR kind IN (0, 1)),
-    CHECK ((block IS NULL) = (total IS NULL)),
+    CHECK ((block IS NULL) = (total IS NULL)
+        AND (block IS NULL) = (total_received IS NULL)
+        AND (block IS NULL) = (total_sent IS NULL)),
     CHECK ((block IS NULL) = (position IS NULL)
         AND (block IS NULL) = (seq IS NULL))
 );
@@ -129,29 +135,40 @@ CREATE UNIQUE INDEX leg_seq ON leg (wallet_index_id, seq);
 CREATE INDEX leg_transaction ON leg ("transaction");
 CREATE INDEX leg_coin ON leg (coin_txid, coin_index) WHERE coin_txid IS NOT NULL;
 
--- A leg with its JSON as the `Leg` model serializes it: what reads that
--- nest legs (a transaction's, a block's rewards, an index's pending ones)
--- aggregate, filtered and ordered by the leg columns.
-CREATE VIEW leg_json AS
+-- A transaction with its block's position (`position`, NULL while pending)
+-- and its legs (`legs`, JSON as the `Leg` model serializes them, by
+-- leg_index): what every transaction read answers.
+CREATE VIEW transaction_with_legs AS
 SELECT
-    l.*,
-    json_object(
-        'id', l.id,
-        'block', l.block,
-        'transaction', l."transaction",
-        'leg_index', l.leg_index,
-        'kind', l.kind,
-        'address', l.address,
-        'asset', l.asset,
-        'amount', l.amount,
-        'coin_txid', l.coin_txid,
-        'coin_index', l.coin_index,
-        'wallet_index_id', l.wallet_index_id,
-        'position', l.position,
-        'seq', l.seq,
-        'total', l.total
-    ) AS json
-FROM leg l;
+    t.*,
+    b.position AS position,
+    COALESCE((
+        SELECT json_group_array(
+            json_object(
+                'id', l.id,
+                'block', l.block,
+                'transaction', l."transaction",
+                'leg_index', l.leg_index,
+                'kind', l.kind,
+                'address', l.address,
+                'asset', l.asset,
+                'amount', l.amount,
+                'coin_txid', l.coin_txid,
+                'coin_index', l.coin_index,
+                'wallet_index_id', l.wallet_index_id,
+                'position', l.position,
+                'seq', l.seq,
+                'total', l.total,
+                'total_received', l.total_received,
+                'total_sent', l.total_sent
+            )
+            ORDER BY l.leg_index
+        )
+        FROM leg l
+        WHERE l."transaction" = t.id
+    ), '[]') AS legs
+FROM "transaction" t
+LEFT JOIN block b ON b.id = t.block;
 
 -- Every address the server knows on a network, keyed or watch-only: its
 -- key's curve and bytes (both NULL: watch-only, no key kept), and its tags
@@ -196,3 +213,82 @@ CREATE TABLE wallet_index (
 CREATE INDEX wallet_index_wallet ON wallet_index (wallet_id);
 CREATE INDEX wallet_index_progress ON wallet_index (indexed_at);
 
+-- Each configured network (the server writes one row per network at start)
+-- and its indexer as of its last step that read the node's tip (written from
+-- the indexer's stats; NULL until then): `tip`, the node's newest block;
+-- `confirmed`, `tip - confirmations` (the network's setting, applied at
+-- write); `indexed`, the last kept block (NULL: none yet); `checked_at`,
+-- Unix ms of the last step whose tip moved.
+CREATE TABLE network (
+    chain      TEXT    NOT NULL,
+    network    TEXT    NOT NULL,
+    tip        INTEGER,
+    confirmed  INTEGER,
+    indexed    INTEGER,
+    checked_at INTEGER,
+    PRIMARY KEY (chain, network)
+);
+
+-- A wallet index with its wallet's network and address, whether its key is
+-- kept, the position it is indexed through and how far that is behind its
+-- network's indexer tip, and the indexer's confirmed position
+-- (`finality_at`). Its balances, NULL while that is unknown (no `network`
+-- confirmed position): `balance`, `balance_received`, `balance_sent`, the totals of its
+-- last live mined leg at or below `finality_at` (`c`; '0': none);
+-- `balance_spendable`, `balance` less its pending outgoing legs (spent,
+-- burned, fee; no block). `balance_pending`: the total of its newest live
+-- mined leg, any block (`n`; '0': none); mempool legs are not in it. Each
+-- leg is one seek of `leg_wallet_index`. `SUM_DECIMAL` is the server's:
+-- read only through its connections.
+CREATE VIEW wallet_index_with_balance AS
+SELECT
+    wi.*,
+    w.chain,
+    w.network,
+    w.address,
+    w.secret IS NOT NULL AS keyed,
+    b.position AS indexed_through,
+    MAX(i.tip - b.position, 0) AS behind_tip,
+    i.confirmed AS finality_at,
+    IIF(i.confirmed IS NULL, NULL, COALESCE(c.total, '0')) AS balance,
+    IIF(i.confirmed IS NULL, NULL, COALESCE(c.total_received, '0')) AS balance_received,
+    IIF(i.confirmed IS NULL, NULL, COALESCE(c.total_sent, '0')) AS balance_sent,
+    COALESCE(n.total, '0') AS balance_pending,
+    IIF(i.confirmed IS NULL, NULL, (
+        SELECT SUM_DECIMAL(v)
+        FROM (
+            SELECT COALESCE(c.total, '0') AS v
+            UNION ALL
+            -- Same as `block IS NULL` (CHECK); lets `leg_wallet_index` seek
+            -- straight to the pending legs.
+            SELECT '-' || p.amount
+            FROM leg p
+            WHERE p.wallet_index_id = wi.id
+              AND p.position IS NULL
+              AND p.kind IN (1, 2, 4)
+        )
+    )) AS balance_spendable
+FROM wallet_index wi
+JOIN wallet w ON w.id = wi.wallet_id
+LEFT JOIN block b ON b.id = wi.indexed_at
+LEFT JOIN network i ON i.chain = w.chain
+    AND i.network = w.network
+LEFT JOIN leg c ON c.id = (
+    SELECT l.id
+    FROM leg l
+    JOIN block lb ON lb.id = l.block
+    WHERE l.wallet_index_id = wi.id
+      AND l.position <= i.confirmed
+      AND lb.archived_at IS NULL
+    ORDER BY l.position DESC, l.seq DESC
+    LIMIT 1
+)
+LEFT JOIN leg n ON n.id = (
+    SELECT l.id
+    FROM leg l
+    JOIN block lb ON lb.id = l.block
+    WHERE l.wallet_index_id = wi.id
+      AND lb.archived_at IS NULL
+    ORDER BY l.position DESC, l.seq DESC
+    LIMIT 1
+);

@@ -8,13 +8,26 @@
 -- One row per network: its RPC endpoint documents in failover order, as one
 -- JSON list. Seeded from the configuration file once, replaced by verified
 -- edits.
-CREATE TABLE rpc_endpoints (
+CREATE TABLE network_endpoint (
     chain   TEXT NOT NULL,
     network TEXT NOT NULL,
     nodes   TEXT NOT NULL,
     PRIMARY KEY (chain, network)
 ) WITHOUT ROWID;
 
+-- Each `network` row with its endpoint documents (`nodes`; NULL: none stored).
+CREATE VIEW network_with_endpoints AS
+SELECT
+    n.chain,
+    n.network,
+    n.tip,
+    n.confirmed,
+    n.indexed,
+    n.checked_at,
+    e.nodes
+FROM network n
+LEFT JOIN network_endpoint e ON e.chain = n.chain
+    AND e.network = n.network;
 
 -- One trigger (pipes): its selector, filter, check and action as JSON, the
 -- types of `apps/server/src/models/trigger.rs`. id: its slug, chosen at creation.

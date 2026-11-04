@@ -9,7 +9,10 @@ use std::{
 
 use axum::{
     Json,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{
+        Path, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::StatusCode,
 };
 use diesel::OptionalExtension as _;
@@ -17,14 +20,15 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody};
+use super::{Error, ErrorBody, IndexParams};
 use crate::{
     api::AppState,
+    db::Paged as _,
     models::{
         self, Trigger,
         trigger::{self as triggers, Action, Filter, Gate, Logic},
         trigger_run,
-        wallet_index::Selector,
+        wallet_index_selector::Selector,
     },
     usecase::workers::trigger::actions::SendInput,
 };
@@ -36,8 +40,49 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(runs))
 }
 
-/// How many runs `GET /v1/triggers/{id}/runs` answers.
-const RUNS: i64 = 50;
+/// `GET /v1/triggers`: a page of triggers.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = TriggerList)]
+struct ListResponse {
+    /// Triggers in id order.
+    triggers: Vec<Trigger>,
+    /// Pass as `cursor` for the next page; null on the last page. Always
+    /// present.
+    #[schema(required)]
+    next_cursor: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/triggers",
+    operation_id = "list_triggers",
+    summary = "List triggers",
+    params(IndexParams),
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Triggers in id order", body = ListResponse),
+        (status = 400, description = "Malformed query or limit", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 503, description = "The store is unavailable", body = ErrorBody)
+    ),
+    tag = "triggers"
+)]
+async fn list(
+    State(state): State<Arc<AppState>>,
+    index: Result<Query<IndexParams>, QueryRejection>,
+) -> Result<Json<ListResponse>, Error> {
+    let Query(index) = index.map_err(Error::invalid_query)?;
+    let page = index.page("triggers", |cursor| Some(cursor.to_owned()))?;
+    let limit = page.limit;
+    let triggers = state
+        .db
+        .read(move |connection| Ok(triggers::db::find_page(connection, page)?))
+        .await?;
+    Ok(Json(ListResponse {
+        next_cursor: triggers.cursor(limit),
+        triggers,
+    }))
+}
 
 /// A trigger as written: in a `POST` (with `id`) or as a `PUT` body.
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
@@ -68,6 +113,52 @@ fn enabled() -> bool {
     true
 }
 
+impl Definition {
+    /// The trigger this definition describes as trigger `id`; a 400 for one
+    /// the model refuses ([`models::Trigger::validate`]) or a send from `This`
+    /// to `This`, a 404 for an unconfigured network or sent asset.
+    fn trigger(
+        self,
+        payments: &payments::Payments,
+        id: String,
+        group_id: String,
+        created_at: i64,
+        updated_at: i64,
+    ) -> Result<models::Trigger, Error> {
+        let network = base::Network::new(base::Chain::new(&self.chain), self.network.clone());
+        payments.service(&network)?;
+        if self.action.name != "send" {
+            return Err(Error::invalid_request(format!(
+                "unknown action {}",
+                self.action.name
+            )));
+        }
+        let send = SendInput::deserialize(&self.action.input)
+            .map_err(|error| Error::invalid_request(format!("send input: {error}")))?;
+        super::asset_info(payments, &network, &send.asset)?;
+        send.validate()
+            .map_err(|invalid| Error::invalid_request(invalid.to_string()))?;
+        let trigger = models::Trigger {
+            id,
+            chain: self.chain,
+            network: self.network,
+            group_id,
+            selector: models::Json(self.selector),
+            filter: self.filter.map(models::Json),
+            check: models::Json(self.check),
+            action: models::Json(self.action),
+            enabled: self.enabled,
+            created_at,
+            updated_at,
+        };
+        // The model's own rules, before it is ever kept.
+        trigger
+            .validate()
+            .map_err(|invalid| Error::invalid_request(invalid.to_string()))?;
+        Ok(trigger)
+    }
+}
+
 /// `POST /v1/triggers` body: triggers of one network stored together, all or none.
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 #[schema(as = TriggerBatch)]
@@ -78,58 +169,47 @@ struct BatchRequest {
     triggers: Vec<Definition>,
 }
 
-/// `GET /v1/triggers`.
+impl BatchRequest {
+    /// The batch's triggers in group `group_id`: 1 to 16, each with its own
+    /// `id`, all on one network.
+    fn triggers(
+        self,
+        payments: &payments::Payments,
+        group_id: &str,
+        now: i64,
+    ) -> Result<Vec<models::Trigger>, Error> {
+        if self.triggers.is_empty() || self.triggers.len() > 16 {
+            return Err(Error::invalid_request("a batch holds 1 to 16 triggers"));
+        }
+        let mut rows = Vec::with_capacity(self.triggers.len());
+        for definition in self.triggers {
+            let id = definition
+                .id
+                .clone()
+                .ok_or_else(|| Error::invalid_request("every trigger of a batch needs an id"))?;
+            if rows.iter().any(|row: &models::Trigger| row.id == id) {
+                return Err(Error::unprocessable("a batch repeats a trigger id"));
+            }
+            if rows.first().is_some_and(|first: &models::Trigger| {
+                (first.chain.as_str(), first.network.as_str())
+                    != (definition.chain.as_str(), definition.network.as_str())
+            }) {
+                return Err(Error::invalid_request(
+                    "every trigger of a batch is on one network",
+                ));
+            }
+            rows.push(definition.trigger(payments, id, group_id.to_owned(), now, now)?);
+        }
+        Ok(rows)
+    }
+}
+
+/// `POST /v1/triggers`: the triggers created.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
-#[schema(as = TriggerList)]
-struct ListResponse {
-    /// Triggers in id order.
+#[schema(as = TriggerBatchCreated)]
+struct CreateResponse {
+    /// The batch's triggers, in its order.
     triggers: Vec<Trigger>,
-}
-
-/// The trigger a route acts on.
-#[derive(Clone, Debug, Deserialize, IntoParams)]
-#[into_params(parameter_in = Path)]
-struct TriggerPath {
-    /// The trigger's slug.
-    id: String,
-}
-
-/// One run of a trigger.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-struct TriggerRun {
-    /// Unix ms.
-    started_at: i64,
-}
-
-/// `GET /v1/triggers/{id}/runs`.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-#[schema(as = TriggerRunList)]
-struct RunsResponse {
-    /// The latest runs, latest first.
-    runs: Vec<TriggerRun>,
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/triggers",
-    operation_id = "list_triggers",
-    summary = "List triggers",
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "Every trigger", body = ListResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
-    ),
-    tag = "triggers"
-)]
-async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, Error> {
-    let triggers = state
-        .db
-        .read(|connection| Ok(triggers::db::find_all(connection)?))
-        .await?;
-    Ok(Json(ListResponse {
-        triggers: triggers.into_iter().collect(),
-    }))
 }
 
 #[utoipa::path(
@@ -143,7 +223,7 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, 
     request_body = BatchRequest,
     security(("bearerAuth" = [])),
     responses(
-        (status = 201, description = "Triggers created", body = ListResponse),
+        (status = 201, description = "Triggers created", body = CreateResponse),
         (status = 400, description = "Malformed body or id, several networks, or a send from \
             This to This", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
@@ -157,33 +237,12 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, 
 async fn create(
     State(state): State<Arc<AppState>>,
     request: Result<Json<BatchRequest>, JsonRejection>,
-) -> Result<(StatusCode, Json<ListResponse>), Error> {
+) -> Result<(StatusCode, Json<CreateResponse>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    if request.triggers.is_empty() || request.triggers.len() > 16 {
-        return Err(Error::invalid_request("a batch holds 1 to 16 triggers"));
-    }
     let now = now()?;
     // One group for the whole batch, so it can be found (and removed) together.
     let group = uuid::Uuid::now_v7().to_string();
-    let mut rows = Vec::with_capacity(request.triggers.len());
-    for definition in request.triggers {
-        let id = definition
-            .id
-            .clone()
-            .ok_or_else(|| Error::invalid_request("every trigger of a batch needs an id"))?;
-        if rows.iter().any(|row: &models::Trigger| row.id == id) {
-            return Err(Error::unprocessable("a batch repeats a trigger id"));
-        }
-        if rows.first().is_some_and(|first: &models::Trigger| {
-            (first.chain.as_str(), first.network.as_str())
-                != (definition.chain.as_str(), definition.network.as_str())
-        }) {
-            return Err(Error::invalid_request(
-                "every trigger of a batch is on one network",
-            ));
-        }
-        rows.push(row(&state, id, group.clone(), definition, now, now)?);
-    }
+    let rows = request.triggers(&state.payments, &group, now)?;
     let kept = rows.clone();
     let taken = state
         .db
@@ -208,7 +267,15 @@ async fn create(
             "a trigger with id {taken} exists"
         )));
     }
-    Ok((StatusCode::CREATED, Json(ListResponse { triggers: rows })))
+    Ok((StatusCode::CREATED, Json(CreateResponse { triggers: rows })))
+}
+
+/// The trigger a route acts on.
+#[derive(Clone, Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Path)]
+struct TriggerPath {
+    /// The trigger's slug.
+    id: String,
 }
 
 #[utoipa::path(
@@ -276,11 +343,10 @@ async fn replace(
         .await?
         .ok_or_else(|| Error::not_found("no such trigger"))?;
     // A replace keeps its id, creation time and group.
-    let row = row(
-        &state,
+    let row = definition.trigger(
+        &state.payments,
         path.id,
         kept.group_id,
-        definition,
         kept.created_at,
         now()?,
     )?;
@@ -325,15 +391,35 @@ async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// One run of a trigger.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+struct TriggerRun {
+    /// Unix ms.
+    started_at: i64,
+}
+
+/// `GET /v1/triggers/{id}/runs`: a page of runs.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = TriggerRunList)]
+struct RunsResponse {
+    /// Runs, latest first.
+    runs: Vec<TriggerRun>,
+    /// Pass as `cursor` for the next page; null on the last page. Always
+    /// present.
+    #[schema(required)]
+    next_cursor: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/v1/triggers/{id}/runs",
     operation_id = "list_trigger_runs",
     summary = "List a trigger's latest runs",
-    params(TriggerPath),
+    params(TriggerPath, IndexParams),
     security(("bearerAuth" = [])),
     responses(
-        (status = 200, description = "Its latest 50 runs, latest first", body = RunsResponse),
+        (status = 200, description = "Its runs, latest first", body = RunsResponse),
+        (status = 400, description = "Malformed query, cursor, or limit", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 503, description = "The store is unavailable", body = ErrorBody)
     ),
@@ -342,13 +428,18 @@ async fn delete(
 async fn runs(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
+    index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<RunsResponse>, Error> {
+    let Query(index) = index.map_err(Error::invalid_query)?;
+    let page = index.page("runs", |cursor| cursor.parse().ok())?;
+    let limit = page.limit;
     let id = path.id;
     let runs = state
         .db
-        .read(move |connection| Ok(trigger_run::db::find_recent(connection, &id, RUNS)?))
+        .read(move |connection| Ok(trigger_run::db::find_page(connection, &id, page)?))
         .await?;
     Ok(Json(RunsResponse {
+        next_cursor: runs.cursor(limit),
         runs: runs
             .into_iter()
             .map(|run| TriggerRun {
@@ -356,57 +447,6 @@ async fn runs(
             })
             .collect(),
     }))
-}
-
-/// The row `definition` describes as trigger `id`.
-///
-/// # Errors
-///
-/// A 400 for a trigger the model refuses ([`models::Trigger::validate`]) or a
-/// send from `This` to `This`; a 404 for an
-/// unconfigured network or sent asset.
-fn row(
-    state: &AppState,
-    id: String,
-    group_id: String,
-    definition: Definition,
-    created_at: i64,
-    updated_at: i64,
-) -> Result<models::Trigger, Error> {
-    let network = base::Network::new(
-        base::Chain::new(&definition.chain),
-        definition.network.clone(),
-    );
-    state.payments.service(&network)?;
-    if definition.action.name != "send" {
-        return Err(Error::invalid_request(format!(
-            "unknown action {}",
-            definition.action.name
-        )));
-    }
-    let send = SendInput::deserialize(&definition.action.input)
-        .map_err(|error| Error::invalid_request(format!("send input: {error}")))?;
-    super::asset_info(&state.payments, &network, &send.asset)?;
-    send.validate()
-        .map_err(|invalid| Error::invalid_request(invalid.to_string()))?;
-    let trigger = models::Trigger {
-        id,
-        chain: definition.chain,
-        network: definition.network,
-        group_id,
-        selector: models::Json(definition.selector),
-        filter: definition.filter.map(models::Json),
-        check: models::Json(definition.check),
-        action: models::Json(definition.action),
-        enabled: definition.enabled,
-        created_at,
-        updated_at,
-    };
-    // The model's own rules, before it is ever kept.
-    trigger
-        .validate()
-        .map_err(|invalid| Error::invalid_request(invalid.to_string()))?;
-    Ok(trigger)
 }
 
 /// Unix ms.

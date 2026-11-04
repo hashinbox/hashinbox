@@ -6,16 +6,17 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State, rejection::QueryRejection},
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, wallet_address};
+use super::{Error, ErrorBody, IndexParams, wallet_address};
 use crate::{
     api::AppState,
+    db::Paged as _,
     models::{Wallet, wallet},
 };
 
@@ -25,13 +26,49 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(add, remove))
 }
 
-/// `GET /v1/wallets/tags`.
+/// `GET /v1/wallets/tags`: a page of tags.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = TagList)]
 struct ListResponse {
-    /// Every tag in use on any wallet, sorted, each once. A wallet's own
-    /// tags are on it (`GET /v1/wallets`).
+    /// Tags in use on any wallet, sorted, each once. A wallet's own tags are
+    /// on it (`GET /v1/wallets`).
     tags: Vec<String>,
+    /// Pass as `cursor` for the next page; null on the last page. Always
+    /// present.
+    #[schema(required)]
+    next_cursor: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/wallets/tags",
+    operation_id = "list_tags",
+    summary = "List the tags in use",
+    params(IndexParams),
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Tags in order", body = ListResponse),
+        (status = 400, description = "Malformed query or limit", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 503, description = "The store is unavailable", body = ErrorBody)
+    ),
+    tag = "triggers"
+)]
+async fn list(
+    State(state): State<Arc<AppState>>,
+    index: Result<Query<IndexParams>, QueryRejection>,
+) -> Result<Json<ListResponse>, Error> {
+    let Query(index) = index.map_err(Error::invalid_query)?;
+    let page = index.page("tags", |cursor| Some(cursor.to_owned()))?;
+    let limit = page.limit;
+    let tags = state
+        .db
+        .read(move |connection| Ok(wallet::db::find_tags_page(connection, page)?))
+        .await?;
+    Ok(Json(ListResponse {
+        next_cursor: tags.cursor(limit),
+        tags,
+    }))
 }
 
 /// The tag a route acts on.
@@ -44,25 +81,20 @@ struct TagPath {
     tag: String,
 }
 
-#[utoipa::path(
-    get,
-    path = "/v1/wallets/tags",
-    operation_id = "list_tags",
-    summary = "List the tags in use",
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "Every tag", body = ListResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
-    ),
-    tag = "triggers"
-)]
-async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, Error> {
-    let tags = state
-        .db
-        .read(|connection| Ok(wallet::db::find_tags(connection)?))
-        .await?;
-    Ok(Json(ListResponse { tags }))
+impl TagPath {
+    /// The wallet's model id; the tag checked.
+    fn wallet_id(&self, payments: &payments::Payments) -> Result<String, Error> {
+        let address = wallet_address(payments, &self.id)?;
+        let id =
+            Wallet::id(&address).map_err(|error| Error::invalid_request(format!("{error:#}")))?;
+        if !wallet::is_tag(&self.tag) {
+            return Err(Error::invalid_request(format!(
+                "a tag is 1 to 64 of [a-z0-9-]: {:?}",
+                self.tag
+            )));
+        }
+        Ok(id)
+    }
 }
 
 #[utoipa::path(
@@ -87,7 +119,12 @@ async fn add(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TagPath>,
 ) -> Result<StatusCode, Error> {
-    set(&state, path, true).await?;
+    let id = path.wallet_id(&state.payments)?;
+    state
+        .db
+        .write(move |connection| wallet::db::set_tag(connection, &id, &path.tag, true))
+        .await?
+        .ok_or_else(|| Error::not_found("wallet is unknown"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -113,30 +150,14 @@ async fn remove(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TagPath>,
 ) -> Result<StatusCode, Error> {
-    if !set(&state, path, false).await? {
+    let id = path.wallet_id(&state.payments)?;
+    let removed = state
+        .db
+        .write(move |connection| wallet::db::set_tag(connection, &id, &path.tag, false))
+        .await?
+        .ok_or_else(|| Error::not_found("wallet is unknown"))?;
+    if !removed {
         return Err(Error::not_found("no such tag"));
     }
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Adds (`add`) or removes the tag of `path` on its wallet; whether its tags
-/// changed.
-///
-/// # Errors
-///
-/// A 400 for a malformed ID or tag, a 404 for an unknown wallet.
-async fn set(state: &AppState, path: TagPath, add: bool) -> Result<bool, Error> {
-    let address = wallet_address(&state.payments, &path.id)?;
-    let id = Wallet::id(&address).map_err(|error| Error::invalid_request(format!("{error:#}")))?;
-    if !crate::models::wallet::is_tag(&path.tag) {
-        return Err(Error::invalid_request(format!(
-            "a tag is 1 to 64 of [a-z0-9-]: {:?}",
-            path.tag
-        )));
-    }
-    state
-        .db
-        .write(move |connection| wallet::db::set_tag(connection, &id, &path.tag, add))
-        .await?
-        .ok_or_else(|| Error::not_found("wallet is unknown"))
 }

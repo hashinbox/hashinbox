@@ -19,9 +19,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, wallet_address};
+use super::{Error, ErrorBody, IndexParams, wallet_address};
 use crate::{
     api::AppState,
+    db::Paged as _,
     models::{self, Wallet},
 };
 
@@ -108,12 +109,11 @@ async fn create(
         models::Wallet::try_from(&*wallet)
     }
     .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
-    let tips = models::wallet::Tips::from_stats(state.payments.stats());
     let (created, wallet) = state
         .db
         .write(move |connection| {
             let created = models::wallet::db::insert(connection, &row)?;
-            let wallet = models::wallet::db::find_at_tip(connection, &row.id, &tips)?;
+            let wallet = models::wallet::db::find(connection, &row.id)?;
             Ok((created, wallet))
         })
         .await?;
@@ -124,26 +124,6 @@ async fn create(
         StatusCode::OK
     };
     Ok((status, Json(wallet)))
-}
-
-/// Query of `GET /v1/wallets`.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
-#[into_params(parameter_in = Query)]
-#[serde(deny_unknown_fields)]
-struct ListQuery {
-    /// `next_cursor` of the previous page (the last wallet id); absent for
-    /// the first page.
-    cursor: Option<String>,
-    /// Page size, 1 to 1000.
-    #[serde(default = "ListQuery::default_limit")]
-    #[param(minimum = 1, maximum = 1000, default = 100)]
-    limit: i64,
-}
-
-impl ListQuery {
-    const fn default_limit() -> i64 {
-        100
-    }
 }
 
 /// `GET /v1/wallets`: a page of wallets.
@@ -165,7 +145,7 @@ struct ListResponse {
     summary = "List the wallets",
     description = "Keyed wallets and watched addresses, a page in wallet ID order, each with \
         its tags and its indexes: their balances (exact atomic units), progress and legs.",
-    params(ListQuery),
+    params(IndexParams),
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Wallets in ID order", body = ListResponse),
@@ -177,28 +157,18 @@ struct ListResponse {
 )]
 async fn list(
     State(state): State<Arc<AppState>>,
-    query: Result<Query<ListQuery>, QueryRejection>,
+    index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    let Query(query) = query.map_err(Error::invalid_query)?;
-    if !(1..=1_000).contains(&query.limit) {
-        return Err(Error::invalid_request(
-            "wallet list limit must be between 1 and 1000",
-        ));
-    }
-    let tips = models::wallet::Tips::from_stats(state.payments.stats());
-    let (after, limit) = (query.cursor.unwrap_or_default(), query.limit);
-    let wallets: Vec<Wallet> = state
+    let Query(index) = index.map_err(Error::invalid_query)?;
+    let page = index.page("wallet list", |cursor| Some(cursor.to_owned()))?;
+    let limit = page.limit;
+    let wallets = state
         .db
-        .read(move |connection| models::wallet::db::list_at_tip(connection, &tips, &after, limit))
-        .await?
-        .into_iter()
-        .collect();
-    let next_cursor = (i64::try_from(wallets.len()) == Ok(limit))
-        .then(|| wallets.last().map(|wallet| wallet.id.clone()))
-        .flatten();
+        .read(move |connection| models::wallet::db::find_page(connection, page))
+        .await?;
     Ok(Json(ListResponse {
+        next_cursor: wallets.cursor(limit),
         wallets,
-        next_cursor,
     }))
 }
 
@@ -235,10 +205,9 @@ async fn read(
     let address = wallet_address(&state.payments, &path.id)?;
     let id = models::Wallet::id(&address)
         .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
-    let tips = models::wallet::Tips::from_stats(state.payments.stats());
     state
         .db
-        .read(move |connection| models::wallet::db::find_at_tip(connection, &id, &tips))
+        .read(move |connection| models::wallet::db::find(connection, &id))
         .await?
         .map(Json)
         .ok_or_else(|| Error::not_found("wallet is unknown"))

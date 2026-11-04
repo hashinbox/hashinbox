@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::Context as _;
-use base::{BlockHash, BlockHeader, BlockParent, Network};
+use base::{BlockHash, BlockHeader, BlockParent, Decimal, Network};
 use diesel::{
     prelude::*,
     sql_types::{BigInt, Text},
@@ -11,8 +11,7 @@ use diesel::{
 };
 
 use super::{
-    Json, Leg, int, key, leg, schema::block, transaction, transaction::Transaction, uint,
-    wallet_index,
+    Leg, int, key, leg, schema::block, transaction, transaction::Transaction, uint, wallet_index,
 };
 
 /// Serializes bytes as lowercase hexadecimal.
@@ -20,10 +19,10 @@ fn hex_text<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, 
     serializer.serialize_str(&hex::encode(bytes))
 }
 
-/// A kept block: its `block` row, its kept transactions in block order and
-/// its kept rewards. The API shows it as is. Read whole in one query: its
-/// children come as JSON arrays SQLite builds (`transactions`, `rewards`).
-#[derive(Clone, Debug, Insertable, QueryableByName, serde::Serialize, utoipa::ToSchema)]
+/// A kept block: its `block` row; the API shows it as is. Written with its
+/// kept transactions in block order and its kept rewards, which are never
+/// read back into it.
+#[derive(Clone, Debug, Insertable, serde::Serialize, utoipa::ToSchema)]
 #[diesel(table_name = block, check_for_backend(Sqlite))]
 pub(crate) struct Block {
     /// `{chain}.{network}.{hash}`.
@@ -48,11 +47,13 @@ pub(crate) struct Block {
     pub(crate) timestamp: Option<i64>,
     /// Unix ms a reorg archived it; null while live.
     pub(crate) archived_at: Option<i64>,
-    /// Its kept transactions, in block order.
-    #[diesel(skip_insertion, sql_type = Text, deserialize_as = Json<Vec<Transaction>>)]
+    /// Its kept transactions, in block order; written, not read.
+    #[serde(skip)]
+    #[diesel(skip_insertion)]
     pub(crate) transactions: Vec<Transaction>,
-    /// Its kept rewards, in order.
-    #[diesel(skip_insertion, sql_type = Text, deserialize_as = Json<Vec<Leg>>)]
+    /// Its kept rewards, in order; written, not read.
+    #[serde(skip)]
+    #[diesel(skip_insertion)]
     pub(crate) rewards: Vec<Leg>,
 }
 
@@ -97,6 +98,7 @@ impl TryFrom<&base::Block> for Block {
         transactions.sort_by_key(|transaction| transaction.order.unwrap_or(0));
         for transaction in &mut transactions {
             transaction.block = Some(id.clone());
+            transaction.position = Some(position);
             transaction.expires_at = None;
             for leg in &mut transaction.legs {
                 leg.block = Some(id.clone());
@@ -179,13 +181,21 @@ impl Block {
     }
 }
 
+/// Its position.
+impl crate::db::Keyed for Block {
+    fn key(&self) -> String {
+        self.position.to_string()
+    }
+}
+
 /// The `block` table's statements.
 pub(crate) mod db {
     #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
     use super::*;
+    use crate::db::Page;
 
     /// One `block` row.
-    #[derive(Queryable, Selectable)]
+    #[derive(Queryable, QueryableByName, Selectable)]
     #[diesel(table_name = block, check_for_backend(Sqlite))]
     pub(in crate::models) struct Row {
         id: String,
@@ -241,8 +251,8 @@ pub(crate) mod db {
     ///    their legs ([`Block::keep`]);
     /// 3. its legs of the wallet indexes its legs are of are deleted (a
     ///    block kept again writes them again);
-    /// 4. each such index's seq and total are read (one query), and each
-    ///    leg, in order, takes the next of its index;
+    /// 4. each such index's seq and received and sent totals are read (one
+    ///    query), and each leg, in order, takes the next of its index;
     /// 5. each transaction's row is upserted, then every leg inserted.
     ///
     /// # Errors
@@ -250,10 +260,11 @@ pub(crate) mod db {
     /// When a value does not decode or a write fails (a live block at its
     /// position already, a seq an index holds).
     pub(crate) fn save(connection: &mut SqliteConnection, block: &mut Block) -> anyhow::Result<()> {
+        let network = Network::new(base::Chain::new(&block.chain), &block.network);
         let parent = block
             .parent_hash
-            .as_ref()
-            .map(|hash| key(&[&block.chain, &block.network, &hex::encode(hash)]))
+            .clone()
+            .map(|hash| Block::id(&network, &BlockHash(hash)))
             .transpose()?;
         save_row(connection, block, parent.as_deref())?;
         let ours = wallet_index::db::advance(connection, block, parent.as_deref())?;
@@ -272,13 +283,20 @@ pub(crate) mod db {
             .flat_map(|transaction| &mut transaction.legs)
             .chain(&mut block.rewards);
         for leg in legs {
-            let (seq, total) = running
+            let (seq, received, sent) = running
                 .get_mut(&leg.wallet_index_id)
                 .context("a leg's index was not read")?;
+            let signed = leg.signed()?;
+            if signed >= Decimal::zero() {
+                *received += signed;
+            } else {
+                *sent -= signed;
+            }
             *seq += 1;
-            *total = total.clone() + leg.signed()?;
             leg.seq = Some(*seq);
-            leg.total = Some(total.to_string());
+            leg.total = Some((&*received - &*sent).to_string());
+            leg.total_received = Some(received.to_string());
+            leg.total_sent = Some(sent.to_string());
         }
 
         for transaction in &block.transactions {
@@ -325,128 +343,37 @@ pub(crate) mod db {
         Ok(())
     }
 
-    /// The `limit` last live blocks of `network`, latest first, with their
-    /// transactions, legs and rewards.
-    pub(crate) fn find_latest(
+    /// At most `page.limit` live blocks of `network` below position
+    /// `page.after` when given, latest first.
+    pub(crate) fn find_page(
         connection: &mut SqliteConnection,
         network: &Network,
-        limit: i64,
+        page: Page<i64>,
     ) -> QueryResult<Vec<Block>> {
-        // The last `?3` live blocks of a network, latest first, each with its
-        // transactions (each with its legs) and rewards.
-        diesel::sql_query(
-            r#"
-            SELECT
-                b.*,
-                COALESCE((
-                    SELECT json_group_array(
-                        json_object(
-                            'id', t.id,
-                            'block', t.block,
-                            'chain', t.chain,
-                            'network', t.network,
-                            'txid', t.txid,
-                            'order', t."order",
-                            'state', t.state,
-                            'reason', t.reason,
-                            'sent_at', t.sent_at,
-                            'expires_at', t.expires_at,
-                            'legs', json(COALESCE((
-                                SELECT json_group_array(
-                                    json(l.json)
-                                    ORDER BY l.leg_index
-                                )
-                                FROM leg_json l
-                                WHERE l."transaction" = t.id
-                            ), '[]'))
-                        )
-                        ORDER BY t."order"
-                    )
-                    FROM "transaction" t
-                    WHERE t.block = b.id
-                ), '[]') AS transactions,
-                COALESCE((
-                    SELECT json_group_array(
-                        json(l.json)
-                        ORDER BY l.leg_index
-                    )
-                    FROM leg_json l
-                    WHERE l."transaction" IS NULL
-                      AND l.block = b.id
-                ), '[]') AS rewards
-            FROM block b
-            WHERE b.chain = ?1
-              AND b.network = ?2
-              AND b.archived_at IS NULL
-            ORDER BY b.position DESC
-            LIMIT ?3"#,
-        )
-        .bind::<Text, _>(network.chain.as_str())
-        .bind::<Text, _>(&network.name)
-        .bind::<BigInt, _>(limit)
-        .load(connection)
+        let mut query = live!(network).into_boxed();
+        if let Some(before) = page.after {
+            query = query.filter(block::position.lt(before));
+        }
+        query
+            .order(block::position.desc())
+            .limit(page.limit)
+            .select(Row::as_select())
+            .load(connection)
+            .map(|rows| rows.into_iter().map(Block::from).collect())
     }
 
-    /// The live block of `network` at `position`, with its transactions,
-    /// legs and rewards.
-    pub(crate) fn find_at(
+    /// The live block of `network` at `position`.
+    pub(crate) fn find_by_position(
         connection: &mut SqliteConnection,
         network: &Network,
         position: i64,
     ) -> QueryResult<Option<Block>> {
-        // The live block of a network at position `?3`, with its transactions
-        // (each with its legs) and rewards.
-        diesel::sql_query(
-            r#"
-            SELECT
-                b.*,
-                COALESCE((
-                    SELECT json_group_array(
-                        json_object(
-                            'id', t.id,
-                            'block', t.block,
-                            'chain', t.chain,
-                            'network', t.network,
-                            'txid', t.txid,
-                            'order', t."order",
-                            'state', t.state,
-                            'reason', t.reason,
-                            'sent_at', t.sent_at,
-                            'expires_at', t.expires_at,
-                            'legs', json(COALESCE((
-                                SELECT json_group_array(
-                                    json(l.json)
-                                    ORDER BY l.leg_index
-                                )
-                                FROM leg_json l
-                                WHERE l."transaction" = t.id
-                            ), '[]'))
-                        )
-                        ORDER BY t."order"
-                    )
-                    FROM "transaction" t
-                    WHERE t.block = b.id
-                ), '[]') AS transactions,
-                COALESCE((
-                    SELECT json_group_array(
-                        json(l.json)
-                        ORDER BY l.leg_index
-                    )
-                    FROM leg_json l
-                    WHERE l."transaction" IS NULL
-                      AND l.block = b.id
-                ), '[]') AS rewards
-            FROM block b
-            WHERE b.chain = ?1
-              AND b.network = ?2
-              AND b.archived_at IS NULL
-              AND b.position = ?3"#,
-        )
-        .bind::<Text, _>(network.chain.as_str())
-        .bind::<Text, _>(&network.name)
-        .bind::<BigInt, _>(position)
-        .get_result(connection)
-        .optional()
+        live!(network)
+            .filter(block::position.eq(position))
+            .select(Row::as_select())
+            .first(connection)
+            .optional()
+            .map(|row| row.map(Block::from))
     }
 
     /// The live blocks of `network` from the one right below `lowest` to
@@ -458,14 +385,11 @@ pub(crate) mod db {
         highest: i64,
     ) -> QueryResult<Vec<Block>> {
         // The live blocks of a network from the one right below position `?3`
-        // to the one right above position `?4`, by position; their
-        // transactions and rewards not read.
+        // to the one right above position `?4`, by position.
         diesel::sql_query(
             "
             SELECT
-                b.*,
-                '[]' AS transactions,
-                '[]' AS rewards
+                b.*
             FROM block b
             WHERE b.chain = ?1
               AND b.network = ?2
@@ -492,20 +416,8 @@ pub(crate) mod db {
         .bind::<Text, _>(&network.name)
         .bind::<BigInt, _>(lowest)
         .bind::<BigInt, _>(highest)
-        .load(connection)
-    }
-
-    /// The last live block of `network`.
-    pub(crate) fn find_last(
-        connection: &mut SqliteConnection,
-        network: &Network,
-    ) -> QueryResult<Option<Block>> {
-        live!(network)
-            .order(block::position.desc())
-            .select(Row::as_select())
-            .first(connection)
-            .optional()
-            .map(|row| row.map(Block::from))
+        .load::<Row>(connection)
+        .map(|rows| rows.into_iter().map(Block::from).collect())
     }
 
     /// How many blocks of every network are kept live, and how many a reorg

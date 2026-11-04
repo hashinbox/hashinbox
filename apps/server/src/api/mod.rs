@@ -6,7 +6,9 @@
 mod assets;
 mod health;
 mod jobs;
+mod network_block_transactions;
 mod network_blocks;
+mod network_endpoints;
 mod network_transactions;
 mod networks;
 mod networks_tip;
@@ -34,8 +36,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
+use crate::db::Page;
 pub(crate) use state::AppState;
 
 /// The document root: title, version, description and servers. Title and
@@ -114,6 +117,8 @@ fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
         .merge(jobs::routes())
         .merge(networks::routes())
         .merge(network_blocks::routes())
+        .merge(network_endpoints::routes())
+        .merge(network_block_transactions::routes())
         .merge(network_transactions::routes())
         .merge(networks_tip::routes())
         .merge(stats::routes())
@@ -231,6 +236,44 @@ impl From<anyhow::Error> for Error {
             _ => Failure::Unavailable,
         };
         Self::new(failure, format!("{error:#}"))
+    }
+}
+
+/// The paging query of every list endpoint; its filters, if any, are a
+/// query of their own.
+#[derive(Clone, Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(crate) struct IndexParams {
+    /// `next_cursor` of the previous page; absent for the first page.
+    cursor: Option<String>,
+    /// Page size, 1 to 500.
+    #[param(minimum = 1, maximum = 500, default = 100)]
+    limit: Option<i64>,
+}
+
+impl IndexParams {
+    /// The page these ask for: `limit` (default 100) checked, `cursor` read
+    /// by `parse`; a 400 named after the list's `name` otherwise.
+    pub(crate) fn page<K>(
+        &self,
+        name: &str,
+        parse: impl FnOnce(&str) -> Option<K>,
+    ) -> Result<Page<K>, Error> {
+        let limit = self.limit.unwrap_or(100);
+        if !(1..=500).contains(&limit) {
+            return Err(Error::invalid_request(format!(
+                "{name} limit must be between 1 and 500"
+            )));
+        }
+        let after = self
+            .cursor
+            .as_deref()
+            .map(|cursor| {
+                parse(cursor)
+                    .ok_or_else(|| Error::invalid_request(format!("{name} cursor is invalid")))
+            })
+            .transpose()?;
+        Ok(Page { after, limit })
     }
 }
 

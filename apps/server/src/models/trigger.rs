@@ -5,7 +5,7 @@ use diesel::{prelude::*, sqlite::Sqlite};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Json, schema::triggers, wallet_index::Selector};
+use super::{Json, schema::triggers, wallet_index_selector::Selector};
 
 /// Why a trigger cannot be kept: which rule it breaks.
 #[derive(Debug)]
@@ -392,12 +392,7 @@ impl Trigger {
     ///
     /// The first rule it breaks.
     pub(crate) fn validate(&self) -> Result<(), Invalid> {
-        if !(1..=64).contains(&self.id.len())
-            || !self
-                .id
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        {
+        if !super::wallet::is_tag(&self.id) {
             return Err(Invalid::new("a trigger id is 1 to 64 of [a-z0-9-]"));
         }
         self.selector.0.validate()?;
@@ -422,9 +417,11 @@ impl Trigger {
     }
 }
 
-collection! {
-    /// Triggers, ordered by id.
-    Triggers(Trigger)
+/// Its id.
+impl crate::db::Keyed for Trigger {
+    fn key(&self) -> String {
+        self.id.clone()
+    }
 }
 
 /// The `trigger` table's statements.
@@ -436,10 +433,13 @@ pub(crate) mod db {
     use base::Network;
     use diesel::{prelude::*, sql_types::BigInt};
 
-    use super::{Trigger, Triggers};
-    use crate::models::{
-        TriggerRun,
-        schema::{trigger_run, triggers},
+    use super::Trigger;
+    use crate::{
+        db::Page,
+        models::{
+            TriggerRun,
+            schema::{trigger_run, triggers},
+        },
     };
 
     /// Stores `trigger`; an existing id is refused.
@@ -469,13 +469,18 @@ pub(crate) mod db {
             .first(connection)
     }
 
-    /// Every trigger, by id.
-    pub(crate) fn find_all(connection: &mut SqliteConnection) -> QueryResult<Triggers> {
-        let triggers = triggers::table
+    /// At most `page.limit` triggers with an id after `page.after` when
+    /// given, by id.
+    pub(crate) fn find_page(
+        connection: &mut SqliteConnection,
+        page: Page<String>,
+    ) -> QueryResult<Vec<Trigger>> {
+        triggers::table
+            .filter(triggers::id.gt(page.after.unwrap_or_default()))
             .order(triggers::id)
+            .limit(page.limit)
             .select(Trigger::as_select())
-            .load(connection)?;
-        Ok(triggers.into())
+            .load(connection)
     }
 
     /// Replaces trigger `trigger.id` with `trigger`, keeping its

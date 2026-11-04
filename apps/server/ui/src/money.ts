@@ -1,6 +1,6 @@
 // Exact amounts. The API sends decimal strings in display units; nothing here
 // ever goes through a float.
-import type { Listing, Network, Transaction, Wallet } from '@/api/client';
+import type { Listing, Network, Wallet } from '@/api/client';
 import { shorten } from '@/_components/trim';
 
 /** Display text to atomic units, given the asset's decimals. */
@@ -38,12 +38,14 @@ export function networkOf(wallet: Wallet): Network {
   return { chain: wallet.chain, name: wallet.network };
 }
 
-export function listingOf(wallet: Wallet, listings: Listing[]): Listing | undefined {
+export function listingOf(
+  wallet: Wallet,
+  listings: Listing[],
+  asset = assetOf(wallet),
+): Listing | undefined {
   return listings.find(
     (l) =>
-      l.asset === assetOf(wallet) &&
-      l.network.chain === wallet.chain &&
-      l.network.name === wallet.network,
+      l.asset === asset && l.network.chain === wallet.chain && l.network.name === wallet.network,
   );
 }
 
@@ -79,30 +81,6 @@ export function displayOf(wallet: Wallet, listings: Listing[]): number | null {
 
 export function decimalsOf(wallet: Wallet, listings: Listing[]): number {
   return listingOf(wallet, listings)?.metadata.decimals ?? 0;
-}
-
-/** What one transaction did to one wallet in one asset. */
-export interface Effect {
-  credit: bigint;
-  debit: bigint;
-  net: bigint;
-  /** The fee this wallet paid in the asset; 0 when none. */
-  fee: bigint;
-}
-
-/** Folds a transaction's legs (atomic), all of this wallet in this asset. */
-export function effect(tx: Transaction): Effect {
-  let credit = 0n;
-  let debit = 0n;
-  let fee = 0n;
-  // kind: 0 received, 1 spent, 2 burned, 3 minted, 4 fee.
-  for (const leg of tx.legs) {
-    const amount = BigInt(leg.amount);
-    if (leg.kind === 0 || leg.kind === 3) credit += amount;
-    else if (leg.kind === 4) fee += amount;
-    else debit += amount;
-  }
-  return { credit, debit, net: credit - debit - fee, fee };
 }
 
 export { shorten } from '@/_components/trim';

@@ -46,6 +46,9 @@ pub struct Service {
     /// How old a watch's start may be: about what history the nodes keep;
     /// `None`: no limit.
     pub max_history: Option<Duration>,
+    /// Positions a block needs below the tip to count as confirmed: the
+    /// confirmed position is `tip - confirmations`.
+    pub confirmations: u64,
 }
 
 impl fmt::Debug for Service {

@@ -28,12 +28,22 @@ impl TriggerRun {
     }
 }
 
+/// Its start.
+impl crate::db::Keyed for TriggerRun {
+    fn key(&self) -> String {
+        self.started_at.to_string()
+    }
+}
+
 /// The `trigger_run` table's statements.
 pub(crate) mod db {
     use diesel::prelude::*;
 
     use super::TriggerRun;
-    use crate::models::schema::{trigger_run, triggers};
+    use crate::{
+        db::Page,
+        models::schema::{trigger_run, triggers},
+    };
 
     /// How many runs started in each hour from `since` (Unix seconds) on,
     /// as (hour, count); hour 0 starts at `since`.
@@ -72,16 +82,18 @@ pub(crate) mod db {
             .execute(connection)
     }
 
-    /// The latest `limit` runs of `trigger`, latest first.
-    pub(crate) fn find_recent(
+    /// At most `page.limit` runs of `trigger` started before `page.after`
+    /// when given, latest first.
+    pub(crate) fn find_page(
         connection: &mut SqliteConnection,
         trigger: &str,
-        limit: i64,
+        page: Page<i64>,
     ) -> QueryResult<Vec<TriggerRun>> {
         trigger_run::table
             .filter(trigger_run::trigger.eq(trigger))
+            .filter(trigger_run::started_at.lt(page.after.unwrap_or(i64::MAX)))
             .order(trigger_run::started_at.desc())
-            .limit(limit)
+            .limit(page.limit)
             .select(TriggerRun::as_select())
             .load(connection)
     }

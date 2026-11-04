@@ -1,16 +1,11 @@
-//! A wallet's transactions: its history (`GET /v1/wallets/{id}/transactions`)
-//! and an ordered send from it (`POST /v1/wallets/{id}/transactions`, a
+//! An ordered send from a wallet (`POST /v1/wallets/{id}/transactions`, a
 //! queued job).
 
 use std::sync::Arc;
 
-use anyhow::Context as _;
 use axum::{
     Json,
-    extract::{
-        Path, Query, State,
-        rejection::{JsonRejection, QueryRejection},
-    },
+    extract::{Path, State, rejection::JsonRejection},
     http::StatusCode,
 };
 use base::Decimal;
@@ -21,7 +16,6 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::{Error, ErrorBody, asset_info, wallet_address};
 use crate::{
     api::AppState,
-    models::{Asset, transaction::Transaction},
     usecase::workers::broadcast::{Payment, SendIntent},
 };
 
@@ -29,124 +23,20 @@ use crate::{
 const MAX_TRANSFERS: usize = 50;
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
-    OpenApiRouter::new().routes(routes!(history, send))
+    OpenApiRouter::new().routes(routes!(send))
 }
 
-/// Query of `GET /v1/wallets/{id}/transactions`.
+/// The wallet a send is from.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
-#[into_params(parameter_in = Query)]
-#[serde(deny_unknown_fields)]
-struct HistoryQuery {
-    /// An asset id of the wallet's network; default `native`.
-    #[serde(default = "native")]
-    #[param(default = "native")]
-    asset: String,
-    /// `next_cursor` of the previous page; absent for the first page.
-    cursor: Option<String>,
-    /// Page size, 1 to 1000.
-    #[serde(default = "HistoryQuery::default_limit")]
-    #[param(minimum = 1, maximum = 1000, default = 100)]
-    limit: usize,
+#[into_params(parameter_in = Path)]
+struct WalletPath {
+    /// `{chain}.{network}.{address}`.
+    id: String,
 }
 
-impl HistoryQuery {
-    const fn default_limit() -> usize {
-        100
-    }
-}
-
+/// The default asset.
 fn native() -> String {
     "native".to_owned()
-}
-
-/// One page of `GET /v1/wallets/{id}/transactions`.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-#[schema(as = TransactionPage)]
-struct HistoryResponse {
-    /// The asset.
-    asset: Asset,
-    /// At most `limit` transactions in kept blocks, in chain order, each
-    /// with only the wallet's legs of the asset (atomic amounts; a mined
-    /// leg's `position` is its block's). Kept blocks reach the produced
-    /// tip, so the last ones may still be taken back by a reorg.
-    transactions: Vec<Transaction>,
-    /// Opaque cursor of the next page; null on a short page. Always present.
-    #[schema(required)]
-    next_cursor: Option<String>,
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/wallets/{id}/transactions",
-    operation_id = "read_wallet_transactions",
-    summary = "Read one page of a wallet's history",
-    description = "The wallet's transactions in `asset`, in chain order, with only its own \
-        legs of that asset; a fee is shown where this address paid it in the native \
-        asset. Block rewards count in the balance but are not transactions.",
-    params(WalletPath, HistoryQuery),
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "One history page", body = HistoryResponse),
-        (status = 400, description = "Malformed wallet ID, query, cursor, or limit",
-            body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Network or asset is not configured", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
-    ),
-    tag = "transactions"
-)]
-async fn history(
-    State(state): State<Arc<AppState>>,
-    Path(path): Path<WalletPath>,
-    query: Result<Query<HistoryQuery>, QueryRejection>,
-) -> Result<Json<HistoryResponse>, Error> {
-    let Query(query) = query.map_err(Error::invalid_query)?;
-    if query.limit == 0 || query.limit > 1_000 {
-        return Err(Error::invalid_request(
-            "history limit must be between 1 and 1000",
-        ));
-    }
-    // A cursor is `<position>:<order>:<txid>` of the last transaction shown.
-    let after = match query.cursor.as_deref() {
-        None => None,
-        Some(cursor) => {
-            let mut parts = cursor.splitn(3, ':');
-            let key = (
-                parts.next().and_then(|part| part.parse::<u64>().ok()),
-                parts.next().and_then(|part| part.parse::<u64>().ok()),
-                parts.next(),
-            );
-            let (Some(position), Some(order), Some(txid)) = key else {
-                return Err(Error::invalid_request("history cursor is invalid"));
-            };
-            Some((position, order, txid.to_owned()))
-        }
-    };
-    let address = wallet_address(&state.payments, &path.id)?;
-    let info = asset_info(&state.payments, &address.network, &query.asset)?;
-    let page =
-        crate::usecase::history::history(&state.db, &address, &info.asset, after, query.limit)
-            .await?;
-    let next_cursor = match page.last().filter(|_| page.len() == query.limit) {
-        Some(last) => {
-            let position = last
-                .legs
-                .first()
-                .and_then(|leg| leg.position)
-                .context("a paged transaction has no mined leg")?;
-            Some(format!(
-                "{position}:{}:{}",
-                last.order.unwrap_or(0),
-                last.txid
-            ))
-        }
-        None => None,
-    };
-    Ok(Json(HistoryResponse {
-        asset: Asset::from(&info),
-        transactions: page,
-        next_cursor,
-    }))
 }
 
 /// One ordered transfer of a send.
@@ -171,6 +61,48 @@ struct SendRequest {
     /// The transfers, in execution order.
     #[schema(min_items = 1, max_items = 50)]
     transfers: Vec<TransferItem>,
+}
+
+impl SendRequest {
+    /// The send from `from`: each transfer's amount in `info`'s atomic units
+    /// and its destination parsed by the wallet's chain; a failure names its
+    /// transfer.
+    fn intent(
+        self,
+        payments: &payments::Payments,
+        from: &base::Address,
+        info: &base::AssetInfo,
+    ) -> Result<SendIntent, Error> {
+        let mut transfers = Vec::with_capacity(self.transfers.len());
+        for (index, item) in self.transfers.into_iter().enumerate() {
+            let at = |error: Error| error.at(index);
+            let units = item
+                .amount
+                .parse::<Decimal>()
+                .ok()
+                .filter(|amount| amount > &Decimal::zero())
+                .and_then(|amount| info.atomic(&amount).ok())
+                .ok_or_else(|| {
+                    at(Error::invalid_request(
+                        "amount must be a positive exact decimal within the asset's decimals",
+                    ))
+                })?;
+            let to = payments
+                .parse(&from.network, &item.destination)
+                .map_err(|error| at(error.into()))?;
+            transfers.push(Payment {
+                to: to.value,
+                amount: units.to_string(),
+            });
+        }
+        Ok(SendIntent {
+            chain: from.network.chain.to_string(),
+            network: from.network.name.clone(),
+            address: from.value.clone(),
+            asset: info.asset.id.clone(),
+            transfers,
+        })
+    }
 }
 
 /// An enqueued send.
@@ -226,36 +158,7 @@ async fn send(
     {
         return Err(Error::unprocessable("the wallet holds no key here"));
     }
-    let mut transfers = Vec::with_capacity(request.transfers.len());
-    for (index, item) in request.transfers.into_iter().enumerate() {
-        let at = |error: Error| error.at(index);
-        let units = item
-            .amount
-            .parse::<Decimal>()
-            .ok()
-            .filter(|amount| amount > &Decimal::zero())
-            .and_then(|amount| info.atomic(&amount).ok())
-            .ok_or_else(|| {
-                at(Error::invalid_request(
-                    "amount must be a positive exact decimal within the asset's decimals",
-                ))
-            })?;
-        let to = state
-            .payments
-            .parse(&address.network, &item.destination)
-            .map_err(|error| at(error.into()))?;
-        transfers.push(Payment {
-            to: to.value,
-            amount: units.to_string(),
-        });
-    }
-    let intent = SendIntent {
-        chain: address.network.chain.to_string(),
-        network: address.network.name.clone(),
-        address: address.value.clone(),
-        asset: info.asset.id,
-        transfers,
-    };
+    let intent = request.intent(&state.payments, &address, &info)?;
     let job = intent
         .job()
         .map_err(|error| Error::invalid_request(error.to_string()))?;
@@ -264,12 +167,4 @@ async fn send(
         .await
         .map_err(|error| Error::unavailable(error.to_string()))?;
     Ok((StatusCode::ACCEPTED, Json(SendResponse { job: id })))
-}
-
-/// The wallet a transaction route reads or sends from.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
-#[into_params(parameter_in = Path)]
-struct WalletPath {
-    /// `{chain}.{network}.{address}`.
-    id: String,
 }

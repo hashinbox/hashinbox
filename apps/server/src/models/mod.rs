@@ -57,31 +57,24 @@ pub(crate) mod explorer;
 mod indexing;
 mod json;
 pub(crate) mod leg;
-mod network;
+pub(crate) mod network;
 pub(crate) mod schema;
 pub(crate) mod task;
 pub(crate) mod transaction;
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "playground: wired by the pipe evaluator later")
-)]
 pub(crate) mod trigger;
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "playground: wired by the pipe evaluator later")
-)]
 pub(crate) mod trigger_run;
 pub(crate) mod wallet;
 pub(crate) mod wallet_index;
+pub(crate) mod wallet_index_selector;
 
 pub(crate) use asset::Asset;
 pub(crate) use block::Block;
-pub(crate) use endpoint::RpcEndpoints;
+pub(crate) use endpoint::{RpcEndpoints, RpcNode};
 pub(crate) use explorer::{Explorer, Explorers};
 pub(crate) use indexing::Indexing;
 pub(crate) use json::Json;
 pub(crate) use leg::Leg;
-pub(crate) use network::Network;
+pub(crate) use network::{Network, NetworkName};
 pub(crate) use task::Task;
 
 #[cfg_attr(

@@ -12,24 +12,13 @@ use serde_json::Value;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody};
-use crate::{api::AppState, models::task, usecase::workers::broadcast};
+use super::{Error, ErrorBody, IndexParams};
+use crate::{api::AppState, db::Paged as _, models::task, usecase::workers::broadcast};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
         .routes(routes!(list))
         .routes(routes!(read))
-}
-
-/// How many jobs `GET /v1/jobs` answers unless `limit` says otherwise.
-const LIMIT: i64 = 100;
-
-/// The job read.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
-#[into_params(parameter_in = Path)]
-struct JobPath {
-    /// The id a send returned.
-    id: String,
 }
 
 /// Which jobs `GET /v1/jobs` lists.
@@ -44,8 +33,20 @@ struct ListQuery {
     kind: Option<String>,
     /// Only jobs in this state.
     state: Option<JobState>,
-    /// At most this many, 1 to 1000; 100 by default.
-    limit: Option<i64>,
+}
+
+impl ListQuery {
+    /// The network of `chain` and `network`, both or neither.
+    fn network(&self) -> Result<Option<base::Network>, Error> {
+        match (&self.chain, &self.network) {
+            (Some(chain), Some(network)) => Ok(Some(base::Network::new(
+                base::Chain::new(chain),
+                network.clone(),
+            ))),
+            (None, None) => Ok(None),
+            _ => Err(Error::invalid_request("chain and network go together")),
+        }
+    }
 }
 
 /// Where a job is.
@@ -132,12 +133,16 @@ impl From<tasks::Job> for Job {
     }
 }
 
-/// `GET /v1/jobs`.
+/// `GET /v1/jobs`: a page of jobs.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = JobList)]
 struct ListResponse {
     /// The jobs last written, latest first.
     jobs: Vec<Job>,
+    /// Pass as `cursor` for the next page; null on the last page. Always
+    /// present.
+    #[schema(required)]
+    next_cursor: Option<String>,
 }
 
 #[utoipa::path(
@@ -145,11 +150,11 @@ struct ListResponse {
     path = "/v1/jobs",
     operation_id = "list_jobs",
     summary = "List queued jobs",
-    params(ListQuery),
+    params(ListQuery, IndexParams),
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The latest jobs", body = ListResponse),
-        (status = 400, description = "Malformed query or limit, or a chain without its network", body = ErrorBody),
+        (status = 400, description = "Malformed query, cursor, or limit, or a chain without its network", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 503, description = "The queue is unavailable", body = ErrorBody)
     ),
@@ -158,38 +163,44 @@ struct ListResponse {
 async fn list(
     State(state): State<Arc<AppState>>,
     query: Result<Query<ListQuery>, QueryRejection>,
+    index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
     let Query(query) = query.map_err(Error::invalid_query)?;
-    let limit = query.limit.unwrap_or(LIMIT);
-    if !(1..=1_000).contains(&limit) {
-        return Err(Error::invalid_request(
-            "jobs limit must be between 1 and 1000",
-        ));
-    }
+    let Query(index) = index.map_err(Error::invalid_query)?;
+    let page = index.page("jobs", |cursor| {
+        let (updated_at, id) = cursor.split_once(':')?;
+        Some((updated_at.parse().ok()?, id.to_owned()))
+    })?;
+    let limit = page.limit;
     let status = query.state.map(JobState::status);
-    let network = match (query.chain, query.network) {
-        (Some(chain), Some(network)) => Some(base::Network::new(base::Chain::new(chain), network)),
-        (None, None) => None,
-        _ => return Err(Error::invalid_request("chain and network go together")),
-    };
+    let network = query.network()?;
     let rows = state
         .db
         .read(move |connection| {
-            Ok(task::db::find_recent(
+            Ok(task::db::find_page(
                 connection,
                 network.as_ref(),
                 query.kind.as_deref(),
                 status,
-                limit,
+                page,
             )?)
         })
         .await?;
+    let next_cursor = rows.cursor(limit);
     let jobs = rows
         .into_iter()
-        .map(|row| tasks::Job::try_from(row).map(Job::from))
+        .map(|(row, _)| tasks::Job::try_from(row).map(Job::from))
         .collect::<anyhow::Result<Vec<_>>>()
         .map_err(|error| Error::unavailable(format!("{error:#}")))?;
-    Ok(Json(ListResponse { jobs }))
+    Ok(Json(ListResponse { jobs, next_cursor }))
+}
+
+/// The job read.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, IntoParams)]
+#[into_params(parameter_in = Path)]
+struct JobPath {
+    /// The id a send returned.
+    id: String,
 }
 
 #[utoipa::path(

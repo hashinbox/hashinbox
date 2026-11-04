@@ -4,7 +4,6 @@
 //! `workers` are the background jobs with their executor, and the rest
 //! combine several models into one read.
 
-pub(crate) mod history;
 pub(crate) mod sdk;
 pub(crate) mod stats;
 pub(crate) mod tasks;

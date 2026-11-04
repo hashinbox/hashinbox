@@ -9,7 +9,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::ErrorBody;
 use crate::{
     api::AppState,
-    models::{Asset, Network},
+    models::{Asset, NetworkName},
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -23,7 +23,7 @@ struct Listing {
     /// or a token's chain-owned id.
     asset: String,
     /// The chain and network this asset's wallets live on.
-    network: Network,
+    network: NetworkName,
     /// The held asset's metadata.
     metadata: Asset,
 }

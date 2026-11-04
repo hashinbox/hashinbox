@@ -4,16 +4,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Context as _;
-use base::{Address, Asset, Decimal, Network, Reason, TransactionId, TransactionState};
+use base::{Decimal, Network, Reason, TransactionId, TransactionState};
 use diesel::{
     prelude::*,
-    sql_types::{BigInt, Bool, Text},
+    sql_types::{BigInt, Nullable, Text},
     sqlite::Sqlite,
 };
 
 use super::{
     Json, Leg, int, key, leg,
-    schema::{self, transactions},
+    schema::{self, transaction_with_legs, transactions},
     uint,
 };
 
@@ -63,9 +63,9 @@ pub(crate) fn decode_state(state: i32, reason: Option<&str>) -> anyhow::Result<T
     Debug,
     Insertable,
     AsChangeset,
+    Queryable,
     QueryableByName,
     serde::Serialize,
-    serde::Deserialize,
     utoipa::ToSchema,
 )]
 #[diesel(
@@ -88,14 +88,16 @@ pub(crate) struct Transaction {
     pub(crate) state: i32,
     /// Why it reverted (JSON), when the chain said; null otherwise.
     pub(crate) reason: Option<String>,
-    /// The signed transaction in its chain's encoding; empty when read
-    /// nested in a block.
+    /// The signed transaction in its chain's encoding.
     #[serde(skip)]
     pub(crate) bytes: Vec<u8>,
     /// Unix ms it was recorded as pending; null once mined.
     pub(crate) sent_at: Option<i64>,
     /// Unix ms it stops holding funds; null once mined.
     pub(crate) expires_at: Option<i64>,
+    /// Its block's position; null while pending.
+    #[diesel(skip_insertion, skip_update, sql_type = Nullable<BigInt>)]
+    pub(crate) position: Option<i64>,
     /// Its kept legs, in order.
     #[diesel(
         skip_insertion,
@@ -106,11 +108,33 @@ pub(crate) struct Transaction {
     pub(crate) legs: Vec<Leg>,
 }
 
-/// Transactions parsed from a JSON column (an array SQLite built).
-impl From<Json<Vec<Transaction>>> for Vec<Transaction> {
-    fn from(Json(transactions): Json<Vec<Transaction>>) -> Self {
-        transactions
+/// `"{position}:{order}:{sent_at}:{txid}"`, a null as `0` (position
+/// `i64::MAX`): one key every list reads the parts it sorts by from.
+impl crate::db::Keyed for Transaction {
+    fn key(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.position.unwrap_or(i64::MAX),
+            self.order.unwrap_or(0),
+            self.sent_at.unwrap_or(0),
+            self.txid
+        )
     }
+}
+
+/// A page key: (block position, `i64::MAX` while pending; `order`;
+/// `sent_at`; `txid`), nulls as `0`.
+pub(crate) type Key = (i64, i64, i64, String);
+
+/// The key cursor `text` names, as [`Keyed`](crate::db::Keyed) wrote it.
+pub(crate) fn parse_key(text: &str) -> Option<Key> {
+    let mut parts = text.splitn(4, ':');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.to_owned(),
+    ))
 }
 
 impl Transaction {
@@ -174,6 +198,7 @@ impl TryFrom<&base::Transaction> for Transaction {
             bytes: transaction.bytes.clone(),
             sent_at: None,
             expires_at: transaction.expires.map(int).transpose()?,
+            position: None,
             legs,
         })
     }
@@ -196,60 +221,7 @@ impl std::error::Error for Short {}
 pub(crate) mod db {
     #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
     use super::*;
-
-    /// At most `limit` transactions of `address` in `asset`, in live blocks,
-    /// after the (`position`, `order`, `txid`) key, each with only its legs
-    /// of `address` in `asset`.
-    pub(crate) fn find_page(
-        connection: &mut SqliteConnection,
-        address: &Address,
-        asset: &Asset,
-        after: (i64, i64, &str),
-        limit: i64,
-    ) -> QueryResult<Vec<Transaction>> {
-        // One page of the transactions in live blocks with a leg of an address
-        // in an asset, after a (position, order, txid) key, in that order, each
-        // with only those legs.
-        diesel::sql_query(
-            r#"
-            SELECT
-                t.*,
-                COALESCE((
-                    SELECT json_group_array(
-                        json(l.json)
-                        ORDER BY l.leg_index
-                    )
-                    FROM leg_json l
-                    WHERE l."transaction" = t.id
-                      AND l.address = ?3
-                      AND l.asset = ?4
-                ), '[]') AS legs
-            FROM "transaction" t
-            JOIN block b ON b.id = t.block
-            WHERE b.chain = ?1
-              AND b.network = ?2
-              AND b.archived_at IS NULL
-              AND EXISTS (
-                  SELECT 1
-                  FROM leg l
-                  WHERE l."transaction" = t.id
-                    AND l.address = ?3
-                    AND l.asset = ?4
-              )
-              AND (b.position, COALESCE(t."order", 0), t.txid) > (?5, ?6, ?7)
-            ORDER BY b.position, COALESCE(t."order", 0), t.txid
-            LIMIT ?8"#,
-        )
-        .bind::<Text, _>(address.network.chain.as_str())
-        .bind::<Text, _>(&address.network.name)
-        .bind::<Text, _>(&address.value)
-        .bind::<Text, _>(&asset.id)
-        .bind::<BigInt, _>(after.0)
-        .bind::<BigInt, _>(after.1)
-        .bind::<Text, _>(after.2)
-        .bind::<BigInt, _>(limit)
-        .load(connection)
-    }
+    use crate::db::Page;
 
     /// Keeps pending `transaction` with its legs of kept wallet indexes
     /// (the others are dropped from it); a no-op when its txid is kept,
@@ -281,19 +253,25 @@ pub(crate) mod db {
                 .entry(leg.wallet_index_id.clone())
                 .or_insert_with(Decimal::zero) += leg.signed()?;
         }
-        let indexes = leg::db::find_spending(connection, takes.keys().collect())?;
-        for index in &indexes {
-            let takes = takes.get(&index.id).context("an index was not read")?;
-            if *takes < Decimal::zero() && !index.can_spend(takes.clone())? {
+        let ours: BTreeMap<String, leg::db::Spending> =
+            leg::db::find_spending(connection, takes.keys().collect())?
+                .into_iter()
+                .map(|index| (index.id.clone(), index))
+                .collect();
+        for (id, takes) in &takes {
+            if *takes >= Decimal::zero() {
+                continue;
+            }
+            // Not kept: nothing to spend.
+            let Some(index) = ours.get(id) else {
+                anyhow::bail!(Short);
+            };
+            if !index.can_spend(takes.clone())? {
                 anyhow::bail!(Short);
             }
         }
         // A counterparty this server does not index leaves no leg.
-        let ours = indexes
-            .into_iter()
-            .filter(|index| index.ours)
-            .map(|index| index.id)
-            .collect();
+        let ours = ours.into_keys().collect();
         transaction.keep(&ours);
         leg::db::insert(connection, transaction.legs.iter().collect())?;
         Ok(())
@@ -324,30 +302,15 @@ pub(crate) mod db {
         Ok(())
     }
 
-    /// Transaction `id` with its kept legs, if kept ([`ONE`]).
+    /// Transaction `id` with its kept legs, if kept.
     pub(crate) fn get(
         connection: &mut SqliteConnection,
         id: &str,
     ) -> QueryResult<Option<Transaction>> {
-        // Transaction `?1` with its legs.
-        diesel::sql_query(
-            r#"
-            SELECT
-                t.*,
-                COALESCE((
-                    SELECT json_group_array(
-                        json(l.json)
-                        ORDER BY l.leg_index
-                    )
-                    FROM leg_json l
-                    WHERE l."transaction" = t.id
-                ), '[]') AS legs
-            FROM "transaction" t
-            WHERE t.id = ?1"#,
-        )
-        .bind::<Text, _>(id)
-        .get_result(connection)
-        .optional()
+        transaction_with_legs::table
+            .find(id)
+            .get_result(connection)
+            .optional()
     }
 
     /// Of every network: how many transactions are kept mined in live
@@ -393,47 +356,109 @@ pub(crate) mod db {
             .load(connection)
     }
 
-    /// At most `limit` pending transactions of `network` with their legs,
-    /// oldest sent first.
-    pub(crate) fn find_by_network(
+    /// At most `page.limit` transactions of `network`, pending or mined in
+    /// live blocks, with their legs, newest first: pending by `sent_at`,
+    /// then mined by (position, `order`); after `page.after` when given.
+    pub(crate) fn find_page(
         connection: &mut SqliteConnection,
         network: &Network,
-        pending: bool,
-        limit: i64,
+        page: Page<Key>,
     ) -> QueryResult<Vec<Transaction>> {
-        // At most `?4` transactions of a network with their legs: pending ones
-        // (`?3` true), oldest sent first, or mined ones in live blocks (`?3`
-        // false), latest first.
+        let (position, order, sent_at, txid) = page
+            .after
+            .map_or((0, 0, 0, None), |(position, order, sent_at, txid)| {
+                (position, order, sent_at, Some(txid))
+            });
         diesel::sql_query(
             r#"
             SELECT
-                t.*,
-                COALESCE((
-                    SELECT json_group_array(
-                        json(l.json)
-                        ORDER BY l.leg_index
-                    )
-                    FROM leg_json l
-                    WHERE l."transaction" = t.id
-                ), '[]') AS legs
-            FROM "transaction" t
+                t.*
+            FROM transaction_with_legs t
             LEFT JOIN block b ON b.id = t.block
             WHERE t.chain = ?1
               AND t.network = ?2
-              AND CASE
-                  WHEN ?3 THEN t.block IS NULL
-                  ELSE b.archived_at IS NULL AND t.block IS NOT NULL
-              END
+              AND (t.block IS NULL OR b.archived_at IS NULL)
+              AND (?6 IS NULL OR (
+                  COALESCE(t.position, 9223372036854775807),
+                  COALESCE(t."order", 0),
+                  COALESCE(t.sent_at, 0),
+                  t.txid
+              ) < (?3, ?4, ?5, ?6))
             ORDER BY
-                b.position DESC,
-                t."order" DESC,
-                t.sent_at
-            LIMIT ?4"#,
+                COALESCE(t.position, 9223372036854775807) DESC,
+                COALESCE(t."order", 0) DESC,
+                COALESCE(t.sent_at, 0) DESC,
+                t.txid DESC
+            LIMIT ?7"#,
         )
         .bind::<Text, _>(network.chain.as_str())
         .bind::<Text, _>(&network.name)
-        .bind::<Bool, _>(pending)
-        .bind::<BigInt, _>(limit)
+        .bind::<BigInt, _>(position)
+        .bind::<BigInt, _>(order)
+        .bind::<BigInt, _>(sent_at)
+        .bind::<Nullable<Text>, _>(txid)
+        .bind::<BigInt, _>(page.limit)
+        .load(connection)
+    }
+
+    /// At most `page.limit` pending transactions of `network` (its mempool),
+    /// with their legs, oldest sent first; after `page.after` when given.
+    pub(crate) fn find_pending_page(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        page: Page<Key>,
+    ) -> QueryResult<Vec<Transaction>> {
+        let (sent_at, txid) = page
+            .after
+            .map_or((0, None), |(_, _, sent_at, txid)| (sent_at, Some(txid)));
+        diesel::sql_query(
+            r#"
+            SELECT
+                t.*
+            FROM transaction_with_legs t
+            WHERE t.chain = ?1
+              AND t.network = ?2
+              AND t.block IS NULL
+              AND (?4 IS NULL OR (COALESCE(t.sent_at, 0), t.txid) > (?3, ?4))
+            ORDER BY
+                COALESCE(t.sent_at, 0),
+                t.txid
+            LIMIT ?5"#,
+        )
+        .bind::<Text, _>(network.chain.as_str())
+        .bind::<Text, _>(&network.name)
+        .bind::<BigInt, _>(sent_at)
+        .bind::<Nullable<Text>, _>(txid)
+        .bind::<BigInt, _>(page.limit)
+        .load(connection)
+    }
+
+    /// At most `page.limit` transactions of block `block` (an id), with
+    /// their legs, in block order; after `page.after` when given.
+    pub(crate) fn find_by_block_page(
+        connection: &mut SqliteConnection,
+        block: &str,
+        page: Page<Key>,
+    ) -> QueryResult<Vec<Transaction>> {
+        let (order, txid) = page
+            .after
+            .map_or((0, None), |(_, order, _, txid)| (order, Some(txid)));
+        diesel::sql_query(
+            r#"
+            SELECT
+                t.*
+            FROM transaction_with_legs t
+            WHERE t.block = ?1
+              AND (?3 IS NULL OR (COALESCE(t."order", 0), t.txid) > (?2, ?3))
+            ORDER BY
+                COALESCE(t."order", 0),
+                t.txid
+            LIMIT ?4"#,
+        )
+        .bind::<Text, _>(block)
+        .bind::<BigInt, _>(order)
+        .bind::<Nullable<Text>, _>(txid)
+        .bind::<BigInt, _>(page.limit)
         .load(connection)
     }
 

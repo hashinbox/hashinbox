@@ -7,7 +7,7 @@
 //! their statements are `models`; the stores, the queue and the reads on
 //! them are `usecase`; the background jobs are `workers`.
 //!
-//! A network's stored `rpc_endpoints` row replaces its section's
+//! A network's stored `network_endpoint` row replaces its section's
 //! `endpoints` before the chain reads it, so a change made through the API
 //! survives a restart; a section with no row seeds it on the first start.
 
@@ -105,7 +105,7 @@ async fn main() -> Result<(), AnyError> {
     // Every network's index job steps its indexer; at the tip it queues a
     // triggers job (locking the whole network), whose sends are broadcast
     // jobs (one topic per sender).
-    let index = usecase::workers::index::Index::new(payments.clone(), queue.clone());
+    let index = usecase::workers::index::Index::new(payments.clone(), db.clone(), queue.clone());
     index.start().await?;
     // Every network's expire job frees what pending transactions held.
     let expire = usecase::workers::expire::Expire::new(payments.clone(), db.clone(), queue.clone());

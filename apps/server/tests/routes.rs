@@ -1,6 +1,6 @@
 //! The routes over the scripted network and a real SQLite file: create
 //! (generate, import, watch), index (create, pause, resume, delete), tag,
-//! list and read wallets; balance and history of indexed blocks; a send
+//! list and read wallets; balance and legs of indexed blocks; a send
 //! enqueued and read back as a job; assets, networks and health.
 
 use std::sync::Arc;
@@ -96,7 +96,7 @@ fn paid(to: &str, amount: u64) -> Blocks {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn wallets_balance_history_and_sends() {
+async fn wallets_balance_legs_and_sends() {
     let (db, _directory) = database().await;
     let payments = payments(&db, Arc::new(Script::default())).await;
     let state = Arc::new(AppState {
@@ -169,7 +169,7 @@ async fn wallets_balance_history_and_sends() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{alice}");
-    assert_eq!(alice["indexes"]["native"]["balance"], "150000000");
+    assert_eq!(alice["indexes"]["native"]["balance_pending"], "150000000");
     assert_eq!(alice["indexes"]["native"]["indexed_through"], 0);
     let (status, _) = call(
         &router,
@@ -188,20 +188,45 @@ async fn wallets_balance_history_and_sends() {
         .unwrap_or_default();
     assert_eq!(alice["tags"], json!(["vip"]), "{list}");
     let (_, tags) = call(&router, Method::GET, "/v1/wallets/tags", None).await;
-    assert_eq!(tags, json!({ "tags": ["vip"] }));
-    assert_eq!(alice["indexes"]["native"]["balance"], "150000000", "{list}");
+    assert_eq!(tags, json!({ "tags": ["vip"], "next_cursor": null }));
+    assert_eq!(
+        alice["indexes"]["native"]["balance_pending"], "150000000",
+        "{list}"
+    );
     assert_eq!(generated["tags"], json!([]));
-    let (status, history) = call(
+    let (status, legs) = call(
         &router,
         Method::GET,
-        "/v1/wallets/bitcoin.regtest.alice/transactions?limit=1",
+        "/v1/wallets/bitcoin.regtest.alice/indexes/native/legs?limit=1",
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{history}");
-    assert_eq!(history["transactions"][0]["txid"], "t0");
-    assert_eq!(history["transactions"][0]["legs"][0]["amount"], "150000000");
-    assert_eq!(history["next_cursor"], "0:0:t0");
+    assert_eq!(status, StatusCode::OK, "{legs}");
+    assert_eq!(legs["legs"][0]["txid"], "t0");
+    assert_eq!(legs["legs"][0]["state"], 1);
+    assert_eq!(legs["legs"][0]["amount"], "150000000");
+    assert_eq!(legs["next_cursor"], "1");
+    let blocks = "/v1/networks/bitcoin/regtest/blocks";
+    let (status, page) = call(
+        &router,
+        Method::GET,
+        &format!("{blocks}/0/transactions?limit=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(
+        (&page["transactions"][0]["txid"], &page["next_cursor"]),
+        (&json!("t0"), &json!("0:0:0:t0"))
+    );
+    let (status, _) = call(
+        &router,
+        Method::GET,
+        &format!("{blocks}/1/transactions"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     let send = json!({ "transfers": [{ "destination": "bob", "amount": "0.1" }] });
     let (status, _) = call(
@@ -236,25 +261,49 @@ async fn wallets_balance_history_and_sends() {
     assert_eq!(assets["assets"][0]["metadata"]["decimals"], 8);
     let (status, networks) = call(&router, Method::GET, "/v1/networks", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(networks["networks"][0]["nodes"], json!([]));
-    let tip = |query: &'static str| {
-        let uri = format!("/v1/networks/bitcoin/regtest/tip{query}");
-        let router = router.clone();
-        async move { call(&router, Method::GET, &uri, None).await.0 }
-    };
-    assert_eq!(tip("").await, StatusCode::UNPROCESSABLE_ENTITY);
+    let network = &networks["networks"][0];
+    assert_eq!(network["endpoints"], json!([]));
     assert_eq!(
-        tip("?at=2026-10-01T00:00:00Z").await,
-        StatusCode::UNPROCESSABLE_ENTITY
+        (&network["tip"], &network["tip_live"]),
+        (&Value::Null, &Value::Null)
     );
-    assert_eq!(tip("?at=yesterday").await, StatusCode::BAD_REQUEST);
+    assert!(network["tip_error"].is_string(), "{network}");
+    let endpoints = "/v1/networks/bitcoin/regtest/endpoints";
+    let (status, listed) = call(&router, Method::GET, endpoints, None).await;
+    assert_eq!((status, &listed["endpoints"]), (StatusCode::OK, &json!([])));
+    let (status, _) = call(
+        &router,
+        Method::PUT,
+        endpoints,
+        Some(json!({ "endpoints": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = call(&router, Method::DELETE, &format!("{endpoints}/0"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(
+        &router,
+        Method::GET,
+        "/v1/networks/bitcoin/x/endpoints",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(&router, Method::GET, "/v1/networks/bitcoin/regtest", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, events) = text(&router, "/v1/networks/bitcoin/regtest/tip/search?at=1").await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         events.contains("event: error") && events.contains("cannot find blocks by time"),
         "{events}"
     );
-    let (status, _) = call(&router, Method::GET, "/v1/networks/bitcoin/x/tip", None).await;
+    let (status, _) = call(
+        &router,
+        Method::GET,
+        "/v1/networks/bitcoin/regtest/tip",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, health) = call(&router, Method::GET, "/health", None).await;
     assert_eq!((status, &health["ready"]), (StatusCode::OK, &json!(true)));
@@ -305,6 +354,7 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
     assert_eq!(index["indexed_through"], Value::Null);
     let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
     assert_eq!(networks["networks"][0]["max_history_days"], 30);
+    assert_eq!(networks["networks"][0]["tip_live"], 100);
     // Block p is 100 - p days old: 50.5 days ago is after block 49.
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -449,7 +499,7 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (_, tags) = call(&router, Method::GET, "/v1/wallets/tags", None).await;
-    assert_eq!(tags, json!({ "tags": [] }));
+    assert_eq!(tags, json!({ "tags": [], "next_cursor": null }));
 
     // Indexes need a kept wallet and an asset.
     let unknown = "/v1/wallets/bitcoin.regtest.nobody";

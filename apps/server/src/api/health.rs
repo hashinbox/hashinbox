@@ -8,7 +8,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     api::AppState,
-    models::{Indexing, Network},
+    models::{Indexing, NetworkName},
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -19,7 +19,7 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 struct NetworkHealth {
     /// The indexed chain and network.
-    network: Network,
+    network: NetworkName,
     /// What its indexer did since the process started.
     indexing: Indexing,
 }

@@ -109,8 +109,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List every configured network, its indexing and its RPC nodes
-         * @description Every network the configuration names, what its indexer did since the process started, and its nodes, each URL parsed.
+         * List every configured network, its indexing, its live tip and its RPC nodes
+         * @description Every network the configuration names: its stored row (the indexer's last read of the node), its nodes, each URL parsed, and its configuration. `tip_live` asks every network's node at once, each for at most 2 s; one that fails keeps the stored `tip` and says why in `tip_error`.
          */
         get: operations["list_networks"];
         put?: never;
@@ -121,7 +121,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/networks/rpc": {
+    "/v1/networks/endpoints": {
         parameters: {
             query?: never;
             header?: never;
@@ -134,7 +134,7 @@ export interface paths {
          * Add RPC nodes to one or more networks
          * @description Appends each node after its network's current ones, stores every changed list in one write (all or none), then sends every later call of those networks to their new lists. A provider's nodes for several networks are added at once this way.
          */
-        post: operations["add_network_rpc"];
+        post: operations["add_endpoints"];
         delete?: never;
         options?: never;
         head?: never;
@@ -148,7 +148,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List a network's last kept blocks */
+        /**
+         * List a network's last kept blocks
+         * @description Live kept blocks, latest first, a page at a time.
+         */
         get: operations["list_blocks"];
         put?: never;
         post?: never;
@@ -165,7 +168,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Read one kept block of a network, with its kept transactions */
+        /** Read one kept block of a network */
         get: operations["read_block"];
         put?: never;
         post?: never;
@@ -175,19 +178,16 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/networks/{chain}/{network}/rpc": {
+    "/v1/networks/{chain}/{network}/blocks/{position}/transactions": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
-        /**
-         * Replace a network's RPC nodes
-         * @description Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. The nodes are not verified here: the chain verifies them on the next start, which uses the stored list whatever the configuration file says.
-         */
-        put: operations["replace_network_rpc"];
+        /** List a live block's kept transactions */
+        get: operations["list_block_transactions"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -195,7 +195,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/networks/{chain}/{network}/rpc/{index}": {
+    "/v1/networks/{chain}/{network}/endpoints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a network's RPC nodes
+         * @description Its stored nodes in failover order, each URL parsed.
+         */
+        get: operations["list_network_endpoints"];
+        /**
+         * Replace a network's RPC nodes
+         * @description Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. The nodes are not verified here: the chain verifies them on the next start, which uses the stored list whatever the configuration file says.
+         */
+        put: operations["replace_network_endpoints"];
+        /**
+         * Add RPC nodes to a network
+         * @description Appends the nodes after the network's current ones, stores the list, then sends every later call of the network to it.
+         */
+        post: operations["add_network_endpoints"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/networks/{chain}/{network}/endpoints/{index}": {
         parameters: {
             query?: never;
             header?: never;
@@ -209,27 +237,7 @@ export interface paths {
          * Remove one RPC node of a network
          * @description Removes the node at `index`, stores the rest and uses them from now on. A network's last node cannot be removed.
          */
-        delete: operations["remove_network_rpc"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/networks/{chain}/{network}/tip": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Read a network's newest block, or its last block at or before a time
-         * @description Read from the node. With `at`, a binary search over block times: about log2(tip) block reads, and on Bitcoin, whose block times only roughly ascend, possibly a few blocks off.
-         */
-        get: operations["read_tip"];
-        put?: never;
-        post?: never;
-        delete?: never;
+        delete: operations["remove_network_endpoint"];
         options?: never;
         head?: never;
         patch?: never;
@@ -262,7 +270,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List a network's pending or mined transactions */
+        /** List a network's transactions, or only its pending ones */
         get: operations["list_network_transactions"];
         put?: never;
         post?: never;
@@ -508,11 +516,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Read one page of a wallet's history
-         * @description The wallet's transactions in `asset`, in chain order, with only its own legs of that asset; a fee is shown where this address paid it in the native asset. Block rewards count in the balance but are not transactions.
-         */
-        get: operations["read_wallet_transactions"];
+        get?: never;
         put?: never;
         /**
          * Enqueue an ordered send from a wallet
@@ -556,9 +560,9 @@ export interface components {
             assets: components["schemas"]["Listing"][];
         };
         /**
-         * @description A kept block: its `block` row, its kept transactions in block order and
-         *     its kept rewards. The API shows it as is. Read whole in one query: its
-         *     children come as JSON arrays SQLite builds (`transactions`, `rewards`).
+         * @description A kept block: its `block` row; the API shows it as is. Written with its
+         *     kept transactions in block order and its kept rewards, which are never
+         *     read back into it.
          */
         Block: {
             /**
@@ -589,20 +593,34 @@ export interface components {
              * @description Native position (height or slot).
              */
             position: number;
-            /** @description Its kept rewards, in order. */
-            rewards: components["schemas"]["Leg"][];
             /**
              * Format: int64
              * @description Unix seconds, when reported.
              */
             timestamp?: number | null;
-            /** @description Its kept transactions, in block order. */
-            transactions: components["schemas"]["Transaction"][];
         };
-        /** @description `GET /v1/networks/{chain}/{network}/blocks`. */
+        /** @description `GET /v1/networks/{chain}/{network}/blocks`: a page of blocks. */
         BlockList: {
-            /** @description The last kept blocks, latest first. */
+            /** @description Live kept blocks, latest first. */
             blocks: components["schemas"]["Block"][];
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
+        };
+        /**
+         * @description `GET /v1/networks/{chain}/{network}/blocks/{position}/transactions`: a
+         *     page of a block's transactions.
+         */
+        BlockTransactions: {
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
+            /** @description The transactions, with their legs, in block order. */
+            transactions: components["schemas"]["Transaction"][];
         };
         /** @description One hour of chain time, across every network. */
         ChainHour: {
@@ -622,24 +640,34 @@ export interface components {
              */
             transactions: number;
         };
-        /** @description `GET /v1/networks/{chain}/{network}/tip`. */
-        ChainTip: {
-            /**
-             * Format: int64
-             * @description Native position (height or slot).
-             */
-            position: number;
-            /**
-             * Format: int64
-             * @description Unix seconds, when reported; always present.
-             */
-            timestamp: number | null;
-        };
-        /** @description One configured network, its indexing, and its nodes. */
+        /**
+         * @description One configured network: its stored row and nodes, the node's tip now,
+         *     and its configuration.
+         */
         ConfiguredNetwork: {
+            /**
+             * Format: int64
+             * @description Unix ms of the indexer's last read whose tip moved; always present.
+             */
+            checked_at: number | null;
+            /**
+             * Format: int64
+             * @description `tip - confirmations`; always present.
+             */
+            confirmed: number | null;
+            /** @description Its nodes in failover order. */
+            endpoints: components["schemas"]["RpcNode"][];
             explorer: null | components["schemas"]["Explorer"];
-            /** @description What its indexer did since the process started. */
-            indexing: components["schemas"]["Indexing"];
+            /**
+             * @description The indexer's last failure since the process started, cleared by the
+             *     next kept block; always present.
+             */
+            index_error: string | null;
+            /**
+             * Format: int64
+             * @description The last kept block; always present, null: none yet.
+             */
+            indexed: number | null;
             /**
              * Format: int64
              * @description How old, in days, a wallet's start may be; null: no limit. Always
@@ -647,8 +675,20 @@ export interface components {
              */
             max_history_days: number | null;
             network: components["schemas"]["Network"];
-            /** @description Its nodes in failover order. */
-            nodes: components["schemas"]["RpcNode"][];
+            /**
+             * Format: int64
+             * @description The node's newest block at the indexer's last read; always present,
+             *     null before the first.
+             */
+            tip: number | null;
+            /** @description Why asking the node failed; always present, null when it answered. */
+            tip_error: string | null;
+            /**
+             * Format: int64
+             * @description The node's newest block, asked now; `tip` when that failed. Always
+             *     present.
+             */
+            tip_live: number | null;
         };
         /**
          * @description `POST /v1/wallets` body: a wallet in one network, created without
@@ -804,10 +844,15 @@ export interface components {
             /** Format: int64 */
             succeeded: number;
         };
-        /** @description `GET /v1/jobs`. */
+        /** @description `GET /v1/jobs`: a page of jobs. */
         JobList: {
             /** @description The jobs last written, latest first. */
             jobs: components["schemas"]["Job"][];
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
         };
         /**
          * @description Where a job is.
@@ -849,6 +894,16 @@ export interface components {
             seq?: number | null;
             /** @description Its index's balance right after it; `None` while pending. */
             total?: string | null;
+            /**
+             * @description What its index has received (received, minted, reward) through it;
+             *     `None` while pending.
+             */
+            total_received?: string | null;
+            /**
+             * @description What its index has sent (spent, burned, fee) through it; `None`
+             *     while pending. `total = total_received - total_sent`.
+             */
+            total_sent?: string | null;
             /** @description Its transaction; null for a reward. */
             transaction?: string | null;
             /** @description The wallet index it is kept for: its address's index in its asset. */
@@ -858,15 +913,14 @@ export interface components {
         LegPage: {
             /**
              * @description Live mined legs, latest first, each with the balance after it
-             *     (`total`).
+             *     (`total`) and its transaction's txid and state (null for a reward).
              */
-            legs: components["schemas"]["Leg"][];
+            legs: components["schemas"]["Movement"][];
             /**
-             * Format: int64
-             * @description Pass as `before` for the next page; null on the last page. Always
+             * @description Pass as `cursor` for the next page; null on the last page. Always
              *     present.
              */
-            next_cursor: number | null;
+            next_cursor: string | null;
         };
         /** @description One configured asset: its id, where its wallets live, and what they hold. */
         Listing: {
@@ -881,6 +935,18 @@ export interface components {
             network: components["schemas"]["Network"];
         };
         /**
+         * @description A mined leg with its transaction's txid and state (null for a reward):
+         *     a row of [`db::find_page`].
+         */
+        Movement: components["schemas"]["Leg"] & {
+            /**
+             * Format: int32
+             * @description 0 pending, 1 succeeded, 2 reverted.
+             */
+            state?: number | null;
+            txid?: string | null;
+        };
+        /**
          * @description The chain and network a wallet, address, or transaction belongs to. It
          *     always ships as one nested object, never as two sibling fields.
          */
@@ -890,6 +956,17 @@ export interface components {
             /** @description Configured network name, e.g. `regtest`. */
             name: string;
         };
+        /** @description A network's nodes. */
+        NetworkEndpoints: {
+            /** @description Its nodes in failover order. */
+            endpoints: components["schemas"]["RpcNode"][];
+            network: components["schemas"]["Network"];
+        };
+        /** @description The networks a change touched. */
+        NetworkEndpointsList: {
+            /** @description Networks in chain, then name, order. */
+            networks: components["schemas"]["NetworkEndpoints"][];
+        };
         /** @description One network's indexing. */
         NetworkHealth: {
             /** @description What its indexer did since the process started. */
@@ -897,7 +974,7 @@ export interface components {
             /** @description The indexed chain and network. */
             network: components["schemas"]["Network"];
         };
-        /** @description Every configured network, or the ones a change touched. */
+        /** @description Every configured network. */
         NetworkList: {
             /** @description Networks in chain, then name, order. */
             networks: components["schemas"]["ConfiguredNetwork"][];
@@ -908,8 +985,13 @@ export interface components {
             endpoint: components["schemas"]["RpcEndpoint"];
             network: string;
         };
-        /** @description `GET /v1/networks/{chain}/{network}/transactions`. */
+        /** @description `GET /v1/networks/{chain}/{network}/transactions`: a page of transactions. */
         NetworkTransactions: {
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
             /** @description The transactions, with their legs. */
             transactions: components["schemas"]["Transaction"][];
         };
@@ -920,7 +1002,7 @@ export interface components {
             /** @description At least one network, and none whose last step failed. */
             ready: boolean;
         };
-        /** @description `POST /v1/networks/rpc` body. */
+        /** @description `POST /v1/networks/endpoints` body. */
         RpcAdditions: {
             /** @description Nodes to append, each after its network's current ones, in order. */
             nodes: components["schemas"]["NetworkNode"][];
@@ -969,7 +1051,7 @@ export interface components {
             /** @description The user of `user:password`, sent as HTTP Basic; empty when none. */
             username: string;
         };
-        /** @description `PUT /v1/networks/{chain}/{network}/rpc` body. */
+        /** @description `POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body. */
         RpcNodes: {
             /** @description One to 16 nodes, in failover order. */
             endpoints: components["schemas"]["RpcEndpoint"][];
@@ -1087,11 +1169,16 @@ export interface components {
              */
             wallets: number;
         };
-        /** @description `GET /v1/wallets/tags`. */
+        /** @description `GET /v1/wallets/tags`: a page of tags. */
         TagList: {
             /**
-             * @description Every tag in use on any wallet, sorted, each once. A wallet's own
-             *     tags are on it (`GET /v1/wallets`).
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
+            /**
+             * @description Tags in use on any wallet, sorted, each once. A wallet's own tags are
+             *     on it (`GET /v1/wallets`).
              */
             tags: string[];
         };
@@ -1119,6 +1206,11 @@ export interface components {
              * @description Its position in its block; null while pending.
              */
             order?: number | null;
+            /**
+             * Format: int64
+             * @description Its block's position; null while pending.
+             */
+            position?: number | null;
             /** @description Why it reverted (JSON), when the chain said; null otherwise. */
             reason?: string | null;
             /**
@@ -1133,20 +1225,6 @@ export interface components {
             state: number;
             /** @description Chain-native transaction id. */
             txid: string;
-        };
-        /** @description One page of `GET /v1/wallets/{id}/transactions`. */
-        TransactionPage: {
-            /** @description The asset. */
-            asset: components["schemas"]["Asset"];
-            /** @description Opaque cursor of the next page; null on a short page. Always present. */
-            next_cursor: string | null;
-            /**
-             * @description At most `limit` transactions in kept blocks, in chain order, each
-             *     with only the wallet's legs of the asset (atomic amounts; a mined
-             *     leg's `position` is its block's). Kept blocks reach the produced
-             *     tip, so the last ones may still be taken back by a reorg.
-             */
-            transactions: components["schemas"]["Transaction"][];
         };
         /** @description One ordered transfer of a send. */
         TransferItem: {
@@ -1203,6 +1281,11 @@ export interface components {
             /** @description One to 16 triggers, each with its `id`. */
             triggers: components["schemas"]["TriggerDefinition"][];
         };
+        /** @description `POST /v1/triggers`: the triggers created. */
+        TriggerBatchCreated: {
+            /** @description The batch's triggers, in its order. */
+            triggers: components["schemas"]["Trigger"][];
+        };
         /** @description A trigger as written: in a `POST` (with `id`) or as a `PUT` body. */
         TriggerDefinition: {
             action: Record<string, never>;
@@ -1216,8 +1299,13 @@ export interface components {
             network: string;
             selector: Record<string, never>;
         };
-        /** @description `GET /v1/triggers`. */
+        /** @description `GET /v1/triggers`: a page of triggers. */
         TriggerList: {
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
             /** @description Triggers in id order. */
             triggers: components["schemas"]["Trigger"][];
         };
@@ -1229,9 +1317,14 @@ export interface components {
              */
             started_at: number;
         };
-        /** @description `GET /v1/triggers/{id}/runs`. */
+        /** @description `GET /v1/triggers/{id}/runs`: a page of runs. */
         TriggerRunList: {
-            /** @description The latest runs, latest first. */
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
+            /** @description Runs, latest first. */
             runs: components["schemas"]["TriggerRun"][];
         };
         /** @description `PATCH /v1/wallets/{id}/indexes/{asset}` body. */
@@ -1246,7 +1339,7 @@ export interface components {
         /**
          * @description One wallet, as the API shows it: an address, whether its key is kept,
          *     its tags, and its indexes (each with its balances, progress and legs;
-         *     read by [`db::find_at_tip`] and [`db::list_at_tip`], empty from the other
+         *     read by [`db::find`] and [`db::find_page`], empty from the other
          *     reads). The key (`curve`, `secret`) is never serialized, and the API
          *     reads leave it out. No `Debug`: it may hold the key.
          */
@@ -1270,20 +1363,36 @@ export interface components {
          * @description One asset of one wallet being indexed, as every read answers it (the
          *     API shows it as is): its columns, how far it is indexed against its
          *     network's tip, its balances and its pending legs. All computed in SQL
-         *     (`db::BY_IDS`); amounts are exact atomic decimal text, never summed.
+         *     (`wallet_index_with_balance`); amounts are exact atomic decimal text, never summed.
          *     Positions are native (height or slot).
          */
         WalletIndex: {
             /** @description The asset id. */
             asset: string;
             /**
-             * @description Its last live mined leg's total, any block: `0` without one;
-             *     negative when indexed debits exceed indexed credits (history before
-             *     the start is unknown).
+             * @description Its confirmed balance: its last live mined leg's total at or below
+             *     `finality_at`, `0` without one; negative when indexed debits exceed
+             *     indexed credits (history before the start is unknown); null while
+             *     `finality_at` is unknown.
              */
-            balance: string;
-            /** @description The same at or below `finality_at`; null when that is unknown. */
-            balance_confirmed?: string | null;
+            balance?: string | null;
+            /**
+             * @description Its balance at the tip: its newest live mined leg's total, any
+             *     block, `0` without one; mempool legs are not in it.
+             */
+            balance_pending: string;
+            /**
+             * @description What it had received by then (that leg's `total_received`):
+             *     `balance = balance_received - balance_sent`.
+             */
+            balance_received?: string | null;
+            /** @description What it had sent by then (fees included), the same way. */
+            balance_sent?: string | null;
+            /**
+             * @description What it can spend: `balance` less its pending outgoing legs (spent,
+             *     burned, fee; no block); null while `balance` is.
+             */
+            balance_spendable?: string | null;
             /**
              * Format: int64
              * @description Blocks between `indexed_through` and the network's produced tip;
@@ -1298,8 +1407,8 @@ export interface components {
             birthday: number;
             /**
              * Format: int64
-             * @description The network's final (confirmed) block the read was given; null when
-             *     unknown.
+             * @description The network's final (confirmed) block: its indexer's, or a trigger
+             *     round's; null when unknown.
              */
             finality_at?: number | null;
             /** @description `{wallet_id}.{asset}`. */
@@ -1309,11 +1418,6 @@ export interface components {
              * @description The last block indexed; null before the first.
              */
             indexed_through?: number | null;
-            /**
-             * @description Its pending legs (no block, no total), by id; its mined ones are
-             *     paged by `leg::db::find_page`.
-             */
-            legs: components["schemas"]["Leg"][];
             /** @description Why it is `no_data`; null otherwise. */
             reason?: string | null;
             /**
@@ -1442,7 +1546,9 @@ export interface operations {
                 kind?: string;
                 /** @description Only jobs in this state. */
                 state?: components["schemas"]["JobState"];
-                /** @description At most this many, 1 to 1000; 100 by default. */
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
                 limit?: number;
             };
             header?: never;
@@ -1460,7 +1566,7 @@ export interface operations {
                     "application/json": components["schemas"]["JobList"];
                 };
             };
-            /** @description Malformed query or limit, or a chain without its network */
+            /** @description Malformed query, cursor, or limit, or a chain without its network */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1566,7 +1672,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description The nodes could not be read */
+            /** @description The networks could not be read */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -1577,7 +1683,7 @@ export interface operations {
             };
         };
     };
-    add_network_rpc: {
+    add_endpoints: {
         parameters: {
             query?: never;
             header?: never;
@@ -1596,7 +1702,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["NetworkList"];
+                    "application/json": components["schemas"]["NetworkEndpointsList"];
                 };
             };
             /** @description Malformed node, or a list above 16 nodes */
@@ -1640,7 +1746,9 @@ export interface operations {
     list_blocks: {
         parameters: {
             query?: {
-                /** @description At most this many, 1 to 100; 20 by default. */
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
                 limit?: number;
             };
             header?: never;
@@ -1663,7 +1771,7 @@ export interface operations {
                     "application/json": components["schemas"]["BlockList"];
                 };
             };
-            /** @description Malformed query or limit */
+            /** @description Malformed query, cursor, or limit */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -1755,7 +1863,127 @@ export interface operations {
             };
         };
     };
-    replace_network_rpc: {
+    list_block_transactions: {
+        parameters: {
+            query?: {
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+                /** @description Native position (height or slot). */
+                position: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The transactions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BlockTransactions"];
+                };
+            };
+            /** @description Malformed query, cursor, or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The network is not configured, or no live block is kept at this position */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_network_endpoints: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The network's nodes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkEndpoints"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Network is not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The nodes could not be read */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    replace_network_endpoints: {
         parameters: {
             query?: never;
             header?: never;
@@ -1779,7 +2007,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ConfiguredNetwork"];
+                    "application/json": components["schemas"]["NetworkEndpoints"];
                 };
             };
             /** @description Malformed node list */
@@ -1820,14 +2048,79 @@ export interface operations {
             };
         };
     };
-    remove_network_rpc: {
+    add_network_endpoints: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RpcNodes"];
+            };
+        };
+        responses: {
+            /** @description Nodes stored and in use */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkEndpoints"];
+                };
+            };
+            /** @description Malformed node, or a list above 16 nodes */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Network is not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The nodes could not be stored */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    remove_network_endpoint: {
         parameters: {
             query?: never;
             header?: never;
             path: {
                 chain: string;
                 network: string;
-                /** @description The node's `index` in `GET /v1/networks`. */
+                /** @description The node's `index` in its network's `endpoints`. */
                 index: number;
             };
             cookie?: never;
@@ -1840,7 +2133,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ConfiguredNetwork"];
+                    "application/json": components["schemas"]["NetworkEndpoints"];
                 };
             };
             /** @description It is the network's last node */
@@ -1871,82 +2164,6 @@ export interface operations {
                 };
             };
             /** @description The nodes could not be stored */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    read_tip: {
-        parameters: {
-            query?: {
-                /**
-                 * @description RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: answer the
-                 *     last block at or before it. Absent: the newest block.
-                 */
-                at?: string;
-            };
-            header?: never;
-            path: {
-                /** @description Chain name, as `GET /v1/networks` lists it. */
-                chain: string;
-                /** @description Network name, as `GET /v1/networks` lists it. */
-                network: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The block */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ChainTip"];
-                };
-            };
-            /** @description Malformed `at` */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Missing or invalid bearer token */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description The network is not configured, or `at` is before its first block */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description The network cannot find blocks by time */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description The node is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -2019,11 +2236,13 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description Pending ones (true, the default), oldest sent first; or mined ones in
-                 *     live blocks (false), latest first.
+                 * @description Only pending ones (true), oldest sent first; otherwise (the default)
+                 *     pending and mined in live blocks, newest first.
                  */
                 pending?: boolean;
-                /** @description At most this many, 1 to 500; 100 by default. */
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
                 limit?: number;
             };
             header?: never;
@@ -2046,7 +2265,7 @@ export interface operations {
                     "application/json": components["schemas"]["NetworkTransactions"];
                 };
             };
-            /** @description Malformed query or limit */
+            /** @description Malformed query, cursor, or limit */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2124,20 +2343,34 @@ export interface operations {
     };
     list_triggers: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Every trigger */
+            /** @description Triggers in id order */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["TriggerList"];
+                };
+            };
+            /** @description Malformed query or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2179,7 +2412,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TriggerList"];
+                    "application/json": components["schemas"]["TriggerBatchCreated"];
                 };
             };
             /** @description Malformed body or id, several networks, or a send from This to This */
@@ -2392,7 +2625,12 @@ export interface operations {
     };
     list_trigger_runs: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
+                limit?: number;
+            };
             header?: never;
             path: {
                 /** @description The trigger's slug. */
@@ -2402,13 +2640,22 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Its latest 50 runs, latest first */
+            /** @description Its runs, latest first */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["TriggerRunList"];
+                };
+            };
+            /** @description Malformed query, cursor, or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2434,12 +2681,9 @@ export interface operations {
     list_wallets: {
         parameters: {
             query?: {
-                /**
-                 * @description `next_cursor` of the previous page (the last wallet id); absent for
-                 *     the first page.
-                 */
+                /** @description `next_cursor` of the previous page; absent for the first page. */
                 cursor?: string;
-                /** @description Page size, 1 to 1000. */
+                /** @description Page size, 1 to 500. */
                 limit?: number;
             };
             header?: never;
@@ -2557,20 +2801,34 @@ export interface operations {
     };
     list_tags: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Every tag */
+            /** @description Tags in order */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["TagList"];
+                };
+            };
+            /** @description Malformed query or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2851,12 +3109,9 @@ export interface operations {
     list_wallet_index_legs: {
         parameters: {
             query?: {
-                /**
-                 * @description `next_cursor` of the previous page (a `seq`); absent for the first
-                 *     page.
-                 */
-                before?: number;
-                /** @description Page size, 1 to 200. */
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
                 limit?: number;
             };
             header?: never;
@@ -2879,7 +3134,7 @@ export interface operations {
                     "application/json": components["schemas"]["LegPage"];
                 };
             };
-            /** @description Malformed wallet ID, query or limit */
+            /** @description Malformed wallet ID, query, cursor, or limit */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3007,72 +3262,6 @@ export interface operations {
                 };
             };
             /** @description No such wallet or tag, or network not configured */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description The store is unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    read_wallet_transactions: {
-        parameters: {
-            query?: {
-                /** @description An asset id of the wallet's network; default `native`. */
-                asset?: string;
-                /** @description `next_cursor` of the previous page; absent for the first page. */
-                cursor?: string;
-                /** @description Page size, 1 to 1000. */
-                limit?: number;
-            };
-            header?: never;
-            path: {
-                /** @description `{chain}.{network}.{address}`. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description One history page */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TransactionPage"];
-                };
-            };
-            /** @description Malformed wallet ID, query, cursor, or limit */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Missing or invalid bearer token */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Network or asset is not configured */
             404: {
                 headers: {
                     [name: string]: unknown;

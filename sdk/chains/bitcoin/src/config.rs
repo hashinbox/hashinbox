@@ -24,7 +24,8 @@ pub struct Config {
     /// Its Bitcoin Core nodes: reads go to one, submissions to all.
     pub endpoints: Vec<Endpoint>,
     /// Blocks a block needs on top of it, itself included, to be final;
-    /// 1 to 1000, default 6. Bitcoin has no finality of its own.
+    /// 1 to 1000, default 6. Bitcoin has no finality of its own. Also the
+    /// service's `confirmations`: `confirmation_depth - 1`.
     #[serde(default = "Config::default_confirmation_depth")]
     pub confirmation_depth: u64,
     /// P2WPKH (default) or `taproot`.
@@ -235,6 +236,7 @@ impl base::Config for Config {
                 max_history: self
                     .max_history_days
                     .map(|days| Duration::from_secs(u64::from(days) * 86_400)),
+                confirmations: self.confirmation_depth.saturating_sub(1),
             })
         })
     }

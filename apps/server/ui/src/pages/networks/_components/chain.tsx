@@ -100,37 +100,47 @@ export function Chain({
 
   const view = read?.view ?? null;
   const blocks = [...(view?.blocks ?? [])].reverse();
-  const inStrip = blocks.some((b) => b.position === picked);
-  // A picked block outside the strip is read on its own; `block: null`: none is kept there.
+  // The picked block and its first page of transactions; `block: null`: none is kept there.
   const { fail } = shell;
-  const [far, setFar] = useState<{ position: number; block: ChainBlock | null } | null>(null);
+  const [far, setFar] = useState<{
+    position: number;
+    block: ChainBlock | null;
+    transactions: ChainTransaction[];
+  } | null>(null);
   useEffect(() => {
-    if (picked === null || inStrip) return;
+    if (picked === null) return;
     let live = true;
-    call(
-      client.GET('/v1/networks/{chain}/{network}/blocks/{position}', {
-        params: { path: { chain, network: name, position: picked } },
-      }),
-    )
-      .then((found) => {
-        if (live) setFar({ position: picked, block: found });
+    const params = { path: { chain, network: name, position: picked } };
+    Promise.all([
+      call(client.GET('/v1/networks/{chain}/{network}/blocks/{position}', { params })),
+      call(client.GET('/v1/networks/{chain}/{network}/blocks/{position}/transactions', { params })),
+    ])
+      .then(([found, { transactions }]) => {
+        if (live) setFar({ position: picked, block: found, transactions });
       })
       .catch((error: unknown) => {
         if (!live) return;
         if (error instanceof ApiError && error.status === 404)
-          setFar({ position: picked, block: null });
+          setFar({ position: picked, block: null, transactions: [] });
         else fail(error);
       });
     return () => {
       live = false;
     };
-  }, [chain, name, picked, inStrip, fail]);
-  const block =
-    blocks.find((b) => b.position === picked) ?? (far?.position === picked ? far.block : null);
-  const shown = picked === null ? (view?.mempool ?? []) : (block?.transactions ?? []);
+  }, [chain, name, picked, fail]);
+  const opened = far?.position === picked ? far : null;
+  const block = opened?.block ?? null;
+  const shown = picked === null ? (view?.mempool ?? []) : (opened?.transactions ?? []);
 
   return (
     <Box component="article" sx={{ minWidth: 0 }}>
+      <Typography variant="body2" color="text.secondary" sx={{ fontFamily: mono, mb: 1 }}>
+        indexed #{network.indexed ?? '—'}
+        {network.indexed != null &&
+          network.tip_live != null &&
+          ` · ${String(Math.max(network.tip_live - network.indexed, 0))} behind`}
+        {' · '}confirmed #{network.confirmed ?? '—'}
+      </Typography>
       <Box
         sx={{
           overflow: 'hidden',
@@ -155,7 +165,6 @@ export function Chain({
             >
               <Cube
                 label={`#${b.position}`}
-                count={b.transactions.length}
                 selected={picked === b.position}
                 onClick={() => onPick(b.position)}
               />
@@ -194,7 +203,7 @@ export function Chain({
               message={
                 picked === null
                   ? 'Nothing pending.'
-                  : far?.position === picked && far.block === null
+                  : opened?.block === null
                     ? 'No live block is kept at this position.'
                     : 'No kept transaction.'
               }
@@ -350,7 +359,7 @@ function Link() {
   return <Box sx={{ width: 28, height: 2, bgcolor: 'divider', flex: 'none' }} />;
 }
 
-/** One block (or the mempool) as an isometric cube with its label and transaction count. */
+/** One block (or the mempool) as an isometric cube with its label and, for the mempool, transaction count. */
 function Cube({
   label,
   count,
@@ -359,7 +368,7 @@ function Cube({
   onClick,
 }: {
   label: string;
-  count: number;
+  count?: number;
   selected: boolean;
   pending?: boolean;
   onClick: () => void;

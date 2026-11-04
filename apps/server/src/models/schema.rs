@@ -50,6 +50,8 @@ diesel::table! {
         position -> Nullable<BigInt>,
         seq -> Nullable<BigInt>,
         total -> Nullable<Text>,
+        total_received -> Nullable<Text>,
+        total_sent -> Nullable<Text>,
     }
 }
 
@@ -79,6 +81,63 @@ diesel::table! {
 }
 
 diesel::table! {
+    network (chain, name) {
+        chain -> Text,
+        #[sql_name = "network"]
+        name -> Text,
+        tip -> Nullable<BigInt>,
+        confirmed -> Nullable<BigInt>,
+        indexed -> Nullable<BigInt>,
+        checked_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    /// Read-only view `transaction_with_legs`: a `transaction` row, its
+    /// block's position and its legs as a JSON array.
+    transaction_with_legs (id) {
+        id -> Text,
+        block -> Nullable<Text>,
+        chain -> Text,
+        network -> Text,
+        txid -> Text,
+        order -> Nullable<BigInt>,
+        state -> Integer,
+        reason -> Nullable<Text>,
+        bytes -> Binary,
+        sent_at -> Nullable<BigInt>,
+        expires_at -> Nullable<BigInt>,
+        position -> Nullable<BigInt>,
+        legs -> Text,
+    }
+}
+
+diesel::table! {
+    /// Read-only view `wallet_index_with_balance`: a `wallet_index` row with
+    /// its wallet's address, progress and balances. Its `chain`,
+    /// `network`, `behind_tip` and `finality_at` are left out: diesel's
+    /// 16-column limit (`IndexRow` reads them by name).
+    wallet_index_with_balance (id) {
+        id -> Text,
+        wallet_id -> Text,
+        asset -> Text,
+        requested_from -> BigInt,
+        birthday -> BigInt,
+        indexed_at -> Nullable<Text>,
+        state -> Integer,
+        reason -> Nullable<Text>,
+        address -> Text,
+        keyed -> Bool,
+        indexed_through -> Nullable<BigInt>,
+        balance -> Nullable<Text>,
+        balance_received -> Nullable<Text>,
+        balance_sent -> Nullable<Text>,
+        balance_pending -> Text,
+        balance_spendable -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     q (id) {
         id -> Text,
         topic -> Text,
@@ -96,10 +155,24 @@ diesel::table! {
 }
 
 diesel::table! {
-    rpc_endpoints (chain, network) {
+    network_endpoint (chain, network) {
         chain -> Text,
         network -> Text,
         nodes -> Text,
+    }
+}
+
+diesel::table! {
+    /// Read-only view `network_with_endpoints`: a `network` row and its
+    /// endpoint documents.
+    network_with_endpoints (chain, network) {
+        chain -> Text,
+        network -> Text,
+        tip -> Nullable<BigInt>,
+        confirmed -> Nullable<BigInt>,
+        indexed -> Nullable<BigInt>,
+        checked_at -> Nullable<BigInt>,
+        nodes -> Nullable<Text>,
     }
 }
 

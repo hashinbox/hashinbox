@@ -83,12 +83,19 @@ collection! {
     Tasks(Task)
 }
 
+/// A job with its `updated_at`: `"{updated_at}:{id}"`.
+impl crate::db::Keyed for (Task, i64) {
+    fn key(&self) -> String {
+        format!("{}:{}", self.1, self.0.id)
+    }
+}
+
 /// The `q` table's statements.
 pub(crate) mod db {
     use diesel::prelude::*;
 
     use super::{Task, Tasks};
-    use crate::models::schema::q;
+    use crate::{db::Page, models::schema::q};
 
     /// Inserts `task`, stamped `now`.
     pub(crate) fn insert(
@@ -175,19 +182,21 @@ pub(crate) mod db {
             .load(connection)
     }
 
-    /// The `limit` tasks last written, latest first, of `network`, `kind`
-    /// and `status` when given. A job's network is its input's `chain` and
-    /// `network`, which every job kind's input carries.
-    pub(crate) fn find_recent(
+    /// At most `page.limit` tasks last written, latest first, of `network`,
+    /// `kind` and `status` when given, each with its `updated_at`; by
+    /// (`updated_at`, `id`), after `page.after` in that order when given. A
+    /// job's network is its input's `chain` and `network`, which every job
+    /// kind's input carries.
+    pub(crate) fn find_page(
         connection: &mut SqliteConnection,
         network: Option<&base::Network>,
         kind: Option<&str>,
         status: Option<i32>,
-        limit: i64,
-    ) -> QueryResult<Tasks> {
+        page: Page<(i64, String)>,
+    ) -> QueryResult<Vec<(Task, i64)>> {
         use diesel::{
             dsl::sql,
-            sql_types::{Bool, Text},
+            sql_types::{BigInt, Bool, Text},
         };
         let mut query = q::table.into_boxed();
         if let Some(network) = network {
@@ -207,12 +216,20 @@ pub(crate) mod db {
         if let Some(status) = status {
             query = query.filter(q::status.eq(status));
         }
-        let tasks = query
+        if let Some((updated_at, id)) = page.after {
+            query = query.filter(
+                sql::<Bool>("(updated_at, id) < (")
+                    .bind::<BigInt, _>(updated_at)
+                    .sql(", ")
+                    .bind::<Text, _>(id)
+                    .sql(")"),
+            );
+        }
+        query
             .order((q::updated_at.desc(), q::id.desc()))
-            .limit(limit)
-            .select(Task::as_select())
-            .load(connection)?;
-        Ok(tasks.into())
+            .limit(page.limit)
+            .select((Task::as_select(), q::updated_at))
+            .load(connection)
     }
 
     /// Every unfinished (pending or running) task, by id: what `next`

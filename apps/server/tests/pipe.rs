@@ -14,10 +14,9 @@ use crate::{
     models::{
         Json, Trigger, TriggerRun, Wallet, int, trigger,
         trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Operator, Target, This},
-        trigger_run, wallet,
-        wallet::db::IndexedSelector,
-        wallet_index,
-        wallet_index::{Selection, Selector},
+        trigger_run, wallet, wallet_index,
+        wallet_index::Selection,
+        wallet_index_selector::Selector,
     },
     usecase::{
         trigger::{Context, Trigger as Deciding},
@@ -77,22 +76,23 @@ INSERT INTO \"transaction\" (id, block, chain, network, txid, \"order\", state, 
  ('bitcoin.regtest.t2','bitcoin.regtest.02','bitcoin','regtest','t2',0,1,x''),
  ('bitcoin.regtest.t3','bitcoin.regtest.f5','bitcoin','regtest','t3',0,1,x'');
 INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, amount,
-  wallet_index_id, position, seq, total) VALUES
+  wallet_index_id, position, seq, total, total_received, total_sent) VALUES
  ('bitcoin.regtest.t1.0','bitcoin.regtest.01','bitcoin.regtest.t1',0,0,'a','native','1000',
-  'bitcoin.regtest.a.native',1,1,'1000'),
+  'bitcoin.regtest.a.native',1,1,'1000','1000','0'),
  ('bitcoin.regtest.t1.1','bitcoin.regtest.01','bitcoin.regtest.t1',1,0,'a','tok',
   '1606938044258990275541962092341162602522202993782792835301376','bitcoin.regtest.a.tok',1,1,
-  '1606938044258990275541962092341162602522202993782792835301376'),
+  '1606938044258990275541962092341162602522202993782792835301376',
+  '1606938044258990275541962092341162602522202993782792835301376','0'),
  ('bitcoin.regtest.t2.0','bitcoin.regtest.02','bitcoin.regtest.t2',0,1,'a','native','300',
-  'bitcoin.regtest.a.native',2,2,'700'),
+  'bitcoin.regtest.a.native',2,2,'700','1000','300'),
  ('bitcoin.regtest.t2.1','bitcoin.regtest.02','bitcoin.regtest.t2',1,4,'a','native','10',
-  'bitcoin.regtest.a.native',2,3,'690'),
+  'bitcoin.regtest.a.native',2,3,'690','1000','310'),
  ('bitcoin.regtest.t3.0','bitcoin.regtest.f5','bitcoin.regtest.t3',0,0,'a','native','7777',
-  'bitcoin.regtest.a.native',5,5,'8467'),
+  'bitcoin.regtest.a.native',5,5,'8467','8782','310'),
  ('bitcoin.regtest.03.reward.0','bitcoin.regtest.03',NULL,0,5,'a','native','5',
-  'bitcoin.regtest.a.native',3,4,'695'),
+  'bitcoin.regtest.a.native',3,4,'695','1005','310'),
  ('bitcoin.regtest.00.reward.0','bitcoin.regtest.00',NULL,0,5,'b','native','50',
-  'bitcoin.regtest.b.native',0,1,'50');
+  'bitcoin.regtest.b.native',0,1,'50','50','0');
 ";
 
 /// A migrated, seeded temp file, a runtime for fee estimates, and a raw
@@ -109,6 +109,7 @@ fn seeded() -> (tempfile::TempDir, tokio::runtime::Runtime, SqliteConnection) {
     connection
         .batch_execute("PRAGMA foreign_keys = ON;")
         .unwrap();
+    crate::db::register(&mut connection).unwrap();
     connection.batch_execute(SEED).unwrap();
     (directory, runtime, connection)
 }
@@ -127,7 +128,7 @@ fn tag_with(
 
 /// The tags of the wallet of `address`.
 fn tags_of(connection: &mut SqliteConnection, address: &Address) -> Vec<String> {
-    wallet::db::find_by_id(connection, &Wallet::id(address).unwrap())
+    wallet::db::find(connection, &Wallet::id(address).unwrap())
         .unwrap()
         .map(|wallet| wallet.tags.0.into_iter().collect())
         .unwrap_or_default()
@@ -479,7 +480,7 @@ fn selection(connection: &mut SqliteConnection, ids: &[String]) -> Selection {
 /// The balance of index `id` of `selection` at its final block.
 fn confirmed(selection: &Selection, id: &str) -> Decimal {
     selection[id]
-        .balance_confirmed
+        .balance
         .as_deref()
         .unwrap_or("0")
         .parse()
@@ -820,69 +821,34 @@ fn triggers_and_their_runs_are_stored() {
 
     assert_eq!(trigger::db::delete(&mut connection, "sweep").unwrap(), 1);
     assert!(
-        trigger_run::db::find_recent(&mut connection, "sweep", 10)
-            .unwrap()
-            .is_empty()
+        trigger_run::db::find_page(
+            &mut connection,
+            "sweep",
+            crate::db::Page {
+                after: None,
+                limit: 10
+            }
+        )
+        .unwrap()
+        .is_empty()
     );
 }
 
 #[test]
-fn wallets_are_found_through_their_indexes() {
+fn a_tag_picks_its_wallets_indexes_on_their_network_only() {
     let (_directory, _runtime, mut connection) = seeded();
     let c = &mut connection;
-    let other = Address::new(Network::new(Chain::new("bitcoin"), "other"), "a");
-    for address in ["a", "b", "c", "d", "z"]
-        .map(address)
-        .into_iter()
-        .chain([other])
-    {
-        let wallet = Wallet::new(
-            &address,
-            crypto::Curve::Secp256k1,
-            crypto::SecretBytes::new(vec![1]),
-        )
-        .unwrap();
-        wallet::db::insert(c, &wallet).unwrap();
-    }
-    tag_with(c, &address("a"), "hot").unwrap();
-    let find = |c: &mut SqliteConnection, selector: IndexedSelector<'_>| -> Vec<String> {
-        wallet::db::find_indexed(c, selector)
+    let other = Network::new(Chain::new("bitcoin"), "other");
+    let picked = |c: &mut SqliteConnection, selector: &Selector| {
+        wallet_index::db::select(c, &other, selector, 3)
             .unwrap()
-            .iter()
-            .map(|wallet| wallet.address.clone())
-            .collect()
+            .ids()
     };
-    let regtest = network();
-    // z has no index; every other wallet has one.
-    assert_eq!(
-        find(c, IndexedSelector::default()),
-        ["a", "a", "b", "c", "d", "e"]
-    );
-    let indexed = IndexedSelector {
-        network: Some(&regtest),
-        confirmed: Some(int(TIP).unwrap()),
-        selector: None,
-    };
-    // d never indexed; c through its token index only.
-    assert_eq!(find(c, indexed), ["a", "b", "c"]);
-    let native = serde_json::from_str(r#"{"asset":"native"}"#).unwrap();
-    assert_eq!(
-        find(
-            c,
-            IndexedSelector {
-                selector: Some(&native),
-                ..indexed
-            }
-        ),
-        ["a", "b"]
-    );
-    let hot = serde_json::from_str(r#"{"tag":"hot"}"#).unwrap();
-    // The tag is on regtest's a, not on other's.
-    let tagged = IndexedSelector {
-        selector: Some(&hot),
-        ..IndexedSelector::default()
-    };
-    assert_eq!(find(c, tagged), ["a"]);
+    tag_with(c, &address("a"), "hot").unwrap();
+    assert_eq!(ids(&tag("hot"), c), [id("a", "native"), id("a", "tok")]);
+    // The tag is on regtest's a, not on other's; other's a is still picked.
+    assert!(picked(c, &tag("hot")).is_empty());
+    assert_eq!(picked(c, &asset("native")), ["bitcoin.other.a.native"]);
 }
 
 #[test]

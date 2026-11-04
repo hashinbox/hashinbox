@@ -8,16 +8,18 @@ import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
 import Link from '@mui/material/Link';
 import Stack from '@mui/material/Stack';
+import Tab from '@mui/material/Tab';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
 import TableCell from '@mui/material/TableCell';
 import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
+import Tabs from '@mui/material/Tabs';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
-import { call, client, type Leg, type Transaction, type Wallet as Account } from '@/api/client';
+import { call, client, type Movement, type Wallet as Account } from '@/api/client';
 import { Address } from '@/_components/address';
 import { Currency } from '@/_components/currency';
 import { format } from '@/_components/format';
@@ -31,7 +33,7 @@ import {
   assetsOf,
   decimalsOf,
   displayOf,
-  effect,
+  listingOf,
   networkOf,
   unitOf,
 } from '@/money';
@@ -41,13 +43,17 @@ import { Send } from './send';
 import { WatchDialog } from './watch';
 import { haltOf, progressOf } from './watching';
 
-const PAGE = 100;
 /** A leg's `kind`: 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward. */
 const KIND = ['received', 'spent', 'burned', 'minted', 'fee', 'reward'];
 
-/** The wallet's balance in its asset, in atomic units, as `GET /v1/wallets/{id}` reports it. */
+/** The wallet's confirmed balance in its asset, in atomic units, as `GET /v1/wallets/{id}` reports it. */
 function amountOf(wallet: Account): string {
   return wallet.indexes[assetOf(wallet)]?.balance ?? '0';
+}
+
+/** Its balance at the tip, unconfirmed blocks included. */
+function pendingOf(wallet: Account): string {
+  return wallet.indexes[assetOf(wallet)]?.balance_pending ?? '0';
 }
 
 /** What a wallet's balance says about the history behind it. */
@@ -95,10 +101,16 @@ export function Wallet({
   const unit = unitOf(wallet, shell.listings);
   const display = displayOf(wallet, shell.listings);
   const [fresh, setFresh] = useState<Account | null>(null);
-  const [rows, setRows] = useState<Transaction[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [legs, setLegs] = useState<Leg[]>([]);
-  const [before, setBefore] = useState<number | null>(null);
+  const [picked, setPicked] = useState(assetOf(wallet));
+  const asset = picked in wallet.indexes ? picked : assetOf(wallet);
+  const listing = listingOf(wallet, shell.listings, asset)?.metadata;
+  const money = {
+    decimals: listing?.decimals ?? 0,
+    display: listing?.display_decimals ?? null,
+    ticker: assetName(shell.listings, wallet.chain, wallet.network, asset),
+  };
+  const [legs, setLegs] = useState<Movement[]>([]);
+  const [legsCursor, setLegsCursor] = useState<string | null>(null);
   const [watchOpen, setWatchOpen] = useState(false);
   const [tagOpen, setTagOpen] = useState(false);
 
@@ -107,48 +119,27 @@ export function Wallet({
     call(client.GET('/v1/wallets/{id}', { params: id }))
       .then(setFresh)
       .catch(shell.fail);
-    call(
-      client.GET('/v1/wallets/{id}/transactions', {
-        params: { ...id, query: { asset: assetOf(wallet), limit: PAGE } },
-      }),
-    )
-      .then((page) => {
-        setRows(page.transactions);
-        setCursor(page.next_cursor ?? null);
-      })
-      .catch(shell.fail);
-    const index = { path: { id: wallet.id, asset: assetOf(wallet) } };
+    const index = { path: { id: wallet.id, asset } };
     call(client.GET('/v1/wallets/{id}/indexes/{asset}/legs', { params: index }))
       .then((page) => {
         setLegs(page.legs);
-        setBefore(page.next_cursor ?? null);
+        setLegsCursor(page.next_cursor ?? null);
       })
       .catch(shell.fail);
-  }, [wallet, shell.fail]);
+  }, [wallet, asset, shell.fail]);
 
   useEffect(refresh, [refresh]);
 
-  const older = () => {
-    if (!cursor) return;
-    const params = {
-      path: { id: wallet.id },
-      query: { asset: assetOf(wallet), limit: PAGE, cursor },
-    };
-    call(client.GET('/v1/wallets/{id}/transactions', { params }))
-      .then((page) => {
-        setRows((current) => [...current, ...page.transactions]);
-        setCursor(page.next_cursor ?? null);
-      })
-      .catch(shell.fail);
-  };
-
   const olderLegs = () => {
-    if (before === null) return;
-    const params = { path: { id: wallet.id, asset: assetOf(wallet) }, query: { before } };
+    if (legsCursor === null) return;
+    const params = {
+      path: { id: wallet.id, asset },
+      query: { cursor: legsCursor },
+    };
     call(client.GET('/v1/wallets/{id}/indexes/{asset}/legs', { params }))
       .then((page) => {
         setLegs((current) => [...current, ...page.legs]);
-        setBefore(page.next_cursor ?? null);
+        setLegsCursor(page.next_cursor ?? null);
       })
       .catch(shell.fail);
   };
@@ -231,6 +222,11 @@ export function Wallet({
             <Box component="span" sx={{ fontSize: '0.6em', color: 'text.secondary' }}>
               {unit}
             </Box>
+            {fresh && pendingOf(fresh) !== amountOf(fresh) && (
+              <Box component="span" sx={{ fontSize: '0.4em', color: 'text.secondary', ml: 1 }}>
+                {format(pendingOf(fresh), { decimals, display })} pending
+              </Box>
+            )}
           </Typography>
           <ButtonGroup size="small" variant="outlined" aria-label="Wallet actions">
             <Button onClick={() => setWatchOpen(true)}>
@@ -254,86 +250,82 @@ export function Wallet({
       )}
 
       <Typography variant="h3" component="h3" sx={{ mt: 3.5, mb: 1 }}>
-        Transactions
-      </Typography>
-      <TableContainer>
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableCell>Transaction</TableCell>
-              <TableCell>Block</TableCell>
-              <TableCell>Amount</TableCell>
-              <TableCell>Fee</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {rows.length === 0 ? (
-              <EmptyRow columns={4} message="No transactions yet." />
-            ) : (
-              rows.map((tx) => (
-                <Row
-                  key={tx.txid}
-                  wallet={wallet}
-                  tx={tx}
-                  decimals={decimals}
-                  display={display}
-                  unit={unit}
-                />
-              ))
-            )}
-          </TableBody>
-        </Table>
-      </TableContainer>
-      {cursor && (
-        <Button onClick={older} sx={{ mt: 1.5 }}>
-          Older
-        </Button>
-      )}
-
-      <Typography variant="h3" component="h3" sx={{ mt: 3.5, mb: 1 }}>
         Movements
       </Typography>
+      {assetsOf(wallet).length > 1 && (
+        <Tabs value={asset} onChange={(_, value: string) => setPicked(value)}>
+          {assetsOf(wallet).map((id) => (
+            <Tab
+              key={id}
+              value={id}
+              label={assetName(shell.listings, wallet.chain, wallet.network, id)}
+            />
+          ))}
+        </Tabs>
+      )}
       <TableContainer>
         <Table>
           <TableHead>
             <TableRow>
-              <TableCell>Block</TableCell>
               <TableCell>Kind</TableCell>
               <TableCell>Amount</TableCell>
-              <TableCell>Balance</TableCell>
+              <TableCell>Balance after</TableCell>
+              <TableCell>Block</TableCell>
+              <TableCell>Transaction</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {legs.length === 0 ? (
-              <EmptyRow columns={4} message="No movements yet." />
+              <EmptyRow columns={5} message="No movements yet." />
             ) : (
-              legs.map((leg) => (
-                <TableRow key={leg.id} hover>
-                  <TableCell sx={figures}>{leg.position}</TableCell>
-                  <TableCell>{KIND[leg.kind]}</TableCell>
-                  <TableCell sx={figures}>
-                    <Money
-                      amount={[1, 2, 4].includes(leg.kind) ? `-${leg.amount}` : leg.amount}
-                      decimals={decimals}
-                      display={display}
-                      ticker={unit}
-                    />
-                  </TableCell>
-                  <TableCell sx={figures}>
-                    <Money
-                      amount={leg.total ?? '0'}
-                      decimals={decimals}
-                      display={display}
-                      ticker={unit}
-                    />
-                  </TableCell>
-                </TableRow>
-              ))
+              legs.map((leg) => {
+                const block = [
+                  'networks',
+                  wallet.chain,
+                  wallet.network,
+                  'blocks',
+                  `${leg.position}`,
+                ];
+                return (
+                  <TableRow key={leg.id} hover>
+                    <TableCell>{KIND[leg.kind]}</TableCell>
+                    <TableCell sx={figures}>
+                      <Money
+                        amount={[1, 2, 4].includes(leg.kind) ? `-${leg.amount}` : leg.amount}
+                        {...money}
+                      />
+                    </TableCell>
+                    <TableCell sx={figures}>
+                      <Money amount={leg.total ?? '0'} {...money} />
+                    </TableCell>
+                    <TableCell sx={figures}>
+                      <Link
+                        href={href(block)}
+                        underline="hover"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          go(block);
+                        }}
+                      >
+                        {leg.position}
+                      </Link>
+                    </TableCell>
+                    <TableCell sx={{ ...figures, fontSize: 12, whiteSpace: 'nowrap' }}>
+                      {leg.txid && <Tx value={leg.txid} network={networkOf(wallet)} />}
+                      {leg.state === 2 && (
+                        <Box component="small" sx={{ color: 'error.main', ml: 1 }}>
+                          reverted
+                        </Box>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                );
+              })
             )}
           </TableBody>
         </Table>
       </TableContainer>
-      {before !== null && (
+      {legsCursor !== null && (
         <Button onClick={olderLegs} sx={{ mt: 1.5 }}>
           Older
         </Button>
@@ -430,56 +422,5 @@ function Tags({
         </Box>
       </Dialog>
     </>
-  );
-}
-
-function Row({
-  wallet,
-  tx,
-  decimals,
-  display,
-  unit,
-}: {
-  wallet: Account;
-  tx: Transaction;
-  decimals: number;
-  display: number | null;
-  unit: string;
-}) {
-  const e = effect(tx);
-  // A mined leg's position is its block's.
-  const position = tx.legs[0]?.position ?? null;
-  const block = ['networks', wallet.chain, wallet.network, 'blocks', String(position)];
-  return (
-    <TableRow hover>
-      <TableCell sx={{ ...figures, fontSize: 12, whiteSpace: 'nowrap' }}>
-        <Tx value={tx.txid} network={networkOf(wallet)} />
-        {tx.state === 2 && (
-          <Box component="small" sx={{ color: 'error.main', ml: 1 }} title={tx.reason ?? undefined}>
-            reverted
-          </Box>
-        )}
-      </TableCell>
-      <TableCell sx={figures}>
-        <Link
-          href={href(block)}
-          underline="hover"
-          onClick={(event) => {
-            event.preventDefault();
-            go(block);
-          }}
-        >
-          {position}
-        </Link>
-      </TableCell>
-      <TableCell sx={figures}>
-        <Money amount={e.net.toString()} decimals={decimals} display={display} ticker={unit} />
-      </TableCell>
-      <TableCell sx={figures}>
-        {e.fee > 0n && (
-          <Money amount={e.fee.toString()} decimals={decimals} display={display} ticker={unit} />
-        )}
-      </TableCell>
-    </TableRow>
   );
 }

@@ -6,6 +6,8 @@
 # The UI dev server (apps/server/ui, `npm run dev`) proxies to this `bind`.
 # `max_history_days` (a network's): how old a wallet's start may be, about
 # what history its public nodes keep (pruned, EIP-4444); absent: no limit.
+# `confirmations` (a network's): positions below the tip before a block counts
+# as confirmed; default ethereum 12, solana 32 (bitcoin: confirmation_depth - 1).
 bind = '127.0.0.1:8080'
 storage = { path = '.data/payment.db' }  # .data/ is git-ignored
 

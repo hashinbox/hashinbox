@@ -161,13 +161,25 @@
             }
           },
           {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
-            "description": "At most this many, 1 to 1000; 100 by default.",
+            "description": "Page size, 1 to 500.",
             "required": false,
             "schema": {
               "type": "integer",
-              "format": "int64"
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
             }
           }
         ],
@@ -183,7 +195,7 @@
             }
           },
           "400": {
-            "description": "Malformed query or limit, or a chain without its network",
+            "description": "Malformed query, cursor, or limit, or a chain without its network",
             "content": {
               "application/json": {
                 "schema": {
@@ -293,8 +305,8 @@
         "tags": [
           "networks"
         ],
-        "summary": "List every configured network, its indexing and its RPC nodes",
-        "description": "Every network the configuration names, what its indexer did since the process started, and its nodes, each URL parsed.",
+        "summary": "List every configured network, its indexing, its live tip and its RPC nodes",
+        "description": "Every network the configuration names: its stored row (the indexer's last read of the node), its nodes, each URL parsed, and its configuration. `tip_live` asks every network's node at once, each for at most 2 s; one that fails keeps the stored `tip` and says why in `tip_error`.",
         "operationId": "list_networks",
         "responses": {
           "200": {
@@ -318,7 +330,7 @@
             }
           },
           "503": {
-            "description": "The nodes could not be read",
+            "description": "The networks could not be read",
             "content": {
               "application/json": {
                 "schema": {
@@ -335,14 +347,14 @@
         ]
       }
     },
-    "/v1/networks/rpc": {
+    "/v1/networks/endpoints": {
       "post": {
         "tags": [
           "networks"
         ],
         "summary": "Add RPC nodes to one or more networks",
         "description": "Appends each node after its network's current ones, stores every changed list in one write (all or none), then sends every later call of those networks to their new lists. A provider's nodes for several networks are added at once this way.",
-        "operationId": "add_network_rpc",
+        "operationId": "add_endpoints",
         "requestBody": {
           "content": {
             "application/json": {
@@ -359,7 +371,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NetworkList"
+                  "$ref": "#/components/schemas/NetworkEndpointsList"
                 }
               }
             }
@@ -418,6 +430,7 @@
           "networks"
         ],
         "summary": "List a network's last kept blocks",
+        "description": "Live kept blocks, latest first, a page at a time.",
         "operationId": "list_blocks",
         "parameters": [
           {
@@ -439,13 +452,25 @@
             }
           },
           {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
-            "description": "At most this many, 1 to 100; 20 by default.",
+            "description": "Page size, 1 to 500.",
             "required": false,
             "schema": {
               "type": "integer",
-              "format": "int64"
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
             }
           }
         ],
@@ -461,7 +486,7 @@
             }
           },
           "400": {
-            "description": "Malformed query or limit",
+            "description": "Malformed query, cursor, or limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -513,7 +538,7 @@
         "tags": [
           "networks"
         ],
-        "summary": "Read one kept block of a network, with its kept transactions",
+        "summary": "Read one kept block of a network",
         "operationId": "read_block",
         "parameters": [
           {
@@ -595,14 +620,208 @@
         ]
       }
     },
-    "/v1/networks/{chain}/{network}/rpc": {
+    "/v1/networks/{chain}/{network}/blocks/{position}/transactions": {
+      "get": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "List a live block's kept transactions",
+        "operationId": "list_block_transactions",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "position",
+            "in": "path",
+            "description": "Native position (height or slot).",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 500.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The transactions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlockTransactions"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query, cursor, or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The network is not configured, or no live block is kept at this position",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/networks/{chain}/{network}/endpoints": {
+      "get": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "List a network's RPC nodes",
+        "description": "Its stored nodes in failover order, each URL parsed.",
+        "operationId": "list_network_endpoints",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The network's nodes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkEndpoints"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The nodes could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
       "put": {
         "tags": [
           "networks"
         ],
         "summary": "Replace a network's RPC nodes",
         "description": "Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. The nodes are not verified here: the chain verifies them on the next start, which uses the stored list whatever the configuration file says.",
-        "operationId": "replace_network_rpc",
+        "operationId": "replace_network_endpoints",
         "parameters": [
           {
             "name": "chain",
@@ -639,7 +858,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ConfiguredNetwork"
+                  "$ref": "#/components/schemas/NetworkEndpoints"
                 }
               }
             }
@@ -690,16 +909,111 @@
             "bearerAuth": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "Add RPC nodes to a network",
+        "description": "Appends the nodes after the network's current ones, stores the list, then sends every later call of the network to it.",
+        "operationId": "add_network_endpoints",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RpcNodes"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Nodes stored and in use",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkEndpoints"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed node, or a list above 16 nodes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The nodes could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
-    "/v1/networks/{chain}/{network}/rpc/{index}": {
+    "/v1/networks/{chain}/{network}/endpoints/{index}": {
       "delete": {
         "tags": [
           "networks"
         ],
         "summary": "Remove one RPC node of a network",
         "description": "Removes the node at `index`, stores the rest and uses them from now on. A network's last node cannot be removed.",
-        "operationId": "remove_network_rpc",
+        "operationId": "remove_network_endpoint",
         "parameters": [
           {
             "name": "chain",
@@ -720,7 +1034,7 @@
           {
             "name": "index",
             "in": "path",
-            "description": "The node's `index` in `GET /v1/networks`.",
+            "description": "The node's `index` in its network's `endpoints`.",
             "required": true,
             "schema": {
               "type": "integer",
@@ -734,7 +1048,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ConfiguredNetwork"
+                  "$ref": "#/components/schemas/NetworkEndpoints"
                 }
               }
             }
@@ -771,112 +1085,6 @@
           },
           "503": {
             "description": "The nodes could not be stored",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/v1/networks/{chain}/{network}/tip": {
-      "get": {
-        "tags": [
-          "networks"
-        ],
-        "summary": "Read a network's newest block, or its last block at or before a time",
-        "description": "Read from the node. With `at`, a binary search over block times: about log2(tip) block reads, and on Bitcoin, whose block times only roughly ascend, possibly a few blocks off.",
-        "operationId": "read_tip",
-        "parameters": [
-          {
-            "name": "chain",
-            "in": "path",
-            "description": "Chain name, as `GET /v1/networks` lists it.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "network",
-            "in": "path",
-            "description": "Network name, as `GET /v1/networks` lists it.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "at",
-            "in": "query",
-            "description": "RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: answer the\nlast block at or before it. Absent: the newest block.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The block",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ChainTip"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed `at`",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "The network is not configured, or `at` is before its first block",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "The network cannot find blocks by time",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The node is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -984,7 +1192,7 @@
         "tags": [
           "networks"
         ],
-        "summary": "List a network's pending or mined transactions",
+        "summary": "List a network's transactions, or only its pending ones",
         "operationId": "list_network_transactions",
         "parameters": [
           {
@@ -1008,20 +1216,32 @@
           {
             "name": "pending",
             "in": "query",
-            "description": "Pending ones (true, the default), oldest sent first; or mined ones in\nlive blocks (false), latest first.",
+            "description": "Only pending ones (true), oldest sent first; otherwise (the default)\npending and mined in live blocks, newest first.",
             "required": false,
             "schema": {
               "type": "boolean"
             }
           },
           {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
-            "description": "At most this many, 1 to 500; 100 by default.",
+            "description": "Page size, 1 to 500.",
             "required": false,
             "schema": {
               "type": "integer",
-              "format": "int64"
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
             }
           }
         ],
@@ -1037,7 +1257,7 @@
             }
           },
           "400": {
-            "description": "Malformed query or limit",
+            "description": "Malformed query, cursor, or limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -1138,13 +1358,47 @@
         ],
         "summary": "List triggers",
         "operationId": "list_triggers",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 500.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Every trigger",
+            "description": "Triggers in id order",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TriggerList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1199,7 +1453,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TriggerList"
+                  "$ref": "#/components/schemas/TriggerBatchCreated"
                 }
               }
             }
@@ -1489,15 +1743,47 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 500.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Its latest 50 runs, latest first",
+            "description": "Its runs, latest first",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TriggerRunList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query, cursor, or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -1542,7 +1828,7 @@
           {
             "name": "cursor",
             "in": "query",
-            "description": "`next_cursor` of the previous page (the last wallet id); absent for\nthe first page.",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1551,13 +1837,13 @@
           {
             "name": "limit",
             "in": "query",
-            "description": "Page size, 1 to 1000.",
+            "description": "Page size, 1 to 500.",
             "required": false,
             "schema": {
               "type": "integer",
               "format": "int64",
               "default": 100,
-              "maximum": 1000,
+              "maximum": 500,
               "minimum": 1
             }
           }
@@ -1703,13 +1989,47 @@
         ],
         "summary": "List the tags in use",
         "operationId": "list_tags",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 500.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Every tag",
+            "description": "Tags in order",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TagList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -2121,25 +2441,24 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "`next_cursor` of the previous page (a `seq`); absent for the first\npage.",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
             "required": false,
             "schema": {
-              "type": "integer",
-              "format": "int64"
+              "type": "string"
             }
           },
           {
             "name": "limit",
             "in": "query",
-            "description": "Page size, 1 to 200.",
+            "description": "Page size, 1 to 500.",
             "required": false,
             "schema": {
               "type": "integer",
               "format": "int64",
-              "default": 50,
-              "maximum": 200,
+              "default": 100,
+              "maximum": 500,
               "minimum": 1
             }
           }
@@ -2156,7 +2475,7 @@
             }
           },
           "400": {
-            "description": "Malformed wallet ID, query or limit",
+            "description": "Malformed wallet ID, query, cursor, or limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -2352,113 +2671,6 @@
       }
     },
     "/v1/wallets/{id}/transactions": {
-      "get": {
-        "tags": [
-          "transactions"
-        ],
-        "summary": "Read one page of a wallet's history",
-        "description": "The wallet's transactions in `asset`, in chain order, with only its own legs of that asset; a fee is shown where this address paid it in the native asset. Block rewards count in the balance but are not transactions.",
-        "operationId": "read_wallet_transactions",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "`{chain}.{network}.{address}`.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "asset",
-            "in": "query",
-            "description": "An asset id of the wallet's network; default `native`.",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "native"
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "`next_cursor` of the previous page; absent for the first page.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "Page size, 1 to 1000.",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 100,
-              "maximum": 1000,
-              "minimum": 1
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "One history page",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TransactionPage"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed wallet ID, query, cursor, or limit",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Network or asset is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The store is unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      },
       "post": {
         "tags": [
           "transactions"
@@ -2628,16 +2840,14 @@
       },
       "Block": {
         "type": "object",
-        "description": "A kept block: its `block` row, its kept transactions in block order and\nits kept rewards. The API shows it as is. Read whole in one query: its\nchildren come as JSON arrays SQLite builds (`transactions`, `rewards`).",
+        "description": "A kept block: its `block` row; the API shows it as is. Written with its\nkept transactions in block order and its kept rewards, which are never\nread back into it.",
         "required": [
           "id",
           "chain",
           "network",
           "position",
           "height",
-          "hash",
-          "transactions",
-          "rewards"
+          "hash"
         ],
         "properties": {
           "archived_at": {
@@ -2687,13 +2897,6 @@
             "format": "int64",
             "description": "Native position (height or slot)."
           },
-          "rewards": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Leg"
-            },
-            "description": "Its kept rewards, in order."
-          },
           "timestamp": {
             "type": [
               "integer",
@@ -2701,21 +2904,15 @@
             ],
             "format": "int64",
             "description": "Unix seconds, when reported."
-          },
-          "transactions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Transaction"
-            },
-            "description": "Its kept transactions, in block order."
           }
         }
       },
       "BlockList": {
         "type": "object",
-        "description": "`GET /v1/networks/{chain}/{network}/blocks`.",
+        "description": "`GET /v1/networks/{chain}/{network}/blocks`: a page of blocks.",
         "required": [
-          "blocks"
+          "blocks",
+          "next_cursor"
         ],
         "properties": {
           "blocks": {
@@ -2723,7 +2920,38 @@
             "items": {
               "$ref": "#/components/schemas/Block"
             },
-            "description": "The last kept blocks, latest first."
+            "description": "Live kept blocks, latest first."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
+          }
+        }
+      },
+      "BlockTransactions": {
+        "type": "object",
+        "description": "`GET /v1/networks/{chain}/{network}/blocks/{position}/transactions`: a\npage of a block's transactions.",
+        "required": [
+          "transactions",
+          "next_cursor"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
+          },
+          "transactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Transaction"
+            },
+            "description": "The transactions, with their legs, in block order."
           }
         }
       },
@@ -2755,42 +2983,48 @@
           }
         }
       },
-      "ChainTip": {
+      "ConfiguredNetwork": {
         "type": "object",
-        "description": "`GET /v1/networks/{chain}/{network}/tip`.",
+        "description": "One configured network: its stored row and nodes, the node's tip now,\nand its configuration.",
         "required": [
-          "position",
-          "timestamp"
+          "network",
+          "tip",
+          "confirmed",
+          "indexed",
+          "checked_at",
+          "tip_live",
+          "tip_error",
+          "index_error",
+          "endpoints",
+          "explorer",
+          "max_history_days"
         ],
         "properties": {
-          "position": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Native position (height or slot).",
-            "minimum": 0
-          },
-          "timestamp": {
+          "checked_at": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Unix seconds, when reported; always present.",
+            "description": "Unix ms of the indexer's last read whose tip moved; always present.",
             "minimum": 0
-          }
-        }
-      },
-      "ConfiguredNetwork": {
-        "type": "object",
-        "description": "One configured network, its indexing, and its nodes.",
-        "required": [
-          "network",
-          "indexing",
-          "nodes",
-          "explorer",
-          "max_history_days"
-        ],
-        "properties": {
+          },
+          "confirmed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`tip - confirmations`; always present.",
+            "minimum": 0
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RpcNode"
+            },
+            "description": "Its nodes in failover order."
+          },
           "explorer": {
             "oneOf": [
               {
@@ -2802,9 +3036,21 @@
               }
             ]
           },
-          "indexing": {
-            "$ref": "#/components/schemas/Indexing",
-            "description": "What its indexer did since the process started."
+          "index_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The indexer's last failure since the process started, cleared by the\nnext kept block; always present."
+          },
+          "indexed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The last kept block; always present, null: none yet.",
+            "minimum": 0
           },
           "max_history_days": {
             "type": [
@@ -2818,12 +3064,30 @@
           "network": {
             "$ref": "#/components/schemas/Network"
           },
-          "nodes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RpcNode"
-            },
-            "description": "Its nodes in failover order."
+          "tip": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The node's newest block at the indexer's last read; always present,\nnull before the first.",
+            "minimum": 0
+          },
+          "tip_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why asking the node failed; always present, null when it answered."
+          },
+          "tip_live": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The node's newest block, asked now; `tip` when that failed. Always\npresent.",
+            "minimum": 0
           }
         }
       },
@@ -3124,9 +3388,10 @@
       },
       "JobList": {
         "type": "object",
-        "description": "`GET /v1/jobs`.",
+        "description": "`GET /v1/jobs`: a page of jobs.",
         "required": [
-          "jobs"
+          "jobs",
+          "next_cursor"
         ],
         "properties": {
           "jobs": {
@@ -3135,6 +3400,13 @@
               "$ref": "#/components/schemas/Job"
             },
             "description": "The jobs last written, latest first."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
           }
         }
       },
@@ -3226,6 +3498,20 @@
             ],
             "description": "Its index's balance right after it; `None` while pending."
           },
+          "total_received": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What its index has received (received, minted, reward) through it;\n`None` while pending."
+          },
+          "total_sent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What its index has sent (spent, burned, fee) through it; `None`\nwhile pending. `total = total_received - total_sent`."
+          },
           "transaction": {
             "type": [
               "string",
@@ -3250,17 +3536,16 @@
           "legs": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Leg"
+              "$ref": "#/components/schemas/Movement"
             },
-            "description": "Live mined legs, latest first, each with the balance after it\n(`total`)."
+            "description": "Live mined legs, latest first, each with the balance after it\n(`total`) and its transaction's txid and state (null for a reward)."
           },
           "next_cursor": {
             "type": [
-              "integer",
+              "string",
               "null"
             ],
-            "format": "int64",
-            "description": "Pass as `before` for the next page; null on the last page. Always\npresent."
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
           }
         }
       },
@@ -3287,6 +3572,33 @@
           }
         }
       },
+      "Movement": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Leg"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "0 pending, 1 succeeded, 2 reverted."
+              },
+              "txid": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A mined leg with its transaction's txid and state (null for a reward):\na row of [`db::find_page`]."
+      },
       "Network": {
         "type": "object",
         "description": "The chain and network a wallet, address, or transaction belongs to. It\nalways ships as one nested object, never as two sibling fields.",
@@ -3302,6 +3614,42 @@
           "name": {
             "type": "string",
             "description": "Configured network name, e.g. `regtest`."
+          }
+        }
+      },
+      "NetworkEndpoints": {
+        "type": "object",
+        "description": "A network's nodes.",
+        "required": [
+          "network",
+          "endpoints"
+        ],
+        "properties": {
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RpcNode"
+            },
+            "description": "Its nodes in failover order."
+          },
+          "network": {
+            "$ref": "#/components/schemas/Network"
+          }
+        }
+      },
+      "NetworkEndpointsList": {
+        "type": "object",
+        "description": "The networks a change touched.",
+        "required": [
+          "networks"
+        ],
+        "properties": {
+          "networks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetworkEndpoints"
+            },
+            "description": "Networks in chain, then name, order."
           }
         }
       },
@@ -3325,7 +3673,7 @@
       },
       "NetworkList": {
         "type": "object",
-        "description": "Every configured network, or the ones a change touched.",
+        "description": "Every configured network.",
         "required": [
           "networks"
         ],
@@ -3362,11 +3710,19 @@
       },
       "NetworkTransactions": {
         "type": "object",
-        "description": "`GET /v1/networks/{chain}/{network}/transactions`.",
+        "description": "`GET /v1/networks/{chain}/{network}/transactions`: a page of transactions.",
         "required": [
-          "transactions"
+          "transactions",
+          "next_cursor"
         ],
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
+          },
           "transactions": {
             "type": "array",
             "items": {
@@ -3399,7 +3755,7 @@
       },
       "RpcAdditions": {
         "type": "object",
-        "description": "`POST /v1/networks/rpc` body.",
+        "description": "`POST /v1/networks/endpoints` body.",
         "required": [
           "nodes"
         ],
@@ -3519,7 +3875,7 @@
       },
       "RpcNodes": {
         "type": "object",
-        "description": "`PUT /v1/networks/{chain}/{network}/rpc` body.",
+        "description": "`POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body.",
         "required": [
           "endpoints"
         ],
@@ -3737,17 +4093,25 @@
       },
       "TagList": {
         "type": "object",
-        "description": "`GET /v1/wallets/tags`.",
+        "description": "`GET /v1/wallets/tags`: a page of tags.",
         "required": [
-          "tags"
+          "tags",
+          "next_cursor"
         ],
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
+          },
           "tags": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Every tag in use on any wallet, sorted, each once. A wallet's own\ntags are on it (`GET /v1/wallets`)."
+            "description": "Tags in use on any wallet, sorted, each once. A wallet's own tags are\non it (`GET /v1/wallets`)."
           }
         }
       },
@@ -3803,6 +4167,14 @@
             "format": "int64",
             "description": "Its position in its block; null while pending."
           },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Its block's position; null while pending."
+          },
           "reason": {
             "type": [
               "string",
@@ -3826,35 +4198,6 @@
           "txid": {
             "type": "string",
             "description": "Chain-native transaction id."
-          }
-        }
-      },
-      "TransactionPage": {
-        "type": "object",
-        "description": "One page of `GET /v1/wallets/{id}/transactions`.",
-        "required": [
-          "asset",
-          "transactions",
-          "next_cursor"
-        ],
-        "properties": {
-          "asset": {
-            "$ref": "#/components/schemas/Asset",
-            "description": "The asset."
-          },
-          "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Opaque cursor of the next page; null on a short page. Always present."
-          },
-          "transactions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Transaction"
-            },
-            "description": "At most `limit` transactions in kept blocks, in chain order, each\nwith only the wallet's legs of the asset (atomic amounts; a mined\nleg's `position` is its block's). Kept blocks reach the produced\ntip, so the last ones may still be taken back by a reorg."
           }
         }
       },
@@ -3963,6 +4306,22 @@
         },
         "additionalProperties": false
       },
+      "TriggerBatchCreated": {
+        "type": "object",
+        "description": "`POST /v1/triggers`: the triggers created.",
+        "required": [
+          "triggers"
+        ],
+        "properties": {
+          "triggers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Trigger"
+            },
+            "description": "The batch's triggers, in its order."
+          }
+        }
+      },
       "TriggerDefinition": {
         "type": "object",
         "description": "A trigger as written: in a `POST` (with `id`) or as a `PUT` body.",
@@ -4008,11 +4367,19 @@
       },
       "TriggerList": {
         "type": "object",
-        "description": "`GET /v1/triggers`.",
+        "description": "`GET /v1/triggers`: a page of triggers.",
         "required": [
-          "triggers"
+          "triggers",
+          "next_cursor"
         ],
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
+          },
           "triggers": {
             "type": "array",
             "items": {
@@ -4038,17 +4405,25 @@
       },
       "TriggerRunList": {
         "type": "object",
-        "description": "`GET /v1/triggers/{id}/runs`.",
+        "description": "`GET /v1/triggers/{id}/runs`: a page of runs.",
         "required": [
-          "runs"
+          "runs",
+          "next_cursor"
         ],
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
+          },
           "runs": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/TriggerRun"
             },
-            "description": "The latest runs, latest first."
+            "description": "Runs, latest first."
           }
         }
       },
@@ -4068,7 +4443,7 @@
       },
       "Wallet": {
         "type": "object",
-        "description": "One wallet, as the API shows it: an address, whether its key is kept,\nits tags, and its indexes (each with its balances, progress and legs;\nread by [`db::find_at_tip`] and [`db::list_at_tip`], empty from the other\nreads). The key (`curve`, `secret`) is never serialized, and the API\nreads leave it out. No `Debug`: it may hold the key.",
+        "description": "One wallet, as the API shows it: an address, whether its key is kept,\nits tags, and its indexes (each with its balances, progress and legs;\nread by [`db::find`] and [`db::find_page`], empty from the other\nreads). The key (`curve`, `secret`) is never serialized, and the API\nreads leave it out. No `Debug`: it may hold the key.",
         "required": [
           "id",
           "chain",
@@ -4118,7 +4493,7 @@
       },
       "WalletIndex": {
         "type": "object",
-        "description": "One asset of one wallet being indexed, as every read answers it (the\nAPI shows it as is): its columns, how far it is indexed against its\nnetwork's tip, its balances and its pending legs. All computed in SQL\n(`db::BY_IDS`); amounts are exact atomic decimal text, never summed.\nPositions are native (height or slot).",
+        "description": "One asset of one wallet being indexed, as every read answers it (the\nAPI shows it as is): its columns, how far it is indexed against its\nnetwork's tip, its balances and its pending legs. All computed in SQL\n(`wallet_index_with_balance`); amounts are exact atomic decimal text, never summed.\nPositions are native (height or slot).",
         "required": [
           "id",
           "wallet_id",
@@ -4126,8 +4501,7 @@
           "state",
           "requested_from",
           "birthday",
-          "balance",
-          "legs"
+          "balance_pending"
         ],
         "properties": {
           "asset": {
@@ -4135,15 +4509,36 @@
             "description": "The asset id."
           },
           "balance": {
-            "type": "string",
-            "description": "Its last live mined leg's total, any block: `0` without one;\nnegative when indexed debits exceed indexed credits (history before\nthe start is unknown)."
-          },
-          "balance_confirmed": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The same at or below `finality_at`; null when that is unknown."
+            "description": "Its confirmed balance: its last live mined leg's total at or below\n`finality_at`, `0` without one; negative when indexed debits exceed\nindexed credits (history before the start is unknown); null while\n`finality_at` is unknown."
+          },
+          "balance_pending": {
+            "type": "string",
+            "description": "Its balance at the tip: its newest live mined leg's total, any\nblock, `0` without one; mempool legs are not in it."
+          },
+          "balance_received": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What it had received by then (that leg's `total_received`):\n`balance = balance_received - balance_sent`."
+          },
+          "balance_sent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What it had sent by then (fees included), the same way."
+          },
+          "balance_spendable": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What it can spend: `balance` less its pending outgoing legs (spent,\nburned, fee; no block); null while `balance` is."
           },
           "behind_tip": {
             "type": [
@@ -4164,7 +4559,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "The network's final (confirmed) block the read was given; null when\nunknown."
+            "description": "The network's final (confirmed) block: its indexer's, or a trigger\nround's; null when unknown."
           },
           "id": {
             "type": "string",
@@ -4177,13 +4572,6 @@
             ],
             "format": "int64",
             "description": "The last block indexed; null before the first."
-          },
-          "legs": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Leg"
-            },
-            "description": "Its pending legs (no block, no total), by id; its mined ones are\npaged by `leg::db::find_page`."
           },
           "reason": {
             "type": [

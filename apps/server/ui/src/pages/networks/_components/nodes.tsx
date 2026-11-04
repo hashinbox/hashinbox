@@ -31,7 +31,7 @@ export function Nodes({
   const [picked, setPicked] = useState(0);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<Node | null>(null);
-  const node = network.nodes[picked] ?? network.nodes[0] ?? null;
+  const node = network.endpoints[picked] ?? network.endpoints[0] ?? null;
   const name = `${network.network.chain}/${network.network.name}`;
 
   const remove = (target: Node) => {
@@ -39,7 +39,7 @@ export function Nodes({
     const params = {
       path: { chain: network.network.chain, network: network.network.name, index: target.index },
     };
-    call(client.DELETE('/v1/networks/{chain}/{network}/rpc/{index}', { params }))
+    call(client.DELETE('/v1/networks/{chain}/{network}/endpoints/{index}', { params }))
       .then(() => {
         shell.notify(`${target.origin} removed from ${name}.`);
         setPicked(0);
@@ -60,7 +60,7 @@ export function Nodes({
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 3, maxWidth: 720 }}>
         Calls go to the first node and fail over in order. A change is stored and used at once.
-        {network.indexing.error && ` Last indexing error: ${network.indexing.error}`}
+        {network.index_error && ` Last indexing error: ${network.index_error}`}
       </Typography>
       <Box
         sx={{
@@ -74,7 +74,7 @@ export function Nodes({
           aria-label="Nodes"
           sx={{ border: 1, borderColor: 'divider', borderRadius: 1 }}
         >
-          {network.nodes.map((n) => (
+          {network.endpoints.map((n) => (
             <ListItemButton
               key={n.index}
               selected={node?.index === n.index}
@@ -95,7 +95,7 @@ export function Nodes({
               </Typography>
             </ListItemButton>
           ))}
-          {network.nodes.length === 0 && (
+          {network.endpoints.length === 0 && (
             <Typography color="text.secondary" sx={{ p: 2, fontSize: 13 }}>
               No stored nodes.
             </Typography>
@@ -105,7 +105,7 @@ export function Nodes({
           <Detail
             node={node}
             onRemove={() => setRemoving(node)}
-            last={network.nodes.length === 1}
+            last={network.endpoints.length === 1}
           />
         )}
       </Box>

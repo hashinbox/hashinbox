@@ -44,6 +44,10 @@ pub struct Config {
     /// nodes keep; none: no limit.
     #[serde(default)]
     pub max_history_days: Option<u32>,
+    /// Slots a block needs below the tip to count as confirmed: the
+    /// confirmed position is `tip - confirmations`; default 32.
+    #[serde(default = "Config::default_confirmations")]
+    pub confirmations: u64,
 }
 
 /// One allowlisted SPL token and the decimals its mint must declare.
@@ -77,7 +81,12 @@ impl Config {
             pending_ttl_ms: Self::default_pending_ttl_ms(),
             interval_ms: Self::default_interval_ms(),
             max_history_days: None,
+            confirmations: Self::default_confirmations(),
         }
+    }
+
+    const fn default_confirmations() -> u64 {
+        32
     }
 
     const fn default_fee_ttl_ms() -> u64 {
@@ -257,6 +266,7 @@ impl base::Config for Config {
                 max_history: self
                     .max_history_days
                     .map(|days| Duration::from_secs(u64::from(days) * 86_400)),
+                confirmations: self.confirmations,
             })
         })
     }

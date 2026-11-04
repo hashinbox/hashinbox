@@ -12,7 +12,7 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
-import { ApiError, call, client, type ConfiguredNetwork } from '@/api/client';
+import { ApiError, call, client, type ConfiguredNetwork, type Schemas } from '@/api/client';
 import type { Shell } from '@/layout';
 import { PROVIDERS, asksKey, baseFor, urlOf } from '@/providers';
 import { mono } from '@/theme';
@@ -43,7 +43,7 @@ export function AddNodes({
   networks: ConfiguredNetwork[];
   open: boolean;
   onClose: () => void;
-  onAdded: (changed: ConfiguredNetwork[]) => void;
+  onAdded: (changed: Schemas['NetworkEndpoints'][]) => void;
 }) {
   const offered = PROVIDERS.filter((p) =>
     networks.some((n) => baseFor(p, n.network.chain, n.network.name) !== undefined),
@@ -93,7 +93,7 @@ export function AddNodes({
     };
     setBusy(true);
     setProblem(null);
-    call(client.POST('/v1/networks/rpc', { body }))
+    call(client.POST('/v1/networks/endpoints', { body }))
       .then((answer) => {
         close();
         onAdded(answer.networks);
@@ -258,7 +258,7 @@ export function AddNode({
     };
     setBusy(true);
     setProblem(null);
-    call(client.POST('/v1/networks/rpc', { body }))
+    call(client.POST('/v1/networks/endpoints', { body }))
       .then(() => {
         close();
         onAdded();

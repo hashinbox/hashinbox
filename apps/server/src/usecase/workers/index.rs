@@ -1,6 +1,8 @@
 //! The index job: one per network, never finished. Each run steps the
-//! network's indexer (`base::Indexer::next`) and asks to run again: at once
-//! while behind, one interval later once at the tip.
+//! network's indexer (`base::Indexer::next`), keeps its tip, confirmed
+//! position (`tip - confirmations`, the network's setting) and last kept
+//! block in the `network` row once the node answered a tip, and asks to run
+//! again: at once while behind, one interval later once at the tip.
 //!
 //! At the tip it queues a triggers job: every trigger decides each interval,
 //! never on a chain still catching up.
@@ -18,7 +20,7 @@ use serde_json::json;
 use tasks::{Ack, Id, Job, Status, Store as _, Task, Topic, Worker};
 
 use super::trigger::Scope;
-use crate::usecase::tasks::Queue;
+use crate::{db::Db, models, usecase::tasks::Queue};
 
 /// The job kind.
 pub(crate) const KIND: &str = "index";
@@ -36,18 +38,27 @@ pub(crate) struct Target {
 /// Steps every network's indexer.
 pub(crate) struct Index {
     payments: Arc<Payments>,
+    db: Db,
     queue: Queue,
 }
 
 impl Index {
-    pub(crate) const fn new(payments: Arc<Payments>, queue: Queue) -> Self {
-        Self { payments, queue }
+    pub(crate) const fn new(payments: Arc<Payments>, db: Db, queue: Queue) -> Self {
+        Self {
+            payments,
+            db,
+            queue,
+        }
     }
 
-    /// Makes sure every network has its index job, pending now; a finished
-    /// one (a Retry ran out) starts over.
+    /// Makes sure every network has its `network` row and its index job,
+    /// pending now; a finished one (a Retry ran out) starts over.
     pub(crate) async fn start(&self) -> anyhow::Result<()> {
         for network in self.payments.networks() {
+            let row = network.clone();
+            self.db
+                .write(move |connection| models::network::db::create(connection, &row))
+                .await?;
             let target = Target {
                 chain: network.chain.as_str().to_owned(),
                 network: network.name.clone(),
@@ -76,21 +87,45 @@ impl Worker for Index {
     type Input = Target;
     type State = ();
 
-    /// Up to [`STEPS`] steps of the indexer. At the tip it queues a triggers
-    /// job and runs again an interval later; still behind, it runs again at
-    /// once. A failed step (in the indexer's stats) waits an interval and
-    /// tries again: the job never ends.
+    /// Up to [`STEPS`] steps of the indexer, each followed by its `network`
+    /// row. At the tip it queues a triggers job and runs again an interval
+    /// later; still behind, it runs again at once. A failed step (in the
+    /// indexer's stats) or row write waits an interval and tries again: the
+    /// job never ends.
     async fn run(&self, task: Task<Target, ()>) -> Ack {
         let target = task.input().clone();
         let network = Network::new(Chain::new(&target.chain), &target.network);
         let now = tasks::now();
-        let indexer = match self.payments.service(&network) {
-            Ok(service) => service.indexer.clone(),
+        let service = match self.payments.service(&network) {
+            Ok(service) => service,
             Err(error) => return task.fail(format!("{error:#}")),
         };
+        let (indexer, confirmations) = (service.indexer.clone(), service.confirmations);
         let later = now.saturating_add(millis(indexer.interval()));
         for _ in 0..STEPS {
-            match indexer.next().await {
+            let next = indexer.next().await;
+            let (stats, at) = (indexer.stats(), network.clone());
+            if let Some(tip) = stats.tip {
+                let indexed = stats.last.map(|last| last.position);
+                let saved = self
+                    .db
+                    .write(move |connection| {
+                        let confirmed = tip.saturating_sub(confirmations);
+                        models::network::db::save(
+                            connection,
+                            &at,
+                            tip,
+                            confirmed,
+                            indexed,
+                            tasks::now(),
+                        )
+                    })
+                    .await;
+                if saved.is_err() {
+                    return task.again(later);
+                }
+            }
+            match next {
                 Ok(Next::Indexed(_) | Next::Reorged(_)) => {}
                 Ok(Next::Idle) => {
                     let scope = Scope {

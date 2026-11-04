@@ -303,6 +303,7 @@ impl base::Config for Config {
                 client,
                 dated: self.1.map(|_| -> Arc<dyn base::Dated> { Arc::new(Days) }),
                 max_history: self.1,
+                confirmations: 0,
             })
         })
     }

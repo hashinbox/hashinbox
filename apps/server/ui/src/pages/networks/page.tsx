@@ -21,13 +21,13 @@ import { AddNodes } from './_components/add';
 const BEAT_MS = 4000;
 
 /** `chain/network`. */
-function nameOf(n: ConfiguredNetwork): string {
+function nameOf(n: Pick<ConfiguredNetwork, 'network'>): string {
   return `${n.network.chain}/${n.network.name}`;
 }
 
 /** Where a network's indexing is: live at the tip, catching up, idle (nothing to index), or failing. */
 function syncOf(n: ConfiguredNetwork): { label: string; color: string; live: boolean } {
-  const { error, last, tip } = n.indexing;
+  const { index_error: error, indexed: last, tip_live: tip } = n;
   if (error) return { label: 'Retrying after an error', color: 'error.main', live: false };
   if (last == null || tip == null)
     return { label: 'Idle: no address to index', color: 'text.disabled', live: false };
@@ -118,8 +118,8 @@ export function Networks({ shell }: { shell: Shell }) {
               </Stack>
               <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                 <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary', flexGrow: 1 }}>
-                  {n.nodes.length} node{n.nodes.length === 1 ? '' : 's'} · kept #
-                  {n.indexing.last ?? '—'} · tip #{n.indexing.tip ?? '—'}
+                  {n.endpoints.length} node{n.endpoints.length === 1 ? '' : 's'} · indexed #
+                  {n.indexed ?? '—'} · tip #{n.tip_live ?? '—'}
                 </Typography>
                 <Tooltip title="Settings">
                   <IconButton
@@ -142,9 +142,9 @@ export function Networks({ shell }: { shell: Shell }) {
                   </IconButton>
                 </Tooltip>
               </Stack>
-              {n.indexing.error && (
+              {n.index_error && (
                 <Typography sx={{ fontFamily: mono, fontSize: 11, color: 'error.main' }}>
-                  {n.indexing.error}
+                  {n.index_error}
                 </Typography>
               )}
             </ListItemButton>

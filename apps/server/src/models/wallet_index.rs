@@ -8,119 +8,18 @@ use base::{Address, Addressed, Asset, BlockHeader, Decimal, Network, Networked, 
 use diesel::{
     dsl::sql,
     prelude::*,
-    sql_types::{BigInt, Bool, Integer, Nullable, Text},
+    sql_types::{BigInt, Nullable, Text},
     sqlite::Sqlite,
 };
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Block, Json, Leg, Wallet, child, int,
-    schema::{block, wallet, wallet_index},
+    Block, Wallet, child, int,
+    schema::{block, wallet, wallet_index, wallet_index_with_balance},
     trigger::{Target, This},
     uint,
-    wallet::Tips,
+    wallet_index_selector::Selector,
 };
-
-/// A set of wallet indexes; resolved in SQL through [`Selector::sql`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Selector {
-    /// These wallet indexes, by id (`chain.network.address.asset`).
-    Ids(Vec<String>),
-    /// Every wallet index of this asset id.
-    Asset(String),
-    /// Every wallet index whose wallet carries this tag.
-    Tag(String),
-    /// Every wallet index whose wallet carries no tag at all.
-    Untagged {},
-    /// In every one of these (AND; empty: all).
-    All(Vec<Selector>),
-    /// In any of these (OR; empty: none).
-    Any(Vec<Selector>),
-    /// Not in this one (relative to the network's fully indexed indexes).
-    Not(Box<Selector>),
-}
-
-impl Selector {
-    /// Whether it names wallets on purpose: no empty group (an empty "all
-    /// of" would be every wallet, an empty "any of" none), no "not" right
-    /// inside a "not", no empty id list, no empty asset, every tag well
-    /// formed.
-    ///
-    /// # Errors
-    ///
-    /// The first part that does not.
-    pub(crate) fn validate(&self) -> Result<(), super::trigger::Invalid> {
-        use super::trigger::Invalid;
-        match self {
-            Self::Ids(ids) if ids.is_empty() => Err(Invalid::new("a wallet list picks no wallet")),
-            Self::Ids(_) => Ok(()),
-            Self::Asset(asset) if asset.is_empty() => Err(Invalid::new("an asset is named")),
-            Self::Asset(_) => Ok(()),
-            Self::Tag(tag) if !super::wallet::is_tag(tag) => {
-                Err(Invalid::new("a tag is 1 to 64 of [a-z0-9-]"))
-            }
-            Self::Tag(_) | Self::Untagged {} => Ok(()),
-            Self::All(all) if all.is_empty() => Err(Invalid::new(
-                "an empty \"all of\" would select every wallet; name them by tag, asset or id",
-            )),
-            Self::Any(any) if any.is_empty() => {
-                Err(Invalid::new("an empty \"any of\" selects no wallet"))
-            }
-            Self::All(many) | Self::Any(many) => many.iter().try_for_each(Self::validate),
-            Self::Not(one) if matches!(**one, Self::Not(_)) => {
-                Err(Invalid::new("a \"not\" inside a \"not\" cancels out"))
-            }
-            Self::Not(one) => one.validate(),
-        }
-    }
-}
-
-impl Selector {
-    /// It as one SQL condition over `wi` (`wallet_index`) and `w` (its
-    /// `wallet`), its values pushed to `binds` in placeholder order: `All`
-    /// is AND (empty: true), `Any` OR (empty: false), `Not` NOT.
-    pub(crate) fn sql(&self, binds: &mut Vec<String>) -> String {
-        let group = |many: &[Self], binds: &mut Vec<String>, join: &str, empty: &str| {
-            if many.is_empty() {
-                return empty.to_owned();
-            }
-            let parts: Vec<String> = many.iter().map(|one| one.sql(binds)).collect();
-            format!("({})", parts.join(join))
-        };
-        match self {
-            Self::Ids(ids) => {
-                binds.extend(ids.iter().cloned());
-                format!("wi.id IN ({})", vec!["?"; ids.len()].join(", "))
-            }
-            Self::Asset(asset) => {
-                binds.push(asset.clone());
-                "wi.asset = ?".to_owned()
-            }
-            Self::Tag(name) => {
-                binds.push(name.clone());
-                "EXISTS (SELECT 1 FROM json_each(w.tags) j WHERE j.value = ?)".to_owned()
-            }
-            Self::Untagged {} => "json_array_length(w.tags) = 0".to_owned(),
-            Self::All(all) => group(all, binds, " AND ", "1"),
-            Self::Any(any) => group(any, binds, " OR ", "0"),
-            Self::Not(inner) => format!("NOT ({})", inner.sql(binds)),
-        }
-    }
-
-    /// The one asset it is restricted to: an `Asset` leaf at its top or
-    /// directly under a top `All`.
-    pub(crate) fn asset(&self) -> Option<&str> {
-        match self {
-            Self::Asset(asset) => Some(asset),
-            Self::All(all) => all.iter().find_map(|one| match one {
-                Self::Asset(asset) => Some(asset.as_str()),
-                _ => None,
-            }),
-            _ => None,
-        }
-    }
-}
 
 /// Whether an index is scanned.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -145,16 +44,6 @@ impl From<WalletIndexState> for IndexState {
     }
 }
 
-impl From<IndexState> for WalletIndexState {
-    fn from(state: IndexState) -> Self {
-        match state {
-            IndexState::Indexing => Self::Indexing,
-            IndexState::Paused => Self::Paused,
-            IndexState::NoData => Self::NoData,
-        }
-    }
-}
-
 /// Serializes an asset as its id.
 fn asset_id<S: serde::Serializer>(asset: &Asset, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&asset.id)
@@ -163,7 +52,7 @@ fn asset_id<S: serde::Serializer>(asset: &Asset, serializer: S) -> Result<S::Ok,
 /// One asset of one wallet being indexed, as every read answers it (the
 /// API shows it as is): its columns, how far it is indexed against its
 /// network's tip, its balances and its pending legs. All computed in SQL
-/// (`db::BY_IDS`); amounts are exact atomic decimal text, never summed.
+/// (`wallet_index_with_balance`); amounts are exact atomic decimal text, never summed.
 /// Positions are native (height or slot).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub(crate) struct WalletIndex {
@@ -188,18 +77,25 @@ pub(crate) struct WalletIndex {
     /// Blocks between `indexed_through` and the network's produced tip;
     /// null before the first block or without a tip.
     pub(crate) behind_tip: Option<i64>,
-    /// The network's final (confirmed) block the read was given; null when
-    /// unknown.
+    /// The network's final (confirmed) block: its indexer's, or a trigger
+    /// round's; null when unknown.
     pub(crate) finality_at: Option<i64>,
-    /// Its last live mined leg's total, any block: `0` without one;
-    /// negative when indexed debits exceed indexed credits (history before
-    /// the start is unknown).
-    pub(crate) balance: String,
-    /// The same at or below `finality_at`; null when that is unknown.
-    pub(crate) balance_confirmed: Option<String>,
-    /// Its pending legs (no block, no total), by id; its mined ones are
-    /// paged by `leg::db::find_page`.
-    pub(crate) legs: Vec<Leg>,
+    /// Its confirmed balance: its last live mined leg's total at or below
+    /// `finality_at`, `0` without one; negative when indexed debits exceed
+    /// indexed credits (history before the start is unknown); null while
+    /// `finality_at` is unknown.
+    pub(crate) balance: Option<String>,
+    /// What it had received by then (that leg's `total_received`):
+    /// `balance = balance_received - balance_sent`.
+    pub(crate) balance_received: Option<String>,
+    /// What it had sent by then (fees included), the same way.
+    pub(crate) balance_sent: Option<String>,
+    /// Its balance at the tip: its newest live mined leg's total, any
+    /// block, `0` without one; mempool legs are not in it.
+    pub(crate) balance_pending: String,
+    /// What it can spend: `balance` less its pending outgoing legs (spent,
+    /// burned, fee; no block); null while `balance` is.
+    pub(crate) balance_spendable: Option<String>,
     /// Whether its wallet's key is kept here.
     #[serde(skip)]
     pub(crate) keyed: bool,
@@ -236,25 +132,18 @@ impl Addressed for WalletIndex {
 }
 
 impl WalletIndex {
-    /// What it can spend: `balance_confirmed` (zero when no final block is
-    /// known) less what its pending sends take, its pending outgoing legs
-    /// (spent, burned, fee; no block). What pending sends bring counts once
-    /// mined.
+    /// What it can spend: `balance_spendable`, zero while unknown. What
+    /// pending sends bring counts once confirmed.
     ///
     /// # Errors
     ///
     /// When a stored amount does not decode.
     pub(crate) fn spendable(&self) -> anyhow::Result<Decimal> {
-        let confirmed: Decimal = self
-            .balance_confirmed
+        self.balance_spendable
             .as_deref()
             .unwrap_or("0")
             .parse()
-            .context("a stored total does not decode")?;
-        self.legs
-            .iter()
-            .filter(|leg| leg.block.is_none() && matches!(leg.kind, 1 | 2 | 4))
-            .try_fold(confirmed, |sum, leg| Ok(sum + leg.signed()?))
+            .context("a stored balance does not decode")
     }
 }
 
@@ -284,19 +173,13 @@ impl Selection {
         self.confirmed
     }
 
-    /// None, of the same network at the same block.
-    #[must_use]
-    pub(crate) fn emptied(&self) -> Self {
-        Self::new(self.network.clone(), self.confirmed)
-    }
-
     /// `one` alone, of the same network at the same block.
     ///
     /// # Errors
     ///
     /// When it is of another network.
     pub(crate) fn only(&self, one: &WalletIndex) -> anyhow::Result<Self> {
-        let mut alone = self.emptied();
+        let mut alone = Self::new(self.network.clone(), self.confirmed);
         alone.insert(one.clone())?;
         Ok(alone)
     }
@@ -318,15 +201,6 @@ impl Selection {
     /// Their ids, in order.
     pub(crate) fn ids(&self) -> Vec<String> {
         self.indexes.keys().cloned().collect()
-    }
-
-    /// Their spendable balances ([`WalletIndex::spendable`]), in id order.
-    ///
-    /// # Errors
-    ///
-    /// When a stored amount does not decode.
-    pub(crate) fn spendable(&self) -> anyhow::Result<Vec<Decimal>> {
-        self.indexes.values().map(WalletIndex::spendable).collect()
     }
 
     /// Each one's (address, asset), what a fee estimate takes.
@@ -402,40 +276,29 @@ pub(crate) mod db {
     /// A [`WalletIndex`] as read, of its wallet's network (not a column):
     /// a row of [`find_at_tip`] or [`select`], or one object of a wallet read's
     /// `indexes` (SQLite builds the same fields as JSON).
-    #[derive(Queryable, QueryableByName, Deserialize)]
+    #[derive(QueryableByName, Deserialize)]
+    #[diesel(table_name = wallet_index_with_balance)]
     pub(crate) struct IndexRow {
-        #[diesel(sql_type = Text)]
         id: String,
-        #[diesel(sql_type = Text)]
         wallet_id: String,
-        #[diesel(sql_type = Text)]
         asset: String,
-        #[diesel(sql_type = BigInt)]
         requested_from: i64,
-        #[diesel(sql_type = BigInt)]
         birthday: i64,
-        #[diesel(sql_type = Nullable<Text>)]
         indexed_at: Option<String>,
-        #[diesel(sql_type = Integer)]
         state: i32,
-        #[diesel(sql_type = Nullable<Text>)]
         reason: Option<String>,
-        #[diesel(sql_type = Text)]
         address: String,
-        #[diesel(sql_type = Nullable<BigInt>)]
         indexed_through: Option<i64>,
         #[diesel(sql_type = Nullable<BigInt>)]
         behind_tip: Option<i64>,
         #[diesel(sql_type = Nullable<BigInt>)]
         finality_at: Option<i64>,
-        #[diesel(sql_type = Text)]
-        balance: String,
-        #[diesel(sql_type = Nullable<Text>)]
-        balance_confirmed: Option<String>,
-        #[diesel(sql_type = Bool)]
+        balance: Option<String>,
+        balance_received: Option<String>,
+        balance_sent: Option<String>,
+        balance_pending: String,
+        balance_spendable: Option<String>,
         keyed: bool,
-        #[diesel(sql_type = Text, deserialize_as = Json<Vec<Leg>>)]
-        legs: Vec<Leg>,
     }
 
     /// The row of an index of `network`.
@@ -459,16 +322,18 @@ pub(crate) mod db {
                 behind_tip: row.behind_tip,
                 finality_at: row.finality_at,
                 balance: row.balance,
-                balance_confirmed: row.balance_confirmed,
-                legs: row.legs,
+                balance_received: row.balance_received,
+                balance_sent: row.balance_sent,
+                balance_pending: row.balance_pending,
+                balance_spendable: row.balance_spendable,
                 keyed: row.keyed,
                 indexed_at: row.indexed_at,
             })
         }
     }
 
-    /// Index `id` (`{wallet_id}.{asset}`) of `network`, if kept, measured
-    /// against `tips` as the wallet reads measure it, with its pending legs.
+    /// Index `id` (`{wallet_id}.{asset}`) of `network`, if kept, as the
+    /// wallet reads measure it (against its network's `network` row).
     ///
     /// # Errors
     ///
@@ -477,76 +342,14 @@ pub(crate) mod db {
         connection: &mut SqliteConnection,
         network: &Network,
         id: &str,
-        tips: &Tips,
     ) -> anyhow::Result<Option<WalletIndex>> {
-        // Index `?2`, measured against its network's entry in tips `?1` (JSON:
-        // tip and final block), with its pending legs. Each balance is the
-        // total of the index's last live mined leg (at or below the final block
-        // for the confirmed one).
         diesel::sql_query(
-            r#"
-            WITH t AS (
-                SELECT
-                    key AS network_id,
-                    json_extract(value, '$.tip') AS tip,
-                    json_extract(value, '$.confirmed') AS confirmed
-                FROM json_each(?1)
-            )
+            "
             SELECT
-                wi.id,
-                wi.wallet_id,
-                wi.asset,
-                wi.requested_from,
-                wi.birthday,
-                wi.indexed_at,
-                wi.state,
-                wi.reason,
-                w.address,
-                b.position AS indexed_through,
-                CASE
-                    WHEN b.position IS NULL OR t.tip IS NULL THEN NULL
-                    ELSE MAX(t.tip - b.position, 0)
-                END AS behind_tip,
-                t.confirmed AS finality_at,
-                COALESCE((
-                    SELECT l.total
-                    FROM leg l
-                    JOIN block lb ON lb.id = l.block
-                    WHERE l.wallet_index_id = wi.id
-                      AND lb.archived_at IS NULL
-                    ORDER BY l.position DESC, l.seq DESC
-                    LIMIT 1
-                ), '0') AS balance,
-                CASE
-                    WHEN t.confirmed IS NULL THEN NULL
-                    ELSE COALESCE((
-                        SELECT l.total
-                        FROM leg l
-                        JOIN block lb ON lb.id = l.block
-                        WHERE l.wallet_index_id = wi.id
-                          AND l.position <= t.confirmed
-                          AND lb.archived_at IS NULL
-                        ORDER BY l.position DESC, l.seq DESC
-                        LIMIT 1
-                    ), '0')
-                END AS balance_confirmed,
-                w.secret IS NOT NULL AS keyed,
-                COALESCE((
-                    SELECT json_group_array(
-                        json(l.json)
-                        ORDER BY l.id
-                    )
-                    FROM leg_json l
-                    WHERE l.wallet_index_id = wi.id
-                      AND l.block IS NULL
-                ), '[]') AS legs
-            FROM wallet_index wi
-            JOIN wallet w ON w.id = wi.wallet_id
-            LEFT JOIN block b ON b.id = wi.indexed_at
-            LEFT JOIN t ON t.network_id = w.chain || '.' || w.network
-            WHERE wi.id = ?2"#,
+                *
+            FROM wallet_index_with_balance
+            WHERE id = ?1",
         )
-        .bind::<Text, _>(serde_json::to_string(tips)?)
         .bind::<Text, _>(id)
         .get_result::<IndexRow>(connection)
         .optional()?
@@ -886,10 +689,12 @@ pub(crate) mod db {
         } else {
             "1"
         };
-        // Each balance is the total of the index's last live mined leg ('0':
-        // none), the confirmed one at or below `confirmed`.
+        // The view's columns, but its confirmed balances are as of
+        // `confirmed`, the round's block, not the indexer's: the totals of
+        // its last live mined leg there (`c`; '0': none), and that balance
+        // less its pending outgoing legs.
         let mut query = diesel::sql_query(format!(
-            r#"
+            "
             SELECT
                 wi.id,
                 wi.wallet_id,
@@ -899,47 +704,45 @@ pub(crate) mod db {
                 wi.indexed_at,
                 wi.state,
                 wi.reason,
-                w.address,
-                b.position AS indexed_through,
+                wi.address,
+                wi.keyed,
+                wi.indexed_through,
+                wi.balance_pending,
                 NULL AS behind_tip,
                 ? AS finality_at,
-                COALESCE((
-                    SELECT l.total
-                    FROM leg l
-                    JOIN block lb ON lb.id = l.block
-                    WHERE l.wallet_index_id = wi.id
-                      AND lb.archived_at IS NULL
-                    ORDER BY l.position DESC, l.seq DESC
-                    LIMIT 1
-                ), '0') AS balance,
-                COALESCE((
-                    SELECT l.total
-                    FROM leg l
-                    JOIN block lb ON lb.id = l.block
-                    WHERE l.wallet_index_id = wi.id
-                      AND lb.archived_at IS NULL
-                      AND l.position <= ?
-                    ORDER BY l.position DESC, l.seq DESC
-                    LIMIT 1
-                ), '0') AS balance_confirmed,
-                w.secret IS NOT NULL AS keyed,
-                COALESCE((
-                    SELECT json_group_array(
-                        json(l.json)
-                        ORDER BY l.id
+                COALESCE(c.total, '0') AS balance,
+                COALESCE(c.total_received, '0') AS balance_received,
+                COALESCE(c.total_sent, '0') AS balance_sent,
+                (
+                    SELECT SUM_DECIMAL(v)
+                    FROM (
+                        SELECT COALESCE(c.total, '0') AS v
+                        UNION ALL
+                        SELECT '-' || p.amount
+                        FROM leg p
+                        WHERE p.wallet_index_id = wi.id
+                          AND p.position IS NULL
+                          AND p.kind IN (1, 2, 4)
                     )
-                    FROM leg_json l
-                    WHERE l.wallet_index_id = wi.id
-                      AND l.block IS NULL
-                ), '[]') AS legs
-            FROM wallet_index wi
+                ) AS balance_spendable
+            FROM wallet_index_with_balance wi
             JOIN wallet w ON w.id = wi.wallet_id
             LEFT JOIN block b ON b.id = wi.indexed_at
-            WHERE w.chain = ?
-              AND w.network = ?
+            LEFT JOIN leg c ON c.id = (
+                SELECT l.id
+                FROM leg l
+                JOIN block lb ON lb.id = l.block
+                WHERE l.wallet_index_id = wi.id
+                  AND lb.archived_at IS NULL
+                  AND l.position <= ?
+                ORDER BY l.position DESC, l.seq DESC
+                LIMIT 1
+            )
+            WHERE wi.chain = ?
+              AND wi.network = ?
               AND ({indexed})
               AND ({picked})
-            ORDER BY wi.wallet_id, wi.asset"#
+            ORDER BY wi.wallet_id, wi.asset"
         ))
         .into_boxed()
         .bind::<BigInt, _>(confirmed)
@@ -957,7 +760,7 @@ pub(crate) mod db {
         for row in rows {
             let index = WalletIndex::try_from((network, row))?;
             let negative = index
-                .balance_confirmed
+                .balance
                 .as_deref()
                 .is_some_and(|total| total.starts_with('-'));
             ensure!(!negative, "a confirmed balance is negative");

@@ -16,7 +16,7 @@ use diesel::SqliteConnection;
 use crate::models::{
     self, TriggerRun, block, trigger,
     trigger::{Action, Aggregate, Amount, Compare, Filter, Gate, Logic, Target},
-    wallet_index::{self, Selection},
+    wallet_index::{self, Selection, WalletIndex},
 };
 
 /// What every trigger of a round decides with, besides the connection.
@@ -98,7 +98,7 @@ impl<'a> Trigger<'a> {
         filter: &Logic<Filter>,
         this: &Selection,
     ) -> anyhow::Result<Selection> {
-        let mut kept = this.emptied();
+        let mut kept = Selection::new(this.network().clone(), this.confirmed_at());
         for one in this.values() {
             let alone = this.only(one)?;
             if filter.eval(&mut |Filter::Compare(compare)| self.compare(compare, &alone))? {
@@ -146,7 +146,11 @@ impl<'a> Trigger<'a> {
         let Some(asset) = asset else {
             return Ok(false);
         };
-        let balances = indexes.spendable()?.into_iter();
+        let balances = indexes
+            .values()
+            .map(WalletIndex::spendable)
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter();
         let left = match compare.aggregate {
             Aggregate::Min => balances.min(),
             Aggregate::Max => balances.max(),
@@ -182,7 +186,7 @@ impl<'a> Trigger<'a> {
             Amount::Balance { of } => {
                 let indexes = self.target(of, this)?;
                 return indexes
-                    .map(|indexes| Ok(indexes.spendable()?.into_iter().sum()))
+                    .map(|indexes| indexes.values().map(WalletIndex::spendable).sum())
                     .transpose();
             }
             Amount::Fee { of } => {
@@ -243,7 +247,8 @@ impl Triggers {
         connection: &mut SqliteConnection,
         network: &Network,
     ) -> anyhow::Result<Self> {
-        let last = block::db::find_last(connection, network)?.map(|block| block.position);
+        let last =
+            block::db::find_below(connection, network, i64::MAX)?.map(|block| block.position);
         let all = match last {
             Some(_) => trigger::db::find_enabled(connection, network)?,
             None => Vec::new(),

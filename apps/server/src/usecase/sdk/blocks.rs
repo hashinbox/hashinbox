@@ -30,7 +30,7 @@ impl BlockStore for Stores {
     ) -> Future<'a, anyhow::Result<Option<BlockHeader>>> {
         let network = network.clone();
         Box::pin(self.db.read(move |connection| {
-            block::db::find_last(connection, &network)?
+            block::db::find_below(connection, &network, i64::MAX)?
                 .map(|block| BlockHeader::try_from(&block))
                 .transpose()
         }))
