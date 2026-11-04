@@ -21,7 +21,7 @@ use crate::{
 async fn storage() -> (Stores, Db, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let db = crate::db::Db::open(&directory.path().join("test.db")).unwrap();
-    db.migrate(&crate::schema::ALL).await.unwrap();
+    db.migrate().await.unwrap();
     (Stores::new(db.clone()), db, directory)
 }
 

@@ -104,7 +104,7 @@ fn seeded() -> (tempfile::TempDir, tokio::runtime::Runtime, SqliteConnection) {
         .build()
         .unwrap();
     let db = crate::db::Db::open(&path).unwrap();
-    runtime.block_on(db.migrate(&crate::schema::ALL)).unwrap();
+    runtime.block_on(db.migrate()).unwrap();
     let mut connection = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
     connection
         .batch_execute("PRAGMA foreign_keys = ON;")

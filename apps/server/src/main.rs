@@ -15,7 +15,6 @@ mod api;
 mod config;
 mod db;
 mod models;
-mod schema;
 mod ui;
 mod usecase;
 
@@ -71,7 +70,7 @@ async fn main() -> Result<(), AnyError> {
         None => return Err(USAGE.into()),
         Some(Command::Migrate { config }) => {
             let db = Config::read(config).await?.storage.open()?;
-            db.migrate(&schema::ALL).await?;
+            db.migrate().await?;
             return Ok(());
         }
         Some(Command::Serve { config }) => config,

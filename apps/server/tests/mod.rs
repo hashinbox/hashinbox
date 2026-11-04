@@ -33,9 +33,7 @@ fn network() -> Network {
 async fn database() -> (crate::db::Db, tempfile::TempDir) {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let db = crate::db::Db::open(&directory.path().join("test.db")).expect("the file opens");
-    db.migrate(&crate::schema::ALL)
-        .await
-        .expect("the schema applies");
+    db.migrate().await.expect("the schema applies");
     (db, directory)
 }
 

@@ -49,10 +49,10 @@ fn tip(node: &Http) -> BoxFuture<'_, Result<u64, CallError>> {
     })
 }
 
-async fn submit(nodes: Vec<Http>, signed: String) -> Result<String, CallError> {
+async fn submit(nodes: Vec<Http>, signed: String) -> Result<(), CallError> {
     let cluster = Cluster::new(nodes, tip, Policy::default()).await?;
     let send = Request::once("sendrawtransaction", json!([signed]));
-    Ok(cluster.broadcast(send).await??.deserialize()?)
+    cluster.broadcast(send).await
 }
 ```
 

@@ -2,9 +2,9 @@
 """Checks that no module of apps/server imports upward (docs/design/069-server-layers.md).
 
 Layers, bottom up: models, usecase, api, main (`main.rs`, `config.rs`, `ui.rs`).
-`db` and `schema` sit beside them and depend on no other module. A module may
-name, through `crate::`, only its own layer, the layers below it, and `db` and
-`schema`; `main` names everything. Comments are ignored.
+`db` sits beside them and depends on no other module. A module may name,
+through `crate::`, only its own layer, the layers below it, and `db`; `main`
+names everything. Comments are ignored.
 
 usage: scripts/server-layers.py        (exits 1 and lists every upward import)
 """
@@ -16,11 +16,10 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOURCE = os.path.join(ROOT, "apps", "server", "src")
 
-BESIDE = {"db", "schema"}
+BESIDE = {"db"}
 # The `crate::` roots each top-level module may name.
 ALLOWED = {
     "db": set(),
-    "schema": set(),
     "models": {"models"} | BESIDE,
     "usecase": {"usecase", "models"} | BESIDE,
     "api": {"api", "usecase", "models"} | BESIDE,

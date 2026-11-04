@@ -148,7 +148,7 @@ mod tests {
     async fn queue() -> (tempfile::TempDir, Queue) {
         let directory = tempfile::tempdir().unwrap();
         let db = crate::db::Db::open(&directory.path().join("q.db")).unwrap();
-        db.migrate(&crate::schema::ALL).await.unwrap();
+        db.migrate().await.unwrap();
         (directory, Queue::new(db))
     }
 

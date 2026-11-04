@@ -30,7 +30,7 @@ impl fmt::Debug for Storage {
 /// One network, ready to run.
 pub struct Service {
     /// Indexes the network into [`Storage::blocks`]; shared, so it can
-    /// [`Indexer::run`] while still answering watches and stats.
+    /// step ([`Indexer::next`]) while still answering watches and stats.
     pub indexer: Arc<Indexer>,
     /// Makes the network's wallets and broadcasts their transactions.
     pub wallets: WalletFactoryBroadcaster,

@@ -13,8 +13,7 @@ cargo run --locked -p payment-server -- migrate ./payments.toml  # once: create 
 cargo run --locked -p payment-server -- serve ./payments.toml
 ```
 
-`migrate` executes `schema/sdk.sql`, `schema/server.sql` and `schema/queue.sql`
-on the configured (new) file; there are no migrations. `serve` only opens it.
+`migrate` executes `init.sql` on the configured (new) file; there are no migrations. `serve` only opens it.
 
 ```toml
 # payments.toml (a `.toml` path is read as TOML, anything else as JSON)
@@ -87,7 +86,7 @@ committed copy. `GET /health` and `GET /openapi.json` need no token.
 
 ## Layout
 
-Layers, bottom up: `models`, `usecase`, `api`, `main`; `db` and `schema` beside
+Layers, bottom up: `models`, `usecase`, `api`, `main`; `db` beside
 them. Nothing imports upward (docs/design/069-server-layers.md;
 `scripts/server-layers.py` checks it).
 
@@ -97,8 +96,8 @@ them. Nothing imports upward (docs/design/069-server-layers.md;
   stops after HTTP drains; unfinished jobs resume on the next start).
   `src/main.rs` is the only file that names a chain crate; `src/config.rs` reads
   the file; `src/ui.rs` serves the page.
-- `src/db.rs`: the SQLite pool, its pragmas, read and write transactions;
-  `src/schema.rs`: the embedded `schema/*.sql` files.
+- `src/db.rs`: the SQLite pool, its pragmas, read and write transactions, and
+  `migrate`, which runs the embedded `init.sql`.
 - `src/api/`: one file per resource; `mod.rs` assembles the router and OpenAPI root
   and holds the shared `Error`; `state.rs` is the handler state.
 - `src/models/`: one file per table (diesel row and its SQL) and the shared wire

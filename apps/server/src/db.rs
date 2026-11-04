@@ -43,7 +43,7 @@ diesel::define_sql_function! {
     fn sum_decimal(amount: diesel::sql_types::Text) -> diesel::sql_types::Nullable<diesel::sql_types::Text>;
 }
 
-/// [`sum_decimal`]'s running sum: `None` once a value does not decode.
+/// `SUM_DECIMAL`'s running sum: `None` once a value does not decode.
 struct SumDecimal(Option<base::Decimal>);
 
 impl Default for SumDecimal {
@@ -136,20 +136,15 @@ impl Db {
         Ok(Self { pool })
     }
 
-    /// Executes `schemas`, in order, in one write on this (new) file.
+    /// Creates the schema (`apps/server/init.sql`) in one write on this
+    /// (new) file.
     ///
     /// # Errors
     ///
-    /// When a schema does not apply.
-    pub(crate) async fn migrate(&self, schemas: &[&'static str]) -> anyhow::Result<()> {
-        let schemas = schemas.to_vec();
-        self.write(move |connection| {
-            for schema in schemas {
-                connection.batch_execute(schema)?;
-            }
-            Ok(())
-        })
-        .await
+    /// When the schema does not apply.
+    pub(crate) async fn migrate(&self) -> anyhow::Result<()> {
+        self.write(|connection| Ok(connection.batch_execute(include_str!("../init.sql"))?))
+            .await
     }
 
     /// Runs `work` in one `BEGIN IMMEDIATE` transaction on a blocking thread;

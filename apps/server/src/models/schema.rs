@@ -1,4 +1,4 @@
-//! Diesel's view of `schema/*.sql`, written by hand to match it; the `migrate`
+//! Diesel's view of `init.sql`, written by hand to match it; the `migrate`
 //! command executes the SQL files, nothing here creates a table.
 
 diesel::table! {

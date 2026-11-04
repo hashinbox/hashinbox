@@ -1,5 +1,5 @@
 //! The nouns the server uses across its endpoints and its storage, one file
-//! per noun, and one file per table of the schema (`schema/*.sql`): the diesel
+//! per noun, and one file per table of the schema (`init.sql`): the diesel
 //! row, every statement that reads or writes it, and its conversions to and
 //! from `base`'s types. The storage traits are implemented on these in
 //! `crate::usecase::sdk` and `crate::usecase::tasks`.
@@ -115,7 +115,7 @@ pub(crate) fn uint(value: i64) -> anyhow::Result<u64> {
     u64::try_from(value).context("a stored value is negative")
 }
 
-/// A row id: `parts` joined with dots (see `schema/sdk.sql`).
+/// A row id: `parts` joined with dots (see `init.sql`).
 ///
 /// # Errors
 ///

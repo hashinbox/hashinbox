@@ -1,4 +1,4 @@
-//! `q`: one row per queued job for its whole life (`schema/queue.sql`). The
+//! `q`: one row per queued job for its whole life (`init.sql`). The
 //! statements behind `tasks::Store` (`crate::usecase::tasks`).
 
 use anyhow::Context as _;
