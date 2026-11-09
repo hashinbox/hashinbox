@@ -1,6 +1,8 @@
 //! [`Transaction`]: an Ethereum transaction and its base form, kept together.
 //! Built for sending and signed, or read from a block.
 
+use std::collections::BTreeMap;
+
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope};
 use alloy_eips::Encodable2718 as _;
 use alloy_primitives::{B256, Bytes, Signature, TxKind, U64, U256, hex, keccak256};
@@ -64,25 +66,30 @@ impl Transaction {
         )
     }
 
-    /// A mined transaction: its object in `eth_getBlockByNumber(n, true)` and
-    /// its receipt. Ether a contract moves inside the transaction (internal
-    /// transfers) is not seen: standard RPC records it nowhere.
-    /// Legs are of ether and of the allowlisted `tokens` only; a reverted
-    /// transaction keeps only its fee.
+    /// A mined transaction: its object in `eth_getBlockByNumber(n, true)`,
+    /// its receipt, and the token `Transfer` logs `eth_getLogs` returned,
+    /// by transaction hash. The receipt gives only its status and fee (until
+    /// those come from elsewhere, every block's receipts are still fetched).
+    /// Ether a contract moves inside the transaction (internal transfers) is
+    /// not seen: standard RPC records it nowhere. Legs are of ether and of
+    /// the allowlisted `tokens` only; a reverted transaction keeps only its
+    /// fee.
     ///
     /// # Errors
     ///
     /// When a field the legs need does not decode.
-    pub fn from_rpc(
+    pub(crate) fn from_rpc(
         transaction: &Value,
         receipt: &Value,
+        logs: &BTreeMap<B256, Vec<Log>>,
         network: &Network,
         tokens: &Tokens,
     ) -> anyhow::Result<Self> {
         let listed = Listed::deserialize(transaction).context("Ethereum transaction")?;
         let receipt = Receipt::deserialize(receipt).context("Ethereum receipt")?;
         let succeeded = receipt.status == U64::from(1);
-        let legs = legs(&listed, &receipt, succeeded, network, tokens);
+        let logs = logs.get(&listed.hash).map_or(&[][..], Vec::as_slice);
+        let legs = legs(&listed, &receipt, logs, succeeded, network, tokens);
         let state = if succeeded {
             TransactionState::Succeeded
         } else {
@@ -220,21 +227,28 @@ struct Receipt {
     gas_used: U256,
     effective_gas_price: U256,
     contract_address: Option<alloy_primitives::Address>,
-    logs: Vec<Log>,
 }
 
+/// One log `eth_getLogs` returned: the fields the legs need, and where it is.
 #[derive(Deserialize)]
-struct Log {
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Log {
     address: alloy_primitives::Address,
     topics: Vec<B256>,
     data: Bytes,
+    /// The transaction that emitted it.
+    pub(crate) transaction_hash: B256,
+    /// The block it is in, to check it is the block fetched.
+    pub(crate) block_hash: B256,
+    /// That block's number.
+    pub(crate) block_number: U64,
 }
 
 /// The legs of a mined transaction, in order:
 ///
 /// 1. Its ether `value`: `Spent` by the sender, `Received` by the target
 ///    (or the created contract).
-/// 2. Each allowlisted token `Transfer` log: `Spent` and `Received`; a mint
+/// 2. Each allowlisted token `Transfer` log of `logs`: `Spent` and `Received`; a mint
 ///    (from zero) is `Minted`, a burn (to zero) `Burned`.
 /// 3. The fee, `gasUsed * effectiveGasPrice`, of the sender.
 ///
@@ -242,6 +256,7 @@ struct Log {
 fn legs(
     listed: &Listed,
     receipt: &Receipt,
+    logs: &[Log],
     succeeded: bool,
     network: &Network,
     tokens: &Tokens,
@@ -268,11 +283,7 @@ fn legs(
                 coin: None,
             });
         }
-        for log in receipt
-            .logs
-            .iter()
-            .filter(|log| tokens.contains(&log.address))
-        {
+        for log in logs.iter().filter(|log| tokens.contains(&log.address)) {
             let Some((from, to, amount)) = erc20::transfer_log(&log.topics, &log.data) else {
                 continue;
             };

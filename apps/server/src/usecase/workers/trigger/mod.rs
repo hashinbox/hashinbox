@@ -5,7 +5,7 @@
 //! A round's topic is the whole network (`chain:network`), so it never runs
 //! beside a broadcast of that network, and the jobs it starts run after it:
 //! every round sees what earlier rounds sent as pending or mined, never in
-//! flight.
+//! flight. At most one round of a network is pending or running.
 
 pub(crate) mod actions;
 
@@ -78,7 +78,8 @@ impl Worker for Round {
 
     /// One round: every enabled trigger decides at the last kept block, on
     /// spendable balances (pending sends already taken off); each action's
-    /// started jobs become one run with them, kept together.
+    /// started jobs become one run with them, every run of the round kept
+    /// in one write.
     async fn run(&self, task: Task<Scope, ()>) -> Ack {
         let scope = task.input();
         let network = Network::new(Chain::new(&scope.chain), &scope.network);
@@ -126,23 +127,27 @@ impl Worker for Round {
                 }
             }
 
-            // Each acting trigger's run and its jobs: both or neither.
-            for (id, jobs) in acting {
-                let run = TriggerRun {
-                    jobs: Json(jobs.iter().map(|job| job.id.to_string()).collect()),
-                    ..TriggerRun::new(&id, now)
-                };
-                self.db
-                    .write(move |connection| {
+            // Every acting trigger's run and its jobs in one write: all or
+            // none, so a rerun never decides again what this one kept.
+            if acting.is_empty() {
+                return anyhow::Ok(());
+            }
+            self.db
+                .write(move |connection| {
+                    for (id, jobs) in &acting {
+                        let run = TriggerRun {
+                            jobs: Json(jobs.iter().map(|job| job.id.to_string()).collect()),
+                            ..TriggerRun::new(id, now)
+                        };
                         trigger_run::db::insert(connection, &run)?;
-                        for job in &jobs {
+                        for job in jobs {
                             task::db::insert(connection, &Row::try_from(job)?, now)?;
                         }
-                        Ok(())
-                    })
-                    .await?;
-                self.queue.announce();
-            }
+                    }
+                    Ok(())
+                })
+                .await?;
+            self.queue.announce();
             anyhow::Ok(())
         };
         match round.await {

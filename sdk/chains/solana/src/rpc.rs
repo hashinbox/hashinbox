@@ -1,7 +1,13 @@
 //! The Solana JSON-RPC calls this crate makes, over `::rpc`, answered in
 //! `base` types.
 
-use std::{str::FromStr as _, sync::Arc};
+use std::{
+    str::FromStr as _,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use ::rpc::{Batch, Call, CallError, CallResult, Client as _, Request};
 use anyhow::{Context as _, anyhow, bail, ensure};
@@ -34,13 +40,41 @@ pub struct Client(Arc<Inner>);
 struct Inner {
     transport: Arc<dyn ::rpc::Client>,
     network: Network,
+    /// What each mint's decimals must be.
+    decimals: Vec<(solana_address::Address, u8)>,
+    /// Whether the node passed [`Client::verify`]; until then every call
+    /// verifies first.
+    verified: AtomicBool,
 }
 
 impl Client {
-    /// A client of `network` over `transport`; [`Self::verify`] checks the node.
+    /// A client of `network` over `transport`, trusted: [`Self::verify`]
+    /// checks the node when asked.
     #[must_use]
     pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
-        Self(Arc::new(Inner { transport, network }))
+        Self(Arc::new(Inner {
+            transport,
+            network,
+            decimals: Vec::new(),
+            verified: AtomicBool::new(true),
+        }))
+    }
+
+    /// A client of `network` over `transport` that asks nothing yet: its
+    /// first call verifies the node ([`Self::verify`], with each mint's
+    /// decimals), again on every call until one passes.
+    #[must_use]
+    pub fn verifying(
+        transport: Arc<dyn ::rpc::Client>,
+        network: Network,
+        decimals: Vec<(solana_address::Address, u8)>,
+    ) -> Self {
+        Self(Arc::new(Inner {
+            transport,
+            network,
+            decimals,
+            verified: AtomicBool::new(false),
+        }))
     }
 
     /// The network it serves.
@@ -50,11 +84,13 @@ impl Client {
     }
 
     /// Checks that the node serves this cluster's genesis hash and an
-    /// executable Memo-v3 program, which every transfer carries.
+    /// executable Memo-v3 program, which every transfer carries, and that
+    /// each mint declares its configured decimals.
     ///
     /// # Errors
     ///
-    /// For another cluster, no Memo-v3, or a node failure.
+    /// For another cluster, no Memo-v3, a mint that disagrees, or a node
+    /// failure.
     pub async fn verify(&self) -> anyhow::Result<()> {
         let genesis: String = self.call("getGenesisHash", json!([])).await?;
         let expected = &self.network().genesis_hash;
@@ -67,6 +103,28 @@ impl Client {
             memo.is_some_and(|program| program.executable),
             "Solana node has no executable Memo-v3 program"
         );
+        for (mint, configured) in &self.0.decimals {
+            let decimals = self.decimals(mint).await?;
+            ensure!(
+                decimals == *configured,
+                "Solana mint {mint} declares {decimals} decimals, not the configured {configured}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Verifies the node once it passes: nothing for a trusted client or
+    /// one already verified.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::verify`]'s failure.
+    pub async fn ready(&self) -> anyhow::Result<()> {
+        if self.0.verified.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.verify().await?;
+        self.0.verified.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -77,6 +135,7 @@ impl Client {
     ///
     /// A node failure.
     pub async fn tips(&self) -> anyhow::Result<Tips> {
+        self.ready().await?;
         let [produced, rooted] = self
             .batch(vec![
                 Call::new("getSlot", json!([{ "commitment": CONFIRMED }])),
@@ -102,6 +161,7 @@ impl Client {
     /// A node failure, a block the node no longer keeps ([`NotServed`]), or
     /// a run that does not link (the chain moved mid-fetch; retry).
     pub async fn blocks(&self, start: u64, end: u64, tokens: &Tokens) -> anyhow::Result<Blocks> {
+        self.ready().await?;
         let network = self.network();
         let mut run = Blocks::new(network.into());
         if start > end {
@@ -165,6 +225,7 @@ impl Client {
     ///
     /// A node failure, or a block it no longer keeps ([`NotServed`]).
     pub async fn time(&self, slot: u64) -> anyhow::Result<Option<u64>> {
+        self.ready().await?;
         let reply = self
             .0
             .transport
@@ -184,6 +245,7 @@ impl Client {
     ///
     /// A node failure.
     pub async fn blockhash(&self) -> anyhow::Result<Hash> {
+        self.ready().await?;
         let latest: Context<Latest> = self
             .call("getLatestBlockhash", json!([{ "commitment": CONFIRMED }]))
             .await?;
@@ -199,6 +261,7 @@ impl Client {
     /// A node failure, or a node that does not price it (its blockhash is
     /// unknown to the node).
     pub async fn fee(&self, message: &Message) -> anyhow::Result<u64> {
+        self.ready().await?;
         let fee: Context<Option<u64>> = self
             .call(
                 "getFeeForMessage",
@@ -214,6 +277,7 @@ impl Client {
     ///
     /// A node failure.
     pub(crate) async fn rent(&self, bytes: u64) -> anyhow::Result<u64> {
+        self.ready().await?;
         self.call("getMinimumBalanceForRentExemption", json!([bytes]))
             .await
     }
@@ -248,6 +312,7 @@ impl Client {
     /// any other refusal; `Unavailable` when no node answered: the outcome is
     /// unknown, retry with the same bytes.
     pub async fn send(&self, bytes: &[u8]) -> Result<(), TransactionError> {
+        self.ready().await.map_err(TransactionError::unavailable)?;
         let request = Request::once(
             "sendTransaction",
             json!([STANDARD.encode(bytes), {

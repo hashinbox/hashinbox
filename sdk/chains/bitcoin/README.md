@@ -54,16 +54,17 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
 network by name, endpoints, BTC's display decimals, `confirmation_depth`
 (`confirmations + 1`), `max_history`, and from `settings` the knobs
 `address_type`, `fee_target_blocks`, `fee_floor`, `fee_ttl_ms`,
-`pending_ttl_ms`, `interval_ms` (each absent one its default).
+`pending_ttl_ms`, `interval_ms`, and `batch`, the blocks the indexer fetches
+per step (default 100) (each absent one its default).
 
 ## Notes
 
-- `Config` implements `base::Config`: `build(&storage, client)` validates,
-  verifies the node and returns the `base::Service`. The indexer wakes every
+- `Config` implements `base::Config`: `build(&storage, client)` validates
+  and returns the `base::Service`, asking no node. The indexer wakes every
   `interval_ms` milliseconds (default 30,000).
 - `client()` is the chain's own cluster over `endpoints`; `build(&storage,
-  client)` verifies once that `client` serves the network and builds every
-  part over it. Pass a `rpc::Swap` and keep it to change nodes live.
+  client)` builds every part over it; the first call verifies that `client`
+  serves the network (again at each call until it does). Pass a `rpc::Swap` and keep it to change nodes live.
   Endpoints are needed only by `client()`.
 - Position and height are both the block height. `confirmation_depth`
   (1 to 1000, default 6) makes a block final once that many blocks, itself

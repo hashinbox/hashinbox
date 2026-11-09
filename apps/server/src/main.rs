@@ -19,11 +19,20 @@ mod usecase;
 #[path = "../tests/mod.rs"]
 mod tests;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use api::AppState;
 use config::{AnyError, Cli, Command};
 use payments::Payments;
+use usecase::workers::executor::{self, Executor};
+
+/// A network's nodes as one client, when the caller has them (tests map
+/// their endpoint URLs to mock nodes); `None`: the chain connects its own.
+pub(crate) type Connect = dyn Fn(
+        base::NetworkConfig,
+    ) -> base::BoxFuture<'static, anyhow::Result<Option<Arc<dyn rpc::Client>>>>
+    + Send
+    + Sync;
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
@@ -49,6 +58,35 @@ async fn main() -> Result<(), AnyError> {
     });
 
     let db = config.storage.open()?;
+    let (state, executor) = boot(db, &|_| Box::pin(async { Ok(None) }), executor::TICK).await?;
+    let jobs = tokio::spawn(executor.run());
+    let router = api::router(state, &server)?.merge(face.routes()?);
+    let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    // Handlers in flight drain before `serve` returns; jobs left running
+    // resume on the next start.
+    let served = axum::serve(listener, router)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await;
+    jobs.abort();
+    Ok(served?)
+}
+
+/// Everything `serve` runs, over `db`: the payments container of every
+/// network with a `network_index` row (each `enabled` network gets one),
+/// its nodes from `connect` or the chain's own, every worker's job, and
+/// the job loop (not yet running) looking for due jobs every `tick`.
+///
+/// # Errors
+///
+/// A store failure. A network that does not build, or whose node does not
+/// answer, only fails its own jobs, with why.
+pub(crate) async fn boot(
+    db: db::Db,
+    connect: &Connect,
+    tick: Duration,
+) -> anyhow::Result<(Arc<AppState>, Executor)> {
     let queue = usecase::tasks::Queue::new(db.clone());
     let stores = Arc::new(usecase::sdk::Stores::new(db.clone()));
     // Every network with a `network_index` row, each built by its chain.
@@ -59,7 +97,11 @@ async fn main() -> Result<(), AnyError> {
         .with_chain::<chain_ethereum::Config>(chain_ethereum::CHAIN_NAME)
         .with_chain::<chain_solana::Config>(chain_solana::CHAIN_NAME);
     for network in networks.iter().filter(|network| network.index.is_some()) {
-        builder = builder.with_network_config(network.into());
+        let config = base::NetworkConfig::from(network);
+        if let Some(client) = connect(config.clone()).await? {
+            builder = builder.with_client(config.network.clone(), client);
+        }
+        builder = builder.with_network_config(config);
     }
     let payments = builder
         .with_storage(base::Storage {
@@ -82,7 +124,7 @@ async fn main() -> Result<(), AnyError> {
     // One prune job deletes jobs that succeeded more than a day ago.
     let prune = usecase::workers::prune::Prune::new(db.clone(), queue.clone());
     prune.start().await?;
-    let executor = usecase::workers::executor::Executor::new(queue.clone())
+    let executor = Executor::new(queue.clone(), tick)
         .add(index, tasks::Retry::default())
         .add(expire, tasks::Retry::default())
         .add(prune, tasks::Retry::default())
@@ -99,21 +141,10 @@ async fn main() -> Result<(), AnyError> {
             ),
             tasks::Retry::default(),
         );
-    let jobs = tokio::spawn(executor.run());
     let state = Arc::new(AppState {
         payments,
         db,
         queue,
     });
-    let router = api::router(state, &server)?.merge(face.routes()?);
-    let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    // Handlers in flight drain before `serve` returns; jobs left running
-    // resume on the next start.
-    let served = axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await;
-    jobs.abort();
-    Ok(served?)
+    Ok((state, executor))
 }

@@ -51,6 +51,9 @@ url = "=2.5.8"
 zeroize.workspace = true
 
 [dev-dependencies]
+# The mock chains and nodes the suite (`tests/support`, `tests/cases`) runs over.
+base = { path = "../../sdk/base", features = ["testing"] }
+chain-ethereum = { path = "../../sdk/chains/ethereum", features = ["testing"] }
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true

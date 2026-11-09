@@ -43,6 +43,9 @@ pub struct Config {
     pub pending_ttl_ms: u64,
     /// How often the indexer wakes, in milliseconds; default 30,000.
     pub interval_ms: u64,
+    /// Blocks the indexer fetches per step; default 100
+    /// ([`base::DEFAULT_BATCH`]). Lower it for a node that limits requests.
+    pub batch: u64,
     /// Fractional digits a view shows of the native currency; none: all.
     pub display_decimals: Option<u32>,
     /// How old a watch's start may be: about what history the nodes keep;
@@ -52,7 +55,7 @@ pub struct Config {
 
 /// The knobs a [`base::NetworkConfig`]'s `settings` may set:
 /// `address_type`, `fee_target_blocks`, `fee_floor`, `fee_ttl_ms`,
-/// `pending_ttl_ms`, `interval_ms`; an absent one keeps its default.
+/// `pending_ttl_ms`, `interval_ms`, `batch`; an absent one keeps its default.
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Settings {
@@ -62,6 +65,7 @@ struct Settings {
     fee_ttl_ms: u64,
     pending_ttl_ms: u64,
     interval_ms: u64,
+    batch: u64,
 }
 
 impl Default for Settings {
@@ -73,6 +77,7 @@ impl Default for Settings {
             fee_ttl_ms: 60_000,
             pending_ttl_ms: 259_200_000,
             interval_ms: 30_000,
+            batch: base::DEFAULT_BATCH,
         }
     }
 }
@@ -95,6 +100,7 @@ impl Config {
             fee_ttl_ms: settings.fee_ttl_ms,
             pending_ttl_ms: settings.pending_ttl_ms,
             interval_ms: settings.interval_ms,
+            batch: settings.batch,
             max_history: None,
             display_decimals: None,
         }
@@ -129,7 +135,9 @@ impl Config {
     ///
     /// [`Self::validate`]'s refusals, or a node of another network.
     pub async fn connect(&self) -> anyhow::Result<Client> {
-        self.open(self.cluster().await?).await
+        let client = self.open(self.cluster().await?)?;
+        client.ready().await?;
+        Ok(client)
     }
 
     /// A cluster of the configured endpoints.
@@ -146,12 +154,11 @@ impl Config {
         Ok(Arc::new(cluster))
     }
 
-    /// Validates, and a verified client over `transport`.
-    async fn open(&self, transport: Arc<dyn ::rpc::Client>) -> anyhow::Result<Client> {
+    /// Validates, and a client over `transport` that verifies the node at
+    /// its first call; asks nothing now.
+    fn open(&self, transport: Arc<dyn ::rpc::Client>) -> anyhow::Result<Client> {
         self.validate()?;
-        let client = Client::new(transport, self.network);
-        client.verify().await?;
-        Ok(client)
+        Ok(Client::verifying(transport, self.network))
     }
 
     /// The chain read through `rpc`.
@@ -238,14 +245,17 @@ impl base::Config for Config {
         client: Arc<dyn ::rpc::Client>,
     ) -> Future<'a, anyhow::Result<Service>> {
         Box::pin(async move {
-            let rpc = self.open(Arc::clone(&client)).await?;
+            let rpc = self.open(Arc::clone(&client))?;
             let chain = Arc::new(self.chain(&rpc)?);
-            let indexer = Arc::new(Indexer::new(
-                chain.clone(),
-                Arc::clone(&storage.blocks),
-                Arc::clone(&storage.indexes),
-                Duration::from_millis(self.interval_ms),
-            ));
+            let indexer = Arc::new(
+                Indexer::new(
+                    chain.clone(),
+                    Arc::clone(&storage.blocks),
+                    Arc::clone(&storage.indexes),
+                    Duration::from_millis(self.interval_ms),
+                )
+                .with_batch(self.batch),
+            );
             Ok(Service {
                 indexer,
                 wallets: WalletFactoryBroadcaster {

@@ -1,0 +1,13 @@
+{
+  "provider": "ethereum-sepolia-rpc.publicnode.com",
+  "network": "sepolia",
+  "recorded_at": "2026-11-04",
+  "method": "eth_sendRawTransaction",
+  "params": [
+    "0x02f86583aa36a780010182520894fefefefefefefefefefefefefefefefefefefefe0180c080a01e13dc0ca99dcf643cccfbb01dfbab53e14d346bc7ec8d192b5dbb4213672cc9a00f5651caf1735fe73d29c7907830f34592f265a904fa9bcba4cf54e3c31d4e90"
+  ],
+  "error": {
+    "code": -32003,
+    "message": "insufficient funds for gas * price + value: have 0 want 21001"
+  }
+}

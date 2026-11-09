@@ -8,7 +8,7 @@ readme = "README.md"
 
 [features]
 default = []
-# The scripted node double (`rpc::testing`). Off, the crate carries no
+# The node doubles (`rpc::testing`: `Script`, `Faults`). Off, the crate carries no
 # test scaffolding; it belongs in a `[dev-dependencies]` entry only.
 testing = []
 
@@ -22,6 +22,7 @@ url = "2"
 
 [dev-dependencies]
 futures-executor.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "rt"] }
 # This package on itself: the only way Cargo offers to turn one of a crate's
 # own features on for its own integration tests.
 rpc = { path = ".", features = ["testing"] }

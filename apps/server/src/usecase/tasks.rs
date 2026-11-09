@@ -50,6 +50,24 @@ impl Queue {
         let _ = self.changes.send(());
     }
 
+    /// Enqueues `job` unless a job of its kind and topic is pending or
+    /// running, in one write; whether it was enqueued.
+    ///
+    /// # Errors
+    ///
+    /// When the job has no row or the write fails.
+    pub(crate) async fn enqueue_alone(&self, job: Job) -> anyhow::Result<bool> {
+        let (row, now) = (Task::try_from(&job)?, i64::try_from(tasks::now())?);
+        let queued = self
+            .db
+            .write(move |connection| Ok(task::db::insert_alone(connection, &row, now)?))
+            .await?;
+        if queued {
+            self.announce();
+        }
+        Ok(queued)
+    }
+
     /// Every job a dead process left running back to pending. Run once on
     /// start, before the queue runs.
     ///
@@ -137,7 +155,7 @@ mod tests {
     use serde_json::json;
     use tasks::{Ack, Retry, Status, Task as Running, Worker};
 
-    use crate::usecase::workers::executor::Executor;
+    use crate::usecase::workers::executor::{Executor, TICK};
 
     use super::*;
 
@@ -303,6 +321,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enqueue_alone_waits_for_the_unfinished_one() {
+        let (_directory, queue) = queue().await;
+        let job = |text| Job::new(topic(text), "k", json!({}));
+        let first = job("n");
+        assert!(queue.enqueue_alone(first.clone()).await.unwrap());
+        assert!(!queue.enqueue_alone(job("n")).await.unwrap(), "pending");
+        let running = Job {
+            status: Status::Running,
+            ..first.clone()
+        };
+        queue.update(running).await.unwrap();
+        assert!(!queue.enqueue_alone(job("n")).await.unwrap(), "running");
+        assert!(
+            queue.enqueue_alone(job("m")).await.unwrap(),
+            "another topic"
+        );
+        let other = Job::new(topic("n"), "other", json!({}));
+        assert!(queue.enqueue_alone(other).await.unwrap(), "another kind");
+        let done = Job {
+            status: Status::Done,
+            ..first
+        };
+        queue.update(done).await.unwrap();
+        assert!(queue.enqueue_alone(job("n")).await.unwrap(), "finished");
+    }
+
+    #[tokio::test]
     async fn recover_returns_running_jobs_to_pending() {
         let (_directory, queue) = queue().await;
         let job = Job::new(topic("a"), "k", json!({}));
@@ -353,7 +398,7 @@ mod tests {
             attempts: NonZeroU32::new(2).unwrap(),
             backoff: Duration::from_millis(20),
         };
-        let executor = Executor::new(queue.clone()).add(Saves, retry);
+        let executor = Executor::new(queue.clone(), TICK).add(Saves, retry);
         let handle = tokio::spawn(executor.run());
         let done = wait(&queue, &job.id).await;
         assert_eq!((done.status, done.attempts), (Status::Done, 2));

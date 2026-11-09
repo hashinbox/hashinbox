@@ -759,8 +759,10 @@ name = "base"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base",
  "crypto",
  "decimal",
+ "futures-executor",
  "rpc",
  "serde",
  "serde_json",
@@ -1090,12 +1092,14 @@ dependencies = [
  "alloy-sol-types",
  "anyhow",
  "base",
+ "chain-ethereum",
  "crypto",
  "futures-executor",
  "num-bigint",
  "rpc",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -1,0 +1,56 @@
+{
+  "provider": "ethereum-sepolia-rpc.publicnode.com",
+  "network": "sepolia",
+  "recorded_at": "2026-11-04",
+  "method": "eth_getBlockByNumber",
+  "params": [
+    "finalized",
+    false
+  ],
+  "result": {
+    "baseFeePerGas": "0x10",
+    "blobGasUsed": "0x2a0000",
+    "blockAccessListHash": "0xca877196746851691809738a777632100e31ba9ca05c3f954b848d04d7e6bf51",
+    "difficulty": "0x0",
+    "excessBlobGas": "0x4935551",
+    "extraData": "0x6275696c6465722e6e666c6169672e65746820303733373662643964303064",
+    "gasLimit": "0xbebc200",
+    "gasUsed": "0x3a03ed7",
+    "hash": "0x5342d907a707291428d77655aaf9563bf0805147e1e40ae0bb2cd7b68ce64f34",
+    "logsBloom": "0x1c3205c86082593043610a48bd5152eb60c540814102c083518b0286f7aa914a8ad888800c21e60188200523e08d40311643c8326c33b10989500b822a2d3b1e59148b5119c29c0864a400dfe8700620c351862825556510082744b3966094802340c0f4b2393020a0f09c060382dd404e027110a0bc10c85c20d45b042c4470a6940840811f014468c0581266860980497226c330c42e6d1e02a0564446640c064ce202141c445212cca163ad08d50806a67301199d020ca80a4281a6858491682f812385aa54c81049ea9435020039500490202c28207f1603ca1040e4734926de4989c4323491980c7004b083e08653ae00469980206ec18b09003609db29",
+    "miner": "0x8f614cdb61e37b6f18d9705942c93fa86b04d711",
+    "mixHash": "0x384b920b3ae3d35811d613fbe505cdadfc70c3e6d5067598ec2079ceeca7af98",
+    "nonce": "0x0000000000000000",
+    "number": "0xb80f1a",
+    "parentBeaconBlockRoot": "0xf2383eb829b1a7b1b400399ae3ef806b65afdfbdcf7e0f01794b065501565b2b",
+    "parentHash": "0x74d239b8734b342ecbcacc5f770ca1de9b8c0e5a14ab38c37f3c0122259b1f0a",
+    "receiptsRoot": "0x6a01afd74a9ba1bfbf8cf9e3dd4da1e29041ff9ebc72ad2d34d9618e071279f7",
+    "requestsHash": "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+    "size": "0xb494",
+    "slotNumber": "0xaf8e3f",
+    "stateRoot": "0xdb8615787d1e57214868b215fa51f114738a29e2040085f4bd44610c89b96ac7",
+    "timestamp": "0x6aeb2854",
+    "transactions": [
+      "0x9429d5530b799a16c05598e22a991da1bd2c0ddec3ae55c66a775c3324b0faea",
+      "0xcd9e978d5cbbf6870ae304a52d77efdd7197440b2054cd28e57f0c0d6dde2b8b"
+    ],
+    "transactionsRoot": "0x7b07b120dee367c720fa98fb78c4adddb021a234ee5983573a8af0d7432872a2",
+    "uncles": [],
+    "withdrawals": [
+      {
+        "address": "0xf97e180c050e5ab072211ad2c213eb5aee4df134",
+        "amount": "0x2c94",
+        "index": "0x8a67139",
+        "validatorIndex": "0x619"
+      },
+      {
+        "address": "0xf97e180c050e5ab072211ad2c213eb5aee4df134",
+        "amount": "0x164a",
+        "index": "0x8a6713a",
+        "validatorIndex": "0x61c"
+      }
+    ],
+    "withdrawalsRoot": "0x3030d2b600ba9d409e19b6c23c51974da6e59df5c3c7a6cad47d723676e8559c"
+  }
+}

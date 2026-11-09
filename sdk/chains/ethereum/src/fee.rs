@@ -139,7 +139,8 @@ const TRANSFER_GAS: u64 = 21_000;
 
 /// The recipient a token's gas is estimated against: an address that holds
 /// no token, so the estimate includes creating the recipient's balance slot.
-const PLACEHOLDER: alloy_primitives::Address = alloy_primitives::Address::repeat_byte(0xfe);
+pub(crate) const PLACEHOLDER: alloy_primitives::Address =
+    alloy_primitives::Address::repeat_byte(0xfe);
 
 /// Ethereum's `base::FeeEstimator`: EIP-1559 fees cached for their time to
 /// live, and each token's transfer gas limit cached for the factory's

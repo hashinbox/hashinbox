@@ -90,7 +90,11 @@ impl Http {
             Err(source) => Err(Error::from_rpc(source)),
         };
         self.events.outcome(self.statistics.call(&result));
-        result
+        // Counted as the node's answer above; repeated as a transport failure.
+        let Ok(Err(failure)) = result else {
+            return result;
+        };
+        Error::limited(failure).map(Err)
     }
 
     /// Every call is serialized before the first byte leaves, so an invalid
@@ -124,7 +128,17 @@ impl Http {
                     .collect()
             });
         self.events.outcome(self.statistics.batch(&result));
-        result
+        // One rate-limited answer fails the batch, so a retry repeats it whole.
+        let results = result?;
+        if let Some(failure) = results.iter().find_map(|entry| {
+            entry
+                .as_ref()
+                .err()
+                .filter(|failure| failure.is_rate_limited())
+        }) {
+            Error::limited(failure.clone())?;
+        }
+        Ok(results)
     }
 }
 
@@ -182,10 +196,9 @@ impl From<ErrorObjectOwned> for Failure {
 impl Error {
     fn from_rpc(error: RpcError) -> Self {
         match error {
-            RpcError::Call(error) => Self::new(
-                ErrorKind::InvalidResponse,
-                format!("JSON-RPC call failed with code {}", error.code()),
-            ),
+            RpcError::Call(error) => {
+                Self::new(ErrorKind::InvalidResponse, Failure::from(error).to_string())
+            }
             RpcError::RequestTimeout => Self::new(ErrorKind::Timeout, "JSON-RPC request timed out"),
             RpcError::Transport(source) => match source.downcast_ref::<transport::Error>() {
                 Some(transport::Error::Rejected { status_code }) => Self::new(

@@ -50,8 +50,9 @@ impl Default for Backoff {
 /// in how much of a *received* answer they treat as a transport problem.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Trigger {
-    /// Transport failures only: timeouts, unavailable endpoints, and HTTP
-    /// 429/502/503/504. The transport's historical behavior.
+    /// Transport failures only: timeouts, unavailable endpoints, HTTP
+    /// 429/502/503/504, and rate-limited answers ([`crate::Failure::is_rate_limited`],
+    /// which [`crate::Http`] turns into transport failures).
     #[default]
     Transport,
     /// Also implementation-defined server errors, `-32099..=-32000`

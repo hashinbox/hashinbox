@@ -6,8 +6,9 @@
 //! step runs again an interval later with its error as the job's `reason`;
 //! the next run that does not fail clears it.
 //!
-//! At the tip it queues a triggers job: every trigger decides each interval,
-//! never on a chain still catching up.
+//! At the tip it queues a triggers job unless the network's last one is
+//! still pending or running: every trigger decides each interval, never on
+//! a chain still catching up, and never twice on the same balances.
 //!
 //! Its topic (`index:chain:network`) conflicts with nothing else: indexing
 //! runs beside triggers and broadcasts; each of them reads or writes in one
@@ -94,7 +95,8 @@ impl Worker for Index {
     type State = ();
 
     /// Up to [`STEPS`] steps of the indexer, each written to its
-    /// `network_index` row. At the tip it queues a triggers job and runs again an interval
+    /// `network_index` row. At the tip it queues a triggers job (none while
+    /// one is unfinished) and runs again an interval
     /// later; still behind, it runs again at once. A failed step or row
     /// write waits an interval and tries again, its error the job's
     /// `reason`: the job never ends.
@@ -129,9 +131,11 @@ impl Worker for Index {
                         chain: target.chain,
                         network: target.network,
                     };
-                    // Not queued, the next interval queues one.
+                    // One round per network waits or runs at a time, so a
+                    // held network never piles rounds deciding on the same
+                    // balances. Not queued, the next interval queues one.
                     if let Ok(job) = scope.job() {
-                        let _ = self.queue.enqueue(job).await;
+                        let _ = self.queue.enqueue_alone(job).await;
                     }
                     return task.again(later);
                 }

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use ::rpc::testing::{Reply, Script};
+use ::rpc::testing::{Faults, Reply, Script};
 use base::{
     Asset, Chained as _, Dated as _, Decimal, Leg, NotServed, Reason, Reward, Tips,
     TransactionState,
@@ -91,6 +91,16 @@ fn log(transaction: u64, contract: &str, from: &str, to: &str, amount: u64, inde
     })
 }
 
+/// The `eth_getLogs` filter of [`TOKEN`]'s `Transfer`s over `from..=to`.
+fn filter(from: &str, to: &str) -> Value {
+    json!([{"fromBlock": from, "toBlock": to, "address": [TOKEN], "topics": [TRANSFER]}])
+}
+
+/// No token logs in the range.
+fn no_logs() -> Reply {
+    Reply::ok("eth_getLogs", json!([]))
+}
+
 fn connect(script: &Script, config: &Config) -> Chain {
     config.chain(&Client::new(Arc::new(script.clone()), config.native()))
 }
@@ -159,9 +169,10 @@ fn a_block_becomes_double_entry_legs() {
         log(1, OTHER_TOKEN, &account(0xc), &account(0xd), 5, 2),
         log(1, TOKEN, &account(0xc), &account(0), 2, 3),
     ];
+    // Token legs come from `eth_getLogs`, not from the receipts.
     let receipts = json!([
         receipt(0, 0xa, &b, 1, vec![]),
-        receipt(1, 0xc, TOKEN, 1, logs),
+        receipt(1, 0xc, TOKEN, 1, vec![]),
         receipt(2, 0xe, &b, 0, vec![]),
     ]);
     let withdrawals = json!([{"index": "0x9", "validatorIndex": "0x1", "address": account(0xf), "amount": "0x3"}]);
@@ -172,6 +183,7 @@ fn a_block_becomes_double_entry_legs() {
         )
         .expecting(json!(["0x5", true])),
         Reply::ok("eth_getBlockReceipts", receipts).expecting(json!([hash(OWN)])),
+        Reply::ok("eth_getLogs", json!(logs)).expecting(filter("0x5", "0x5")),
     ]);
     let block = block_on(chain.block(HEIGHT)).unwrap().unwrap();
     script.exhausted();
@@ -272,16 +284,20 @@ fn blocks_are_fetched_in_batches_and_must_link() {
             "eth_getBlockByNumber",
             block(6, 0x66, 0x55, vec![], json!([])),
         ),
+        no_logs(),
     ]);
     let run = block_on(chain.blocks(5, 6)).unwrap();
     assert_eq!(run.len(), 2);
     let kept = run.last().unwrap().clone();
 
     // The chain reorganised block 6 away: the refetched run no longer holds it.
-    script.push([Reply::ok(
-        "eth_getBlockByNumber",
-        block(6, 0x67, 0x55, vec![], json!([])),
-    )]);
+    script.push([
+        Reply::ok(
+            "eth_getBlockByNumber",
+            block(6, 0x67, 0x55, vec![], json!([])),
+        ),
+        no_logs(),
+    ]);
     let refetched = block_on(chain.blocks(6, 6)).unwrap();
     assert!(!refetched.contains(&kept));
 
@@ -295,6 +311,7 @@ fn blocks_are_fetched_in_batches_and_must_link() {
             "eth_getBlockByNumber",
             block(6, 0x66, 0x99, vec![], json!([])),
         ),
+        no_logs(),
     ]);
     let error = block_on(chain.blocks(5, 6)).unwrap_err();
     assert!(format!("{error:#}").contains("does not link"), "{error:#}");
@@ -316,9 +333,11 @@ fn receipts_fall_back_to_one_call_per_transaction() {
         Reply::failure("eth_getBlockReceipts", -32_601, "the method does not exist"),
         Reply::ok("eth_getTransactionReceipt", receipt(0, 0xa, &b, 1, vec![]))
             .expecting(json!([hash(0x100)])),
+        no_logs(),
         // Remembered: the next block asks per transaction at once.
         Reply::ok("eth_getBlockByNumber", head()),
         Reply::ok("eth_getTransactionReceipt", receipt(0, 0xa, &b, 1, vec![])),
+        no_logs(),
     ]);
     assert_eq!(
         block_on(chain.block(5))
@@ -338,6 +357,100 @@ fn receipts_fall_back_to_one_call_per_transaction() {
             .len(),
         1
     );
+    script.exhausted();
+}
+
+#[test]
+fn a_refused_log_range_is_halved_and_logs_must_be_of_the_fetched_blocks() {
+    let script = Script::new([]);
+    let chain = connect(&script, &config());
+    let blocks = |sixth: u64| {
+        [
+            Reply::ok(
+                "eth_getBlockByNumber",
+                block(5, 0x55, 0x44, vec![], json!([])),
+            ),
+            Reply::ok(
+                "eth_getBlockByNumber",
+                block(
+                    6,
+                    sixth,
+                    0x55,
+                    vec![transaction(0, 0xc, TOKEN, 0)],
+                    json!([]),
+                ),
+            ),
+            Reply::ok(
+                "eth_getBlockReceipts",
+                json!([receipt(0, 0xc, TOKEN, 1, vec![])]),
+            )
+            .expecting(json!([hash(sixth)])),
+        ]
+    };
+    let mut moved = log(0, TOKEN, &account(0xc), &account(0xd), 7, 0);
+    moved["blockNumber"] = json!("0x6");
+    moved["blockHash"] = json!(hash(0x66));
+
+    // Too wide a range for the node (Alchemy's answer): one block at a time.
+    script.push(blocks(0x66));
+    script.push([
+        Reply::failure(
+            "eth_getLogs",
+            -32_602,
+            "Log response size exceeded. You can make eth_getLogs requests with up to a 2K block range and no limit on the response size, or you can request any block range with a cap of 10K logs in the response.",
+        )
+        .expecting(filter("0x5", "0x6")),
+        no_logs().expecting(filter("0x5", "0x5")),
+        Reply::ok("eth_getLogs", json!([moved])).expecting(filter("0x6", "0x6")),
+    ]);
+    let run = block_on(chain.blocks(5, 6)).unwrap();
+    let token = Asset {
+        network: network(),
+        id: TOKEN.to_owned(),
+    };
+    assert_eq!(
+        run[1].transactions.0[0].legs[..2],
+        [
+            Leg::Spent {
+                address: address(0xc),
+                asset: token.clone(),
+                amount: atomic(7),
+                coin: None
+            },
+            Leg::Received {
+                address: address(0xd),
+                asset: token,
+                amount: atomic(7),
+                coin: None
+            },
+        ]
+    );
+
+    // An answer over the response bound is halved the same way.
+    script.push(blocks(0x66));
+    script.push([
+        Reply::result(
+            "eth_getLogs",
+            Err(::rpc::Error {
+                kind: ::rpc::ErrorKind::ResponseTooLarge,
+                message: "JSON-RPC response exceeded its configured limit".to_owned(),
+            }),
+        ),
+        no_logs().expecting(filter("0x5", "0x5")),
+        no_logs().expecting(filter("0x6", "0x6")),
+    ]);
+    assert_eq!(block_on(chain.blocks(5, 6)).unwrap().len(), 2);
+
+    // Logs of a block the chain replaced since: retry.
+    script.push(blocks(0x67));
+    script.push([Reply::ok("eth_getLogs", json!([moved]))]);
+    let error = block_on(chain.blocks(5, 6)).unwrap_err();
+    assert!(format!("{error:#}").contains("another block"), "{error:#}");
+
+    // One block the node still refuses is an error.
+    script.push(blocks(0x66).into_iter().skip(1));
+    script.push([Reply::failure("eth_getLogs", -32_602, "too large")]);
+    assert!(block_on(chain.blocks(6, 6)).is_err());
     script.exhausted();
 }
 
@@ -390,5 +503,188 @@ fn a_block_time_is_a_header_read_and_expired_history_says_so() {
     )]);
     let error = block_on(chain.block(3)).unwrap_err();
     assert_eq!(NotServed::find(&error), Some(NotServed { position: 3 }));
+    script.exhausted();
+}
+
+/// Storage for an indexer that has never kept a block and indexes from
+/// block 5; every other store call fails the test.
+struct Fresh;
+
+impl base::BlockStore for Fresh {
+    fn insert<'a>(&'a self, _: &'a base::Blocks) -> base::Future<'a, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn find_last<'a>(
+        &'a self,
+        _: &'a base::Network,
+    ) -> base::Future<'a, anyhow::Result<Option<base::BlockHeader>>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn delete<'a>(&'a self, _: &'a base::Network, _: u64) -> base::Future<'a, anyhow::Result<()>> {
+        unreachable!("nothing to archive")
+    }
+}
+
+impl base::WalletIndexStore for Fresh {
+    fn insert<'a>(&'a self, _: &'a base::WalletIndex) -> base::Future<'a, anyhow::Result<()>> {
+        unreachable!("no watch")
+    }
+
+    fn find_next<'a>(
+        &'a self,
+        _: &'a base::Network,
+        _: Option<u64>,
+    ) -> base::Future<'a, anyhow::Result<Option<u64>>> {
+        Box::pin(async { Ok(Some(5)) })
+    }
+
+    fn find_all<'a>(
+        &'a self,
+        _: &'a base::Network,
+    ) -> base::Future<'a, anyhow::Result<Vec<base::WalletIndex>>> {
+        unreachable!("nothing pruned")
+    }
+
+    fn move_birthday<'a>(
+        &'a self,
+        _: &'a base::WalletIndex,
+        _: u64,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        unreachable!("nothing pruned")
+    }
+
+    fn set_state<'a>(
+        &'a self,
+        _: &'a base::WalletIndex,
+        _: base::WalletIndexState,
+        _: Option<&'a str>,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        unreachable!("nothing pruned")
+    }
+}
+
+impl base::InputStore for Fresh {
+    fn find_unspent<'a>(
+        &'a self,
+        _: &'a [base::Address],
+    ) -> base::Future<'a, anyhow::Result<base::Inputs>> {
+        unreachable!("no spend")
+    }
+}
+
+impl base::WalletStore for Fresh {
+    fn insert<'a>(&'a self, _: &'a dyn base::Wallet) -> base::Future<'a, anyhow::Result<()>> {
+        unreachable!("no wallet")
+    }
+
+    fn find_all<'a>(
+        &'a self,
+        _: &'a base::WalletFactories,
+    ) -> base::Future<'a, anyhow::Result<Vec<Arc<dyn base::Wallet>>>> {
+        unreachable!("no wallet")
+    }
+}
+
+#[test]
+fn the_settings_batch_is_the_indexers_step() {
+    use base::Config as _;
+
+    let stored = base::NetworkConfig {
+        network: network(),
+        chain_id: Some("1".to_owned()),
+        testnet: false,
+        block_time: std::time::Duration::from_secs(12),
+        confirmations: 12,
+        max_history: None,
+        explorer_address: None,
+        explorer_transaction: None,
+        settings: json!({"batch": 2}),
+        assets: Vec::new(),
+        endpoints: Vec::new(),
+    };
+    let config = Config::try_from(&stored).unwrap();
+    assert_eq!(config.batch, 2);
+    let defaults = base::NetworkConfig {
+        settings: json!({}),
+        ..stored
+    };
+    assert_eq!(
+        Config::try_from(&defaults).unwrap().batch,
+        base::DEFAULT_BATCH
+    );
+
+    let fresh = Arc::new(Fresh);
+    let storage = base::Storage {
+        blocks: fresh.clone(),
+        indexes: fresh.clone(),
+        inputs: fresh.clone(),
+        wallets: fresh,
+    };
+    let script = Script::new([Reply::ok("eth_chainId", json!("0x1"))]);
+    let service = block_on(config.build(&storage, Arc::new(script.clone()))).unwrap();
+    // From block 5 with the tip at 16: two blocks a step, not the default 100.
+    script.push([
+        Reply::ok("eth_blockNumber", json!("0x10")),
+        Reply::ok("eth_getBlockByNumber", json!({"number": "0xc"})),
+        Reply::ok(
+            "eth_getBlockByNumber",
+            block(5, 0x55, 0x44, vec![], json!([])),
+        )
+        .expecting(json!(["0x5", true])),
+        Reply::ok(
+            "eth_getBlockByNumber",
+            block(6, 0x66, 0x55, vec![], json!([])),
+        )
+        .expecting(json!(["0x6", true])),
+    ]);
+    let next = block_on(service.indexer.next()).unwrap();
+    assert!(matches!(next, base::Next::Indexed(header) if header.position == 6));
+    script.exhausted();
+}
+
+#[test]
+fn a_network_builds_with_its_node_down_and_verifies_at_first_use() {
+    use base::Config as _;
+
+    let script = Script::new([]);
+    let node = Faults::new(script.clone());
+    let switch = node.switch();
+    switch.down(true);
+    let fresh = Arc::new(Fresh);
+    let storage = base::Storage {
+        blocks: fresh.clone(),
+        indexes: fresh.clone(),
+        inputs: fresh.clone(),
+        wallets: fresh,
+    };
+    let service = block_on(config().build(&storage, Arc::new(node))).unwrap();
+    let chain = service.dated.unwrap();
+    assert!(block_on(chain.tips()).is_err(), "the node is down");
+
+    switch.down(false);
+    script.push([Reply::ok("eth_chainId", json!("0x2"))]);
+    let error = block_on(chain.tips()).unwrap_err();
+    assert!(format!("{error:#}").contains("chain ID"), "{error:#}");
+
+    let tips = || {
+        [
+            Reply::ok("eth_blockNumber", json!("0x10")),
+            Reply::ok("eth_getBlockByNumber", json!({"number": "0xc"})),
+        ]
+    };
+    script.push([
+        Reply::ok("eth_chainId", json!("0x1")),
+        Reply::ok("eth_call", json!(format!("0x{:064x}", 6))),
+    ]);
+    script.push(tips());
+    script.push(tips());
+    let expected = Tips {
+        produced: 16,
+        confirmed: 12,
+    };
+    assert_eq!(block_on(chain.tips()).unwrap(), expected);
+    assert_eq!(block_on(chain.tips()).unwrap(), expected, "verified once");
     script.exhausted();
 }

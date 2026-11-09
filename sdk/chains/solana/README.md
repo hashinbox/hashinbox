@@ -46,17 +46,17 @@ async fn solana(storage: Storage) -> anyhow::Result<()> {
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network:
 the genesis hash (`chain_id`), endpoints, assets (SOL's display decimals, the
 `contract` mints), `confirmations`, `max_history`, and from `settings` the
-knobs `fee_ttl_ms`, `pending_ttl_ms`, `interval_ms` (each absent one its
-default).
+knobs `fee_ttl_ms`, `pending_ttl_ms`, `interval_ms`, and `batch`, the slots
+the indexer fetches per step (default 100) (each absent one its default).
 
 ## Notes
 
-- `Config` implements `base::Config`: `build(&storage, client)` validates,
-  verifies the node and returns the `base::Service`. The indexer wakes every
+- `Config` implements `base::Config`: `build(&storage, client)` validates
+  and returns the `base::Service`, asking no node. The indexer wakes every
   `interval_ms` milliseconds (default 1,000).
 - `client()` is the chain's own cluster over `endpoints`; `build(&storage,
-  client)` verifies once that `client` serves the network and builds every
-  part over it. Pass a `rpc::Swap` and keep it to change nodes live.
+  client)` builds every part over it; the first call verifies that `client`
+  serves the network (again at each call until it does). Pass a `rpc::Swap` and keep it to change nodes live.
   Endpoints are needed only by `client()`.
 - Position is the slot; a skipped slot holds no block. `Header.height` is the
   block height. Blocks are read at `confirmed` commitment; `Tips.produced` is

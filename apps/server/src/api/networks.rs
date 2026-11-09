@@ -64,9 +64,12 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, 
     let networks = rows.into_iter().map(|mut row| {
         let state = &state;
         async move {
-            let Ok(service) = state.payments.service(&row.key()) else {
-                row.tip_error = Some("the network is not running".to_owned());
-                return row;
+            let service = match state.payments.service(&row.key()) {
+                Ok(service) => service,
+                Err(error) => {
+                    row.tip_error = Some(format!("{error:#}"));
+                    return row;
+                }
             };
             let live = match &service.dated {
                 None => Err("this network cannot read its tip".to_owned()),

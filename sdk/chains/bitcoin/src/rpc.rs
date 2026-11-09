@@ -1,7 +1,10 @@
 //! The Bitcoin Core calls this crate makes, over `::rpc`, answered in
 //! `base` types.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use ::rpc::{Batch, Call, CallResult, Failure, Request};
 use anyhow::{Context as _, bail, ensure};
@@ -28,18 +31,38 @@ const REJECTED: i64 = -26;
 /// `RPC_VERIFY_ALREADY_IN_CHAIN`: it is already mined.
 const ALREADY_IN_CHAIN: i64 = -27;
 
-/// A Bitcoin Core client of one network; cheap to clone.
+/// A Bitcoin Core client of one network; cheap to clone, clones share
+/// whether the node is verified.
 #[derive(Clone)]
 pub struct Client {
     transport: Arc<dyn ::rpc::Client>,
     network: Network,
+    /// Whether the node passed [`Client::verify`]; until then every call
+    /// verifies first.
+    verified: Arc<AtomicBool>,
 }
 
 impl Client {
-    /// A client of `network` over `transport`; [`Self::verify`] checks the node.
+    /// A client of `network` over `transport`, trusted: [`Self::verify`]
+    /// checks the node when asked.
     #[must_use]
     pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
-        Self { transport, network }
+        Self {
+            transport,
+            network,
+            verified: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// A client of `network` over `transport` that asks nothing yet: its
+    /// first call verifies the node ([`Self::verify`]), again on every call
+    /// until one passes.
+    #[must_use]
+    pub fn verifying(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
+        Self {
+            verified: Arc::new(AtomicBool::new(false)),
+            ..Self::new(transport, network)
+        }
     }
 
     /// The network it serves.
@@ -67,6 +90,21 @@ impl Client {
         Ok(())
     }
 
+    /// Verifies the node once it passes: nothing for a trusted client or
+    /// one already verified.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::verify`]'s failure.
+    pub async fn ready(&self) -> anyhow::Result<()> {
+        if self.verified.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.verify().await?;
+        self.verified.store(true, Ordering::Release);
+        Ok(())
+    }
+
     /// The node's best height, and the height `depth` blocks deep (`depth` 1
     /// is the tip itself) as confirmed.
     ///
@@ -74,6 +112,7 @@ impl Client {
     ///
     /// A node failure.
     pub async fn tips(&self, depth: u64) -> anyhow::Result<Tips> {
+        self.ready().await?;
         let produced: u64 = self.call("getblockcount", json!([])).await?;
         Ok(Tips {
             produced,
@@ -90,6 +129,7 @@ impl Client {
     /// not parse or is not the one asked, or a run that does not link (the
     /// chain moved mid-fetch; retry).
     pub async fn blocks(&self, start: u64, end: u64) -> anyhow::Result<Blocks> {
+        self.ready().await?;
         let hashes = self.hashes(start, end).await?;
         let mut run = Blocks::new(self.network.into());
         if hashes.is_empty() {
@@ -130,6 +170,7 @@ impl Client {
     ///
     /// A node failure, or a height above the node's tip.
     pub async fn time(&self, height: u64) -> anyhow::Result<u64> {
+        self.ready().await?;
         let hash: String = self.call("getblockhash", json!([height])).await?;
         let header: WireHeader = self.call("getblockheader", json!([hash, true])).await?;
         ensure!(
@@ -146,6 +187,7 @@ impl Client {
     ///
     /// A node failure or an unreadable rate.
     pub async fn fee_rate(&self, target: u16) -> anyhow::Result<Option<FeeRate>> {
+        self.ready().await?;
         let reply: Value = self
             .call("estimatesmartfee", json!([target, "conservative"]))
             .await?;
@@ -166,6 +208,7 @@ impl Client {
     /// `Unavailable` when no node answers or one is warming up; `Rejected`
     /// with the node's reason otherwise.
     pub async fn send(&self, bytes: &[u8]) -> Result<(), TransactionError> {
+        self.ready().await.map_err(TransactionError::unavailable)?;
         let request = Request::once("sendrawtransaction", json!([bytes.to_lower_hex_string()]));
         match self.transport.broadcast(request).await {
             Ok(()) => Ok(()),

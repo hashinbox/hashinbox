@@ -1,12 +1,15 @@
 //! The Ethereum JSON-RPC calls this crate makes, over `::rpc`, answered in
 //! `base` types.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
-use ::rpc::{Batch, Call, CallError, CallResult, Client as _, Failure, Request};
+use ::rpc::{Batch, Call, CallError, CallResult, Client as _, ErrorKind, Failure, Request};
 use alloy_consensus::TxEip1559;
 use alloy_primitives::{B256, Bytes, U64, U256, hex, keccak256};
 use alloy_rpc_types_eth::Block as RpcBlock;
@@ -18,7 +21,10 @@ use base::{
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use crate::{Address, Network, Tokens, erc20, transaction::Transaction};
+use crate::{
+    Address, Network, Tokens, erc20,
+    transaction::{Log, Transaction},
+};
 
 /// JSON-RPC "method not found": a node without `eth_getBlockReceipts`.
 const METHOD_NOT_FOUND: i64 = -32_601;
@@ -42,16 +48,42 @@ struct Inner {
     /// Set once the node refuses `eth_getBlockReceipts`: receipts then come
     /// one per transaction.
     receipts_by_transaction: AtomicBool,
+    /// What each token contract's `decimals()` must report.
+    decimals: Vec<(alloy_primitives::Address, u8)>,
+    /// Whether the node passed [`Client::verify`]; until then every call
+    /// verifies first.
+    verified: AtomicBool,
 }
 
 impl Client {
-    /// A client of `network` over `transport`; [`Self::verify`] checks the node.
+    /// A client of `network` over `transport`, trusted: [`Self::verify`]
+    /// checks the node when asked.
     #[must_use]
     pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
         Self(Arc::new(Inner {
             transport,
             network,
             receipts_by_transaction: AtomicBool::new(false),
+            decimals: Vec::new(),
+            verified: AtomicBool::new(true),
+        }))
+    }
+
+    /// A client of `network` over `transport` that asks nothing yet: its
+    /// first call verifies the node ([`Self::verify`], with each token
+    /// contract's `decimals`), again on every call until one passes.
+    #[must_use]
+    pub fn verifying(
+        transport: Arc<dyn ::rpc::Client>,
+        network: Network,
+        decimals: Vec<(alloy_primitives::Address, u8)>,
+    ) -> Self {
+        Self(Arc::new(Inner {
+            transport,
+            network,
+            receipts_by_transaction: AtomicBool::new(false),
+            decimals,
+            verified: AtomicBool::new(false),
         }))
     }
 
@@ -61,11 +93,13 @@ impl Client {
         &self.0.network
     }
 
-    /// Checks that the node serves this network's chain ID.
+    /// Checks that the node serves this network's chain ID, and that each
+    /// token contract reports its configured decimals.
     ///
     /// # Errors
     ///
-    /// For another chain, or a node failure.
+    /// For another chain, a token whose contract disagrees, or a node
+    /// failure.
     pub async fn verify(&self) -> anyhow::Result<()> {
         let actual: U64 = self.call("eth_chainId", json!([])).await?;
         let expected = self.network().chain_id;
@@ -73,6 +107,28 @@ impl Client {
             actual == U64::from(expected),
             "Ethereum node serves chain ID {actual}, not the configured {expected}"
         );
+        for (contract, configured) in &self.0.decimals {
+            let decimals = self.decimals(contract).await?;
+            ensure!(
+                decimals == *configured,
+                "ERC-20 {contract} reports {decimals} decimals, not the configured {configured}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Verifies the node once it passes: nothing for a trusted client or
+    /// one already verified.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::verify`]'s failure.
+    pub async fn ready(&self) -> anyhow::Result<()> {
+        if self.0.verified.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.verify().await?;
+        self.0.verified.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -84,6 +140,7 @@ impl Client {
     /// A node failure, or a node that serves no finalized block yet
     /// (syncing, or a development chain); retry later.
     pub async fn tips(&self) -> anyhow::Result<Tips> {
+        self.ready().await?;
         let [produced, finalized] = self
             .batch(vec![
                 Call::new("eth_blockNumber", json!([])),
@@ -103,7 +160,9 @@ impl Client {
     }
 
     /// Blocks `start..=end`, linked, legs of ether and of `tokens` only. Two
-    /// batches: the blocks, then their receipts.
+    /// batches, the blocks then their receipts (still needed for every
+    /// transaction's status and fee), and one `eth_getLogs` of the `tokens`'
+    /// `Transfer`s over the blocks fetched, for the token legs.
     ///
     /// # Errors
     ///
@@ -112,6 +171,7 @@ impl Client {
     /// receipts of a finalized block count as pruned), or a run that does
     /// not link (the chain moved mid-fetch; retry).
     pub async fn blocks(&self, start: u64, end: u64, tokens: &Tokens) -> anyhow::Result<Blocks> {
+        self.ready().await?;
         let network = self.network();
         let mut run = Blocks::new(network.into());
         if start > end {
@@ -139,6 +199,7 @@ impl Client {
             wires.push(wire);
         }
         let receipts = self.receipts(&wires).await?;
+        let logs = self.transfers(&wires, tokens).await?;
         for (wire, receipts) in wires.into_iter().zip(receipts) {
             let height = wire.number();
             // No receipts for a block the node has: not ready yet near the
@@ -149,7 +210,7 @@ impl Client {
                 }
                 break;
             };
-            let block = block(wire, &receipts, network, tokens)
+            let block = block(wire, &receipts, &logs, network, tokens)
                 .with_context(|| format!("Ethereum block {height}"))?;
             if !run.push(block) {
                 bail!("Ethereum block {height} does not link; retry");
@@ -166,6 +227,7 @@ impl Client {
     /// A node failure, a block the node does not hold yet, or a node that
     /// keeps no history for it ([`NotServed`], EIP-4444).
     pub async fn time(&self, height: u64) -> anyhow::Result<u64> {
+        self.ready().await?;
         let method = "eth_getBlockByNumber";
         let reply = self
             .0
@@ -190,6 +252,7 @@ impl Client {
     ///
     /// A node failure.
     pub async fn nonce(&self, address: &Address) -> anyhow::Result<u64> {
+        self.ready().await?;
         let nonce: U64 = self
             .call(
                 "eth_getTransactionCount",
@@ -206,6 +269,7 @@ impl Client {
     ///
     /// A node failure, or a latest block without an EIP-1559 base fee.
     pub async fn fees(&self) -> anyhow::Result<(U256, U256)> {
+        self.ready().await?;
         let [priority, latest] = self
             .batch(vec![
                 Call::new("eth_maxPriorityFeePerGas", json!([])),
@@ -233,6 +297,7 @@ impl Client {
         from: &Address,
         request: &TxEip1559,
     ) -> Result<u64, TransactionError> {
+        self.ready().await.map_err(TransactionError::unavailable)?;
         let params = json!([{
             "from": from.to_string(),
             "to": request.to.to().map(hex::encode_prefixed),
@@ -301,6 +366,7 @@ impl Client {
     /// `Rejected` with its reason for a definite refusal; `Unavailable` when
     /// the outcome is unknown: retry with the same bytes.
     pub async fn send(&self, bytes: &[u8]) -> Result<(), TransactionError> {
+        self.ready().await.map_err(TransactionError::unavailable)?;
         let request = Request::once(
             "eth_sendRawTransaction",
             json!([hex::encode_prefixed(bytes)]),
@@ -374,6 +440,68 @@ impl Client {
         }
     }
 
+    /// The `Transfer` logs of `tokens` in the blocks of `wires`, by
+    /// transaction hash; none without tokens. A range the node refuses (an
+    /// error object: too wide, too many results; or too large an answer) is
+    /// halved until one block, which must answer.
+    ///
+    /// # Errors
+    ///
+    /// A node failure, or a log of another block than the one fetched (the
+    /// chain moved mid-fetch; retry).
+    async fn transfers(
+        &self,
+        wires: &[WireBlock],
+        tokens: &Tokens,
+    ) -> anyhow::Result<BTreeMap<B256, Vec<Log>>> {
+        let mut transfers = BTreeMap::<B256, Vec<Log>>::new();
+        let (Some(first), Some(last)) = (wires.first(), wires.last()) else {
+            return Ok(transfers);
+        };
+        let contracts: Vec<_> = tokens.iter().map(hex::encode_prefixed).collect();
+        if contracts.is_empty() {
+            return Ok(transfers);
+        }
+        let mut ranges = vec![(first.number(), last.number())];
+        while let Some((from, to)) = ranges.pop() {
+            let filter = json!([{
+                "fromBlock": format!("{from:#x}"),
+                "toBlock": format!("{to:#x}"),
+                "address": contracts,
+                "topics": [hex::encode_prefixed(erc20::TRANSFER)],
+            }]);
+            let reply = self
+                .0
+                .transport
+                .request(Request::new("eth_getLogs", filter))
+                .await;
+            let refused = match &reply {
+                Ok(Err(_)) => true,
+                Err(error) => error.kind == ErrorKind::ResponseTooLarge,
+                Ok(Ok(_)) => false,
+            };
+            if refused && from < to {
+                let middle = from + (to - from) / 2;
+                ranges.push((middle + 1, to));
+                ranges.push((from, middle));
+                continue;
+            }
+            let reply = reply.context("Ethereum eth_getLogs")?;
+            expired(from, &reply)?;
+            for log in decode::<Vec<Log>>("eth_getLogs", reply)? {
+                let height = log.block_number.to::<u64>();
+                ensure!(
+                    wires
+                        .iter()
+                        .any(|wire| wire.number() == height && wire.header.hash == log.block_hash),
+                    "Ethereum logs of block {height} are of another block; retry"
+                );
+                transfers.entry(log.transaction_hash).or_default().push(log);
+            }
+        }
+        Ok(transfers)
+    }
+
     /// One repeatable call, decoded.
     async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> anyhow::Result<T> {
         let reply = self
@@ -414,8 +542,12 @@ impl base::Broadcaster for Client {
 }
 
 /// A node's height (`eth_blockNumber`): how a [`::rpc::Cluster`] picks its
-/// primary.
-pub(crate) fn height(node: &::rpc::Http) -> ::rpc::BoxFuture<'_, Result<u64, CallError>> {
+/// primary, over any node client.
+///
+/// # Errors
+///
+/// The node's failure, or an answer that is not a height.
+pub fn height<C: ::rpc::Client + ?Sized>(node: &C) -> ::rpc::BoxFuture<'_, Result<u64, CallError>> {
     Box::pin(async move {
         let raw = node
             .request(Request::new("eth_blockNumber", json!([])))
@@ -424,10 +556,12 @@ pub(crate) fn height(node: &::rpc::Http) -> ::rpc::BoxFuture<'_, Result<u64, Cal
     })
 }
 
-/// `wire` with its receipts, as a base block; withdrawals are its rewards.
+/// `wire` with its receipts and token logs, as a base block; withdrawals are
+/// its rewards.
 fn block(
     wire: WireBlock,
     receipts: &[Value],
+    logs: &BTreeMap<B256, Vec<Log>>,
     network: &Network,
     tokens: &Tokens,
 ) -> anyhow::Result<Block> {
@@ -451,7 +585,7 @@ fn block(
         .iter()
         .zip(receipts)
         .map(|(transaction, receipt)| {
-            Ok(Transaction::from_rpc(transaction, receipt, network, tokens)?.into())
+            Ok(Transaction::from_rpc(transaction, receipt, logs, network, tokens)?.into())
         })
         .collect::<anyhow::Result<_>>()?;
     let rewards = wire

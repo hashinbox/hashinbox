@@ -6,6 +6,12 @@ rust-version.workspace = true
 description = "Ethereum for the payment SDK: a block-by-block chain, ETH and ERC-20 wallets, and a broadcaster."
 readme = "README.md"
 
+[features]
+default = []
+# The mock Sepolia (`chain_ethereum::testing`): its model, recordings and
+# `TestChain`. Dev-dependencies only.
+testing = ["base/testing", "rpc/testing"]
+
 [dependencies]
 anyhow.workspace = true
 base = { path = "../../base" }
@@ -24,6 +30,10 @@ serde = { workspace = true, features = ["derive"] }
 futures-executor.workspace = true
 # The scripted node double (`rpc::testing`): tests only, never a production link.
 rpc = { path = "../../../packages/rpc", features = ["testing"] }
+# This crate on itself: turns `testing` on for its own tests.
+chain-ethereum = { path = ".", features = ["testing"] }
+# The record step's runtime (`RECORD=1`, by hand).
+tokio = { workspace = true }
 
 [lints]
 workspace = true

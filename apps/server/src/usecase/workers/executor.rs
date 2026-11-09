@@ -15,7 +15,7 @@ const CONCURRENCY: usize = 4;
 const PAUSE: Duration = Duration::from_secs(1);
 
 /// How often due retries are looked for without a write.
-const TICK: Duration = Duration::from_secs(1);
+pub(crate) const TICK: Duration = Duration::from_secs(1);
 
 /// A worker behind its types: one run of a job, answered.
 type Run =
@@ -24,14 +24,17 @@ type Run =
 /// Runs the queue's jobs with a worker and retry rule per kind.
 pub(crate) struct Executor {
     queue: Queue,
+    tick: Duration,
     kinds: HashMap<&'static str, (Run, Retry)>,
 }
 
 impl Executor {
-    /// No workers, over `queue`.
-    pub(crate) fn new(queue: Queue) -> Self {
+    /// No workers, over `queue`, looking for due jobs every `tick`
+    /// ([`TICK`]) without a write.
+    pub(crate) fn new(queue: Queue, tick: Duration) -> Self {
         Self {
             queue,
+            tick,
             kinds: HashMap::new(),
         }
     }
@@ -60,7 +63,7 @@ impl Executor {
     /// When the recovery fails.
     pub(crate) async fn run(self) -> anyhow::Result<()> {
         self.queue.recover().await?;
-        let ticking = Ticking::new(&self.queue, TICK);
+        let ticking = Ticking::new(&self.queue, self.tick);
         // Subscribe first: a change between a look and the wait is not lost.
         let mut signal = ticking.changes();
         let mut running = JoinSet::new();

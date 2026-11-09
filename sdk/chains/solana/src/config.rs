@@ -37,6 +37,9 @@ pub struct Config {
     pub pending_ttl_ms: u64,
     /// How often the indexer wakes, in milliseconds; default 1,000.
     pub interval_ms: u64,
+    /// Blocks the indexer fetches per step; default 100
+    /// ([`base::DEFAULT_BATCH`]). Lower it for a node that limits requests.
+    pub batch: u64,
     /// How old a watch's start may be: about what history the nodes keep;
     /// none: no limit.
     pub max_history: Option<Duration>,
@@ -46,13 +49,14 @@ pub struct Config {
 }
 
 /// The knobs a [`base::NetworkConfig`]'s `settings` may set: `fee_ttl_ms`,
-/// `pending_ttl_ms`, `interval_ms`; an absent one keeps its default.
+/// `pending_ttl_ms`, `interval_ms`, `batch`; an absent one keeps its default.
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Settings {
     fee_ttl_ms: u64,
     pending_ttl_ms: u64,
     interval_ms: u64,
+    batch: u64,
 }
 
 impl Default for Settings {
@@ -61,6 +65,7 @@ impl Default for Settings {
             fee_ttl_ms: 5_000,
             pending_ttl_ms: 120_000,
             interval_ms: 1_000,
+            batch: base::DEFAULT_BATCH,
         }
     }
 }
@@ -92,6 +97,7 @@ impl Config {
             fee_ttl_ms: settings.fee_ttl_ms,
             pending_ttl_ms: settings.pending_ttl_ms,
             interval_ms: settings.interval_ms,
+            batch: settings.batch,
             max_history: None,
             confirmations: 32,
         }
@@ -125,7 +131,9 @@ impl Config {
     /// [`Self::validate`]'s refusals, an unreachable or foreign node, or a
     /// mint that disagrees (Token-2022 included).
     pub async fn connect(&self) -> anyhow::Result<Client> {
-        self.open(self.cluster().await?).await
+        let client = self.open(self.cluster().await?)?;
+        client.ready().await?;
+        Ok(client)
     }
 
     /// A cluster of the configured endpoints.
@@ -142,21 +150,17 @@ impl Config {
         Ok(Arc::new(Retry::new(cluster)))
     }
 
-    /// Validates, and a verified client over `transport`.
-    async fn open(&self, transport: Arc<dyn ::rpc::Client>) -> anyhow::Result<Client> {
+    /// Validates, and a client over `transport` that verifies the genesis
+    /// hash, Memo-v3 and every mint's decimals at its first call; asks
+    /// nothing now.
+    fn open(&self, transport: Arc<dyn ::rpc::Client>) -> anyhow::Result<Client> {
         self.validate()?;
-        let client = Client::new(transport, self.native());
-        client.verify().await?;
-        for token in &self.tokens {
-            let decimals = client.decimals(&token.mint).await?;
-            ensure!(
-                decimals == token.decimals,
-                "Solana mint {} declares {decimals} decimals, not the configured {}",
-                token.mint,
-                token.decimals
-            );
-        }
-        Ok(client)
+        let decimals = self
+            .tokens
+            .iter()
+            .map(|token| (token.mint, token.decimals))
+            .collect();
+        Ok(Client::verifying(transport, self.native(), decimals))
     }
 
     /// The chain read through `rpc`.
@@ -264,6 +268,7 @@ impl TryFrom<&base::NetworkConfig> for Config {
             fee_ttl_ms: settings.fee_ttl_ms,
             pending_ttl_ms: settings.pending_ttl_ms,
             interval_ms: settings.interval_ms,
+            batch: settings.batch,
             max_history: config.max_history,
             confirmations: config.confirmations,
         };
@@ -290,14 +295,17 @@ impl base::Config for Config {
         client: Arc<dyn ::rpc::Client>,
     ) -> Future<'a, anyhow::Result<Service>> {
         Box::pin(async move {
-            let rpc = self.open(Arc::clone(&client)).await?;
+            let rpc = self.open(Arc::clone(&client))?;
             let chain = Arc::new(self.chain(&rpc));
-            let indexer = Arc::new(Indexer::new(
-                chain.clone(),
-                Arc::clone(&storage.blocks),
-                Arc::clone(&storage.indexes),
-                Duration::from_millis(self.interval_ms),
-            ));
+            let indexer = Arc::new(
+                Indexer::new(
+                    chain.clone(),
+                    Arc::clone(&storage.blocks),
+                    Arc::clone(&storage.indexes),
+                    Duration::from_millis(self.interval_ms),
+                )
+                .with_batch(self.batch),
+            );
             Ok(Service {
                 indexer,
                 wallets: WalletFactoryBroadcaster {

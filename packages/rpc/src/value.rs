@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{Error, ErrorKind};
@@ -53,12 +55,16 @@ impl RawJson {
     }
 }
 
+/// The most characters of a node's message a [`Failure`] shows.
+const SHOWN: usize = 200;
+
 /// A JSON-RPC error object returned by the server for one call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Failure {
     /// JSON-RPC error code.
     pub code: i64,
-    /// Server-controlled message; do not show it to end users.
+    /// Server-controlled message; operators see it (truncated) in
+    /// [`fmt::Display`], end users should not.
     pub message: String,
     /// Optional server-controlled detail.
     pub data: Option<RawJson>,
@@ -69,6 +75,35 @@ impl Failure {
     #[must_use]
     pub const fn is_server_error(&self) -> bool {
         self.code >= -32_099 && self.code <= -32_000
+    }
+
+    /// Whether the node refused for a rate or size limit, so the same call
+    /// may succeed later: `-32005` ("limit exceeded"), or `-32003` when its
+    /// message says "limit".
+    #[must_use]
+    pub fn is_rate_limited(&self) -> bool {
+        match self.code {
+            -32_005 => true,
+            -32_003 => self.message.to_ascii_lowercase().contains("limit"),
+            _ => false,
+        }
+    }
+}
+
+/// The code and the node's message, cut to its first 200 characters.
+impl fmt::Display for Failure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let shown: String = self.message.chars().take(SHOWN).collect();
+        let cut = if shown.len() < self.message.len() {
+            "…"
+        } else {
+            ""
+        };
+        write!(
+            formatter,
+            "JSON-RPC call failed with code {}: {shown}{cut}",
+            self.code
+        )
     }
 }
 

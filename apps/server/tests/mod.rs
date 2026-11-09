@@ -1,12 +1,15 @@
 //! The server's tests, compiled into the binary's test target (the server has
-//! no library): the stores and reads on SQLite (`storage`), the send job
-//! (`send`) and the routes (`routes`), over one scripted network. Offline and
-//! deterministic.
+//! no library): the suite (`cases`, over mock chains through `support`),
+//! and, until it replaces them, the stores and reads on SQLite (`storage`),
+//! the send job (`send`) and the routes (`routes`) over one scripted
+//! network. Offline.
 
+mod cases;
 mod pipe;
 mod routes;
 mod send;
 mod storage;
+mod support;
 
 use std::{
     collections::VecDeque,

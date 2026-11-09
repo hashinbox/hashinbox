@@ -21,10 +21,13 @@ type Parser = Box<dyn Fn(&NetworkConfig) -> anyhow::Result<Box<dyn Config>> + Se
 /// It names no chain: the application registers each chain's configuration
 /// with [`Builder::with_chain`] and hands [`NetworkConfig`]s in with
 /// [`Builder::with_network_config`], or chain configurations with
-/// [`Builder::with_network`].
+/// [`Builder::with_network`]. A network that did not build has no service;
+/// asking for it says why.
 pub struct Payments {
     services: BTreeMap<Network, Service>,
     clients: BTreeMap<Network, Arc<Swap>>,
+    /// Why each network that did not build did not.
+    failures: BTreeMap<Network, String>,
 }
 
 impl Payments {
@@ -38,11 +41,20 @@ impl Payments {
     ///
     /// # Errors
     ///
-    /// `Unsupported` for a network that is not configured.
+    /// `Unsupported` for a network that is not configured, or that did not
+    /// build (with why).
     pub fn service(&self, network: &Network) -> anyhow::Result<&Service> {
-        self.services
-            .get(network)
-            .ok_or_else(|| unsupported().into())
+        if let Some(service) = self.services.get(network) {
+            return Ok(service);
+        }
+        let Some(reason) = self.failures.get(network) else {
+            return Err(unsupported().into());
+        };
+        Err(WalletError::new(
+            WalletErrorKind::Unsupported,
+            format!("network did not build: {reason}"),
+        )
+        .into())
     }
 
     /// Every network's service.
@@ -259,66 +271,95 @@ impl Builder {
     }
 
     /// Builds every [`NetworkConfig`] by its chain, then each network over a
-    /// [`Swap`] of its given client or the chain's own.
+    /// [`Swap`] of its given client or the chain's own. A network that does
+    /// not build (an unregistered chain, settings that do not decode, an
+    /// invalid configuration or endpoint) is left out with why, see
+    /// [`Payments::service`]; the others build. Nothing asks a node: each
+    /// chain verifies its node at first use.
     ///
     /// # Errors
     ///
-    /// No storage, a network of an unregistered chain or whose settings do
-    /// not decode, a network configured twice, a client for a network with no
-    /// configuration, or a network whose configuration is invalid or whose
-    /// nodes do not connect.
+    /// No storage, a network configured twice, or a client for a network
+    /// with no configuration.
     pub async fn build(self) -> anyhow::Result<Payments> {
         let storage = self.storage.context("payments needs with_storage")?;
+        let mut payments = Payments {
+            services: BTreeMap::new(),
+            clients: BTreeMap::new(),
+            failures: BTreeMap::new(),
+        };
 
         let mut configs = Vec::new();
         for config in &self.configs {
             let network = &config.network;
-            let parse = self.parsers.get(&network.chain).with_context(|| {
-                let known = self.parsers.keys().collect::<Vec<_>>();
-                format!(
-                    "no chain {} is registered; registered: {known:?}",
-                    network.chain
-                )
-            })?;
             let label = format!("{}/{}", network.chain, network.name);
-            configs.push(parse(config).context(label)?);
+            let parsed = self
+                .parsers
+                .get(&network.chain)
+                .with_context(|| {
+                    let known = self.parsers.keys().collect::<Vec<_>>();
+                    format!(
+                        "no chain {} is registered; registered: {known:?}",
+                        network.chain
+                    )
+                })
+                .and_then(|parse| parse(config));
+            match parsed {
+                Ok(parsed) => configs.push(parsed),
+                Err(error) => {
+                    let reason = format!("{:#}", error.context(label));
+                    payments.failures.insert(network.clone(), reason);
+                }
+            }
         }
         configs.extend(self.networks);
         let mut given = self.clients;
         for network in given.keys() {
             ensure!(
-                configs.iter().any(|config| config.network() == *network),
+                payments.failures.contains_key(network)
+                    || configs.iter().any(|config| config.network() == *network),
                 "a client is given for {}/{}, which is not configured",
                 network.chain,
                 network.name
             );
         }
 
-        let mut payments = Payments {
-            services: BTreeMap::new(),
-            clients: BTreeMap::new(),
-        };
         for config in configs {
             let network = config.network();
             let label = format!("{}/{}", network.chain, network.name);
             ensure!(
-                !payments.services.contains_key(&network),
+                !payments.services.contains_key(&network)
+                    && !payments.failures.contains_key(&network),
                 "network {label} is configured twice"
             );
-            let transport = match given.remove(&network) {
-                Some(client) => client,
-                None => config.client().await.with_context(|| label.clone())?,
-            };
-            let client = Arc::new(Swap::new(transport, Vec::new()));
-            let service = config
-                .build(&storage, client.clone())
-                .await
-                .with_context(|| label.clone())?;
-            payments.services.insert(network.clone(), service);
-            payments.clients.insert(network, client);
+            let given = given.remove(&network);
+            match open(&*config, given, &storage).await.context(label) {
+                Ok((service, client)) => {
+                    payments.services.insert(network.clone(), service);
+                    payments.clients.insert(network, client);
+                }
+                Err(error) => {
+                    payments.failures.insert(network, format!("{error:#}"));
+                }
+            }
         }
         Ok(payments)
     }
+}
+
+/// `config` built over a [`Swap`] of `given`, or of the chain's own client.
+async fn open(
+    config: &dyn Config,
+    given: Option<Arc<dyn rpc::Client>>,
+    storage: &Storage,
+) -> anyhow::Result<(Service, Arc<Swap>)> {
+    let transport = match given {
+        Some(client) => client,
+        None => config.client().await?,
+    };
+    let client = Arc::new(Swap::new(transport, Vec::new()));
+    let service = config.build(storage, client.clone()).await?;
+    Ok((service, client))
 }
 
 impl fmt::Debug for Builder {

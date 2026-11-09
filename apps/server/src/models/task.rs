@@ -109,6 +109,25 @@ pub(crate) mod db {
             .map(drop)
     }
 
+    /// Inserts `task`, stamped `now`, unless a task of its kind and topic is
+    /// unfinished (pending or running); whether it was inserted.
+    pub(crate) fn insert_alone(
+        connection: &mut SqliteConnection,
+        task: &Task,
+        now: i64,
+    ) -> QueryResult<bool> {
+        let unfinished: i64 = q::table
+            .filter(q::kind.eq(&task.kind))
+            .filter(q::topic.eq(&task.topic))
+            .filter(q::status.eq_any([0, 1]))
+            .count()
+            .get_result(connection)?;
+        if unfinished > 0 {
+            return Ok(false);
+        }
+        insert(connection, task, now).map(|()| true)
+    }
+
     /// Replaces the stored `task` whole, stamped `now`; whether it was there.
     pub(crate) fn update(
         connection: &mut SqliteConnection,

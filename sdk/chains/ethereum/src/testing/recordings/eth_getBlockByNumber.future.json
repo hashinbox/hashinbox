@@ -1,0 +1,11 @@
+{
+  "provider": "ethereum-sepolia-rpc.publicnode.com",
+  "network": "sepolia",
+  "recorded_at": "2026-11-04",
+  "method": "eth_getBlockByNumber",
+  "params": [
+    "0xb99607",
+    false
+  ],
+  "result": null
+}

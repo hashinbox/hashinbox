@@ -10,6 +10,8 @@ mod fee;
 mod indexer;
 mod inout;
 mod network;
+#[cfg(feature = "testing")]
+pub mod testing;
 /// Signed transactions, their identity, building, and broadcast.
 pub mod transaction;
 mod wallet;

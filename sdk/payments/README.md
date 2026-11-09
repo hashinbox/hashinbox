@@ -11,7 +11,9 @@ through. It names no chain; every call is keyed by network.
   `with_network(config)` adds a chain's own config; `with_client(network, client)`
   reaches that network through `client` instead of the chain's own
   `Config::client()`; `with_storage(base::Storage)` (required). `build()`
-  wraps each network's transport in a `Swap` and builds the service over it.
+  wraps each network's transport in a `Swap` and builds the service over it,
+  asking no node; a network that does not build is left out and
+  `service(network)` says why.
 - `Payments`:
   - services: `service(network)`, `services()`, `networks()`, `assets()`
     (merged), `client(network)` (the `Swap`: `replace` changes nodes live,

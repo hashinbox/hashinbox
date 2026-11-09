@@ -14,6 +14,9 @@ sol! {
     }
 }
 
+/// The `Transfer` event's topic: what `eth_getLogs` filters on.
+pub(crate) const TRANSFER: B256 = Erc20::Transfer::SIGNATURE_HASH;
+
 /// `transfer(to, amount)` calldata.
 pub(crate) fn transfer(to: Address, amount: U256) -> Vec<u8> {
     Erc20::transferCall {
@@ -40,7 +43,7 @@ pub(crate) fn transfer_log(topics: &[B256], data: &[u8]) -> Option<(Address, Add
     let [signature, from, to] = topics else {
         return None;
     };
-    if *signature != Erc20::Transfer::SIGNATURE_HASH || data.len() != 32 {
+    if *signature != TRANSFER || data.len() != 32 {
         return None;
     }
     Some((
