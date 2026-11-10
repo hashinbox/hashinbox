@@ -5,58 +5,40 @@
 //! A round's topic is the whole network (`chain:network`), so it never runs
 //! beside a broadcast of that network, and the jobs it starts run after it:
 //! every round sees what earlier rounds sent as pending or mined, never in
-//! flight. At most one round of a network is pending or running.
+//! flight. It is unique: at most one round of a network is pending or
+//! running. It gives way (`OnLock::Skip`) to a job of its network queued
+//! after it, such as a send from the API: it would decide without seeing it.
 
 pub(crate) mod actions;
 
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
-use base::{Chain, Network};
 use logging::{Level, Logger};
 use payments::Payments;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use tasks::{Ack, Job, Task, Topic, Worker};
+use tasks::{Ack, OnLock, Policy, Topic, Worker};
 
 pub(crate) use actions::{Actions, Invocation};
 
+use super::{TIMEOUT, index::Target};
 use crate::{
     db::Db,
     models::{Json, Task as Row, TriggerRun, task, trigger_run},
     usecase::{
         tasks::Queue,
-        trigger::{Context, Triggers},
+        trigger::{Context as Snapshot, Triggers},
     },
 };
 
 /// The job kind.
 pub(crate) const KIND: &str = "triggers";
 
-/// What a round looks at.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Scope {
-    /// The network's chain.
-    pub(crate) chain: String,
-    /// The network.
-    pub(crate) network: String,
-}
-
-impl Scope {
-    /// The round job of this scope, locking its whole network.
-    pub(crate) fn job(&self) -> anyhow::Result<Job> {
-        let topic = Topic::new([format!("{}:{}", self.chain, self.network)])
-            .ok_or_else(|| anyhow::anyhow!("the network does not make a topic"))?;
-        Ok(Job::new(topic, KIND, json!(self)))
-    }
-}
-
 /// Runs a network's triggers: the triggers job.
 pub(crate) struct Round {
     payments: Arc<Payments>,
     db: Db,
     queue: Queue,
-    logger: Logger,
     actions: Arc<Actions>,
+    logger: Logger,
 }
 
 impl Round {
@@ -65,30 +47,43 @@ impl Round {
             payments,
             db,
             queue,
-            logger,
             actions: Arc::new(Actions::new().add(actions::Transfer)),
+            logger,
         }
     }
 }
 
 impl Worker for Round {
     const KIND: &'static str = KIND;
-    type Input = Scope;
+    /// One round per network unfinished, two networks' rounds at once; each
+    /// gives way to a later job of its network.
+    const POLICY: Policy = Policy {
+        on_lock: OnLock::Skip,
+        unique: true,
+        concurrency: NonZeroUsize::new(2).unwrap(),
+        timeout: TIMEOUT,
+        ..Policy::DEFAULT
+    };
+    type Input = Target;
     type State = ();
+
+    /// `chain:network`: the whole network.
+    fn topic(target: &Target) -> Option<Topic> {
+        Topic::new([target.segment()])
+    }
 
     /// One round: every enabled trigger decides at the last kept block, on
     /// spendable balances (pending sends already taken off); each action's
     /// started jobs become one run with them, every run of the round kept
     /// in one write.
-    async fn run(&self, task: Task<Scope, ()>) -> Ack {
-        let scope = task.input();
-        let network = Network::new(Chain::new(&scope.chain), &scope.network);
+    async fn run(&self, cx: tasks::Context<'_, Target, ()>) -> Ack {
+        let network = cx.input().network();
         let round = async {
             let now = i64::try_from(tasks::now())?;
 
             // Every enabled trigger decides on one snapshot.
             let service = self.payments.service(&network)?;
-            let context = Context {
+            let context = Snapshot {
                 assets: service.assets.clone(),
                 estimator: service.wallets.factory.fees(),
                 runtime: tokio::runtime::Handle::current(),
@@ -127,32 +122,36 @@ impl Worker for Round {
                 }
             }
 
-            // Every acting trigger's run and its jobs in one write: all or
-            // none, so a rerun never decides again what this one kept.
+            // Every acting trigger's jobs and run in one write: all or none,
+            // so a rerun never decides again what this one kept. The one
+            // write to the queue outside its store, allowed because the jobs
+            // are not unique: each is admitted.
             if acting.is_empty() {
                 return anyhow::Ok(());
             }
             self.db
                 .write(move |connection| {
                     for (id, jobs) in &acting {
+                        let mut ids = Vec::new();
+                        for job in jobs {
+                            let queued = task::db::insert(connection, &Row::try_from(job)?, now)?;
+                            ids.push(queued.to_string());
+                        }
                         let run = TriggerRun {
-                            jobs: Json(jobs.iter().map(|job| job.id.to_string()).collect()),
+                            jobs: Json(ids),
                             ..TriggerRun::new(id, now)
                         };
                         trigger_run::db::insert(connection, &run)?;
-                        for job in jobs {
-                            task::db::insert(connection, &Row::try_from(job)?, now)?;
-                        }
                     }
                     Ok(())
                 })
                 .await?;
-            self.queue.announce();
+            self.queue.notify();
             anyhow::Ok(())
         };
         match round.await {
-            Ok(()) => task.ack(),
-            Err(error) => task.nack(format!("{error:#}")),
+            Ok(()) => Ack::Done,
+            Err(error) => Ack::Retry(format!("{error:#}")),
         }
     }
 }

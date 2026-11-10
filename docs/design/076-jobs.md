@@ -1,7 +1,7 @@
 # 076: Jobs: worker policy, executor and store in `tasks`
 
-Status: draft. Changes `packages/tasks` (needs approval) and the server's
-workers.
+Status: implemented, with the deviations listed at the end. Changes
+`packages/tasks` (approved) and the server's workers.
 
 067 gave the queue one lock rule (topics) and one state machine. Everything
 else a job needs (when it runs, what happens on a held lock, how many run,
@@ -127,7 +127,7 @@ Our workers:
 
 | kind | schedule | on_lock | concurrency | timeout |
 |---|---|---|---|---|
-| `index` | `Every(interval)`, one per network | `Wait` | 4 | 60 s |
+| `index` | `Every(interval)`, one per network | `Wait` | 4 | 5 min |
 | `expire` | `Every(PERIOD)`, one per network | `Wait` | 1 | 60 s |
 | `prune` | `Every(period)`, one | `Wait` | 1 | 60 s |
 | `triggers` | `Manual` | `Skip` | 2 | 60 s |
@@ -306,3 +306,76 @@ id too. The server wires a real sink (stderr) in `main.rs`.
   (issues.md) sets per-method RPC budgets.
 - `unfinished()` reads every unfinished job; fine at our sizes, revisit with
   issue 10.
+
+## Deviations (as implemented)
+
+- **`Skip` waits for earlier jobs; only a later one skips it.** Refusing a
+  `Skip` job at enqueue while any conflicting job is unfinished would break
+  the 075 `queued` scenario (one round waits behind a send stuck in retry).
+  So a `Skip` job waits behind earlier conflicting jobs like `Wait`, and is
+  finished `skipped` at start while a *later* conflicting job is unfinished:
+  the case the design cares about (a newer API send it cannot see). It never
+  runs on a view missing a job queued after it, and a round behind a stuck
+  send decides once the send ends.
+- **Admission is the key alone.** With the rule above nothing is refused at
+  enqueue by its topic, so `Admission` is `Queued(seq)` or `Duplicate(id)`
+  and `Store::enqueue` takes no `on_lock`. There is no `Jobs::admit`: each
+  store checks the key in its own write (the SQLite store also has a partial
+  unique index on `(kind, key)`), and the contract suite pins it.
+- **A new place in line is `seq` 0.** `settle` sets `seq` to 0 when a job
+  goes back to pending for a new run (`Again`, `AgainBecause`, an `Every`
+  re-arm); a store gives a job with `seq` 0 the next place on `enqueue` or
+  `update`. A retry keeps its `seq`.
+- **No `Timeout` ack.** The executor drops a run past its timeout, logs
+  `job.timeout` and settles it as `Ack::Retry("timeout")`.
+- **`index` is `Manual`.** It never answers `Done`; it answers `again(at)` at
+  its network's interval (the per-network interval in Open), so an `Every`
+  period would never apply.
+- **`Wait { max }`** counts from the job's `run_at` (when it fell due).
+- **Admissions are logged by `Notifying`** (it holds a logger), so every
+  enqueue, from any caller, logs `job.queued` or `job.duplicate`.
+- **The round's outside write** is allowed because its broadcast jobs have
+  no key: admission is trivially `Queued`.
+- **Tests.** The two round scenarios are one server case (`skipped`): a
+  round waiting behind a stuck send is skipped once a newer send is queued,
+  its reason and its `job.skipped` log naming that send. The hung-run
+  timeout and the per-kind cap are executor tests in `tasks` over
+  `MemoryStore`, not server cases.
+- **Prune also deletes skipped rounds**; they are as much noise as
+  succeeded ones.
+- **The stderr sink prints `info` and above**: skips, retries, timeouts,
+  lock timeouts and failures. `job.queued`, `job.duplicate`, `job.started`,
+  `job.again` and `job.done` are `debug`.
+- **No job is queued when a network is added at runtime**: networks are
+  built at boot, and boot enqueues every instance.
+- **Recurring jobs retry for ever.** With the default retry (three
+  attempts), three timeouts or failed writes in a row failed `index`,
+  `expire` or `prune` for good, and nothing re-armed it until a restart.
+  They now retry with `FOREVER` (`workers/mod.rs`): attempts never run out,
+  each retry waits a second longer than the last (`backoff × attempts`), and
+  a run that ends `again` or `Done` starts the count over. `index` also has
+  its own timeout, 5 min, above one slow Ethereum step (~3 min, issues.md
+  T1), so a run always makes progress before it can be dropped. The test is
+  `index::tests::an_index_job_timing_out_again_and_again_stays_pending`: 100
+  timeouts in a row leave the job pending with a later `run_at`.
+- **The `partial` case created its two triggers in one batch.** It created
+  `a` and `b` in two API calls. A round could run between them: it decided
+  `a` alone and kept its run and send, and the quarter that send held left
+  the treasury below 0.9, so neither trigger decided again and no round ever
+  failed at `b` (seen as 1 in ~25 loaded runs; confirmed with `a`'s run
+  present at the failure). The queue never promised a round would not run
+  between two API calls; the case now creates both in one `POST
+  /v1/triggers`, which is stored as one write, so a round sees both or
+  neither.
+- **Where the removed server queue tests live.** The SQLite store's own
+  queue tests became `the_sqlite_store_keeps_the_contract`, which runs
+  `tasks::testing::store_contract` (as does `MemoryStore`):
+
+  | removed test | now tested by |
+  |---|---|
+  | `update_replaces_the_job_whole` | `store_contract`, "an update replaces the job whole" |
+  | `next_never_starts_a_conflicting_topic_or_overtakes` | `store_contract`, "what may start from the line" (the same steps, through the store's `unfinished` and `Jobs::startable`); `jobs::tests::nothing_starts_beside_or_ahead_of_a_conflicting_job` |
+  | `a_wildcard_locks_its_wallet_on_every_network` | `store_contract`, "a wildcard locks its wallet on every network" |
+  | `enqueue_alone_waits_for_the_unfinished_one` | `store_contract`, "a key is unique among the unfinished jobs of a kind" (pending, running, another kind, no key, after done, failed or skipped, concurrent) |
+  | `recover_returns_running_jobs_to_pending` | `store_contract`, "running jobs go back to pending" |
+  | `the_queue_retries_saves_fails_unknown_kinds_and_expires` | `executor::tests::it_retries_saves_fails_unknown_kinds_and_expires` (over `MemoryStore`) |

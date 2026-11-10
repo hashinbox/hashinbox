@@ -19,12 +19,20 @@ mod usecase;
 #[path = "../tests/mod.rs"]
 mod tests;
 
-use std::{sync::Arc, time::Duration};
+use std::{fmt::Write as _, sync::Arc, time::Duration};
 
 use api::AppState;
 use config::{AnyError, Cli, Command};
+use logging::{Level, Logger, kv};
 use payments::Payments;
-use usecase::workers::executor::{self, Executor};
+use tasks::Executor;
+use usecase::{
+    tasks::Queue,
+    workers::{broadcast, expire, index, prune, trigger},
+};
+
+/// How often due jobs are looked for without a write.
+const TICK: Duration = Duration::from_secs(1);
 
 /// A network's nodes as one client, when the caller has them (tests map
 /// their endpoint URLs to mock nodes); `None`: the chain connects its own.
@@ -58,8 +66,9 @@ async fn main() -> Result<(), AnyError> {
     });
 
     let db = config.storage.open()?;
-    let (state, executor) = boot(db, &|_| Box::pin(async { Ok(None) }), executor::TICK).await?;
-    let jobs = tokio::spawn(executor.run());
+    let logger = Logger::new(Arc::new(Stderr));
+    let (state, executor) = boot(db, &|_| Box::pin(async { Ok(None) }), TICK, logger).await?;
+    let jobs = executor.run();
     let router = api::router(state, &server)?.merge(face.routes()?);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     // Handlers in flight drain before `serve` returns; jobs left running
@@ -69,14 +78,15 @@ async fn main() -> Result<(), AnyError> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await;
-    jobs.abort();
+    jobs.stop().await;
     Ok(served?)
 }
 
 /// Everything `serve` runs, over `db`: the payments container of every
 /// network with a `network_index` row (each `enabled` network gets one),
-/// its nodes from `connect` or the chain's own, every worker's job, and
-/// the job loop (not yet running) looking for due jobs every `tick`.
+/// its nodes from `connect` or the chain's own, every recurring job, and
+/// the job queues (not yet running) looking for due jobs every `tick`,
+/// a trigger round's refusals going to `logger`.
 ///
 /// # Errors
 ///
@@ -86,8 +96,9 @@ pub(crate) async fn boot(
     db: db::Db,
     connect: &Connect,
     tick: Duration,
-) -> anyhow::Result<(Arc<AppState>, Executor)> {
-    let queue = usecase::tasks::Queue::new(db.clone());
+    logger: Logger,
+) -> anyhow::Result<(Arc<AppState>, Executor<Queue>)> {
+    let queue = usecase::tasks::queue(db.clone());
     let stores = Arc::new(usecase::sdk::Stores::new(db.clone()));
     // Every network with a `network_index` row, each built by its chain.
     db.write(models::network_index::db::create_enabled).await?;
@@ -113,38 +124,62 @@ pub(crate) async fn boot(
         .build()
         .await?;
     let payments = Arc::new(payments);
-    // Every network's index job steps its indexer; at the tip it queues a
-    // triggers job (locking the whole network), whose sends are broadcast
-    // jobs (one topic per sender).
-    let index = usecase::workers::index::Index::new(payments.clone(), db.clone(), queue.clone());
-    index.start().await?;
-    // Every network's expire job frees what pending transactions held.
-    let expire = usecase::workers::expire::Expire::new(payments.clone(), db.clone(), queue.clone());
-    expire.start().await?;
-    // One prune job deletes jobs that succeeded more than a day ago.
-    let prune = usecase::workers::prune::Prune::new(db.clone(), queue.clone());
-    prune.start().await?;
+    // Each recurring worker seeds its own jobs when its queue starts
+    // (`Worker::before`): every network's index job steps its indexer and at
+    // the tip queues a triggers job (locking the whole network), whose sends
+    // are broadcast jobs (one topic per sender); every network's expire job
+    // frees what pending transactions held; one prune job deletes old
+    // succeeded jobs.
     let executor = Executor::new(queue.clone(), tick)
-        .add(index, tasks::Retry::default())
-        .add(expire, tasks::Retry::default())
-        .add(prune, tasks::Retry::default())
-        .add(
-            usecase::workers::broadcast::Broadcast::new(payments.clone(), db.clone()),
-            tasks::Retry::default(),
-        )
-        .add(
-            usecase::workers::trigger::Round::new(
-                payments.clone(),
-                db.clone(),
-                queue.clone(),
-                logging::Logger::default(),
-            ),
-            tasks::Retry::default(),
-        );
+        .add(index::Index::new(
+            payments.clone(),
+            db.clone(),
+            queue.clone(),
+        ))
+        .add(expire::Expire::new(db.clone()))
+        .add(prune::Prune::new(db.clone()))
+        .add(broadcast::Broadcast::new(payments.clone(), db.clone()))
+        .add(trigger::Round::new(
+            payments.clone(),
+            db.clone(),
+            queue.clone(),
+            logger,
+        ));
     let state = Arc::new(AppState {
         payments,
         db,
         queue,
     });
     Ok((state, executor))
+}
+
+/// Events at `info` and above, one line each on stderr: level, event,
+/// message, then each field as `key=value`.
+struct Stderr;
+
+impl logging::Log for Stderr {
+    fn enabled(&self, metadata: &logging::Metadata<'_>) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &logging::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let mut line = format!("{} {} {}", record.level(), record.target(), record.args());
+        let _ = record.key_values().visit(&mut Fields(&mut line));
+        eprintln!("{line}");
+    }
+
+    fn flush(&self) {}
+}
+
+/// Appends each field to a line.
+struct Fields<'a>(&'a mut String);
+
+impl<'kvs> kv::VisitSource<'kvs> for Fields<'_> {
+    fn visit_pair(&mut self, key: kv::Key<'kvs>, value: kv::Value<'kvs>) -> Result<(), kv::Error> {
+        let _ = write!(self.0, " {key}={value}");
+        Ok(())
+    }
 }

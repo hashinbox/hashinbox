@@ -9,7 +9,7 @@ use anyhow::{Context as _, bail, ensure};
 use base::{Address, Decimal, Network};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tasks::Job;
+use tasks::{Job, Worker as _};
 
 use crate::{
     models::{
@@ -18,7 +18,7 @@ use crate::{
     },
     usecase::{
         trigger::Trigger,
-        workers::broadcast::{Payment, SendIntent},
+        workers::broadcast::{Broadcast, Payment, SendIntent},
     },
 };
 
@@ -228,7 +228,7 @@ impl Action for Transfer {
                 asset: send.asset.clone(),
                 transfers,
             };
-            invocation.start(intent.job()?);
+            invocation.start(Broadcast::job(&intent)?);
         }
         Ok(())
     }

@@ -17,19 +17,21 @@
 //! A rerun with saved state never builds again: it broadcasts the recorded
 //! transactions not yet sent; one forgotten meanwhile (expired) fails it.
 
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
+use anyhow::ensure;
 use base::{
     Address, Asset, BuilderExt as _, Chain, Decimal, Network, TransactionErrorKind, WalletError,
 };
 use payments::Payments;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tasks::{Ack, Job, Task, Topic, Worker};
+use serde_json::Value;
+use tasks::{Ack, Context, Job, Policy, Topic, Worker};
 
+use super::TIMEOUT;
 use crate::{
     db::Db,
-    models::{Task as Row, task, transaction, transaction::Transaction},
+    models::{Task as Row, int, task, transaction, transaction::Transaction},
 };
 
 /// The job kind.
@@ -76,15 +78,6 @@ impl SendIntent {
     pub(crate) fn sender(&self) -> Address {
         let network = Network::new(Chain::new(&self.chain), &self.network);
         Address::new(network, &self.address)
-    }
-
-    /// The job of this intent, locking its sender on its network
-    /// (`chain:network.address`).
-    pub(crate) fn job(&self) -> anyhow::Result<Job> {
-        let network = format!("{}:{}", self.chain, self.network);
-        let topic = Topic::new([network.as_str(), &self.address])
-            .ok_or_else(|| anyhow::anyhow!("the sender does not make a topic"))?;
-        Ok(Job::new(topic, KIND, json!(self)))
     }
 }
 
@@ -138,8 +131,8 @@ impl Broadcast {
 
     /// In one write: checks every transaction of `signed` against what its
     /// senders hold beyond what is in flight, records each as pending and
-    /// stores `job` with their ids as its state. `false`, and nothing
-    /// written, when a sender is short.
+    /// stores `job` with their ids as its state, while the run still holds
+    /// it. `false`, and nothing written, when a sender is short.
     async fn record(&self, job: &Job, signed: base::Transactions) -> anyhow::Result<bool> {
         let ids: Vec<String> = signed
             .iter()
@@ -150,6 +143,7 @@ impl Broadcast {
             state: Some(state),
             ..job.clone()
         })?;
+        let (id, attempt) = (int(job.id.0)?, i32::try_from(job.attempts)?);
         let now = i64::try_from(tasks::now())?;
         let recorded = self
             .db
@@ -160,7 +154,10 @@ impl Broadcast {
                     pending.sent_at = Some(now);
                     transaction::db::save_pending(connection, &mut pending)?;
                 }
-                task::db::update(connection, &row, now)?;
+                ensure!(
+                    task::db::update(connection, id, attempt, &row, now)?,
+                    "the run has ended"
+                );
                 Ok(())
             })
             .await;
@@ -204,10 +201,24 @@ impl Broadcast {
 
 impl Worker for Broadcast {
     const KIND: &'static str = KIND;
+    /// Four sends at once, each waiting its turn on its sender.
+    const POLICY: Policy = Policy {
+        concurrency: NonZeroUsize::new(4).unwrap(),
+        timeout: TIMEOUT,
+        ..Policy::DEFAULT
+    };
     type Input = SendIntent;
     type State = Progress;
 
-    async fn run(&self, mut task: Task<SendIntent, Progress>) -> Ack {
+    /// `chain:network.address`: its sender on its network.
+    fn topic(intent: &SendIntent) -> Option<Topic> {
+        Topic::new([
+            format!("{}:{}", intent.chain, intent.network),
+            intent.address.clone(),
+        ])
+    }
+
+    async fn run(&self, mut task: Context<'_, SendIntent, Progress>) -> Ack {
         let network = task.input().sender().network;
         let mut progress = match task.state() {
             Some(progress) => progress.clone(),
@@ -222,9 +233,16 @@ impl Worker for Broadcast {
                     .map(|transaction| transaction.id.id.clone())
                     .collect();
                 match self.record(task.job(), signed).await {
-                    Ok(true) => Progress { ids, sent: 0 },
-                    Ok(false) => return task.fail("insufficient-funds"),
-                    Err(error) => return task.nack(format!("{error:#}")),
+                    // Saved again, so the run's outcome carries it too.
+                    Ok(true) => {
+                        let progress = Progress { ids, sent: 0 };
+                        if let Err(error) = task.save(progress.clone()).await {
+                            return Ack::Retry(error.to_string());
+                        }
+                        progress
+                    }
+                    Ok(false) => return Ack::Fail("insufficient-funds".into()),
+                    Err(error) => return Ack::Retry(format!("{error:#}")),
                 }
             }
         };
@@ -232,31 +250,31 @@ impl Worker for Broadcast {
             let transaction = match self.pending(&network, &txid).await {
                 Ok(Some(transaction)) => transaction,
                 // Forgotten meanwhile (expired): it may never land.
-                Ok(None) => return task.fail("outcome-unknown"),
-                Err(error) => return task.nack(format!("{error:#}")),
+                Ok(None) => return Ack::Fail("outcome-unknown".into()),
+                Err(error) => return Ack::Retry(format!("{error:#}")),
             };
             match self.payments.broadcast(&network, &transaction).await {
                 Ok(()) => {
                     progress.sent += 1;
                     if let Err(error) = task.save(progress.clone()).await {
-                        return task.nack(error.to_string());
+                        return Ack::Retry(error.to_string());
                     }
                 }
                 // It may have landed: the record stays; the same bytes go again.
-                Err(error) if error.kind.retryable() => return task.nack(error.message),
+                Err(error) if error.kind.retryable() => return Ack::Retry(error.message),
                 // Refused or expired: it and the rest will not be sent.
                 Err(error) => {
                     let unsent = &progress.ids[progress.sent..];
                     if let Err(forgot) = self.forget(&network, unsent).await {
-                        return task.nack(format!("{forgot:#}"));
+                        return Ack::Retry(format!("{forgot:#}"));
                     }
                     let refused = error.kind == TransactionErrorKind::Rejected;
                     let prefix = if refused { "refused" } else { "invalid" };
-                    return task.fail(format!("{prefix}: {}", error.message));
+                    return Ack::Fail(format!("{prefix}: {}", error.message));
                 }
             }
         }
-        task.ack()
+        Ack::Done
     }
 }
 

@@ -24,6 +24,7 @@ mod queued;
 mod refused;
 mod reorg;
 mod send;
+mod skipped;
 mod slow;
 mod stale;
 
@@ -65,6 +66,7 @@ scenarios! {
     backlog: ethereum => chain_ethereum::testing::Ethereum [single];
     queued: ethereum => chain_ethereum::testing::Ethereum [single];
     partial: ethereum => chain_ethereum::testing::Ethereum [single];
+    skipped: ethereum => chain_ethereum::testing::Ethereum [single];
 }
 
 /// One whole unit of the native currency, in atomic units.
@@ -177,28 +179,35 @@ async fn indexed<T: TestChain>(app: &App, chain: &T) -> Wallet {
     wallet
 }
 
-/// Creates trigger `id`: while `source` can spend 0.9 or more, it pays a
-/// quarter to `payee`. A fixed payout: each decision is a real payment.
-async fn payout<T: TestChain>(app: &App, chain: &T, id: &str, source: &Wallet, payee: &Wallet) {
+/// Creates triggers `ids` in one batch, so a round sees all or none of
+/// them: each, while `source` can spend 0.9 or more, pays a quarter to
+/// `payee`. A fixed payout: each decision is a real payment.
+async fn payout<T: TestChain>(app: &App, chain: &T, ids: &[&str], source: &Wallet, payee: &Wallet) {
     let network = chain.network().network;
-    let body = json!({"triggers": [{
-        "id": id,
-        "chain": network.chain.as_str(),
-        "network": network.name,
-        "selector": {"ids": [format!("{}.native", source.id)]},
-        "check": {"compare": {
-            "of": {"this": {}},
-            "aggregate": "sum",
-            "operator": "at_least",
-            "value": {"value": "0.9"},
-        }},
-        "action": {"name": "send", "input": {
-            "source": {"this": {}},
-            "asset": "native",
-            "destination": {"select": {"ids": [format!("{}.native", payee.id)]}},
-            "amount": {"value": "0.25"},
-        }},
-    }]});
+    let triggers: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            json!({
+                "id": id,
+                "chain": network.chain.as_str(),
+                "network": network.name,
+                "selector": {"ids": [format!("{}.native", source.id)]},
+                "check": {"compare": {
+                    "of": {"this": {}},
+                    "aggregate": "sum",
+                    "operator": "at_least",
+                    "value": {"value": "0.9"},
+                }},
+                "action": {"name": "send", "input": {
+                    "source": {"this": {}},
+                    "asset": "native",
+                    "destination": {"select": {"ids": [format!("{}.native", payee.id)]}},
+                    "amount": {"value": "0.25"},
+                }},
+            })
+        })
+        .collect();
+    let body = json!({ "triggers": triggers });
     let (status, created) = app
         .api
         .call(axum::http::Method::POST, "/v1/triggers", Some(body))

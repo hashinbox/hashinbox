@@ -29,14 +29,9 @@ const PATIENCE: Duration = Duration::from_secs(5);
 pub(crate) struct App {
     pub(crate) api: Api,
     db: crate::db::Db,
-    jobs: tokio::task::JoinHandle<anyhow::Result<()>>,
+    /// The job queues; dropping them stops them.
+    _jobs: tasks::Running,
     _directory: tempfile::TempDir,
-}
-
-impl Drop for App {
-    fn drop(&mut self) {
-        self.jobs.abort();
-    }
 }
 
 impl App {
@@ -73,10 +68,11 @@ impl App {
                 .collect();
             Box::pin(connect::<T>(picked))
         };
-        let (state, executor) = crate::boot(db.clone(), &connect, TICK)
+        let logger = logging::Logger::default();
+        let (state, executor) = crate::boot(db.clone(), &connect, TICK, logger)
             .await
             .expect("it boots");
-        let jobs = tokio::spawn(executor.run());
+        let jobs = executor.run();
         let config = http_server::Config::new(
             "127.0.0.1:0".parse().expect("an address"),
             http_server::TransportSecurity::PlaintextLoopback,
@@ -87,7 +83,7 @@ impl App {
         Self {
             api: Api::new(router),
             db,
-            jobs,
+            _jobs: jobs,
             _directory: directory,
         }
     }

@@ -61,6 +61,8 @@ enum JobState {
     Succeeded,
     /// Failed for good; `reason` says why.
     Failed,
+    /// Finished without running; `reason` names the job it gave way to.
+    Skipped,
 }
 
 impl JobState {
@@ -70,6 +72,7 @@ impl JobState {
             Self::Running => 1,
             Self::Succeeded => 2,
             Self::Failed => 3,
+            Self::Skipped => 4,
         }
     }
 }
@@ -81,7 +84,7 @@ struct Job {
     id: String,
     /// The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`, `prune`).
     kind: String,
-    /// What it locks: jobs whose topics conflict run one at a time, in id order.
+    /// What it locks: jobs whose topics conflict run one at a time, in line order.
     topic: String,
     /// Where it is.
     state: JobState,
@@ -120,6 +123,7 @@ impl From<tasks::Job> for Job {
                 tasks::Status::Running => JobState::Running,
                 tasks::Status::Done => JobState::Succeeded,
                 tasks::Status::Failed => JobState::Failed,
+                tasks::Status::Skipped => JobState::Skipped,
             },
             run_at: job.run_at,
             deadline: job.deadline,
@@ -169,7 +173,7 @@ async fn list(
     let Query(index) = index.map_err(Error::invalid_query)?;
     let page = index.page("jobs", |cursor| {
         let (updated_at, id) = cursor.split_once(':')?;
-        Some((updated_at.parse().ok()?, id.to_owned()))
+        Some((updated_at.parse().ok()?, id.parse().ok()?))
     })?;
     let limit = page.limit;
     let status = query.state.map(JobState::status);
@@ -189,7 +193,7 @@ async fn list(
     let next_cursor = rows.cursor(limit);
     let jobs = rows
         .into_iter()
-        .map(|(row, _)| tasks::Job::try_from(row).map(Job::from))
+        .map(|(id, row, _)| row.into_job(id).map(Job::from))
         .collect::<anyhow::Result<Vec<_>>>()
         .map_err(|error| Error::unavailable(format!("{error:#}")))?;
     Ok(Json(ListResponse { jobs, next_cursor }))
@@ -224,8 +228,10 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<JobPath>,
 ) -> Result<Json<Job>, Error> {
-    let id = tasks::Id::from(path.id);
-    let job = tasks::Store::get(&state.queue, &id)
+    let Ok(id) = path.id.parse() else {
+        return Err(Error::not_found("job does not exist"));
+    };
+    let job = tasks::Store::get(&state.queue, tasks::Id(id))
         .await
         .map_err(|error| Error::unavailable(error.to_string()))?
         .ok_or_else(|| Error::not_found("job does not exist"))?;

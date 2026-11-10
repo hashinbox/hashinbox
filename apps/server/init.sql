@@ -404,23 +404,26 @@ CREATE INDEX trigger_run_latest ON trigger_run ("trigger", started_at);
 -- One row per job for its whole life; finished rows are the record. Queue
 -- fields are the queue's; `input` and `state` are the job's worker's.
 CREATE TABLE q (
-    id         TEXT    NOT NULL, -- UUIDv7: time ordered, the lane order.
+    id         INTEGER PRIMARY KEY AUTOINCREMENT, -- Identity and place in line.
     topic      TEXT    NOT NULL, -- What it locks: `a.b.c`; a prefix conflicts.
     kind       TEXT    NOT NULL, -- Worker selector.
-    status     INTEGER NOT NULL, -- 0 pending, 1 running, 2 done, 3 failed.
-    run_at     INTEGER NOT NULL, -- ms since epoch; not started before.
+    status     INTEGER NOT NULL, -- 0 pending, 1 running, 2 done, 3 failed, 4 skipped.
+    run_at     INTEGER NOT NULL, -- ms since epoch; not started before; running: lease end.
     deadline   INTEGER,          -- ms since epoch; not started after.
-    attempts   INTEGER NOT NULL, -- Executions started.
+    attempts   INTEGER NOT NULL, -- Executions started since it was last fresh.
     reason     TEXT,             -- Why it failed, or why it last retried.
     input      TEXT    NOT NULL, -- JSON: what to do; never changed.
     state      TEXT,             -- JSON: what the worker has done so far.
     created_at INTEGER NOT NULL, -- ms.
     updated_at INTEGER NOT NULL, -- ms; last written.
-    PRIMARY KEY (id),
-    CHECK (status IN (0, 1, 2, 3)),
+    CHECK (status IN (0, 1, 2, 3, 4)),
     CHECK (attempts >= 0),
     CHECK (json_valid(input)),
     CHECK (state IS NULL OR json_valid(state))
-) WITHOUT ROWID;
--- What `next` compares against: the unfinished jobs.
-CREATE INDEX q_unfinished ON q (id, topic) WHERE status IN (0, 1);
+);
+-- What a claim weighs a job against: the unfinished jobs, by topic.
+CREATE INDEX q_unfinished ON q (topic) WHERE status IN (0, 1);
+-- A kind's one unfinished job per topic.
+CREATE INDEX q_kind ON q (kind, topic) WHERE status IN (0, 1);
+-- A kind's due jobs.
+CREATE INDEX q_due ON q (kind, run_at) WHERE status IN (0, 1);

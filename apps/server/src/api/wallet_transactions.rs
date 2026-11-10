@@ -10,13 +10,14 @@ use axum::{
 };
 use base::Decimal;
 use serde::{Deserialize, Serialize};
+use tasks::Worker as _;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody, asset_info, wallet_address};
 use crate::{
     api::AppState,
-    usecase::workers::broadcast::{Payment, SendIntent},
+    usecase::workers::broadcast::{Broadcast, Payment, SendIntent},
 };
 
 /// Maximum transfers one send request accepts.
@@ -159,12 +160,14 @@ async fn send(
         return Err(Error::unprocessable("the wallet holds no key here"));
     }
     let intent = request.intent(&state.payments, &address, &info)?;
-    let job = intent
-        .job()
-        .map_err(|error| Error::invalid_request(error.to_string()))?;
-    let id = job.id.to_string();
-    tasks::Store::enqueue(&state.queue, job)
+    let queued = Broadcast::enqueue(&state.queue, &intent)
         .await
-        .map_err(|error| Error::unavailable(error.to_string()))?;
-    Ok((StatusCode::ACCEPTED, Json(SendResponse { job: id })))
+        .map_err(|error| match error {
+            tasks::StoreError::Invalid(reason) => Error::invalid_request(reason),
+            error => Error::unavailable(error.to_string()),
+        })?;
+    // A send is not unique: it is always queued.
+    let (tasks::Admission::Queued(id) | tasks::Admission::Duplicate(id)) = queued;
+    let job = id.to_string();
+    Ok((StatusCode::ACCEPTED, Json(SendResponse { job })))
 }

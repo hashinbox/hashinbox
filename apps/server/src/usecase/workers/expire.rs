@@ -1,20 +1,18 @@
-//! The expire job: one per network, never finished. Every [`PERIOD`] it
+//! The expire job: one per indexed network, never finished. Every [`PERIOD`] it
 //! forgets the network's pending transactions past their expiry, so the
 //! funds and coins they held are spendable again.
 //!
-//! Its topic (`expire:chain:network`) conflicts with nothing else. A
+//! Its `before` enqueues one per indexed network, unique per network. Its
+//! topic (`expire:chain:network`) conflicts with nothing else. A
 //! broadcast job whose transaction is forgotten meanwhile fails
 //! `outcome-unknown`.
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
-use base::{Chain, Network};
-use payments::Payments;
-use serde_json::json;
-use tasks::{Ack, Id, Job, Status, Store as _, Task, Topic, Worker};
+use tasks::{Ack, Context, Policy, Store, StoreError, Topic, Worker, millis};
 
-use super::index::Target;
-use crate::{db::Db, models::transaction, usecase::tasks::Queue};
+use super::{FOREVER, TIMEOUT, index::Target};
+use crate::{db::Db, models::transaction};
 
 /// The job kind.
 pub(crate) const KIND: &str = "expire";
@@ -24,70 +22,50 @@ const PERIOD: Duration = Duration::from_secs(60);
 
 /// Forgets every network's expired pending transactions.
 pub(crate) struct Expire {
-    payments: Arc<Payments>,
     db: Db,
-    queue: Queue,
 }
 
 impl Expire {
-    pub(crate) const fn new(payments: Arc<Payments>, db: Db, queue: Queue) -> Self {
-        Self {
-            payments,
-            db,
-            queue,
-        }
-    }
-
-    /// Makes sure every network has its expire job; a finished one starts
-    /// over.
-    pub(crate) async fn start(&self) -> anyhow::Result<()> {
-        for network in self.payments.networks() {
-            let target = Target {
-                chain: network.chain.as_str().to_owned(),
-                network: network.name.clone(),
-            };
-            let topic = Topic::new([format!("expire:{}:{}", target.chain, target.network)])
-                .ok_or_else(|| anyhow::anyhow!("the network does not make a topic"))?;
-            let job = Job {
-                id: Id::from(format!("expire.{}.{}", target.chain, target.network)),
-                ..Job::new(topic, KIND, json!(target))
-            };
-            match self.queue.get(&job.id).await? {
-                None => self.queue.enqueue(job).await?,
-                Some(kept) if matches!(kept.status, Status::Done | Status::Failed) => {
-                    self.queue.update(job).await?;
-                }
-                Some(_) => {}
-            }
-        }
-        Ok(())
+    pub(crate) const fn new(db: Db) -> Self {
+        Self { db }
     }
 }
 
 impl Worker for Expire {
     const KIND: &'static str = KIND;
+    /// One per network, retried for ever.
+    const POLICY: Policy = Policy {
+        unique: true,
+        timeout: TIMEOUT,
+        retry: FOREVER,
+        ..Policy::DEFAULT
+    };
     type Input = Target;
     type State = ();
 
-    /// Forgets what expired, then runs again a [`PERIOD`] later; a failed
-    /// write retries.
-    async fn run(&self, task: Task<Target, ()>) -> Ack {
-        let target = task.input();
-        let network = Network::new(Chain::new(&target.chain), &target.network);
-        let now = tasks::now();
-        let Ok(at) = i64::try_from(now) else {
-            return task.fail("now is above range");
+    /// `expire:chain:network`: it conflicts with nothing else.
+    fn topic(target: &Target) -> Option<Topic> {
+        Topic::new([format!("expire:{}", target.segment())])
+    }
+
+    /// Forgets what expired; a failed write retries.
+    async fn run(&self, cx: Context<'_, Target, ()>) -> Ack {
+        let network = cx.input().network();
+        let Ok(at) = i64::try_from(tasks::now()) else {
+            return Ack::Fail("now is above range".into());
         };
         let expired = self
             .db
             .write(move |connection| Ok(transaction::db::expire(connection, &network, at)?))
             .await;
         match expired {
-            Ok(_) => {
-                let period = u64::try_from(PERIOD.as_millis()).unwrap_or(u64::MAX);
-                task.again(now.saturating_add(period))
-            }
-            Err(error) => task.nack(format!("{error:#}")),
+            Ok(_) => Ack::Again(tasks::now().saturating_add(millis(PERIOD)), None),
+            Err(error) => Ack::Retry(format!("{error:#}")),
         }
+    }
+
+    /// One job per indexed network.
+    async fn before(&self, store: &dyn Store) -> Result<(), StoreError> {
+        Target::enqueue_each::<Self>(&self.db, store).await
     }
 }

@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use base::{TransactionErrorKind, WalletStore as _};
-use tasks::{Ack, Job, Status, Store, Task, Worker as _};
+use tasks::{Ack, Admission, Claim, Context, Id, OnLock, Store, Worker};
 
 use super::{Fake, Script, database, network, payments};
 use crate::{
@@ -22,7 +22,7 @@ struct Fixture {
     queue: Queue,
     script: Arc<Script>,
     worker: Broadcast,
-    job: Job,
+    job: Id,
     _directory: tempfile::TempDir,
 }
 
@@ -39,7 +39,7 @@ impl Fixture {
         fee: u64,
     ) -> Self {
         let (db, directory) = database().await;
-        let queue = Queue::new(db.clone());
+        let queue = crate::usecase::tasks::queue(db.clone());
         let script = Arc::new(Script {
             answers: Mutex::new(answers.into()),
             fee,
@@ -66,10 +66,20 @@ impl Fixture {
                 })
                 .collect(),
         };
-        let mut job = intent.job().expect("a job");
-        queue.enqueue(job.clone()).await.expect("a job");
-        job.status = Status::Running;
-        queue.update(job.clone()).await.expect("running");
+        let queued = Broadcast::enqueue(&queue, &intent).await.expect("a job");
+        let Admission::Queued(job) = queued else {
+            panic!("a send is always queued");
+        };
+        let now = tasks::now();
+        let claim = Claim {
+            kind: Broadcast::KIND,
+            limit: 1,
+            on_lock: OnLock::Wait,
+            now,
+            until: now + 60_000,
+        };
+        let claimed = queue.claim(claim).await.expect("claimed");
+        assert_eq!(claimed.len(), 1, "the job runs");
         Self {
             worker: Broadcast::new(payments(&db, script.clone()).await, db.clone()),
             db,
@@ -82,14 +92,15 @@ impl Fixture {
 
     /// One run of the job as stored now.
     async fn run(&self) -> Ack {
-        let job = self
+        let mut job = self
             .queue
-            .get(&self.job.id)
+            .get(self.job)
             .await
             .expect("a read")
             .expect("the job");
-        let task = Task::new(job, Arc::new(self.queue.clone())).expect("a task");
-        self.worker.run(task).await
+        let store: Arc<dyn Store> = Arc::new(self.queue.clone());
+        let cx = Context::new(&mut job, store).expect("a context");
+        self.worker.run(cx).await
     }
 
     /// Whether txid `txid` is recorded as pending.

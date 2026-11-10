@@ -377,7 +377,7 @@
             }
           },
           "400": {
-            "description": "Malformed node, or a list above 16 nodes",
+            "description": "Malformed node, a list above 16 nodes, or a node that fails or serves another chain",
             "content": {
               "application/json": {
                 "schema": {
@@ -820,7 +820,7 @@
           "networks"
         ],
         "summary": "Replace a network's RPC nodes",
-        "description": "Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. The nodes are not verified here: the chain verifies them on the next start, which uses the stored list whatever the configuration file says.",
+        "description": "Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. Each node is asked its chain and tip once, before storing.",
         "operationId": "replace_network_endpoints",
         "parameters": [
           {
@@ -864,7 +864,7 @@
             }
           },
           "400": {
-            "description": "Malformed node list",
+            "description": "Malformed node list, or a node that fails or serves another chain",
             "content": {
               "application/json": {
                 "schema": {
@@ -959,7 +959,7 @@
             }
           },
           "400": {
-            "description": "Malformed node, or a list above 16 nodes",
+            "description": "Malformed node, a list above 16 nodes, or a node that fails or serves another chain",
             "content": {
               "application/json": {
                 "schema": {
@@ -3300,7 +3300,7 @@
           },
           "topic": {
             "type": "string",
-            "description": "What it locks: jobs whose topics conflict run one at a time, in id order."
+            "description": "What it locks: jobs whose topics conflict run one at a time, in line order."
           }
         }
       },
@@ -3367,7 +3367,8 @@
           "pending",
           "running",
           "succeeded",
-          "failed"
+          "failed",
+          "skipped"
         ]
       },
       "Leg": {

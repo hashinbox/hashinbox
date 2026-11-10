@@ -4,17 +4,23 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 readme = "README.md"
-description = "Owned Tokio tasks and durable job queue primitives."
+description = "A job queue: workers, a store port with an in-memory default, and an executor."
 
 [features]
-# `Worker`, `Task` and `Ticking`.
+# `Worker`, `Task` and `Executor`.
 runner = ["tokio/time", "tokio/macros"]
 
 [dependencies]
+# A worker's panic fails its job instead of leaving its topic locked.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "=1.49.0", default-features = false, features = ["rt", "sync"] }
-uuid.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { version = "=1.49.0", default-features = false, features = ["macros", "rt", "time"] }
+# This package on itself, so its own tests have every feature.
+tasks = { path = ".", features = ["runner"] }
 
 [lints]
 workspace = true

@@ -173,7 +173,7 @@ diesel::table! {
 
 diesel::table! {
     q (id) {
-        id -> Text,
+        id -> BigInt,
         topic -> Text,
         kind -> Text,
         status -> Integer,

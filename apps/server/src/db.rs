@@ -43,6 +43,13 @@ diesel::define_sql_function! {
     fn sum_decimal(amount: diesel::sql_types::Text) -> diesel::sql_types::Nullable<diesel::sql_types::Text>;
 }
 
+diesel::define_sql_function! {
+    /// Whether two job topics may not run at once ([`tasks::Topic::conflicts`]);
+    /// false when either is not a topic.
+    #[sql_name = "CONFLICTS"]
+    fn conflicts(a: diesel::sql_types::Text, b: diesel::sql_types::Text) -> diesel::sql_types::Bool;
+}
+
 /// `SUM_DECIMAL`'s running sum: `None` once a value does not decode.
 struct SumDecimal(Option<base::Decimal>);
 
@@ -68,13 +75,19 @@ impl diesel::sqlite::SqliteAggregateFunction<String> for SumDecimal {
     }
 }
 
-/// Registers the SQL functions every connection has (`SUM_DECIMAL`).
+/// Registers the SQL functions every connection has (`SUM_DECIMAL`,
+/// `CONFLICTS`).
 ///
 /// # Errors
 ///
 /// When SQLite refuses one.
 pub(crate) fn register(connection: &mut SqliteConnection) -> QueryResult<()> {
-    sum_decimal_utils::register_impl::<SumDecimal, _>(connection)
+    sum_decimal_utils::register_impl::<SumDecimal, _>(connection)?;
+    conflicts_utils::register_impl(connection, |a: String, b: String| {
+        tasks::Topic::parse(&a)
+            .zip(tasks::Topic::parse(&b))
+            .is_some_and(|(a, b)| a.conflicts(&b))
+    })
 }
 
 /// What a list query reads: at most `limit` rows after key `after` in the

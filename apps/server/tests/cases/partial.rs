@@ -18,8 +18,9 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
          BEGIN SELECT RAISE(ABORT, 'injected'); END;",
     )
     .await;
-    payout(app, chain, "a", &treasury, &payee).await;
-    payout(app, chain, "b", &treasury, &payee).await;
+    // One batch: a round between two creations would decide `a` alone, and
+    // its send would leave too little for either to decide again.
+    payout(app, chain, &["a", "b"], &treasury, &payee).await;
     until("the round to fail at b", || async {
         let failed = jobs(app, "kind=triggers&state=failed").await;
         if failed.iter().any(|round| {

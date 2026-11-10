@@ -5,6 +5,7 @@ use std::{sync::Arc, time::Duration};
 
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
+use tasks::Worker as _;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -54,8 +55,15 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, 
         .read(|connection| {
             let mut rows = network::db::find_all(connection)?;
             for row in &mut rows {
-                let id = index::job_id(&row.chain, &row.network);
-                let job = task::db::find_by_id(connection, id.as_str())?;
+                let target = index::Target {
+                    chain: row.chain.clone(),
+                    network: row.network.clone(),
+                };
+                let topic = index::Index::topic(&target).map(|topic| topic.to_string());
+                let job = match topic {
+                    Some(topic) => task::db::find_last(connection, index::KIND, &topic)?,
+                    None => None,
+                };
                 row.index_job_reason = job.and_then(|job| job.reason);
             }
             Ok(rows)

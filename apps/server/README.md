@@ -91,10 +91,12 @@ them. Nothing imports upward (docs/design/069-server-layers.md;
 - `src/models/`: one file per table (diesel row and its SQL) and the shared wire
   shapes (`asset`, `network`).
 - `src/usecase/`: `sdk/` (every `base` store on the models), `tasks.rs` (the
-  job queue), `trigger.rs` (a trigger's decision), the multi-model reads
-  (`history.rs`, `wallets.rs`, `chain.rs`, `stats.rs`), and `workers/`: the
-  executor and its jobs (`index.rs`, `expire.rs`, `prune.rs`, `broadcast.rs`,
-  `trigger/` with `actions.rs`); docs/design/068-index-job.md.
+  job queue: `tasks::Store` on SQLite, wrapped in `tasks::Notifying`),
+  `trigger.rs` (a trigger's decision), the multi-model reads (`history.rs`,
+  `wallets.rs`, `chain.rs`, `stats.rs`), and `workers/`: the jobs, each
+  declaring its `tasks::Policy` (`index.rs`, `expire.rs`, `prune.rs`,
+  `broadcast.rs`, `trigger/` with `actions.rs`), run by `tasks::Executor`;
+  docs/design/068-index-job.md, 076-jobs.md.
 
 ## Notes
 

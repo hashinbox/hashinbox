@@ -103,7 +103,7 @@ async fn wallets_balance_legs_and_sends() {
     let state = Arc::new(AppState {
         payments,
         db: db.clone(),
-        queue: crate::usecase::tasks::Queue::new(db.clone()),
+        queue: crate::usecase::tasks::queue(db.clone()),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -317,7 +317,7 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
     let state = Arc::new(AppState {
         payments,
         db: db.clone(),
-        queue: crate::usecase::tasks::Queue::new(db.clone()),
+        queue: crate::usecase::tasks::queue(db.clone()),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -415,7 +415,7 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
     let state = Arc::new(AppState {
         payments,
         db: db.clone(),
-        queue: crate::usecase::tasks::Queue::new(db.clone()),
+        queue: crate::usecase::tasks::queue(db.clone()),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -592,29 +592,39 @@ async fn a_network_asset_icon_is_served_and_an_unknown_one_is_not() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready() {
     use diesel::connection::SimpleConnection as _;
-    use tasks::{Retry, Store as _, Task, Worker as _};
+    use tasks::{Admission, Claim, OnLock, Store as _, Task, Worker as _};
 
-    use crate::usecase::workers::index::{Index, job_id};
+    use crate::usecase::workers::index::{Index, Target};
 
     let (db, _directory) = database().await;
     let payments = payments(&db, Arc::new(Script::default())).await;
-    let queue = crate::usecase::tasks::Queue::new(db.clone());
-    let worker = Index::new(payments.clone(), db.clone(), queue.clone());
-    worker.start().await.expect("the index job");
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let worker = Arc::new(Index::new(payments.clone(), db.clone(), queue.clone()));
+    let target = Target {
+        chain: "bitcoin".into(),
+        network: "regtest".into(),
+    };
+    let queued = Index::enqueue(&queue, &target).await.expect("queued");
+    let Admission::Queued(id) = queued else {
+        panic!("the first index job");
+    };
     // The block store fails, so every indexer step does.
     db.write(|connection| Ok(connection.batch_execute("DROP TABLE block")?))
         .await
         .expect("dropped");
-    let id = job_id("bitcoin", "regtest");
-    let job = queue.get(&id).await.expect("a read").expect("the job");
-    let job = job.start(tasks::now());
-    queue.update(job.clone()).await.expect("running");
-    let task = Task::new(job, Arc::new(queue.clone())).expect("a task");
-    let ack = worker.run(task).await;
-    let ran = queue.get(&id).await.expect("a read").expect("the job");
-    let settled = ran.settle(ack, &Retry::default(), tasks::now());
-    queue.update(settled).await.expect("settled");
-    let job = queue.get(&id).await.expect("a read").expect("the job");
+    let now = tasks::now();
+    let claim = Claim {
+        kind: Index::KIND,
+        limit: 1,
+        on_lock: OnLock::Wait,
+        now,
+        until: now + 60_000,
+    };
+    let job = queue.claim(claim).await.expect("claimed").remove(0);
+    let mut task = Task::new(worker, job, Arc::new(queue.clone()));
+    task.run().await;
+    task.update().await.expect("settled");
+    let job = queue.get(id).await.expect("a read").expect("the job");
     let reason = job.reason.clone().unwrap_or_default();
     assert!(reason.contains("no such table: block"), "{job:?}");
     assert_eq!(job.status, tasks::Status::Pending);

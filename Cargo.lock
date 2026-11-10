@@ -4458,10 +4458,11 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 name = "tasks"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "serde",
  "serde_json",
+ "tasks",
  "tokio",
- "uuid",
 ]
 
 [[package]]

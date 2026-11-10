@@ -1,46 +1,175 @@
-//! What runs a job: a [`Worker`] per kind and the [`Task`] it is handed; and
-//! a timer for [`Changes`] ([`Ticking`]). The executor is the caller's.
+//! What runs a job: a [`Worker`] per kind, its [`Policy`], the [`Context`]
+//! it is handed and the [`Ack`] it answers.
+//! The `Executor` runs them.
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    num::{NonZeroU32, NonZeroUsize},
+    sync::Arc,
+    time::Duration,
+};
 
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::sync::broadcast;
 
 use crate::{
-    rules::Ack,
-    storage::{Changes, Store, StoreError},
-    task::Job,
+    job::Job,
+    storage::{Admission, Store, StoreError, StoreFuture},
+    topic::Topic,
 };
+
+/// How a worker answered a job.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ack {
+    /// Succeeded.
+    Done,
+    /// Failed for good, with why.
+    Fail(String),
+    /// Run again after the backoff while attempts remain, with why not now.
+    Retry(String),
+    /// Run again at this Unix ms as fresh (attempts cleared), keeping why
+    /// when given. A recurring job is one that answers this instead of
+    /// `Done`; it never runs out.
+    Again(u64, Option<String>),
+}
+
+/// How retries go: at most `attempts` executions, a retry after attempt `n`
+/// waiting `backoff × n`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retry {
+    /// Executions, the first included.
+    pub attempts: NonZeroU32,
+    /// The wait per attempt made.
+    pub backoff: Duration,
+}
+
+impl Retry {
+    /// Three attempts, 250 ms backoff.
+    pub const DEFAULT: Self = Self {
+        attempts: NonZeroU32::new(3).unwrap(),
+        backoff: Duration::from_millis(250),
+    };
+}
+
+impl Default for Retry {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// How a worker's jobs run: declared by the worker, applied by the queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Policy {
+    /// What a job does while a conflicting one holds its topic.
+    pub on_lock: OnLock,
+    /// At most one unfinished job of the kind per topic: enqueueing another
+    /// answers the one there ([`crate::Admission::Duplicate`]).
+    pub unique: bool,
+    /// Runs of this kind at once.
+    pub concurrency: NonZeroUsize,
+    /// Longest a run may take; past it the run is dropped and retried, and
+    /// its claim's lease ends soon after.
+    pub timeout: Duration,
+    /// How failed runs retry.
+    pub retry: Retry,
+}
+
+impl Policy {
+    /// Waiting in line, not unique, one at a time, a one-minute timeout,
+    /// the default retry.
+    pub const DEFAULT: Self = Self {
+        on_lock: OnLock::Wait,
+        unique: false,
+        concurrency: NonZeroUsize::MIN,
+        timeout: Duration::from_secs(60),
+        retry: Retry::DEFAULT,
+    };
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// What a job does while a conflicting job holds its topic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnLock {
+    /// Waits in line behind earlier conflicting jobs.
+    Wait,
+    /// Waits behind earlier conflicting jobs, and is finished `skipped`
+    /// when a newer conflicting job is unfinished: it would run on a view
+    /// missing that job.
+    Skip,
+}
 
 /// Does one kind of job.
 pub trait Worker: Send + Sync + 'static {
     /// The kind name stored on its jobs.
     const KIND: &'static str;
+    /// How its jobs run.
+    const POLICY: Policy;
     /// What to do.
-    type Input: DeserializeOwned + Send;
+    type Input: Serialize + DeserializeOwned + Send;
     /// What is done so far; `()` when a rerun needs nothing.
     type State: Serialize + DeserializeOwned + Send;
 
+    /// What a job of `input` locks; `None` when `input` makes no topic.
+    fn topic(input: &Self::Input) -> Option<Topic>;
+
     /// Runs one job and answers it.
-    fn run(&self, task: Task<Self::Input, Self::State>) -> impl Future<Output = Ack> + Send;
+    fn run(&self, cx: Context<'_, Self::Input, Self::State>) -> impl Future<Output = Ack> + Send;
+
+    /// Runs once when the worker's queue starts, before it claims: where a
+    /// worker enqueues the jobs that must always exist (its recurring
+    /// ones, `unique`, so a restart adds none). Nothing by default; a
+    /// failure is tried again until it succeeds.
+    ///
+    /// # Errors
+    /// The store's, or the worker's own as [`StoreError::Backend`].
+    fn before(&self, store: &dyn Store) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let _ = store;
+        std::future::ready(Ok(()))
+    }
+
+    /// A job of `input`, due now.
+    ///
+    /// # Errors
+    /// [`StoreError::Invalid`] when `input` makes no topic or does not
+    /// serialize.
+    fn job(input: &Self::Input) -> Result<Job, StoreError> {
+        let topic = Self::topic(input)
+            .ok_or_else(|| StoreError::Invalid(format!("a {} input makes no topic", Self::KIND)))?;
+        let input =
+            serde_json::to_value(input).map_err(|error| StoreError::Invalid(error.to_string()))?;
+        Ok(Job::new(topic, Self::KIND, input))
+    }
+
+    /// Enqueues a job of `input` in `store`, under the kind's
+    /// [`Policy::unique`].
+    fn enqueue<'a>(store: &'a dyn Store, input: &Self::Input) -> StoreFuture<'a, Admission> {
+        match Self::job(input) {
+            Ok(job) => store.enqueue(job, Self::POLICY.unique),
+            Err(error) => Box::pin(std::future::ready(Err(error))),
+        }
+    }
 }
 
-/// One running job, as its worker sees it.
-pub struct Task<I, S> {
-    job: Job,
+/// One running job, as its worker sees it: the job it borrows from its
+/// [`Task`](crate::Task), so what it saves is what the run's outcome stores.
+pub struct Context<'a, I, S> {
+    job: &'a mut Job,
     input: I,
     state: Option<S>,
     store: Arc<dyn Store>,
 }
 
-impl<I: DeserializeOwned, S: DeserializeOwned> Task<I, S> {
-    /// The task of running `job`, its input and state decoded; a custom
-    /// executor makes one to call [`Worker::run`].
+impl<'a, I: DeserializeOwned, S: DeserializeOwned> Context<'a, I, S> {
+    /// The context of running `job`, its input and state decoded.
     ///
     /// # Errors
     /// `Ack::Fail` with `invalid-input` or `invalid-state` when either does
     /// not decode.
-    pub fn new(job: Job, store: Arc<dyn Store>) -> Result<Self, Ack> {
+    pub fn new(job: &'a mut Job, store: Arc<dyn Store>) -> Result<Self, Ack> {
         let input = serde_json::from_value(job.input.clone())
             .map_err(|_| Ack::Fail("invalid-input".into()))?;
         let state = job
@@ -58,112 +187,35 @@ impl<I: DeserializeOwned, S: DeserializeOwned> Task<I, S> {
     }
 }
 
-impl<I, S: Serialize> Task<I, S> {
-    /// The job: id, topic, attempts, reason, deadline. Read only.
-    pub fn job(&self) -> &Job {
-        &self.job
+impl<I, S: Serialize> Context<'_, I, S> {
+    /// The job: id, topic, attempts, reason, deadline.
+    pub const fn job(&self) -> &Job {
+        self.job
     }
 
     /// What to do.
-    pub fn input(&self) -> &I {
+    pub const fn input(&self) -> &I {
         &self.input
     }
 
     /// The last saved state; `None` on a first run.
-    pub fn state(&self) -> Option<&S> {
+    pub const fn state(&self) -> Option<&S> {
         self.state.as_ref()
     }
 
-    /// Stores `state` now; a rerun starts from it.
+    /// Stores `state` now ([`Store::update`]); a rerun starts from it.
     ///
     /// # Errors
-    /// When `state` does not serialize or the store fails.
+    /// When `state` does not serialize, the store fails, or the run has
+    /// ended ([`StoreError::Stale`]).
     pub async fn save(&mut self, state: S) -> Result<(), StoreError> {
         let value =
             serde_json::to_value(&state).map_err(|error| StoreError::Invalid(error.to_string()))?;
         self.job.state = Some(value);
-        self.store.update(self.job.clone()).await?;
+        self.store
+            .update(self.job.clone(), self.job.attempts)
+            .await?;
         self.state = Some(state);
         Ok(())
-    }
-
-    /// Done.
-    #[must_use]
-    pub fn ack(self) -> Ack {
-        Ack::Done
-    }
-
-    /// Retried while attempts are left.
-    #[must_use]
-    pub fn nack(self, reason: impl Into<String>) -> Ack {
-        Ack::Retry(reason.into())
-    }
-
-    /// Failed, not retried.
-    #[must_use]
-    pub fn fail(self, reason: impl Into<String>) -> Ack {
-        Ack::Fail(reason.into())
-    }
-
-    /// Done for now; runs again at `at` (Unix ms) as fresh.
-    #[must_use]
-    pub fn again(self, at: u64) -> Ack {
-        Ack::Again(at)
-    }
-
-    /// Not done; runs again at `at` (Unix ms) as fresh, `reason` kept on
-    /// the job until a run ends otherwise.
-    #[must_use]
-    pub fn again_because(self, at: u64, reason: impl Into<String>) -> Ack {
-        Ack::AgainBecause(at, reason.into())
-    }
-}
-
-/// Another [`Changes`]' signal, plus one every `period`: a retry falls due
-/// with no write.
-pub struct Ticking {
-    sender: broadcast::Sender<()>,
-    timer: tokio::task::JoinHandle<()>,
-}
-
-impl Ticking {
-    /// `inner`'s changes and a tick every `period`.
-    ///
-    /// # Panics
-    /// Outside a Tokio runtime.
-    #[must_use]
-    pub fn new(inner: &dyn Changes, period: Duration) -> Self {
-        let sender = broadcast::channel(16).0;
-        let mut from = inner.changes();
-        let to = sender.clone();
-        let timer = tokio::spawn(async move {
-            let mut ticks = tokio::time::interval(period);
-            loop {
-                tokio::select! {
-                    received = from.recv() => {
-                        if matches!(received, Err(broadcast::error::RecvError::Closed)) {
-                            from = from.resubscribe();
-                            ticks.tick().await;
-                        }
-                    }
-                    _ = ticks.tick() => {}
-                }
-                // No subscriber is not an error.
-                let _ = to.send(());
-            }
-        });
-        Self { sender, timer }
-    }
-}
-
-impl Changes for Ticking {
-    fn changes(&self) -> broadcast::Receiver<()> {
-        self.sender.subscribe()
-    }
-}
-
-impl Drop for Ticking {
-    fn drop(&mut self) {
-        self.timer.abort();
     }
 }

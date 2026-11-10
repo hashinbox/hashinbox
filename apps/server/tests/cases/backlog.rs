@@ -34,7 +34,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         Err(job.to_string())
     })
     .await;
-    payout(app, chain, "payout", &treasury, &payee).await;
+    payout(app, chain, &["payout"], &treasury, &payee).await;
     for _ in 0..3 {
         chain.mine(1);
         at_tip(app, chain).await;
