@@ -256,7 +256,8 @@ impl Client {
                 "preflightCommitment": CONFIRMED,
                 "maxRetries": 0,
             }]),
-        );
+        )
+        .with_timeout(::rpc::SEND_TIMEOUT);
         let failure = match self.0.transport.broadcast(request).await {
             Ok(()) => return Ok(()),
             Err(::rpc::CallError::Remote(failure)) => failure,
@@ -343,10 +344,10 @@ impl base::Broadcaster for Client {
 pub(crate) fn height(node: &::rpc::Http) -> ::rpc::BoxFuture<'_, Result<u64, CallError>> {
     Box::pin(async move {
         let raw = node
-            .request(Request::new(
-                "getSlot",
-                json!([{ "commitment": CONFIRMED }]),
-            ))
+            .request(
+                Request::new("getSlot", json!([{ "commitment": CONFIRMED }]))
+                    .with_timeout(::rpc::PROBE_TIMEOUT),
+            )
             .await??;
         Ok(raw.deserialize()?)
     })

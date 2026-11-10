@@ -274,7 +274,7 @@ pub(crate) mod db {
             .legs()
             .map(|leg| leg.wallet_index_id.clone())
             .collect();
-        leg::db::delete_in(connection, &block.id, &index_ids)?;
+        leg::db::delete_in(connection, &block.id, block.position, &index_ids)?;
 
         let mut running = leg::db::find_running(connection, &index_ids, block.position)?;
         let legs = block

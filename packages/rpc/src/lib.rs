@@ -15,7 +15,10 @@ mod value;
 
 use serde_json::Value;
 
-pub use client::{Batch, BoxFuture, Client, Repetition, Request};
+pub use client::{
+    BATCH_BASE, BATCH_PER_CALL, Batch, BoxFuture, Client, PROBE_TIMEOUT, Repetition, Request,
+    SEND_TIMEOUT,
+};
 pub use cluster::{Cluster, Limit, Policy};
 pub use endpoint::{Bounds, Endpoint, Parameter, Parts};
 pub use error::{CallError, Error, ErrorKind};

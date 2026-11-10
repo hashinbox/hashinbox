@@ -79,12 +79,13 @@ impl Failure {
 
     /// Whether the node refused for a rate or size limit, so the same call
     /// may succeed later: `-32005` ("limit exceeded"), or `-32003` when its
-    /// message says "limit".
+    /// message says "rate limit" or "request limit".
     #[must_use]
     pub fn is_rate_limited(&self) -> bool {
+        let message = self.message.to_ascii_lowercase();
         match self.code {
             -32_005 => true,
-            -32_003 => self.message.to_ascii_lowercase().contains("limit"),
+            -32_003 => message.contains("rate limit") || message.contains("request limit"),
             _ => false,
         }
     }

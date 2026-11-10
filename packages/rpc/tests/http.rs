@@ -202,6 +202,14 @@ async fn rate_limit_error_objects_are_retryable_transport_errors() {
 }
 
 #[tokio::test]
+async fn a_pool_rejection_mentioning_a_limit_is_not_a_rate_limit() {
+    let (url, _) =
+        node(|seen| ok(&error(&seen.body["id"], -32003, "exceeds block gas limit"))).await;
+    let failure = call(&url).await.unwrap().unwrap_err();
+    assert!(!failure.is_rate_limited());
+}
+
+#[tokio::test]
 async fn batch_results_follow_request_order() {
     let (url, seen) = node(|seen| {
         let mut out: Vec<Value> = items(seen)
@@ -318,14 +326,13 @@ async fn batch_with_unknown_id_is_invalid_response() {
 }
 
 #[tokio::test]
-#[ignore = "finding: a short batch answer yields fewer results than calls instead of an error"]
+#[ignore = "finding: a short batch answer yields fewer results than calls; callers check the count"]
 async fn short_batch_is_invalid_response() {
     let (url, _) = node(|seen| ok(&json!([result(&items(seen)[0]["id"], json!(1))]))).await;
     assert_eq!(kind(batch(&url).await), (ErrorKind::InvalidResponse, false));
 }
 
 #[tokio::test]
-#[ignore = "finding: a duplicated batch id fabricates Failure { code: 0, message: \"\" } for the missing call"]
 async fn duplicate_batch_id_is_invalid_response() {
     let (url, _) = node(|seen| {
         let id = &items(seen)[0]["id"];
@@ -349,6 +356,31 @@ async fn slow_node_times_out() {
     let outcome = http.request(rpc::Request::new("ping", json!([]))).await;
     assert_eq!(kind(outcome), (ErrorKind::Timeout, true));
     assert!(start.elapsed() < Duration::from_millis(500));
+}
+
+#[tokio::test]
+async fn a_request_or_batch_times_out_at_its_own_limit() {
+    let (url, _) = node(|_| Answer::Hang).await;
+    let http = connect(&url, Bounds::default());
+    let start = Instant::now();
+    let short = rpc::Request::new("ping", json!([])).with_timeout(Duration::from_millis(100));
+    assert_eq!(kind(http.request(short).await), (ErrorKind::Timeout, true));
+    let calls = vec![Call::new("ping", json!([]))];
+    let short = Batch::new(calls)
+        .unwrap()
+        .with_timeout(Duration::from_millis(100));
+    assert_eq!(kind(http.batch(short).await), (ErrorKind::Timeout, true));
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "not the node's 15 s"
+    );
+}
+
+#[test]
+fn a_batch_may_take_a_base_and_a_second_per_call() {
+    let calls = vec![Call::new("a", json!([])), Call::new("b", json!([]))];
+    let batch = Batch::new(calls).unwrap();
+    assert_eq!(batch.timeout(), rpc::BATCH_BASE + rpc::BATCH_PER_CALL * 2);
 }
 
 #[tokio::test]
@@ -389,7 +421,6 @@ async fn oversized_response_is_too_large() {
 }
 
 #[tokio::test]
-#[ignore = "finding: an oversized request fails locally but maps to retryable Unavailable; expected InvalidRequest"]
 async fn oversized_request_is_invalid_request() {
     let (url, seen) = node(|seen| ok(&result(&seen.body["id"], json!(null)))).await;
     let http = connect(

@@ -170,7 +170,8 @@ impl Client {
     /// `Unavailable` when no node answers or one is warming up; `Rejected`
     /// with the node's reason otherwise.
     pub async fn send(&self, bytes: &[u8]) -> Result<(), TransactionError> {
-        let request = Request::once("sendrawtransaction", json!([bytes.to_lower_hex_string()]));
+        let request = Request::once("sendrawtransaction", json!([bytes.to_lower_hex_string()]))
+            .with_timeout(::rpc::SEND_TIMEOUT);
         match self.transport.broadcast(request).await {
             Ok(()) => Ok(()),
             Err(::rpc::CallError::Remote(failure)) => refusal(&failure),

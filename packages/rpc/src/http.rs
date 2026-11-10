@@ -77,16 +77,16 @@ impl Http {
     }
 
     async fn execute(&self, request: Request) -> Result<CallResult, Error> {
+        let limit = request.timeout();
         let call = request.into_call();
         let params = Params::new(call.params)?;
         self.statistics.begin();
-        let result = match self
+        let sent = self
             .client
-            .request::<Box<RawValue>, _>(&call.method, params)
-            .await
-        {
+            .request::<Box<RawValue>, _>(&call.method, params);
+        let result = match within(limit, sent).await {
             Ok(value) => Ok(Ok(RawJson(value.get().as_bytes().to_vec()))),
-            Err(RpcError::Call(error)) => Ok(Err(Failure::from(error))),
+            Err(RpcError::Call(error)) => Failure::try_from(error).map(Err),
             Err(source) => Err(Error::from_rpc(source)),
         };
         self.events.outcome(self.statistics.call(&result));
@@ -100,6 +100,7 @@ impl Http {
     /// Every call is serialized before the first byte leaves, so an invalid
     /// parameter fails without contacting the node.
     async fn execute_batch(&self, batch: Batch) -> Result<Vec<CallResult>, Error> {
+        let limit = batch.timeout();
         let calls = batch.into_calls();
         let mut builder = BatchRequestBuilder::new();
         for call in &calls {
@@ -113,19 +114,20 @@ impl Http {
                 })?;
         }
         self.statistics.begin();
-        let result = self
-            .client
-            .batch_request::<Box<RawValue>>(builder)
+        let sent = self.client.batch_request::<Box<RawValue>>(builder);
+        let result = within(Some(limit), sent)
             .await
             .map_err(Error::from_rpc)
-            .map(|responses| {
-                responses
-                    .into_iter()
-                    .map(|entry| match entry {
+            .and_then(|responses| {
+                // A call answered twice leaves another unanswered: nothing usable.
+                let mut results = Vec::with_capacity(calls.len());
+                for entry in responses {
+                    results.push(match entry {
                         Ok(value) => Ok(RawJson(value.get().as_bytes().to_vec())),
-                        Err(error) => Err(Failure::from(error.into_owned())),
-                    })
-                    .collect()
+                        Err(error) => Err(Failure::try_from(error.into_owned())?),
+                    });
+                }
+                Ok(results)
             });
         self.events.outcome(self.statistics.batch(&result));
         // One rate-limited answer fails the batch, so a retry repeats it whole.
@@ -150,6 +152,20 @@ impl Client for Http {
     fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
         Box::pin(self.execute_batch(batch))
     }
+}
+
+/// `sent`, given up past `limit` as a timeout; the client's own bound still
+/// applies.
+async fn within<T>(
+    limit: Option<std::time::Duration>,
+    sent: impl std::future::Future<Output = Result<T, RpcError>>,
+) -> Result<T, RpcError> {
+    let Some(limit) = limit else {
+        return sent.await;
+    };
+    tokio::time::timeout(limit, sent)
+        .await
+        .unwrap_or(Err(RpcError::RequestTimeout))
 }
 
 #[derive(Clone)]
@@ -181,24 +197,35 @@ impl ToRpcParams for Params {
     }
 }
 
-impl From<ErrorObjectOwned> for Failure {
-    fn from(error: ErrorObjectOwned) -> Self {
-        Self {
+/// The node's error object; jsonrpsee's placeholder for a batch call the
+/// node never answered (code 0, no message) is an invalid response.
+impl TryFrom<ErrorObjectOwned> for Failure {
+    type Error = Error;
+
+    fn try_from(error: ErrorObjectOwned) -> Result<Self, Error> {
+        if error.code() == 0 && error.message().is_empty() {
+            return Err(Error::new(
+                ErrorKind::InvalidResponse,
+                "JSON-RPC answer left a call unanswered",
+            ));
+        }
+        Ok(Self {
             code: error.code() as i64,
             message: error.message().to_owned(),
             data: error
                 .data()
                 .map(|data| RawJson(data.get().as_bytes().to_vec())),
-        }
+        })
     }
 }
 
 impl Error {
     fn from_rpc(error: RpcError) -> Self {
         match error {
-            RpcError::Call(error) => {
-                Self::new(ErrorKind::InvalidResponse, Failure::from(error).to_string())
-            }
+            RpcError::Call(error) => match Failure::try_from(error) {
+                Ok(failure) => Self::new(ErrorKind::InvalidResponse, failure.to_string()),
+                Err(unanswered) => unanswered,
+            },
             RpcError::RequestTimeout => Self::new(ErrorKind::Timeout, "JSON-RPC request timed out"),
             RpcError::Transport(source) => match source.downcast_ref::<transport::Error>() {
                 Some(transport::Error::Rejected { status_code }) => Self::new(
@@ -208,6 +235,10 @@ impl Error {
                 Some(transport::Error::Http(HttpError::TooLarge)) => Self::new(
                     ErrorKind::ResponseTooLarge,
                     "JSON-RPC response exceeded its configured limit",
+                ),
+                Some(transport::Error::RequestTooLarge) => Self::new(
+                    ErrorKind::InvalidRequest,
+                    "JSON-RPC request exceeded its configured limit",
                 ),
                 Some(transport::Error::Http(HttpError::Malformed)) => Self::new(
                     ErrorKind::InvalidResponse,

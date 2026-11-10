@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use serde_json::Value;
 
@@ -77,11 +77,13 @@ pub enum Repetition {
     Forbidden,
 }
 
-/// One call and whether a decorator may repeat it.
+/// One call, whether a decorator may repeat it, and how long one execution
+/// may take.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     call: Call,
     repetition: Repetition,
+    timeout: Option<Duration>,
 }
 
 impl Request {
@@ -91,6 +93,7 @@ impl Request {
         Self {
             call: Call::new(method, params),
             repetition: Repetition::Permitted,
+            timeout: None,
         }
     }
 
@@ -100,7 +103,22 @@ impl Request {
         Self {
             call: Call::new(method, params),
             repetition: Repetition::Forbidden,
+            timeout: None,
         }
+    }
+
+    /// The same, one execution taking at most `timeout`; the node's own
+    /// bound still applies when it is shorter.
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// How long one execution may take; `None`: the node's bound.
+    #[must_use]
+    pub const fn timeout(&self) -> Option<Duration> {
+        self.timeout
     }
 
     /// Whether a decorator may execute this request more than once.
@@ -116,13 +134,27 @@ impl Request {
     }
 }
 
-/// Several calls executed as one JSON-RPC batch, and whether a decorator may
-/// repeat them.
+/// Several calls executed as one JSON-RPC batch, whether a decorator may
+/// repeat them, and how long one execution may take: by default
+/// [`BATCH_BASE`] plus [`BATCH_PER_CALL`] per call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Batch {
     calls: Vec<Call>,
     repetition: Repetition,
+    timeout: Duration,
 }
+
+/// What any batch may take, before its calls.
+pub const BATCH_BASE: Duration = Duration::from_secs(5);
+
+/// What each call adds to a batch's timeout.
+pub const BATCH_PER_CALL: Duration = Duration::from_secs(1);
+
+/// What a tip probe may take: a node slower than this is not one to pick.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// What one node may take to answer a submission.
+pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl Batch {
     /// A repeatable batch; a retry repeats the whole batch, so every call in
@@ -150,6 +182,20 @@ impl Batch {
         self.repetition
     }
 
+    /// The same, one execution taking at most `timeout`; the node's own
+    /// bound still applies when it is shorter.
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// How long one execution may take.
+    #[must_use]
+    pub const fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     /// The calls to execute, in request order.
     #[must_use]
     pub fn into_calls(self) -> Vec<Call> {
@@ -163,6 +209,12 @@ impl Batch {
                 "JSON-RPC batch must not be empty",
             ));
         }
-        Ok(Self { calls, repetition })
+        let count = u32::try_from(calls.len()).unwrap_or(u32::MAX);
+        let timeout = BATCH_BASE.saturating_add(BATCH_PER_CALL.saturating_mul(count));
+        Ok(Self {
+            calls,
+            repetition,
+            timeout,
+        })
     }
 }

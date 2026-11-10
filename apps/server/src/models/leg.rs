@@ -396,17 +396,21 @@ pub(crate) mod db {
             .collect()
     }
 
-    /// Deletes the legs of block `block` kept for wallet indexes `indexes`
-    /// (a block kept again writes them again).
+    /// Deletes the legs of block `block` at `position` kept for wallet
+    /// indexes `indexes` (a block kept again writes them again). The
+    /// position lets `leg_wallet_index` seek to the block's legs instead of
+    /// reading every leg of each index.
     pub(crate) fn delete_in(
         connection: &mut SqliteConnection,
         block: &str,
+        position: i64,
         indexes: &BTreeSet<String>,
     ) -> QueryResult<usize> {
         diesel::delete(
             leg::table
-                .filter(leg::block.eq(block))
-                .filter(leg::wallet_index_id.eq_any(indexes)),
+                .filter(leg::wallet_index_id.eq_any(indexes))
+                .filter(leg::position.eq(position))
+                .filter(leg::block.eq(block)),
         )
         .execute(connection)
     }

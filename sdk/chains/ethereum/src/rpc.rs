@@ -317,7 +317,8 @@ impl Client {
         let request = Request::once(
             "eth_sendRawTransaction",
             json!([hex::encode_prefixed(bytes)]),
-        );
+        )
+        .with_timeout(::rpc::SEND_TIMEOUT);
         let failure = match self.0.transport.broadcast(request).await {
             Ok(()) => return Ok(()),
             Err(::rpc::CallError::Remote(failure)) => failure,
@@ -497,7 +498,7 @@ impl base::Broadcaster for Client {
 pub fn height<C: ::rpc::Client + ?Sized>(node: &C) -> ::rpc::BoxFuture<'_, Result<u64, CallError>> {
     Box::pin(async move {
         let raw = node
-            .request(Request::new("eth_blockNumber", json!([])))
+            .request(Request::new("eth_blockNumber", json!([])).with_timeout(::rpc::PROBE_TIMEOUT))
             .await??;
         Ok(raw.deserialize::<U64>()?.to())
     })
@@ -649,9 +650,15 @@ fn reason(message: &str) -> Option<Reason> {
         Some(Reason::NonceUsed)
     } else if message.contains("insufficient funds") {
         Some(Reason::InsufficientFunds)
-    } else if message.contains("underpriced") || message.contains("fee too low") {
+    } else if message.contains("underpriced")
+        || message.contains("fee too low")
+        || message.contains("max fee per gas less than block base fee")
+    {
         Some(Reason::FeeTooLow)
-    } else if message.contains("invalid sender") || message.contains("invalid signature") {
+    } else if message.contains("invalid sender")
+        || message.contains("invalid signature")
+        || message.contains("intrinsic gas too low")
+    {
         Some(Reason::Invalid)
     } else {
         None
@@ -676,4 +683,35 @@ struct Timed {
 #[serde(rename_all = "camelCase")]
 struct Latest {
     base_fee_per_gas: Option<U256>,
+}
+
+#[cfg(test)]
+mod tests {
+    use base::Reason;
+
+    use super::reason;
+
+    #[test]
+    fn a_refusal_is_read_from_what_geth_and_reth_say() {
+        for (message, expected) in [
+            ("nonce too low: next nonce 5, tx nonce 4", Reason::NonceUsed),
+            (
+                "insufficient funds for gas * price + value",
+                Reason::InsufficientFunds,
+            ),
+            ("replacement transaction underpriced", Reason::FeeTooLow),
+            (
+                "max fee per gas less than block base fee: address 0x1, maxFeePerGas: 1, baseFee: 7",
+                Reason::FeeTooLow,
+            ),
+            (
+                "intrinsic gas too low: gas 20000, minimum needed 21000",
+                Reason::Invalid,
+            ),
+            ("invalid sender", Reason::Invalid),
+        ] {
+            assert_eq!(reason(message), Some(expected), "{message}");
+        }
+        assert_eq!(reason("something else"), None);
+    }
 }

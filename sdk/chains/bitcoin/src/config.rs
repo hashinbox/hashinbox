@@ -250,7 +250,7 @@ impl base::Config for Config {
 fn height(node: &Http) -> BoxFuture<'_, Result<u64, CallError>> {
     Box::pin(async move {
         let reply = node
-            .request(Request::new("getblockcount", json!([])))
+            .request(Request::new("getblockcount", json!([])).with_timeout(::rpc::PROBE_TIMEOUT))
             .await??;
         Ok(reply.deserialize()?)
     })

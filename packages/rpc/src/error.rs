@@ -163,6 +163,7 @@ mod tests {
         }
         for (code, message) in [
             (-32_003, "transaction rejected"),
+            (-32_003, "exceeds block gas limit"),
             (-32_000, "execution reverted"),
             (-32_601, "the method does not exist"),
         ] {
