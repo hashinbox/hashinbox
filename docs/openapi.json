@@ -154,7 +154,7 @@
           {
             "name": "state",
             "in": "query",
-            "description": "Only jobs in this state.",
+            "description": "Only jobs in this state; absent, every state but `idle`.",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/JobState"
@@ -3228,6 +3228,8 @@
           "topic",
           "state",
           "run_at",
+          "created_at",
+          "updated_at",
           "deadline",
           "attempts",
           "reason",
@@ -3247,6 +3249,11 @@
             "format": "int32",
             "description": "Executions started since it was last fresh.",
             "minimum": 0
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was queued, Unix ms."
           },
           "deadline": {
             "type": [
@@ -3301,6 +3308,11 @@
           "topic": {
             "type": "string",
             "description": "What it locks: jobs whose topics conflict run one at a time, in line order."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was last written, Unix ms: started, retried or finished."
           }
         }
       },
@@ -3368,7 +3380,8 @@
           "running",
           "succeeded",
           "failed",
-          "skipped"
+          "skipped",
+          "idle"
         ]
       },
       "Leg": {

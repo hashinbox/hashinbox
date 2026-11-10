@@ -31,7 +31,7 @@ struct ListQuery {
     network: Option<String>,
     /// Only this kind (`index`, `expire`, `triggers`, `broadcast`, `prune`).
     kind: Option<String>,
-    /// Only jobs in this state.
+    /// Only jobs in this state; absent, every state but `idle`.
     state: Option<JobState>,
 }
 
@@ -63,6 +63,8 @@ pub(super) enum JobState {
     Failed,
     /// Finished without running; `reason` names the job it gave way to.
     Skipped,
+    /// Succeeded, and had nothing to do; listed only when asked for.
+    Idle,
 }
 
 impl From<tasks::Status> for JobState {
@@ -73,6 +75,7 @@ impl From<tasks::Status> for JobState {
             tasks::Status::Done => Self::Succeeded,
             tasks::Status::Failed => Self::Failed,
             tasks::Status::Skipped => Self::Skipped,
+            tasks::Status::Idle => Self::Idle,
         }
     }
 }
@@ -85,6 +88,7 @@ impl JobState {
             Self::Succeeded => 2,
             Self::Failed => 3,
             Self::Skipped => 4,
+            Self::Idle => 5,
         }
     }
 }
@@ -102,6 +106,10 @@ struct Job {
     state: JobState,
     /// Not started before this, Unix ms: the next run of a pending job.
     run_at: u64,
+    /// When it was queued, Unix ms.
+    created_at: i64,
+    /// When it was last written, Unix ms: started, retried or finished.
+    updated_at: i64,
     /// Not started after this, Unix ms; always present.
     #[schema(required)]
     deadline: Option<u64>,
@@ -123,15 +131,19 @@ struct Job {
     accepted: usize,
 }
 
-impl From<tasks::Job> for Job {
-    fn from(job: tasks::Job) -> Self {
+impl Job {
+    /// Row `id` of the queue, with when it was queued and last written.
+    fn new((id, row, created_at, updated_at): (i64, task::Task, i64, i64)) -> anyhow::Result<Self> {
+        let job = row.into_job(id)?;
         let (signed, accepted) = broadcast::progress(job.state.as_ref());
-        Self {
+        Ok(Self {
             id: job.id.to_string(),
             kind: job.kind,
             topic: job.topic.to_string(),
             state: job.status.into(),
             run_at: job.run_at,
+            created_at,
+            updated_at,
             deadline: job.deadline,
             attempts: job.attempts,
             reason: job.reason,
@@ -139,7 +151,7 @@ impl From<tasks::Job> for Job {
             progress: job.state,
             signed,
             accepted,
-        }
+        })
     }
 }
 
@@ -199,7 +211,7 @@ async fn list(
     let next_cursor = rows.cursor(limit);
     let jobs = rows
         .into_iter()
-        .map(|(id, row, _)| row.into_job(id).map(Job::from))
+        .map(Job::new)
         .collect::<anyhow::Result<Vec<_>>>()
         .map_err(|error| Error::unavailable(format!("{error:#}")))?;
     Ok(Json(ListResponse { jobs, next_cursor }))
@@ -237,9 +249,11 @@ async fn read(
     let Ok(id) = path.id.parse() else {
         return Err(Error::not_found("job does not exist"));
     };
-    let job = tasks::Store::get(&state.queue, tasks::Id(id))
-        .await
-        .map_err(|error| Error::unavailable(error.to_string()))?
+    let row = state
+        .db
+        .read(move |connection| Ok(task::db::find_by_id(connection, id)?))
+        .await?
         .ok_or_else(|| Error::not_found("job does not exist"))?;
-    Ok(Json(Job::from(job)))
+    let job = Job::new(row).map_err(|error| Error::unavailable(format!("{error:#}")))?;
+    Ok(Json(job))
 }

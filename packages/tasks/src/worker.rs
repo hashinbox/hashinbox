@@ -22,6 +22,8 @@ use crate::{
 pub enum Ack {
     /// Succeeded.
     Done,
+    /// Succeeded, and had nothing to do.
+    Idle,
     /// Failed for good, with why.
     Fail(String),
     /// Run again after the backoff while attempts remain, with why not now.

@@ -431,7 +431,7 @@ CREATE TABLE q (
     id         INTEGER PRIMARY KEY AUTOINCREMENT, -- Identity and place in line.
     topic      TEXT    NOT NULL, -- What it locks: `a.b.c`; a prefix conflicts.
     kind       TEXT    NOT NULL, -- Worker selector.
-    status     INTEGER NOT NULL, -- 0 pending, 1 running, 2 done, 3 failed, 4 skipped.
+    status     INTEGER NOT NULL, -- 0 pending, 1 running, 2 done, 3 failed, 4 skipped, 5 idle.
     run_at     INTEGER NOT NULL, -- ms since epoch; not started before; running: lease end.
     deadline   INTEGER,          -- ms since epoch; not started after.
     attempts   INTEGER NOT NULL, -- Executions started since it was last fresh.
@@ -440,7 +440,7 @@ CREATE TABLE q (
     state      TEXT,             -- JSON: what the worker has done so far.
     created_at INTEGER NOT NULL, -- ms.
     updated_at INTEGER NOT NULL, -- ms; last written.
-    CHECK (status IN (0, 1, 2, 3, 4)),
+    CHECK (status IN (0, 1, 2, 3, 4, 5)),
     CHECK (attempts >= 0),
     CHECK (json_valid(input)),
     CHECK (state IS NULL OR json_valid(state))

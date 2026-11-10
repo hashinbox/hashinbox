@@ -250,7 +250,9 @@ async fn decided_after<T: TestChain>(app: &App, chain: &T, wallet: &Wallet) -> V
     let last = sends[0]["id"].as_str().unwrap_or_default().to_owned();
     chain.mine(1);
     until("a round after the sends", || async {
-        let rounds = jobs(app, "kind=triggers&state=succeeded").await;
+        // A round that acted, or one that had nothing to do.
+        let mut rounds = jobs(app, "kind=triggers&state=succeeded").await;
+        rounds.extend(jobs(app, "kind=triggers&state=idle").await);
         if rounds
             .iter()
             .any(|round| round["id"].as_str() > Some(last.as_str()))

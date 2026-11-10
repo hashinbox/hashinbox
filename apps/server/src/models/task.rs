@@ -31,6 +31,7 @@ pub(crate) const fn status(status: Status) -> i32 {
         Status::Done => 2,
         Status::Failed => 3,
         Status::Skipped => 4,
+        Status::Idle => 5,
     }
 }
 
@@ -41,6 +42,7 @@ pub(crate) const fn status_of(status: i32) -> Status {
         1 => Status::Running,
         2 => Status::Done,
         4 => Status::Skipped,
+        5 => Status::Idle,
         _ => Status::Failed,
     }
 }
@@ -88,10 +90,10 @@ impl Task {
     }
 }
 
-/// A job with its id and `updated_at`: `"{updated_at}:{id}"`.
-impl crate::db::Keyed for (i64, Task, i64) {
+/// A job with its id, `created_at` and `updated_at`: `"{updated_at}:{id}"`.
+impl crate::db::Keyed for (i64, Task, i64, i64) {
     fn key(&self) -> String {
-        format!("{}:{}", self.2, self.0)
+        format!("{}:{}", self.3, self.0)
     }
 }
 
@@ -257,14 +259,14 @@ pub(crate) mod db {
         Ok(leased)
     }
 
-    /// The job `id`, if any.
+    /// The job `id`, if any, with its id, `created_at` and `updated_at`.
     pub(crate) fn find_by_id(
         connection: &mut SqliteConnection,
         id: i64,
-    ) -> QueryResult<Option<(i64, Task)>> {
+    ) -> QueryResult<Option<(i64, Task, i64, i64)>> {
         q::table
             .find(id)
-            .select((q::id, Task::as_select()))
+            .select((q::id, Task::as_select(), q::created_at, q::updated_at))
             .first(connection)
             .optional()
     }
@@ -284,8 +286,8 @@ pub(crate) mod db {
             .optional()
     }
 
-    /// Deletes every job of one of `kinds` that succeeded or was skipped
-    /// and was last written before `before` (Unix ms); how many.
+    /// Deletes every job of one of `kinds` that succeeded, was idle or was
+    /// skipped and was last written before `before` (Unix ms); how many.
     pub(crate) fn delete_done_before(
         connection: &mut SqliteConnection,
         kinds: &[&str],
@@ -294,7 +296,7 @@ pub(crate) mod db {
         diesel::delete(
             q::table
                 .filter(q::kind.eq_any(kinds))
-                .filter(q::status.eq_any([2, 4]))
+                .filter(q::status.eq_any([2, 4, 5]))
                 .filter(q::updated_at.lt(before)),
         )
         .execute(connection)
@@ -342,8 +344,9 @@ pub(crate) mod db {
     }
 
     /// At most `page.limit` jobs last written, latest first, of `network`,
-    /// `kind` and `status` when given, each with its id and `updated_at`;
-    /// by (`updated_at`, `id`), after `page.after` in that order when given.
+    /// `kind` and `status` when given (absent: every status but idle), each
+    /// with its id, `created_at` and `updated_at`; by (`updated_at`, `id`),
+    /// after `page.after` in that order when given.
     /// A job's network is its input's `chain` and `network`, which every
     /// job kind's input carries.
     pub(crate) fn find_page(
@@ -352,7 +355,7 @@ pub(crate) mod db {
         kind: Option<&str>,
         status: Option<i32>,
         page: Page<(i64, i64)>,
-    ) -> QueryResult<Vec<(i64, Task, i64)>> {
+    ) -> QueryResult<Vec<(i64, Task, i64, i64)>> {
         use diesel::dsl::sql;
         let mut query = q::table.into_boxed();
         if let Some(network) = network {
@@ -369,9 +372,10 @@ pub(crate) mod db {
         if let Some(kind) = kind {
             query = query.filter(q::kind.eq(kind));
         }
-        if let Some(status) = status {
-            query = query.filter(q::status.eq(status));
-        }
+        query = match status {
+            Some(status) => query.filter(q::status.eq(status)),
+            None => query.filter(q::status.ne(super::status(tasks::Status::Idle))),
+        };
         if let Some((updated_at, id)) = page.after {
             query = query.filter(
                 sql::<Bool>("(updated_at, id) < (")
@@ -384,7 +388,7 @@ pub(crate) mod db {
         query
             .order((q::updated_at.desc(), q::id.desc()))
             .limit(page.limit)
-            .select((q::id, Task::as_select(), q::updated_at))
+            .select((q::id, Task::as_select(), q::created_at, q::updated_at))
             .load(connection)
     }
 }

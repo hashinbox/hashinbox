@@ -127,7 +127,7 @@ impl Worker for Round {
             // write to the queue outside its store, allowed because the jobs
             // are not unique: each is admitted.
             if acting.is_empty() {
-                return anyhow::Ok(());
+                return anyhow::Ok(Ack::Idle);
             }
             self.db
                 .write(move |connection| {
@@ -147,10 +147,10 @@ impl Worker for Round {
                 })
                 .await?;
             self.queue.notify();
-            anyhow::Ok(())
+            anyhow::Ok(Ack::Done)
         };
         match round.await {
-            Ok(()) => Ack::Done,
+            Ok(ack) => ack,
             Err(error) => Ack::Retry(format!("{error:#}")),
         }
     }

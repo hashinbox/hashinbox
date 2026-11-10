@@ -33,7 +33,7 @@ const KINDS = [
 function labelOf(kind: string): string {
   return KINDS.find((k) => k.kind === kind)?.label ?? kind;
 }
-const STATES = ['pending', 'running', 'succeeded', 'failed', 'skipped'] as const;
+const STATES = ['pending', 'running', 'succeeded', 'failed', 'skipped', 'idle'] as const;
 
 /** One tag of the filter: a network, a kind or a state. */
 interface Filter {
@@ -47,6 +47,7 @@ const TONE: Record<Job['state'], string> = {
   succeeded: 'success.main',
   failed: 'error.main',
   skipped: 'text.disabled',
+  idle: 'text.disabled',
 };
 
 const figures = { fontFamily: mono, fontSize: 12, fontVariantNumeric: 'tabular-nums' } as const;
@@ -67,10 +68,10 @@ function Dot({ state }: { state: Job['state'] }) {
   );
 }
 
-/** The network a job's input names (every kind's input carries one). */
+/** The network a job's input names; none for `prune`, whose input is null. */
 function networkOf(job: Job): string {
-  const input = job.input as { chain?: unknown; network?: unknown };
-  return typeof input.chain === 'string' && typeof input.network === 'string'
+  const input = job.input as { chain?: unknown; network?: unknown } | null;
+  return typeof input?.chain === 'string' && typeof input.network === 'string'
     ? `${input.chain}/${input.network}`
     : '—';
 }
@@ -193,13 +194,15 @@ export function Jobs({ shell }: { shell: Shell }) {
               <TableCell>Job</TableCell>
               <TableCell>Kind</TableCell>
               <TableCell>Network</TableCell>
+              <TableCell>Created</TableCell>
+              <TableCell>Updated</TableCell>
               <TableCell>Next run</TableCell>
               <TableCell>Attempts</TableCell>
               <TableCell>Reason</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
-            {jobs.length === 0 && <EmptyRow columns={6} message="No job matches." />}
+            {jobs.length === 0 && <EmptyRow columns={8} message="No job matches." />}
             {jobs.map((j) => (
               <TableRow
                 key={j.id}
@@ -213,6 +216,12 @@ export function Jobs({ shell }: { shell: Shell }) {
                 </TableCell>
                 <TableCell>{labelOf(j.kind)}</TableCell>
                 <TableCell sx={figures}>{networkOf(j)}</TableCell>
+                <TableCell sx={figures}>
+                  <When at={j.created_at} />
+                </TableCell>
+                <TableCell sx={figures}>
+                  <When at={j.updated_at} />
+                </TableCell>
                 <TableCell sx={figures}>{next(j)}</TableCell>
                 <TableCell sx={figures}>{j.attempts}</TableCell>
                 <TableCell

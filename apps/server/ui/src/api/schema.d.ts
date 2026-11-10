@@ -785,6 +785,11 @@ export interface components {
             attempts: number;
             /**
              * Format: int64
+             * @description When it was queued, Unix ms.
+             */
+            created_at: number;
+            /**
+             * Format: int64
              * @description Not started after this, Unix ms; always present.
              */
             deadline: number | null;
@@ -812,6 +817,11 @@ export interface components {
             state: components["schemas"]["JobState"];
             /** @description What it locks: jobs whose topics conflict run one at a time, in line order. */
             topic: string;
+            /**
+             * Format: int64
+             * @description When it was last written, Unix ms: started, retried or finished.
+             */
+            updated_at: number;
         };
         /** @description Jobs by where they are. */
         JobCounts: {
@@ -838,7 +848,7 @@ export interface components {
          * @description Where a job is.
          * @enum {string}
          */
-        JobState: "pending" | "running" | "succeeded" | "failed" | "skipped";
+        JobState: "pending" | "running" | "succeeded" | "failed" | "skipped" | "idle";
         /**
          * @description One `leg` row: a transaction's leg, or a block's reward; the API shows
          *     it as is.
@@ -1629,7 +1639,7 @@ export interface operations {
                 network?: string;
                 /** @description Only this kind (`index`, `expire`, `triggers`, `broadcast`, `prune`). */
                 kind?: string;
-                /** @description Only jobs in this state. */
+                /** @description Only jobs in this state; absent, every state but `idle`. */
                 state?: components["schemas"]["JobState"];
                 /** @description `next_cursor` of the previous page; absent for the first page. */
                 cursor?: string;

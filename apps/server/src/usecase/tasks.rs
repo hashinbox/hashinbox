@@ -121,7 +121,7 @@ impl Store for Sqlite {
                 .read(move |connection| Ok(task::db::find_by_id(connection, id)?));
             row.await
                 .map_err(backend)?
-                .map(|(id, row)| row.into_job(id).map_err(backend))
+                .map(|(id, row, _, _)| row.into_job(id).map_err(backend))
                 .transpose()
         })
     }

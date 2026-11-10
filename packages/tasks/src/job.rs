@@ -32,6 +32,8 @@ pub enum Status {
     Running,
     /// Succeeded.
     Done,
+    /// Succeeded, and had nothing to do.
+    Idle,
     /// Failed for good; `reason` says why.
     Failed,
     /// Finished without running; `reason` names the job it gave way to.
@@ -42,7 +44,7 @@ impl Status {
     /// Whether it is terminal.
     #[must_use]
     pub const fn is_finished(self) -> bool {
-        matches!(self, Self::Done | Self::Failed | Self::Skipped)
+        matches!(self, Self::Done | Self::Idle | Self::Failed | Self::Skipped)
     }
 }
 
@@ -151,7 +153,7 @@ pub fn blocks(id: Id, status: Status, run_at: u64, attempts: u32, job: Id, now: 
         _ if id == job => false,
         Status::Running => true,
         Status::Pending => id < job && (run_at <= now || attempts > 0),
-        Status::Done | Status::Failed | Status::Skipped => false,
+        Status::Done | Status::Idle | Status::Failed | Status::Skipped => false,
     }
 }
 
@@ -172,6 +174,7 @@ impl Job {
         let retry = &policy.retry;
         match ack {
             Ack::Done => self.status = Status::Done,
+            Ack::Idle => self.status = Status::Idle,
             Ack::Fail(reason) => return self.fail(reason),
             Ack::Retry(reason) if self.attempts >= retry.attempts.get() => {
                 return self.fail(format!("attempts-exhausted: {reason}"));
@@ -250,6 +253,7 @@ mod tests {
         let settle = |ack| running().settle(ack, &POLICY, 100);
         let view = |job: Job| (job.status, job.run_at, job.attempts, job.reason);
         assert_eq!(view(settle(Ack::Done)), (Status::Done, 0, 1, None));
+        assert_eq!(view(settle(Ack::Idle)), (Status::Idle, 0, 1, None));
         assert_eq!(
             view(settle(Ack::Fail("no".into()))),
             (Status::Failed, 0, 1, Some("no".into()))
