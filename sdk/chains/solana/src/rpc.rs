@@ -131,7 +131,7 @@ impl Client {
                             "commitment": CONFIRMED,
                             "encoding": "json",
                             "transactionDetails": "full",
-                            "maxSupportedTransactionVersion": 0,
+                            "maxSupportedTransactionVersion": 1,
                             "rewards": true,
                         }]),
                     )

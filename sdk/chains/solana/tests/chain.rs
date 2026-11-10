@@ -181,6 +181,52 @@ fn a_block_becomes_balance_legs_fees_and_rewards() {
     script.exhausted();
 }
 
+/// A real devnet block (slot 520749165), trimmed to one legacy, one v0 and
+/// one v1 transaction, their log messages dropped.
+const DEVNET_BLOCK: &str = include_str!("fixtures/devnet-520749165.json");
+
+#[test]
+fn a_block_with_version_1_transactions_is_read() {
+    let fixture: Value = serde_json::from_str(DEVNET_BLOCK).unwrap();
+    let slot = 520_749_165;
+    let script = Script::new([
+        Reply::ok("getBlocks", json!([slot])),
+        get_block(fixture.clone()).expecting(json!([slot, {
+            "commitment": "confirmed",
+            "encoding": "json",
+            "transactionDetails": "full",
+            "maxSupportedTransactionVersion": 1,
+            "rewards": true,
+        }])),
+    ]);
+    let block = block_on(chain(&script).block(slot)).unwrap().unwrap();
+    let sent = fixture["transactions"].as_array().unwrap();
+    let ids: Vec<&str> = block
+        .transactions
+        .0
+        .iter()
+        .map(|one| one.id.id.as_str())
+        .collect();
+    let expected: Vec<&str> = sent
+        .iter()
+        .map(|one| one["transaction"]["signatures"][0].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, expected, "legacy, v0 and v1, in block order");
+    // The v1 transaction only paid its fee.
+    let payer = sent[2]["transaction"]["message"]["accountKeys"][0]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        block.transactions.0[2].legs,
+        [Leg::Fee {
+            address: Address::new(network(), payer),
+            asset: Asset::native(network()),
+            amount: Decimal::from(5000),
+        }]
+    );
+    script.exhausted();
+}
+
 #[test]
 fn a_skipped_slot_has_no_block() {
     let script = Script::new([
