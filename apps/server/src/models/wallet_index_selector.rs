@@ -80,9 +80,9 @@ impl Selector {
             }
             Self::Tag(name) => {
                 binds.push(name.clone());
-                "EXISTS (SELECT 1 FROM json_each(w.tags) j WHERE j.value = ?)".to_owned()
+                "EXISTS (SELECT 1 FROM json_each(wi.tags) j WHERE j.value = ?)".to_owned()
             }
-            Self::Untagged {} => "json_array_length(w.tags) = 0".to_owned(),
+            Self::Untagged {} => "json_array_length(wi.tags) = 0".to_owned(),
             Self::All(all) => group(all, binds, " AND ", "1"),
             Self::Any(any) => group(any, binds, " OR ", "0"),
             Self::Not(inner) => format!("NOT ({})", inner.sql(binds)),

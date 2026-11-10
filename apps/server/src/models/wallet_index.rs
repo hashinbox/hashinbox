@@ -633,9 +633,10 @@ pub(crate) mod db {
     }
 
     /// The fully indexed indexes of `network` that `selector` picks:
-    /// indexed through a live block at or above `confirmed` (the universe, so
-    /// `Not` is relative to it), balances at `confirmed`, each with its
-    /// pending legs (what [`WalletIndex::spendable`] reads), in one query.
+    /// indexed through a live block at or above `confirmed`, the round's
+    /// block (the universe, so `Not` is relative to it), with the view's
+    /// balances at the last kept block (what [`WalletIndex::spendable`]
+    /// reads), in one query.
     ///
     /// # Errors
     ///
@@ -674,7 +675,7 @@ pub(crate) mod db {
 
     /// The indexes of `network` that `selector` picks, only those indexed
     /// through a live block at or above `confirmed` when `fully_indexed`,
-    /// balances at `confirmed`, each with its pending legs, in one query.
+    /// with the view's balances at the last kept block, in one query.
     fn read(
         connection: &mut SqliteConnection,
         network: &Network,
@@ -685,14 +686,13 @@ pub(crate) mod db {
         let mut binds = Vec::new();
         let picked = selector.sql(&mut binds);
         let indexed = if fully_indexed {
-            "b.archived_at IS NULL AND b.position >= ?"
+            "wi.indexed_through >= ?"
         } else {
             "1"
         };
-        // The view's columns, but its confirmed balances are as of
-        // `confirmed`, the round's block, not the indexer's: the totals of
-        // its last live mined leg there (`c`; '0': none), and that balance
-        // less its pending outgoing legs.
+        // The view's row, its balances at the last kept block: what a round
+        // decides on. Its received and sent totals stay the view's (at the
+        // confirmed position); a round reads neither.
         let mut query = diesel::sql_query(format!(
             "
             SELECT
@@ -707,37 +707,14 @@ pub(crate) mod db {
                 wi.address,
                 wi.keyed,
                 wi.indexed_through,
-                wi.balance_pending,
                 NULL AS behind_tip,
                 ? AS finality_at,
-                COALESCE(c.total, '0') AS balance,
-                COALESCE(c.total_received, '0') AS balance_received,
-                COALESCE(c.total_sent, '0') AS balance_sent,
-                (
-                    SELECT SUM_DECIMAL(v)
-                    FROM (
-                        SELECT COALESCE(c.total, '0') AS v
-                        UNION ALL
-                        SELECT '-' || p.amount
-                        FROM leg p
-                        WHERE p.wallet_index_id = wi.id
-                          AND p.position IS NULL
-                          AND p.kind IN (1, 2, 4)
-                    )
-                ) AS balance_spendable
+                wi.balance_pending AS balance,
+                wi.balance_received,
+                wi.balance_sent,
+                wi.balance_pending,
+                wi.balance_pending_spendable AS balance_spendable
             FROM wallet_index_with_balance wi
-            JOIN wallet w ON w.id = wi.wallet_id
-            LEFT JOIN block b ON b.id = wi.indexed_at
-            LEFT JOIN leg c ON c.id = (
-                SELECT l.id
-                FROM leg l
-                JOIN block lb ON lb.id = l.block
-                WHERE l.wallet_index_id = wi.id
-                  AND lb.archived_at IS NULL
-                  AND l.position <= ?
-                ORDER BY l.position DESC, l.seq DESC
-                LIMIT 1
-            )
             WHERE wi.chain = ?
               AND wi.network = ?
               AND ({indexed})
@@ -745,7 +722,6 @@ pub(crate) mod db {
             ORDER BY wi.wallet_id, wi.asset"
         ))
         .into_boxed()
-        .bind::<BigInt, _>(confirmed)
         .bind::<BigInt, _>(confirmed)
         .bind::<Text, _>(network.chain.as_str().to_owned())
         .bind::<Text, _>(network.name.clone());

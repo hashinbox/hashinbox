@@ -1048,7 +1048,8 @@ fn send(network: &Network, from: &str, to: &str, amount: u64, fee: u64, spent: C
 /// total and index, and checks every balance read against the
 /// recomputation: now (the balance route's read) and at each confirmed
 /// position up to `tip` (the wallet read, the trigger read); spendable is
-/// the confirmed balance less the pending outgoing legs.
+/// the confirmed balance less the outgoing legs not yet in it: pending, or
+/// mined above the confirmed position.
 async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip: i64) {
     use diesel::{
         RunQueryDsl as _,
@@ -1087,6 +1088,8 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
     let mut running = std::collections::BTreeMap::<String, (Decimal, Decimal)>::new();
     // (address, position, balance right after the leg), in order.
     let mut steps = Vec::new();
+    // (address, position, amount) of every mined outgoing leg.
+    let mut sends = Vec::new();
     for row in rows {
         assert_eq!(
             row.wallet_index_id,
@@ -1096,6 +1099,9 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
         let (received, sent) = running
             .entry(row.address.clone())
             .or_insert_with(|| (Decimal::zero(), Decimal::zero()));
+        if matches!(row.kind, 1 | 2 | 4) {
+            sends.push((row.address.clone(), row.position, amount.clone()));
+        }
         match row.kind {
             0 | 3 | 5 => *received += amount,
             _ => *sent += amount,
@@ -1126,13 +1132,19 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
     )
     .load(&mut raw(directory))
     .unwrap();
-    let out = |name: &str| {
-        pending
+    // What spendable takes off the balance through `through`.
+    let out = |name: &str, through: i64| {
+        let pending = pending
             .iter()
             .filter(|row| row.address == name)
             .fold(Decimal::zero(), |sum, row| {
                 sum + row.amount.parse::<Decimal>().unwrap()
-            })
+            });
+        let mined = sends
+            .iter()
+            .filter(|(address, position, _)| address == name && *position > through)
+            .fold(Decimal::zero(), |sum, (_, _, amount)| sum + amount.clone());
+        pending + mined
     };
     let network = network();
     for name in names {
@@ -1199,7 +1211,7 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
                 one.address
             );
             let spendable = parse(index.balance_spendable.as_deref().unwrap());
-            let expected = at(&one.address, through) - out(&one.address);
+            let expected = at(&one.address, through) - out(&one.address, through);
             assert_eq!(
                 spendable, expected,
                 "{} spendable at {through}",
@@ -1222,33 +1234,32 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
         .iter()
         .map(|name| format!("bitcoin.regtest.{name}.native"))
         .collect();
-    for through in 0..=tip {
-        let ids = ids.clone();
-        let balances = db
-            .read(move |connection| {
-                crate::models::wallet_index::db::find_by_ids(
-                    connection,
-                    &crate::tests::network(),
-                    &ids,
-                    through,
-                )
-            })
-            .await
-            .unwrap();
-        for name in names {
-            let id = format!("bitcoin.regtest.{name}.native");
-            let confirmed = balances[&id]
-                .balance
-                .as_deref()
-                .map(|total| total.parse::<Decimal>().unwrap());
-            assert_eq!(confirmed, Some(at(name, through)), "{name} at {through}");
-            let spendable = balances[&id].spendable().unwrap();
-            assert_eq!(
-                spendable,
-                at(name, through) - out(name),
-                "{name} at {through}"
-            );
-        }
+    // The round's read: balances at the last kept block, spendable less
+    // the pending sends.
+    let balances = db
+        .read(move |connection| {
+            crate::models::wallet_index::db::find_by_ids(
+                connection,
+                &crate::tests::network(),
+                &ids,
+                tip,
+            )
+        })
+        .await
+        .unwrap();
+    for name in names {
+        let id = format!("bitcoin.regtest.{name}.native");
+        let last = balances[&id]
+            .balance
+            .as_deref()
+            .map(|total| total.parse::<Decimal>().unwrap());
+        assert_eq!(last, Some(at(name, i64::MAX)), "{name} at the last block");
+        let spendable = balances[&id].spendable().unwrap();
+        assert_eq!(
+            spendable,
+            at(name, i64::MAX) - out(name, i64::MAX),
+            "{name} spendable at the last block"
+        );
     }
 }
 
@@ -1368,7 +1379,9 @@ async fn running_totals_match_the_amounts_through_reorgs_and_sends() {
     BlockStore::insert(&storage, &run(&network, vec![third.clone()]))
         .await
         .unwrap();
-    assert_eq!(spendable(db.clone()).await, Decimal::from(10));
+    // Mined above the confirmed block 1: not in its balance yet, still taken
+    // off what is spendable (N2): 10 less 2 + 2.
+    assert_eq!(spendable(db.clone()).await, Decimal::from(6));
     totals_hold(&db, &directory, &names, 2).await;
 
     // A reorg: block 2 archived; a branch mines p again (fee 3) one block later.

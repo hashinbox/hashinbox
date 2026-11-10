@@ -42,8 +42,8 @@ fn network() -> Network {
 /// a, b fully indexed in native and `tok`; c `tok` full, native behind; d
 /// never indexed; e through an archived block; `bitcoin.other.a.native` full.
 /// Every indexed address is a watch-only wallet.
-/// a native: received 1000 (block 1), spent 300 + fee 10 (block 2), reward 5
-/// above the tip (block 3); b native: reward 50 (block 0); a tok: 2^200.
+/// a native: received 1000 (block 1), spent 300 + fee 10 (block 2); b
+/// native: reward 50 (block 0); a tok: 2^200.
 /// Mined legs carry their index, position, seq and running total, as the
 /// store writes.
 const SEED: &str = "
@@ -89,8 +89,6 @@ INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, am
   'bitcoin.regtest.a.native',2,3,'690','1000','310'),
  ('bitcoin.regtest.t3.0','bitcoin.regtest.f5','bitcoin.regtest.t3',0,0,'a','native','7777',
   'bitcoin.regtest.a.native',5,5,'8467','8782','310'),
- ('bitcoin.regtest.03.reward.0','bitcoin.regtest.03',NULL,0,5,'a','native','5',
-  'bitcoin.regtest.a.native',3,4,'695','1005','310'),
  ('bitcoin.regtest.00.reward.0','bitcoin.regtest.00',NULL,0,5,'b','native','50',
   'bitcoin.regtest.b.native',0,1,'50','50','0');
 ";
@@ -309,7 +307,7 @@ fn balances_are_confirmed_exact_and_folded() {
         id("b", "tok"),
     ];
     let balances = wallet_index::db::find_by_ids(&mut connection, &network(), &all, 2).unwrap();
-    // The reward at block 3 and the archived block's leg are not counted.
+    // The archived block's leg is not counted.
     assert_eq!(confirmed(&balances, &id("a", "native")), decimal("690"));
     assert_eq!(confirmed(&balances, &id("b", "native")), decimal("50"));
     assert_eq!(
@@ -317,8 +315,6 @@ fn balances_are_confirmed_exact_and_folded() {
         decimal("1606938044258990275541962092341162602522202993782792835301376")
     );
     assert_eq!(confirmed(&balances, &id("b", "tok")), Decimal::zero());
-    let later = wallet_index::db::find_by_ids(&mut connection, &network(), &all[..1], 3).unwrap();
-    assert_eq!(confirmed(&later, &id("a", "native")), decimal("695"));
     assert_eq!(
         balances[&id("a", "native")].spendable().unwrap(),
         decimal("690")
