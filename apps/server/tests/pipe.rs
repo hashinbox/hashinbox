@@ -13,7 +13,9 @@ use diesel::{Connection as _, SqliteConnection, connection::SimpleConnection as 
 use crate::{
     models::{
         Json, Trigger, TriggerRun, Wallet, int, trigger,
-        trigger::{Aggregate, Amount, Compare, Filter, Gate, Logic, Operator, Target, This},
+        trigger::{
+            Aggregate, Amount, Balance, Compare, Filter, Gate, Logic, Operator, Target, This,
+        },
         trigger_run, wallet, wallet_index,
         wallet_index::Selection,
         wallet_index_selector::Selector,
@@ -42,8 +44,9 @@ fn network() -> Network {
 /// a, b fully indexed in native and `tok`; c `tok` full, native behind; d
 /// never indexed; e through an archived block; `bitcoin.other.a.native` full.
 /// Every indexed address is a watch-only wallet.
-/// a native: received 1000 (block 1), spent 300 + fee 10 (block 2); b
-/// native: reward 50 (block 0); a tok: 2^200.
+/// Its indexer confirmed through block [`TIP`]. a native: received 1000
+/// (block 1), spent 300 + fee 10 (block 2), reward 5 above the confirmed
+/// block (block 3); b native: reward 50 (block 0); a tok: 2^200.
 /// Mined legs carry their index, position, seq and running total, as the
 /// store writes.
 const SEED: &str = "
@@ -89,8 +92,11 @@ INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, am
   'bitcoin.regtest.a.native',2,3,'690','1000','310'),
  ('bitcoin.regtest.t3.0','bitcoin.regtest.f5','bitcoin.regtest.t3',0,0,'a','native','7777',
   'bitcoin.regtest.a.native',5,5,'8467','8782','310'),
+ ('bitcoin.regtest.03.reward.0','bitcoin.regtest.03',NULL,0,5,'a','native','5',
+  'bitcoin.regtest.a.native',3,4,'695','1005','310'),
  ('bitcoin.regtest.00.reward.0','bitcoin.regtest.00',NULL,0,5,'b','native','50',
   'bitcoin.regtest.b.native',0,1,'50','50','0');
+UPDATE network_index SET tip = 3, confirmed = 2 WHERE chain = 'bitcoin' AND network = 'regtest';
 ";
 
 /// A migrated, seeded temp file, a runtime for fee estimates, and a raw
@@ -307,7 +313,8 @@ fn balances_are_confirmed_exact_and_folded() {
         id("b", "tok"),
     ];
     let balances = wallet_index::db::find_by_ids(&mut connection, &network(), &all, 2).unwrap();
-    // The archived block's leg is not counted.
+    // The reward above the confirmed block and the archived block's leg
+    // are not counted.
     assert_eq!(confirmed(&balances, &id("a", "native")), decimal("690"));
     assert_eq!(confirmed(&balances, &id("b", "native")), decimal("50"));
     assert_eq!(
@@ -321,10 +328,8 @@ fn balances_are_confirmed_exact_and_folded() {
     );
 }
 
-#[test]
-fn a_pending_send_is_taken_off_what_its_sender_can_spend() {
-    let (_directory, _runtime, mut connection) = seeded();
-    // a sends 100 to b, fee 5; still pending.
+/// a sends 100 to b, fee 5; still pending.
+fn pending_send(connection: &mut SqliteConnection) {
     connection
         .batch_execute(
             "INSERT INTO \"transaction\" (id, block, chain, network, txid, state, bytes, \
@@ -340,6 +345,12 @@ fn a_pending_send_is_taken_off_what_its_sender_can_spend() {
                        'bitcoin.regtest.b.native');",
         )
         .unwrap();
+}
+
+#[test]
+fn a_pending_send_is_taken_off_what_its_sender_can_spend() {
+    let (_directory, _runtime, mut connection) = seeded();
+    pending_send(&mut connection);
     let ids = [id("a", "native"), id("b", "native")];
     let balances = wallet_index::db::find_by_ids(&mut connection, &network(), &ids, 2).unwrap();
     let a = &balances[&id("a", "native")];
@@ -458,6 +469,7 @@ fn compare(of: Target, aggregate: Aggregate, operator: Operator, value: Amount) 
     Compare {
         of,
         aggregate,
+        balance: Balance::Confirmed,
         operator,
         value,
     }
@@ -476,7 +488,7 @@ fn selection(connection: &mut SqliteConnection, ids: &[String]) -> Selection {
 /// The balance of index `id` of `selection` at its final block.
 fn confirmed(selection: &Selection, id: &str) -> Decimal {
     selection[id]
-        .balance
+        .balance_confirmed
         .as_deref()
         .unwrap_or("0")
         .parse()
@@ -608,7 +620,12 @@ fn amounts_evaluate_in_atomic_units() {
     let (_directory, runtime, mut connection) = seeded();
     let a = selection(&mut connection, &[id("a", "native")]);
     let mut evaluation = open(&mut connection, &runtime, fees("100"), None);
-    let balance = || Box::new(Amount::Balance { of: this(None) });
+    let balance = || {
+        Box::new(Amount::Balance {
+            of: this(None),
+            balance: Balance::Confirmed,
+        })
+    };
     let fee = || Box::new(Amount::Fee { of: this(None) });
     // 690 - 100 = 590; 590 + 10 = 600; min(690, 5 sats) = 5; max(-…, 0) = 0.
     let cases = [
@@ -780,7 +797,13 @@ fn the_sweep_trigger_round_trips_through_json() {
     let parsed: Logic<Gate> = serde_json::from_str(full).unwrap();
     assert_eq!(serde_json::to_string(&parsed).unwrap(), full);
     let short: Amount = serde_json::from_str(r#"{"balance":{}}"#).unwrap();
-    assert_eq!(short, Amount::Balance { of: this(None) });
+    assert_eq!(
+        short,
+        Amount::Balance {
+            of: this(None),
+            balance: Balance::Confirmed,
+        }
+    );
     assert!(serde_json::from_str::<Amount>(r#"{"value":1.5}"#).is_err());
 }
 
@@ -891,7 +914,12 @@ fn a_send_pays_per_source_or_per_destination() {
     let both = selection(&mut connection, &[id("a", "native"), id("b", "native")]);
     let b = selection(&mut connection, &[id("b", "native")]);
     let mut evaluation = open(&mut connection, &runtime, fees("100"), None);
-    let balance = || Box::new(Amount::Balance { of: this(None) });
+    let balance = || {
+        Box::new(Amount::Balance {
+            of: this(None),
+            balance: Balance::Confirmed,
+        })
+    };
     let fee = || Box::new(Amount::Fee { of: this(None) });
 
     // Many sources to one: everything less the fee, each source alone;
@@ -932,7 +960,38 @@ fn a_send_pays_per_source_or_per_destination() {
     let tangled = send(
         this(None),
         ids_of(&["a", "b"]),
-        Amount::Balance { of: this(None) },
+        Amount::Balance {
+            of: this(None),
+            balance: Balance::Confirmed,
+        },
     );
     assert!(plan(&tangled, &both).is_err());
+}
+
+#[test]
+fn a_pending_balance_counts_what_is_already_on_its_way() {
+    let (_directory, runtime, mut connection) = seeded();
+    pending_send(&mut connection);
+    let balances = selection(&mut connection, &[id("a", "native"), id("b", "native")]);
+    let held = |name: &str, balance| balances[&id(name, "native")].held(balance).unwrap();
+    // a: 695 at the last block (the reward included) less 105 on its way out.
+    assert_eq!(held("a", Balance::Pending), decimal("590"));
+    // b: 50, and 100 on its way in.
+    assert_eq!(held("b", Balance::Confirmed), decimal("50"));
+    assert_eq!(held("b", Balance::Pending), decimal("150"));
+    // A prefund of b while it holds under 100 sats: the confirmed balance
+    // says it is short; the pending one, with 100 on its way, does not.
+    let only_b = selection(&mut connection, &[id("b", "native")]);
+    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
+    let short = |balance| Compare {
+        balance,
+        ..compare(
+            this(None),
+            Aggregate::Sum,
+            Operator::Below,
+            value("0.000001"),
+        )
+    };
+    assert!(compares(&mut evaluation, &short(Balance::Confirmed), &only_b).unwrap());
+    assert!(!compares(&mut evaluation, &short(Balance::Pending), &only_b).unwrap());
 }

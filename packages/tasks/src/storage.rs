@@ -82,8 +82,8 @@ pub trait Store: Send + Sync {
     /// running until `claim.until`, oldest first, and returns them, their
     /// attempt counted. A job is claimed when it is due ([`Job::is_due`]) and no
     /// conflicting job ahead of it holds its place. With [`OnLock::Skip`], a
-    /// job a newer conflicting unfinished job follows is marked skipped
-    /// instead (`skipped: {id}`). Atomic: no job is claimed twice.
+    /// due job such a job blocks is marked skipped instead (`skipped: {id}`,
+    /// the holder). Atomic: no job is claimed twice.
     fn claim(&self, claim: Claim<'_>) -> StoreFuture<'_, Vec<Job>>;
 
     /// Stores `job` (a run's saved state, or how it ended) only while the

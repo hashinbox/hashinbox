@@ -48,10 +48,10 @@ const KIND = ['received', 'spent', 'burned', 'minted', 'fee', 'reward'];
 
 /** The wallet's confirmed balance in its asset, in atomic units, as `GET /v1/wallets/{id}` reports it. */
 function amountOf(wallet: Account): string {
-  return wallet.indexes[assetOf(wallet)]?.balance ?? '0';
+  return wallet.indexes[assetOf(wallet)]?.balance_confirmed ?? '0';
 }
 
-/** Its balance at the tip, unconfirmed blocks included. */
+/** What it will hold once everything in flight lands: the newest block, with what this server sent and is not mined yet. */
 function pendingOf(wallet: Account): string {
   return wallet.indexes[assetOf(wallet)]?.balance_pending ?? '0';
 }

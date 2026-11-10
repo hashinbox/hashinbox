@@ -196,7 +196,7 @@ impl Worker for Sends {
     }
 }
 
-/// Decides on the whole network `n`; gives way to a newer job on it.
+/// Decides on the whole network `n`; skipped while a job holds it.
 struct Rounds;
 
 impl Worker for Rounds {
@@ -342,24 +342,19 @@ async fn jobs_on_one_topic_run_one_at_a_time_in_order() {
 }
 
 #[tokio::test]
-async fn a_round_gives_way_to_a_newer_job_on_its_network() {
+async fn a_round_is_skipped_while_a_send_holds_its_network() {
     let (store, running) = start(|executor| executor.add(Sends).add(Rounds));
     let held = enqueue::<Sends>(&store, &1).await;
     wait(&store, held, |job| job.status == Status::Running).await;
     let round = enqueue::<Rounds>(&store, &()).await;
-    let again = Rounds::enqueue(&store, &()).await.unwrap();
-    assert_eq!(again, Admission::Duplicate(round), "one unfinished round");
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    let waiting = store.get(round).await.unwrap().unwrap();
-    assert_eq!(waiting.status, Status::Pending, "behind the running send");
-
-    let newer = enqueue::<Sends>(&store, &2).await;
     let skipped = wait(&store, round, finished).await;
     assert_eq!(
         (skipped.status, skipped.reason),
-        (Status::Skipped, Some(format!("skipped: {newer}")))
+        (Status::Skipped, Some(format!("skipped: {held}")))
     );
-    assert_eq!(wait(&store, newer, finished).await.status, Status::Done);
+    assert_eq!(wait(&store, held, finished).await.status, Status::Done);
+    let next = enqueue::<Rounds>(&store, &()).await;
+    assert_eq!(wait(&store, next, finished).await.status, Status::Done);
     running.stop().await;
 }
 

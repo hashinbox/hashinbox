@@ -4598,37 +4598,37 @@
             "type": "string",
             "description": "The asset id."
           },
-          "balance": {
+          "balance_confirmed": {
             "type": [
               "string",
               "null"
             ],
             "description": "Its confirmed balance: its last live mined leg's total at or below\n`finality_at`, `0` without one; negative when indexed debits exceed\nindexed credits (history before the start is unknown); null while\n`finality_at` is unknown."
           },
-          "balance_pending": {
-            "type": "string",
-            "description": "Its balance at the tip: its newest live mined leg's total, any\nblock, `0` without one; mempool legs are not in it."
-          },
-          "balance_received": {
+          "balance_confirmed_received": {
             "type": [
               "string",
               "null"
             ],
-            "description": "What it had received by then (that leg's `total_received`):\n`balance = balance_received - balance_sent`."
+            "description": "What it had received by then (that leg's `total_received`):\n`balance_confirmed = balance_confirmed_received -\nbalance_confirmed_sent`."
           },
-          "balance_sent": {
+          "balance_confirmed_sent": {
             "type": [
               "string",
               "null"
             ],
             "description": "What it had sent by then (fees included), the same way."
           },
-          "balance_spendable": {
+          "balance_confirmed_spendable": {
             "type": [
               "string",
               "null"
             ],
-            "description": "What it can spend: `balance` less its pending outgoing legs (spent,\nburned, fee; no block); null while `balance` is."
+            "description": "What it can spend: `balance_confirmed` less its outgoing legs not yet\nin it (pending, or mined above `finality_at`); null while\n`balance_confirmed` is."
+          },
+          "balance_pending": {
+            "type": "string",
+            "description": "What it will hold once every pending transaction lands: its newest\nlive mined leg's total, any block (`0` without one), with what this\nserver sent and is not mined yet, in and out."
           },
           "behind_tip": {
             "type": [

@@ -90,7 +90,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
         // In the wallet's currency (atomic units over its decimals); none
         // indexed reads as zero.
         return passes(
-          new Decimal(w.indexes[assetOf(w)]?.balance ?? '0').div(
+          new Decimal(w.indexes[assetOf(w)]?.balance_confirmed ?? '0').div(
             new Decimal(10).pow(decimalsOf(w, shell.listings)),
           ),
           f.value,

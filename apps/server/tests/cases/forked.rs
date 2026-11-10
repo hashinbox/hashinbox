@@ -38,7 +38,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     })
     .await;
     assert_eq!(leg["amount"], unit(chain));
-    reaches(app, &wallet, "native", "balance", &unit(chain)).await;
+    reaches(app, &wallet, "native", "balance_confirmed", &unit(chain)).await;
     at_tip(app, chain).await;
     let blocks = linked(app, chain).await;
     assert!(blocks.iter().all(|block| block["id"] != side), "{blocks:?}");

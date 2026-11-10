@@ -10,7 +10,7 @@ mod worker;
 
 #[cfg(feature = "runner")]
 pub use executor::{Executor, Queue, Running, Task, Tasks};
-pub use job::{Id, Job, Status, millis, now};
+pub use job::{Id, Job, Status, blocks, millis, now};
 pub use memory::MemoryStore;
 pub use storage::{Admission, Changes, Claim, Notifying, Store, StoreError, StoreFuture};
 pub use topic::Topic;

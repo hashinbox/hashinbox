@@ -63,7 +63,7 @@ impl Store for Sqlite {
         let kind = claim.kind.to_owned();
         Box::pin(async move {
             let (now, until) = (stored(claim.now)?, stored(claim.until)?);
-            let limit = i64::try_from(claim.limit).unwrap_or(i64::MAX);
+            let limit = claim.limit;
             let skip = claim.on_lock == OnLock::Skip;
             // A read first: most looks find nothing due, and a write would
             // queue behind every other writer of the file.
@@ -77,10 +77,17 @@ impl Store for Sqlite {
             // In one write, so no job is claimed twice.
             let rows = self.db.write(move |connection| {
                 task::db::expire(connection, &kind, now)?;
-                if skip {
-                    task::db::skip_superseded(connection, &kind, now)?;
+                let mut ids = Vec::new();
+                for (id, blocker) in task::db::due(connection, &kind, now)? {
+                    match blocker {
+                        Some(holder) if skip => {
+                            task::db::skip(connection, id, holder, now)?;
+                        }
+                        Some(_) => {}
+                        None if ids.len() < limit => ids.push(id),
+                        None => {}
+                    }
                 }
-                let ids = task::db::claimable(connection, &kind, now, limit)?;
                 Ok(task::db::lease(connection, &ids, now, until)?)
             });
             rows.await
@@ -232,20 +239,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_skip_job_gives_way_to_a_newer_conflicting_job() {
+    async fn a_skip_job_is_skipped_while_a_conflicting_job_holds_its_topic() {
         let (_directory, _db, store) = store().await;
-        enqueue(&store, job("send", "n.w1")).await;
+        let held = enqueue(&store, job("send", "n.w1")).await;
         claim(&store, "send", 1, OnLock::Wait, 0).await;
         let round = enqueue(&store, job("round", "n")).await;
-        assert!(claim(&store, "round", 1, OnLock::Skip, 0).await.is_empty());
-        assert_eq!(get(&store, round).await.status, Status::Pending);
-        let newer = enqueue(&store, job("send", "n.w2")).await;
         assert!(claim(&store, "round", 1, OnLock::Skip, 0).await.is_empty());
         let skipped = get(&store, round).await;
         assert_eq!(
             (skipped.status, skipped.reason),
-            (Status::Skipped, Some(format!("skipped: {newer}")))
+            (Status::Skipped, Some(format!("skipped: {held}")))
         );
+        finish(&store, held).await;
+        let next = enqueue(&store, job("round", "n")).await;
+        enqueue(&store, job("send", "n.w2")).await;
+        assert_eq!(claim(&store, "round", 1, OnLock::Skip, 0).await, [next]);
     }
 
     #[tokio::test]

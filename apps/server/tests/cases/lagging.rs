@@ -23,7 +23,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     assert_eq!(index["birthday"], chain.tip());
     chain.fund(&wallet.address, &unit(chain), "native");
     settle(chain);
-    reaches(app, &wallet, "native", "balance", &unit(chain)).await;
+    reaches(app, &wallet, "native", "balance_confirmed", &unit(chain)).await;
     let tip = chain.tip();
     until("the index at the chain's tip", || async {
         let network = app.api.network().await;

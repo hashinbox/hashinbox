@@ -34,6 +34,17 @@ pub(crate) const fn status(status: Status) -> i32 {
     }
 }
 
+/// A stored `status`; an unknown one reads as failed.
+pub(crate) const fn status_of(status: i32) -> Status {
+    match status {
+        0 => Status::Pending,
+        1 => Status::Running,
+        2 => Status::Done,
+        4 => Status::Skipped,
+        _ => Status::Failed,
+    }
+}
+
 /// The row of a job. Fails when a time or the attempts are above SQLite's
 /// integer range.
 impl TryFrom<&Job> for Task {
@@ -62,13 +73,7 @@ impl Task {
             id: Id(uint(id)?),
             topic: Topic::parse(&row.topic).context("stored topic")?,
             kind: row.kind,
-            status: match row.status {
-                0 => Status::Pending,
-                1 => Status::Running,
-                2 => Status::Done,
-                4 => Status::Skipped,
-                _ => Status::Failed,
-            },
+            status: status_of(row.status),
             run_at: uint(row.run_at)?,
             deadline: row.deadline.map(uint).transpose()?,
             attempts: u32::try_from(row.attempts).context("stored attempts are negative")?,
@@ -181,67 +186,54 @@ pub(crate) mod db {
             .execute(connection)
     }
 
-    /// Marks `kind`'s due jobs that a newer unfinished conflicting job
-    /// follows skipped, naming the first such job; how many.
-    pub(crate) fn skip_superseded(
+    /// `kind`'s jobs due at `now`, oldest first, each with the first
+    /// conflicting job blocking it (`BLOCKS`), if any.
+    pub(crate) fn due(
         connection: &mut SqliteConnection,
         kind: &str,
         now: i64,
-    ) -> QueryResult<usize> {
-        diesel::sql_query(
-            "UPDATE q SET
-                status = 4,
-                updated_at = ?2,
-                reason = 'skipped: ' || (
-                    SELECT MIN(newer.id) FROM q newer
-                    WHERE newer.id > q.id AND newer.status IN (0, 1)
-                      AND CONFLICTS(newer.topic, q.topic))
-             WHERE kind = ?1 AND status IN (0, 1) AND run_at <= ?2
-               AND EXISTS (
-                SELECT 1 FROM q newer
-                WHERE newer.id > q.id AND newer.status IN (0, 1)
-                  AND CONFLICTS(newer.topic, q.topic))",
-        )
-        .bind::<Text, _>(kind)
-        .bind::<BigInt, _>(now)
-        .execute(connection)
-    }
-
-    /// Up to `limit` of `kind`'s jobs that may start at `now`, oldest
-    /// first: due, and no conflicting job blocks them. A job blocks one
-    /// after it while it runs, or while it is pending and either due or
-    /// retried (it holds its place); a running job blocks every other.
-    pub(crate) fn claimable(
-        connection: &mut SqliteConnection,
-        kind: &str,
-        now: i64,
-        limit: i64,
-    ) -> QueryResult<Vec<i64>> {
-        /// One claimable job.
+    ) -> QueryResult<Vec<(i64, Option<i64>)>> {
+        /// A due job and its blocker.
         #[derive(QueryableByName)]
-        struct Claimable {
+        struct Due {
             #[diesel(sql_type = BigInt)]
             id: i64,
+            #[diesel(sql_type = diesel::sql_types::Nullable<BigInt>)]
+            blocker: Option<i64>,
         }
 
-        let claimable: Vec<Claimable> = diesel::sql_query(
-            "SELECT job.id FROM q job
+        let due: Vec<Due> = diesel::sql_query(
+            "SELECT
+                job.id,
+                (SELECT MIN(other.id) FROM q other
+                 WHERE other.status IN (0, 1)
+                   AND CONFLICTS(other.topic, job.topic)
+                   AND BLOCKS(other.id, other.status, other.run_at, other.attempts, job.id, ?2)
+                ) AS blocker
+             FROM q job
              WHERE job.kind = ?1 AND job.status IN (0, 1) AND job.run_at <= ?2
-               AND NOT EXISTS (
-                SELECT 1 FROM q other
-                WHERE other.id <> job.id
-                  AND CONFLICTS(other.topic, job.topic)
-                  AND (other.status = 1
-                    OR (other.status = 0 AND other.id < job.id
-                      AND (other.run_at <= ?2 OR other.attempts > 0))))
-             ORDER BY job.id
-             LIMIT ?3",
+             ORDER BY job.id",
         )
         .bind::<Text, _>(kind)
         .bind::<BigInt, _>(now)
-        .bind::<BigInt, _>(limit)
         .load(connection)?;
-        Ok(claimable.into_iter().map(|job| job.id).collect())
+        Ok(due.into_iter().map(|job| (job.id, job.blocker)).collect())
+    }
+
+    /// Marks job `id` skipped at `now`, giving way to `holder`.
+    pub(crate) fn skip(
+        connection: &mut SqliteConnection,
+        id: i64,
+        holder: i64,
+        now: i64,
+    ) -> QueryResult<usize> {
+        diesel::update(q::table.find(id))
+            .set((
+                q::status.eq(4),
+                q::reason.eq(format!("skipped: {holder}")),
+                q::updated_at.eq(now),
+            ))
+            .execute(connection)
     }
 
     /// Marks jobs `ids` running until `until`, their attempt counted; them,

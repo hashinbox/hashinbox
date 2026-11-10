@@ -14,9 +14,12 @@ export type Selector = Logic<Pick>;
 
 export type Target = { this: { asset?: string } } | { select: Selector };
 
+/** Which balance a read takes: confirmed (the default), or with what is pending in and out. */
+export type Balance = 'confirmed' | 'pending';
+
 export type Amount =
   | { value: string }
-  | { balance: { of?: Target } }
+  | { balance: { of?: Target; balance?: Balance } }
   | { fee: { of?: Target } }
   | { add: [Amount, Amount] }
   | { sub: [Amount, Amount] }
@@ -29,6 +32,7 @@ export type Operator = 'above' | 'at_least' | 'below' | 'at_most' | 'equal';
 export interface Compare {
   of: Target;
   aggregate: Aggregate;
+  balance?: Balance;
   operator: Operator;
   value: Amount;
 }
@@ -307,8 +311,11 @@ const FEE: Amount = { fee: { of: { this: {} } } };
 /** Everything it holds less the fee of sending it. */
 const ALL_LESS_FEE: Amount = { sub: [BALANCE, FEE] };
 /** The native a `token` send lacks for its fee; never below 0. */
+/** This index's balance with what is already on its way, in and out. */
+const EXPECTED: Amount = { balance: { of: { this: {} }, balance: 'pending' } };
+/** What this index lacks for its token's transfer fee, counting gas already on its way. */
 const shortfall = (token: string): Amount => ({
-  max: [{ sub: [{ fee: { of: { this: { asset: token } } } }, BALANCE] }, { value: '0' }],
+  max: [{ sub: [{ fee: { of: { this: { asset: token } } } }, EXPECTED] }, { value: '0' }],
 });
 
 // ---- Blank triggers and templates -----------------------------------------------
@@ -437,9 +444,11 @@ export const TEMPLATES: Template[] = [
               },
             },
             {
+              // Gas already on its way counts: never prefunded twice.
               compare: {
                 of: { this: {} },
                 aggregate: 'sum',
+                balance: 'pending',
                 operator: 'below',
                 value: { fee: { of: { this: { asset: place.token } } } },
               },

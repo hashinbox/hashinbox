@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     Block, Wallet, child, int,
     schema::{block, wallet, wallet_index, wallet_index_with_balance},
-    trigger::{Target, This},
+    trigger::{Balance, Target, This},
     uint,
     wallet_index_selector::Selector,
 };
@@ -84,18 +84,21 @@ pub(crate) struct WalletIndex {
     /// `finality_at`, `0` without one; negative when indexed debits exceed
     /// indexed credits (history before the start is unknown); null while
     /// `finality_at` is unknown.
-    pub(crate) balance: Option<String>,
+    pub(crate) balance_confirmed: Option<String>,
     /// What it had received by then (that leg's `total_received`):
-    /// `balance = balance_received - balance_sent`.
-    pub(crate) balance_received: Option<String>,
+    /// `balance_confirmed = balance_confirmed_received -
+    /// balance_confirmed_sent`.
+    pub(crate) balance_confirmed_received: Option<String>,
     /// What it had sent by then (fees included), the same way.
-    pub(crate) balance_sent: Option<String>,
-    /// Its balance at the tip: its newest live mined leg's total, any
-    /// block, `0` without one; mempool legs are not in it.
+    pub(crate) balance_confirmed_sent: Option<String>,
+    /// What it can spend: `balance_confirmed` less its outgoing legs not yet
+    /// in it (pending, or mined above `finality_at`); null while
+    /// `balance_confirmed` is.
+    pub(crate) balance_confirmed_spendable: Option<String>,
+    /// What it will hold once every pending transaction lands: its newest
+    /// live mined leg's total, any block (`0` without one), with what this
+    /// server sent and is not mined yet, in and out.
     pub(crate) balance_pending: String,
-    /// What it can spend: `balance` less its pending outgoing legs (spent,
-    /// burned, fee; no block); null while `balance` is.
-    pub(crate) balance_spendable: Option<String>,
     /// Whether its wallet's key is kept here.
     #[serde(skip)]
     pub(crate) keyed: bool,
@@ -132,18 +135,34 @@ impl Addressed for WalletIndex {
 }
 
 impl WalletIndex {
-    /// What it can spend: `balance_spendable`, zero while unknown. What
+    /// What it can spend: `balance_confirmed_spendable`, zero while unknown. What
     /// pending sends bring counts once confirmed.
     ///
     /// # Errors
     ///
     /// When a stored amount does not decode.
     pub(crate) fn spendable(&self) -> anyhow::Result<Decimal> {
-        self.balance_spendable
+        self.balance_confirmed_spendable
             .as_deref()
             .unwrap_or("0")
             .parse()
             .context("a stored balance does not decode")
+    }
+
+    /// The balance a trigger reads as `balance`: [`Self::spendable`], or what
+    /// it will hold once every pending transaction lands.
+    ///
+    /// # Errors
+    ///
+    /// When a stored amount does not decode.
+    pub(crate) fn held(&self, balance: Balance) -> anyhow::Result<Decimal> {
+        match balance {
+            Balance::Confirmed => self.spendable(),
+            Balance::Pending => self
+                .balance_pending
+                .parse()
+                .context("a stored balance does not decode"),
+        }
     }
 }
 
@@ -293,11 +312,11 @@ pub(crate) mod db {
         behind_tip: Option<i64>,
         #[diesel(sql_type = Nullable<BigInt>)]
         finality_at: Option<i64>,
-        balance: Option<String>,
-        balance_received: Option<String>,
-        balance_sent: Option<String>,
+        balance_confirmed: Option<String>,
+        balance_confirmed_received: Option<String>,
+        balance_confirmed_sent: Option<String>,
+        balance_confirmed_spendable: Option<String>,
         balance_pending: String,
-        balance_spendable: Option<String>,
         keyed: bool,
     }
 
@@ -321,11 +340,11 @@ pub(crate) mod db {
                 indexed_through: row.indexed_through,
                 behind_tip: row.behind_tip,
                 finality_at: row.finality_at,
-                balance: row.balance,
-                balance_received: row.balance_received,
-                balance_sent: row.balance_sent,
+                balance_confirmed: row.balance_confirmed,
+                balance_confirmed_received: row.balance_confirmed_received,
+                balance_confirmed_sent: row.balance_confirmed_sent,
+                balance_confirmed_spendable: row.balance_confirmed_spendable,
                 balance_pending: row.balance_pending,
-                balance_spendable: row.balance_spendable,
                 keyed: row.keyed,
                 indexed_at: row.indexed_at,
             })
@@ -633,10 +652,10 @@ pub(crate) mod db {
     }
 
     /// The fully indexed indexes of `network` that `selector` picks:
-    /// indexed through a live block at or above `confirmed`, the round's
-    /// block (the universe, so `Not` is relative to it), with the view's
-    /// balances at the last kept block (what [`WalletIndex::spendable`]
-    /// reads), in one query.
+    /// indexed through a live block at or above `confirmed`, the network's
+    /// confirmed position (the universe, so `Not` is relative to it), with
+    /// the view's balances there (what [`WalletIndex::spendable`] reads), in
+    /// one query.
     ///
     /// # Errors
     ///
@@ -675,7 +694,7 @@ pub(crate) mod db {
 
     /// The indexes of `network` that `selector` picks, only those indexed
     /// through a live block at or above `confirmed` when `fully_indexed`,
-    /// with the view's balances at the last kept block, in one query.
+    /// with the view's balances at the confirmed position, in one query.
     fn read(
         connection: &mut SqliteConnection,
         network: &Network,
@@ -690,9 +709,8 @@ pub(crate) mod db {
         } else {
             "1"
         };
-        // The view's row, its balances at the last kept block: what a round
-        // decides on. Its received and sent totals stay the view's (at the
-        // confirmed position); a round reads neither.
+        // The view's row: its balances at the confirmed position, what a
+        // round decides on.
         let mut query = diesel::sql_query(format!(
             "
             SELECT
@@ -708,12 +726,12 @@ pub(crate) mod db {
                 wi.keyed,
                 wi.indexed_through,
                 NULL AS behind_tip,
-                ? AS finality_at,
-                wi.balance_pending AS balance,
-                wi.balance_received,
-                wi.balance_sent,
-                wi.balance_pending,
-                wi.balance_pending_spendable AS balance_spendable
+                wi.finality_at,
+                wi.balance_confirmed,
+                wi.balance_confirmed_received,
+                wi.balance_confirmed_sent,
+                wi.balance_confirmed_spendable,
+                wi.balance_pending
             FROM wallet_index_with_balance wi
             WHERE wi.chain = ?
               AND wi.network = ?
@@ -722,7 +740,6 @@ pub(crate) mod db {
             ORDER BY wi.wallet_id, wi.asset"
         ))
         .into_boxed()
-        .bind::<BigInt, _>(confirmed)
         .bind::<Text, _>(network.chain.as_str().to_owned())
         .bind::<Text, _>(network.name.clone());
         if fully_indexed {
@@ -736,7 +753,7 @@ pub(crate) mod db {
         for row in rows {
             let index = WalletIndex::try_from((network, row))?;
             let negative = index
-                .balance
+                .balance_confirmed
                 .as_deref()
                 .is_some_and(|total| total.starts_with('-'));
             ensure!(!negative, "a confirmed balance is negative");

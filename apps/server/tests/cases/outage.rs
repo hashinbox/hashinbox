@@ -35,7 +35,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         chain.node(node).faults().down(false);
     }
     let twice = (2 * number(&unit(chain))).to_string();
-    reaches(app, &wallet, "native", "balance", &twice).await;
+    reaches(app, &wallet, "native", "balance_confirmed", &twice).await;
     at_tip(app, chain).await;
     assert_eq!(app.api.legs(&wallet, "native").await.len(), 2);
     let blocks = linked(app, chain).await;

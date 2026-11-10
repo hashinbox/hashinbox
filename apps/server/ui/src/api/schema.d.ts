@@ -209,7 +209,7 @@ export interface paths {
         get: operations["list_network_endpoints"];
         /**
          * Replace a network's RPC nodes
-         * @description Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. The nodes are not verified here: the chain verifies them on the next start, which uses the stored list whatever the configuration file says.
+         * @description Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. Each node is asked its chain and tip once, before storing.
          */
         put: operations["replace_network_endpoints"];
         /**
@@ -810,7 +810,7 @@ export interface components {
             signed: number;
             /** @description Where it is. */
             state: components["schemas"]["JobState"];
-            /** @description What it locks: jobs whose topics conflict run one at a time, in id order. */
+            /** @description What it locks: jobs whose topics conflict run one at a time, in line order. */
             topic: string;
         };
         /** @description Jobs by where they are. */
@@ -838,7 +838,7 @@ export interface components {
          * @description Where a job is.
          * @enum {string}
          */
-        JobState: "pending" | "running" | "succeeded" | "failed";
+        JobState: "pending" | "running" | "succeeded" | "failed" | "skipped";
         /**
          * @description One `leg` row: a transaction's leg, or a block's reward; the API shows
          *     it as is.
@@ -1435,24 +1435,27 @@ export interface components {
              *     indexed credits (history before the start is unknown); null while
              *     `finality_at` is unknown.
              */
-            balance?: string | null;
-            /**
-             * @description Its balance at the tip: its newest live mined leg's total, any
-             *     block, `0` without one; mempool legs are not in it.
-             */
-            balance_pending: string;
+            balance_confirmed?: string | null;
             /**
              * @description What it had received by then (that leg's `total_received`):
-             *     `balance = balance_received - balance_sent`.
+             *     `balance_confirmed = balance_confirmed_received -
+             *     balance_confirmed_sent`.
              */
-            balance_received?: string | null;
+            balance_confirmed_received?: string | null;
             /** @description What it had sent by then (fees included), the same way. */
-            balance_sent?: string | null;
+            balance_confirmed_sent?: string | null;
             /**
-             * @description What it can spend: `balance` less its pending outgoing legs (spent,
-             *     burned, fee; no block); null while `balance` is.
+             * @description What it can spend: `balance_confirmed` less its outgoing legs not yet
+             *     in it (pending, or mined above `finality_at`); null while
+             *     `balance_confirmed` is.
              */
-            balance_spendable?: string | null;
+            balance_confirmed_spendable?: string | null;
+            /**
+             * @description What it will hold once every pending transaction lands: its newest
+             *     live mined leg's total, any block (`0` without one), with what this
+             *     server sent and is not mined yet, in and out.
+             */
+            balance_pending: string;
             /**
              * Format: int64
              * @description Blocks between `indexed_through` and the network's produced tip;
@@ -1765,7 +1768,7 @@ export interface operations {
                     "application/json": components["schemas"]["NetworkEndpointsList"];
                 };
             };
-            /** @description Malformed node, or a list above 16 nodes */
+            /** @description Malformed node, a list above 16 nodes, or a node that fails or serves another chain */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2070,7 +2073,7 @@ export interface operations {
                     "application/json": components["schemas"]["NetworkEndpoints"];
                 };
             };
-            /** @description Malformed node list */
+            /** @description Malformed node list, or a node that fails or serves another chain */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2135,7 +2138,7 @@ export interface operations {
                     "application/json": components["schemas"]["NetworkEndpoints"];
                 };
             };
-            /** @description Malformed node, or a list above 16 nodes */
+            /** @description Malformed node, a list above 16 nodes, or a node that fails or serves another chain */
             400: {
                 headers: {
                     [name: string]: unknown;

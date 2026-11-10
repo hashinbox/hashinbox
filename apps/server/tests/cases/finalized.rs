@@ -29,10 +29,10 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     let index = app.api.index_of(&wallet, "native").await;
     assert_eq!(text(&index, "balance_pending"), unit(chain), "{index}");
     assert_eq!(
-        text(&index, "balance"),
+        text(&index, "balance_confirmed"),
         "0",
         "not final on any node: {index}"
     );
     chain.mine(3);
-    reaches(app, &wallet, "native", "balance", &unit(chain)).await;
+    reaches(app, &wallet, "native", "balance_confirmed", &unit(chain)).await;
 }

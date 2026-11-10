@@ -96,9 +96,8 @@ impl Default for Policy {
 pub enum OnLock {
     /// Waits in line behind earlier conflicting jobs.
     Wait,
-    /// Waits behind earlier conflicting jobs, and is finished `skipped`
-    /// when a newer conflicting job is unfinished: it would run on a view
-    /// missing that job.
+    /// Is finished `skipped`, naming the holder, when a conflicting job
+    /// holds its topic as it falls due: it does not wait.
     Skip,
 }
 

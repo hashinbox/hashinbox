@@ -35,5 +35,5 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     })
     .await;
     at_tip(app, chain).await;
-    reaches(app, &wallet, "native", "balance", &unit(chain)).await;
+    reaches(app, &wallet, "native", "balance_confirmed", &unit(chain)).await;
 }

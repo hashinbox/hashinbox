@@ -1128,7 +1128,7 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
     let pending: Vec<Mined> = diesel::sql_query(
         "SELECT l.address, l.wallet_index_id, 0 AS position, l.kind, l.amount, '0' AS total,
         '0' AS total_received, '0' AS total_sent FROM leg l
-        WHERE l.position IS NULL AND l.asset = 'native' AND l.kind IN (1, 2, 4)",
+        WHERE l.position IS NULL AND l.asset = 'native'",
     )
     .load(&mut raw(directory))
     .unwrap();
@@ -1136,7 +1136,7 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
     let out = |name: &str, through: i64| {
         let pending = pending
             .iter()
-            .filter(|row| row.address == name)
+            .filter(|row| row.address == name && matches!(row.kind, 1 | 2 | 4))
             .fold(Decimal::zero(), |sum, row| {
                 sum + row.amount.parse::<Decimal>().unwrap()
             });
@@ -1145,6 +1145,20 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
             .filter(|(address, position, _)| address == name && *position > through)
             .fold(Decimal::zero(), |sum, (_, _, amount)| sum + amount.clone());
         pending + mined
+    };
+    // What each address's pending legs move, in and out.
+    let in_flight = |name: &str| {
+        pending
+            .iter()
+            .filter(|row| row.address == name)
+            .fold(Decimal::zero(), |sum, row| {
+                let amount = row.amount.parse::<Decimal>().unwrap();
+                if matches!(row.kind, 1 | 2 | 4) {
+                    sum - amount
+                } else {
+                    sum + amount
+                }
+            })
     };
     let network = network();
     for name in names {
@@ -1195,8 +1209,12 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
             let index = &one.indexes["native"];
             assert_eq!(index.finality_at, Some(through));
             let parse = |text: &str| text.parse::<Decimal>().unwrap();
-            let read = [&index.balance, &index.balance_received, &index.balance_sent]
-                .map(|text| parse(text.as_deref().unwrap()));
+            let read = [
+                &index.balance_confirmed,
+                &index.balance_confirmed_received,
+                &index.balance_confirmed_sent,
+            ]
+            .map(|text| parse(text.as_deref().unwrap()));
             assert_eq!(
                 read,
                 totals(&one.address, through),
@@ -1206,11 +1224,11 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
             let tip = parse(&index.balance_pending);
             assert_eq!(
                 tip,
-                at(&one.address, i64::MAX),
+                at(&one.address, i64::MAX) + in_flight(&one.address),
                 "{} at the tip",
                 one.address
             );
-            let spendable = parse(index.balance_spendable.as_deref().unwrap());
+            let spendable = parse(index.balance_confirmed_spendable.as_deref().unwrap());
             let expected = at(&one.address, through) - out(&one.address, through);
             assert_eq!(
                 spendable, expected,
@@ -1250,7 +1268,7 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
     for name in names {
         let id = format!("bitcoin.regtest.{name}.native");
         let last = balances[&id]
-            .balance
+            .balance_confirmed
             .as_deref()
             .map(|total| total.parse::<Decimal>().unwrap());
         assert_eq!(last, Some(at(name, i64::MAX)), "{name} at the last block");

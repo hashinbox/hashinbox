@@ -161,26 +161,30 @@ async fn a_job_waiting_for_a_fresh_run_holds_no_place_but_a_retry_does() {
 }
 
 #[tokio::test]
-async fn a_skip_job_gives_way_to_a_newer_conflicting_job() {
+async fn a_skip_job_is_skipped_while_a_conflicting_job_holds_its_topic() {
     let store = MemoryStore::new();
     let held = enqueue(&store, job("send", "n.w1")).await;
     claim(&store, "send", 1, OnLock::Wait, 0).await;
     let round = enqueue(&store, job("round", "n")).await;
-    assert!(
-        claim(&store, "round", 1, OnLock::Skip, 0).await.is_empty(),
-        "behind the running send"
-    );
-    assert_eq!(get(&store, round).await.status, Status::Pending);
-
-    let newer = enqueue(&store, job("send", "n.w2")).await;
     assert!(claim(&store, "round", 1, OnLock::Skip, 0).await.is_empty());
     let skipped = get(&store, round).await;
     assert_eq!(
         (skipped.status, skipped.reason),
-        (Status::Skipped, Some(format!("skipped: {newer}")))
+        (Status::Skipped, Some(format!("skipped: {held}"))),
+        "the running send holds the network"
     );
     finish(&store, held).await;
-    assert_eq!(claim(&store, "send", 1, OnLock::Wait, 0).await, [newer]);
+    let next = enqueue(&store, job("round", "n")).await;
+    let later = enqueue(&store, job("send", "n.w2")).await;
+    assert_eq!(
+        claim(&store, "round", 1, OnLock::Skip, 0).await,
+        [next],
+        "a later job does not hold it"
+    );
+    assert!(
+        claim(&store, "send", 1, OnLock::Wait, 0).await.is_empty(),
+        "{later} waits for the round"
+    );
 }
 
 #[tokio::test]

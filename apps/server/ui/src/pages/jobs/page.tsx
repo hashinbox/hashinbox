@@ -33,7 +33,7 @@ const KINDS = [
 function labelOf(kind: string): string {
   return KINDS.find((k) => k.kind === kind)?.label ?? kind;
 }
-const STATES = ['pending', 'running', 'succeeded', 'failed'] as const;
+const STATES = ['pending', 'running', 'succeeded', 'failed', 'skipped'] as const;
 
 /** One tag of the filter: a network, a kind or a state. */
 interface Filter {
@@ -46,6 +46,7 @@ const TONE: Record<Job['state'], string> = {
   running: 'info.main',
   succeeded: 'success.main',
   failed: 'error.main',
+  skipped: 'text.disabled',
 };
 
 const figures = { fontFamily: mono, fontSize: 12, fontVariantNumeric: 'tabular-nums' } as const;

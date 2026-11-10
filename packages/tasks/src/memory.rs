@@ -64,23 +64,13 @@ impl Line {
         }
     }
 
-    /// Whether a conflicting job blocks `job` at `now`: one running, or one
-    /// ahead of it holding its place.
-    fn blocked(&self, job: &Job, now: u64) -> bool {
-        self.jobs.values().any(|other| {
-            let ahead =
-                other.status == Status::Running || (other.id < job.id && other.holds_place(now));
-            other.id != job.id && ahead && other.topic.conflicts(&job.topic)
-        })
-    }
-
-    /// The first unfinished job after `job` of a conflicting topic.
-    fn newer(&self, job: &Job) -> Option<Id> {
+    /// The first conflicting job blocking `job` at `now`: one running, or
+    /// one ahead of it holding its place.
+    fn blocker(&self, job: &Job, now: u64) -> Option<Id> {
         self.jobs
-            .range(Id(job.id.0 + 1)..)
-            .map(|(_, newer)| newer)
-            .find(|newer| !newer.status.is_finished() && newer.topic.conflicts(&job.topic))
-            .map(|newer| newer.id)
+            .values()
+            .find(|other| other.blocks(job, now))
+            .map(|other| other.id)
     }
 
     /// The unfinished job of `job`'s kind on its topic, if any.
@@ -142,13 +132,10 @@ impl Store for MemoryStore {
                 break;
             }
             let job = line.jobs[&id].clone();
-            if on_lock == OnLock::Skip
-                && let Some(newer) = line.newer(&job)
-            {
-                line.keep(job.skip(newer));
-                continue;
-            }
-            if line.blocked(&job, now) {
+            if let Some(holder) = line.blocker(&job, now) {
+                if on_lock == OnLock::Skip {
+                    line.keep(job.skip(holder));
+                }
                 continue;
             }
             let running = Job {

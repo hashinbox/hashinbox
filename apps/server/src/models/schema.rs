@@ -163,11 +163,11 @@ diesel::table! {
         address -> Text,
         keyed -> Bool,
         indexed_through -> Nullable<BigInt>,
-        balance -> Nullable<Text>,
-        balance_received -> Nullable<Text>,
-        balance_sent -> Nullable<Text>,
+        balance_confirmed -> Nullable<Text>,
+        balance_confirmed_received -> Nullable<Text>,
+        balance_confirmed_sent -> Nullable<Text>,
+        balance_confirmed_spendable -> Nullable<Text>,
         balance_pending -> Text,
-        balance_spendable -> Nullable<Text>,
     }
 }
 

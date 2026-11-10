@@ -305,12 +305,12 @@ pub(crate) mod db {
                             'indexed_through', wi.indexed_through,
                             'behind_tip', wi.behind_tip,
                             'finality_at', wi.finality_at,
-                            'balance', wi.balance,
-                            'balance_received', wi.balance_received,
-                            'balance_sent', wi.balance_sent,
+                            'balance_confirmed', wi.balance_confirmed,
+                            'balance_confirmed_received', wi.balance_confirmed_received,
+                            'balance_confirmed_sent', wi.balance_confirmed_sent,
                             'balance_pending', wi.balance_pending,
                             'keyed', json(iif(wi.keyed, 'true', 'false')),
-                            'balance_spendable', wi.balance_spendable
+                            'balance_confirmed_spendable', wi.balance_confirmed_spendable
                         )
                     )
                     FROM wallet_index_with_balance wi
@@ -363,12 +363,12 @@ pub(crate) mod db {
                             'indexed_through', wi.indexed_through,
                             'behind_tip', wi.behind_tip,
                             'finality_at', wi.finality_at,
-                            'balance', wi.balance,
-                            'balance_received', wi.balance_received,
-                            'balance_sent', wi.balance_sent,
+                            'balance_confirmed', wi.balance_confirmed,
+                            'balance_confirmed_received', wi.balance_confirmed_received,
+                            'balance_confirmed_sent', wi.balance_confirmed_sent,
                             'balance_pending', wi.balance_pending,
                             'keyed', json(iif(wi.keyed, 'true', 'false')),
-                            'balance_spendable', wi.balance_spendable
+                            'balance_confirmed_spendable', wi.balance_confirmed_spendable
                         )
                     )
                     FROM wallet_index_with_balance wi

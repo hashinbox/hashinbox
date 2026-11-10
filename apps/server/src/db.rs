@@ -50,6 +50,20 @@ diesel::define_sql_function! {
     fn conflicts(a: diesel::sql_types::Text, b: diesel::sql_types::Text) -> diesel::sql_types::Bool;
 }
 
+diesel::define_sql_function! {
+    /// Whether job `id` (`status`, `run_at`, `attempts`) blocks job `job` at
+    /// `now`, their topics conflicting ([`tasks::blocks`]).
+    #[sql_name = "BLOCKS"]
+    fn blocks(
+        id: diesel::sql_types::BigInt,
+        status: diesel::sql_types::Integer,
+        run_at: diesel::sql_types::BigInt,
+        attempts: diesel::sql_types::Integer,
+        job: diesel::sql_types::BigInt,
+        now: diesel::sql_types::BigInt
+    ) -> diesel::sql_types::Bool;
+}
+
 /// `SUM_DECIMAL`'s running sum: `None` once a value does not decode.
 struct SumDecimal(Option<base::Decimal>);
 
@@ -76,7 +90,7 @@ impl diesel::sqlite::SqliteAggregateFunction<String> for SumDecimal {
 }
 
 /// Registers the SQL functions every connection has (`SUM_DECIMAL`,
-/// `CONFLICTS`).
+/// `CONFLICTS`, `BLOCKS`).
 ///
 /// # Errors
 ///
@@ -87,7 +101,21 @@ pub(crate) fn register(connection: &mut SqliteConnection) -> QueryResult<()> {
         tasks::Topic::parse(&a)
             .zip(tasks::Topic::parse(&b))
             .is_some_and(|(a, b)| a.conflicts(&b))
-    })
+    })?;
+    blocks_utils::register_impl(
+        connection,
+        |id: i64, status: i32, run_at: i64, attempts: i32, job: i64, now: i64| {
+            let unsigned = |value: i64| u64::try_from(value).unwrap_or(0);
+            tasks::blocks(
+                tasks::Id(unsigned(id)),
+                crate::models::task::status_of(status),
+                unsigned(run_at),
+                u32::try_from(attempts).unwrap_or(0),
+                tasks::Id(unsigned(job)),
+                unsigned(now),
+            )
+        },
+    )
 }
 
 /// What a list query reads: at most `limit` rows after key `after` in the

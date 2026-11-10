@@ -27,7 +27,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         let failed = network["index"]["failures"].as_u64() > before["failures"].as_u64();
         let index = app.api.index_of(&wallet, "native").await;
         assert_eq!(
-            text(&index, "balance"),
+            text(&index, "balance_confirmed"),
             unit(chain),
             "the balance went back: {index}"
         );
@@ -46,5 +46,5 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         "{network}"
     );
     let index = app.api.index_of(&wallet, "native").await;
-    assert_eq!(text(&index, "balance"), unit(chain), "{index}");
+    assert_eq!(text(&index, "balance_confirmed"), unit(chain), "{index}");
 }

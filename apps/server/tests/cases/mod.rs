@@ -159,7 +159,7 @@ async fn funded<T: TestChain>(app: &App, chain: &T) -> Wallet {
     app.api.index(&wallet, "native", None).await;
     chain.fund(&wallet.address, &unit(chain), "native");
     settle(chain);
-    reaches(app, &wallet, "native", "balance", &unit(chain)).await;
+    reaches(app, &wallet, "native", "balance_confirmed", &unit(chain)).await;
     wallet
 }
 

@@ -115,6 +115,21 @@ impl Job {
             && self.deadline.is_none_or(|deadline| now <= deadline)
     }
 
+    /// Whether it blocks `job` at `now`: their topics conflict, and it runs,
+    /// or it is ahead of `job` and holds its place ([`blocks`]).
+    #[must_use]
+    pub fn blocks(&self, job: &Self, now: u64) -> bool {
+        self.topic.conflicts(&job.topic)
+            && blocks(
+                self.id,
+                self.status,
+                self.run_at,
+                self.attempts,
+                job.id,
+                now,
+            )
+    }
+
     /// Whether it is past its deadline at `now` and not under a lease: it
     /// will never start.
     #[must_use]
@@ -123,17 +138,20 @@ impl Job {
             || (self.status == Status::Running && self.run_at <= now);
         unleased && self.deadline.is_some_and(|deadline| deadline < now)
     }
+}
 
-    /// Whether it holds its place in line at `now`: running, or pending and
-    /// either due or retried before. A job waiting for a fresh run blocks
-    /// nobody until it is due.
-    #[must_use]
-    pub fn holds_place(&self, now: u64) -> bool {
-        match self.status {
-            Status::Running => true,
-            Status::Pending => self.run_at <= now || self.attempts > 0,
-            Status::Done | Status::Failed | Status::Skipped => false,
-        }
+/// Whether a job (`id`, `status`, `run_at`, `attempts`) blocks the job
+/// `job` at `now`, their topics conflicting: it runs, or it is ahead of
+/// `job` and holds its place, due or retried. A job waiting for a fresh run
+/// blocks nobody until it is due. [`Job::blocks`] on plain values, for a
+/// store that runs the rule in its own query language.
+#[must_use]
+pub fn blocks(id: Id, status: Status, run_at: u64, attempts: u32, job: Id, now: u64) -> bool {
+    match status {
+        _ if id == job => false,
+        Status::Running => true,
+        Status::Pending => id < job && (run_at <= now || attempts > 0),
+        Status::Done | Status::Failed | Status::Skipped => false,
     }
 }
 

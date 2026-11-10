@@ -33,7 +33,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
             let network = app.api.network().await;
             let index = app.api.index_of(&wallet, "native").await;
             let confirmed = network["index"]["confirmed"].as_u64().unwrap_or(0);
-            let balance = index["balance"].as_str().map_or(0, number);
+            let balance = index["balance_confirmed"].as_str().map_or(0, number);
             let now = (confirmed, balance);
             let before = seen.replace(now);
             assert!(
@@ -47,5 +47,5 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         })
         .await;
     }
-    reaches(app, &wallet, "native", "balance", &unit(chain)).await;
+    reaches(app, &wallet, "native", "balance_confirmed", &unit(chain)).await;
 }

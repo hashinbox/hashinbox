@@ -224,15 +224,16 @@ CREATE INDEX wallet_index_progress ON wallet_index (indexed_at);
 -- A wallet index with its wallet's network, address and tags, whether its
 -- key is kept, the live block position it is indexed through (NULL through
 -- an archived one) and how far that is behind its network's indexer tip, and the indexer's confirmed position
--- (`finality_at`). Its balances, NULL while that is unknown (no
--- `network_index` confirmed position): `balance`, `balance_received`, `balance_sent`, the totals of its
+-- (`finality_at`). Its confirmed balances, NULL while that is unknown
+-- (no `network_index` confirmed position): `balance_confirmed`,
+-- `balance_confirmed_received`, `balance_confirmed_sent`, the totals of its
 -- last live mined leg at or below `finality_at` (`c`; '0': none);
--- `balance_spendable`, `balance` less its outgoing legs (spent, burned,
--- fee) not yet in it: pending (no block), or mined in a live block above
--- `finality_at`. `balance_pending`: the total of its newest live
--- mined leg, any block (`n`; '0': none): its balance at the last kept
--- block; mempool legs are not in it. `balance_pending_spendable`: that balance
--- less its pending outgoing legs, what a trigger round spends. Each
+-- `balance_confirmed_spendable`, `balance_confirmed` less its outgoing legs
+-- (spent, burned, fee) not yet in it: pending (no block), or mined in a
+-- live block above `finality_at`. `balance_pending`: what it will hold once
+-- every pending transaction lands: the total of its newest live mined leg,
+-- any block (`n`; '0': none), with its pending legs (what this server sent,
+-- not mined yet), in and out. Each
 -- leg is one seek of `leg_wallet_index`. `SUM_DECIMAL` is the server's:
 -- read only through its connections.
 CREATE VIEW wallet_index_with_balance AS
@@ -247,10 +248,9 @@ SELECT
     IIF(b.archived_at IS NULL, b.position, NULL) AS indexed_through,
     MAX(i.tip - IIF(b.archived_at IS NULL, b.position, NULL), 0) AS behind_tip,
     i.confirmed AS finality_at,
-    IIF(i.confirmed IS NULL, NULL, COALESCE(c.total, '0')) AS balance,
-    IIF(i.confirmed IS NULL, NULL, COALESCE(c.total_received, '0')) AS balance_received,
-    IIF(i.confirmed IS NULL, NULL, COALESCE(c.total_sent, '0')) AS balance_sent,
-    COALESCE(n.total, '0') AS balance_pending,
+    IIF(i.confirmed IS NULL, NULL, COALESCE(c.total, '0')) AS balance_confirmed,
+    IIF(i.confirmed IS NULL, NULL, COALESCE(c.total_received, '0')) AS balance_confirmed_received,
+    IIF(i.confirmed IS NULL, NULL, COALESCE(c.total_sent, '0')) AS balance_confirmed_sent,
     IIF(i.confirmed IS NULL, NULL, (
         SELECT SUM_DECIMAL(v)
         FROM (
@@ -272,19 +272,18 @@ SELECT
               AND mb.archived_at IS NULL
               AND m.kind IN (1, 2, 4)
         )
-    )) AS balance_spendable,
+    )) AS balance_confirmed_spendable,
     (
         SELECT SUM_DECIMAL(v)
         FROM (
             SELECT COALESCE(n.total, '0') AS v
             UNION ALL
-            SELECT '-' || p.amount
+            SELECT IIF(p.kind IN (1, 2, 4), '-' || p.amount, p.amount)
             FROM leg p
             WHERE p.wallet_index_id = wi.id
               AND p.position IS NULL
-              AND p.kind IN (1, 2, 4)
         )
-    ) AS balance_pending_spendable
+    ) AS balance_pending
 FROM wallet_index wi
 JOIN wallet w ON w.id = wi.wallet_id
 LEFT JOIN block b ON b.id = wi.indexed_at

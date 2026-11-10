@@ -1,5 +1,5 @@
 //! A trigger evaluated over its network: [`Triggers`], a network's enabled
-//! triggers read at its last kept block; each [`Trigger`] selects its wallet
+//! triggers read at its confirmed block (what a reorg cannot undo); each [`Trigger`] selects its wallet
 //! indexes, keeps those its filter keeps and tells whether its check holds.
 //! It ends at the decision ([`Decision`]): what the action does with it is
 //! the caller's (the triggers worker).
@@ -14,9 +14,9 @@ use base::{Assets, Decimal, FeeEstimator, Network, Networked as _};
 use diesel::SqliteConnection;
 
 use crate::models::{
-    self, TriggerRun, block, trigger,
+    self, TriggerRun, network_index, trigger,
     trigger::{Action, Aggregate, Amount, Compare, Filter, Gate, Logic, Target},
-    wallet_index::{self, Selection, WalletIndex},
+    wallet_index::{self, Selection},
 };
 
 /// What every trigger of a round decides with, besides the connection.
@@ -61,16 +61,18 @@ impl<'a> Trigger<'a> {
         }
     }
 
-    /// What it decides on `network` at block position `last`: the wallet
-    /// indexes its selector picks, with spendable balances, and those its
-    /// filter keeps (`This`) if its check holds; `None` when it does not.
+    /// What it decides on `network` at its confirmed position `confirmed`:
+    /// the wallet indexes its selector picks, with spendable balances, and
+    /// those its filter keeps (`This`) if its check holds; `None` when it
+    /// does not.
     ///
     /// # Errors
     ///
     /// When a read or the fee estimate fails.
-    fn decide(&mut self, network: &Network, last: i64) -> anyhow::Result<Option<Selection>> {
+    fn decide(&mut self, network: &Network, confirmed: i64) -> anyhow::Result<Option<Selection>> {
         let row = self.row.clone();
-        let selected = wallet_index::db::select(self.connection, network, &row.selector.0, last)?;
+        let selected =
+            wallet_index::db::select(self.connection, network, &row.selector.0, confirmed)?;
         let kept = match &row.filter {
             Some(filter) => self.filter(&filter.0, &selected)?,
             None => selected,
@@ -148,7 +150,7 @@ impl<'a> Trigger<'a> {
         };
         let balances = indexes
             .values()
-            .map(WalletIndex::spendable)
+            .map(|one| one.held(compare.balance))
             .collect::<anyhow::Result<Vec<_>>>()?
             .into_iter();
         let left = match compare.aggregate {
@@ -183,10 +185,10 @@ impl<'a> Trigger<'a> {
                     .with_context(|| format!("asset {asset} is not configured"))?;
                 return Ok(Some(info.atomic(value)?));
             }
-            Amount::Balance { of } => {
+            Amount::Balance { of, balance } => {
                 let indexes = self.target(of, this)?;
                 return indexes
-                    .map(|indexes| indexes.values().map(WalletIndex::spendable).sum())
+                    .map(|indexes| indexes.values().map(|one| one.held(*balance)).sum())
                     .transpose();
             }
             Amount::Fee { of } => {
@@ -228,17 +230,17 @@ impl<'a> Trigger<'a> {
     }
 }
 
-/// Every enabled trigger of one network, at its last kept block.
+/// Every enabled trigger of one network, at its confirmed block.
 pub(crate) struct Triggers {
     network: Network,
-    /// The last kept block's position; `None` before the first block.
-    last: Option<i64>,
+    /// The confirmed position; `None` while unknown.
+    confirmed: Option<i64>,
     /// Each with its latest run.
     all: Vec<(models::Trigger, Option<TriggerRun>)>,
 }
 
 impl Triggers {
-    /// Reads them; none before `network`'s first kept block.
+    /// Reads them; none while `network`'s confirmed position is unknown.
     ///
     /// # Errors
     ///
@@ -247,15 +249,14 @@ impl Triggers {
         connection: &mut SqliteConnection,
         network: &Network,
     ) -> anyhow::Result<Self> {
-        let last =
-            block::db::find_below(connection, network, i64::MAX)?.map(|block| block.position);
-        let all = match last {
+        let confirmed = network_index::db::find_confirmed(connection, network)?;
+        let all = match confirmed {
             Some(_) => trigger::db::find_enabled(connection, network)?,
             None => Vec::new(),
         };
         Ok(Self {
             network: network.clone(),
-            last,
+            confirmed,
             all,
         })
     }
@@ -269,13 +270,13 @@ impl Triggers {
         context: &Context,
         mut act: impl FnMut(Decision<'_, '_>) -> anyhow::Result<T>,
     ) -> Vec<(String, anyhow::Result<Option<T>>)> {
-        let Some(last) = self.last else {
+        let Some(confirmed) = self.confirmed else {
             return Vec::new();
         };
         let mut decided = Vec::with_capacity(self.all.len());
         for (row, run) in &self.all {
             let mut trigger = Trigger::new(row.clone(), connection, context.clone(), run.clone());
-            let outcome = trigger.decide(&self.network, last).and_then(|this| {
+            let outcome = trigger.decide(&self.network, confirmed).and_then(|this| {
                 let Some(this) = this else {
                     return Ok(None);
                 };

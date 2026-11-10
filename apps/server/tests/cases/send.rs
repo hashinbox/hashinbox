@@ -18,7 +18,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         .await;
     let pending = until("the send to be pending", || async {
         let index = app.api.index_of(&wallet, "native").await;
-        if text(&index, "balance_spendable") != text(&index, "balance") {
+        if text(&index, "balance_confirmed_spendable") != text(&index, "balance_confirmed") {
             return Ok(index);
         }
         Err(index.to_string())
@@ -27,26 +27,33 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     // In flight: the quarter and the worst-case fee held, nothing mined.
     let (whole, quarter) = (number(&unit(chain)), number(&quarter(chain)));
     assert!(
-        number(&text(&pending, "balance_spendable")) < whole - quarter,
+        number(&text(&pending, "balance_confirmed_spendable")) < whole - quarter,
         "{pending}"
     );
-    assert_eq!(text(&pending, "balance_pending"), unit(chain));
+    // The pending balance counts the send already: what is left once it lands.
+    assert_eq!(
+        text(&pending, "balance_pending"),
+        text(&pending, "balance_confirmed_spendable")
+    );
     assert_eq!(succeeded(app, &job).await["accepted"], 1);
 
     settle(chain);
     let mined = until("the send to be mined", || async {
         let index = app.api.index_of(&wallet, "native").await;
-        if text(&index, "balance") != unit(chain)
-            && text(&index, "balance") == text(&index, "balance_pending")
+        if text(&index, "balance_confirmed") != unit(chain)
+            && text(&index, "balance_confirmed") == text(&index, "balance_pending")
         {
             return Ok(index);
         }
         Err(index.to_string())
     })
     .await;
-    assert_eq!(text(&mined, "balance_spendable"), text(&mined, "balance"));
+    assert_eq!(
+        text(&mined, "balance_confirmed_spendable"),
+        text(&mined, "balance_confirmed")
+    );
     assert!(
-        number(&text(&mined, "balance")) < whole - quarter,
+        number(&text(&mined, "balance_confirmed")) < whole - quarter,
         "{mined}"
     );
     let legs = app.api.legs(&wallet, "native").await;
@@ -66,8 +73,8 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         app,
         &wallet,
         "native",
-        "balance_spendable",
-        &text(&mined, "balance"),
+        "balance_confirmed_spendable",
+        &text(&mined, "balance_confirmed"),
     )
     .await;
 }

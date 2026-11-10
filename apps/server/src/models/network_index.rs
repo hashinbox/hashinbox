@@ -162,6 +162,20 @@ pub(crate) mod db {
         Ok(())
     }
 
+    /// `network`'s confirmed position; `None` while unknown.
+    pub(crate) fn find_confirmed(
+        connection: &mut SqliteConnection,
+        network: &base::Network,
+    ) -> QueryResult<Option<i64>> {
+        let row = network_index::table
+            .filter(network_index::chain.eq(network.chain.as_str()))
+            .filter(network_index::network.eq(&network.name))
+            .select(network_index::confirmed)
+            .first::<Option<i64>>(connection)
+            .optional()?;
+        Ok(row.flatten())
+    }
+
     /// Every row: the networks the server indexes.
     ///
     /// # Errors

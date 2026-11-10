@@ -92,6 +92,9 @@ pub(crate) enum Filter {
 pub(crate) struct Compare {
     pub(crate) of: Target,
     pub(crate) aggregate: Aggregate,
+    /// Which balance of `of` it reads.
+    #[serde(default, skip_serializing_if = "Balance::is_confirmed")]
+    pub(crate) balance: Balance,
     pub(crate) operator: Operator,
     pub(crate) value: Amount,
 }
@@ -106,6 +109,26 @@ impl Compare {
     /// then can it tell one wallet from another.
     fn reads_this(&self) -> bool {
         matches!(self.of, Target::This(_)) || self.value.reads_this()
+    }
+}
+
+/// Which balance a trigger reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Balance {
+    /// Spendable at the confirmed block: what a reorg cannot undo, less
+    /// what is on its way out. For how much to send.
+    #[default]
+    Confirmed,
+    /// What it will hold once every pending transaction lands, in and out.
+    /// For whether it still needs something: what is already on its way in
+    /// counts (a prefund is not sent twice).
+    Pending,
+}
+
+impl Balance {
+    const fn is_confirmed(&self) -> bool {
+        matches!(self, Self::Confirmed)
     }
 }
 
@@ -151,11 +174,12 @@ impl Operator {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Amount {
-    /// The summed spendable balance of `of` (default: `This {}`): confirmed,
-    /// less what pending transactions take.
+    /// The summed `balance` of `of` (default: `This {}`, confirmed).
     Balance {
         #[serde(default)]
         of: Target,
+        #[serde(default, skip_serializing_if = "Balance::is_confirmed")]
+        balance: Balance,
     },
     /// The native fee of sending everything `of` holds to one address.
     Fee {
@@ -174,7 +198,7 @@ impl Amount {
     /// Whether every wallet set it reads names wallets on purpose.
     pub(crate) fn validate(&self) -> Result<(), Invalid> {
         match self {
-            Self::Balance { of } | Self::Fee { of } => of.validate(),
+            Self::Balance { of, .. } | Self::Fee { of } => of.validate(),
             Self::Value(_) => Ok(()),
             Self::Add(a, b) | Self::Sub(a, b) | Self::Min(a, b) | Self::Max(a, b) => {
                 a.validate()?;
@@ -186,7 +210,7 @@ impl Amount {
     /// Whether a balance or fee in it, at any depth, reads `This`.
     fn reads_this(&self) -> bool {
         match self {
-            Self::Balance { of } | Self::Fee { of } => matches!(of, Target::This(_)),
+            Self::Balance { of, .. } | Self::Fee { of } => matches!(of, Target::This(_)),
             Self::Value(_) => false,
             Self::Add(a, b) | Self::Sub(a, b) | Self::Min(a, b) | Self::Max(a, b) => {
                 a.reads_this() || b.reads_this()

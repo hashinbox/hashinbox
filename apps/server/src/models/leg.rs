@@ -285,12 +285,12 @@ pub(crate) mod db {
     #[diesel(table_name = wallet_index_with_balance)]
     pub(crate) struct Spending {
         pub(crate) id: String,
-        balance_spendable: Option<String>,
+        balance_confirmed_spendable: Option<String>,
     }
 
     impl Spending {
         /// Whether it can spend `takes` (signed: what a send takes is
-        /// negative): its `balance_spendable` (zero while unknown) plus
+        /// negative): its `balance_confirmed_spendable` (zero while unknown) plus
         /// `takes` stays at or above zero.
         ///
         /// # Errors
@@ -298,7 +298,7 @@ pub(crate) mod db {
         /// When a stored amount does not decode.
         pub(crate) fn can_spend(&self, takes: Decimal) -> anyhow::Result<bool> {
             let spendable: Decimal = self
-                .balance_spendable
+                .balance_confirmed_spendable
                 .as_deref()
                 .unwrap_or("0")
                 .parse()
