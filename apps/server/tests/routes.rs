@@ -649,3 +649,102 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
     assert_eq!(status, StatusCode::OK);
     assert_eq!(networks["networks"][0]["index_job_reason"], json!(reason));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
+    use diesel::connection::SimpleConnection as _;
+
+    let (db, _directory) = database().await;
+    let payments = payments(&db, Arc::new(Script::default())).await;
+    // One run that queued two sends: one succeeded, one failed.
+    db.write(|connection| {
+        Ok(connection.batch_execute(
+            r#"INSERT INTO q (id, topic, kind, status, run_at, attempts, reason, input,
+               created_at, updated_at) VALUES
+             (7,'n.a','broadcast',2,0,1,NULL,'{}',0,0),
+             (8,'n.b','broadcast',3,0,1,'insufficient-funds','{}',0,0);
+             INSERT INTO "trigger" (id, chain, network, group_id, selector, "check", action,
+               enabled, created_at, updated_at) VALUES
+             ('t','bitcoin','regtest','g','{"asset":"native"}','{"all":[]}',
+              '{"name":"send","input":{}}',1,0,0);
+             INSERT INTO trigger_run (id, "trigger", started_at, jobs)
+               VALUES ('t.5','t',5,'["7","8"]');"#,
+        )?)
+    })
+    .await
+    .expect("seeded");
+    let state = Arc::new(AppState {
+        payments,
+        db: db.clone(),
+        queue: crate::usecase::tasks::queue(db),
+    });
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("an address"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        None,
+        http_server::RequestLimits::default(),
+    );
+    let router = api::router(state, &config).expect("a router");
+    let (status, page) = call(&router, Method::GET, "/v1/triggers/t/runs", None).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let run = &page["runs"][0];
+    assert_eq!(run["started_at"], json!(5));
+    assert_eq!(run["outcome"], json!("mixed"));
+    assert_eq!(
+        run["jobs"],
+        json!([
+            {"id": "7", "state": "succeeded", "reason": null},
+            {"id": "8", "state": "failed", "reason": "insufficient-funds"},
+        ])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_count_compares_with_a_whole_number_or_the_trigger_is_refused() {
+    let (db, _directory) = database().await;
+    let payments = payments(&db, Arc::new(Script::default())).await;
+    let state = Arc::new(AppState {
+        payments,
+        db: db.clone(),
+        queue: crate::usecase::tasks::queue(db),
+    });
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("an address"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        None,
+        http_server::RequestLimits::default(),
+    );
+    let router = api::router(state, &config).expect("a router");
+    // A sweep of regtest's native indexes (8 decimals), gated by `check`.
+    let create = |id: &str, check: Value| {
+        json!({"triggers": [{
+            "id": id,
+            "chain": "bitcoin",
+            "network": "regtest",
+            "selector": {"asset": "native"},
+            "check": check,
+            "action": {"name": "send", "input": {
+                "source": {"this": {}},
+                "asset": "native",
+                "destination": {"select": {"ids": ["bitcoin.regtest.x.native"]}},
+                "amount": {"balance": {}},
+            }},
+        }]})
+    };
+    let compare = |of: Value, aggregate: &str, value: &str| {
+        json!({"compare": {
+            "of": of,
+            "aggregate": aggregate,
+            "operator": "above",
+            "value": {"value": value},
+        }})
+    };
+    let select = || json!({"select": {"asset": "native"}});
+    let half = create("half", compare(select(), "count", "1.5"));
+    let (status, body) = call(&router, Method::POST, "/v1/triggers", Some(half)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("whole number"), "{body}");
+    let fine = create("fine", compare(select(), "count", "2"));
+    let (status, body) = call(&router, Method::POST, "/v1/triggers", Some(fine)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}

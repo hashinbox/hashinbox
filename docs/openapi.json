@@ -3996,6 +3996,41 @@
           }
         }
       },
+      "RunJob": {
+        "type": "object",
+        "description": "One send job of a run.",
+        "required": [
+          "id",
+          "state",
+          "reason"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The job id: `GET /v1/jobs/{id}` reads it."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it failed, or why its last attempt is being retried; always\npresent."
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState"
+          }
+        }
+      },
+      "RunOutcome": {
+        "type": "string",
+        "description": "Where a run's jobs are together.",
+        "enum": [
+          "pending",
+          "succeeded",
+          "failed",
+          "mixed"
+        ]
+      },
       "Send": {
         "type": "object",
         "description": "`POST /v1/wallets/{id}/transactions` body: an ordered send from the\npath's wallet in one asset.",
@@ -4473,11 +4508,31 @@
       },
       "TriggerRun": {
         "type": "object",
-        "description": "One run of a trigger.",
+        "description": "One run of a trigger: when it started, the send jobs it queued and how\nthey ended.",
         "required": [
-          "started_at"
+          "started_at",
+          "outcome",
+          "jobs"
         ],
         "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunJob"
+            },
+            "description": "Its send jobs, in the order queued; a job no longer kept is left out."
+          },
+          "outcome": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RunOutcome",
+                "description": "Where its jobs are together; null when none of them is kept."
+              }
+            ]
+          },
           "started_at": {
             "type": "integer",
             "format": "int64",

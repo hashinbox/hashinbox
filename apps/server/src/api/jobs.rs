@@ -52,7 +52,7 @@ impl ListQuery {
 /// Where a job is.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-enum JobState {
+pub(super) enum JobState {
     /// Waiting for its turn.
     Pending,
     /// Executing.
@@ -63,6 +63,18 @@ enum JobState {
     Failed,
     /// Finished without running; `reason` names the job it gave way to.
     Skipped,
+}
+
+impl From<tasks::Status> for JobState {
+    fn from(status: tasks::Status) -> Self {
+        match status {
+            tasks::Status::Pending => Self::Pending,
+            tasks::Status::Running => Self::Running,
+            tasks::Status::Done => Self::Succeeded,
+            tasks::Status::Failed => Self::Failed,
+            tasks::Status::Skipped => Self::Skipped,
+        }
+    }
 }
 
 impl JobState {
@@ -118,13 +130,7 @@ impl From<tasks::Job> for Job {
             id: job.id.to_string(),
             kind: job.kind,
             topic: job.topic.to_string(),
-            state: match job.status {
-                tasks::Status::Pending => JobState::Pending,
-                tasks::Status::Running => JobState::Running,
-                tasks::Status::Done => JobState::Succeeded,
-                tasks::Status::Failed => JobState::Failed,
-                tasks::Status::Skipped => JobState::Skipped,
-            },
+            state: job.status.into(),
             run_at: job.run_at,
             deadline: job.deadline,
             attempts: job.attempts,

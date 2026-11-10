@@ -102,7 +102,13 @@ pub(crate) struct Compare {
 impl Compare {
     fn validate(&self) -> Result<(), Invalid> {
         self.of.validate()?;
-        self.value.validate()
+        self.value.validate()?;
+        // A count compares with a plain whole number.
+        let whole = matches!(&self.value, Amount::Value(value) if value.scale() == 0);
+        if self.aggregate == Aggregate::Count && !whole {
+            return Err(Invalid::new("a count compares with a whole number"));
+        }
+        Ok(())
     }
 
     /// Whether it reads the wallet in context (`This`) on either side: only

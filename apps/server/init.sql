@@ -451,3 +451,20 @@ CREATE INDEX q_unfinished ON q (topic) WHERE status IN (0, 1);
 CREATE INDEX q_kind ON q (kind, topic) WHERE status IN (0, 1);
 -- A kind's due jobs.
 CREATE INDEX q_due ON q (kind, run_at) WHERE status IN (0, 1);
+
+-- Each trigger run with each send job it queued, as the job is now: one row
+-- per job in the order queued (`position`), its `job`, `status` and
+-- `reason` NULL when the job is no longer kept; a run that queued none has
+-- one row of NULLs.
+CREATE VIEW trigger_run_with_jobs AS
+SELECT
+    run.id AS run,
+    run."trigger",
+    run.started_at,
+    queued.key AS position,
+    job.id AS job,
+    job.status,
+    job.reason
+FROM trigger_run run
+LEFT JOIN json_each(run.jobs) queued
+LEFT JOIN q job ON job.id = CAST(queued.value AS INTEGER);

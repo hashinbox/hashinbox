@@ -28,6 +28,29 @@ impl TriggerRun {
     }
 }
 
+/// A run as a trigger's runs page shows it: when it started, and each send
+/// job it queued that is still kept, as it is now, in the order queued.
+#[derive(Clone, Debug)]
+pub(crate) struct Run {
+    pub(crate) started_at: i64,
+    pub(crate) jobs: Vec<RunJob>,
+}
+
+/// One send job of a [`Run`], as it is now.
+#[derive(Clone, Debug)]
+pub(crate) struct RunJob {
+    pub(crate) id: i64,
+    pub(crate) status: tasks::Status,
+    pub(crate) reason: Option<String>,
+}
+
+/// Its start.
+impl crate::db::Keyed for Run {
+    fn key(&self) -> String {
+        self.started_at.to_string()
+    }
+}
+
 /// Its start.
 impl crate::db::Keyed for TriggerRun {
     fn key(&self) -> String {
@@ -39,7 +62,7 @@ impl crate::db::Keyed for TriggerRun {
 pub(crate) mod db {
     use diesel::prelude::*;
 
-    use super::TriggerRun;
+    use super::{Run, RunJob, TriggerRun};
     use crate::{
         db::Page,
         models::schema::{trigger_run, triggers},
@@ -82,19 +105,64 @@ pub(crate) mod db {
             .execute(connection)
     }
 
-    /// At most `page.limit` runs of `trigger` started before `page.after`
-    /// when given, latest first.
+    /// At most `page.limit` runs of `trigger`, latest first, started before
+    /// `page.after` when given, each with its send jobs still kept
+    /// (`trigger_run_with_jobs`), in one query.
     pub(crate) fn find_page(
         connection: &mut SqliteConnection,
         trigger: &str,
         page: Page<i64>,
-    ) -> QueryResult<Vec<TriggerRun>> {
-        trigger_run::table
-            .filter(trigger_run::trigger.eq(trigger))
-            .filter(trigger_run::started_at.lt(page.after.unwrap_or(i64::MAX)))
-            .order(trigger_run::started_at.desc())
-            .limit(page.limit)
-            .select(TriggerRun::as_select())
-            .load(connection)
+    ) -> QueryResult<Vec<Run>> {
+        use diesel::sql_types::{BigInt, Integer, Nullable, Text};
+
+        /// A run and one of its jobs (none: it queued none still kept).
+        #[derive(QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = BigInt)]
+            started_at: i64,
+            #[diesel(sql_type = Nullable<BigInt>)]
+            job: Option<i64>,
+            #[diesel(sql_type = Nullable<Integer>)]
+            status: Option<i32>,
+            #[diesel(sql_type = Nullable<Text>)]
+            reason: Option<String>,
+        }
+
+        let rows: Vec<Row> = diesel::sql_query(
+            r#"SELECT started_at, job, status, reason
+               FROM trigger_run_with_jobs
+               WHERE run IN (
+                SELECT id FROM trigger_run
+                WHERE "trigger" = ?1 AND started_at < ?2
+                ORDER BY started_at DESC
+                LIMIT ?3
+               )
+               ORDER BY started_at DESC, position"#,
+        )
+        .bind::<Text, _>(trigger)
+        .bind::<BigInt, _>(page.after.unwrap_or(i64::MAX))
+        .bind::<BigInt, _>(page.limit)
+        .load(connection)?;
+        let mut runs: Vec<Run> = Vec::new();
+        for row in rows {
+            if runs
+                .last()
+                .is_none_or(|run| run.started_at != row.started_at)
+            {
+                runs.push(Run {
+                    started_at: row.started_at,
+                    jobs: Vec::new(),
+                });
+            }
+            let (Some(id), Some(status), Some(run)) = (row.job, row.status, runs.last_mut()) else {
+                continue;
+            };
+            run.jobs.push(RunJob {
+                id,
+                status: crate::models::task::status_of(status),
+                reason: row.reason,
+            });
+        }
+        Ok(runs)
     }
 }

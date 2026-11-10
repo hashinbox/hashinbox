@@ -245,10 +245,7 @@ impl Indexer {
             .indexes
             .find_next(network, last.as_ref().map(|last| last.position))
             .await?;
-        // Forward starts at the last kept block, to see it is still on the chain.
-        let Some(start) = lagging.or(last.as_ref().map(|last| last.position)) else {
-            return Ok(Next::Idle);
-        };
+        // The tip first: a network with nothing to index still shows it.
         let tips = self.chain.tips().await?;
         let tip = tips.produced;
         {
@@ -256,6 +253,10 @@ impl Indexer {
             stats.tip = Some(tip);
             stats.confirmed = Some(tips.confirmed);
         }
+        // Forward starts at the last kept block, to see it is still on the chain.
+        let Some(start) = lagging.or(last.as_ref().map(|last| last.position)) else {
+            return Ok(Next::Idle);
+        };
         let end = tip.min(start.saturating_add(self.batch - 1));
         let run = self.chain.blocks(start, end).await?;
         // The run may end early (the node has no more yet): only the
@@ -547,6 +548,14 @@ mod tests {
 
     fn at(index: &WalletIndex) -> Option<u64> {
         index.indexed_at.as_ref().map(|header| header.position)
+    }
+
+    #[tokio::test]
+    async fn a_network_with_nothing_to_index_still_reads_its_tip() {
+        let (_fake, indexer) = indexer(0, 100);
+        assert_eq!(indexer.next().await.unwrap(), Next::Idle);
+        let stats = indexer.stats();
+        assert_eq!((stats.tip, stats.confirmed), (Some(TIP), Some(TIP)));
     }
 
     #[tokio::test]

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, IndexParams};
+use super::{Error, ErrorBody, IndexParams, jobs::JobState};
 use crate::{
     api::AppState,
     db::Paged as _,
@@ -391,11 +391,60 @@ async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// One run of a trigger.
+/// One run of a trigger: when it started, the send jobs it queued and how
+/// they ended.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 struct TriggerRun {
     /// Unix ms.
     started_at: i64,
+    /// Where its jobs are together; null when none of them is kept.
+    #[schema(required)]
+    outcome: Option<RunOutcome>,
+    /// Its send jobs, in the order queued; a job no longer kept is left out.
+    jobs: Vec<RunJob>,
+}
+
+/// Where a run's jobs are together.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+enum RunOutcome {
+    /// One still waits or runs.
+    Pending,
+    /// Every one succeeded.
+    Succeeded,
+    /// None succeeded.
+    Failed,
+    /// Some succeeded, some did not.
+    Mixed,
+}
+
+impl RunOutcome {
+    /// Where `states` are together; `None` for none.
+    fn of(states: &[JobState]) -> Option<Self> {
+        let succeeded = states.iter().filter(|state| **state == JobState::Succeeded);
+        let unfinished = states
+            .iter()
+            .any(|state| matches!(state, JobState::Pending | JobState::Running));
+        Some(match succeeded.count() {
+            _ if states.is_empty() => return None,
+            _ if unfinished => Self::Pending,
+            all if all == states.len() => Self::Succeeded,
+            0 => Self::Failed,
+            _ => Self::Mixed,
+        })
+    }
+}
+
+/// One send job of a run.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+struct RunJob {
+    /// The job id: `GET /v1/jobs/{id}` reads it.
+    id: String,
+    state: JobState,
+    /// Why it failed, or why its last attempt is being retried; always
+    /// present.
+    #[schema(required)]
+    reason: Option<String>,
 }
 
 /// `GET /v1/triggers/{id}/runs`: a page of runs.
@@ -440,13 +489,28 @@ async fn runs(
         .await?;
     Ok(Json(RunsResponse {
         next_cursor: runs.cursor(limit),
-        runs: runs
-            .into_iter()
-            .map(|run| TriggerRun {
-                started_at: run.started_at,
-            })
-            .collect(),
+        runs: runs.into_iter().map(TriggerRun::from).collect(),
     }))
+}
+
+impl From<trigger_run::Run> for TriggerRun {
+    fn from(run: trigger_run::Run) -> Self {
+        let jobs: Vec<RunJob> = run
+            .jobs
+            .into_iter()
+            .map(|job| RunJob {
+                id: job.id.to_string(),
+                state: job.status.into(),
+                reason: job.reason,
+            })
+            .collect();
+        let states: Vec<JobState> = jobs.iter().map(|job| job.state).collect();
+        Self {
+            started_at: run.started_at,
+            outcome: RunOutcome::of(&states),
+            jobs,
+        }
+    }
 }
 
 /// Unix ms.

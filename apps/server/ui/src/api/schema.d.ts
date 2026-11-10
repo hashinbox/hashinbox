@@ -1119,6 +1119,22 @@ export interface components {
             name: string;
             value: string;
         };
+        /** @description One send job of a run. */
+        RunJob: {
+            /** @description The job id: `GET /v1/jobs/{id}` reads it. */
+            id: string;
+            /**
+             * @description Why it failed, or why its last attempt is being retried; always
+             *     present.
+             */
+            reason: string | null;
+            state: components["schemas"]["JobState"];
+        };
+        /**
+         * @description Where a run's jobs are together.
+         * @enum {string}
+         */
+        RunOutcome: "pending" | "succeeded" | "failed" | "mixed";
         /**
          * @description `POST /v1/wallets/{id}/transactions` body: an ordered send from the
          *     path's wallet in one asset.
@@ -1364,8 +1380,14 @@ export interface components {
             /** @description Triggers in id order. */
             triggers: components["schemas"]["Trigger"][];
         };
-        /** @description One run of a trigger. */
+        /**
+         * @description One run of a trigger: when it started, the send jobs it queued and how
+         *     they ended.
+         */
         TriggerRun: {
+            /** @description Its send jobs, in the order queued; a job no longer kept is left out. */
+            jobs: components["schemas"]["RunJob"][];
+            outcome: null | components["schemas"]["RunOutcome"];
             /**
              * Format: int64
              * @description Unix ms.
