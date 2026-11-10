@@ -1,79 +1,17 @@
 //! Every network's RPC endpoints, in the server's `network_endpoint` table
 //! of the one database file (seeded by `seed.sql`).
 
-use std::{collections::BTreeMap, fmt};
+use std::collections::BTreeMap;
 
 use anyhow::Context as _;
 use base::{Chain, Network};
 use diesel::{prelude::*, sqlite::Sqlite, upsert::excluded};
 use serde::Serialize;
-use serde_json::Value;
 
 use super::schema::network_endpoint;
 
 /// The most endpoints one network may list.
 const MOST: usize = 16;
-
-/// One configured RPC endpoint: the document a configuration file's
-/// `rpc.endpoints` holds — a URL, or an object with the URL and bounds —
-/// checked as `rpc::Endpoint` checks it.
-
-#[derive(Clone)]
-pub(crate) struct Endpoint {
-    document: Value,
-    /// The node the document describes.
-    endpoint: rpc::Endpoint,
-    /// The URL's scheme, host and port; `unresolved` when it does not parse.
-    origin: String,
-}
-
-impl Endpoint {
-    /// Checks `document` without contacting a node.
-    ///
-    /// # Errors
-    ///
-    /// One that is neither a URL nor an endpoint object, or one
-    /// `rpc::Endpoint::validate` refuses.
-    pub(crate) fn new(document: Value) -> Result<Self, String> {
-        let endpoint: rpc::Endpoint = serde_json::from_value(document.clone())
-            .map_err(|_| "an RPC node is a URL or an object of url and bounds")?;
-        endpoint.validate().map_err(|error| error.to_string())?;
-        let origin = url::Url::parse(&endpoint.url).map_or_else(
-            |_| "unresolved".to_owned(),
-            |url| url.origin().ascii_serialization(),
-        );
-        Ok(Self {
-            document,
-            endpoint,
-            origin,
-        })
-    }
-
-    /// Its URL, the URL's parts ([`rpc::Endpoint::parts`]) and its bounds;
-    /// `None` when its URL does not parse.
-    fn view(&self) -> Option<(String, rpc::Parts, rpc::Bounds)> {
-        Some((
-            self.endpoint.url.clone(),
-            self.endpoint.parts()?,
-            self.endpoint.bounds,
-        ))
-    }
-}
-
-impl fmt::Display for Endpoint {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.origin)
-    }
-}
-
-impl fmt::Debug for Endpoint {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("Endpoint")
-            .field(&self.origin)
-            .finish()
-    }
-}
 
 /// One query parameter of a node's URL.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
@@ -145,60 +83,43 @@ impl RpcNode {
 
 /// One row of `network_endpoint`: a network's endpoints in failover order, one
 /// to [`MOST`] of them. The store's operations are this row's.
-#[derive(Clone)]
-pub(crate) struct RpcEndpoints(Vec<Endpoint>);
+#[derive(Clone, Debug)]
+pub(crate) struct RpcEndpoints(Vec<rpc::Endpoint>);
 
 impl RpcEndpoints {
-    /// Every document checked, in order.
+    /// Every endpoint checked, in order; asks no node.
     ///
     /// # Errors
     ///
-    /// A message naming the position of the first unusable endpoint and never
-    /// its contents, or the list's size when it is empty or longer than
-    /// [`MOST`].
-    pub(crate) fn new(documents: Vec<Value>) -> Result<Self, String> {
-        if documents.is_empty() || documents.len() > MOST {
+    /// A message naming the position of the first unusable endpoint, or the
+    /// list's size when it is empty or longer than [`MOST`].
+    pub(crate) fn new(endpoints: Vec<rpc::Endpoint>) -> Result<Self, String> {
+        if endpoints.is_empty() || endpoints.len() > MOST {
             return Err(format!("a network lists between 1 and {MOST} RPC nodes"));
         }
-        let endpoints = documents
-            .into_iter()
-            .enumerate()
-            .map(|(position, document)| {
-                Endpoint::new(document).map_err(|reason| format!("RPC node {position}: {reason}"))
-            });
-        endpoints.collect::<Result<_, _>>().map(Self)
-    }
-
-    /// The documents, in failover order, for storage and for the section a
-    /// chain parses them in.
-    pub(crate) fn documents(&self) -> Vec<Value> {
-        self.0
-            .iter()
-            .map(|endpoint| endpoint.document.clone())
-            .collect()
+        for (position, endpoint) in endpoints.iter().enumerate() {
+            endpoint
+                .validate()
+                .map_err(|error| format!("RPC node {position}: {error}"))?;
+        }
+        Ok(Self(endpoints))
     }
 
     /// Each one's shown form, in failover order; one whose URL does not
     /// parse is left out.
     pub(crate) fn shown(&self) -> Vec<RpcNode> {
-        let views = self.0.iter().filter_map(Endpoint::view).enumerate();
+        let views = self.0.iter().filter_map(|endpoint| {
+            Some((endpoint.url.clone(), endpoint.parts()?, endpoint.bounds))
+        });
         views
+            .enumerate()
             .map(|(index, view)| RpcNode::new(index, view))
             .collect()
     }
 
-    /// The nodes the documents describe, in failover order, for a transport.
-    pub(crate) fn nodes(&self) -> Vec<rpc::Endpoint> {
-        self.0
-            .iter()
-            .map(|endpoint| endpoint.endpoint.clone())
-            .collect()
-    }
-}
-
-impl fmt::Debug for RpcEndpoints {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_list().entries(&self.0).finish()
+    /// The endpoints, in failover order.
+    pub(crate) fn nodes(&self) -> &[rpc::Endpoint] {
+        &self.0
     }
 }
 
@@ -211,12 +132,12 @@ impl NetworkEndpoints {
         &self.0
     }
 
-    /// Every network's documents, in failover order, for composition.
-    pub(crate) fn documents(&self) -> BTreeMap<Network, Vec<Value>> {
+    /// `network`'s endpoints, in failover order; none when it has no row.
+    pub(crate) fn nodes(&self, network: &Network) -> Vec<rpc::Endpoint> {
         self.0
-            .iter()
-            .map(|(network, endpoints)| (network.clone(), endpoints.documents()))
-            .collect()
+            .get(network)
+            .map(|endpoints| endpoints.0.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -237,11 +158,10 @@ pub(crate) mod db {
     impl TryFrom<Row> for (Network, RpcEndpoints) {
         type Error = String;
 
-        /// The network and its endpoints; a refusal names the network and never
-        /// quotes the stored documents.
+        /// The network and its endpoints; a refusal names the network.
         fn try_from(row: Row) -> Result<Self, String> {
-            let endpoints = serde_json::from_str::<Vec<Value>>(&row.nodes)
-                .map_err(|_| "stored RPC nodes are not a JSON list".to_owned())
+            let endpoints = serde_json::from_str::<Vec<rpc::Endpoint>>(&row.nodes)
+                .map_err(|_| "stored RPC nodes are not a JSON list of nodes".to_owned())
                 .and_then(RpcEndpoints::new)
                 .map_err(|reason| format!("{}/{}: {reason}", row.chain, row.network))?;
             Ok((Network::new(Chain::new(&row.chain), row.network), endpoints))
@@ -252,19 +172,18 @@ pub(crate) mod db {
     ///
     /// # Errors
     ///
-    /// When the documents do not encode or the write fails.
+    /// When the endpoints do not encode or the write fails.
     pub(crate) fn upsert(
         connection: &mut SqliteConnection,
         network: &Network,
         endpoints: &RpcEndpoints,
     ) -> anyhow::Result<()> {
-        let documents =
-            serde_json::to_string(&endpoints.documents()).context("RPC nodes did not encode")?;
+        let nodes = serde_json::to_string(&endpoints.0).context("RPC nodes did not encode")?;
         diesel::insert_into(network_endpoint::table)
             .values((
                 network_endpoint::chain.eq(network.chain.as_str()),
                 network_endpoint::network.eq(&network.name),
-                network_endpoint::nodes.eq(documents),
+                network_endpoint::nodes.eq(nodes),
             ))
             .on_conflict((network_endpoint::chain, network_endpoint::network))
             .do_update()
@@ -277,7 +196,7 @@ pub(crate) mod db {
     ///
     /// # Errors
     ///
-    /// The read, or a row that no longer checks; the refusal never quotes it.
+    /// The read, or a row that no longer checks.
     pub(crate) fn find_all(connection: &mut SqliteConnection) -> anyhow::Result<NetworkEndpoints> {
         let rows = network_endpoint::table
             .select(Row::as_select())

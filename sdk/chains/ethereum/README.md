@@ -8,20 +8,19 @@ and token transfers as EIP-1559 transactions.
 
 ```rust,no_run
 use base::{Asset, Broadcaster as _, BuilderExt as _, Chained as _, Config as _, Storage, WalletFactory as _};
-use chain_ethereum::{Config, Network};
+use std::sync::Arc;
+
+use chain_ethereum::{Client, Config, Network};
 use rpc::Endpoint;
 
 async fn ethereum(storage: Storage) -> anyhow::Result<()> {
-    let config = Config::new(
-        Network::new(1, "mainnet"),
-        vec![Endpoint::new("https://node.invalid/v3/KEY")],
-    );
+    let config = Config::new(Network::new(1, "mainnet"));
+    let node: Arc<dyn rpc::Client> = Arc::new(Endpoint::new("https://node.invalid/v3/KEY").connect()?);
     // The one entry point a container uses: indexer, factory, broadcaster,
     // and assets over the application's stores.
-    let _service = config.build(&storage, config.client().await?).await?;
+    let _service = config.build(&storage, node.clone()).await?;
 
-    // Checks the chain ID and every token's decimals.
-    let rpc = config.connect().await?;
+    let rpc = Client::new(node, config.native());
 
     // Reading: what `base::Indexer` consumes.
     let chain = config.chain(&rpc);
@@ -43,7 +42,7 @@ async fn ethereum(storage: Storage) -> anyhow::Result<()> {
 ```
 
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network:
-`chain_id`, endpoints, assets (ether's display decimals, the `contract`
+`chain_id`, assets (ether's display decimals, the `contract`
 tokens), `confirmations`, `max_history`, and from `settings` the knobs
 `limits`, `fee_ttl_ms`, `pending_ttl_ms`, `interval_ms`, and `batch`, the
 blocks the indexer fetches per step (default 100; lower it for a node that
@@ -54,10 +53,11 @@ rate-limits) (each absent one its default).
 - `Config` implements `base::Config`: `build(&storage, client)` validates
   and returns the `base::Service`, asking no node. The indexer wakes every
   `interval_ms` milliseconds (default 12,000).
-- `client()` is the chain's own cluster over `endpoints`; `build(&storage,
-  client)` builds every part over it; the first call verifies that `client`
-  serves the network (again at each call until it does). Pass a `rpc::Swap` and keep it to change nodes live.
-  Endpoints are needed only by `client()`.
+- The config holds no endpoints: `build(&storage, client)` builds every
+  part over the given transport, asking no node; `payments` clusters a
+  network's nodes by `height()`. `info(client)` asks a node its chain and
+  tip, once, when it is added. Pass a `rpc::Swap` and keep it to change
+  nodes live.
 - Position and height are the block number. A block is confirmed once it is at
   or below the node's `finalized` block; a node that serves none yet (syncing,
   a development chain) fails `tips`.

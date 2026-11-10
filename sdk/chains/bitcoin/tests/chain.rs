@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use ::rpc::testing::{Faults, Reply, Script};
+use ::rpc::testing::{Reply, Script};
 use base::{
     Addressed as _, Asset, Chained, Coin, Dated as _, Leg, NotServed, TransactionId,
     TransactionState,
@@ -106,7 +106,7 @@ fn block(height: u64, own: u8, parent: u8, transactions: &[(&Transaction, Vec<Tx
 
 fn chain(script: &Script, depth: u64) -> chain_bitcoin::Chain {
     let rpc = Client::new(Arc::new(script.clone()), Network::Regtest);
-    let mut config = Config::new(Network::Regtest, Vec::new());
+    let mut config = Config::new(Network::Regtest);
     config.confirmation_depth = depth;
     config.chain(&rpc).expect("valid depth")
 }
@@ -306,9 +306,7 @@ async fn a_chain_over_a_swap_follows_its_replacement() {
     let old = Script::new([Reply::ok("getblockcount", json!(10))]);
     let swap = Arc::new(::rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
     let rpc = Client::new(swap.clone(), Network::Regtest);
-    let chain = Config::new(Network::Regtest, Vec::new())
-        .chain(&rpc)
-        .expect("chain");
+    let chain = Config::new(Network::Regtest).chain(&rpc).expect("chain");
     assert_eq!(chain.tips().await.expect("old node").produced, 10);
 
     let next = Script::new([Reply::ok("getblockcount", json!(20))]);
@@ -332,41 +330,5 @@ async fn a_block_time_is_a_header_read() {
         chain(&script, 1).time(1).await.unwrap(),
         Some(1_700_000_000)
     );
-    script.exhausted();
-}
-
-#[tokio::test]
-async fn a_verifying_client_asks_nothing_until_used_and_verifies_once() {
-    let script = Script::new([]);
-    let node = Faults::new(script.clone());
-    let switch = node.switch();
-    switch.down(true);
-    let rpc = Client::verifying(Arc::new(node), Network::Regtest);
-    let chain = Config::new(Network::Regtest, Vec::new())
-        .chain(&rpc)
-        .expect("valid depth");
-    assert!(chain.tips().await.is_err(), "the node is down");
-
-    switch.down(false);
-    script.push([Reply::ok(
-        "getblockchaininfo",
-        json!({"chain": "main", "pruned": false}),
-    )]);
-    let error = chain.tips().await.expect_err("another network");
-    assert!(
-        format!("{error:#}").contains("another network"),
-        "{error:#}"
-    );
-
-    script.push([
-        Reply::ok(
-            "getblockchaininfo",
-            json!({"chain": "regtest", "pruned": false}),
-        ),
-        Reply::ok("getblockcount", json!(100)),
-        Reply::ok("getblockcount", json!(100)),
-    ]);
-    assert_eq!(chain.tips().await.expect("tips").produced, 100);
-    assert_eq!(chain.tips().await.expect("verified once").produced, 100);
     script.exhausted();
 }

@@ -46,7 +46,7 @@ fn factory(script: &Script) -> Factory {
 }
 
 fn config() -> Config {
-    let mut config = Config::new(Network::new(1, "mainnet"), Vec::new());
+    let mut config = Config::new(Network::new(1, "mainnet"));
     config.tokens = vec![Token {
         contract: TOKEN.parse().unwrap(),
         decimals: 6,
@@ -254,7 +254,7 @@ fn height(_: &Script) -> BoxFuture<'_, Result<u64, CallError>> {
 fn a_broadcast_reaches_every_node_once() {
     let nodes =
         [Script::new([]), Script::new([])].map(|node| node.once_only("eth_sendRawTransaction"));
-    let cluster = block_on(Cluster::new(nodes.to_vec(), height, Policy::default())).unwrap();
+    let cluster = Cluster::new(nodes.to_vec(), height, Policy::default()).unwrap();
     let broadcaster = connect(Arc::new(cluster));
     let bytes = b"\x02signed".to_vec();
     let id = hex::encode_prefixed(keccak256(&bytes));

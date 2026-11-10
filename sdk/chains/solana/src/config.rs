@@ -2,7 +2,6 @@
 
 use std::{sync::Arc, time::Duration};
 
-use ::rpc::{Cluster, Endpoint, Policy, Retry};
 use anyhow::{Context as _, ensure};
 use base::{
     Asset, AssetInfo, AssetKind, Assets, Future, Indexer, Service, Storage,
@@ -23,8 +22,6 @@ pub struct Config {
     pub network: String,
     /// The genesis hash every node is checked against.
     pub genesis_hash: GenesisHash,
-    /// The nodes: reads go to one, submissions to all.
-    pub endpoints: Vec<Endpoint>,
     /// Allowlisted SPL tokens: the only tokens indexed and sent.
     pub tokens: Vec<Token>,
     /// Fractional digits a view shows of the native currency; none: all.
@@ -84,14 +81,13 @@ pub struct Token {
 }
 
 impl Config {
-    /// `network` over `endpoints`, with no tokens.
+    /// `network`, with no tokens.
     #[must_use]
-    pub fn new(network: Network, endpoints: Vec<Endpoint>) -> Self {
+    pub fn new(network: Network) -> Self {
         let settings = Settings::default();
         Self {
             network: network.slug,
             genesis_hash: network.genesis_hash,
-            endpoints,
             tokens: Vec::new(),
             display_decimals: None,
             fee_ttl_ms: settings.fee_ttl_ms,
@@ -113,54 +109,17 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// For an invalid network or endpoints, or a zero interval.
+    /// For an invalid network, or a zero interval.
     pub fn validate(&self) -> anyhow::Result<()> {
         self.native().validate()?;
-        for endpoint in &self.endpoints {
-            endpoint.validate()?;
-        }
         ensure!(self.interval_ms > 0, "Solana interval must be positive");
         Ok(())
     }
 
-    /// Validates, connects to every endpoint, and verifies the genesis hash,
-    /// the Memo-v3 program and every mint's decimals.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::validate`]'s refusals, an unreachable or foreign node, or a
-    /// mint that disagrees (Token-2022 included).
-    pub async fn connect(&self) -> anyhow::Result<Client> {
-        let client = self.open(self.cluster().await?)?;
-        client.ready().await?;
-        Ok(client)
-    }
-
-    /// A cluster of the configured endpoints.
-    async fn cluster(&self) -> anyhow::Result<Arc<dyn ::rpc::Client>> {
-        ensure!(!self.endpoints.is_empty(), "Solana needs an endpoint");
-        let nodes = self
-            .endpoints
-            .iter()
-            .map(Endpoint::connect)
-            .collect::<Result<Vec<_>, _>>()?;
-        let cluster = Cluster::new(nodes, rpc::height, Policy::default())
-            .await
-            .context("Solana endpoints")?;
-        Ok(Arc::new(Retry::new(cluster)))
-    }
-
-    /// Validates, and a client over `transport` that verifies the genesis
-    /// hash, Memo-v3 and every mint's decimals at its first call; asks
-    /// nothing now.
+    /// Validates, and a client over `transport`; asks the node nothing.
     fn open(&self, transport: Arc<dyn ::rpc::Client>) -> anyhow::Result<Client> {
         self.validate()?;
-        let decimals = self
-            .tokens
-            .iter()
-            .map(|token| (token.mint, token.decimals))
-            .collect();
-        Ok(Client::verifying(transport, self.native(), decimals))
+        Ok(Client::new(transport, self.native()))
     }
 
     /// The chain read through `rpc`.
@@ -186,8 +145,7 @@ impl Config {
         }
     }
 
-    /// SOL and every allowlisted token, in the scale [`Self::connect`]
-    /// checks each mint declares.
+    /// SOL and every allowlisted token, in its configured decimals.
     #[must_use]
     pub fn assets(&self) -> Assets {
         let network = base::Network::from(&self.native());
@@ -232,7 +190,7 @@ fn mint(text: &str) -> anyhow::Result<solana_address::Address> {
 impl TryFrom<&base::NetworkConfig> for Config {
     type Error = anyhow::Error;
 
-    /// Its genesis hash (`chain_id`), endpoints and assets, and its knobs
+    /// Its genesis hash (`chain_id`) and assets, and its knobs
     /// from `settings`.
     fn try_from(config: &base::NetworkConfig) -> anyhow::Result<Self> {
         let settings = Settings::deserialize(&config.settings).context("Solana settings")?;
@@ -262,7 +220,6 @@ impl TryFrom<&base::NetworkConfig> for Config {
         let built = Self {
             network: config.network.name.clone(),
             genesis_hash: genesis.parse().context("Solana genesis hash")?,
-            endpoints: config.endpoints.clone(),
             tokens,
             display_decimals,
             fee_ttl_ms: settings.fee_ttl_ms,
@@ -285,8 +242,12 @@ impl base::Config for Config {
         (&self.native()).into()
     }
 
-    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn ::rpc::Client>>> {
-        Box::pin(self.cluster())
+    fn height(&self) -> base::Height {
+        rpc::height
+    }
+
+    fn info(&self, client: Arc<dyn ::rpc::Client>) -> Future<'_, anyhow::Result<base::NodeInfo>> {
+        Box::pin(async move { self.open(client)?.info().await })
     }
 
     fn build<'a>(

@@ -62,7 +62,7 @@ impl Default for Policy {
 /// so no node's execution is cancelled by an earlier answer.
 ///
 /// The primary is chosen by an injected tip probe — the chain's own height
-/// call — when the cluster is built and whenever a call arrives after a
+/// call — at the first call and whenever a call arrives after a
 /// trigger: a transport failure brought the primary to
 /// [`Policy::failure_threshold`] consecutive failures, its latest failure is
 /// one of [`Policy::rate_limit_codes`], or [`Policy::refresh`] elapsed. The
@@ -96,7 +96,8 @@ struct Selection<C> {
     /// The primary that hit a trigger, until a selection replaces it.
     demoted: AtomicUsize,
     probing: AtomicBool,
-    refreshed: Mutex<Instant>,
+    /// When nodes were last probed; `None` until the first call.
+    refreshed: Mutex<Option<Instant>>,
 }
 
 impl<C> fmt::Debug for Cluster<C> {
@@ -110,7 +111,8 @@ impl<C> fmt::Debug for Cluster<C> {
 }
 
 impl<C: Client> Cluster<C> {
-    /// Probes every node and makes the highest tip primary; a tie, or no
+    /// The first node primary, asking no node anything: the first call
+    /// probes every node and makes the highest tip primary; a tie, or no
     /// answering probe, leaves the first node primary.
     ///
     /// `probe` reads one node's tip in the chain's own unit. A probe failure
@@ -119,7 +121,7 @@ impl<C: Client> Cluster<C> {
     /// # Errors
     ///
     /// [`ErrorKind::InvalidConfiguration`] when `clients` is empty.
-    pub async fn new<P>(clients: Vec<C>, probe: P, policy: Policy) -> Result<Self, Error>
+    pub fn new<P>(clients: Vec<C>, probe: P, policy: Policy) -> Result<Self, Error>
     where
         P: for<'a> Fn(&'a C) -> BoxFuture<'a, Result<u64, CallError>> + Send + Sync + 'static,
     {
@@ -130,7 +132,7 @@ impl<C: Client> Cluster<C> {
                 "JSON-RPC requires at least one endpoint",
             ));
         };
-        let cluster = Self {
+        Ok(Self {
             first,
             rest: nodes.collect(),
             selection: Some(Selection {
@@ -139,11 +141,9 @@ impl<C: Client> Cluster<C> {
                 primary: AtomicUsize::new(0),
                 demoted: AtomicUsize::new(NONE),
                 probing: AtomicBool::new(false),
-                refreshed: Mutex::new(Instant::now()),
+                refreshed: Mutex::new(None),
             }),
-        };
-        cluster.select(NONE).await;
-        Ok(cluster)
+        })
     }
 
     /// One node: every call reaches it, and nothing is probed.
@@ -274,7 +274,7 @@ impl<C: Client> Cluster<C> {
         *selection
             .refreshed
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Instant::now();
+            .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
     }
 }
 
@@ -329,7 +329,7 @@ impl<C> Selection<C> {
             .refreshed
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        refreshed.elapsed() >= self.policy.refresh
+        refreshed.is_none_or(|at| at.elapsed() >= self.policy.refresh)
     }
 }
 

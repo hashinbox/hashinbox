@@ -12,7 +12,6 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -51,22 +50,14 @@ struct DetailedEndpoint {
     /// `max_response_bytes`; each defaults when absent.
     #[serde(default)]
     #[schema(value_type = Option<Object>)]
-    bounds: Option<Value>,
+    bounds: rpc::Bounds,
 }
 
-impl From<RpcEndpoint> for Value {
-    /// The document the configuration file would hold for the node.
+impl From<RpcEndpoint> for rpc::Endpoint {
     fn from(endpoint: RpcEndpoint) -> Self {
         match endpoint {
-            RpcEndpoint::Url(url) => Self::String(url),
-            RpcEndpoint::Detailed(detailed) => {
-                let mut document = serde_json::Map::new();
-                document.insert("url".to_owned(), Self::String(detailed.url));
-                if let Some(bounds) = detailed.bounds {
-                    document.insert("bounds".to_owned(), bounds);
-                }
-                Self::Object(document)
-            }
+            RpcEndpoint::Url(url) => Self::new(url),
+            RpcEndpoint::Detailed(detailed) => Self::new(detailed.url).with_bounds(detailed.bounds),
         }
     }
 }
@@ -123,9 +114,9 @@ struct NodesRequest {
 }
 
 impl NodesRequest {
-    /// The nodes' documents, in order.
-    fn documents(self) -> Vec<Value> {
-        self.endpoints.into_iter().map(Value::from).collect()
+    /// The nodes, in order.
+    fn nodes(self) -> Vec<rpc::Endpoint> {
+        self.endpoints.into_iter().map(Into::into).collect()
     }
 }
 
@@ -141,7 +132,8 @@ impl NodesRequest {
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Nodes stored and in use", body = EndpointsResponse),
-        (status = 400, description = "Malformed node, or a list above 16 nodes", body = ErrorBody),
+        (status = 400, description = "Malformed node, a list above 16 nodes, or a node that \
+            fails or serves another chain", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "Network is not configured", body = ErrorBody),
         (status = 503, description = "The nodes could not be stored", body = ErrorBody)
@@ -158,15 +150,11 @@ async fn add(
     if request.endpoints.is_empty() {
         return Err(Error::invalid_request("add 1 to 16 nodes at once"));
     }
-    let mut documents = state
-        .db
-        .read(endpoint::db::find_all)
-        .await?
-        .documents()
-        .remove(&network)
-        .unwrap_or_default();
-    documents.extend(request.documents());
-    let nodes = RpcEndpoints::new(documents).map_err(Error::invalid_request)?;
+    let mut nodes = state.db.read(endpoint::db::find_all).await?.nodes(&network);
+    let added = request.nodes();
+    nodes.extend(added.clone());
+    let nodes = RpcEndpoints::new(nodes).map_err(Error::invalid_request)?;
+    check(&state, &network, &added).await?;
     store(&state, &network, &nodes).await?;
     Ok(Json(install(&state, network, &nodes)?))
 }
@@ -178,14 +166,14 @@ async fn add(
     summary = "Replace a network's RPC nodes",
     description = "Stores the nodes, then sends every later call of the network (indexing, \
         wallets, broadcast) to them, failing over in order; calls already sent finish on the \
-        node they reached. The nodes are not verified here: the chain verifies them on the \
-        next start, which uses the stored list whatever the configuration file says.",
+        node they reached. Each node is asked its chain and tip once, before storing.",
     params(NetworkPath),
     request_body = NodesRequest,
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Nodes stored and in use", body = EndpointsResponse),
-        (status = 400, description = "Malformed node list", body = ErrorBody),
+        (status = 400, description = "Malformed node list, or a node that fails or serves \
+            another chain", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "Network is not configured", body = ErrorBody),
         (status = 503, description = "The nodes could not be stored", body = ErrorBody)
@@ -199,7 +187,8 @@ async fn replace(
 ) -> Result<Json<EndpointsResponse>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let network = path.network(&state.payments)?;
-    let nodes = RpcEndpoints::new(request.documents()).map_err(Error::invalid_request)?;
+    let nodes = RpcEndpoints::new(request.nodes()).map_err(Error::invalid_request)?;
+    check(&state, &network, nodes.nodes()).await?;
     store(&state, &network, &nodes).await?;
     Ok(Json(install(&state, network, &nodes)?))
 }
@@ -243,7 +232,8 @@ struct AddManyResponse {
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Nodes stored and in use", body = AddManyResponse),
-        (status = 400, description = "Malformed node, or a list above 16 nodes", body = ErrorBody),
+        (status = 400, description = "Malformed node, a list above 16 nodes, or a node that \
+            fails or serves another chain", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "A network is not configured", body = ErrorBody),
         (status = 503, description = "The nodes could not be stored", body = ErrorBody)
@@ -258,24 +248,30 @@ async fn add_many(
     if request.nodes.is_empty() || request.nodes.len() > 64 {
         return Err(Error::invalid_request("add 1 to 64 nodes at once"));
     }
-    let stored = state.db.read(endpoint::db::find_all).await?.documents();
-    let mut lists: BTreeMap<base::Network, Vec<Value>> = BTreeMap::new();
+    let stored = state.db.read(endpoint::db::find_all).await?;
+    let mut lists: BTreeMap<base::Network, Vec<rpc::Endpoint>> = BTreeMap::new();
+    let mut added = Vec::new();
     for node in request.nodes {
         let network = base::Network::new(base::Chain::new(node.chain), node.network);
         state.payments.service(&network)?;
+        let endpoint = rpc::Endpoint::from(node.endpoint);
+        added.push((network.clone(), endpoint.clone()));
         lists
             .entry(network.clone())
-            .or_insert_with(|| stored.get(&network).cloned().unwrap_or_default())
-            .push(node.endpoint.into());
+            .or_insert_with(|| stored.nodes(&network))
+            .push(endpoint);
     }
     let lists = lists
         .into_iter()
-        .map(|(network, documents)| {
-            RpcEndpoints::new(documents)
+        .map(|(network, nodes)| {
+            RpcEndpoints::new(nodes)
                 .map(|nodes| (network, nodes))
                 .map_err(Error::invalid_request)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    for (network, endpoint) in added {
+        check(&state, &network, &[endpoint]).await?;
+    }
     let kept = lists.clone();
     // Stored before installed: a restart never forgets a change in use.
     state
@@ -329,21 +325,33 @@ async fn remove(
 ) -> Result<Json<EndpointsResponse>, Error> {
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
     state.payments.service(&network)?;
-    let mut documents = state
-        .db
-        .read(endpoint::db::find_all)
-        .await?
-        .documents()
-        .remove(&network)
-        .unwrap_or_default();
-    if path.index >= documents.len() {
+    let mut nodes = state.db.read(endpoint::db::find_all).await?.nodes(&network);
+    if path.index >= nodes.len() {
         return Err(Error::not_found("no such node"));
     }
-    documents.remove(path.index);
-    let nodes = RpcEndpoints::new(documents)
+    nodes.remove(path.index);
+    let nodes = RpcEndpoints::new(nodes)
         .map_err(|_| Error::invalid_request("a network keeps at least one node"))?;
     store(&state, &network, &nodes).await?;
     Ok(Json(install(&state, network, &nodes)?))
+}
+
+/// Asks each of `endpoints` which chain it serves and its tip, once, before
+/// anything is stored: a node that fails or serves another chain is refused
+/// with why. Nothing asks again while the server runs.
+async fn check(
+    state: &AppState,
+    network: &base::Network,
+    endpoints: &[rpc::Endpoint],
+) -> Result<(), Error> {
+    for (index, endpoint) in endpoints.iter().enumerate() {
+        state
+            .payments
+            .info(network, endpoint)
+            .await
+            .map_err(|error| Error::invalid_request(format!("node {index}: {error:#}")))?;
+    }
+    Ok(())
 }
 
 /// Stores `nodes` as `network`'s list.
@@ -361,23 +369,13 @@ async fn store(
     Ok(())
 }
 
-/// Sends every later call of `network` to `nodes`, failing over in order.
+/// Sends every later call of `network` to a cluster of `nodes`.
 fn install(
     state: &AppState,
     network: base::Network,
     nodes: &RpcEndpoints,
 ) -> Result<EndpointsResponse, Error> {
-    let client = state.payments.client(&network)?;
-    let https = nodes
-        .nodes()
-        .iter()
-        .map(rpc::Endpoint::connect)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| Error::invalid_request(error.to_string()))?;
-    let statistics = https.iter().map(rpc::Http::statistics).collect();
-    let failover =
-        rpc::Failover::new(https).map_err(|error| Error::invalid_request(error.to_string()))?;
-    client.replace(Arc::new(failover), statistics);
+    state.payments.set_endpoints(&network, nodes.nodes())?;
     Ok(EndpointsResponse {
         endpoints: nodes.shown(),
         network: network.into(),

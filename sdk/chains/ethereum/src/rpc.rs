@@ -15,8 +15,8 @@ use alloy_primitives::{B256, Bytes, U64, U256, hex, keccak256};
 use alloy_rpc_types_eth::Block as RpcBlock;
 use anyhow::{Context as _, anyhow, bail, ensure};
 use base::{
-    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, NotServed, Reason, Reward,
-    Tips, TransactionError, TransactionErrorKind, Transactions,
+    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, NodeInfo, NotServed,
+    Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -48,42 +48,16 @@ struct Inner {
     /// Set once the node refuses `eth_getBlockReceipts`: receipts then come
     /// one per transaction.
     receipts_by_transaction: AtomicBool,
-    /// What each token contract's `decimals()` must report.
-    decimals: Vec<(alloy_primitives::Address, u8)>,
-    /// Whether the node passed [`Client::verify`]; until then every call
-    /// verifies first.
-    verified: AtomicBool,
 }
 
 impl Client {
-    /// A client of `network` over `transport`, trusted: [`Self::verify`]
-    /// checks the node when asked.
+    /// A client of `network` over `transport`; [`Self::verify`] checks the node.
     #[must_use]
     pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
         Self(Arc::new(Inner {
             transport,
             network,
             receipts_by_transaction: AtomicBool::new(false),
-            decimals: Vec::new(),
-            verified: AtomicBool::new(true),
-        }))
-    }
-
-    /// A client of `network` over `transport` that asks nothing yet: its
-    /// first call verifies the node ([`Self::verify`], with each token
-    /// contract's `decimals`), again on every call until one passes.
-    #[must_use]
-    pub fn verifying(
-        transport: Arc<dyn ::rpc::Client>,
-        network: Network,
-        decimals: Vec<(alloy_primitives::Address, u8)>,
-    ) -> Self {
-        Self(Arc::new(Inner {
-            transport,
-            network,
-            receipts_by_transaction: AtomicBool::new(false),
-            decimals,
-            verified: AtomicBool::new(false),
         }))
     }
 
@@ -93,43 +67,23 @@ impl Client {
         &self.0.network
     }
 
-    /// Checks that the node serves this network's chain ID, and that each
-    /// token contract reports its configured decimals.
+    /// The chain ID the node serves and its newest block.
     ///
     /// # Errors
     ///
-    /// For another chain, a token whose contract disagrees, or a node
-    /// failure.
-    pub async fn verify(&self) -> anyhow::Result<()> {
+    /// A node failure, or a node of another chain.
+    pub async fn info(&self) -> anyhow::Result<NodeInfo> {
         let actual: U64 = self.call("eth_chainId", json!([])).await?;
         let expected = self.network().chain_id;
         ensure!(
             actual == U64::from(expected),
             "Ethereum node serves chain ID {actual}, not the configured {expected}"
         );
-        for (contract, configured) in &self.0.decimals {
-            let decimals = self.decimals(contract).await?;
-            ensure!(
-                decimals == *configured,
-                "ERC-20 {contract} reports {decimals} decimals, not the configured {configured}"
-            );
-        }
-        Ok(())
-    }
-
-    /// Verifies the node once it passes: nothing for a trusted client or
-    /// one already verified.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::verify`]'s failure.
-    pub async fn ready(&self) -> anyhow::Result<()> {
-        if self.0.verified.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        self.verify().await?;
-        self.0.verified.store(true, Ordering::Release);
-        Ok(())
+        let tip: U64 = self.call("eth_blockNumber", json!([])).await?;
+        Ok(NodeInfo {
+            chain_id: expected.to_string(),
+            tip: tip.to(),
+        })
     }
 
     /// The newest block (`eth_blockNumber`) and the newest block consensus
@@ -140,7 +94,6 @@ impl Client {
     /// A node failure, or a node that serves no finalized block yet
     /// (syncing, or a development chain); retry later.
     pub async fn tips(&self) -> anyhow::Result<Tips> {
-        self.ready().await?;
         let [produced, finalized] = self
             .batch(vec![
                 Call::new("eth_blockNumber", json!([])),
@@ -171,7 +124,6 @@ impl Client {
     /// receipts of a finalized block count as pruned), or a run that does
     /// not link (the chain moved mid-fetch; retry).
     pub async fn blocks(&self, start: u64, end: u64, tokens: &Tokens) -> anyhow::Result<Blocks> {
-        self.ready().await?;
         let network = self.network();
         let mut run = Blocks::new(network.into());
         if start > end {
@@ -227,7 +179,6 @@ impl Client {
     /// A node failure, a block the node does not hold yet, or a node that
     /// keeps no history for it ([`NotServed`], EIP-4444).
     pub async fn time(&self, height: u64) -> anyhow::Result<u64> {
-        self.ready().await?;
         let method = "eth_getBlockByNumber";
         let reply = self
             .0
@@ -252,7 +203,6 @@ impl Client {
     ///
     /// A node failure.
     pub async fn nonce(&self, address: &Address) -> anyhow::Result<u64> {
-        self.ready().await?;
         let nonce: U64 = self
             .call(
                 "eth_getTransactionCount",
@@ -269,7 +219,6 @@ impl Client {
     ///
     /// A node failure, or a latest block without an EIP-1559 base fee.
     pub async fn fees(&self) -> anyhow::Result<(U256, U256)> {
-        self.ready().await?;
         let [priority, latest] = self
             .batch(vec![
                 Call::new("eth_maxPriorityFeePerGas", json!([])),
@@ -297,7 +246,6 @@ impl Client {
         from: &Address,
         request: &TxEip1559,
     ) -> Result<u64, TransactionError> {
-        self.ready().await.map_err(TransactionError::unavailable)?;
         let params = json!([{
             "from": from.to_string(),
             "to": request.to.to().map(hex::encode_prefixed),
@@ -366,7 +314,6 @@ impl Client {
     /// `Rejected` with its reason for a definite refusal; `Unavailable` when
     /// the outcome is unknown: retry with the same bytes.
     pub async fn send(&self, bytes: &[u8]) -> Result<(), TransactionError> {
-        self.ready().await.map_err(TransactionError::unavailable)?;
         let request = Request::once(
             "eth_sendRawTransaction",
             json!([hex::encode_prefixed(bytes)]),

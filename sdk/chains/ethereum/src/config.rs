@@ -2,7 +2,6 @@
 
 use std::{sync::Arc, time::Duration};
 
-use ::rpc::{Cluster, Endpoint, Policy, Retry};
 use alloy_primitives::hex;
 use anyhow::{Context as _, ensure};
 use base::{
@@ -24,8 +23,6 @@ pub struct Config {
     pub network: String,
     /// The EIP-155 chain ID the node is checked against.
     pub chain_id: u64,
-    /// The nodes: reads go to one, submissions to all.
-    pub endpoints: Vec<Endpoint>,
     /// Allowlisted ERC-20 tokens: the only tokens indexed and sent.
     pub tokens: Vec<Token>,
     /// Fractional digits a view shows of the native currency; none: all.
@@ -89,15 +86,13 @@ pub struct Token {
 }
 
 impl Config {
-    /// `network` over `endpoints`, with no tokens, default fee limits, and
-    /// tracing on.
+    /// `network`, with no tokens and default fee limits.
     #[must_use]
-    pub fn new(network: Network, endpoints: Vec<Endpoint>) -> Self {
+    pub fn new(network: Network) -> Self {
         let settings = Settings::default();
         Self {
             network: network.slug,
             chain_id: network.chain_id,
-            endpoints,
             tokens: Vec::new(),
             display_decimals: None,
             limits: settings.limits,
@@ -120,13 +115,10 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// For an invalid network, invalid endpoints, a zero token
+    /// For an invalid network, a zero token
     /// contract, or contradicting fee limits.
     pub fn validate(&self) -> anyhow::Result<()> {
         self.native().validate()?;
-        for endpoint in &self.endpoints {
-            endpoint.validate()?;
-        }
         ensure!(
             self.tokens.iter().all(|token| !token.contract.is_zero()),
             "Ethereum token contract must not be the zero address"
@@ -135,43 +127,10 @@ impl Config {
         self.limits.validate()
     }
 
-    /// Validates, connects to every endpoint, and verifies the chain ID and
-    /// every token's decimals.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::validate`]'s refusals, an unreachable or foreign node, or a
-    /// token whose contract disagrees.
-    pub async fn connect(&self) -> anyhow::Result<Client> {
-        let client = self.open(self.cluster().await?)?;
-        client.ready().await?;
-        Ok(client)
-    }
-
-    /// A cluster of the configured endpoints.
-    async fn cluster(&self) -> anyhow::Result<Arc<dyn ::rpc::Client>> {
-        ensure!(!self.endpoints.is_empty(), "Ethereum needs an endpoint");
-        let nodes = self
-            .endpoints
-            .iter()
-            .map(Endpoint::connect)
-            .collect::<Result<Vec<_>, _>>()?;
-        let cluster = Cluster::new(nodes, rpc::height, Policy::default())
-            .await
-            .context("Ethereum endpoints")?;
-        Ok(Arc::new(Retry::new(cluster)))
-    }
-
-    /// Validates, and a client over `transport` that verifies the chain ID
-    /// and every token's decimals at its first call; asks nothing now.
+    /// Validates, and a client over `transport`; asks the node nothing.
     fn open(&self, transport: Arc<dyn ::rpc::Client>) -> anyhow::Result<Client> {
         self.validate()?;
-        let decimals = self
-            .tokens
-            .iter()
-            .map(|token| (token.contract, token.decimals))
-            .collect();
-        Ok(Client::verifying(transport, self.native(), decimals))
+        Ok(Client::new(transport, self.native()))
     }
 
     /// The chain read through `rpc`.
@@ -198,8 +157,7 @@ impl Config {
         }
     }
 
-    /// Ether and every allowlisted token, in the scale [`Self::connect`]
-    /// checks each contract reports.
+    /// Ether and every allowlisted token, in its configured decimals.
     #[must_use]
     pub fn assets(&self) -> Assets {
         let network = base::Network::from(&self.native());
@@ -244,7 +202,7 @@ fn contract(text: &str) -> anyhow::Result<alloy_primitives::Address> {
 impl TryFrom<&base::NetworkConfig> for Config {
     type Error = anyhow::Error;
 
-    /// Its chain ID, endpoints, assets and limits, and its knobs from
+    /// Its chain ID, assets and limits, and its knobs from
     /// `settings`.
     fn try_from(config: &base::NetworkConfig) -> anyhow::Result<Self> {
         let settings = Settings::deserialize(&config.settings).context("Ethereum settings")?;
@@ -274,7 +232,6 @@ impl TryFrom<&base::NetworkConfig> for Config {
         let built = Self {
             network: config.network.name.clone(),
             chain_id: chain_id.parse().context("Ethereum chain_id")?,
-            endpoints: config.endpoints.clone(),
             tokens,
             display_decimals,
             limits: settings.limits,
@@ -298,8 +255,12 @@ impl base::Config for Config {
         (&self.native()).into()
     }
 
-    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn ::rpc::Client>>> {
-        Box::pin(self.cluster())
+    fn height(&self) -> base::Height {
+        rpc::height
+    }
+
+    fn info(&self, client: Arc<dyn ::rpc::Client>) -> Future<'_, anyhow::Result<base::NodeInfo>> {
+        Box::pin(async move { self.open(client)?.info().await })
     }
 
     fn build<'a>(

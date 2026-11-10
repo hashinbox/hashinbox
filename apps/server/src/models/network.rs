@@ -197,7 +197,7 @@ pub(crate) mod db {
             network.assets = assets.remove(&key).unwrap_or_default();
             if let Some(nodes) = endpoints.rows().get(&key) {
                 network.endpoints = nodes.shown();
-                network.nodes = nodes.nodes();
+                network.nodes = nodes.nodes().to_vec();
             }
             network.index = indexes.remove(&key);
             network.tip_live = network.index.as_ref().and_then(|index| index.tip);

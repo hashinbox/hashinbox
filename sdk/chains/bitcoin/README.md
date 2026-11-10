@@ -13,24 +13,22 @@ use std::sync::Arc;
 use base::{
     Asset, Broadcaster as _, BuilderExt as _, Chained as _, Config as _, Storage, WalletFactory as _,
 };
-use chain_bitcoin::{AddressType, Config, Network};
+use chain_bitcoin::{AddressType, Client, Config, Network};
 use rpc::Endpoint;
 
 /// `storage` is the application's stores; its `inputs` are the unspent
 /// outputs coin selection spends.
 async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
-    let mut config = Config::new(
-        Network::Regtest,
-        vec![Endpoint::new("http://bitcoin:bitcoin@127.0.0.1:18443")],
-    );
+    let mut config = Config::new(Network::Regtest);
     config.address_type = AddressType::Taproot;
+    let node: Arc<dyn rpc::Client> =
+        Arc::new(Endpoint::new("http://bitcoin:bitcoin@127.0.0.1:18443").connect()?);
 
     // The one entry point a container uses: indexer, factory, broadcaster
     // and assets over the application's stores.
-    let _service = config.build(&storage, config.client().await?).await?;
+    let _service = config.build(&storage, node.clone()).await?;
 
-    // Checks the node and its network.
-    let rpc = config.connect().await?;
+    let rpc = Client::new(node, config.network);
 
     // Reading: what `base::Indexer` consumes.
     let chain = config.chain(&rpc)?;
@@ -51,7 +49,7 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
 ```
 
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network: the
-network by name, endpoints, BTC's display decimals, `confirmation_depth`
+network by name, BTC's display decimals, `confirmation_depth`
 (`confirmations + 1`), `max_history`, and from `settings` the knobs
 `address_type`, `fee_target_blocks`, `fee_floor`, `fee_ttl_ms`,
 `pending_ttl_ms`, `interval_ms`, and `batch`, the blocks the indexer fetches
@@ -62,10 +60,11 @@ per step (default 100) (each absent one its default).
 - `Config` implements `base::Config`: `build(&storage, client)` validates
   and returns the `base::Service`, asking no node. The indexer wakes every
   `interval_ms` milliseconds (default 30,000).
-- `client()` is the chain's own cluster over `endpoints`; `build(&storage,
-  client)` builds every part over it; the first call verifies that `client`
-  serves the network (again at each call until it does). Pass a `rpc::Swap` and keep it to change nodes live.
-  Endpoints are needed only by `client()`.
+- The config holds no endpoints: `build(&storage, client)` builds every
+  part over the given transport, asking no node; `payments` clusters a
+  network's nodes by `height()`. `info(client)` asks a node its chain and
+  tip, once, when it is added. Pass a `rpc::Swap` and keep it to change
+  nodes live.
 - Position and height are both the block height. `confirmation_depth`
   (1 to 1000, default 6) makes a block final once that many blocks, itself
   included, are on the chain: `confirmed = produced - (depth - 1)`. Bitcoin

@@ -8,21 +8,20 @@ token transfers.
 
 ```rust,no_run
 use base::{Asset, Broadcaster as _, BuilderExt as _, Chained as _, Config as _, Storage, WalletFactory as _};
-use chain_solana::{Config, Network};
+use std::sync::Arc;
+
+use chain_solana::{Client, Config, Network};
 use rpc::Endpoint;
 
 async fn solana(storage: Storage) -> anyhow::Result<()> {
     let genesis = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d".parse()?;
-    let config = Config::new(
-        Network::new(genesis, "mainnet-beta"),
-        vec![Endpoint::new("http://127.0.0.1:8899")],
-    );
+    let config = Config::new(Network::new(genesis, "mainnet-beta"));
+    let node: Arc<dyn rpc::Client> = Arc::new(Endpoint::new("http://127.0.0.1:8899").connect()?);
     // The one entry point a container uses: indexer, factory, broadcaster,
     // and assets over the application's stores.
-    let _service = config.build(&storage, config.client().await?).await?;
+    let _service = config.build(&storage, node.clone()).await?;
 
-    // Checks the genesis hash, the Memo-v3 program and every mint's decimals.
-    let rpc = config.connect().await?;
+    let rpc = Client::new(node, config.native());
 
     // Reading: what `base::Indexer` consumes.
     let chain = config.chain(&rpc);
@@ -44,7 +43,7 @@ async fn solana(storage: Storage) -> anyhow::Result<()> {
 ```
 
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network:
-the genesis hash (`chain_id`), endpoints, assets (SOL's display decimals, the
+the genesis hash (`chain_id`), assets (SOL's display decimals, the
 `contract` mints), `confirmations`, `max_history`, and from `settings` the
 knobs `fee_ttl_ms`, `pending_ttl_ms`, `interval_ms`, and `batch`, the slots
 the indexer fetches per step (default 100) (each absent one its default).
@@ -54,10 +53,11 @@ the indexer fetches per step (default 100) (each absent one its default).
 - `Config` implements `base::Config`: `build(&storage, client)` validates
   and returns the `base::Service`, asking no node. The indexer wakes every
   `interval_ms` milliseconds (default 1,000).
-- `client()` is the chain's own cluster over `endpoints`; `build(&storage,
-  client)` builds every part over it; the first call verifies that `client`
-  serves the network (again at each call until it does). Pass a `rpc::Swap` and keep it to change nodes live.
-  Endpoints are needed only by `client()`.
+- The config holds no endpoints: `build(&storage, client)` builds every
+  part over the given transport, asking no node; `payments` clusters a
+  network's nodes by `height()`. `info(client)` asks a node its chain and
+  tip, once, when it is added. Pass a `rpc::Swap` and keep it to change
+  nodes live.
 - Position is the slot; a skipped slot holds no block. `Header.height` is the
   block height. Blocks are read at `confirmed` commitment; `Tips.produced` is
   the newest confirmed slot, `Tips.confirmed` the newest rooted (`finalized`)

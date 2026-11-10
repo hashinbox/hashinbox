@@ -106,7 +106,7 @@ fn connect(script: &Script, config: &Config) -> Chain {
 }
 
 fn config() -> Config {
-    let mut config = Config::new(Network::new(1, "mainnet"), Vec::new());
+    let mut config = Config::new(Network::new(1, "mainnet"));
     config.tokens = vec![Token {
         contract: TOKEN.parse().unwrap(),
         decimals: 6,
@@ -117,13 +117,18 @@ fn config() -> Config {
 }
 
 #[test]
-fn verify_checks_the_chain_id() {
+fn info_reads_the_chain_id_and_tip() {
     let script = Script::new([]);
     let client = Client::new(Arc::new(script.clone()), Network::new(1, "mainnet"));
-    script.push([Reply::ok("eth_chainId", json!("0x1"))]);
-    block_on(client.verify()).unwrap();
+    script.push([
+        Reply::ok("eth_chainId", json!("0x1")),
+        Reply::ok("eth_blockNumber", json!("0x10")),
+    ]);
+    let info = block_on(client.info()).unwrap();
+    assert_eq!((info.chain_id.as_str(), info.tip), ("1", 16));
     script.push([Reply::ok("eth_chainId", json!("0x2"))]);
-    assert!(block_on(client.verify()).is_err());
+    let error = block_on(client.info()).unwrap_err();
+    assert!(format!("{error:#}").contains("chain ID 2"), "{error:#}");
     script.exhausted();
 }
 
@@ -622,7 +627,7 @@ fn the_settings_batch_is_the_indexers_step() {
         inputs: fresh.clone(),
         wallets: fresh,
     };
-    let script = Script::new([Reply::ok("eth_chainId", json!("0x1"))]);
+    let script = Script::new([]);
     let service = block_on(config.build(&storage, Arc::new(script.clone()))).unwrap();
     // From block 5 with the tip at 16: two blocks a step, not the default 100.
     script.push([
@@ -645,7 +650,7 @@ fn the_settings_batch_is_the_indexers_step() {
 }
 
 #[test]
-fn a_network_builds_with_its_node_down_and_verifies_at_first_use() {
+fn a_network_builds_with_its_node_down_and_asks_it_nothing() {
     use base::Config as _;
 
     let script = Script::new([]);
@@ -661,30 +666,17 @@ fn a_network_builds_with_its_node_down_and_verifies_at_first_use() {
     };
     let service = block_on(config().build(&storage, Arc::new(node))).unwrap();
     let chain = service.dated.unwrap();
-    assert!(block_on(chain.tips()).is_err(), "the node is down");
+    script.exhausted();
 
     switch.down(false);
-    script.push([Reply::ok("eth_chainId", json!("0x2"))]);
-    let error = block_on(chain.tips()).unwrap_err();
-    assert!(format!("{error:#}").contains("chain ID"), "{error:#}");
-
-    let tips = || {
-        [
-            Reply::ok("eth_blockNumber", json!("0x10")),
-            Reply::ok("eth_getBlockByNumber", json!({"number": "0xc"})),
-        ]
-    };
     script.push([
-        Reply::ok("eth_chainId", json!("0x1")),
-        Reply::ok("eth_call", json!(format!("0x{:064x}", 6))),
+        Reply::ok("eth_blockNumber", json!("0x10")),
+        Reply::ok("eth_getBlockByNumber", json!({"number": "0xc"})),
     ]);
-    script.push(tips());
-    script.push(tips());
     let expected = Tips {
         produced: 16,
         confirmed: 12,
     };
     assert_eq!(block_on(chain.tips()).unwrap(), expected);
-    assert_eq!(block_on(chain.tips()).unwrap(), expected, "verified once");
     script.exhausted();
 }

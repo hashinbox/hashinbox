@@ -31,7 +31,7 @@ fn connect() -> Result<impl Client, rpc::Error> {
 
 `Cluster` makes several nodes of one network act as one `Client`. Requests go
 to the primary: the node with the highest tip, read by a probe the chain
-injects. A failing or rate-limited primary, or an elapsed refresh interval,
+injects. Building asks no node; the first call probes. A failing or rate-limited primary, or an elapsed refresh interval,
 makes the next call probe again; a tie keeps the incumbent, and a node more
 than `Policy::max_lag` behind never takes over. `Client::broadcast` sends one
 request to every node exactly once and returns the first success.
@@ -50,7 +50,7 @@ fn tip(node: &Http) -> BoxFuture<'_, Result<u64, CallError>> {
 }
 
 async fn submit(nodes: Vec<Http>, signed: String) -> Result<(), CallError> {
-    let cluster = Cluster::new(nodes, tip, Policy::default()).await?;
+    let cluster = Cluster::new(nodes, tip, Policy::default())?;
     let send = Request::once("sendrawtransaction", json!([signed]));
     cluster.broadcast(send).await
 }

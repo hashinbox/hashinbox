@@ -120,26 +120,43 @@ impl fmt::Debug for Service {
     }
 }
 
+/// What a node says about itself: which chain it serves and its tip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeInfo {
+    /// The chain it serves, as the network's `chain_id` writes it (EVM chain
+    /// ID, Solana genesis hash, Bitcoin Core chain name).
+    pub chain_id: String,
+    /// Its newest block (or slot).
+    pub tip: u64,
+}
+
+/// Reads one node's tip in the chain's own unit (blocks, slots).
+pub type Height = for<'a> fn(&'a rpc::Http) -> rpc::BoxFuture<'a, Result<u64, rpc::CallError>>;
+
 /// A chain's configuration of one network.
 pub trait Config: Send + Sync {
     /// The network it configures.
     fn network(&self) -> Network;
 
-    /// The chain's own transport: a cluster over its configured endpoints.
+    /// How a node's tip is read: what a cluster of the network's nodes
+    /// ranks them by.
+    fn height(&self) -> Height;
+
+    /// What the node behind `client` serves; asked once, when a node is
+    /// added, never while running.
     ///
     /// # Errors
     ///
-    /// No or invalid endpoints, or none reachable.
-    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn rpc::Client>>>;
+    /// A node failure, or a node of another chain.
+    fn info(&self, client: Arc<dyn rpc::Client>) -> Future<'_, anyhow::Result<NodeInfo>>;
 
-    /// Validates, verifies once that `client` serves this network, and
-    /// builds the service over `storage`, every part of it reaching the
+    /// Validates and builds the service over `storage`, every part of it reaching the
     /// nodes through `client` (typically a [`rpc::Swap`] the caller
     /// keeps to change nodes live).
     ///
     /// # Errors
     ///
-    /// An invalid configuration, or an unreachable or foreign node.
+    /// An invalid configuration.
     fn build<'a>(
         &'a self,
         storage: &'a Storage,

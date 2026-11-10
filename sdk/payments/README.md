@@ -8,16 +8,18 @@ through. It names no chain; every call is keyed by network.
 - `Payments::builder()`: `with_chain::<C>(chain)` registers the chain's
   `base::Config`, built from a `base::NetworkConfig` (`C: TryFrom<&NetworkConfig>`);
   `with_network_config(config)` adds a network its chain builds;
-  `with_network(config)` adds a chain's own config; `with_client(network, client)`
-  reaches that network through `client` instead of the chain's own
-  `Config::client()`; `with_storage(base::Storage)` (required). `build()`
-  wraps each network's transport in a `Swap` and builds the service over it,
-  asking no node; a network that does not build is left out and
+  `with_network(config, endpoints)` adds a chain's own config over its
+  nodes; `with_client(network, client)` reaches that network through
+  `client` instead; `with_storage(base::Storage)` (required). `build()`
+  clusters each network's nodes (primary by the chain's `height()`,
+  transport failures retried), wraps that in a `Swap` and builds the service
+  over it, asking no node; a network that does not build is left out and
   `service(network)` says why.
 - `Payments`:
   - services: `service(network)`, `services()`, `networks()`, `assets()`
-    (merged), `client(network)` (the `Swap`: `replace` changes nodes live,
-    without verifying them);
+    (merged), `client(network)` (the `Swap`), `set_endpoints(network,
+    endpoints)` (moves every part to a cluster of other nodes, asking none),
+    `info(network, endpoint)` (asks one node its chain and tip);
   - indexing: each service's `indexer` (the caller steps `next()`, about
     every `interval()`), `watch(address, asset, birthday)` on the address's
     network, `stats()`;

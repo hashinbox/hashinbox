@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use ::rpc::{BoxFuture, CallError, Client as _, Cluster, Endpoint, Http, Policy, Request};
+use ::rpc::{BoxFuture, CallError, Client as _, Http, Request};
 use anyhow::{Context as _, ensure};
 use base::{
     Asset, AssetInfo, AssetKind, Cache, Future, Indexer, InputStore, Service, Storage,
@@ -21,8 +21,6 @@ use crate::{FeeRate, fee::Fees, rpc::Client};
 pub struct Config {
     /// The network.
     pub network: Network,
-    /// Its Bitcoin Core nodes: reads go to one, submissions to all.
-    pub endpoints: Vec<Endpoint>,
     /// Blocks a block needs on top of it, itself included, to be final;
     /// 1 to 1000, default 6. Bitcoin has no finality of its own. Also the
     /// service's `confirmations`: `confirmation_depth - 1`.
@@ -85,14 +83,13 @@ impl Default for Settings {
 impl Config {
     /// The defaults around the two required values.
     #[must_use]
-    pub fn new(network: Network, endpoints: Vec<Endpoint>) -> Self {
-        Self::with(network, endpoints, Settings::default())
+    pub fn new(network: Network) -> Self {
+        Self::with(network, Settings::default())
     }
 
-    fn with(network: Network, endpoints: Vec<Endpoint>, settings: Settings) -> Self {
+    fn with(network: Network, settings: Settings) -> Self {
         Self {
             network,
-            endpoints,
             confirmation_depth: 6,
             address_type: settings.address_type,
             fee_target_blocks: settings.fee_target_blocks,
@@ -110,12 +107,9 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// For invalid endpoints, a depth outside `1..=1000`, a zero fee
+    /// For a depth outside `1..=1000`, a zero fee
     /// target, fee floor or interval.
     pub fn validate(&self) -> anyhow::Result<()> {
-        for endpoint in &self.endpoints {
-            endpoint.validate()?;
-        }
         ensure!(
             (1..=1_000).contains(&self.confirmation_depth),
             "Bitcoin confirmation depth must be between 1 and 1000"
@@ -129,36 +123,10 @@ impl Config {
         Ok(())
     }
 
-    /// Validates, connects to every endpoint and verifies the node.
-    ///
-    /// # Errors
-    ///
-    /// [`Self::validate`]'s refusals, or a node of another network.
-    pub async fn connect(&self) -> anyhow::Result<Client> {
-        let client = self.open(self.cluster().await?)?;
-        client.ready().await?;
-        Ok(client)
-    }
-
-    /// A cluster of the configured endpoints.
-    async fn cluster(&self) -> anyhow::Result<Arc<dyn ::rpc::Client>> {
-        ensure!(!self.endpoints.is_empty(), "Bitcoin needs an endpoint");
-        let nodes = self
-            .endpoints
-            .iter()
-            .map(Endpoint::connect)
-            .collect::<Result<Vec<_>, _>>()?;
-        let cluster = Cluster::new(nodes, height, Policy::default())
-            .await
-            .context("Bitcoin endpoints")?;
-        Ok(Arc::new(cluster))
-    }
-
-    /// Validates, and a client over `transport` that verifies the node at
-    /// its first call; asks nothing now.
+    /// Validates, and a client over `transport`; asks the node nothing.
     fn open(&self, transport: Arc<dyn ::rpc::Client>) -> anyhow::Result<Client> {
         self.validate()?;
-        Ok(Client::verifying(transport, self.network))
+        Ok(Client::new(transport, self.network))
     }
 
     /// The chain read through `rpc`.
@@ -207,14 +175,14 @@ impl Config {
 impl TryFrom<&base::NetworkConfig> for Config {
     type Error = anyhow::Error;
 
-    /// Its network (by name), endpoints and native display, its
+    /// Its network (by name) and native display, its
     /// `confirmation_depth` (`confirmations + 1`), and its knobs from
     /// `settings`.
     fn try_from(config: &base::NetworkConfig) -> anyhow::Result<Self> {
         let settings = Settings::deserialize(&config.settings).context("Bitcoin settings")?;
         let network =
             Network::deserialize(json!(config.network.name)).context("Bitcoin network")?;
-        let mut built = Self::with(network, config.endpoints.clone(), settings);
+        let mut built = Self::with(network, settings);
         built.confirmation_depth = config.confirmations.saturating_add(1);
         built.max_history = config.max_history;
         for asset in &config.assets {
@@ -235,8 +203,12 @@ impl base::Config for Config {
         self.network.into()
     }
 
-    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn ::rpc::Client>>> {
-        Box::pin(self.cluster())
+    fn height(&self) -> base::Height {
+        height
+    }
+
+    fn info(&self, client: Arc<dyn ::rpc::Client>) -> Future<'_, anyhow::Result<base::NodeInfo>> {
+        Box::pin(async move { self.open(client)?.info().await })
     }
 
     fn build<'a>(

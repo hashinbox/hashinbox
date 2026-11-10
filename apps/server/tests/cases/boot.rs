@@ -1,4 +1,4 @@
-//! A network whose node is down, or serves another chain, at boot: the
+//! A network whose node is down at boot, or whose settings do not decode: the
 //! server boots, the other network indexes, the failing one says why in its
 //! index job and live tip, and indexes once its node answers.
 
@@ -63,7 +63,7 @@ async fn a_node_down_at_boot_fails_its_network_alone_until_it_answers() {
     assert_eq!(health["networks"].as_array().map(Vec::len), Some(2));
     assert!(status == StatusCode::OK || status == StatusCode::SERVICE_UNAVAILABLE);
     indexed(&app, "sepolia", good.tip()).await;
-    failing(&app, "other", "eth_chainId").await;
+    failing(&app, "other", "(fault)").await;
 
     bad.node(0).faults().down(false);
     indexed(&app, "other", bad.tip()).await;
@@ -77,15 +77,6 @@ async fn a_node_down_at_boot_fails_its_network_alone_until_it_answers() {
         Err(health.to_string())
     })
     .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_node_of_another_chain_fails_its_network_with_why() {
-    let (good, bad, mut other) = two();
-    other.chain_id = Some("999".to_owned());
-    let app = boot(&good, &bad, other).await;
-    indexed(&app, "sepolia", good.tip()).await;
-    failing(&app, "other", "not the configured 999").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

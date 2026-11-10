@@ -7,7 +7,7 @@ use base::{
 };
 use std::sync::Arc;
 
-use ::rpc::testing::{Faults, Reply, Script};
+use ::rpc::testing::{Reply, Script};
 use chain_solana::{Chain, Client, Config};
 use futures_executor::block_on;
 use serde_json::{Value, json};
@@ -20,9 +20,8 @@ fn base58(byte: u8, length: usize) -> String {
 
 fn config() -> Config {
     let genesis_hash = base58(9, 32).parse().unwrap();
-    let endpoints = vec![::rpc::Endpoint::new("http://127.0.0.1:8899")];
     let network = chain_solana::Network::new(genesis_hash, "localnet");
-    let mut config = Config::new(network, endpoints);
+    let mut config = Config::new(network);
     config.tokens = vec![chain_solana::Token {
         mint: MINT.parse().unwrap(),
         decimals: 6,
@@ -284,48 +283,5 @@ fn a_search_by_time_reads_block_times_and_steps_over_skipped_slots() {
     ]);
     let stamp = block_on(chain(&script).position_at(250)).unwrap().unwrap();
     assert_eq!((stamp.position, stamp.timestamp), (2, 200));
-    script.exhausted();
-}
-
-#[test]
-fn a_verifying_client_asks_nothing_until_used_and_verifies_once() {
-    let script = Script::new([]);
-    let node = Faults::new(script.clone());
-    let switch = node.switch();
-    switch.down(true);
-    let config = config();
-    let chain = config.chain(&Client::verifying(
-        Arc::new(node),
-        config.native(),
-        Vec::new(),
-    ));
-    assert!(block_on(chain.tips()).is_err(), "the node is down");
-
-    switch.down(false);
-    script.push([Reply::ok("getGenesisHash", json!(base58(8, 32)))]);
-    let error = block_on(chain.tips()).unwrap_err();
-    assert!(format!("{error:#}").contains("genesis"), "{error:#}");
-
-    let memo = json!({"context": {"slot": 1}, "value": {
-        "owner": base58(2, 32), "executable": true, "data": ["", "base64"],
-    }});
-    let tips = || {
-        [
-            Reply::ok("getSlot", json!(100)),
-            Reply::ok("getSlot", json!(90)),
-        ]
-    };
-    script.push([
-        Reply::ok("getGenesisHash", json!(base58(9, 32))),
-        Reply::ok("getAccountInfo", memo),
-    ]);
-    script.push(tips());
-    script.push(tips());
-    assert_eq!(block_on(chain.tips()).unwrap().produced, 100);
-    assert_eq!(
-        block_on(chain.tips()).unwrap().produced,
-        100,
-        "verified once"
-    );
     script.exhausted();
 }

@@ -37,7 +37,7 @@ fn network() -> base::Network {
 
 fn factory(script: &Script, kind: AddressType, inputs: Vec<Input>) -> Factory {
     let rpc = Client::new(Arc::new(script.clone()), Network::Regtest);
-    let mut config = Config::new(Network::Regtest, Vec::new());
+    let mut config = Config::new(Network::Regtest);
     config.address_type = kind;
     config.factory(&rpc, Arc::new(Store(inputs)))
 }
@@ -249,7 +249,6 @@ async fn broadcasts_exact_bytes_to_every_node() {
     let nodes: Vec<Script> = (0..2)
         .map(|_| {
             Script::new([
-                Reply::ok("getblockcount", json!(5)),
                 Reply::ok("sendrawtransaction", json!("txid")).expecting(json!([
                     bitcoin::hex::DisplayHex::to_lower_hex_string(&bytes[..])
                 ])),
@@ -257,9 +256,7 @@ async fn broadcasts_exact_bytes_to_every_node() {
             .once_only("sendrawtransaction")
         })
         .collect();
-    let cluster = Cluster::new(nodes.clone(), probe, Policy::default())
-        .await
-        .expect("cluster");
+    let cluster = Cluster::new(nodes.clone(), probe, Policy::default()).expect("cluster");
     let rpc = Client::new(Arc::new(cluster), Network::Regtest);
     let broadcaster = rpc;
     broadcaster
@@ -495,7 +492,7 @@ async fn the_fee_rate_refreshes_once_per_time_to_live() {
 
     let script = Script::new([rate_reply(), rate_reply()]);
     let rpc = Client::new(Arc::new(script.clone()), Network::Regtest);
-    let mut config = Config::new(Network::Regtest, Vec::new());
+    let mut config = Config::new(Network::Regtest);
     config.fee_ttl_ms = 0;
     let fees = config
         .factory(&rpc, Arc::new(Store(vec![funded(&owner, 1_000)])))

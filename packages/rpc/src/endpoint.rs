@@ -1,6 +1,6 @@
 use std::{fmt, time::Duration};
 
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use url::Url;
 
 use std::collections::HashMap;
@@ -46,7 +46,7 @@ pub struct Parameter {
 
 /// What one call to one node may take and carry: 15 s, 10 MiB requests,
 /// 64 MiB responses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Bounds {
     /// How long one execution may take.
@@ -109,7 +109,8 @@ impl Bounds {
 /// ["https://node.invalid/v3/KEY",
 ///  {"url": "http://user:pass@node.invalid/", "bounds": {"timeout_ms": 20000}}]
 /// ```
-#[derive(Clone, PartialEq, Eq)]
+/// It serializes as the object form.
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct Endpoint {
     /// The node's URL: `http` or `https`, a host, and no fragment.
     pub url: String,

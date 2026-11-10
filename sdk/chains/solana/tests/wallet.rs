@@ -26,9 +26,8 @@ fn base58(byte: u8, length: usize) -> String {
 
 fn config() -> Config {
     let genesis_hash = base58(9, 32).parse().unwrap();
-    let endpoints = vec![::rpc::Endpoint::new("http://127.0.0.1:8899")];
     let network = chain_solana::Network::new(genesis_hash, "localnet");
-    let mut config = Config::new(network, endpoints);
+    let mut config = Config::new(network);
     config.tokens = vec![chain_solana::Token {
         mint: MINT.parse().unwrap(),
         decimals: 6,
@@ -294,7 +293,7 @@ fn broadcast_sends_the_exact_bytes_to_every_node() {
                 .once_only("sendTransaction")
         })
         .collect();
-    let cluster = block_on(Cluster::new(nodes.clone(), probe, Policy::default())).unwrap();
+    let cluster = Cluster::new(nodes.clone(), probe, Policy::default()).unwrap();
     let broadcaster = client(cluster);
 
     block_on(broadcaster.broadcast(&transaction)).unwrap();

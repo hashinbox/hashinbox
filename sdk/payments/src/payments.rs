@@ -5,12 +5,12 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Address, Asset, Assets, Birthday, Chain, Config, Network, NetworkConfig, Service, Stats,
-    Storage, TransactionError, TransactionErrorKind, Wallet, WalletError, WalletErrorKind,
+    Address, Asset, Assets, Birthday, Chain, Config, Network, NetworkConfig, NodeInfo, Service,
+    Stats, Storage, TransactionError, TransactionErrorKind, Wallet, WalletError, WalletErrorKind,
     WalletFactories,
 };
 use crypto::SecretBytes;
-use rpc::Swap;
+use rpc::{Cluster, Policy, Retry, Swap};
 
 /// Builds a registered chain's configuration from a [`NetworkConfig`].
 type Parser = Box<dyn Fn(&NetworkConfig) -> anyhow::Result<Box<dyn Config>> + Send + Sync>;
@@ -26,6 +26,8 @@ type Parser = Box<dyn Fn(&NetworkConfig) -> anyhow::Result<Box<dyn Config>> + Se
 pub struct Payments {
     services: BTreeMap<Network, Service>,
     clients: BTreeMap<Network, Arc<Swap>>,
+    /// Each built network's configuration, for [`Payments::info`].
+    configs: BTreeMap<Network, Box<dyn Config>>,
     /// Why each network that did not build did not.
     failures: BTreeMap<Network, String>,
 }
@@ -77,9 +79,8 @@ impl Payments {
             .collect()
     }
 
-    /// The transport every part of `network` reaches its nodes through:
-    /// [`Swap::replace`] moves its indexer, factory, wallets and broadcaster
-    /// to other nodes at once, without verifying them.
+    /// The transport every part of `network` reaches its nodes through;
+    /// [`Self::set_endpoints`] moves it to other nodes.
     ///
     /// # Errors
     ///
@@ -88,6 +89,40 @@ impl Payments {
         self.clients
             .get(network)
             .ok_or_else(|| unsupported().into())
+    }
+
+    /// What the node at `endpoint` serves, asked as `network`'s chain asks
+    /// it: once, when a node is added.
+    ///
+    /// # Errors
+    ///
+    /// `Unsupported` for a network that is not configured; an invalid
+    /// endpoint, a node failure, or a node of another chain.
+    pub async fn info(
+        &self,
+        network: &Network,
+        endpoint: &rpc::Endpoint,
+    ) -> anyhow::Result<NodeInfo> {
+        let config = self.configs.get(network).ok_or_else(unsupported)?;
+        config.info(Arc::new(endpoint.connect()?)).await
+    }
+
+    /// Sends every later call of `network` (indexer, factory, wallets,
+    /// broadcaster) to a cluster of `endpoints`; asks no node.
+    ///
+    /// # Errors
+    ///
+    /// `Unsupported` for a network that is not configured; no or an invalid
+    /// endpoint.
+    pub fn set_endpoints(
+        &self,
+        network: &Network,
+        endpoints: &[rpc::Endpoint],
+    ) -> anyhow::Result<()> {
+        let config = self.configs.get(network).ok_or_else(unsupported)?;
+        let (transport, statistics) = cluster(&**config, endpoints)?;
+        self.client(network)?.replace(transport, statistics);
+        Ok(())
     }
 
     /// Indexes `asset` of `address` from `birthday`, on the address's network.
@@ -219,7 +254,7 @@ impl fmt::Debug for Payments {
 pub struct Builder {
     parsers: BTreeMap<Chain, Parser>,
     configs: Vec<NetworkConfig>,
-    networks: Vec<Box<dyn Config>>,
+    networks: Vec<(Box<dyn Config>, Vec<rpc::Endpoint>)>,
     clients: BTreeMap<Network, Arc<dyn rpc::Client>>,
     storage: Option<Storage>,
 }
@@ -244,15 +279,20 @@ impl Builder {
         self
     }
 
-    /// One more network, configured in code.
+    /// One more network, configured in code, over `endpoints` in failover
+    /// order.
     #[must_use]
-    pub fn with_network(mut self, config: impl Config + 'static) -> Self {
-        self.networks.push(Box::new(config));
+    pub fn with_network(
+        mut self,
+        config: impl Config + 'static,
+        endpoints: Vec<rpc::Endpoint>,
+    ) -> Self {
+        self.networks.push((Box::new(config), endpoints));
         self
     }
 
-    /// Reaches `network`'s nodes through `client` instead of the chain's own
-    /// [`Config::client`].
+    /// Reaches `network`'s nodes through `client` instead of a cluster of
+    /// its endpoints.
     #[must_use]
     pub fn with_client(
         mut self,
@@ -274,8 +314,7 @@ impl Builder {
     /// [`Swap`] of its given client or the chain's own. A network that does
     /// not build (an unregistered chain, settings that do not decode, an
     /// invalid configuration or endpoint) is left out with why, see
-    /// [`Payments::service`]; the others build. Nothing asks a node: each
-    /// chain verifies its node at first use.
+    /// [`Payments::service`]; the others build. Nothing asks a node.
     ///
     /// # Errors
     ///
@@ -286,6 +325,7 @@ impl Builder {
         let mut payments = Payments {
             services: BTreeMap::new(),
             clients: BTreeMap::new(),
+            configs: BTreeMap::new(),
             failures: BTreeMap::new(),
         };
 
@@ -305,7 +345,7 @@ impl Builder {
                 })
                 .and_then(|parse| parse(config));
             match parsed {
-                Ok(parsed) => configs.push(parsed),
+                Ok(parsed) => configs.push((parsed, config.endpoints.clone())),
                 Err(error) => {
                     let reason = format!("{:#}", error.context(label));
                     payments.failures.insert(network.clone(), reason);
@@ -317,14 +357,16 @@ impl Builder {
         for network in given.keys() {
             ensure!(
                 payments.failures.contains_key(network)
-                    || configs.iter().any(|config| config.network() == *network),
+                    || configs
+                        .iter()
+                        .any(|(config, _)| config.network() == *network),
                 "a client is given for {}/{}, which is not configured",
                 network.chain,
                 network.name
             );
         }
 
-        for config in configs {
+        for (config, endpoints) in configs {
             let network = config.network();
             let label = format!("{}/{}", network.chain, network.name);
             ensure!(
@@ -333,10 +375,14 @@ impl Builder {
                 "network {label} is configured twice"
             );
             let given = given.remove(&network);
-            match open(&*config, given, &storage).await.context(label) {
+            match open(&*config, &endpoints, given, &storage)
+                .await
+                .context(label)
+            {
                 Ok((service, client)) => {
                     payments.services.insert(network.clone(), service);
-                    payments.clients.insert(network, client);
+                    payments.clients.insert(network.clone(), client);
+                    payments.configs.insert(network, config);
                 }
                 Err(error) => {
                     payments.failures.insert(network, format!("{error:#}"));
@@ -347,19 +393,36 @@ impl Builder {
     }
 }
 
-/// `config` built over a [`Swap`] of `given`, or of the chain's own client.
+/// `config` built over a [`Swap`] of `given`, or of a cluster of `endpoints`.
 async fn open(
     config: &dyn Config,
+    endpoints: &[rpc::Endpoint],
     given: Option<Arc<dyn rpc::Client>>,
     storage: &Storage,
 ) -> anyhow::Result<(Service, Arc<Swap>)> {
-    let transport = match given {
-        Some(client) => client,
-        None => config.client().await?,
+    let (transport, statistics) = match given {
+        Some(client) => (client, Vec::new()),
+        None => cluster(config, endpoints)?,
     };
-    let client = Arc::new(Swap::new(transport, Vec::new()));
+    let client = Arc::new(Swap::new(transport, statistics));
     let service = config.build(storage, client.clone()).await?;
     Ok((service, client))
+}
+
+/// One transport over every node of `endpoints`, primary chosen by
+/// `config`'s height and transport failures retried, and each node's
+/// counters; asks no node.
+fn cluster(
+    config: &dyn Config,
+    endpoints: &[rpc::Endpoint],
+) -> anyhow::Result<(Arc<dyn rpc::Client>, Vec<rpc::Statistics>)> {
+    let nodes = endpoints
+        .iter()
+        .map(rpc::Endpoint::connect)
+        .collect::<Result<Vec<_>, _>>()?;
+    let statistics = nodes.iter().map(rpc::Http::statistics).collect();
+    let cluster = Cluster::new(nodes, config.height(), Policy::default())?;
+    Ok((Arc::new(Retry::new(cluster)), statistics))
 }
 
 impl fmt::Debug for Builder {

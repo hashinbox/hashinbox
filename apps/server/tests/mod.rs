@@ -282,10 +282,19 @@ impl base::Config for Config {
         network()
     }
 
-    fn client(&self) -> Future<'_, anyhow::Result<Arc<dyn rpc::Client>>> {
+    fn height(&self) -> base::Height {
+        fn zero(_: &rpc::Http) -> rpc::BoxFuture<'_, Result<u64, rpc::CallError>> {
+            Box::pin(async { Ok(0) })
+        }
+        zero
+    }
+
+    fn info(&self, _: Arc<dyn rpc::Client>) -> Future<'_, anyhow::Result<base::NodeInfo>> {
         Box::pin(async {
-            let client: Arc<dyn rpc::Client> = Arc::new(rpc::testing::Script::default());
-            Ok(client)
+            Ok(base::NodeInfo {
+                chain_id: "regtest".to_owned(),
+                tip: 0,
+            })
         })
     }
 
@@ -342,7 +351,8 @@ async fn limited(
 ) -> Arc<Payments> {
     let stores = Arc::new(crate::usecase::sdk::Stores::new(db.clone()));
     let payments = Payments::builder()
-        .with_network(Config(script, max_history))
+        .with_network(Config(script, max_history), Vec::new())
+        .with_client(network(), Arc::new(rpc::testing::Script::default()))
         .with_storage(base::Storage {
             blocks: stores.clone(),
             indexes: stores.clone(),
