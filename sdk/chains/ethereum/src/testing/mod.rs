@@ -265,8 +265,8 @@ impl TestChain for Ethereum {
         self.chain.hold(on);
     }
 
-    fn reorg(&self, depth: u64) {
-        self.chain.reorg(depth);
+    fn reorg(&self, depth: u64, mined: u64) {
+        self.chain.reorg(depth, mined);
     }
 
     fn prune(&self, below: u64) {

@@ -96,8 +96,9 @@ pub trait TestChain: Sized + Send + Sync + 'static {
     /// While `on`, mined blocks leave the mempool alone.
     fn hold(&self, on: bool);
     /// Takes the last `depth` blocks back (their transactions return to
-    /// the mempool) and mines a longer branch without them.
-    fn reorg(&self, depth: u64);
+    /// the mempool) and mines `mined` blocks on a branch without them;
+    /// fewer than `depth` leaves the chain shorter.
+    fn reorg(&self, depth: u64, mined: u64);
     /// Every node stops serving what is below `below`.
     fn prune(&self, below: u64);
     /// The controls of node `index`.

@@ -18,7 +18,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     let first = app.api.legs(&wallet, "native").await;
     assert_eq!(first.len(), 1, "{first:?}");
 
-    chain.reorg(2);
+    chain.reorg(2, 3);
     reaches(app, &wallet, "native", "balance_pending", "0").await;
     assert!(app.api.legs(&wallet, "native").await.is_empty());
     // The block is archived within the step; the row counts it as the

@@ -223,8 +223,9 @@ impl<M: Model> Chain<M> {
 
     /// Takes the last `depth` canonical blocks back (kept as an old branch;
     /// their transactions return to the front of the mempool) and mines
-    /// `depth + 1` empty blocks on another branch.
-    pub fn reorg(&self, depth: u64) {
+    /// `mined` empty blocks on another branch: fewer than `depth` makes the
+    /// canonical chain shorter.
+    pub fn reorg(&self, depth: u64, mined: u64) {
         let mut inner = self.lock();
         let depth = usize::try_from(depth)
             .unwrap_or(usize::MAX)
@@ -238,7 +239,7 @@ impl<M: Model> Chain<M> {
         back.append(&mut inner.mempool);
         inner.mempool = back;
         inner.branches += 1;
-        for _ in 0..=depth {
+        for _ in 0..mined {
             inner.mine(&self.model, false);
         }
     }
@@ -354,7 +355,7 @@ mod tests {
         chain.mine(1);
         forked.control().fork(true);
         assert_eq!(ask(&forked, "head", json!([])), json!([3, 3, 7]));
-        chain.reorg(1);
+        chain.reorg(1, 2);
         assert_eq!(ask(&node, "head", json!([])), json!([4, 4, 0]));
         assert_eq!(ask(&forked, "head", json!([])), json!([3, 3, 7]));
         assert_eq!(chain.pending(), 7);

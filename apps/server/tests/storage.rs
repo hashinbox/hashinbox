@@ -1174,11 +1174,16 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
         let (found, legs) = db
             .write(move |connection| {
                 let network = crate::tests::network();
-                crate::models::network_index::db::save(
-                    connection,
-                    &network,
-                    &step(tip, confirmed),
-                )?;
+                // Set as read at `through`, not stepped: a step never moves
+                // the confirmed position back.
+                diesel::sql_query(
+                    "UPDATE network_index SET tip = ?, confirmed = ? WHERE chain = ? AND network = ?",
+                )
+                .bind::<diesel::sql_types::BigInt, _>(i64::try_from(tip)?)
+                .bind::<diesel::sql_types::BigInt, _>(i64::try_from(confirmed)?)
+                .bind::<diesel::sql_types::Text, _>(network.chain.as_str())
+                .bind::<diesel::sql_types::Text, _>(&network.name)
+                .execute(connection)?;
                 let found = crate::models::wallet::db::find_page(
                     connection,
                     Page {
@@ -1890,5 +1895,51 @@ async fn the_network_index_is_fresh_only_when_its_tip_moves_and_counts_up() {
             (Some(4), Some(4), Some(1), 2),
             (Some(6), Some(4), Some(3), 3)
         ]
+    );
+}
+
+#[tokio::test]
+async fn the_network_index_moves_back_only_on_a_reorg() {
+    use diesel::{QueryDsl as _, RunQueryDsl as _};
+
+    use crate::models::{NetworkIndex, network_index::db::save, schema::network_index};
+    let (_storage, db, _directory) = storage().await;
+    let rows = db
+        .write(|connection| {
+            let network = network();
+            let mut rows = Vec::new();
+            // A step at 12, one read from a node behind (no reorg), then a
+            // reorg to a shorter chain.
+            for (tip, reorgs, now) in [(12, 0, 1), (9, 0, 2), (9, 1, 3)] {
+                let step = NetworkIndex {
+                    tip: Some(tip),
+                    confirmed: Some(tip - 6),
+                    checked_at: Some(now),
+                    reorgs,
+                    ..Default::default()
+                };
+                save(connection, &network, &step)?;
+                rows.push(
+                    network_index::table
+                        .select((
+                            network_index::tip,
+                            network_index::confirmed,
+                            network_index::checked_at,
+                        ))
+                        .first::<(Option<i64>, Option<i64>, Option<i64>)>(connection)?,
+                );
+            }
+            Ok(rows)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        [
+            (Some(12), Some(6), Some(1)),
+            (Some(12), Some(6), Some(1)),
+            (Some(9), Some(3), Some(3))
+        ],
+        "a node behind keeps them, and does not look fresh; a reorg moves them"
     );
 }

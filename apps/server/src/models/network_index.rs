@@ -120,10 +120,12 @@ pub(crate) mod db {
         Ok(())
     }
 
-    /// Writes one step ([`NetworkIndex::step`]) to `network`'s row: a known
-    /// position replaces the stored one (an unknown one keeps it),
-    /// `checked_at` moves only with the tip (a node that stopped producing
-    /// does not look fresh), and the counters add up.
+    /// Writes one step ([`NetworkIndex::step`]) to `network`'s row. `tip` and
+    /// `confirmed` only move forward, unless the step archived blocks (a
+    /// reorg, which may shorten the chain): a step read from a node behind
+    /// the last one (a failover) keeps them. `indexed` takes a known
+    /// position. `checked_at` moves only when the tip does (a node that
+    /// stopped producing does not look fresh), and the counters add up.
     ///
     /// # Errors
     ///
@@ -137,9 +139,21 @@ pub(crate) mod db {
         diesel::sql_query(
             "
             UPDATE network_index
-            SET checked_at = IIF(?1 IS NOT NULL AND ?1 IS NOT tip, ?4, checked_at),
-                tip = COALESCE(?1, tip),
-                confirmed = COALESCE(?2, confirmed),
+            SET checked_at = IIF(
+                    ?1 IS NOT NULL AND (tip IS NULL OR ?1 > tip OR (?6 > 0 AND ?1 IS NOT tip)),
+                    ?4,
+                    checked_at
+                ),
+                tip = IIF(
+                    ?1 IS NOT NULL AND (tip IS NULL OR ?1 > tip OR ?6 > 0),
+                    ?1,
+                    tip
+                ),
+                confirmed = IIF(
+                    ?2 IS NOT NULL AND (confirmed IS NULL OR ?2 > confirmed OR ?6 > 0),
+                    ?2,
+                    confirmed
+                ),
                 indexed = COALESCE(?3, indexed),
                 blocks = blocks + ?5,
                 reorgs = reorgs + ?6,

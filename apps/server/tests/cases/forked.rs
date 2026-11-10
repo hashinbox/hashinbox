@@ -24,7 +24,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     T::height(&primary)
         .await
         .expect("the primary pins its branch");
-    chain.reorg(1);
+    chain.reorg(1, 2);
     chain.mine(1);
 
     chain.node(0).fork(false);

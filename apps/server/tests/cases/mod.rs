@@ -24,6 +24,7 @@ mod queued;
 mod refused;
 mod reorg;
 mod send;
+mod shorter;
 mod skipped;
 mod slow;
 mod stale;
@@ -38,13 +39,12 @@ scenarios! {
     send: ethereum => chain_ethereum::testing::Ethereum [single, cluster];
     duplicate: ethereum => chain_ethereum::testing::Ethereum [single, cluster];
     reorg: ethereum => chain_ethereum::testing::Ethereum [single, cluster];
+    shorter: ethereum => chain_ethereum::testing::Ethereum [single];
     pruned: ethereum => chain_ethereum::testing::Ethereum [single, cluster];
     lagging: ethereum => chain_ethereum::testing::Ethereum [cluster];
     refused: ethereum => chain_ethereum::testing::Ethereum [cluster];
     lost: ethereum => chain_ethereum::testing::Ethereum [cluster];
-    ahead: ethereum => chain_ethereum::testing::Ethereum [
-        #[ignore = "finding: failover to a node behind moves the index tip and confirmed back; the confirmed balance drops"] cluster
-    ];
+    ahead: ethereum => chain_ethereum::testing::Ethereum [cluster];
     forked: ethereum => chain_ethereum::testing::Ethereum [cluster];
     stale: ethereum => chain_ethereum::testing::Ethereum [
         #[ignore = "finding: a primary stuck on a dead fork is kept (until the 120 s refresh); its block and leg stay live"] cluster

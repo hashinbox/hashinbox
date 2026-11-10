@@ -23,7 +23,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     T::height(&primary)
         .await
         .expect("the primary pins its branch");
-    chain.reorg(1);
+    chain.reorg(1, 2);
     chain.mine(3);
 
     until("the deposit on the chain's block", || async {
