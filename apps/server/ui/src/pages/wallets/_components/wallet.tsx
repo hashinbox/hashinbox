@@ -179,20 +179,31 @@ export function Wallet({
     const units = { decimals: listed?.decimals ?? 0, display: listed?.display_decimals ?? null };
     const confirmed = fresh ? amountOf(fresh, id) : null;
     const pending = fresh ? pendingOf(fresh, id) : null;
+    const change =
+      pending === null || confirmed === null ? null : new Decimal(pending).minus(confirmed);
     return (
-      <Box sx={{ textAlign: 'left', fontVariantNumeric: 'tabular-nums' }}>
+      // As tall as both lines, so every tab is one height; a lone amount sits in the middle.
+      <Box
+        sx={{
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'center',
+          minHeight: 38,
+          textAlign: 'left',
+          fontVariantNumeric: 'tabular-nums',
+        }}
+      >
         <Typography sx={{ fontSize: 18, lineHeight: 1.2, color: 'text.primary' }}>
           {confirmed === null ? '—' : format(confirmed, units)}{' '}
           <Box component="span" sx={{ fontSize: 12, color: 'text.secondary' }}>
             {assetName(shell.listings, wallet.chain, wallet.network, id)}
           </Box>
         </Typography>
-        <Typography sx={{ fontSize: 11, color: 'text.secondary' }}>
-          {pending === null || confirmed === null
-            ? '—'
-            : signed(new Decimal(pending).minus(confirmed), units)}{' '}
-          pending
-        </Typography>
+        {change !== null && !change.isZero() && (
+          <Typography sx={{ fontSize: 11, color: 'text.secondary' }}>
+            {signed(change, units)} pending
+          </Typography>
+        )}
       </Box>
     );
   };

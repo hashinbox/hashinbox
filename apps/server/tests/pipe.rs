@@ -648,6 +648,9 @@ fn amounts_evaluate_in_atomic_units() {
             "600",
         ),
         (Amount::Min(balance(), Box::new(value("0.00000005"))), "5"),
+        // Headroom over a fee: 100 × 1.25; 100 × 1.005 = 100.5, rounded up.
+        (Amount::Times(fee(), decimal("1.25")), "125"),
+        (Amount::Times(fee(), decimal("1.005")), "101"),
         (
             Amount::Max(
                 Box::new(Amount::Sub(fee(), Box::new(value("1")))),

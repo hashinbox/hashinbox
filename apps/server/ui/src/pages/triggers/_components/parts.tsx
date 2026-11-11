@@ -204,6 +204,7 @@ const AMOUNTS = [
   { value: 'sub', label: 'difference of' },
   { value: 'min', label: 'lower of' },
   { value: 'max', label: 'higher of' },
+  { value: 'times', label: 'times' },
 ];
 
 /** Who a fee is priced for: the chosen wallets, or an address no one has used (dearest). */
@@ -288,6 +289,31 @@ export function AmountWords({
             />
           )}
         </>
+      )}
+      {'times' in value && (
+        <Block>
+          <Row>
+            <AmountWords
+              value={value.times[0]}
+              choices={choices}
+              onChange={(a) => onChange({ times: [a, value.times[1]] })}
+            />
+          </Row>
+          <Row>
+            <Word>×</Word>
+            <TextField
+              fullWidth={false}
+              placeholder="1.25"
+              value={value.times[1]}
+              error={!decimal(value.times[1]) || Number(value.times[1]) <= 0}
+              onChange={(e) => onChange({ times: [value.times[0], e.target.value] })}
+              slotProps={{
+                htmlInput: { inputMode: 'decimal', spellCheck: false, 'aria-label': 'Factor' },
+              }}
+              sx={{ width: 100 }}
+            />
+          </Row>
+        </Block>
       )}
       {pair && (
         <Block>

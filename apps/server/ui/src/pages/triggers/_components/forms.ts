@@ -24,7 +24,8 @@ export type Amount =
   | { add: [Amount, Amount] }
   | { sub: [Amount, Amount] }
   | { min: [Amount, Amount] }
-  | { max: [Amount, Amount] };
+  | { max: [Amount, Amount] }
+  | { times: [Amount, string] };
 
 export type Aggregate = 'sum' | 'min' | 'max' | 'count';
 export type Operator = 'above' | 'at_least' | 'below' | 'at_most' | 'equal';
@@ -177,7 +178,7 @@ export function sides(amount: Amount): [Amount, Amount] | null {
 /** `amount` turned into `kind`, keeping its sides and target where it can. */
 export function rekindAmount(amount: Amount, kind: string): Amount {
   if (kind === variant(amount)) return amount;
-  const held = sides(amount) ?? [amount];
+  const held = sides(amount) ?? ('times' in amount ? [amount.times[0]] : [amount]);
   const of = 'balance' in amount ? amount.balance.of : 'fee' in amount ? amount.fee.of : undefined;
   const target = of ?? { this: {} };
   const pair: [Amount, Amount] = [held[0], held[1] ?? { value: '0' }];
@@ -190,6 +191,8 @@ export function rekindAmount(amount: Amount, kind: string): Amount {
       return {
         fee: { of: target, ...('fee' in amount && amount.fee.to && { to: amount.fee.to }) },
       };
+    case 'times':
+      return { times: [held[0], '1'] };
     default:
       return paired(kind, pair);
   }
@@ -264,6 +267,7 @@ export function describeAmount(amount: Amount, name: Name, self: string): string
   if ('add' in amount) return `(${d(amount.add[0])} + ${d(amount.add[1])})`;
   if ('sub' in amount) return `(${d(amount.sub[0])} − ${d(amount.sub[1])})`;
   if ('min' in amount) return `lower of (${d(amount.min[0])}, ${d(amount.min[1])})`;
+  if ('times' in amount) return `${d(amount.times[0])} × ${amount.times[1] || '?'}`;
   return `higher of (${d(amount.max[0])}, ${d(amount.max[1])})`;
 }
 
@@ -331,8 +335,13 @@ const ALL_LESS_FEE: Amount = { sub: [BALANCE, FEE] };
 /** This index's balance with what is already on its way, in and out. */
 const EXPECTED: Amount = { balance: { of: { this: {} }, balance: 'pending' } };
 /** What this index lacks for its token's transfer fee, counting gas already on its way. */
+/**
+ * What this index lacks for its token's transfer fee with headroom: up to 1.25 × the fee,
+ * counting gas already on its way. Topped up only below 1 × (the filter), so a small rise in the
+ * gas price before the sweep needs no second top-up.
+ */
 const shortfall = (token: string): Amount => ({
-  max: [{ sub: [fee({ this: { asset: token } }), EXPECTED] }, { value: '0' }],
+  max: [{ sub: [{ times: [fee({ this: { asset: token } }), '1.25'] }, EXPECTED] }, { value: '0' }],
 });
 
 // ---- Blank triggers and templates -----------------------------------------------

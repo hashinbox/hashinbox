@@ -203,6 +203,9 @@ pub(crate) enum Amount {
     Sub(Box<Amount>, Box<Amount>),
     Min(Box<Amount>, Box<Amount>),
     Max(Box<Amount>, Box<Amount>),
+    /// An amount times a positive factor (`"1.25"`), rounded up to a whole
+    /// atomic unit: headroom over a fee, say.
+    Times(Box<Amount>, #[serde(with = "text")] Decimal),
 }
 
 impl Amount {
@@ -219,6 +222,10 @@ impl Amount {
                 a.validate()?;
                 b.validate()
             }
+            Self::Times(_, factor) if *factor <= Decimal::zero() => {
+                Err(Invalid::new("an amount is multiplied by a positive factor"))
+            }
+            Self::Times(a, _) => a.validate(),
         }
     }
 
@@ -230,6 +237,7 @@ impl Amount {
             Self::Add(a, b) | Self::Sub(a, b) | Self::Min(a, b) | Self::Max(a, b) => {
                 a.reads_this() || b.reads_this()
             }
+            Self::Times(a, _) => a.reads_this(),
         }
     }
 }
@@ -701,5 +709,19 @@ mod tests {
             )
             .contains("cancels out")
         );
+    }
+
+    #[test]
+    fn a_times_amount_reads_as_written_and_needs_a_positive_factor() {
+        let headroom = json!({ "times": [{ "fee": { "of": { "this": {} } } }, "1.25"] });
+        let amount: super::Amount = serde_json::from_value(headroom.clone()).expect("an amount");
+        assert_eq!(serde_json::to_value(&amount).unwrap(), headroom);
+        assert!(amount.validate().is_ok());
+        for factor in ["0", "-1"] {
+            let amount: super::Amount =
+                serde_json::from_value(json!({ "times": [{ "value": "1" }, factor] })).unwrap();
+            let refused = amount.validate().expect_err("refused").to_string();
+            assert!(refused.contains("positive"), "{refused}");
+        }
     }
 }

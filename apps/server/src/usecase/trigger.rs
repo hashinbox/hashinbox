@@ -226,6 +226,10 @@ impl<'a> Trigger<'a> {
                     .block_on(self.context.estimator.estimate(&spends))?;
                 return Ok(Some(fee));
             }
+            Amount::Times(amount, factor) => {
+                let amount = self.amount(amount, this, asset)?;
+                return Ok(amount.map(|amount| up(&(amount * factor))));
+            }
             Amount::Add(a, b) => (a, b, |a, b| a + b),
             Amount::Sub(a, b) => (a, b, |a, b| a - b),
             Amount::Min(a, b) => (a, b, Decimal::min),
@@ -249,6 +253,16 @@ impl<'a> Trigger<'a> {
         let found = wallet_index::db::find_by_target(self.connection, this, target)?;
         self.targets.insert(key, found.clone());
         Ok(found)
+    }
+}
+
+/// `amount` rounded up to a whole atomic unit.
+fn up(amount: &Decimal) -> Decimal {
+    let whole = amount.truncate(0);
+    if whole < *amount {
+        whole + Decimal::from(1_u64)
+    } else {
+        whole
     }
 }
 
