@@ -10,7 +10,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context as _, bail, ensure};
-use base::{Assets, Decimal, FeeEstimator, Network, Networked as _, Spend, Spends};
+use base::{Assets, Decimal, FeeEstimator, Network, Networked as _};
 use diesel::SqliteConnection;
 
 use crate::models::{
@@ -204,37 +204,22 @@ impl<'a> Trigger<'a> {
                 let Some(indexes) = self.target(of, this)? else {
                     return Ok(None);
                 };
-                if indexes.is_empty() {
-                    return Ok(Some(Decimal::zero()));
-                }
                 // One recipient address is priced as it is; none named, or
                 // several, as a new address.
-                let mut recipients = match to {
+                let to = match to {
                     Some(to) => {
                         let Some(to) = self.target(to, this)? else {
                             return Ok(None);
                         };
-                        to.sources()
-                            .into_iter()
-                            .map(|(address, _)| address)
-                            .collect()
+                        to.address().cloned()
                     }
-                    None => Vec::new(),
+                    None => None,
                 };
-                recipients.dedup();
-                let to = match recipients.as_slice() {
-                    [to] => Some(to.clone()),
-                    _ => None,
-                };
-                let spends: Spends = indexes
-                    .sources()
-                    .into_iter()
-                    .map(|(from, asset)| Spend {
-                        from,
-                        asset,
-                        to: to.clone(),
-                    })
-                    .collect();
+                // Indexes that hold nothing send nothing: no fee, nothing asked.
+                let spends = indexes.spends(to.as_ref())?;
+                if spends.is_empty() {
+                    return Ok(Some(Decimal::zero()));
+                }
                 let fee = self
                     .context
                     .runtime

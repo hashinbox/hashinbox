@@ -718,6 +718,32 @@ fn a_fee_is_priced_for_its_one_recipient_or_a_new_address() {
 }
 
 #[test]
+fn a_wallet_holding_nothing_costs_no_fee_and_asks_nothing() {
+    let (_directory, runtime, mut connection) = seeded();
+    // c's native index has no legs: it holds nothing.
+    let c = selection(&mut connection, &[id("c", "native")]);
+    let estimator = fees("100");
+    let mut evaluation = open(&mut connection, &runtime, estimator.clone(), None);
+    let fee = Amount::Fee {
+        of: this(None),
+        to: None,
+    };
+    assert!(
+        compares(
+            &mut evaluation,
+            &compare(this(None), Aggregate::Sum, Operator::Equal, fee),
+            &c
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        estimator.calls.load(Ordering::SeqCst),
+        0,
+        "no estimate asked"
+    );
+}
+
+#[test]
 fn holders_are_keyed_wallets_with_a_balance_of_the_asset() {
     let (_directory, _runtime, mut connection) = seeded();
     let c = &mut connection;

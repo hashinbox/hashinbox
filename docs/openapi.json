@@ -3579,6 +3579,9 @@
           },
           {
             "type": "object",
+            "required": [
+              "timestamp"
+            ],
             "properties": {
               "state": {
                 "type": [
@@ -3587,6 +3590,14 @@
                 ],
                 "format": "int32",
                 "description": "0 pending, 1 succeeded, 2 reverted."
+              },
+              "timestamp": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Its block's time, Unix seconds, when the node reported one."
               },
               "txid": {
                 "type": [
@@ -3597,7 +3608,7 @@
             }
           }
         ],
-        "description": "A mined leg with its transaction's txid and state (null for a reward):\na row of [`db::find_page`]."
+        "description": "A mined leg with its transaction's txid and state (null for a reward)\nand its block's time: a row of [`db::find_page`]."
       },
       "Network": {
         "type": "object",

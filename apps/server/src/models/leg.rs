@@ -230,8 +230,8 @@ impl crate::db::Keyed for Leg {
     }
 }
 
-/// A mined leg with its transaction's txid and state (null for a reward):
-/// a row of [`db::find_page`].
+/// A mined leg with its transaction's txid and state (null for a reward)
+/// and its block's time: a row of [`db::find_page`].
 #[derive(QueryableByName, serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct Movement {
     #[diesel(embed)]
@@ -242,6 +242,10 @@ pub(crate) struct Movement {
     /// 0 pending, 1 succeeded, 2 reverted.
     #[diesel(sql_type = Nullable<Integer>)]
     pub(crate) state: Option<i32>,
+    /// Its block's time, Unix seconds, when the node reported one.
+    #[diesel(sql_type = Nullable<BigInt>)]
+    #[schema(required)]
+    pub(crate) timestamp: Option<i64>,
 }
 
 /// Its leg's `seq`.
@@ -323,7 +327,8 @@ pub(crate) mod db {
             SELECT
                 l.*,
                 t.txid,
-                t.state
+                t.state,
+                b.timestamp
             FROM leg l
             JOIN block b ON b.id = l.block
             LEFT JOIN "transaction" t ON t.id = l."transaction"

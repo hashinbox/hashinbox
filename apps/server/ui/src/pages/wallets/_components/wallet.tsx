@@ -29,6 +29,7 @@ import { format } from '@/_components/format';
 import { Money } from '@/_components/money';
 import { EmptyRow } from '@/_components/table';
 import { Transaction as Tx } from '@/_components/transaction';
+import { When } from '@/_components/when';
 import type { Shell } from '@/layout';
 import { assetName, assetOf, assetsOf, listingOf, networkOf, tickersOf } from '@/money';
 import { go, href } from '@/route';
@@ -73,12 +74,32 @@ function claimOf(wallet: Account, asset: string): { text: string; color: string 
   return { text: `Indexed through ${through}.`, color: 'text.secondary' };
 }
 
+/**
+ * How confirmed the block at `position` is, as `n/N`: its confirmations so far (its own block
+ * counts as one) of the `N` the network needs; `final` once its block is final.
+ */
+function confirmationsOf(
+  position: number | null | undefined,
+  index: Account['indexes'][string] | undefined,
+): string {
+  if (position == null || index?.indexed_through == null) return '—';
+  const final = index.finality_at;
+  if (final != null && position <= final) return 'final';
+  const tip = index.indexed_through + (index.behind_tip ?? 0);
+  const needed = final == null ? null : tip - final;
+  const count = Math.max(tip - position + 1, 0);
+  return needed == null ? String(count) : `${String(Math.min(count, needed))}/${String(needed)}`;
+}
+
 /** `amount` with its sign: `+` above zero, `-` below, none at zero. */
 function signed(amount: Decimal, units: { decimals: number; display: number | null }): string {
   const text = format(amount.abs(), units);
   if (amount.isZero()) return text;
   return `${amount.isNegative() ? '-' : '+'}${text}`;
 }
+
+/** How often the wallet and its movements are read again. */
+const REFRESH_MS = 10_000;
 
 const figures = { fontFamily: mono, fontWeight: 300, fontVariantNumeric: 'tabular-nums' } as const;
 
@@ -128,7 +149,12 @@ export function Wallet({
       .catch(shell.fail);
   }, [wallet, asset, shell.fail]);
 
-  useEffect(refresh, [refresh]);
+  useEffect(() => {
+    refresh();
+    // Balances, movements and their confirmations move with every block.
+    const timer = window.setInterval(refresh, REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
 
   const olderLegs = () => {
     if (legsCursor === null) return;
@@ -325,13 +351,15 @@ export function Wallet({
               <TableCell>Kind</TableCell>
               <TableCell>Amount</TableCell>
               <TableCell>Balance after</TableCell>
+              <TableCell>Time</TableCell>
               <TableCell>Block</TableCell>
+              <TableCell>Confirmations</TableCell>
               <TableCell>Transaction</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {legs.length === 0 ? (
-              <EmptyRow columns={5} message="No movements yet." />
+              <EmptyRow columns={7} message="No movements yet." />
             ) : (
               legs.map((leg) => {
                 const block = [
@@ -353,6 +381,9 @@ export function Wallet({
                     <TableCell sx={figures}>
                       <Money amount={leg.total ?? '0'} {...money} />
                     </TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                      {leg.timestamp == null ? '—' : <When at={leg.timestamp * 1000} />}
+                    </TableCell>
                     <TableCell sx={figures}>
                       <Link
                         href={href(block)}
@@ -364,6 +395,9 @@ export function Wallet({
                       >
                         {leg.position}
                       </Link>
+                    </TableCell>
+                    <TableCell sx={{ ...figures, whiteSpace: 'nowrap' }}>
+                      {confirmationsOf(leg.position, (fresh ?? wallet).indexes[asset])}
                     </TableCell>
                     <TableCell sx={{ ...figures, fontSize: 12, whiteSpace: 'nowrap' }}>
                       {leg.txid && <Tx value={leg.txid} network={networkOf(wallet)} />}

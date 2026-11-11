@@ -222,12 +222,32 @@ impl Selection {
         self.indexes.keys().cloned().collect()
     }
 
-    /// Each one's (address, asset), what a fee estimate takes.
-    pub(crate) fn sources(&self) -> Vec<(Address, Asset)> {
-        self.indexes
-            .values()
-            .map(|one| (one.address.clone(), one.asset.clone()))
-            .collect()
+    /// What sending everything each one holds to `to` (`None`: a new
+    /// address) is: one spend per index with a spendable balance. One that
+    /// holds nothing sends nothing, so it is left out: its fee is none.
+    ///
+    /// # Errors
+    ///
+    /// When a stored balance does not decode.
+    pub(crate) fn spends(&self, to: Option<&Address>) -> anyhow::Result<base::Spends> {
+        let mut spends = base::Spends::default();
+        for one in self.indexes.values() {
+            if one.spendable()? > Decimal::zero() {
+                spends.push(base::Spend {
+                    from: one.address.clone(),
+                    asset: one.asset.clone(),
+                    to: to.cloned(),
+                });
+            }
+        }
+        Ok(spends)
+    }
+
+    /// The one address all of them are of, if they share one.
+    pub(crate) fn address(&self) -> Option<&Address> {
+        let mut addresses = self.indexes.values().map(|one| &one.address);
+        let first = addresses.next()?;
+        addresses.all(|other| other == first).then_some(first)
     }
 }
 

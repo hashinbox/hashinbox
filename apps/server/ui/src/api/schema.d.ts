@@ -940,8 +940,8 @@ export interface components {
             network: components["schemas"]["Network"];
         };
         /**
-         * @description A mined leg with its transaction's txid and state (null for a reward):
-         *     a row of [`db::find_page`].
+         * @description A mined leg with its transaction's txid and state (null for a reward)
+         *     and its block's time: a row of [`db::find_page`].
          */
         Movement: components["schemas"]["Leg"] & {
             /**
@@ -949,6 +949,11 @@ export interface components {
              * @description 0 pending, 1 succeeded, 2 reverted.
              */
             state?: number | null;
+            /**
+             * Format: int64
+             * @description Its block's time, Unix seconds, when the node reported one.
+             */
+            timestamp: number | null;
             txid?: string | null;
         };
         /**

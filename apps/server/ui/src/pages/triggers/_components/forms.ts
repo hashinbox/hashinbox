@@ -488,13 +488,26 @@ export const TEMPLATES: Template[] = [
       {
         ...native(place, 'sweep-token'),
         selector: tagged('deposit', place.token),
+        // Something to sweep first: the fee of sending none is never asked.
         filter: {
-          compare: {
-            of: { this: { asset: 'native' } },
-            aggregate: 'sum',
-            operator: 'at_least',
-            value: FEE,
-          },
+          all: [
+            {
+              compare: {
+                of: { this: {} },
+                aggregate: 'sum',
+                operator: 'above',
+                value: { value: '0' },
+              },
+            },
+            {
+              compare: {
+                of: { this: { asset: 'native' } },
+                aggregate: 'sum',
+                operator: 'at_least',
+                value: FEE,
+              },
+            },
+          ],
         },
         check: { all: [] },
         action: {
