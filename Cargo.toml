@@ -6,6 +6,7 @@ members = [
     "sdk/chains/ethereum",
     "sdk/chains/solana",
     "sdk/payments",
+    "sdk/trigger",
     "packages/decimal",
     "packages/crypto",
     "packages/rpc",
@@ -40,6 +41,7 @@ reqwest = { version = "=0.12.28", default-features = false, features = ["json", 
 jsonrpsee = { version = "=0.24.10", default-features = false, features = ["http-client"] }
 serde = { version = "1", default-features = false }
 serde_json = "1"
+utoipa = "=5.5.0"
 sha2 = "=0.10.9"
 # The server's SQL store: diesel on SQLite (sync; run on `spawn_blocking`),
 # pooled with r2d2. 2.3 needs Rust 1.86, within the MSRV.

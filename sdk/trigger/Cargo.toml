@@ -1,0 +1,28 @@
+[package]
+name = "trigger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The trigger engine as composable pieces: wallets, amounts, conditions, actions, the trigger and the round."
+
+[features]
+default = []
+# `utoipa::ToSchema` on the stats a round keeps.
+openapi = ["dep:utoipa"]
+# The test doubles: the in-memory store and the fixed-price fee estimator (`trigger::testing`).
+testing = []
+
+[dependencies]
+anyhow.workspace = true
+base = { path = "../base" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+utoipa = { workspace = true, optional = true }
+
+[dev-dependencies]
+# This crate on itself: turns `testing` on for its own tests and examples.
+trigger = { path = ".", features = ["testing"] }
+futures-executor.workspace = true
+
+[lints]
+workspace = true

@@ -1,379 +1,445 @@
-# 077: `sdk/trigger`: the trigger engine as a package
+# 077: `sdk/trigger`: the trigger engine as composable pieces
 
-Status: design, no code changed. Paths under `apps/server/` unless noted.
+Status: package built (`sdk/trigger`, steps 1–3 of section 7); the server
+is not switched yet. Section 9 lists where the code differs from this design.
+Paths under `apps/server/` unless noted;
+line numbers are as of `bcbf1db`.
 
-The trigger engine (definitions, validation, evaluation, the `send` plan)
-lives in the server today, spread over 3 models, a usecase, a worker and an
-action registry (~2,000 lines without tests). This design moves everything
-that does not need SQL, HTTP or the job queue into a new package,
-`sdk/trigger`. The server keeps storage, HTTP and job wiring, the same way
-`packages/tasks` and `sdk/base` already split the work: the package declares
-what it reads, and the server implements that over SQLite in `usecase`.
+Today one trigger is evaluated by one 330-line struct
+(`src/usecase/trigger.rs:36-253`). It matches on closed enums
+(`src/models/trigger.rs:36-245`) and reaches into SQL directly
+(`wallet_index::db::select`, `find_by_target`). An action registry sits on
+top of it (`src/usecase/workers/trigger/actions.rs:25-108`). Adding a
+condition, an amount or an action means editing all three.
+
+This design splits the engine into small domains: **selection**, **amounts**,
+**conditions**, **actions**, the **trigger** and the **round**. Each holds
+its types, its rules, its errors and its tests, and the domains compose
+through three traits. The package `sdk/trigger` holds them. The server
+supplies storage, chooses which conditions and amounts make up its trigger
+language, and registers its actions. It becomes configuration.
 
 ## Decisions first
 
-1. **New crate `trigger` at `sdk/trigger`**, depending on `base`, `serde`,
-   `anyhow` and nothing else (optional `utoipa` behind feature `openapi`).
-   It never touches SQL, `tasks`, `payments` or tokio.
-2. **One read port, `Snapshot`**: everything a round reads, from one
-   consistent view of the store: the confirmed position, the enabled triggers
-   with their latest run, and wallet indexes picked by a selector or named by
-   (address, asset). Async, `base::Future`, `anyhow`, as `base`'s stores are.
-3. **No write port.** A round returns a value (`Round`): each trigger's
-   `LastRound` and the sends it plans. The server writes it in one
-   transaction together with the broadcast jobs, which belong to the server.
-   A write trait would have one implementer and one caller, both in the
-   server.
-4. **Actions become an enum.** `Action::Send(SendInput)`, serde-tagged so the
-   stored JSON (`{"name": "send", "input": {…}}`) does not change. This
-   deletes the `Action` trait, the `Actions` registry, `Invocation`, the
-   `"unknown action"` path and the API's hand-made name check.
-5. **The package plans sends and the server turns them into jobs.**
-   `Payout { from, asset, transfers }`, one per sender, in order. The server
-   maps each one to its `broadcast::SendIntent` → `Broadcast::job`.
-6. **Selector meaning moves to the package, selector SQL stays in the
-   server.** `Selector` and its validation are package types.
-   `Selector::sql` becomes a free function in `models/wallet_index.rs`'s
-   `db` (the model owns its SQL); `wallet_index_selector.rs` goes away.
-7. **The round keeps its single snapshot.** The server opens one read
-   transaction and drives the package's async `decide` inside it with one
-   `Handle::block_on`. Today it calls `block_on` once per fee estimate
-   instead.
-8. **Step one changes no behaviour.** The bugs found below (section 6) are
-   fixed in their own later steps, each with its own test.
-9. **No change to `sdk/base`, `sdk/wallets` or `packages/crypto` is needed.**
+1. **Three traits carry the composition**:
+   - `conditions::Condition`: a yes/no question about the wallets being
+     evaluated.
+   - `amounts::Amount`: atomic units of an asset, or unknown.
+   - `actions::Action<E>`: what a trigger does with its kept wallets,
+     returned as effects of type `E`, never performed.
 
-## 1. Inventory: what moves, what stays
+   Everything else implements, combines or feeds one of them.
+2. **Combinators are generic.** `conditions::Logic<C>` (`all`/`any`/`not`)
+   works over any condition and is one itself. `amounts::Arithmetic<A>`
+   (`add`/`sub`/`min`/`max`/`times`) works over any amount and is one
+   itself. The package ships the building blocks: `Compare`, `Since`,
+   `Value`, `Balance`, `Fee`.
+3. **The trigger language is the server's.** Its `Filter`, `Check` and
+   `AmountTerm` enums choose the building blocks and give the stored JSON
+   its shape. Today's JSON does not change. A new building block is a
+   server type plus one enum variant.
+4. **Actions are the server's.** The package defines the `Action` trait,
+   the `Registry` and the stored `Call { name, input }`. It never parses an
+   input: each action declares its own `Input` type, and the registry
+   decodes and validates it. The server's `send` returns broadcast
+   `tasks::Job`s.
+5. **One store trait, `trigger::Store`**: a network's wallet indexes at
+   its confirmed block, from one consistent read. Async with
+   `base::Future`, as `base`'s stores are. The confirmed position and the
+   enabled triggers are inputs to the round, not reads behind the trait.
+6. **No write trait.** A round returns one `Decision` per trigger (its last
+   round and its effects). The server writes them, jobs included, in one
+   transaction.
+7. **One error, classed.** `error::Error { class, message }`: every
+   piece returns it directly, its `Class` saying what kind of thing is
+   wrong and its message today's text. No roll-up, no `From` chains. There is no other
+   "invalid" file.
+8. **Fees are the chain's business.** The package takes the
+   `Arc<dyn base::FeeEstimator>` that `factory.fees()` hands out and calls
+   `estimate(&Spends)`. That is each chain's `Cached` estimator
+   (`sdk/chains/{ethereum,solana,bitcoin}/src/fee_cache.rs`), which decides
+   what to reuse. The package has no fee cache of its own.
+9. **No change to `sdk/base`, `sdk/wallets` or `packages/crypto`.**
 
-| Today | Item | Goes to |
-|---|---|---|
-| `models/trigger.rs` | `Invalid`, `This`, `Target` (+`asset`, `validate`), `Gate`, `Filter`, `Compare` (+`validate`, `reads_this`), `Balance`, `Aggregate`, `Operator` (+`holds`), `Amount` (+`validate`, `reads_this`), `text` (Decimal as text), `Logic<L>` (+`validate`, `eval`, `Form`, `Combinator`) | **moves** `sdk/trigger/src/definition.rs` |
-| `models/trigger.rs`, `usecase/trigger.rs` (uncommitted in the working tree as this was written) | `Amount::Times(amount, factor)` with its validation, and `up` (round up to a whole atomic unit) | **moves** with `Amount` and evaluation |
-| `models/trigger.rs` | `Action { name, input: Value }` | **moves, reshaped**: `enum Action { Send(SendInput) }` |
-| `models/trigger.rs` | `Stats`, `LastRound` | **moves** `sdk/trigger/src/round.rs` (`ToSchema` behind `openapi`) |
-| `models/trigger.rs` | `Trigger::validate` | **splits**: the definition's rules (selector, filter reads `This`, check can hold, send shape) **move** to `trigger::Trigger::validate`. The id slug rule **stays** on the row |
-| `models/trigger.rs` | `Trigger` row (diesel, `Json<…>` columns, `group_id`, `enabled`, times, `last_round`), `Keyed`, `db::{insert, count, get_by_id, find_page, update, find_enabled, set_last_round, delete}` | **stays**. Columns are typed by package types. Adds `Trigger::new(id, network, group, definition, enabled, at)` and `From<Trigger> for trigger::Trigger` |
-| `models/trigger.rs` tests | `wallets_are_named_on_purpose`, `a_filter_reads_the_wallet_it_tests`, `a_check_can_hold` | **move** to package (without the id part) |
-| `models/wallet_index_selector.rs` | `Selector` enum, `validate`, `asset` | **moves** `sdk/trigger/src/selector.rs` |
-| `models/wallet_index_selector.rs` | `Selector::sql` | **stays**, as `wallet_index::db::picked(&Selector, &mut binds)`. The file is deleted |
-| `models/wallet.rs` | `is_tag` | **splits**: the tag rule moves to `trigger::is_tag` (selectors validate tags). `wallet::is_tag` calls it, and the trigger id check uses it too |
-| `models/wallet_index.rs` | `WalletIndex` (API row), `IndexState`, all `db` statements except below | **stays** |
-| `models/wallet_index.rs` | `Selection` (`new`, `only`, `insert`, `ids`, `spends`, `address`, `Deref`), `WalletIndex::held` | **move** as `trigger::Selection` over a lean `trigger::Index` (balances decoded once) |
-| `models/wallet_index.rs` | `WalletIndex::spendable` | **stays only as the conversion** `TryFrom<WalletIndex> for trigger::Index` (decode, refuse a negative confirmed balance). No other caller |
-| `models/wallet_index.rs` | `db::select`, `db::read` | **stay**. They return `Vec<trigger::Index>` |
-| `models/wallet_index.rs` | `db::find_by_target` | **splits**: `This{}` / `This{asset}` / `Select` resolution and the sibling count check **move** to the package. The server keeps only `db::find(network, wanted: &[(Address, Asset)], confirmed)` (fully indexed ones, one query). `find_by_ids` (test only) goes |
-| `models/wallet_index.rs` | `db::find_held` (`base::Holdings`) | **stays**. It is fee pricing, used by the estimator, not read by the engine |
-| `models/trigger_run.rs` | `TriggerRun` row, `Run`, `RunJob`, `db::{insert, find_page, count_by_hour}`, view `trigger_run_with_jobs` | **stays** (runs reference job ids: queue knowledge). `stats: Json<trigger::Stats>` |
-| `usecase/trigger.rs` | `Trigger` (decide, check, filter, gate, compare, amount, target cache), `Triggers` (confirmed + enabled, decide in id order), `Decision`, `Context` | **moves** to `sdk/trigger/src/round.rs`. The file is replaced by the SQLite `Snapshot` (~60 lines) |
-| `usecase/workers/trigger/actions.rs` | `Action` trait, `Actions`, `Invocation`, `Transfer` (the send plan), `SendInput` (+`validate`) | **moves**: `SendInput` to `definition.rs`, the send plan to `round.rs` as `Payout`s. Trait, registry and invocation are **deleted** |
-| `usecase/workers/trigger/mod.rs` | `Round` worker: `KIND`, `POLICY` (Skip, unique, 2), `topic` (`chain:network`), read → decide → refusal log → one write → notify → Idle/Done | **stays**, shrinks to wiring: build `Context`, read+decide, log refusals, write. Becomes `workers/trigger.rs` |
-| `api/triggers.rs` | routes, `Definition`, `BatchRequest`, `CreateResponse`, `TriggerRun`/`RunOutcome`/`RunJob`, `RunsResponse`, `now` | **stays**. `Definition::trigger` builds a `trigger::Trigger`, calls its `validate`, checks network and send asset (404s), builds the row. `RunOutcome` stays: it is a fold over job states |
-| `usecase/stats.rs`, `workers/prune.rs`, `workers/index.rs` (`Round::enqueue`), `main.rs` | counts, prune of rounds, queueing at tip, wiring | **stay**, untouched |
-| `init.sql` | `trigger`, `trigger_run`, `trigger_run_with_jobs` | **stay**, unchanged |
-
-The server goes from ~2,000 lines of trigger code to about 700 (row, run
-row, snapshot, worker, API). The package is about 900 lines plus tests.
-
-## 2. The package's public API
+## 1. The package, domain by domain
 
 ```text
-sdk/trigger/src/
-  lib.rs          re-exports
-  definition.rs   Trigger, Logic, Filter, Gate, Compare, Aggregate, Operator,
-                  Balance, Amount, Target, This, Action, SendInput, Invalid, is_tag
-  selector.rs     Selector (validate, asset)
-  selection.rs    Index, Selection
-  snapshot.rs     Snapshot, Enabled
-  round.rs        Context, decide, Round, Decided, Stats, LastRound, Payout
-  memory.rs       Memory (feature `testing`)
+sdk/trigger/
+  Cargo.toml         base, serde, serde_json, anyhow; features `openapi` (utoipa), `testing`
+  src/lib.rs         how the pieces fit together; re-exports
+  src/selection.rs   Index, BalanceKind, Selection, Selector, Target
+  src/store.rs       the Store trait (a network's indexes at its confirmed block, one consistent read); CachedStore
+  src/amounts.rs     the Amount trait; Value, Balance, Fee, Arithmetic (add/sub/min/max/times)
+  src/conditions.rs  the Condition trait; Compare (Aggregate, Operator), Since, Logic (all/any/not)
+  src/actions.rs     the Action trait, Registry, Call
+  src/trigger.rs     Trigger (selector, filter, check, action), its rules and how one trigger decides; Context
+  src/error.rs       Error { class, message } and Class: the one error every rule returns
+  src/round.rs       Round over every enabled trigger at one block; Enabled, Decision, Stats, LastRound
+  src/testing/       (feature testing) the two test doubles
+    mod.rs           docs and re-exports
+    memory.rs        `Wallets`: the in-memory Store, the reference for what each selector means
+    fee.rs           `Fees`: a fixed-price FeeEstimator that keeps what it was asked
+  tests/             end-to-end tests through the public API (section 6)
+  examples/sweep.rs  the "Token sweep with gas funding" pair, one round, offline
 ```
 
-### Definitions
+Each file holds one whole domain: its trait, its pieces, its rules, its
+error and its tests. That is about 1,000 lines over 8 files, 80–200 each.
 
-These are the types of `models/trigger.rs`, byte for byte in JSON. Two
-changes:
+`Context` lives in `trigger.rs`: it is the state of one trigger
+deciding (its wallets, its last run), and the round only creates one per
+trigger.
+
+### Names: what changed and why
+
+| Before (v2 of this doc) | Now | Why |
+|---|---|---|
+| `Predicate` | `Condition` | the plain word for "when this holds" |
+| `Expr<L>` | `Arithmetic<A>` | says what it does: add, sub, min, max, times |
+| `Scope` | `Context` | it is the state of evaluating one trigger: its wallets, its last run, the round's reads |
+| `Indexes` (port), `Snapshot` (v3) | `Store` | what the round reads wallet indexes from, as `tasks::Store` is what the queue reads jobs from |
+| `CachedSnapshot` (v3) | `CachedStore` | a `Store` over another that answers each selector once per round |
+| `Held` | `BalanceKind` | which balance, confirmed or pending; avoids a clash with the `Balance` amount |
+| `Actions<P>` | `actions::Registry<E>` | a registry of actions by name |
+| plans, `P` | effects, `E` | what the action asks its caller to carry out once the round is written |
+| `Decided<P>` | `round::Decision<E>` | a noun: what one trigger decided this round |
+| `Gate`, `Leaf` (server) | `Check`, `AmountTerm` | match the JSON key `check` and say what they are |
+| `delegate!` | removed | a hand-written `match` is clearer than a macro (section 3) |
+| `invalid.rs`, `Invalid` | `error::Error` with a `Class` | one error, its class says what kind of thing is wrong |
+| `Evaluation` (v3) | `Context` | the state one trigger decides in; was `Evaluation` |
+| `wallets.rs` | `selection.rs` | the module of `Selection`, `Selector` and their store |
+| `pricing.rs`, `Pricing` | removed | each chain's `Cached` estimator already reuses answers |
+
+Names that stay, each in one line:
+
+- `Index`, `Selection`, `Selector`: the words the API and the server already
+  use for these exact things (`GET /v1/wallets/…/indexes`, `selector`).
+- `Target`: the JSON forms `{"this": …}` / `{"select": …}` that every
+  compare, amount and send names.
+- `Logic`: the type of `all`/`any`/`not`, in `conditions.rs`.
+- `Compare`, `Since`, `Value`, `Balance`, `Fee`: the JSON keys themselves.
+- `Call`: a stored call to an action (`{"name", "input"}`).
+- `Enabled`: an enabled trigger with its id and last run, which is what a
+  round takes.
+
+## 2. The domains and their contracts
+
+| Domain | Types | Responsibility | In → out | Composes with |
+|---|---|---|---|---|
+| selection | `Index`, `BalanceKind`, `Selection`, `Selector`, `Target` | which wallets, and their balances at the confirmed block | selector or (address, asset) pairs → indexes | every amount and condition, through `Context::wallets` |
+| amounts | `Amount`, `Value`, `Balance`, `Fee`, `Arithmetic<A>` | how much, in atomic units of an asset | (`Context`, `Asset`) → `Option<Decimal>` | `Compare`, actions |
+| conditions | `Condition`, `Compare<A>`, `Since`, `Logic<C>` | whether something holds | `Context` → `bool` | filters and checks of a trigger |
+| actions | `Action<E>`, `Registry<E>`, `Call` | the seam a trigger acts through; decodes and checks calls | (input, `Context`) → `Vec<E>` | `Trigger`, `Round` |
+| trigger | `Trigger<F, C>`, `Context` | select → keep each index by `F` → check by `C` → call | `Context` → kept wallets + effects | `Round` |
+| error | `Error`, `Class` | why something cannot be stored | — | every `validate` |
+| store | `Store`, `CachedStore` | reads a network's indexes at its confirmed block, one consistent read; each selector once per round | selector or (address, asset) pairs → indexes | `Context`, `Round` |
+| round | `Round<E>`, `Enabled`, `Decision<E>`, `Stats`, `LastRound` | every enabled trigger at one block; one refused trigger never stops the others | (`Store`, triggers) → `Vec<Decision<E>>` | the server's worker |
+
+We considered making these into traits too, and chose not to:
+
+- **`Target`**: its forms are the whole vocabulary of "which wallets" over
+  the store. A new form would need a new store method anyway.
+- **`Selector`**: it is the store's query language, translated by each
+  store (SQL in the server, a `match` in `testing/memory.rs`).
+- **Pipeline stages**: three lines in `Trigger::decide`.
+
+### The traits
 
 ```rust
-/// A trigger's definition: what it picks, keeps, waits for and does. Its id,
-/// network, group and enabled flag are its store's.
+// conditions.rs
+/// Whether something holds about the wallets being evaluated.
+pub trait Condition: Send + Sync {
+    /// A term it cannot know (a sibling not fully indexed, no asset) is
+    /// `false`; a read error stays an error.
+    fn holds<'a>(&'a self, on: &'a mut Context<'_>) -> Future<'a, anyhow::Result<bool>>;
+    /// The rules it must keep to be stored.
+    fn validate(&self) -> Result<(), Error>;
+    /// Whether it reads `this`: a filter may only use ones that do.
+    fn reads_this(&self) -> bool;
+}
+
+// amounts.rs
+/// An amount in atomic units of `asset`; `None`: a term is unknown.
+pub trait Amount: Send + Sync {
+    fn atomic<'a>(&'a self, on: &'a mut Context<'_>, asset: &'a Asset)
+        -> Future<'a, anyhow::Result<Option<Decimal>>>;
+    fn validate(&self) -> Result<(), Error>;
+    fn reads_this(&self) -> bool;
+    /// Its fixed display value when it is one: a count compares only with a whole one.
+    fn constant(&self) -> Option<&Decimal> { None }
+}
+
+// actions.rs
+/// What a trigger does once its check holds: effects for its caller to
+/// carry out after the round is written, never effects of its own (it runs
+/// inside the round's read).
+pub trait Action<E>: Send + Sync + 'static {
+    /// Its name in `{"name": …, "input": …}`.
+    const NAME: &'static str;
+    type Input: DeserializeOwned + Send + Sync;
+    /// Refuses an input it could never run, before the trigger is stored.
+    fn validate(&self, input: &Self::Input, network: &Network, assets: &Assets) -> Result<(), Error>;
+    /// What to do now, `on.this()` being the kept wallets.
+    fn run<'a>(&'a self, input: &'a Self::Input, on: &'a mut Context<'_>)
+        -> Future<'a, anyhow::Result<Vec<E>>>;
+}
+
+// store.rs
+/// Reads one network's wallet indexes at its confirmed block, all from one
+/// consistent read: only fully indexed ones (indexed through a live block at
+/// or above the confirmed position, the universe `Selector::Not` is relative
+/// to), each with its balances at that position.
+pub trait Store: Send {
+    fn select<'a>(&'a mut self, selector: &'a Selector) -> Future<'a, anyhow::Result<Vec<Index>>>;
+    /// Of `wanted`, the fully indexed ones; the rest are left out.
+    fn find<'a>(&'a mut self, wanted: &'a [(Address, Asset)]) -> Future<'a, anyhow::Result<Vec<Index>>>;
+}
+```
+
+### What an evaluation offers (`trigger.rs`)
+
+```rust
+impl<'r> Context<'r> {
+    /// The wallets being evaluated: `this`.
+    pub fn this(&self) -> &Selection;
+    /// The same evaluation with `this` replaced: a filter per index, an amount per source.
+    pub fn with(&mut self, this: Selection) -> Context<'_>;
+    /// The wallets `target` names, read once per round (`select` by its selector alone).
+    pub async fn wallets(&mut self, target: &Target) -> anyhow::Result<Option<Selection>>;
+    /// The chain's estimator, as `factory.fees()` handed it out.
+    pub fn fees(&self) -> &dyn FeeEstimator;
+    /// `value` in display units of `asset` → atomic.
+    pub fn atomic(&self, asset: &Asset, value: &Decimal) -> anyhow::Result<Decimal>;
+    pub fn network(&self) -> &Network;
+    /// Unix ms.
+    pub fn now(&self) -> u64;
+    /// When this trigger's latest run started; `None`: never.
+    pub fn last_run(&self) -> Option<u64>;
+}
+```
+
+### Errors: one, classed (`error.rs`)
+
+```rust
+pub struct Error { pub class: Class, message: String }   // Display: the message
+pub enum Class {
+    EmptySelection, Malformed, Impossible, Redundant, OutOfRange,
+    FilterIgnoresWallet, UnknownAction, BadInput, Refused, NotConfigured,
+}
+```
+
+Each rule returns `Error::new(class, message)` itself; nothing wraps or
+converts. The messages are today's (`src/models/trigger.rs:296-482`,
+`wallet_index_selector.rs:37-53`), so the API answers and the tests that
+match on them do not change. The API maps the class to a status:
+
+| Class | What is wrong | Status |
+|---|---|---|
+| `EmptySelection` | a selection picks nothing or everything: empty ids, empty "any of" / "all of", empty asset | 400 |
+| `Malformed` | a name not well formed: a tag | 400 |
+| `Impossible` | a condition that can never hold: an empty "any of" | 400 |
+| `Redundant` | a "not" right inside a "not" (selector or condition) | 400 |
+| `OutOfRange` | a count against a fractional number, a `times` factor ≤ 0 | 400 |
+| `FilterIgnoresWallet` | a filter condition that never reads the wallet it tests | 400 |
+| `UnknownAction` | no action of the name is registered | 404 |
+| `BadInput` | an action's input does not decode (`"send input: …"`) | 400 |
+| `Refused` | an action refuses its input | 400 |
+| `NotConfigured` | an action's input names an asset not configured here | 404 |
+
+Old variant → class: `wallets::Error::{EveryWallet, NoIds, NoWallet,
+NoAsset}` → `EmptySelection`; `BadTag` → `Malformed`; `DoubleNot` (both) →
+`Redundant`; `conditions::Error::NeverHolds` → `Impossible`;
+`CountNotWhole` and `amounts::Error::FactorNotPositive` → `OutOfRange`;
+`trigger::Error::FilterIgnoresThis` → `FilterIgnoresWallet`;
+`actions::Error::{Unknown, Input, Refused, NotConfigured}` →
+`UnknownAction`, `BadInput`, `Refused`, `NotConfigured`. The wrapping
+variants (`Wallets`, `Amount`, `Selector`, `Filter`, `Check`, `Action`) are
+gone: the inner error is returned as it is.
+
+### The trigger and the round
+
+```rust
+// trigger.rs
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Trigger {
+pub struct Trigger<F, C> {
     pub selector: Selector,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter: Option<Logic<Filter>>,
-    pub check: Logic<Gate>,
-    pub action: Action,
+    pub filter: Option<Logic<F>>,
+    pub check: Logic<C>,
+    pub action: Call,
 }
 
-impl Trigger {
-    /// Wallets named on purpose, a filter whose every compare reads `This`,
-    /// a filter and check that can hold, a send that is not many to many.
-    pub fn validate(&self) -> Result<(), Invalid>;
+impl<F: Condition, C: Condition> Trigger<F, C> {
+    pub fn validate<E>(&self, actions: &Registry<E>, network: &Network, assets: &Assets) -> Result<(), Error>;
 }
 
-/// What a trigger does when its check holds. JSON: `{"name": "send", "input": {…}}`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "name", content = "input", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Action {
-    Send(SendInput),
-}
-```
-
-`Selector`, `Target` and `This` also derive `PartialOrd, Ord`, so a resolved
-target is cached by the value itself, not by its JSON text
-(`serde_json::to_string(target)` today).
-
-### Selection
-
-```rust
-/// One asset of one address, as a round reads it at the confirmed block.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Index {
-    pub address: Address,
-    pub asset: Asset,
-    /// Its wallet's key is kept: it may send.
-    pub keyed: bool,
-    /// Spendable at the confirmed block: what a reorg cannot undo, less what
-    /// is on its way out (`Balance::Confirmed`).
-    pub confirmed: Decimal,
-    /// What it holds once every pending transaction lands (`Balance::Pending`).
-    pub pending: Decimal,
+// round.rs
+impl<'a, E> Round<'a, E> {
+    pub fn new(actions: &'a Registry<E>, fees: Arc<dyn FeeEstimator>, assets: &'a Assets,
+               network: Network, confirmed: u64, now: u64) -> Self;
+    /// Every trigger in the order given.
+    pub async fn run<F: Condition, C: Condition>(self, store: &mut dyn Store,
+               triggers: Vec<Enabled<F, C>>) -> Vec<Decision<E>>;
 }
 
-impl Index {
-    /// `chain.network.address.asset`: what `Selector::Ids` names.
-    pub fn id(&self) -> String;
-    pub fn held(&self, balance: Balance) -> &Decimal;
-}
-
-/// Indexes of one network, by (address, asset): `This`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Selection(BTreeMap<(Address, Asset), Index>);
-// only(&Index), spends(to: Option<&Address>) -> Spends, address() -> Option<&Address>,
-// Deref to the map, FromIterator<Index>
-```
-
-The key is (address, asset), the identity `base` already uses. The server's
-id string is only needed by `Selector::Ids`, and `Index::id` derives it.
-`Selection` no longer carries `network` or `confirmed`: the round holds them.
-
-### Evaluation
-
-```rust
-/// What every trigger of a round decides with.
-#[derive(Clone)]
-pub struct Context {
-    pub network: Network,
-    /// The network's assets: a `value` in display units → atomic.
-    pub assets: Assets,
-    pub fees: Arc<dyn FeeEstimator>,
-    /// Unix ms; `since` gates compare against it.
-    pub now: u64,
-}
-
-/// One round of `snapshot`'s network: `None` while its confirmed position is
-/// unknown. Every enabled trigger decides at that position, in id order; one
-/// that cannot decide is refused (its `LastRound` says why) and the others go
-/// on.
-///
-/// # Errors
-///
-/// When the confirmed position or the triggers cannot be read: the round
-/// is retried.
-pub async fn decide(snapshot: &mut dyn Snapshot, context: &Context) -> anyhow::Result<Option<Round>>;
-
-/// What one round decided.
-pub struct Round {
-    /// When it decided, Unix ms (`context.now`).
-    pub at: u64,
-    /// The confirmed position it decided at.
-    pub confirmed: u64,
-    /// Every enabled trigger, in id order.
-    pub decided: Vec<Decided>,
-}
-
-/// One trigger's part of a round.
-pub struct Decided {
-    pub trigger: String,
-    /// What it saw, and why it was refused: written every round.
-    pub last: LastRound,
-    /// What it sends, one per sender; empty: it does not act (no run).
-    pub payouts: Vec<Payout>,
-}
-
-/// One sender's transfers of one asset, in order: one broadcast.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Payout {
-    pub from: Address,
-    pub asset: Asset,
-    /// (recipient, atomic amount), each above zero.
-    pub transfers: Vec<(Address, Decimal)>,
-}
+pub struct Enabled<F, C> { pub id: String, pub trigger: Trigger<F, C>, pub last_run: Option<u64> }
+pub struct Decision<E> { pub trigger: String, pub last: LastRound, pub effects: Vec<E> }
 ```
 
 `Stats { selected, kept, checked, jobs }` and `LastRound { at, confirmed,
-stats (flattened), refused }` keep their JSON. `jobs` is `payouts.len()`.
-`at` and `confirmed` become `u64` (as `tasks::now()` and `base` positions
-are); the JSON is the same.
+stats, refused }` keep their JSON (`src/models/trigger.rs:386-415`), and
+`jobs` is `effects.len()`. They derive `utoipa::ToSchema` behind feature
+`openapi`. `RunOutcome` stays in the server (`src/api/triggers.rs:411-440`):
+it folds queue job states.
 
-Run outcomes (`RunOutcome`: pending / succeeded / failed / mixed) are **not**
-in the package. They fold the states of queue jobs, which the package never
-sees. They stay in `api/triggers.rs`.
+## 3. The server after: configuration
 
-## 3. The store interface: `Snapshot`
-
-What evaluation reads today, from `usecase/trigger.rs`, `actions.rs` and
-`wallet_index.rs`:
-
-| Read | When | Today |
-|---|---|---|
-| confirmed position of the network | once per round | `network_index::db::find_confirmed` |
-| enabled triggers by id + latest run's `started_at` | once per round | `trigger::db::find_enabled` (joins `last_run`) |
-| indexes a selector picks, fully indexed at confirmed, with spendable and pending balances, `keyed` | per trigger (selector), per `Select` target | `wallet_index::db::select` |
-| the `asset` sibling of each wallet in `This`, fully indexed | per `This{asset}` target | `find_by_target` → `read(Ids)` |
-| fee of `Spends` with an optional recipient | per `Fee` amount | `FeeEstimator::estimate` (reads `Holdings` itself) |
-| asset decimals | per `value` | `Assets` |
-
-The fee and the assets are capabilities the server already has (`base`), so
-they go in `Context`, not in the port. The rest is the port:
+### The language (`src/models/trigger.rs`, the stored vocabulary, ~50 lines)
 
 ```rust
-/// Everything one round reads from its store, all from one consistent view:
-/// a round opens one, reads through it, and drops it. A SQL store holds one
-/// read transaction; balances and the confirmed position never move under a
-/// round.
-///
-/// An index is *fully indexed* when it is indexed through a live block at or
-/// above the confirmed position; only fully indexed ones are read. That set is
-/// the universe `Selector::Not` is relative to.
-pub trait Snapshot: Send {
-    /// The network's confirmed position; `None` while unknown.
-    ///
-    /// # Errors
-    ///
-    /// When the store cannot read.
-    fn confirmed(&mut self) -> Future<'_, anyhow::Result<Option<u64>>>;
+/// The amount terms this server offers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AmountTerm { Value(amounts::Value), Balance(amounts::Balance), Fee(amounts::Fee) }
+pub(crate) type Amount = amounts::Arithmetic<AmountTerm>;
+pub(crate) type Compare = conditions::Compare<Amount>;
 
-    /// The network's enabled triggers, by id.
-    ///
-    /// # Errors
-    ///
-    /// When the store cannot read or a stored trigger does not decode.
-    fn triggers(&mut self) -> Future<'_, anyhow::Result<Vec<Enabled>>>;
+/// What a filter may test, per index.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Filter { Compare(Compare) }
 
-    /// The fully indexed indexes at `confirmed` that `selector` picks
-    /// (`Ids`: by `Index::id`; `Asset`; `Tag`: its wallet carries it;
-    /// `Untagged`; `All`/`Any`/`Not` as AND/OR/NOT within the universe).
-    ///
-    /// # Errors
-    ///
-    /// When the store cannot read, or a confirmed balance is negative.
-    fn select<'a>(
-        &'a mut self,
-        selector: &'a Selector,
-        confirmed: u64,
-    ) -> Future<'a, anyhow::Result<Vec<Index>>>;
+/// What a check may test, over the kept set.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Check { Since(conditions::Since), Compare(Compare) }
 
-    /// Of `wanted`, the fully indexed indexes at `confirmed`; the others are
-    /// left out.
-    ///
-    /// # Errors
-    ///
-    /// As [`Snapshot::select`].
-    fn find<'a>(
-        &'a mut self,
-        wanted: &'a [(Address, Asset)],
-        confirmed: u64,
-    ) -> Future<'a, anyhow::Result<Vec<Index>>>;
-}
-
-/// An enabled trigger as a round reads it.
-pub struct Enabled {
-    pub id: String,
-    pub trigger: Trigger,
-    /// When its latest run started, Unix ms; `None`: never ran.
-    pub last_run: Option<u64>,
-}
-```
-
-Why it looks like this:
-
-- **One trait, reads only.** A round's writes are one transaction that
-  mixes trigger rows with job rows. Jobs are the server's (`task` model,
-  `Broadcast::job`, `Notifying::notify`). The package returns `Round`, and
-  the server writes it (section 4). Tests check the returned value, with no
-  fake writer.
-- **`&mut self`, one per round.** This is what makes "one snapshot" a type
-  rule: the server builds it over the `&mut SqliteConnection` of one read
-  transaction. A store over an async database would hold a repeatable-read
-  transaction the same way. `tasks::Store` uses `&self` because it is
-  shared; a snapshot is not.
-- **Async with `base::Future` and `anyhow`**, as `base::BlockStore`,
-  `WalletIndexStore` and `Holdings` are. A third party on an async database
-  implements it directly. SQLite answers with ready futures.
-- **`find` by (address, asset), not by `Target`.** `This{asset}` sibling
-  building (one per wallet, de-duplicated) and the rule "fewer found than
-  wanted: unknown" are evaluation rules. They move into the package, and
-  the store only answers which of these pairs are fully indexed.
-- **`confirmed` is passed back explicitly** to `select` and `find`, so the
-  server's implementation holds no state beyond the connection.
-  `Selection::confirmed_at` goes away.
-
-## 4. The server after
-
-### `usecase/trigger.rs`: the SQLite snapshot
-
-```rust
-/// `trigger::Snapshot` over one read transaction: every statement is a model's.
-pub(crate) struct Sqlite<'c> {
-    connection: &'c mut SqliteConnection,
-    network: Network,
-}
-
-impl trigger::Snapshot for Sqlite<'_> {
-    fn confirmed(&mut self) -> Future<'_, anyhow::Result<Option<u64>>> {
-        let found = network_index::db::find_confirmed(self.connection, &self.network);
-        Box::pin(std::future::ready(found.map_err(Into::into).and_then(|at| at.map(uint).transpose())))
+impl conditions::Condition for Check {
+    fn holds<'a>(&'a self, on: &'a mut Context<'_>) -> Future<'a, anyhow::Result<bool>> {
+        match self { Self::Since(one) => one.holds(on), Self::Compare(one) => one.holds(on) }
     }
-    fn triggers(&mut self) -> Future<'_, anyhow::Result<Vec<Enabled>>> { /* find_enabled → Enabled */ }
-    fn select<'a>(&'a mut self, selector: &'a Selector, confirmed: u64) -> … { /* wallet_index::db::select */ }
-    fn find<'a>(&'a mut self, wanted: &'a [(Address, Asset)], confirmed: u64) -> … { /* wallet_index::db::find */ }
+    fn validate(&self) -> Result<(), trigger::Error> {
+        match self { Self::Since(one) => one.validate(), Self::Compare(one) => one.validate() }
+    }
+    fn reads_this(&self) -> bool {
+        match self { Self::Since(one) => one.reads_this(), Self::Compare(one) => one.reads_this() }
+    }
+}
+// `Filter` and `AmountTerm`: the same `match`, one arm per variant.
+
+pub(crate) type Definition = ::trigger::Trigger<Filter, Check>;
+```
+
+The JSON stays as it is: `{"value": "1"}`, `{"balance": {...}}`,
+`{"fee": {...}}`, `{"add": [a, b]}`, `{"times": [a, "1.25"]}`,
+`{"since": {"seconds": n}}`, `{"compare": {...}}`, `{"all": [...]}`. The row
+(`Trigger`, `db`) stays (`:417-609`). Its columns are typed
+`Json<Selector>`, `Option<Json<Logic<Filter>>>`, `Json<Logic<Check>>`,
+`Json<Call>`, and `db::find_enabled` returns
+`Vec<round::Enabled<Filter, Check>>`.
+
+### The store (`src/usecase/trigger/store.rs`, ~50 lines)
+
+```rust
+/// `trigger::Store` over one read transaction: every statement is `wallet_index`'s.
+pub(crate) struct Sqlite<'c> { connection: &'c mut SqliteConnection, network: Network, confirmed: i64 }
+
+impl ::trigger::Store for Sqlite<'_> {
+    fn select<'a>(&'a mut self, selector: &'a Selector) -> Future<'a, anyhow::Result<Vec<Index>>> {
+        let found = wallet_index::db::select(self.connection, &self.network, selector, self.confirmed);
+        Box::pin(std::future::ready(found))
+    }
+    fn find<'a>(&'a mut self, wanted: &'a [(Address, Asset)]) -> Future<'a, anyhow::Result<Vec<Index>>> {
+        let found = wallet_index::db::find(self.connection, &self.network, wanted, self.confirmed);
+        Box::pin(std::future::ready(found))
+    }
 }
 ```
 
-Each method is one model call wrapped in `ready`. The SQL stays where it is:
-`wallet_index::db::{select, find, picked}`, `trigger::db::find_enabled`,
-`network_index::db::find_confirmed`. `find_enabled` may narrow to
-`trigger_run.started_at`, since that is all it needs.
+`wallet_index::db::select` keeps its query (`src/models/wallet_index.rs:747-846`).
+`Selector::sql` (`src/models/wallet_index_selector.rs:64-90`) becomes the
+free function `wallet_index::db::picked`, and the file is deleted. It
+answers `selection::Index`, decoded once (today's `spendable`/`held` at
+`:144-166`), and refuses a negative confirmed balance as today (`:838-842`).
+`find_by_target` (`:855-878`) becomes `find`: one query, the pairs as ids.
 
-### `workers/trigger.rs`: the `Round` worker
+### The action (`src/usecase/trigger/send.rs`, ~110 lines)
 
-Policy, topic, `KIND`, `enqueue` from the index job: unchanged. `run`:
+```rust
+/// `send`'s input, the stored JSON of today.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SendInput { source: Target, asset: String, destination: Target, amount: models::trigger::Amount }
+
+/// `send`: moves funds, one broadcast job per sender.
+pub(crate) struct Transfer;
+
+impl actions::Action<Job> for Transfer {
+    const NAME: &'static str = "send";
+    type Input = SendInput;
+
+    fn validate(&self, send: &SendInput, network: &Network, assets: &Assets) -> Result<(), trigger::Error> {
+        // targets named on purpose, the amount's rules, not this → this;
+        // `NotConfigured` when the sent asset is not configured
+    }
+
+    fn run<'a>(&'a self, send: &'a SendInput, on: &'a mut Context<'_>) -> Future<'a, anyhow::Result<Vec<Job>>> {
+        Box::pin(async move {
+            let asset = Asset { network: on.network().clone(), id: send.asset.clone() };
+            let Some(sources) = on.wallets(&send.source).await? else { bail!("a source is not fully indexed") };
+            let Some(destinations) = on.wallets(&send.destination).await? else { bail!("a destination is not fully indexed") };
+            // ensure! one asset, not many↔many; walk the many side (today's
+            // actions.rs:176-197), each alone:
+            //   let amount = send.amount.atomic(&mut on.with(each.only(one)), &asset).await?;
+            // skip ≤ 0 or unknown, ensure! keyed, group by sender
+            by_sender.into_iter()
+                .map(|(from, transfers)| Broadcast::job(&SendIntent::new(&from, &asset, transfers)))
+                .collect()
+        })
+    }
+}
+```
+
+The planning logic is today's `Transfer::run` (`actions.rs:153-235`). It
+now reads wallets and amounts through `Context` instead of the old
+`Trigger<'c>`.
+
+### The composition root (`src/main.rs::boot`, +3 lines)
+
+```rust
+let actions = Arc::new(actions::Registry::new().add(usecase::trigger::Transfer));
+let executor = Executor::new(queue.clone(), tick)
+    // … index, expire, prune, broadcast as today …
+    .add(trigger::Round::new(payments.clone(), db.clone(), queue.clone(), actions.clone(), logger));
+let state = Arc::new(AppState { payments, db, queue, actions });
+```
+
+### The worker (`src/usecase/workers/trigger.rs`, ~100 lines)
+
+Its policy, topic and the index job's `enqueue` are unchanged
+(`src/usecase/workers/trigger/mod.rs:60-77`). `run` is wiring:
 
 ```rust
 async fn run(&self, cx: tasks::Context<'_, Target, ()>) -> Ack {
     let network = cx.input().network();
     let round = async {
         let service = self.payments.service(&network)?;
-        let context = trigger::Context {
-            network: network.clone(),
-            assets: service.assets.clone(),
-            fees: service.wallets.factory.fees(),
-            now: tasks::now(),
-        };
-        // One read transaction; the estimator's own reads run beside it.
-        let runtime = tokio::runtime::Handle::current();
+        // The chain's cached estimator: it decides what it reuses.
+        let (actions, fees, assets) = (self.actions.clone(), service.wallets.factory.fees(), service.assets.clone());
+        let (now, runtime, at) = (tasks::now(), Handle::current(), network.clone());
+        // One read transaction: confirmed, triggers and every wallet read agree.
         let decided = self.db.read(move |connection| {
-            let mut snapshot = usecase::trigger::Sqlite::new(connection, &context.network);
-            runtime.block_on(trigger::decide(&mut snapshot, &context))
+            let Some(confirmed) = network_index::db::find_confirmed(connection, &at)? else { return Ok(None) };
+            let triggers = trigger::db::find_enabled(connection, &at)?;
+            let mut wallets = usecase::trigger::Sqlite::new(connection, &at, confirmed);
+            let round = ::trigger::round::Round::new(&actions, fees, &assets, at.clone(), uint(confirmed)?, now);
+            Ok(Some(runtime.block_on(round.run(&mut wallets, triggers))))
         });
-        let Some(round) = decided.await? else { return anyhow::Ok(Ack::Idle) };
-        for refused in round.decided.iter().filter(|d| d.last.refused.is_some()) {
-            /* trigger.refused warn, as today */
-        }
-        if round.decided.is_empty() { return anyhow::Ok(Ack::Idle) }
-        let acted = round.decided.iter().any(|d| !d.payouts.is_empty());
-        self.db.write(move |connection| save(connection, &round)).await?;
+        let Some(decided) = decided.await? else { return anyhow::Ok(Ack::Idle) };
+        self.log_refusals(&network, &decided);
+        if decided.is_empty() { return anyhow::Ok(Ack::Idle) }
+        let acted = decided.iter().any(|one| !one.effects.is_empty());
+        self.db.write(move |connection| save(connection, now, &decided)).await?;
         if !acted { return anyhow::Ok(Ack::Idle) }
         self.queue.notify();
         anyhow::Ok(Ack::Done)
@@ -381,233 +447,311 @@ async fn run(&self, cx: tasks::Context<'_, Target, ()>) -> Ack {
     round.await.unwrap_or_else(|error| Ack::Retry(format!("{error:#}")))
 }
 
-/// Every trigger's last round, and every acting one's jobs and run: one write.
-fn save(connection: &mut SqliteConnection, round: &trigger::Round) -> anyhow::Result<()> {
-    let at = int(round.at)?;
-    for decided in &round.decided {
-        trigger::db::set_last_round(connection, &decided.trigger, &decided.last)?;
-        if decided.payouts.is_empty() { continue }
-        let mut jobs = Vec::new();
-        for payout in &decided.payouts {
-            let job = Broadcast::job(&SendIntent::from(payout))?;
-            jobs.push(task::db::insert(connection, &Row::try_from(&job)?, at)?.to_string());
-        }
-        trigger_run::db::insert(connection, &TriggerRun::new(&decided.trigger, at, jobs, decided.last.stats))?;
+/// Every trigger's last round, and each acting one's jobs and run: one write.
+fn save(connection: &mut SqliteConnection, now: u64, decided: &[Decision<Job>]) -> anyhow::Result<()> {
+    let now = int(now)?;
+    for one in decided {
+        trigger::db::set_last_round(connection, &one.trigger, &one.last)?;
+        if one.effects.is_empty() { continue }
+        let jobs = one.effects.iter()
+            .map(|job| Ok(task::db::insert(connection, &Row::try_from(job)?, now)?.to_string()))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        trigger_run::db::insert(connection, &TriggerRun::new(&one.trigger, now, jobs, one.last.stats))?;
     }
     Ok(())
 }
 ```
 
-`SendIntent::from(&trigger::Payout)` lives in `broadcast.rs`, next to
-`SendIntent`. It is the only place that knows the job input format.
+### The API (`src/api/triggers.rs`)
 
-### `api/triggers.rs`
+`Definition::trigger` (`:116-161`) builds a `models::trigger::Definition`
+and calls `definition.validate(&state.actions, &network, &service.assets)`,
+mapping its `Class` to a status as in section 2. The API no longer names `send`,
+`SendInput` or an action name.
 
-`Definition` keeps all its fields. It cannot `#[serde(flatten)]` a
-`trigger::Trigger`, because serde does not support `flatten` together with
-`deny_unknown_fields`. Its `selector`, `filter`, `check` and `action` are
-package types, and `Definition::trigger`:
+### The server's trigger code, before → after
 
-1. refuses a bad id (`trigger::is_tag`), with 400 as today;
-2. `payments.service(&network)?`, with 404 as today;
-3. `let Action::Send(send) = &definition.action;` then
-   `asset_info(send.asset)`, with 404 as today;
-4. builds `trigger::Trigger { selector, filter, check, action }` and calls
-   its `validate()`, with 400 as today;
-5. `models::Trigger::new(…)`.
+| | Before | After |
+|---|---|---|
+| models (`trigger.rs`, `wallet_index_selector.rs`, trigger part of `wallet_index.rs`) | ~1,000 | ~320 (row, db, language, `picked`, `find`) |
+| `usecase/trigger.rs` + `workers/trigger/{mod,actions}.rs` | ~760 | ~260 (store 50, `send` 110, worker 100) |
+| `api/triggers.rs` | 527 | ~500 |
+| `main.rs` | — | +3 |
 
-The `"unknown action"` 400 now comes from serde: an unknown `name` is a
-malformed body. Same status, different text.
+## 4. Worked examples
 
-## 5. Actions: the boundary
+### A: "Token sweep with gas funding" (`ui/src/pages/triggers/_components/forms.ts:456-525`)
 
-- **Package**: what to send. Sources and destinations resolve at the
-  confirmed block. It refuses many↔many, a source in another asset, a
-  source not keyed here and a target not fully indexed. Amounts are
-  evaluated per source or per destination (`This` is the walked side), and
-  amounts ≤ 0 or unknown are skipped. Transfers are grouped per sender, in
-  source-then-destination order. Out comes `Vec<Payout>`.
-- **Server**: how it is sent. `Payout` → `SendIntent` → `Broadcast::job`,
-  job rows, `trigger_run` row with the job ids, `notify()`. The broadcast's
-  own guard (check spendable and record pending in one write) is unchanged.
-- No action trait: `match` on `Action`. A new action means a new variant
-  with its own `Decided` output field. That is fine while there is one
-  action; a registry comes back only if third parties need their own.
+Two triggers on the deposit wallets. Each line is a building block; none
+is specific to this template.
 
-## 6. Correctness requirements to keep
+```text
+fund-gas
+  selector  Selector::All[Tag(deposit), Asset(native)]                      → Store::select
+  filter    Logic::All[                                                       each index alone (Context::with)
+              Filter::Compare(Compare{ of: This{asset: token}, Sum, Above, Value 0 }),
+              Filter::Compare(Compare{ of: This{}, Sum, balance: Pending, Below,
+                                       Fee{ of: This{asset: token}, to: chosen } }) ]
+  check     Logic::All[]                                                      always
+  action    Call{ "send", { source: chosen, asset: native, destination: This{},
+              amount: Max[ Sub[ Times[Fee{This{asset: token}, chosen}, 1.25], Balance{This, Pending} ], Value 0 ] } }
+sweep-token
+  selector  Selector::All[Tag(deposit), Asset(token)]
+  filter    Logic::All[ Compare{ This{}, Sum, Above, Value 0 },
+                        Compare{ This{asset: native}, Sum, AtLeast, Fee{ This{}, chosen } } ]
+  check     Logic::All[]
+  action    Call{ "send", { source: This{}, asset: token, destination: chosen, amount: Balance{This} } }
+```
 
-| # | Requirement | Where it is enforced | Tested today |
+How the pieces evaluate it:
+
+- `This{asset: token}` goes through `Context::wallets`, then
+  `Store::find`. It is unknown (the compare is `false`) when the token
+  index is not fully indexed (R6).
+- `Fee` builds `Selection::spends(to)` and calls `on.fees().estimate`. A
+  wallet holding nothing costs 0 and asks nothing (R8).
+- Ethereum's `Cached` (`sdk/chains/ethereum/src/fee_cache.rs:12-28`) keeps
+  the gas price and the gas per (asset, recipient holds it), so the
+  filter's fee and the action's `Times[Fee…]` get one answer from the node.
+- `send` is the server's: its `amount` is an `Arithmetic<AmountTerm>`,
+  evaluated per destination with `on.with(each.only(one))`.
+
+### B: a new condition, then a new action, both in the server only
+
+A check that holds only in a UTC hour window,
+`{"window": {"from": 9, "to": 17}}`:
+
+```rust
+// src/models/trigger.rs
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Window { from: u8, to: u8 }
+
+impl conditions::Condition for Window {
+    fn holds<'a>(&'a self, on: &'a mut Context<'_>) -> Future<'a, anyhow::Result<bool>> {
+        let hour = u8::try_from(on.now() / 3_600_000 % 24).unwrap_or(0);
+        Box::pin(std::future::ready(Ok((self.from..self.to).contains(&hour))))
+    }
+    fn validate(&self) -> Result<(), trigger::Error> {
+        if self.from < self.to && self.to <= 24 { return Ok(()) }
+        Err(Error::new(Class::Impossible, "a window ends after it starts"))
+    }
+    fn reads_this(&self) -> bool { false }
+}
+
+pub(crate) enum Check { Since(conditions::Since), Compare(Compare), Window(Window) }   // + one variant
+// + one arm in each of Check's three matches
+```
+
+`Logic<Check>` accepts it under `all`/`any`/`not` at once. Because
+`reads_this` is false, putting it in a filter is refused by the existing
+`FilterIgnoresThis` rule. No package change.
+
+An action `split` that pays a source's balance to several destinations by
+shares, `{"name": "split", "input": {"source": …, "asset": …, "shares":
+[{"to": …, "share": "0.7"}, …]}}`:
+
+```rust
+// src/usecase/trigger/split.rs
+impl actions::Action<Job> for Split {
+    const NAME: &'static str = "split";
+    type Input = SplitInput;
+    fn validate(&self, input: &SplitInput, network: &Network, assets: &Assets) -> Result<(), trigger::Error> { /* shares in (0, 1], sum ≤ 1 */ }
+    fn run<'a>(&'a self, input: &'a SplitInput, on: &'a mut Context<'_>) -> Future<'a, anyhow::Result<Vec<Job>>> {
+        // on.wallets(source), Balance{This}.atomic(...), one Broadcast::job with a transfer per share
+    }
+}
+// src/main.rs
+let actions = Arc::new(actions::Registry::new().add(Transfer).add(Split));
+```
+
+The API validates it, rounds run it and runs record its jobs, with no other
+change.
+
+## 5. Correctness requirements to keep
+
+| # | Requirement | Where after | Tested today |
 |---|---|---|---|
-| R1 | Decide at the confirmed position, never the tip; no round while unknown | `Triggers::new` (`find_confirmed`) | universe: `pipe.rs` `leaves_pick_exactly_their_fully_indexed_indexes`, `combinators_are_set_operations_within_the_universe`; **no test pins "confirmed, not tip"** |
-| R2 | Only fully indexed indexes (live block ≥ confirmed); `Not` relative to them | `wallet_index::db::read` | `pipe.rs` `leaves_pick…`, `a_tag_or_indexing_brings_indexes_in` |
-| R3 | `Balance::Confirmed` = spendable (confirmed less outgoing not yet in it); `Pending` = once every pending tx lands | view `wallet_index_with_balance`, `WalletIndex::held` | `pipe.rs` `balances_are_confirmed_exact_and_folded`, `a_pending_send_is_taken_off…`, `a_pending_balance_counts…`; `storage.rs` `totals_hold` |
-| R4 | One snapshot per round: every read sees the same confirmed position and balances | one `db.read` | implicit, no test |
-| R5 | Filter per index (`This` = it alone), check over the kept set; written order, short-circuit; errors stay errors (under `Not` too) | `Trigger::filter`, `Logic::eval` | `pipe.rs` `a_filter_keeps_each_index_on_its_own`, `logic_stops_early_and_errors_stay_errors` |
-| R6 | Unknown is `false`: a `This{asset}` sibling missing, no asset, `min`/`max` of none | `compare`, `find_by_target` | `pipe.rs` `counterparts_must_be_fully_indexed`, `aggregates_and_operators` |
-| R7 | `since` reads the latest run's start; no run passes | `Trigger::gate` | `pipe.rs` `since_reads_the_last_run`, `triggers_and_their_runs_are_stored` |
-| R8 | Fees via `FeeEstimator` over `Spends`, one recipient address priced as it is, none or several as new; holding nothing costs 0 and asks nothing | `Amount::Fee`, `Selection::spends` | `pipe.rs` `a_fee_is_priced_for_its_one_recipient_or_a_new_address`, `a_wallet_holding_nothing_costs_no_fee_and_asks_nothing`, `holders_are_keyed_wallets…` |
-| R9 | Counts compare with whole numbers (create and decide) | `Compare::validate`, `compare` | `routes.rs` `a_count_compares_with_a_whole_number…`, `aggregates_and_operators` |
-| R10 | `value` in display units → atomic by the asset's decimals; too many decimals is an error | `Amount::Value`, `AssetInfo::atomic` | `pipe.rs` `values_must_fit_their_asset`, `amounts_evaluate_in_atomic_units` |
-| R11 | Send shapes, keyed sources, per-sender grouping, skip ≤ 0 | `Transfer::run` | `pipe.rs` `a_send_pays_per_source_or_per_destination` |
-| R12 | A refusal is per trigger: the others decide; stats keep what was counted before the refusal | `Triggers::decide`, `Round::run` | **no test** of the refusal path or its `last_round.refused` |
-| R13 | Last round written every round for every enabled trigger, acted or not | `Round::run` | `cases/backlog.rs` (`last_round.confirmed`, `refused` null) |
-| R14 | A run is written only when the action started ≥1 job, with its job ids and stats | `Round::run` | `routes.rs` `a_trigger_run_shows_its_jobs_and_how_they_ended` (seeded) |
-| R15 | One write per round: all or none | `Round::run` | `cases/partial.rs` |
-| R16 | A round is unique per network and skips while a later job of its network is unfinished | `Round::POLICY`, topic | `cases/skipped.rs`, `cases/backlog.rs` |
-| R17 | Stored JSON forms unchanged (API and UI read them) | serde attributes | `pipe.rs` `the_sweep_trigger_round_trips_through_json` |
-| R18 | Validation: wallets named on purpose, filter reads `This`, check can hold, no `This`→`This` send | `Trigger::validate`, `SendInput::validate` | `models/trigger.rs` tests |
+| R1 | Decide at the confirmed position, never the tip; no round while unknown | worker reads `find_confirmed`, `Round::new(confirmed)` | universe only: `tests/pipe.rs:204,239`; **"confirmed, not tip" untested** |
+| R2 | Only fully indexed indexes; `Not` relative to them | `Store` contract, `wallet_index::db::select` | `pipe.rs:204`, `:281` |
+| R3 | `BalanceKind::Confirmed` = spendable at confirmed, `Pending` = once pending lands | `selection::Index`, view `wallet_index_with_balance` | `pipe.rs:307`, `:351`, `:1094`; `tests/storage.rs:1050` |
+| R4 | One consistent read per round | the worker's one `db.read` around `Round::run` | implicit, no test |
+| R5 | Filter per index, check over the kept set; written order, short-circuit; errors stay errors | `Trigger::decide`, `conditions::Logic` | `pipe.rs:991`, `:813` |
+| R6 | Unknown is `false` (sibling missing, no asset, min/max of none) | `Context::wallets`, `Compare` | `pipe.rs:787`, `:504` |
+| R7 | `since` from the latest run; no run passes | `Since`, `Context::last_run` | `pipe.rs:869`, `:927` |
+| R8 | Fee via `FeeEstimator` over `Spends`, one recipient priced as is, else a new address; holding nothing costs 0 and asks nothing | `amounts::Fee`, `Selection::spends` | `pipe.rs:687`, `:721`, `:747` |
+| R9 | Counts compare with whole numbers, at create and at decide | `Compare::validate` via `Amount::constant` | `tests/routes.rs:708`, `pipe.rs:504` |
+| R10 | `value` display → atomic by the asset's decimals; too many decimals errors | `amounts::Value`, `Context::atomic` | `pipe.rs:608`, `:624` |
+| R11 | Send shapes, keyed sources, per-sender grouping, skip ≤ 0 | server `Transfer` | `pipe.rs:1023` |
+| R12 | A refusal is per trigger; stats keep what was counted before it | `Round::run` | **untested** |
+| R13 | A last round for every enabled trigger, every round | `Decision.last`, `save` | `tests/cases/backlog.rs:61-63` |
+| R14 | A run only when effects exist, with job ids and stats | `save` | `routes.rs:654` |
+| R15 | One write per round, all or none | `save` in one `db.write` | `cases/partial.rs` |
+| R16 | Unique round per network; skipped while a later job of the network is unfinished | worker `POLICY`, topic | `cases/skipped.rs`, `cases/backlog.rs` |
+| R17 | Stored JSON unchanged | the language enums, `Logic`/`Arithmetic` forms | `pipe.rs:884` |
+| R18 | Definition rules: wallets on purpose, filter reads `this`, check can hold, no `this`→`this` send | each domain's `validate`, rolled up by `Trigger::validate`; `Transfer::validate` | `src/models/trigger.rs:642-704` |
 
-### Ambiguities and bugs found (not fixed by the move)
+### Bugs and ambiguities (fixed in their own steps, after the move)
 
-- **B1 A compare's asset can be the wrong one.** `compare` takes the asset
-  from `of.asset()` or else from the first index of `This`. A check like
-  `{of: {select: {ids: [treasury.native]}}, value: {value: "0.9"}}` on a
-  `This` of 6-decimal token indexes converts `0.9` with the token's
-  decimals and compares that with native balances. The same goes for
-  `Amount::Balance` inside an amount of another asset. Fix: a compare's
-  asset is the single asset of the indexes `of` resolved to; mixed assets
-  are a refusal; an empty set falls back to the named asset, then `This`'s.
-- **B2 Mixed-asset sums.** A selector like `{tag: deposit}` picks native and
-  token indexes, and `sum` over them adds native and token atomic units.
-  B1's fix (one asset per compare) also refuses this.
-- **B3 Fees are not cached.** Each `Fee` term calls the estimator again.
-  eval.md chose one fee per evaluation so that check and action agree (075
-  §6.7); it was never built. Two calls can straddle a cache refresh, so the
-  check passes on one fee and the amount uses another.
-- **B4 The `Select` target cache is keyed by `This`'s ids.** In a filter
-  (one `This` per index) a `{select: …}` term runs one SQL query per
-  selected index, and the same treasury is read again by every trigger. It
-  should be cached per round by the selector alone; the snapshot makes that
-  safe.
-- **B5 Empty source or destination is a silent no-op** (075 F8). A send
-  whose other side resolves empty returns no payout with no refusal.
-- **B6 Value precision is checked only at decide time** (075 F8). It is
-  refused every round, never at create, even when the asset is known (the
-  send's `asset`, a compare whose `of` names one).
-- **B7 `count` with `"1.0"` is refused** (scale 1). Strict but clear; keep.
-- **B8 `find_page` hides undecodable stats** (`unwrap_or_default`), so a
-  broken row shows zeros.
-- **B9 The estimator reads outside the snapshot.** Holdings and UTXOs come
-  on a second pool connection while the round holds one (075 §1). Prices
-  only, and conservative; unchanged.
-- **B10 `routes.rs` seeds `{"name":"send","input":{}}`.** With a typed
-  `Action` that row no longer decodes. The runs page never reads it, but
-  the fixture should carry a full send input.
+- **B1 A compare can use the wrong asset.** `compare` takes `of.asset()` or
+  else the first index of `this` (`src/usecase/trigger.rs:151-159`), and a
+  `value` is converted with that asset's decimals. Picture a `select` of a
+  native index checked against a `this` of token indexes. Fix in
+  `conditions.rs` (`Compare`): the asset is the single asset of `of`'s
+  resolved indexes; mixed assets are a refusal; an empty set falls back to
+  the named asset, then `this`'s.
+- **B2 Mixed-asset sums.** A `{tag}` selector over native and token indexes
+  sums both. B1's fix refuses it.
+- **B3 Fees asked twice (re-checked; no longer a bug).** Each `Fee` term
+  still calls `estimate` (`src/usecase/trigger.rs:203-227`). But the
+  estimator is the chain's `Cached`, handed out by `factory.fees()` and
+  signed with by every builder (`sdk/chains/*/src/fee_cache.rs`):
+  - Ethereum keeps the gas price and the gas per (asset, recipient holds
+    it);
+  - Solana keeps the blockhash and signature price, and rent for good;
+  - Bitcoin keeps the fee rate and reads each sender's coins from the
+    store, not the node.
 
-## 7. Testing plan
+  Within a round, check and action get the same price, unless the TTL ends
+  between them. Then the broadcast signs at the newer price, which the
+  `FeeEstimator` contract allows (it may overpay slightly, never
+  underpay). What is left is a cost, not a bug: one holdings read per
+  `Fee` term (one store read on Bitcoin). No package cache.
+- **B4 The `Select` target cache is keyed by `this`'s ids** (`:245`). A
+  filter re-reads the same selector once per index. `Context::wallets`
+  keys a `Select` by the selector alone. Under one consistent read the results are
+  equal, so this ships with the move.
+- **B5 Empty source or destination is a silent no-op**
+  (`actions.rs:195-197`, 075 F8). Fix in the server's `Transfer`.
+- **B6 Value precision is checked only at decide time** (075 F8). Fix: the
+  `Value`/`Compare` validation, given assets where the asset is named.
+- **B10 A `routes.rs` fixture won't validate.** `tests/routes.rs:666-668`
+  seeds `{"name":"send","input":{}}`. `Call` keeps the input as JSON, so
+  the row still decodes, but `Trigger::validate` would refuse it. The
+  fixture should carry a full input.
+- **B11 A fee is native whatever the compare reads.** `Fee` ignores the
+  asset it is asked in (`src/usecase/trigger.rs:203-227`, ported as is in
+  `amounts::Fee`). `{"compare": {"of": {"this": {"asset": token}}, …,
+  "value": {"fee": {}}}}` compares token units with native ones, and
+  `{"sub": [{"balance": …token…}, {"fee": {}}]}` mixes them. Fix with B1:
+  a fee in a non-native compare or sum is a refusal.
+- **B12 Out-of-range waits and negative values pass create.** A `since`
+  whose seconds overflow Unix ms (`> i64::MAX / 1000`) and a `{"value":
+  "-1"}` are refused only at decide time, as a refusal every round. Fix with
+  B6: `Since::validate` and `Value::validate` refuse them.
+- **B13 A scheduled transfer ignores the balance.** "Scheduled transfer"
+  sends `{"value": "0.1"}` once a day whatever the treasury holds
+  (`tests/scheduled.rs`): below it, a job is queued that cannot succeed,
+  every day. Fix in the template (a check that the balance covers the amount
+  and its fee), not the package.
+- **B14 An empty `this` hides the asset of a selector compare.** A compare
+  over a `select` that names no asset takes the asset of `this`'s first
+  index; with no wallet in context it is `false`, even `sum at_least 0`
+  (`tests/conditions.rs`). Fixed with B1 (the asset of `of`, then the named
+  one).
 
-**`sdk/trigger` tests** (over `Memory`, a fixed-fee estimator that counts
-calls, `futures_executor::block_on`):
+## 6. Testing plan
 
-- `Memory` (feature `testing`, like `tasks::MemoryStore` is the reference
-  store): `confirmed`, `triggers`, and kept indexes with tags and a
-  `fully_indexed` flag. Its `select` evaluates `Selector` in Rust (~30
-  lines), so it is also the reference for what a selector means.
-- Moved from `pipe.rs`, rewritten over `Memory`:
-  `aggregates_and_operators`, `values_must_fit_their_asset`,
-  `amounts_evaluate_in_atomic_units`,
-  `a_fee_is_priced_for_its_one_recipient_or_a_new_address`,
-  `a_wallet_holding_nothing_costs_no_fee_and_asks_nothing`,
-  `counterparts_must_be_fully_indexed` (the "fewer found: unknown" half),
-  `logic_stops_early_and_errors_stay_errors`, `since_reads_the_last_run`,
-  `the_sweep_trigger_round_trips_through_json`,
-  `a_filter_keeps_each_index_on_its_own`,
-  `a_send_pays_per_source_or_per_destination`, the compare half of
-  `a_pending_balance_counts_what_is_already_on_its_way`.
-- Moved from `models/trigger.rs`: the three validation tests.
-- New, for the gaps above:
-  - no round while confirmed is unknown, and `select` is asked at the
-    confirmed position (R1);
-  - one trigger refused, the others decide, and its `LastRound` keeps
-    `selected`/`kept` counted before the error (R12);
-  - every enabled trigger gets a `LastRound` (R13);
-  - `jobs == payouts.len()`, and a trigger whose check held but that sends
-    nothing has no payouts (R14);
-  - payouts grouped by sender in order (R11).
+**`sdk/trigger`**: end to end, through the public API only, in
+`sdk/trigger/tests/` (`src/` keeps no tests: nothing private needs one). Each
+test parses triggers from their stored JSON, validates them, runs a `Round`
+over `testing::Wallets` with `testing::Fees` and a recording `send`, and
+asserts decisions, effects and stats. `tests/common/mod.rs` holds the shared
+setup: a trigger language as the server writes it, that `send`, the UI's
+templates as stored JSON, and a `World` of Sepolia wallets.
 
-**Server tests** (SQL, HTTP, workers):
+| File | Covers |
+|---|---|
+| `forward.rs` | "Native forward": over twice the fee, each alone, priced to the chosen wallet, a cheaper known recipient, an unkeyed source refused |
+| `consolidate.rs` | "Consolidation over a threshold": below / at the threshold, wallets not worth their fee not counted, pending not counted |
+| `sweep.rs` | "Token sweep with gas funding", both triggers: 1.25 × headroom rounded up, no second top-up while pending gas ≥ 1 × fee, top-up by the rest, sweep at one fee, nothing, a token index behind, never both |
+| `scheduled.rs` | "Scheduled transfer": never run, an hour ago, a day ago, a moment short, only the treasury |
+| `amounts.rs` | values by decimals, too many decimals, unconfigured; confirmed vs pending; fee to one recipient / several / none / missing, holders only, nothing costs 0 and is never asked, a failing estimate; `times` rounding; add/sub/min/max; unknown propagates |
+| `conditions.rs` | every aggregate and operator; counts with whole numbers only; pending; siblings; empty sets; `all`/`any`/`not` in order, stopping early (a later condition that would fail is never reached; a later fee is never asked); errors under `not`; `since` |
+| `selection.rs` | ids, asset, tag, untagged, all/any/not, behind never picked; targets `this`, `this` in another asset (missing, behind), a selector; spends, address, network |
+| `round.rs` | order kept, empty round, a refusal not stopping the others and keeping its stats, a last round for every trigger, jobs = effects, each selector read once per round, `since` per trigger, a failing estimate, refusals at run |
+| `validation.rs` | one test per `Class` with its message; every template accepted; which part is checked first |
+| `json.rs` | every stored form (selector, target, amount, check, filter, call, trigger, last round) round-trips byte for byte; templates; defaults written out |
 
-- `pipe.rs` keeps the store facts: `tags_are_kept_once_listed_and_removed`,
-  `leaves_pick…`, `combinators…`, `a_tag_or_indexing_brings_indexes_in`,
-  `balances_are_confirmed_exact_and_folded`, `a_pending_send_is_taken_off…`,
-  `holders_are_keyed_wallets…`, `triggers_and_their_runs_are_stored`,
-  `a_tag_picks_its_wallets_indexes_on_their_network_only`, and the SQL half
-  of `a_pending_balance_counts…`. They call `usecase::trigger::Sqlite`
-  through the `Snapshot` trait, so they also test the implementation: `find`
-  leaves out a sibling that is not fully indexed, and `select` refuses a
-  negative confirmed balance.
-- `routes.rs`, `cases/*` (`backlog`, `partial`, `skipped` and the other
-  trigger cases): unchanged, still green. They cover R13–R16 end to end.
-- Optional later: a `trigger::testing::snapshot_contract` that both `Memory`
-  and the SQLite snapshot run, as `tasks::testing::store_contract` does
-  (open question 5).
+**Server** (SQL, HTTP, workers):
 
-## 8. Migration steps
+- `pipe.rs` keeps the store facts (`:178`, `:204`, `:239`, `:281`, `:307`,
+  `:351`, `:747`, `:927`, `:974`, the SQL half of `:1094`) through
+  `usecase::trigger::Sqlite`.
+- `Transfer` keeps its test (`:1023`), over the real store.
+- `routes.rs` and `cases/*` stay unchanged and keep R13–R16 green.
 
-Each step builds the workspace and leaves `cargo test` green. Steps 1–4
-change no behaviour and no JSON.
+## 7. Migration (each step builds and keeps `cargo test` green)
 
-1. **Package with definitions.** Add `sdk/trigger` to the workspace and
-   move `definition.rs` (all definition types, `Logic`, `Invalid`,
-   `is_tag`), `selector.rs` (`Selector`, `validate`, `asset`), `Stats` and
-   `LastRound` (feature `openapi` for `ToSchema`). In the server:
-   `models/trigger.rs` keeps the row and `db`; `Selector::sql` becomes
-   `wallet_index::db::picked`; `wallet_index_selector.rs` is deleted;
-   `wallet::is_tag` delegates. The three model validation tests move.
-2. **Action enum.** `Action::Send(SendInput)`, with `SendInput::validate`
-   folded into `Trigger::validate`. In the server, `actions.rs` matches the
-   enum instead of looking up a name; the API drops its name check and
-   `SendInput::deserialize`; the `routes.rs` fixture gets a full input
-   (B10).
-3. **Evaluation in the package, added beside the server's.** Add
-   `selection.rs`, `snapshot.rs`, `round.rs` (`decide`, `Round`, `Decided`,
-   `Payout`), and `memory.rs`, with the package tests of section 7. The
-   server is untouched; both engines exist for one step.
-4. **The server switches.** `usecase/trigger.rs` becomes `Sqlite` (the
-   `Snapshot`); the `Round` worker calls `trigger::decide` and `save`;
-   `SendIntent::from(&Payout)` goes in `broadcast.rs`; `actions.rs`,
-   `Selection`, `WalletIndex::held`, `find_by_target` and `find_by_ids` are
-   deleted; `wallet_index::db::{select, find}` return `trigger::Index`.
-   `pipe.rs` drops the tests that moved and calls the snapshot for the
-   rest.
+1. **Wallets**, added: `sdk/trigger` with `selection.rs`, `store.rs`, `testing/` and their tests. The
+   server is untouched.
+2. **Amounts and conditions**, added: `amounts.rs`, `conditions.rs`,
+   and `Context` in `trigger.rs`, with the moved evaluation tests over
+   `testing/`.
+3. **Actions, trigger, round**, added: `actions.rs`, the rest of
+   `trigger.rs`, `round.rs`, and their tests.
+4. **The server switches.** The language in `models/trigger.rs`; the
+   store in `usecase/trigger/store.rs`; `Transfer` in
+   `usecase/trigger/send.rs`; the worker, API and `main.rs` as in
+   section 3. Deleted: `usecase/trigger.rs` (the old one),
+   `workers/trigger/actions.rs`, `models/wallet_index_selector.rs`,
+   `Selection`, `find_by_target`, `find_by_ids`. `pipe.rs` drops what
+   moved; the `routes.rs` fixture is fixed (B10). The JSON is unchanged,
+   and `pipe.rs:884`, `routes.rs` and `cases/*` guard it.
+5. Then, one step each, with a test, once agreed: B1 and B2, B5, B6.
 
-Then, one step each, each with its test, only once agreed (open questions):
+## 8. Open questions (recommendation first)
 
-5. Per-round caches: selections by selector (B4), fees by spends (B3).
-6. One asset per compare (B1, B2).
-7. Refuse an empty source or destination (B5).
-8. Validate value precision at create where the asset is known (B6),
-   as a package `Trigger::validate_assets(&Assets, &Network)`.
+1. **Crate name `trigger`** clashes with `models::trigger`,
+   `usecase::trigger` and `workers::trigger`. *Recommend:* keep it as asked
+   and write `::trigger::` in those three modules.
+2. **Should the package also ship a standard language** (`Filter`, `Check`,
+   `AmountTerm`) for third parties? *Recommend:* not yet. The server is the
+   only user; promote its enums when a second one appears.
+3. **The effect type `E`.** *Recommend:* `tasks::Job`. Every effect today is
+   a job, so the round's one write stays one write. A server enum only
+   when an action needs an effect that is not a job.
+4. **Conditions that need data an evaluation lacks** (eval.md's `Idle`: the
+   last run settled). *Recommend:* grow `Context::last_run` into a
+   `LastRun { started_at, settled }` when `Idle` is built; do not make
+   `Context` generic now.
+5. **Async store driven by one `block_on`, or a sync one?**
+   *Recommend:* async. It is `base`'s style and allows async stores; the
+   server pays one `block_on` per round (today: one per fee).
+6. **Hand-written `match` in the server's language enums** (three per enum,
+   one arm per variant) instead of a macro. *Recommend:* yes. It is about
+   30 lines in all, and a reader sees each delegation.
+7. **Fix B1, B2, B5, B6 as listed?** *Recommend:* yes, each as its own step
+   after step 4.
+8. **Should the `Round` worker itself be generic in the package?**
+   *Recommend:* no. Its topic, `Skip` policy and job rows tie it to the
+   server's broadcasts.
 
-## 9. Open questions (recommendation first)
+## 9. As built: where the code differs (`sdk/trigger`)
 
-1. **Crate name.** The server already has `models::trigger`,
-   `usecase::trigger` and `workers::trigger`, so a crate named `trigger`
-   must be written `::trigger::…` inside those modules. *Recommend:* keep
-   the crate `trigger` (as asked) and use `::trigger` there. Renaming
-   server modules or aliasing the dependency hides the real name.
-2. **Async port driven by one `block_on`, or a sync port?** A sync
-   `Snapshot` fits diesel exactly, but it shuts out async stores and
-   differs from `base`'s style. *Recommend:* async, as above. The server
-   pays one `block_on` per round (today it pays one per fee).
-3. **`utoipa` in the package.** *Recommend:* an optional `openapi` feature
-   deriving `ToSchema` on `Stats` and `LastRound`, rather than mirror DTOs
-   in the server.
-4. **Action enum instead of a registry.** *Recommend:* yes; there is one
-   action. Bring back a trait only if third parties need their own actions.
-5. **A snapshot contract suite now?** *Recommend:* not now. `Memory` is the
-   reference, and `pipe.rs` pins the SQL. Add the suite if the two ever
-   disagree.
-6. **Fix B1/B2 (one asset per compare, mixed sets refused)?** *Recommend:*
-   yes, as step 6. Today such a trigger silently compares in the wrong
-   units.
-7. **Per-round caches (B3, B4)?** *Recommend:* yes, as step 5. The fee
-   cache makes check and action agree, as eval.md decided.
-8. **Empty source or destination (B5) and create-time precision (B6)?**
-   *Recommend:* refuse both (075 Q5, §6.6).
-9. **Should a failed run count for `since`?** (075 Q3, still open.)
-   *Recommend:* out of scope here. The package reads `last_run` as the
-   store gives it, so the rule stays a store query either way.
-10. **Should the `Round` worker move into the package, generic over
-    `tasks`?** *Recommend:* no. Its topic, policy and job rows tie it to
-    the server's broadcast worker; the package stays free of the queue.
+- Errors are one `error::Error { class, message }` (section 2), not one
+  enum per domain; the selection's two "no wallet" texts stay distinct.
+  `UnknownAction` maps to 404, as asked in review; the API answers 400
+  for it today, so the switch changes that one status.
+- The read-once cache is `CachedStore` in `store.rs`, a crate-private
+  `Store` over the caller's, keyed by selector and by (address, asset) pairs, for the
+  whole round. `Context` itself reads straight through, so one used
+  outside a round (a test) is uncached.
+- `Context::new(wallets, fees, assets, network, now, last_run)` starts
+  with an empty `this`; `with` sets it. `Context::select(selector)` is
+  public too.
+- `Selection` no longer carries the confirmed position: the store reads at
+  it, and the round records it in `LastRound`. `Index::held` returns the
+  decoded balance (no decode error). `Index::new` builds today's id.
+- `Trigger::decide(actions, on, stats) -> Vec<E>` fills `round::Stats` as
+  it goes; the round sets `jobs = effects.len()`.
+- `Trigger::validate` checks the action first, then selector, filter and
+  check: the API's order today. The filter's "reads this" rule runs after
+  the filter's own rules, over every condition in it (`Logic::reads_this`
+  is "every one does"); a filter that breaks both shows the other rule
+  first.
+- `LastRound.at` and `confirmed` are `u64` (the JSON numbers are the same).
+- The leaf variants are `Logic::One` and `Arithmetic::Term`. Both serialize
+  by hand so no `Clone` bound is needed; the JSON is today's.
+- `utoipa` is a workspace dependency (`=5.5.0`, the server's version).
+- R1 ("confirmed, not tip") stays the store's contract: the package can
+  only test that the round records the position it was given.
