@@ -667,8 +667,9 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
                enabled, created_at, updated_at) VALUES
              ('t','bitcoin','regtest','g','{"asset":"native"}','{"all":[]}',
               '{"name":"send","input":{}}',1,0,0);
-             INSERT INTO trigger_run (id, "trigger", started_at, jobs)
-               VALUES ('t.5','t',5,'["7","8"]');"#,
+             INSERT INTO trigger_run (id, "trigger", started_at, jobs, stats)
+               VALUES ('t.5','t',5,'["7","8"]',
+                '{"selected":3,"kept":2,"checked":true,"jobs":2}');"#,
         )?)
     })
     .await
@@ -690,6 +691,10 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
     let run = &page["runs"][0];
     assert_eq!(run["started_at"], json!(5));
     assert_eq!(run["outcome"], json!("mixed"));
+    assert_eq!(
+        run["stats"],
+        json!({"selected": 3, "kept": 2, "checked": true, "jobs": 2})
+    );
     assert_eq!(
         run["jobs"],
         json!([

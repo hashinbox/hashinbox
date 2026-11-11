@@ -211,6 +211,7 @@ diesel::table! {
         created_at -> BigInt,
         updated_at -> BigInt,
         last_run -> Nullable<Text>,
+        last_round -> Nullable<Text>,
     }
 }
 
@@ -220,6 +221,7 @@ diesel::table! {
         trigger -> Text,
         started_at -> BigInt,
         jobs -> Text,
+        stats -> Text,
     }
 }
 

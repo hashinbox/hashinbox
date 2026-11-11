@@ -308,6 +308,8 @@ export function describeSend(send: Send, name: Name): string {
 // Written as the server writes them back.
 const BALANCE: Amount = { balance: { of: { this: {} } } };
 const FEE: Amount = { fee: { of: { this: {} } } };
+/** Twice the fee of sending everything it holds. */
+const TWO_FEES: Amount = { add: [FEE, FEE] };
 /** Everything it holds less the fee of sending it. */
 const ALL_LESS_FEE: Amount = { sub: [BALANCE, FEE] };
 /** The native a `token` send lacks for its fee; never below 0. */
@@ -377,12 +379,17 @@ export const TEMPLATES: Template[] = [
   {
     name: 'Native forward',
     description:
-      'Each address tagged deposit forwards everything it holds, less the fee, once that is worth sending.',
+      'Each address tagged deposit forwards everything it holds, less the fee, once it holds more than twice the fee: the fee then takes at most half.',
     token: false,
     make: (place) => [
       {
         ...native(place, 'forward'),
-        filter: { compare: { of: { this: {} }, aggregate: 'sum', operator: 'above', value: FEE } },
+        // More than twice the fee, not just more than it: the fee reserved is
+        // a ceiling, so a forward leaves dust worth about one fee, and dust
+        // just above the fee would be forwarded for almost nothing.
+        filter: {
+          compare: { of: { this: {} }, aggregate: 'sum', operator: 'above', value: TWO_FEES },
+        },
         check: { all: [] },
         action: {
           name: 'send',

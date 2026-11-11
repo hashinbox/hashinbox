@@ -849,6 +849,21 @@ export interface components {
          * @enum {string}
          */
         JobState: "pending" | "running" | "succeeded" | "failed" | "skipped" | "idle";
+        /** @description A trigger's last round, whether it acted or not. */
+        LastRound: components["schemas"]["TriggerStats"] & {
+            /**
+             * Format: int64
+             * @description When it decided, Unix ms.
+             */
+            at: number;
+            /**
+             * Format: int64
+             * @description The confirmed block position it decided at.
+             */
+            confirmed: number;
+            /** @description Why it was refused (it then acted on nothing); always present. */
+            refused: string | null;
+        };
         /**
          * @description One `leg` row: a transaction's leg, or a block's reward; the API shows
          *     it as is.
@@ -1344,6 +1359,7 @@ export interface components {
             group: string;
             /** @description Its slug: 1 to 64 of `[a-z0-9-]`. */
             id: string;
+            last_round: null | components["schemas"]["LastRound"];
             /** @description Network name, as `GET /v1/assets` lists it. */
             network: string;
             /**
@@ -1403,6 +1419,11 @@ export interface components {
              * @description Unix ms.
              */
             started_at: number;
+            /**
+             * @description What its round saw: wallets selected, kept by the filter, whether
+             *     the check held, and send jobs queued.
+             */
+            stats: components["schemas"]["TriggerStats"];
         };
         /** @description `GET /v1/triggers/{id}/runs`: a page of runs. */
         TriggerRunList: {
@@ -1413,6 +1434,21 @@ export interface components {
             next_cursor: string | null;
             /** @description Runs, latest first. */
             runs: components["schemas"]["TriggerRun"][];
+        };
+        /**
+         * @description What one round saw of a trigger: how many wallet indexes its selector
+         *     picked, how many of them its filter kept, whether its check held over
+         *     those, and how many send jobs its action queued.
+         */
+        TriggerStats: {
+            /** @description Whether its check held over the kept ones. */
+            checked: boolean;
+            /** @description Send jobs its action queued. */
+            jobs: number;
+            /** @description How many of them its filter kept (all of them without a filter). */
+            kept: number;
+            /** @description Wallet indexes its selector picked. */
+            selected: number;
         };
         /** @description `PATCH /v1/wallets/{id}/indexes/{asset}` body. */
         UpdateWalletIndex: {

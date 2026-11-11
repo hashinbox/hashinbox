@@ -416,6 +416,7 @@ fn open<'a>(
         enabled: true,
         created_at: 1,
         updated_at: 1,
+        last_round: None,
     };
     let assets = [("native", 8), ("tok", 2)]
         .into_iter()
@@ -822,6 +823,7 @@ fn triggers_and_their_runs_are_stored() {
         enabled: true,
         created_at: 1,
         updated_at: 1,
+        last_round: None,
     };
     trigger::db::insert(&mut connection, &trigger).unwrap();
     assert!(trigger::db::insert(&mut connection, &trigger).is_err());

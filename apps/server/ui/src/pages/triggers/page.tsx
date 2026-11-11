@@ -1,10 +1,16 @@
 import Add from '@mui/icons-material/Add';
 import Bolt from '@mui/icons-material/Bolt';
+import DeleteOutlined from '@mui/icons-material/DeleteOutlined';
+import Edit from '@mui/icons-material/Edit';
+import Settings from '@mui/icons-material/Settings';
 import Box from '@mui/material/Box';
 import Chip from '@mui/material/Chip';
 import IconButton from '@mui/material/IconButton';
 import List from '@mui/material/List';
 import ListItemButton from '@mui/material/ListItemButton';
+import ListItemIcon from '@mui/material/ListItemIcon';
+import Menu from '@mui/material/Menu';
+import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
@@ -14,14 +20,20 @@ import { assetName } from '@/money';
 import { Empty } from '@/_components/empty';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
+import { Confirm } from '@/_components/confirm';
 import { Editor } from './_components/editor';
+import { View } from './_components/view';
 import { Compose } from './_components/compose';
 import { Start } from './_components/start';
 import type { Definition } from './_components/forms';
 import { Split } from '@/_components/split';
 
-/** What the right side shows: a stored trigger, new ones being written, or nothing. */
-type Open = { kept: Trigger } | { compose: { title: string; drafts: Definition[] } } | null;
+/** What the right side shows: a stored trigger read or edited, new ones being written, or nothing. */
+type Open =
+  | { view: Trigger }
+  | { edit: Trigger }
+  | { compose: { title: string; drafts: Definition[] } }
+  | null;
 
 /** A kept trigger as the editor holds it. */
 function definitionOf(trigger: Trigger): Definition {
@@ -37,6 +49,11 @@ function definitionOf(trigger: Trigger): Definition {
   };
 }
 
+/** The stored trigger an open view or editor shows. */
+function kept(open: { view: Trigger } | { edit: Trigger }): Trigger {
+  return 'view' in open ? open.view : open.edit;
+}
+
 /** One line on what a trigger does. */
 function summary(trigger: Trigger, listings: Listing[]): string {
   const send = definitionOf(trigger).action.input;
@@ -49,6 +66,20 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
   const [open, setOpen] = useState<Open>(null);
   const [choosing, setChoosing] = useState(false);
   const [tags, setTags] = useState<string[]>([]);
+  // The trigger whose cog menu is open, and where; the one being deleted.
+  const [menu, setMenu] = useState<{ anchor: HTMLElement; trigger: Trigger } | null>(null);
+  const [deleting, setDeleting] = useState<Trigger | null>(null);
+
+  const remove = (trigger: Trigger) => {
+    setDeleting(null);
+    call(client.DELETE('/v1/triggers/{id}', { params: { path: { id: trigger.id } } }))
+      .then(() => {
+        shell.notify('Trigger deleted.');
+        refresh();
+        setOpen((now) => (now && !('compose' in now) && kept(now).id === trigger.id ? null : now));
+      })
+      .catch(shell.fail);
+  };
 
   const refresh = useCallback(() => {
     call(client.GET('/v1/triggers'))
@@ -63,7 +94,7 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
       .catch(shell.fail);
   }, [shell.fail]);
 
-  const selected = open && 'kept' in open ? open.kept.id : null;
+  const selected = open && !('compose' in open) ? kept(open).id : null;
 
   return (
     <>
@@ -106,7 +137,7 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
                 <ListItemButton
                   key={t.id}
                   selected={t.id === selected}
-                  onClick={() => setOpen({ kept: t })}
+                  onClick={() => setOpen({ view: t })}
                   sx={{ py: 1.25, px: 1, display: 'block' }}
                 >
                   <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
@@ -118,6 +149,18 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
                       label={t.enabled ? 'on' : 'off'}
                       color={t.enabled ? 'success' : 'default'}
                     />
+                    <IconButton
+                      size="small"
+                      aria-label={`Settings of ${t.id}`}
+                      onClick={(e) => {
+                        // The row stays as it is: the cog only opens its menu.
+                        e.stopPropagation();
+                        setMenu({ anchor: e.currentTarget, trigger: t });
+                      }}
+                      sx={{ mr: -0.5 }}
+                    >
+                      <Settings fontSize="small" />
+                    </IconButton>
                   </Stack>
                   <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary' }}>
                     {t.chain}/{t.network} · {summary(t, shell.listings)}
@@ -135,21 +178,25 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
         detail={
           <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
             {open ? (
-              'kept' in open ? (
+              'view' in open ? (
+                <View
+                  key={open.view.id}
+                  shell={shell}
+                  initial={open.view}
+                  onEdit={() => setOpen({ edit: open.view })}
+                />
+              ) : 'edit' in open ? (
                 <Editor
-                  key={open.kept.id}
+                  key={open.edit.id}
                   shell={shell}
                   wallets={wallets}
                   tags={tags}
-                  initial={definitionOf(open.kept)}
+                  initial={definitionOf(open.edit)}
                   onSaved={(saved) => {
                     refresh();
-                    setOpen({ kept: saved });
+                    setOpen({ view: saved });
                   }}
-                  onDeleted={() => {
-                    refresh();
-                    setOpen(null);
-                  }}
+                  onCancel={() => setOpen({ view: open.edit })}
                 />
               ) : (
                 <Compose
@@ -164,20 +211,55 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
                     refresh();
                     shell.notify(`Created ${created.map((t) => t.id).join(', ')}.`);
                     const first = created[0];
-                    setOpen(first ? { kept: first } : null);
+                    setOpen(first ? { view: first } : null);
                   }}
                 />
               )
             ) : (
               <Empty icon={<Bolt />} title="Triggers">
                 A trigger watches wallets and sends money on its own when a rule is met, like a
-                balance going over a limit. Pick one to edit its rule and action, or add new ones
-                with +.
+                balance going over a limit. Pick one to see what it does and how its rounds went;
+                edit or delete it from its cog. Add new ones with +.
               </Empty>
             )}
           </Box>
         }
       />
+      <Menu anchorEl={menu?.anchor} open={menu !== null} onClose={() => setMenu(null)}>
+        <MenuItem
+          onClick={() => {
+            if (menu) setOpen({ edit: menu.trigger });
+            setMenu(null);
+          }}
+        >
+          <ListItemIcon>
+            <Edit fontSize="small" />
+          </ListItemIcon>
+          Edit
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            setDeleting(menu?.trigger ?? null);
+            setMenu(null);
+          }}
+          sx={{ color: 'error.main' }}
+        >
+          <ListItemIcon>
+            <DeleteOutlined fontSize="small" color="error" />
+          </ListItemIcon>
+          Delete
+        </MenuItem>
+      </Menu>
+      <Confirm
+        open={deleting !== null}
+        title={`Delete ${deleting?.id ?? ''}`}
+        phrase={deleting?.id ?? ''}
+        action="Delete"
+        onClose={() => setDeleting(null)}
+        onConfirm={() => deleting && remove(deleting)}
+      >
+        Deletes the trigger and its run history. Sends already queued still go out.
+      </Confirm>
       <Start
         shell={shell}
         open={choosing}

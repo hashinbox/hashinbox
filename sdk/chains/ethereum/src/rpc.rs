@@ -151,7 +151,11 @@ impl Client {
             wires.push(wire);
         }
         let receipts = self.receipts(&wires).await?;
-        let logs = self.transfers(&wires, tokens).await?;
+        let (logs, ahead) = self.transfers(&wires, tokens).await?;
+        // A block the logs' node is not at yet: the run ends before it.
+        if let Some(ahead) = ahead {
+            wires.retain(|wire| wire.number() < ahead);
+        }
         for (wire, receipts) in wires.into_iter().zip(receipts) {
             let height = wire.number();
             // No receipts for a block the node has: not ready yet near the
@@ -235,7 +239,9 @@ impl Client {
         Ok((base, priority))
     }
 
-    /// `eth_estimateGas` of `request` from `from`.
+    /// `eth_estimateGas` of `request` from `from`, as if `from` held ample
+    /// ether: the gas does not depend on it, so a sender without ether (yet)
+    /// is estimated too.
     ///
     /// # Errors
     ///
@@ -246,12 +252,16 @@ impl Client {
         from: &Address,
         request: &TxEip1559,
     ) -> Result<u64, TransactionError> {
-        let params = json!([{
-            "from": from.to_string(),
-            "to": request.to.to().map(hex::encode_prefixed),
-            "value": format!("{:#x}", request.value),
-            "data": hex::encode_prefixed(&request.input),
-        }]);
+        let params = json!([
+            {
+                "from": from.to_string(),
+                "to": request.to.to().map(hex::encode_prefixed),
+                "value": format!("{:#x}", request.value),
+                "data": hex::encode_prefixed(&request.input),
+            },
+            "latest",
+            { from.to_string(): { "balance": "0xffffffffffffffffffffffff" } },
+        ]);
         let reply = match self
             .0
             .transport
@@ -391,7 +401,10 @@ impl Client {
     /// The `Transfer` logs of `tokens` in the blocks of `wires`, by
     /// transaction hash; none without tokens. A range the node refuses (an
     /// error object: too wide, too many results; or too large an answer) is
-    /// halved until one block, which must answer.
+    /// halved until one block, which must answer, unless the node is not at
+    /// that block yet: a node behind one URL can trail the one the blocks
+    /// came from. Then the logs stop below it, and that block is returned:
+    /// the run must end before it.
     ///
     /// # Errors
     ///
@@ -401,14 +414,14 @@ impl Client {
         &self,
         wires: &[WireBlock],
         tokens: &Tokens,
-    ) -> anyhow::Result<BTreeMap<B256, Vec<Log>>> {
+    ) -> anyhow::Result<(BTreeMap<B256, Vec<Log>>, Option<u64>)> {
         let mut transfers = BTreeMap::<B256, Vec<Log>>::new();
         let (Some(first), Some(last)) = (wires.first(), wires.last()) else {
-            return Ok(transfers);
+            return Ok((transfers, None));
         };
         let contracts: Vec<_> = tokens.iter().map(hex::encode_prefixed).collect();
         if contracts.is_empty() {
-            return Ok(transfers);
+            return Ok((transfers, None));
         }
         let mut ranges = vec![(first.number(), last.number())];
         while let Some((from, to)) = ranges.pop() {
@@ -434,6 +447,12 @@ impl Client {
                 ranges.push((from, middle));
                 continue;
             }
+            // Lower halves go first, so every range left is above this one.
+            if let Ok(Err(failure)) = &reply
+                && is_ahead(failure)
+            {
+                return Ok((transfers, Some(from)));
+            }
             let reply = reply.context("Ethereum eth_getLogs")?;
             expired(from, &reply)?;
             for log in decode::<Vec<Log>>("eth_getLogs", reply)? {
@@ -447,7 +466,7 @@ impl Client {
                 transfers.entry(log.transaction_hash).or_default().push(log);
             }
         }
-        Ok(transfers)
+        Ok((transfers, None))
     }
 
     /// One repeatable call, decoded.
@@ -623,6 +642,12 @@ fn collect(
         collected.push(receipts);
     }
     Ok(Some(collected))
+}
+
+/// Whether `failure` says the block asked for is past the node's head, as
+/// reth and Erigon word it: the node has not reached it yet.
+fn is_ahead(failure: &Failure) -> bool {
+    failure.message.contains("beyond current head")
 }
 
 /// [`NotServed`] when `reply` says the node keeps no history for block

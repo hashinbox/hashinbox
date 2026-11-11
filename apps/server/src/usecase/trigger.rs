@@ -15,7 +15,7 @@ use diesel::SqliteConnection;
 
 use crate::models::{
     self, TriggerRun, network_index, trigger,
-    trigger::{Action, Aggregate, Amount, Compare, Filter, Gate, Logic, Target},
+    trigger::{Action, Aggregate, Amount, Compare, Filter, Gate, Logic, Stats, Target},
     wallet_index::{self, Selection},
 };
 
@@ -64,20 +64,29 @@ impl<'a> Trigger<'a> {
     /// What it decides on `network` at its confirmed position `confirmed`:
     /// the wallet indexes its selector picks, with spendable balances, and
     /// those its filter keeps (`This`) if its check holds; `None` when it
-    /// does not.
+    /// does not. `stats` counts each step as it is taken, so a refusal keeps
+    /// what was counted before it.
     ///
     /// # Errors
     ///
     /// When a read or the fee estimate fails.
-    fn decide(&mut self, network: &Network, confirmed: i64) -> anyhow::Result<Option<Selection>> {
+    fn decide(
+        &mut self,
+        network: &Network,
+        confirmed: i64,
+        stats: &mut Stats,
+    ) -> anyhow::Result<Option<Selection>> {
         let row = self.row.clone();
         let selected =
             wallet_index::db::select(self.connection, network, &row.selector.0, confirmed)?;
+        stats.selected = selected.len();
         let kept = match &row.filter {
             Some(filter) => self.filter(&filter.0, &selected)?,
             None => selected,
         };
-        Ok(self.check(&row.check.0, &kept)?.then_some(kept))
+        stats.kept = kept.len();
+        stats.checked = self.check(&row.check.0, &kept)?;
+        Ok(stats.checked.then_some(kept))
     }
 
     /// Whether `check` holds over `this`, leaves in written order, stopping early.
@@ -261,22 +270,29 @@ impl Triggers {
         })
     }
 
-    /// Each one's id and what `act` made of its decision, in id order:
-    /// `None` when its check does not hold, the error when it cannot decide
-    /// or `act` fails.
+    /// The confirmed position they decide at; `None` while unknown.
+    pub(crate) const fn confirmed(&self) -> Option<i64> {
+        self.confirmed
+    }
+
+    /// Each one's id, what it saw, and what `act` made of its decision, in
+    /// id order: `None` when its check does not hold, the error when it
+    /// cannot decide or `act` fails.
     pub(crate) fn decide<T>(
         &self,
         connection: &mut SqliteConnection,
         context: &Context,
         mut act: impl FnMut(Decision<'_, '_>) -> anyhow::Result<T>,
-    ) -> Vec<(String, anyhow::Result<Option<T>>)> {
+    ) -> Vec<(String, Stats, anyhow::Result<Option<T>>)> {
         let Some(confirmed) = self.confirmed else {
             return Vec::new();
         };
         let mut decided = Vec::with_capacity(self.all.len());
         for (row, run) in &self.all {
             let mut trigger = Trigger::new(row.clone(), connection, context.clone(), run.clone());
-            let outcome = trigger.decide(&self.network, confirmed).and_then(|this| {
+            let mut stats = Stats::default();
+            let chosen = trigger.decide(&self.network, confirmed, &mut stats);
+            let outcome = chosen.and_then(|this| {
                 let Some(this) = this else {
                     return Ok(None);
                 };
@@ -288,7 +304,7 @@ impl Triggers {
                 })
                 .map(Some)
             });
-            decided.push((row.id.clone(), outcome));
+            decided.push((row.id.clone(), stats, outcome));
         }
         decided
     }

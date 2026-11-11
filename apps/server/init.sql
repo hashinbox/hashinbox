@@ -405,6 +405,9 @@ CREATE TABLE "trigger" (
     updated_at INTEGER NOT NULL, -- Unix ms.
     -- Its latest run, set in the write that records it; NULL: never run.
     last_run   TEXT    REFERENCES trigger_run (id) ON DELETE SET NULL,
+    -- JSON: what its last round saw (`trigger::LastRound`), acted or not;
+    -- NULL: no round yet.
+    last_round TEXT             CHECK (json_valid(last_round)),
     CHECK (length(id) BETWEEN 1 AND 64 AND id NOT GLOB '*[^a-z0-9-]*')
 );
 CREATE INDEX trigger_network ON "trigger" (chain, network);
@@ -418,6 +421,7 @@ CREATE TABLE trigger_run (
     "trigger"  TEXT    NOT NULL REFERENCES "trigger" (id) ON DELETE CASCADE,
     started_at INTEGER NOT NULL, -- Unix ms.
     jobs       TEXT    NOT NULL CHECK (json_valid(jobs)), -- The send jobs' ids, a JSON list.
+    stats      TEXT    NOT NULL CHECK (json_valid(stats)), -- JSON: what its round saw (`trigger::Stats`).
     CHECK (id = "trigger" || '.' || started_at)
 );
 CREATE INDEX trigger_run_latest ON trigger_run ("trigger", started_at);
@@ -452,15 +456,16 @@ CREATE INDEX q_kind ON q (kind, topic) WHERE status IN (0, 1);
 -- A kind's due jobs.
 CREATE INDEX q_due ON q (kind, run_at) WHERE status IN (0, 1);
 
--- Each trigger run with each send job it queued, as the job is now: one row
--- per job in the order queued (`position`), its `job`, `status` and
--- `reason` NULL when the job is no longer kept; a run that queued none has
--- one row of NULLs.
+-- Each trigger run, with what its round saw (`stats`), and each send job it
+-- queued, as the job is now: one row per job in the order queued
+-- (`position`), its `job`, `status` and `reason` NULL when the job is no
+-- longer kept; a run that queued none has one row of NULLs.
 CREATE VIEW trigger_run_with_jobs AS
 SELECT
     run.id AS run,
     run."trigger",
     run.started_at,
+    run.stats,
     queued.key AS position,
     job.id AS job,
     job.status,

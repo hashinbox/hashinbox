@@ -3384,6 +3384,42 @@
           "idle"
         ]
       },
+      "LastRound": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/TriggerStats",
+            "description": "What it saw."
+          },
+          {
+            "type": "object",
+            "required": [
+              "at",
+              "confirmed",
+              "refused"
+            ],
+            "properties": {
+              "at": {
+                "type": "integer",
+                "format": "int64",
+                "description": "When it decided, Unix ms."
+              },
+              "confirmed": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The confirmed block position it decided at."
+              },
+              "refused": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why it was refused (it then acted on nothing); always present."
+              }
+            }
+          }
+        ],
+        "description": "A trigger's last round, whether it acted or not."
+      },
       "Leg": {
         "type": "object",
         "description": "One `leg` row: a transaction's leg, or a block's reward; the API shows\nit as is.",
@@ -4363,7 +4399,8 @@
           "action",
           "enabled",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "last_round"
         ],
         "properties": {
           "action": {
@@ -4401,6 +4438,17 @@
           "id": {
             "type": "string",
             "description": "Its slug: 1 to 64 of `[a-z0-9-]`."
+          },
+          "last_round": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LastRound",
+                "description": "What its last round saw; null before its first round. Always present."
+              }
+            ]
           },
           "network": {
             "type": "string",
@@ -4524,6 +4572,7 @@
         "description": "One run of a trigger: when it started, the send jobs it queued and how\nthey ended.",
         "required": [
           "started_at",
+          "stats",
           "outcome",
           "jobs"
         ],
@@ -4550,6 +4599,10 @@
             "type": "integer",
             "format": "int64",
             "description": "Unix ms."
+          },
+          "stats": {
+            "$ref": "#/components/schemas/TriggerStats",
+            "description": "What its round saw: wallets selected, kept by the filter, whether\nthe check held, and send jobs queued."
           }
         }
       },
@@ -4574,6 +4627,37 @@
               "$ref": "#/components/schemas/TriggerRun"
             },
             "description": "Runs, latest first."
+          }
+        }
+      },
+      "TriggerStats": {
+        "type": "object",
+        "description": "What one round saw of a trigger: how many wallet indexes its selector\npicked, how many of them its filter kept, whether its check held over\nthose, and how many send jobs its action queued.",
+        "required": [
+          "selected",
+          "kept",
+          "checked",
+          "jobs"
+        ],
+        "properties": {
+          "checked": {
+            "type": "boolean",
+            "description": "Whether its check held over the kept ones."
+          },
+          "jobs": {
+            "type": "integer",
+            "description": "Send jobs its action queued.",
+            "minimum": 0
+          },
+          "kept": {
+            "type": "integer",
+            "description": "How many of them its filter kept (all of them without a filter).",
+            "minimum": 0
+          },
+          "selected": {
+            "type": "integer",
+            "description": "Wallet indexes its selector picked.",
+            "minimum": 0
           }
         }
       },

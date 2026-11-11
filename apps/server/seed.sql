@@ -24,10 +24,10 @@ VALUES
 INSERT INTO network_asset (chain, network, asset, kind, contract, ticker, decimals,
     display_decimals)
 VALUES
-    ('ethereum', 'sepolia', 'native', 'native', NULL, 'ETH', 18, 6),
+    ('ethereum', 'sepolia', 'native', 'native', NULL, 'ETH', 18, 12),
     ('ethereum', 'sepolia', '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238', 'contract',
         '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238', 'USDC', 6, 2),
-    ('ethereum', 'mainnet', 'native', 'native', NULL, 'ETH', 18, 6),
+    ('ethereum', 'mainnet', 'native', 'native', NULL, 'ETH', 18, 12),
     ('ethereum', 'mainnet', '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', 'contract',
         '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', 'USDC', 6, 2),
     ('ethereum', 'mainnet', '0xdac17f958d2ee523a2206206994597c13d831ec7', 'contract',

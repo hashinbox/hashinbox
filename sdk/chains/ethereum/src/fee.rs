@@ -134,33 +134,43 @@ impl FeeLimits {
     }
 }
 
-/// Gas of a native ether transfer to an account without code.
-const TRANSFER_GAS: u64 = 21_000;
+/// A recipient no one has used: a fresh pseudo-random address per call, so
+/// an estimate against it includes creating the recipient (its account for
+/// ether, its balance slot for a token), the dearest case. A fixed address
+/// would not do: anyone can fund it, and estimates against it would then
+/// leave out the creation.
+fn unused() -> alloy_primitives::Address {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let mut seed = nanos.to_be_bytes().to_vec();
+    seed.extend(CALLS.fetch_add(1, Ordering::Relaxed).to_be_bytes());
+    alloy_primitives::Address::from_slice(&alloy_primitives::keccak256(seed)[12..])
+}
 
-/// The recipient a token's gas is estimated against: an address that holds
-/// no token, so the estimate includes creating the recipient's balance slot.
-pub(crate) const PLACEHOLDER: alloy_primitives::Address =
-    alloy_primitives::Address::repeat_byte(0xfe);
-
-/// Ethereum's `base::FeeEstimator`: EIP-1559 fees cached for their time to
-/// live, and each token's transfer gas limit cached for the factory's
-/// lifetime; every builder of the factory signs with them.
+/// Ethereum's `base::FeeEstimator`: EIP-1559 fees and the transfer gas
+/// limit of ether and each token, each cached for the fees' time to live;
+/// every builder of the factory signs with them.
 pub(crate) struct Estimator {
     pub(crate) network: base::Network,
     pub(crate) rpc: Client,
     pub(crate) limits: FeeLimits,
     pub(crate) tokens: Tokens,
     pub(crate) fees: Cache<Fees>,
-    /// Each allowlisted token's gas limit, margin included.
-    pub(crate) gas: BTreeMap<alloy_primitives::Address, Cache<u64>>,
+    /// The gas limit of sending ether (`None`) and each allowlisted token,
+    /// margin included.
+    pub(crate) gas: BTreeMap<Option<alloy_primitives::Address>, Cache<u64>>,
 }
 
 impl Estimator {
-    /// `rpc`'s fees under `limits`, cached `ttl`, and the gas of `tokens`.
+    /// `rpc`'s fees under `limits` and the gas of ether and `tokens`, each
+    /// cached `ttl`.
     pub(crate) fn new(rpc: Client, limits: FeeLimits, tokens: Tokens, ttl: Duration) -> Self {
-        let gas = tokens
-            .iter()
-            .map(|contract| (contract, Cache::new(Duration::MAX)))
+        let gas = std::iter::once(None)
+            .chain(tokens.iter().map(Some))
+            .map(|contract| (contract, Cache::new(ttl)))
             .collect();
         Self {
             network: rpc.network().into(),
@@ -188,17 +198,16 @@ impl Estimator {
             .await
     }
 
-    /// The gas limit of sending ether (`None`) or the `contract` token:
-    /// 21 000, or the token's `transfer(placeholder, 1)` estimate from
-    /// `from` (the first sender to ask) plus the margin, kept from then on.
+    /// The gas limit of sending ether (`None`) or the `contract` token to a
+    /// recipient that never held it: the node's estimate of such a transfer
+    /// from `from` (the first sender to ask while stale) plus the margin.
+    /// Covers any recipient without code: one that holds it already costs
+    /// less, and only the gas used is paid.
     pub(crate) async fn gas(
         &self,
         contract: Option<alloy_primitives::Address>,
         from: &Address,
     ) -> Result<u64, TransactionError> {
-        let Some(contract) = contract else {
-            return Ok(TRANSFER_GAS);
-        };
         let cache = self.gas.get(&contract).ok_or_else(|| {
             TransactionError::new(
                 TransactionErrorKind::Unsupported,
@@ -207,10 +216,17 @@ impl Estimator {
         })?;
         cache
             .get(|| async {
-                let request = TxEip1559 {
-                    to: TxKind::Call(contract),
-                    input: Bytes::from(erc20::transfer(PLACEHOLDER, U256::from(1))),
-                    ..TxEip1559::default()
+                let request = match contract {
+                    None => TxEip1559 {
+                        to: TxKind::Call(unused()),
+                        value: U256::from(1),
+                        ..TxEip1559::default()
+                    },
+                    Some(contract) => TxEip1559 {
+                        to: TxKind::Call(contract),
+                        input: Bytes::from(erc20::transfer(unused(), U256::from(1))),
+                        ..TxEip1559::default()
+                    },
                 };
                 let gas = self.rpc.estimate(from, &request).await?;
                 self.limits.gas_limit(gas).map_err(TransactionError::failed)

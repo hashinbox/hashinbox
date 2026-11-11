@@ -26,7 +26,7 @@ use crate::{
     db::Paged as _,
     models::{
         self, Trigger,
-        trigger::{self as triggers, Action, Filter, Gate, Logic},
+        trigger::{self as triggers, Action, Filter, Gate, Logic, Stats},
         trigger_run,
         wallet_index_selector::Selector,
     },
@@ -150,6 +150,7 @@ impl Definition {
             enabled: self.enabled,
             created_at,
             updated_at,
+            last_round: None,
         };
         // The model's own rules, before it is ever kept.
         trigger
@@ -397,6 +398,9 @@ async fn delete(
 struct TriggerRun {
     /// Unix ms.
     started_at: i64,
+    /// What its round saw: wallets selected, kept by the filter, whether
+    /// the check held, and send jobs queued.
+    stats: Stats,
     /// Where its jobs are together; null when none of them is kept.
     #[schema(required)]
     outcome: Option<RunOutcome>,
@@ -507,6 +511,7 @@ impl From<trigger_run::Run> for TriggerRun {
         let states: Vec<JobState> = jobs.iter().map(|job| job.state).collect();
         Self {
             started_at: run.started_at,
+            stats: run.stats,
             outcome: RunOutcome::of(&states),
             jobs,
         }

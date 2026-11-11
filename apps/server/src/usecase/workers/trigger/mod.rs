@@ -22,7 +22,11 @@ pub(crate) use actions::{Actions, Invocation};
 use super::{TIMEOUT, index::Target};
 use crate::{
     db::Db,
-    models::{Json, Task as Row, TriggerRun, task, trigger_run},
+    models::{
+        Json, Task as Row, TriggerRun, task,
+        trigger::{self, LastRound},
+        trigger_run,
+    },
     usecase::{
         tasks::Queue,
         trigger::{Context as Snapshot, Triggers},
@@ -90,48 +94,74 @@ impl Worker for Round {
                 now,
             };
             let (deciding, actions) = (network.clone(), self.actions.clone());
-            let verdicts = self
+            let (confirmed, verdicts) = self
                 .db
                 .read(move |connection| {
                     let triggers = Triggers::new(connection, &deciding)?;
-                    Ok(triggers.decide(connection, &context, |decision| {
+                    let verdicts = triggers.decide(connection, &context, |decision| {
                         let mut invocation =
                             Invocation::new(decision.network, decision.this, decision.trigger);
                         let action = decision.action;
                         actions.run(&action.name, &action.input, &mut invocation)?;
                         Ok(invocation.started())
-                    }))
+                    });
+                    Ok((triggers.confirmed(), verdicts))
                 })
                 .await?;
+            let Some(confirmed) = confirmed else {
+                return anyhow::Ok(Ack::Idle);
+            };
 
-            // Refusals are logged; the rest that started jobs act.
+            // What each trigger saw; refusals are logged too, and the rest
+            // that started jobs act.
+            let mut rounds = Vec::new();
             let mut acting = Vec::new();
-            for (id, verdict) in verdicts {
+            for (id, mut stats, verdict) in verdicts {
+                let mut refused = None;
                 match verdict {
-                    Ok(Some(jobs)) if !jobs.is_empty() => acting.push((id, jobs)),
+                    Ok(Some(jobs)) if !jobs.is_empty() => {
+                        stats.jobs = jobs.len();
+                        acting.push((id.clone(), stats, jobs));
+                    }
                     Ok(_) => {}
-                    Err(error) => self.logger.event(
-                        Level::Warn,
-                        "trigger.refused",
-                        &format!("{id}: {error:#}"),
-                        &[
-                            ("chain", network.chain.as_str()),
-                            ("network", &network.name),
-                        ],
-                    ),
+                    Err(error) => {
+                        let why = format!("{error:#}");
+                        self.logger.event(
+                            Level::Warn,
+                            "trigger.refused",
+                            &format!("{id}: {why}"),
+                            &[
+                                ("chain", network.chain.as_str()),
+                                ("network", &network.name),
+                            ],
+                        );
+                        refused = Some(why);
+                    }
                 }
+                let round = LastRound {
+                    at: now,
+                    confirmed,
+                    stats,
+                    refused,
+                };
+                rounds.push((id, round));
             }
-
-            // Every acting trigger's jobs and run in one write: all or none,
-            // so a rerun never decides again what this one kept. The one
-            // write to the queue outside its store, allowed because the jobs
-            // are not unique: each is admitted.
-            if acting.is_empty() {
+            if rounds.is_empty() {
                 return anyhow::Ok(Ack::Idle);
             }
+
+            // What every trigger saw, and every acting trigger's jobs and
+            // run, in one write: all or none, so a rerun never decides again
+            // what this one kept. The one write to the queue outside its
+            // store, allowed because the jobs are not unique: each is
+            // admitted.
+            let acted = !acting.is_empty();
             self.db
                 .write(move |connection| {
-                    for (id, jobs) in &acting {
+                    for (id, round) in &rounds {
+                        trigger::db::set_last_round(connection, id, round)?;
+                    }
+                    for (id, stats, jobs) in &acting {
                         let mut ids = Vec::new();
                         for job in jobs {
                             let queued = task::db::insert(connection, &Row::try_from(job)?, now)?;
@@ -139,6 +169,7 @@ impl Worker for Round {
                         }
                         let run = TriggerRun {
                             jobs: Json(ids),
+                            stats: Json(*stats),
                             ..TriggerRun::new(id, now)
                         };
                         trigger_run::db::insert(connection, &run)?;
@@ -146,6 +177,9 @@ impl Worker for Round {
                     Ok(())
                 })
                 .await?;
+            if !acted {
+                return anyhow::Ok(Ack::Idle);
+            }
             self.queue.notify();
             anyhow::Ok(Ack::Done)
         };

@@ -7,6 +7,7 @@ import Stack from '@mui/material/Stack';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
 import TableCell from '@mui/material/TableCell';
+import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import TextField from '@mui/material/TextField';
@@ -188,58 +189,61 @@ export function Jobs({ shell }: { shell: Shell }) {
             )}
             sx={{ mb: 2, maxWidth: 720 }}
           />
-          <Table size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell>Job</TableCell>
-                <TableCell>Kind</TableCell>
-                <TableCell>Network</TableCell>
-                <TableCell>Created</TableCell>
-                <TableCell>Updated</TableCell>
-                <TableCell>Next run</TableCell>
-                <TableCell>Attempts</TableCell>
-                <TableCell>Reason</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {jobs.length === 0 && <EmptyRow columns={8} message="No job matches." />}
-              {jobs.map((j) => (
-                <TableRow
-                  key={j.id}
-                  hover
-                  selected={j.id === selected}
-                  onClick={() => setSelected(j.id)}
-                  sx={{ cursor: 'pointer' }}
-                >
-                  <TableCell sx={{ ...figures, whiteSpace: 'nowrap' }} title={j.id}>
-                    <Dot state={j.state} /> {shorten(j.id)}
-                  </TableCell>
-                  <TableCell>{labelOf(j.kind)}</TableCell>
-                  <TableCell sx={figures}>{networkOf(j)}</TableCell>
-                  <TableCell sx={figures}>
-                    <When at={j.created_at} />
-                  </TableCell>
-                  <TableCell sx={figures}>
-                    <When at={j.updated_at} />
-                  </TableCell>
-                  <TableCell sx={figures}>{next(j)}</TableCell>
-                  <TableCell sx={figures}>{j.attempts}</TableCell>
-                  <TableCell
-                    sx={{
-                      ...figures,
-                      color: j.state === 'failed' ? 'error.main' : 'text.secondary',
-                      maxWidth: 280,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {j.reason ?? ''}
-                  </TableCell>
+          {/* Wider than its column: it scrolls inside, never over the detail beside it. */}
+          <TableContainer>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Job</TableCell>
+                  <TableCell>Kind</TableCell>
+                  <TableCell>Network</TableCell>
+                  <TableCell>Created</TableCell>
+                  <TableCell>Updated</TableCell>
+                  <TableCell>Next run</TableCell>
+                  <TableCell>Attempts</TableCell>
+                  <TableCell>Reason</TableCell>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHead>
+              <TableBody>
+                {jobs.length === 0 && <EmptyRow columns={8} message="No job matches." />}
+                {jobs.map((j) => (
+                  <TableRow
+                    key={j.id}
+                    hover
+                    selected={j.id === selected}
+                    onClick={() => setSelected(j.id)}
+                    sx={{ cursor: 'pointer' }}
+                  >
+                    <TableCell sx={{ ...figures, whiteSpace: 'nowrap' }} title={j.id}>
+                      <Dot state={j.state} /> {shorten(j.id)}
+                    </TableCell>
+                    <TableCell>{labelOf(j.kind)}</TableCell>
+                    <TableCell sx={figures}>{networkOf(j)}</TableCell>
+                    <TableCell sx={figures}>
+                      <When at={j.created_at} />
+                    </TableCell>
+                    <TableCell sx={figures}>
+                      <When at={j.updated_at} />
+                    </TableCell>
+                    <TableCell sx={figures}>{next(j)}</TableCell>
+                    <TableCell sx={figures}>{j.attempts}</TableCell>
+                    <TableCell
+                      sx={{
+                        ...figures,
+                        color: j.state === 'failed' ? 'error.main' : 'text.secondary',
+                        maxWidth: 280,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {j.reason ?? ''}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
         </Box>
       }
       detail={

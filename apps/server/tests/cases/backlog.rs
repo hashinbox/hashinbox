@@ -44,7 +44,25 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     succeeded(app, &stuck).await;
     let sends = decided_after(app, chain, &treasury).await;
     assert_eq!(sends.len(), 1, "{sends:?}");
-    assert_eq!(runs(app, "payout").await.len(), 1);
+    let ran = runs(app, "payout").await;
+    assert_eq!(ran.len(), 1);
+    // The run keeps what its round saw; the trigger keeps its last round's.
+    let stats = &ran[0]["stats"];
+    assert_eq!(
+        (stats["checked"].as_bool(), stats["jobs"].as_u64()),
+        (Some(true), Some(1)),
+        "{stats}"
+    );
+    assert!(
+        stats["selected"].as_u64() >= stats["kept"].as_u64(),
+        "{stats}"
+    );
+    assert!(stats["kept"].as_u64() >= Some(1), "{stats}");
+    let last = &app.api.get("/v1/triggers/payout").await["last_round"];
+    assert!(
+        last["confirmed"].as_u64().is_some() && last["refused"].is_null(),
+        "{last}"
+    );
     settle(chain);
     let legs = until("the payout and its fee to be mined", || async {
         let legs = app.api.legs(&treasury, "native").await;

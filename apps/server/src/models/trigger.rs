@@ -374,6 +374,37 @@ impl<L> From<Logic<L>> for Form<L> {
     }
 }
 
+/// What one round saw of a trigger: how many wallet indexes its selector
+/// picked, how many of them its filter kept, whether its check held over
+/// those, and how many send jobs its action queued.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = TriggerStats)]
+pub(crate) struct Stats {
+    /// Wallet indexes its selector picked.
+    pub(crate) selected: usize,
+    /// How many of them its filter kept (all of them without a filter).
+    pub(crate) kept: usize,
+    /// Whether its check held over the kept ones.
+    pub(crate) checked: bool,
+    /// Send jobs its action queued.
+    pub(crate) jobs: usize,
+}
+
+/// A trigger's last round, whether it acted or not.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub(crate) struct LastRound {
+    /// When it decided, Unix ms.
+    pub(crate) at: i64,
+    /// The confirmed block position it decided at.
+    pub(crate) confirmed: i64,
+    /// What it saw.
+    #[serde(flatten)]
+    pub(crate) stats: Stats,
+    /// Why it was refused (it then acted on nothing); always present.
+    #[schema(required)]
+    pub(crate) refused: Option<String>,
+}
+
 /// One `trigger` row; the API shows it as is.
 #[derive(Clone, Debug, Queryable, Selectable, Insertable, Serialize, utoipa::ToSchema)]
 #[diesel(table_name = triggers, check_for_backend(Sqlite))]
@@ -409,6 +440,9 @@ pub(crate) struct Trigger {
     pub(crate) created_at: i64,
     /// Unix ms.
     pub(crate) updated_at: i64,
+    /// What its last round saw; null before its first round. Always present.
+    #[schema(value_type = Option<LastRound>, required)]
+    pub(crate) last_round: Option<Json<LastRound>>,
 }
 
 impl Trigger {
@@ -463,7 +497,7 @@ pub(crate) mod db {
     use base::Network;
     use diesel::{prelude::*, sql_types::BigInt};
 
-    use super::Trigger;
+    use super::{LastRound, Trigger};
     use crate::{
         db::Page,
         models::{
@@ -548,6 +582,17 @@ pub(crate) mod db {
             .load(connection)
     }
 
+    /// Keeps `round` as trigger `id`'s last.
+    pub(crate) fn set_last_round(
+        connection: &mut SqliteConnection,
+        id: &str,
+        round: &LastRound,
+    ) -> QueryResult<usize> {
+        diesel::update(triggers::table.find(id))
+            .set(triggers::last_round.eq(Some(super::Json(round.clone()))))
+            .execute(connection)
+    }
+
     /// Removes trigger `id` and its runs; how many triggers went (0 or 1).
     pub(crate) fn delete(connection: &mut SqliteConnection, id: &str) -> QueryResult<usize> {
         diesel::delete(triggers::table.find(id)).execute(connection)
@@ -574,6 +619,7 @@ mod tests {
             enabled: true,
             created_at: 0,
             updated_at: 0,
+            last_round: None,
         }
     }
 

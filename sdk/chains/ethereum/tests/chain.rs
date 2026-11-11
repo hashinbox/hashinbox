@@ -456,6 +456,24 @@ fn a_refused_log_range_is_halved_and_logs_must_be_of_the_fetched_blocks() {
     script.push(blocks(0x66).into_iter().skip(1));
     script.push([Reply::failure("eth_getLogs", -32_602, "too large")]);
     assert!(block_on(chain.blocks(6, 6)).is_err());
+
+    // The logs' node trails the blocks' one (one URL, several nodes): the
+    // run ends before the block it has not reached, without an error.
+    let ahead = |head: &str| {
+        Reply::failure(
+            "eth_getLogs",
+            -32_602,
+            &format!("block range extends beyond current head block: requested 6, head {head}"),
+        )
+    };
+    script.push(blocks(0x66));
+    script.push([
+        ahead("5").expecting(filter("0x5", "0x6")),
+        no_logs().expecting(filter("0x5", "0x5")),
+        ahead("5").expecting(filter("0x6", "0x6")),
+    ]);
+    let run = block_on(chain.blocks(5, 6)).unwrap();
+    assert_eq!(run.len(), 1, "block 6 waits for the next step");
     script.exhausted();
 }
 

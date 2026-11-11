@@ -30,7 +30,8 @@ const SINK: Address = alloy_primitives::address!("000000000000000000000000000000
 /// Blocks a node's `finalized` trails its head by.
 const FINALITY: u64 = 3;
 
-use crate::fee::PLACEHOLDER;
+/// The recipient the recordings send to: an address that holds nothing.
+const PLACEHOLDER: alloy_primitives::Address = alloy_primitives::Address::repeat_byte(0xfe);
 
 /// Every recording, by name.
 const RECORDINGS: &[(&str, &str)] = &[

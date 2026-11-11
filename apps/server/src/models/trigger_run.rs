@@ -2,7 +2,7 @@
 
 use diesel::{prelude::*, sqlite::Sqlite};
 
-use super::{Json, schema::trigger_run};
+use super::{Json, schema::trigger_run, trigger::Stats};
 
 /// One run of a trigger.
 #[derive(Clone, Debug, Queryable, Selectable, Insertable)]
@@ -14,6 +14,8 @@ pub(crate) struct TriggerRun {
     pub(crate) started_at: i64,
     /// The ids of the send jobs it queued.
     pub(crate) jobs: Json<Vec<String>>,
+    /// What its round saw.
+    pub(crate) stats: Json<Stats>,
 }
 
 impl TriggerRun {
@@ -24,6 +26,7 @@ impl TriggerRun {
             trigger: trigger.to_owned(),
             started_at: now,
             jobs: Json(Vec::new()),
+            stats: Json(Stats::default()),
         }
     }
 }
@@ -33,6 +36,8 @@ impl TriggerRun {
 #[derive(Clone, Debug)]
 pub(crate) struct Run {
     pub(crate) started_at: i64,
+    /// What its round saw.
+    pub(crate) stats: Stats,
     pub(crate) jobs: Vec<RunJob>,
 }
 
@@ -120,6 +125,8 @@ pub(crate) mod db {
         struct Row {
             #[diesel(sql_type = BigInt)]
             started_at: i64,
+            #[diesel(sql_type = Text)]
+            stats: String,
             #[diesel(sql_type = Nullable<BigInt>)]
             job: Option<i64>,
             #[diesel(sql_type = Nullable<Integer>)]
@@ -129,7 +136,7 @@ pub(crate) mod db {
         }
 
         let rows: Vec<Row> = diesel::sql_query(
-            r#"SELECT started_at, job, status, reason
+            r#"SELECT started_at, stats, job, status, reason
                FROM trigger_run_with_jobs
                WHERE run IN (
                 SELECT id FROM trigger_run
@@ -151,6 +158,7 @@ pub(crate) mod db {
             {
                 runs.push(Run {
                     started_at: row.started_at,
+                    stats: serde_json::from_str(&row.stats).unwrap_or_default(),
                     jobs: Vec::new(),
                 });
             }

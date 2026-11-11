@@ -56,6 +56,32 @@ fn config() -> Config {
     config
 }
 
+/// The node's estimate of an ether transfer to an unused address, and the
+/// gas limit it signs with: that plus the default 20% margin.
+const ETHER_ESTIMATE: &str = "0x5208";
+const ETHER_GAS: u64 = 25_200;
+
+/// The estimate request a send of `asset` makes: from `from`, as if it held
+/// ample ether, to a recipient no one has used (an ether transfer of 1 wei,
+/// or a token `transfer` of 1 to it); the recipient it names.
+fn estimated_recipient(request: &serde_json::Value, from: &str) -> alloy_primitives::Address {
+    assert_eq!(request[1], json!("latest"));
+    assert_eq!(
+        request[2],
+        json!({ from: { "balance": "0xffffffffffffffffffffffff" } })
+    );
+    let call = &request[0];
+    assert_eq!(call["from"], json!(from));
+    if call["data"] == json!("0x") {
+        assert_eq!(call["value"], json!("0x1"));
+        return call["to"].as_str().unwrap().parse().unwrap();
+    }
+    let data = hex::decode(call["data"].as_str().unwrap()).unwrap();
+    let transfer = transferCall::abi_decode(&data).unwrap();
+    assert_eq!(transfer.amount, alloy_primitives::U256::from(1));
+    transfer.recipient
+}
+
 fn key_one() -> SecretBytes {
     let mut bytes = [0_u8; 32];
     bytes[31] = 1;
@@ -101,9 +127,15 @@ fn a_batch_signs_consecutive_nonces_in_order() {
         Reply::ok("eth_getTransactionCount", json!("0x7")).expecting(json!([KEY_ONE, "pending"])),
         Reply::ok("eth_maxPriorityFeePerGas", json!("0x3b9aca00")),
         Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x2"})),
+        Reply::ok("eth_estimateGas", json!(ETHER_ESTIMATE)),
     ]);
     let signed = block_on(builder.sign()).unwrap();
     script.exhausted();
+    let (_, request) = script.requests().pop().unwrap();
+    assert_ne!(
+        estimated_recipient(&request, KEY_ONE),
+        to.value.parse::<alloy_primitives::Address>().unwrap()
+    );
 
     assert_eq!(signed.len(), 2);
     for (transaction, (nonce, value)) in signed.iter().zip([(7, 1000_u64), (8, 2000)]) {
@@ -114,11 +146,11 @@ fn a_batch_signs_consecutive_nonces_in_order() {
         assert_eq!(transaction.state, TransactionState::Pending);
         let envelope = TxEnvelope::decode_2718_exact(&transaction.bytes).unwrap();
         assert_eq!(envelope.nonce(), nonce);
-        assert_eq!(envelope.gas_limit(), 21_000, "a plain ether transfer");
+        assert_eq!(envelope.gas_limit(), ETHER_GAS, "the node's estimate");
         assert_eq!(envelope.value(), alloy_primitives::U256::from(value));
         assert_eq!(envelope.chain_id(), Some(1));
         let from = base::Address::new(network(), KEY_ONE);
-        let worst = (2 * 2 + 1_000_000_000_u64) * 21_000;
+        let worst = (2 * 2 + 1_000_000_000_u64) * ETHER_GAS;
         assert_eq!(
             transaction.legs,
             vec![
@@ -161,18 +193,17 @@ fn a_token_batch_calls_the_contract_with_consecutive_nonces() {
         Reply::ok("eth_getTransactionCount", json!("0x3")),
         Reply::ok("eth_maxPriorityFeePerGas", json!("0x1")),
         Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x1"})),
-        Reply::ok("eth_estimateGas", json!("0xc350")).expecting(json!([{
-            "from": KEY_ONE,
-            "to": TOKEN,
-            "value": "0x0",
-            "data": hex::encode_prefixed(transferCall {
-                recipient: alloy_primitives::Address::repeat_byte(0xfe),
-                amount: alloy_primitives::U256::from(1),
-            }.abi_encode()),
-        }])),
+        Reply::ok("eth_estimateGas", json!("0xc350")),
     ]);
     let signed = block_on(builder.sign()).unwrap();
     script.exhausted();
+    let (_, request) = script.requests().pop().unwrap();
+    assert_eq!(request[0]["to"], json!(TOKEN));
+    assert_eq!(request[0]["value"], json!("0x0"));
+    assert_ne!(
+        estimated_recipient(&request, KEY_ONE),
+        to.value.parse::<alloy_primitives::Address>().unwrap()
+    );
 
     assert_eq!(signed.len(), 2);
     let from = base::Address::new(network(), KEY_ONE);
@@ -330,6 +361,7 @@ fn two_sources_sign_one_transaction_each_with_their_own_nonces() {
         Reply::ok("eth_getTransactionCount", json!("0x2")).expecting(json!([KEY_TWO, "pending"])),
         Reply::ok("eth_maxPriorityFeePerGas", json!("0x3b9aca00")),
         Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x2"})),
+        Reply::ok("eth_estimateGas", json!(ETHER_ESTIMATE)),
     ]);
     let signed = block_on(builder.sign()).unwrap();
     script.exhausted();
@@ -387,14 +419,17 @@ fn fee_replies() -> [Reply; 2] {
 #[test]
 fn an_estimate_sums_one_transaction_per_source() {
     let script = Script::new(fee_replies());
-    script.push([Reply::ok("eth_estimateGas", json!("0xc350"))]);
+    script.push([
+        Reply::ok("eth_estimateGas", json!(ETHER_ESTIMATE)),
+        Reply::ok("eth_estimateGas", json!("0xc350")),
+    ]);
     let fees = factory(&script).fees();
     let one = base::Address::new(network(), KEY_ONE);
     let two = base::Address::new(network(), KEY_TWO);
     let max_fee = 2 * 2 + 1_000_000_000_u64;
 
     let single = block_on(fees.estimate(&[(one.clone(), Asset::native(network()))])).unwrap();
-    assert_eq!(single, atomic(max_fee * 21_000));
+    assert_eq!(single, atomic(max_fee * ETHER_GAS));
 
     let several = [
         (one.clone(), Asset::native(network())),
@@ -402,13 +437,15 @@ fn an_estimate_sums_one_transaction_per_source() {
         (two, token()),
     ];
     let total = block_on(fees.estimate(&several)).unwrap();
-    assert_eq!(total, atomic(max_fee * (21_000 + 2 * 60_000)));
+    assert_eq!(total, atomic(max_fee * (ETHER_GAS + 2 * 60_000)));
     script.exhausted();
 }
 
 #[test]
-fn fees_refresh_once_per_time_to_live() {
+fn fees_and_gas_refresh_once_per_time_to_live() {
+    let estimate = || Reply::ok("eth_estimateGas", json!(ETHER_ESTIMATE));
     let script = Script::new(fee_replies());
+    script.push([estimate()]);
     let source = [(
         base::Address::new(network(), KEY_ONE),
         Asset::native(network()),
@@ -421,16 +458,28 @@ fn fees_refresh_once_per_time_to_live() {
     let mut config = config();
     config.fee_ttl_ms = 0;
     let script = Script::new(fee_replies());
+    script.push([estimate()]);
     script.push(fee_replies());
+    script.push([estimate()]);
     let fees = config.factory(&connect(Arc::new(script.clone()))).fees();
     block_on(fees.estimate(&source)).unwrap();
     block_on(fees.estimate(&source)).unwrap();
     script.exhausted();
+    // Each refresh asks about another unused address: none can have been funded since.
+    let recipients: Vec<_> = script
+        .requests()
+        .iter()
+        .filter(|(method, _)| method == "eth_estimateGas")
+        .map(|(_, request)| estimated_recipient(request, KEY_ONE))
+        .collect();
+    assert_eq!(recipients.len(), 2);
+    assert_ne!(recipients[0], recipients[1]);
 }
 
 #[test]
 fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
     let script = Script::new(fee_replies());
+    script.push([Reply::ok("eth_estimateGas", json!(ETHER_ESTIMATE))]);
     let factory = factory(&script);
     let wallet = block_on(factory.from_pk(key_one())).unwrap();
     let source = [(wallet.address().clone(), Asset::native(network()))];
