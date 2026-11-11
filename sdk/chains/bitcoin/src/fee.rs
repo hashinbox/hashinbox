@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::ensure;
-use base::{Asset, Cache, Decimal, InputStore, TransactionError};
+use base::{Asset, Decimal, InputStore, TransactionError};
 use bitcoin::Script;
 
 use crate::rpc::Client;
@@ -76,72 +76,84 @@ fn output_weight(script: &Script) -> u64 {
 /// An estimate prices its one output as this, since the recipient is unknown.
 const WIDEST_OUTPUT: [u8; 34] = [0x51; 34];
 
-/// Bitcoin's `base::FeeEstimator`: the node's conservative fee rate, never
-/// below the floor, cached for its time to live; every builder of the
-/// factory prices with it.
-pub(crate) struct Fees {
+/// Bitcoin's precise `base::FeeEstimator`: the node's conservative fee rate
+/// asked every time, never below the floor, times the size of spending
+/// every coin the senders hold; keeps nothing. [`crate::fee_cache::Cached`]
+/// decides when its rate can be reused.
+pub(crate) struct Estimator {
     pub(crate) network: base::Network,
     pub(crate) rpc: Client,
     pub(crate) inputs: Arc<dyn InputStore>,
     pub(crate) target_blocks: u16,
     pub(crate) floor: FeeRate,
-    pub(crate) rate: Cache<FeeRate>,
 }
 
-impl Fees {
-    /// The cached rate, refreshed from `estimatesmartfee` when stale.
+impl Estimator {
+    /// The fee rate now: `estimatesmartfee`, never below the floor. One
+    /// call.
+    ///
+    /// # Errors
+    ///
+    /// The node's failure.
     pub(crate) async fn rate(&self) -> Result<FeeRate, TransactionError> {
-        self.rate
-            .get(|| async {
-                let estimate = self
-                    .rpc
-                    .fee_rate(self.target_blocks)
-                    .await
-                    .map_err(TransactionError::unavailable)?;
-                Ok(estimate.map_or(self.floor, |rate| rate.max(self.floor)))
-            })
+        let estimate = self
+            .rpc
+            .fee_rate(self.target_blocks)
             .await
+            .map_err(TransactionError::unavailable)?;
+        Ok(estimate.map_or(self.floor, |rate| rate.max(self.floor)))
+    }
+
+    /// The fee of `spends` at `rate`: every unspent coin of every sender in
+    /// one transaction with one output of the widest standard script and no
+    /// change, what a builder pays sending a balance less this fee (a
+    /// leftover below dust is fee too). The recipient does not change it: an
+    /// output is as wide for any, and the widest is counted.
+    ///
+    /// # Errors
+    ///
+    /// An asset other than BTC, or a store failure.
+    pub(crate) async fn fee(
+        &self,
+        spends: &base::Spends,
+        rate: FeeRate,
+    ) -> anyhow::Result<Decimal> {
+        let native = Asset::native(self.network.clone());
+        ensure!(
+            spends.iter().all(|spend| spend.asset == native),
+            "a Bitcoin estimate prices BTC only"
+        );
+        let addresses: Vec<base::Address> = spends.iter().map(|spend| spend.from.clone()).collect();
+        let coins = self.inputs.find_unspent(&addresses).await?;
+        if coins.is_empty() {
+            return Ok(Decimal::from(0_u64));
+        }
+        let spent = coins
+            .iter()
+            .map(|coin| {
+                crate::Address::parse(&coin.address.value, self.rpc.network())
+                    .map(|address| address.script_pubkey())
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let output = Script::from_bytes(&WIDEST_OUTPUT);
+        Ok(Decimal::from(
+            rate.fee(vsize(spent.iter().map(AsRef::as_ref), [output])),
+        ))
     }
 }
 
-impl base::Networked for Fees {
+impl base::Networked for Estimator {
     fn network(&self) -> &base::Network {
         &self.network
     }
 }
 
-impl base::FeeEstimator for Fees {
-    /// Every unspent coin of every source in one transaction with one output
-    /// of the widest standard script and no change: what a builder pays
-    /// sending a balance less this fee (a leftover below dust is fee too).
+impl base::FeeEstimator for Estimator {
+    /// The fee of `spends` at the rate asked now.
     fn estimate<'a>(
         &'a self,
-        sources: &'a [(base::Address, Asset)],
+        spends: &'a base::Spends,
     ) -> base::Future<'a, anyhow::Result<Decimal>> {
-        Box::pin(async move {
-            let native = Asset::native(self.network.clone());
-            ensure!(
-                sources.iter().all(|(_, asset)| *asset == native),
-                "a Bitcoin estimate prices BTC only"
-            );
-            let addresses: Vec<base::Address> =
-                sources.iter().map(|(address, _)| address.clone()).collect();
-            let coins = self.inputs.find_unspent(&addresses).await?;
-            if coins.is_empty() {
-                return Ok(Decimal::from(0_u64));
-            }
-            let spent = coins
-                .iter()
-                .map(|coin| {
-                    crate::Address::parse(&coin.address.value, self.rpc.network())
-                        .map(|address| address.script_pubkey())
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            let rate = self.rate().await?;
-            let output = Script::from_bytes(&WIDEST_OUTPUT);
-            Ok(Decimal::from(
-                rate.fee(vsize(spent.iter().map(AsRef::as_ref), [output])),
-            ))
-        })
+        Box::pin(async move { self.fee(spends, self.rate().await?).await })
     }
 }

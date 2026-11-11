@@ -27,7 +27,7 @@ const MINT_DECIMALS: usize = 44;
 const MINT_LENGTH: usize = 82;
 
 /// The associated token account of `owner` for `mint`.
-fn account(owner: &Address, mint: &Address) -> anyhow::Result<Address> {
+pub(crate) fn account(owner: &Address, mint: &Address) -> anyhow::Result<Address> {
     let seeds: [&[u8]; 3] = [owner.as_array(), TOKEN_PROGRAM.as_array(), mint.as_array()];
     let (account, _) = Address::try_find_program_address(&seeds, &ASSOCIATED_TOKEN_PROGRAM)
         .context("no associated token account address")?;

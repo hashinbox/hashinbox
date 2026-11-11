@@ -68,6 +68,11 @@ fn kind(error: &anyhow::Error) -> Option<WalletErrorKind> {
     error.downcast_ref::<WalletError>().map(|error| error.kind)
 }
 
+/// `sources` as spends to new addresses.
+fn spends(sources: &[(base::Address, Asset)]) -> base::Spends {
+    sources.iter().cloned().collect()
+}
+
 #[tokio::test]
 async fn keys_and_addresses_round_trip() {
     let factory = factory(&Script::default(), AddressType::Taproot, Vec::new());
@@ -470,11 +475,13 @@ async fn an_estimate_prices_every_source_in_one_transaction() {
     let btc = Asset::native(network());
 
     // 2 sat/vB: 122 vB for one P2WPKH input and a 34-byte output.
-    let one = fees.estimate(&[(segwit.clone(), btc.clone())]).await;
+    let one = fees
+        .estimate(&spends(&[(segwit.clone(), btc.clone())]))
+        .await;
     assert_eq!(one.expect("priced"), 244_u64.into());
     // One transaction of 180 vB, not the sum of two.
     let both = fees
-        .estimate(&[(segwit, btc.clone()), (taproot, btc)])
+        .estimate(&spends(&[(segwit, btc.clone()), (taproot, btc)]))
         .await;
     assert_eq!(both.expect("priced"), 360_u64.into());
     script.exhausted();
@@ -486,8 +493,8 @@ async fn the_fee_rate_refreshes_once_per_time_to_live() {
     let source = [(owner.clone(), Asset::native(network()))];
     let script = Script::new([rate_reply()]);
     let fees = factory(&script, AddressType::SegwitV0, vec![funded(&owner, 1_000)]).fees();
-    fees.estimate(&source).await.expect("priced");
-    fees.estimate(&source).await.expect("priced");
+    fees.estimate(&spends(&source)).await.expect("priced");
+    fees.estimate(&spends(&source)).await.expect("priced");
     script.exhausted();
 
     let script = Script::new([rate_reply(), rate_reply()]);
@@ -497,8 +504,8 @@ async fn the_fee_rate_refreshes_once_per_time_to_live() {
     let fees = config
         .factory(&rpc, Arc::new(Store(vec![funded(&owner, 1_000)])))
         .fees();
-    fees.estimate(&source).await.expect("priced");
-    fees.estimate(&source).await.expect("priced");
+    fees.estimate(&spends(&source)).await.expect("priced");
+    fees.estimate(&spends(&source)).await.expect("priced");
     script.exhausted();
 }
 
@@ -517,7 +524,7 @@ async fn a_sweep_of_balance_less_estimate_pays_the_estimate_without_change() {
         .expect("key");
     let fee = factory
         .fees()
-        .estimate(&[(owner, Asset::native(network()))])
+        .estimate(&spends(&[(owner, Asset::native(network()))]))
         .await
         .expect("priced");
     let mut builder = wallet.transaction(&Asset::native(network())).expect("BTC");

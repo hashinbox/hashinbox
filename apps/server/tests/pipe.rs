@@ -366,11 +366,13 @@ fn a_pending_send_is_taken_off_what_its_sender_can_spend() {
     );
 }
 
-/// A fee estimator answering a fixed fee and counting its calls.
+/// A fee estimator answering a fixed fee per spend, counting its calls and
+/// keeping the recipients it was asked about.
 struct Fees {
     network: Network,
     fee: Decimal,
     calls: AtomicUsize,
+    to: std::sync::Mutex<Vec<Option<Address>>>,
 }
 
 impl Networked for Fees {
@@ -380,12 +382,13 @@ impl Networked for Fees {
 }
 
 impl FeeEstimator for Fees {
-    fn estimate<'a>(
-        &'a self,
-        sources: &'a [(Address, Asset)],
-    ) -> Future<'a, anyhow::Result<Decimal>> {
+    fn estimate<'a>(&'a self, spends: &'a base::Spends) -> Future<'a, anyhow::Result<Decimal>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let fee = self.fee.clone() * Decimal::from(sources.len() as u64);
+        self.to
+            .lock()
+            .unwrap()
+            .extend(spends.iter().map(|spend| spend.to.clone()));
+        let fee = self.fee.clone() * Decimal::from(spends.len() as u64);
         Box::pin(async move { Ok(fee) })
     }
 }
@@ -395,6 +398,7 @@ fn fees(fee: &str) -> Arc<Fees> {
         network: network(),
         fee: decimal(fee),
         calls: AtomicUsize::new(0),
+        to: std::sync::Mutex::default(),
     })
 }
 
@@ -627,7 +631,12 @@ fn amounts_evaluate_in_atomic_units() {
             balance: Balance::Confirmed,
         })
     };
-    let fee = || Box::new(Amount::Fee { of: this(None) });
+    let fee = || {
+        Box::new(Amount::Fee {
+            of: this(None),
+            to: None,
+        })
+    };
     // 690 - 100 = 590; 590 + 10 = 600; min(690, 5 sats) = 5; max(-…, 0) = 0.
     let cases = [
         (Amount::Sub(balance(), fee()), "590"),
@@ -672,6 +681,80 @@ fn amounts_evaluate_in_atomic_units() {
         )
         .unwrap()
     );
+}
+
+#[test]
+fn a_fee_is_priced_for_its_one_recipient_or_a_new_address() {
+    let (_directory, runtime, mut connection) = seeded();
+    let a = selection(&mut connection, &[id("a", "native")]);
+    let estimator = fees("100");
+    let mut evaluation = open(&mut connection, &runtime, estimator.clone(), None);
+    let fee_to = |to: Option<Selector>| Amount::Fee {
+        of: this(None),
+        to: to.map(Target::Select),
+    };
+    let one = Selector::Ids(vec![id("b", "native")]);
+    let two = Selector::Ids(vec![id("b", "native"), id("c", "tok")]);
+    for to in [Some(one), Some(two), None] {
+        let fee = fee_to(to);
+        assert!(
+            compares(
+                &mut evaluation,
+                &compare(this(None), Aggregate::Sum, Operator::Above, fee),
+                &a
+            )
+            .unwrap()
+        );
+    }
+    // `b` alone is its recipient; two addresses, or none, a new address.
+    let asked: Vec<Option<String>> = estimator
+        .to
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|to| to.as_ref().map(|to| to.value.clone()))
+        .collect();
+    assert_eq!(asked, [Some("b".to_owned()), None, None]);
+}
+
+#[test]
+fn holders_are_keyed_wallets_with_a_balance_of_the_asset() {
+    let (_directory, _runtime, mut connection) = seeded();
+    let c = &mut connection;
+    let pair = |name: &str, asset: &str| {
+        let asset = Asset {
+            network: network(),
+            id: asset.to_owned(),
+        };
+        (address(name), asset)
+    };
+    let asked = [
+        pair("a", "native"),
+        pair("b", "native"),
+        pair("b", "tok"),
+        pair("a", "tok"),
+        pair("c", "native"),
+    ];
+    let held = |c: &mut SqliteConnection| {
+        let mut held =
+            wallet_index::db::find_held(c, asked.iter().map(|(to, asset)| (to, asset))).unwrap();
+        held.sort();
+        held
+    };
+    // Watch-only wallets hold nothing we can count on.
+    assert!(held(c).is_empty());
+
+    // Keys kept for a and b: a holds both its assets, b its 50 native (a
+    // reward) and no tok; c holds native, but watch-only.
+    c.batch_execute(
+        "UPDATE wallet SET secret = x'01', curve = 'secp256k1'
+         WHERE id IN ('bitcoin.regtest.a', 'bitcoin.regtest.b')",
+    )
+    .unwrap();
+    let mut expected = vec![pair("a", "native"), pair("a", "tok"), pair("b", "native")];
+    expected.sort();
+    assert_eq!(held(c), expected);
+    assert!(wallet_index::db::find_held(c, []).unwrap().is_empty());
 }
 
 #[test]
@@ -746,7 +829,10 @@ fn logic_stops_early_and_errors_stay_errors() {
             this(None),
             Aggregate::Sum,
             Operator::Above,
-            Amount::Fee { of: this(None) },
+            Amount::Fee {
+                of: this(None),
+                to: None,
+            },
         ))),
     ]);
     assert!(!checks(&mut evaluation, &check, &a).unwrap());
@@ -786,7 +872,10 @@ fn the_sweep_trigger_round_trips_through_json() {
             this(Some("native")),
             Aggregate::Sum,
             Operator::AtLeast,
-            Amount::Fee { of: this(None) }
+            Amount::Fee {
+                of: this(None),
+                to: None
+            }
         )))
     );
     assert_eq!(serde_json::to_string(&parsed).unwrap(), filter);
@@ -922,7 +1011,12 @@ fn a_send_pays_per_source_or_per_destination() {
             balance: Balance::Confirmed,
         })
     };
-    let fee = || Box::new(Amount::Fee { of: this(None) });
+    let fee = || {
+        Box::new(Amount::Fee {
+            of: this(None),
+            to: None,
+        })
+    };
 
     // Many sources to one: everything less the fee, each source alone;
     // b's 50 sats do not cover its 100 sat fee, so it is skipped.

@@ -644,6 +644,7 @@ fn the_settings_batch_is_the_indexers_step() {
         indexes: fresh.clone(),
         inputs: fresh.clone(),
         wallets: fresh,
+        holdings: Arc::new(base::NoHoldings),
     };
     let script = Script::new([]);
     let service = block_on(config.build(&storage, Arc::new(script.clone()))).unwrap();
@@ -681,6 +682,7 @@ fn a_network_builds_with_its_node_down_and_asks_it_nothing() {
         indexes: fresh.clone(),
         inputs: fresh.clone(),
         wallets: fresh,
+        holdings: Arc::new(base::NoHoldings),
     };
     let service = block_on(config().build(&storage, Arc::new(node))).unwrap();
     let chain = service.dated.unwrap();

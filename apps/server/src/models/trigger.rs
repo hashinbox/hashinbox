@@ -187,10 +187,15 @@ pub(crate) enum Amount {
         #[serde(default, skip_serializing_if = "Balance::is_confirmed")]
         balance: Balance,
     },
-    /// The native fee of sending everything `of` holds to one address.
+    /// The native fee of sending everything `of` holds to `to`, one
+    /// address: priced as to a recipient that holds the asset when it is a
+    /// wallet kept here that does. Without `to`, or when it names several
+    /// addresses, to a new address, the dearest case.
     Fee {
         #[serde(default)]
         of: Target,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<Target>,
     },
     /// A fixed value in the asset's display units.
     Value(#[serde(with = "text")] Decimal),
@@ -204,7 +209,11 @@ impl Amount {
     /// Whether every wallet set it reads names wallets on purpose.
     pub(crate) fn validate(&self) -> Result<(), Invalid> {
         match self {
-            Self::Balance { of, .. } | Self::Fee { of } => of.validate(),
+            Self::Balance { of, .. } | Self::Fee { of, to: None } => of.validate(),
+            Self::Fee { of, to: Some(to) } => {
+                of.validate()?;
+                to.validate()
+            }
             Self::Value(_) => Ok(()),
             Self::Add(a, b) | Self::Sub(a, b) | Self::Min(a, b) | Self::Max(a, b) => {
                 a.validate()?;
@@ -216,7 +225,7 @@ impl Amount {
     /// Whether a balance or fee in it, at any depth, reads `This`.
     fn reads_this(&self) -> bool {
         match self {
-            Self::Balance { of, .. } | Self::Fee { of } => matches!(of, Target::This(_)),
+            Self::Balance { of, .. } | Self::Fee { of, .. } => matches!(of, Target::This(_)),
             Self::Value(_) => false,
             Self::Add(a, b) | Self::Sub(a, b) | Self::Min(a, b) | Self::Max(a, b) => {
                 a.reads_this() || b.reads_this()

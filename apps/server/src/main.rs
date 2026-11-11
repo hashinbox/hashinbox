@@ -120,6 +120,7 @@ pub(crate) async fn boot(
             indexes: stores.clone(),
             inputs: stores.clone(),
             wallets: stores.clone(),
+            holdings: stores.clone(),
         })
         .build()
         .await?;

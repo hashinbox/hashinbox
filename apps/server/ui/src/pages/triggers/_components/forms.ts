@@ -20,7 +20,7 @@ export type Balance = 'confirmed' | 'pending';
 export type Amount =
   | { value: string }
   | { balance: { of?: Target; balance?: Balance } }
-  | { fee: { of?: Target } }
+  | { fee: { of?: Target; to?: Target } }
   | { add: [Amount, Amount] }
   | { sub: [Amount, Amount] }
   | { min: [Amount, Amount] }
@@ -187,7 +187,9 @@ export function rekindAmount(amount: Amount, kind: string): Amount {
     case 'balance':
       return { balance: { of: target } };
     case 'fee':
-      return { fee: { of: target } };
+      return {
+        fee: { of: target, ...('fee' in amount && amount.fee.to && { to: amount.fee.to }) },
+      };
     default:
       return paired(kind, pair);
   }
@@ -254,7 +256,11 @@ export function describeAmount(amount: Amount, name: Name, self: string): string
   const d = (a: Amount) => describeAmount(a, name, self);
   if ('value' in amount) return amount.value || '0';
   if ('balance' in amount) return `balance of ${describeTarget(amount.balance.of, name, self)}`;
-  if ('fee' in amount) return `fee to send all of ${describeTarget(amount.fee.of, name, self)}`;
+  if ('fee' in amount) {
+    const to = amount.fee.to;
+    const recipient = to ? ` to ${describeTarget(to, name, self)}` : '';
+    return `fee to send all of ${describeTarget(amount.fee.of, name, self)}${recipient}`;
+  }
   if ('add' in amount) return `(${d(amount.add[0])} + ${d(amount.add[1])})`;
   if ('sub' in amount) return `(${d(amount.sub[0])} − ${d(amount.sub[1])})`;
   if ('min' in amount) return `lower of (${d(amount.min[0])}, ${d(amount.min[1])})`;
@@ -303,11 +309,20 @@ export function describeSend(send: Send, name: Name): string {
   return `send ${name(send.asset)} from ${describeTarget(send.source, name, SELF.kept)} to ${describeTarget(send.destination, name, SELF.kept)}, ${describeAmount(send.amount, name, SELF.one)} each`;
 }
 
+/** Chosen in the form: the recipient, or the wallet paying gas. */
+const chosen: Target = { select: { ids: [] } };
+
 // ---- Amounts the templates use ---------------------------------------------------
 
 // Written as the server writes them back.
 const BALANCE: Amount = { balance: { of: { this: {} } } };
-const FEE: Amount = { fee: { of: { this: {} } } };
+/**
+ * The fee of sending everything `of` holds to the chosen wallets: priced for
+ * them, which costs less when they hold the asset already than for a new
+ * address. The chosen wallets are where the template's money goes.
+ */
+const fee = (of: Target = { this: {} }): Amount => ({ fee: { of, to: chosen } });
+const FEE: Amount = fee();
 /** Twice the fee of sending everything it holds. */
 const TWO_FEES: Amount = { add: [FEE, FEE] };
 /** Everything it holds less the fee of sending it. */
@@ -317,7 +332,7 @@ const ALL_LESS_FEE: Amount = { sub: [BALANCE, FEE] };
 const EXPECTED: Amount = { balance: { of: { this: {} }, balance: 'pending' } };
 /** What this index lacks for its token's transfer fee, counting gas already on its way. */
 const shortfall = (token: string): Amount => ({
-  max: [{ sub: [{ fee: { of: { this: { asset: token } } } }, EXPECTED] }, { value: '0' }],
+  max: [{ sub: [fee({ this: { asset: token } }), EXPECTED] }, { value: '0' }],
 });
 
 // ---- Blank triggers and templates -----------------------------------------------
@@ -363,9 +378,6 @@ export interface Template {
 
 /** The wallets tagged `tag`, in `asset`. */
 const tagged = (tag: string, asset: string): Selector => ({ all: [{ tag }, { asset }] });
-
-/** Chosen in the form: the recipient, or the wallet paying gas. */
-const chosen: Target = { select: { ids: [] } };
 
 const native = (place: Place, id: string): Omit<Definition, 'filter' | 'check' | 'action'> => ({
   id,
@@ -457,7 +469,7 @@ export const TEMPLATES: Template[] = [
                 aggregate: 'sum',
                 balance: 'pending',
                 operator: 'below',
-                value: { fee: { of: { this: { asset: place.token } } } },
+                value: fee({ this: { asset: place.token } }),
               },
             },
           ],

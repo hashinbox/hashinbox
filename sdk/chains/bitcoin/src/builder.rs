@@ -9,9 +9,7 @@ use base::{
 
 use crate::Address;
 use crate::{
-    KeyPair,
-    fee::{Fees, vsize},
-    rpc::Client,
+    KeyPair, fee::vsize, fee_cache::Cached, rpc::Client,
     transaction::Transaction as NativeTransaction,
 };
 
@@ -26,7 +24,7 @@ pub(crate) struct Builder {
     pub(crate) rpc: Client,
     pub(crate) inputs: Arc<dyn InputStore>,
     /// The factory's estimator, whose cached rate prices the fee.
-    pub(crate) fees: Arc<Fees>,
+    pub(crate) fees: Arc<Cached>,
     pub(crate) default: Option<Signer>,
     pub(crate) outputs: Outputs<Address>,
     /// Each output's own source, in output order.

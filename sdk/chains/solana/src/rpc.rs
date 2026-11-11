@@ -301,6 +301,15 @@ impl Client {
         Ok(account.value)
     }
 
+    /// Whether account `address` exists (finalized).
+    ///
+    /// # Errors
+    ///
+    /// A node failure.
+    pub(crate) async fn exists(&self, address: &solana_address::Address) -> anyhow::Result<bool> {
+        Ok(self.account(address).await?.is_some())
+    }
+
     /// One repeatable call, decoded.
     async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> anyhow::Result<T> {
         let reply = self

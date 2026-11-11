@@ -27,8 +27,9 @@ async fn ethereum(storage: Storage) -> anyhow::Result<()> {
     let tips = chain.tips().await?;
     let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
 
-    // Sending: sign, keep the bytes, then broadcast them to every node.
-    let factory = config.factory(&rpc);
+    // Sending: sign, keep the bytes, then broadcast them to every node. Fees
+    // are priced for a new recipient unless `Holdings` say it holds the asset.
+    let factory = config.factory(&rpc, std::sync::Arc::new(base::NoHoldings));
     let wallet = factory.from_pk(factory.generate().await?).await?;
     let ether = Asset::native((&config.native()).into());
     let mut builder = wallet.transaction(&ether)?;
@@ -79,10 +80,20 @@ rate-limits) (each absent one its default).
   `Unsupported`. A batch is one transaction per transfer, with the node's
   pending nonce and the next ones, all signed before anything is broadcast.
   Gas and fees come from the factory's one fee estimator
-  (`WalletFactory::fees`): EIP-1559 fees cached for `fee_ttl_ms` (default
-  12 s); 21 000 gas for ether (an EOA recipient); for a token, one
-  `eth_estimateGas` of `transfer(0xfefe…fe, 1)` from its first sender, plus
-  the margin, kept for the factory's life. A signed transaction's `Fee` leg
-  is its worst case, `gas limit * max fee`, which is what an estimate sums.
+  (`WalletFactory::fees`), which every builder signs with too, so an
+  estimate and the transaction signed after it agree. It is two: a precise
+  one (`fee.rs`) that asks the node every time, exactly for the transfer
+  given (`eth_estimateGas` from its sender to its recipient, or to a fresh
+  unused address without one, plus the margin; the price from the node's tip
+  and the latest base fee), and a cached one (`fee_cache.rs`) around it. On
+  Ethereum the price is the same for every send, and a transfer's gas
+  depends only on its asset and on whether its recipient holds it already,
+  not on who sends it: so the cached one keeps the price, and the gas of
+  each (asset, recipient holds it, as `Holdings` say), for `fee_ttl_ms`
+  (default 12 s), asking the node once per kind of send however many
+  wallets send. A sender holding none of a token cannot be tested (the node
+  runs the transfer) and gets its kind's last answer. A signed transaction's
+  `Fee` leg is its worst case, `gas limit * max fee`, which is what an
+  estimate sums.
 - A broadcast refused as "already known" or "nonce too low" is acceptance when
   the node holds that exact hash.

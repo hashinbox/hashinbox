@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use ::rpc::{BoxFuture, CallError, Client as _, Http, Request};
 use anyhow::{Context as _, ensure};
 use base::{
-    Asset, AssetInfo, AssetKind, Cache, Future, Indexer, InputStore, Service, Storage,
+    Asset, AssetInfo, AssetKind, Future, Indexer, InputStore, Service, Storage,
     WalletFactoryBroadcaster,
 };
 use serde::Deserialize;
@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::{AddressType, Chain, Factory};
 use crate::{BTC_DECIMALS, BTC_NAME, BTC_TICKER, Network};
-use crate::{FeeRate, fee::Fees, rpc::Client};
+use crate::{FeeRate, fee::Estimator, fee_cache::Cached, rpc::Client};
 
 /// Everything one Bitcoin network needs; built in code with [`Config::new`]
 /// or from a [`base::NetworkConfig`].
@@ -138,18 +138,18 @@ impl Config {
         Chain::new(rpc.clone(), self.confirmation_depth)
     }
 
-    /// The wallet factory: coins from `inputs`, fee rates from `rpc`,
-    /// cached by its one estimator.
+    /// The wallet factory: coins from `inputs`; fee rates from `rpc`,
+    /// reused by its one cached estimator for `fee_ttl_ms`.
     #[must_use]
     pub fn factory(&self, rpc: &Client, inputs: Arc<dyn InputStore>) -> Factory {
-        let fees = Fees {
+        let precise = Estimator {
             network: self.network.into(),
             rpc: rpc.clone(),
             inputs: Arc::clone(&inputs),
             target_blocks: self.fee_target_blocks,
             floor: FeeRate::from_sat_per_kvb(self.fee_floor),
-            rate: Cache::new(Duration::from_millis(self.fee_ttl_ms)),
         };
+        let fees = Cached::new(precise, Duration::from_millis(self.fee_ttl_ms));
         Factory {
             rpc: rpc.clone(),
             pending_ttl: Duration::from_millis(self.pending_ttl_ms),

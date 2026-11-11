@@ -45,6 +45,15 @@ impl<T: Clone + Send> Cache<T> {
         Ok(value)
     }
 
+    /// The last value kept, however old; `None` before the first.
+    pub async fn last(&self) -> Option<T> {
+        self.slot
+            .lock()
+            .await
+            .as_ref()
+            .map(|(_, value)| value.clone())
+    }
+
     /// Forgets the value, so the next read refreshes: for a caller that
     /// learns of a new block.
     pub async fn expire(&self) {

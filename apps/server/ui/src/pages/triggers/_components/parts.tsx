@@ -206,6 +206,12 @@ const AMOUNTS = [
   { value: 'max', label: 'higher of' },
 ];
 
+/** Who a fee is priced for: the chosen wallets, or an address no one has used (dearest). */
+const RECIPIENTS = [
+  { value: 'new', label: 'a new address' },
+  { value: 'select', label: 'wallets' },
+];
+
 /** The word joining the two sides of each two-sided amount. */
 const JOIN: Record<string, string> = { add: 'plus', sub: 'minus', min: 'and', max: 'and' };
 
@@ -252,9 +258,36 @@ export function AmountWords({
           value={of ?? { this: {} }}
           choices={choices}
           onChange={(target) =>
-            onChange('balance' in value ? { balance: { of: target } } : { fee: { of: target } })
+            onChange(
+              'balance' in value
+                ? { balance: { ...value.balance, of: target } }
+                : { fee: { ...value.fee, of: target } },
+            )
           }
         />
+      )}
+      {'fee' in value && (
+        <>
+          <Word>to</Word>
+          <Choice
+            label="Recipient"
+            value={value.fee.to ? 'select' : 'new'}
+            options={RECIPIENTS}
+            onChange={(k) => {
+              const of = value.fee.of ?? { this: {} };
+              onChange({
+                fee: k === 'new' ? { of } : { of, to: { select: firstTag(choices) } },
+              });
+            }}
+          />
+          {value.fee.to && 'select' in value.fee.to && (
+            <SelectorWords
+              value={value.fee.to.select}
+              choices={choices}
+              onChange={(select) => onChange({ fee: { ...value.fee, to: { select } } })}
+            />
+          )}
+        </>
       )}
       {pair && (
         <Block>

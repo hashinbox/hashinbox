@@ -82,8 +82,11 @@ per step (default 100) (each absent one its default).
 - Fees come from `estimatesmartfee` (conservative, `fee_target_blocks`),
   never below `fee_floor`; the floor alone prices a send when the node cannot
   estimate, such as on a fresh regtest chain. The factory's one fee
-  estimator (`WalletFactory::fees`) caches the rate for `fee_ttl_ms`
-  (default 60 s) and every builder prices with it. Its estimate is one
+  estimator (`WalletFactory::fees`), which every builder prices with too,
+  is two: a precise one (`fee.rs`) that asks the node for the rate every
+  time, and a cached one (`fee_cache.rs`) around it that keeps the rate for
+  `fee_ttl_ms` (default 60 s); a send's size comes from the store's coins,
+  not the node, so only the rate is kept. Its estimate is one
   transaction spending every coin of every source to one 34-byte output, no
   change: change is made only when it is above dust after paying for itself;
   a smaller leftover is fee.

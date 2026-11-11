@@ -10,7 +10,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context as _, bail, ensure};
-use base::{Assets, Decimal, FeeEstimator, Network, Networked as _};
+use base::{Assets, Decimal, FeeEstimator, Network, Networked as _, Spend, Spends};
 use diesel::SqliteConnection;
 
 use crate::models::{
@@ -200,17 +200,45 @@ impl<'a> Trigger<'a> {
                     .map(|indexes| indexes.values().map(|one| one.held(*balance)).sum())
                     .transpose();
             }
-            Amount::Fee { of } => {
+            Amount::Fee { of, to } => {
                 let Some(indexes) = self.target(of, this)? else {
                     return Ok(None);
                 };
                 if indexes.is_empty() {
                     return Ok(Some(Decimal::zero()));
                 }
+                // One recipient address is priced as it is; none named, or
+                // several, as a new address.
+                let mut recipients = match to {
+                    Some(to) => {
+                        let Some(to) = self.target(to, this)? else {
+                            return Ok(None);
+                        };
+                        to.sources()
+                            .into_iter()
+                            .map(|(address, _)| address)
+                            .collect()
+                    }
+                    None => Vec::new(),
+                };
+                recipients.dedup();
+                let to = match recipients.as_slice() {
+                    [to] => Some(to.clone()),
+                    _ => None,
+                };
+                let spends: Spends = indexes
+                    .sources()
+                    .into_iter()
+                    .map(|(from, asset)| Spend {
+                        from,
+                        asset,
+                        to: to.clone(),
+                    })
+                    .collect();
                 let fee = self
                     .context
                     .runtime
-                    .block_on(self.context.estimator.estimate(&indexes.sources()))?;
+                    .block_on(self.context.estimator.estimate(&spends))?;
                 return Ok(Some(fee));
             }
             Amount::Add(a, b) => (a, b, |a, b| a + b),

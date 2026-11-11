@@ -5,6 +5,7 @@ mod builder;
 mod chain;
 mod config;
 mod fee;
+mod fee_cache;
 mod key;
 mod network;
 mod rpc;

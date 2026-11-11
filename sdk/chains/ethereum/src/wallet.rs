@@ -9,7 +9,7 @@ use base::{
 use crypto::{Curve, SecretBytes};
 
 use crate::builder::Builder;
-use crate::{KeyPair, Tokens, fee::Estimator, rpc::Client};
+use crate::{KeyPair, Tokens, fee_cache::Cached, rpc::Client};
 
 /// Makes the wallets of one Ethereum network. Their builders send ether and
 /// the allowlisted tokens under the fee limits, with nonces from the node and
@@ -20,7 +20,7 @@ pub struct Factory {
     /// How long a signed transaction counts as pending.
     pub(crate) pending_ttl: std::time::Duration,
     pub(crate) tokens: Tokens,
-    pub(crate) fees: Arc<Estimator>,
+    pub(crate) fees: Arc<Cached>,
 }
 
 impl base::WalletFactory for Factory {

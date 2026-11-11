@@ -29,7 +29,7 @@ async fn solana(storage: Storage) -> anyhow::Result<()> {
     let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
 
     // Sending: sign, keep the bytes, then broadcast them to every node.
-    let factory = config.factory(&rpc);
+    let factory = config.factory(&rpc, std::sync::Arc::new(base::NoHoldings));
     let wallet = factory.from_pk(factory.generate().await?).await?;
     let sol = Asset::native((&config.native()).into());
     let mut builder = wallet.transaction(&sol)?;
@@ -77,11 +77,16 @@ the indexer fetches per step (default 100) (each absent one its default).
   `Unsupported`. It packs as many transfers as fit a packet into each
   transaction, all on one recent blockhash, each with a random Memo-v3 so two
   equal transfers stay distinct. Recipients must be on-curve addresses.
-- The factory's one fee estimator (`WalletFactory::fees`) caches a blockhash
-  and the price of a signature for `fee_ttl_ms` (default 5 s); builders sign
-  on them, a message's fee being its signatures at that price. An estimate is
-  one signature per source plus, for a token, a token account's rent (the
-  recipient may lack one); the `Fee` leg is the signature part only.
+- The factory's one fee estimator (`WalletFactory::fees`), which builders
+  sign on too (its blockhash and price), is two: a precise one (`fee.rs`)
+  that asks the node every time (a blockhash, the price of a signature on it,
+  and, for a token, whether the recipient has its token account and the
+  rent of one), and a cached one (`fee_cache.rs`) around it, which keeps the
+  blockhash and price for `fee_ttl_ms` (default 5 s) and the rent for good,
+  and takes a recipient that `Holdings` say holds the token to have its
+  account, without asking. An estimate is one signature per source plus,
+  for a token, a token account's rent when the recipient has none (without
+  a recipient, a new one has none); the `Fee` leg is the signature part only.
 - `broadcast` sends the exact bytes once to every node, with preflight. A
   signed transaction lands only until its blockhash expires (about a minute);
   after that `broadcast` fails as `Expired`. Resending until then is the

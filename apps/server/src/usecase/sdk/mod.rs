@@ -1,8 +1,9 @@
 //! `base`'s store traits (`BlockStore`, `WalletIndexStore`, `InputStore`,
-//! `WalletStore`) on the models, one file per trait, all on [`Stores`]. A
-//! store only orchestrates; every statement is a model's.
+//! `WalletStore`, `Holdings`) on the models, one file per trait, all on
+//! [`Stores`]. A store only orchestrates; every statement is a model's.
 
 mod blocks;
+mod holdings;
 mod indexes;
 mod inputs;
 mod wallets;

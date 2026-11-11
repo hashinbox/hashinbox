@@ -7,8 +7,8 @@ use std::{fmt, sync::Arc, time::Duration};
 use serde_json::Value;
 
 use crate::{
-    Assets, BlockStore, Dated, Future, Indexer, InputStore, Network, WalletFactoryBroadcaster,
-    WalletIndexStore, WalletStore,
+    Assets, BlockStore, Dated, Future, Holdings, Indexer, InputStore, Network,
+    WalletFactoryBroadcaster, WalletIndexStore, WalletStore,
 };
 
 /// One network as an application stores it, whatever its chain: the facts
@@ -79,6 +79,8 @@ pub struct Storage {
     pub inputs: Arc<dyn InputStore>,
     /// Keyed wallets.
     pub wallets: Arc<dyn WalletStore>,
+    /// Who holds what, so fees are priced for their recipients.
+    pub holdings: Arc<dyn Holdings>,
 }
 
 impl fmt::Debug for Storage {

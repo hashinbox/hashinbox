@@ -6,6 +6,7 @@ mod chain;
 mod config;
 mod erc20;
 mod fee;
+mod fee_cache;
 mod key;
 mod network;
 mod rpc;

@@ -440,6 +440,69 @@ pub(crate) mod db {
         Ok(())
     }
 
+    /// Of `wanted` (address, asset), those whose address is a keyed wallet
+    /// holding the asset now: a positive balance, pending legs counted. One
+    /// read, whatever their networks.
+    pub(crate) fn find_held<'a>(
+        connection: &mut SqliteConnection,
+        wanted: impl IntoIterator<Item = (&'a Address, &'a Asset)>,
+    ) -> QueryResult<Vec<(Address, Asset)>> {
+        use diesel::sql_types::Text;
+
+        #[derive(QueryableByName)]
+        struct Held {
+            #[diesel(sql_type = Text)]
+            chain: String,
+            #[diesel(sql_type = Text)]
+            network: String,
+            #[diesel(sql_type = Text)]
+            address: String,
+            #[diesel(sql_type = Text)]
+            asset: String,
+        }
+
+        let wanted: Vec<[&str; 4]> = wanted
+            .into_iter()
+            .map(|(address, asset)| {
+                let network = &address.network;
+                [
+                    network.chain.as_str(),
+                    &network.name,
+                    &address.value,
+                    &asset.id,
+                ]
+            })
+            .collect();
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted = serde_json::to_string(&wanted)
+            .map_err(|error| diesel::result::Error::SerializationError(Box::new(error)))?;
+        let held: Vec<Held> = diesel::sql_query(
+            "SELECT chain, network, address, asset
+             FROM wallet_index_with_balance
+             WHERE (chain, network, address, asset) IN (
+                SELECT value ->> 0, value ->> 1, value ->> 2, value ->> 3
+                FROM json_each(?1)
+               )
+               AND keyed
+               AND balance_pending != '0' AND balance_pending NOT LIKE '-%'",
+        )
+        .bind::<Text, _>(wanted)
+        .load(connection)?;
+        Ok(held
+            .into_iter()
+            .map(|held| {
+                let network = Network::new(base::Chain::new(held.chain), held.network);
+                let asset = Asset {
+                    network: network.clone(),
+                    id: held.asset,
+                };
+                (Address::new(network, held.address), asset)
+            })
+            .collect())
+    }
+
     /// How many distinct wallets of every network are indexed.
     pub(crate) fn count_addresses(connection: &mut SqliteConnection) -> QueryResult<i64> {
         wallet_index::table

@@ -9,7 +9,7 @@ use base::{
 
 use crate::{
     Address, Client, KeyPair, Token,
-    fee::Estimator,
+    fee_cache::Cached,
     transaction::{Transaction, messages},
 };
 
@@ -23,7 +23,7 @@ pub(crate) struct Builder {
     pub(crate) pending_ttl: std::time::Duration,
     pub(crate) rpc: Client,
     /// The factory's estimator: its cached blockhash and signature price.
-    pub(crate) fees: Arc<Estimator>,
+    pub(crate) fees: Arc<Cached>,
     pub(crate) asset: Asset,
     pub(crate) token: Option<Token>,
     pub(crate) default: Option<Signer>,

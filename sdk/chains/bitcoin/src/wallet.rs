@@ -10,7 +10,7 @@ use crypto::{Curve, SecretBytes};
 
 use crate::AddressType;
 use crate::builder::Builder;
-use crate::{KeyPair, Network as Native, fee::Fees, rpc::Client};
+use crate::{KeyPair, Network as Native, fee_cache::Cached, rpc::Client};
 
 /// Makes the wallets of one Bitcoin network and address type. Their builders
 /// spend the store's inputs and price fees with the factory's one estimator.
@@ -21,7 +21,7 @@ pub struct Factory {
     pub(crate) pending_ttl: std::time::Duration,
     pub(crate) inputs: Arc<dyn InputStore>,
     pub(crate) address_type: AddressType,
-    pub(crate) fees: Arc<Fees>,
+    pub(crate) fees: Arc<Cached>,
 }
 
 impl Factory {

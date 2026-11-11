@@ -29,7 +29,7 @@ pub use config::{
     AssetConfig, AssetKind, Config, Height, NetworkConfig, NodeInfo, Service, Storage,
 };
 pub use decimal::{Decimal, Error as DecimalError};
-pub use fee::Estimator as FeeEstimator;
+pub use fee::{Estimator as FeeEstimator, Holdings, NoHoldings, Spend, Spends};
 pub use indexer::{Birthday, DEFAULT_BATCH, Indexer, Next, Stats};
 
 pub use inout::{Coin, Input, Inputs, Output, Outputs, Store as InputStore};

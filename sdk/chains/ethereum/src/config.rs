@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::{
     Chain, Client, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Factory, FeeLimits, Network, Tokens,
-    fee::Estimator, rpc,
+    fee::Estimator, fee_cache::Cached, rpc,
 };
 
 /// Everything one Ethereum network needs; built in code with
@@ -139,14 +139,14 @@ impl Config {
         Chain::new(rpc.clone(), self.contracts())
     }
 
-    /// The wallet factory: nonces from `rpc`, fees and gas from `rpc`
-    /// cached by its one estimator.
+    /// The wallet factory: nonces from `rpc`; fees and gas from `rpc`,
+    /// reused by its one cached estimator for `fee_ttl_ms`, each send priced
+    /// for its recipient as `holdings` say.
     #[must_use]
-    pub fn factory(&self, rpc: &Client) -> Factory {
-        let fees = Estimator::new(
-            rpc.clone(),
-            self.limits,
-            self.contracts(),
+    pub fn factory(&self, rpc: &Client, holdings: Arc<dyn base::Holdings>) -> Factory {
+        let fees = Cached::new(
+            Estimator::new(rpc.clone(), self.limits, self.contracts()),
+            holdings,
             Duration::from_millis(self.fee_ttl_ms),
         );
         Factory {
@@ -284,7 +284,7 @@ impl base::Config for Config {
                 indexer,
                 wallets: WalletFactoryBroadcaster {
                     network: (&self.native()).into(),
-                    factory: Arc::new(self.factory(&rpc)),
+                    factory: Arc::new(self.factory(&rpc, Arc::clone(&storage.holdings))),
                     broadcaster: Arc::new(rpc),
                 },
                 assets: self.assets(),

@@ -46,7 +46,7 @@ fn client(transport: impl ::rpc::Client + 'static) -> Client {
 }
 
 fn wallet(script: &Script) -> Arc<dyn Wallet> {
-    let factory = config().factory(&client(script.clone()));
+    let factory = config().factory(&client(script.clone()), Arc::new(base::NoHoldings));
     block_on(factory.from_pk(SecretBytes::new(SEED))).unwrap()
 }
 
@@ -69,6 +69,20 @@ fn signing_replies() -> [Reply; 2] {
     ]
 }
 
+/// `sources` as spends to new addresses.
+fn spends(sources: &[(base::Address, Asset)]) -> base::Spends {
+    sources.iter().cloned().collect()
+}
+
+/// `sources` as spends to `to`.
+fn spends_to(sources: &[(base::Address, Asset)], to: &base::Address) -> base::Spends {
+    sources
+        .iter()
+        .cloned()
+        .map(|(from, asset)| (from, asset, to.clone()))
+        .collect()
+}
+
 #[test]
 fn a_wallet_keeps_its_ed25519_key_and_parses_canonical_addresses() {
     let script = Script::default();
@@ -77,7 +91,7 @@ fn a_wallet_keeps_its_ed25519_key_and_parses_canonical_addresses() {
     assert_eq!(wallet.address().value, reference.pubkey().to_string());
     assert_eq!(wallet.private_key().1.as_bytes(), SEED);
 
-    let factory = config().factory(&client(script));
+    let factory = config().factory(&client(script), Arc::new(base::NoHoldings));
     let parsed = factory.parse_address(&wallet.address().value).unwrap();
     assert_eq!(&parsed, wallet.address());
     let error = factory.parse_address("0x00").unwrap_err();
@@ -366,7 +380,7 @@ fn associated(owner: &str) -> solana_address::Address {
 #[test]
 fn two_sources_sign_one_transaction_each() {
     let script = Script::new([]);
-    let factory = config().factory(&client(script.clone()));
+    let factory = config().factory(&client(script.clone()), Arc::new(base::NoHoldings));
     let one = block_on(factory.from_pk(SecretBytes::new(SEED))).unwrap();
     let two = block_on(factory.from_pk(SecretBytes::new([9; 32]))).unwrap();
     let mut builder = factory.transaction(&Asset::native(network())).unwrap();
@@ -394,7 +408,7 @@ fn two_sources_sign_one_transaction_each() {
 #[test]
 fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
     let script = Script::new([]);
-    let factory = config().factory(&client(script.clone()));
+    let factory = config().factory(&client(script.clone()), Arc::new(base::NoHoldings));
     let mut builder = factory.transaction(&Asset::native(network())).unwrap();
     builder.send((recipient(), Decimal::from(100))).unwrap();
     assert_eq!(
@@ -432,11 +446,14 @@ fn an_estimate_sums_signatures_and_a_token_accounts_rent() {
     script.push([
         Reply::ok("getMinimumBalanceForRentExemption", json!(2_039_280)).expecting(json!([165])),
     ]);
-    let fees = config().factory(&client(script.clone())).fees();
+    let fees = config()
+        .factory(&client(script.clone()), Arc::new(base::NoHoldings))
+        .fees();
     let one = wallet(&script).address().clone();
     let two = recipient();
 
-    let single = block_on(fees.estimate(&[(one.clone(), Asset::native(network()))])).unwrap();
+    let single =
+        block_on(fees.estimate(&spends(&[(one.clone(), Asset::native(network()))]))).unwrap();
     assert_eq!(single, Decimal::from(5_000));
 
     let several = [
@@ -444,8 +461,45 @@ fn an_estimate_sums_signatures_and_a_token_accounts_rent() {
         (one, token()),
         (two, token()),
     ];
-    let total = block_on(fees.estimate(&several)).unwrap();
+    let total = block_on(fees.estimate(&spends(&several))).unwrap();
     assert_eq!(total, Decimal::from(3 * 5_000 + 2 * 2_039_280));
+    script.exhausted();
+}
+
+/// Holdings where every address holds every asset.
+struct HeldByAll;
+
+impl base::Holdings for HeldByAll {
+    fn holds<'a>(
+        &'a self,
+        spends: &'a base::Spends,
+    ) -> base::Future<'a, anyhow::Result<Vec<bool>>> {
+        let held = spends.iter().map(|spend| spend.to.is_some()).collect();
+        Box::pin(async move { Ok(held) })
+    }
+}
+
+#[test]
+fn a_token_sent_to_a_holder_is_priced_without_the_rent_of_its_account() {
+    let script = Script::new(signing_replies());
+    let fees = config()
+        .factory(&client(script.clone()), Arc::new(HeldByAll))
+        .fees();
+    let one = wallet(&script).address().clone();
+    let source = [(one, token())];
+    let to_holder = block_on(fees.estimate(&spends_to(&source, &recipient()))).unwrap();
+    assert_eq!(
+        to_holder,
+        Decimal::from(5_000),
+        "one signature, no account to create"
+    );
+    // Without a recipient it is a new address: the rent is read and counted.
+    script.push([Reply::ok(
+        "getMinimumBalanceForRentExemption",
+        json!(2_039_280),
+    )]);
+    let to_anyone = block_on(fees.estimate(&spends(&source))).unwrap();
+    assert_eq!(to_anyone, Decimal::from(5_000 + 2_039_280));
     script.exhausted();
 }
 
@@ -453,28 +507,32 @@ fn an_estimate_sums_signatures_and_a_token_accounts_rent() {
 fn prices_refresh_once_per_time_to_live() {
     let source = [(recipient(), Asset::native(network()))];
     let script = Script::new(signing_replies());
-    let fees = config().factory(&client(script.clone())).fees();
-    block_on(fees.estimate(&source)).unwrap();
-    block_on(fees.estimate(&source)).unwrap();
+    let fees = config()
+        .factory(&client(script.clone()), Arc::new(base::NoHoldings))
+        .fees();
+    block_on(fees.estimate(&spends(&source))).unwrap();
+    block_on(fees.estimate(&spends(&source))).unwrap();
     script.exhausted();
 
     let mut config = config();
     config.fee_ttl_ms = 0;
     let script = Script::new(signing_replies());
     script.push(signing_replies());
-    let fees = config.factory(&client(script.clone())).fees();
-    block_on(fees.estimate(&source)).unwrap();
-    block_on(fees.estimate(&source)).unwrap();
+    let fees = config
+        .factory(&client(script.clone()), Arc::new(base::NoHoldings))
+        .fees();
+    block_on(fees.estimate(&spends(&source))).unwrap();
+    block_on(fees.estimate(&spends(&source))).unwrap();
     script.exhausted();
 }
 
 #[test]
 fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
     let script = Script::new(signing_replies());
-    let factory = config().factory(&client(script.clone()));
+    let factory = config().factory(&client(script.clone()), Arc::new(base::NoHoldings));
     let wallet = block_on(factory.from_pk(SecretBytes::new(SEED))).unwrap();
     let source = [(wallet.address().clone(), Asset::native(network()))];
-    let fee = block_on(factory.fees().estimate(&source)).unwrap();
+    let fee = block_on(factory.fees().estimate(&spends(&source))).unwrap();
     let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
     builder
         .send((recipient(), Decimal::from(1_000_000) - fee.clone()))
@@ -490,7 +548,7 @@ fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
 
 #[test]
 fn a_base58_secret_or_keypair_imports() {
-    let factory = config().factory(&client(Script::new([])));
+    let factory = config().factory(&client(Script::new([])), Arc::new(base::NoHoldings));
     let keypair = Keypair::new_from_array(SEED);
     for text in [keypair.to_base58_string(), bs58::encode(SEED).into_string()] {
         let wallet = block_on(factory.from_pk_text(&text)).unwrap();

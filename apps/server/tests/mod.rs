@@ -357,7 +357,8 @@ async fn limited(
             blocks: stores.clone(),
             indexes: stores.clone(),
             inputs: stores.clone(),
-            wallets: stores,
+            wallets: stores.clone(),
+            holdings: stores,
         })
         .build()
         .await
