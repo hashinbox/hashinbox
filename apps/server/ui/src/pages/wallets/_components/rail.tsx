@@ -22,9 +22,9 @@ import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Decimal from 'decimal.js';
 import { useState, type SubmitEvent } from 'react';
 import { call, client, type Wallet } from '@/api/client';
-import { Currency } from '@/_components/currency';
+import { Currencies } from '@/_components/currency';
 import type { Shell } from '@/layout';
-import { assetOf, decimalsOf, networkChoices, unitOf } from '@/money';
+import { assetOf, decimalsOf, networkChoices, tickersOf, unitOf } from '@/money';
 import { mono } from '@/theme';
 import { WatchFields } from './watch';
 import { WATCH_NOTHING, haltOf, watch, type Watching } from './watching';
@@ -277,16 +277,15 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
             onClick={() => onSelect(w.id)}
             sx={{ gap: 1.5, py: 1.25, px: 1 }}
           >
-            <Box sx={{ display: 'flex', fontSize: 22, flex: 'none' }}>
-              <Currency chain={w.chain} ticker={unitOf(w, shell.listings)} label={false} />
+            <Box sx={{ display: 'flex', fontSize: 22 }}>
+              <Currencies chain={w.chain} tickers={tickersOf(w, shell.listings)} />
             </Box>
             <Box sx={{ minWidth: 0, flexGrow: 1 }}>
               <Typography noWrap sx={{ fontFamily: mono, fontSize: 12.5 }}>
                 {middle(w.address)}
               </Typography>
               <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary' }}>
-                {unitOf(w, shell.listings)} · {w.chain}/{w.network}
-                {!w.keyed && ' · watch only'}
+                {w.chain}/{w.network}
                 {(tags.get(w.id) ?? []).map((t) => ` · #${t}`).join('')}
                 <Halted wallet={w} />
               </Typography>

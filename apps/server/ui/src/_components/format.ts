@@ -8,8 +8,9 @@ const Exact = Decimal.clone({ precision: 1000, toExpNeg: -9e15, toExpPos: 9e15 }
 const THIN = ' ';
 
 /**
- * `amount` as a view shows it: cut toward zero to `display` fractional digits
- * (all of them when absent), thousands grouped by thin spaces, a true minus.
+ * `amount` as a view shows it: cut toward zero to exactly `display`
+ * fractional digits (all it has when absent), thousands grouped by thin
+ * spaces, a true minus.
  * With `decimals`, `amount` is atomic units of an asset with that many.
  */
 export function format(
@@ -22,7 +23,9 @@ export function format(
   let value = new Exact(amount);
   if (decimals !== undefined) value = value.div(new Exact(10).pow(decimals));
   if (display != null) value = value.toDecimalPlaces(display, Exact.ROUND_DOWN);
-  const [whole = '0', fraction] = value.abs().toFixed().split('.');
+  // With `display`, always that many fractional digits: amounts of one asset line up.
+  const fixed = display != null ? value.abs().toFixed(display) : value.abs().toFixed();
+  const [whole = '0', fraction] = fixed.split('.');
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, THIN);
   return `${value.isNegative() && !value.isZero() ? '−' : ''}${grouped}${fraction ? `.${fraction}` : ''}`;
 }

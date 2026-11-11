@@ -19,6 +19,7 @@ import { EmptyRow } from '@/_components/table';
 import { shorten } from '@/_components/trim';
 import { When } from '@/_components/when';
 import { mono } from '@/theme';
+import { Split } from '@/_components/split';
 
 const BEAT_MS = 4000;
 /** Every job kind there is, as the filter names them. */
@@ -123,156 +124,160 @@ export function Jobs({ shell }: { shell: Shell }) {
     ...STATES.map((v) => ({ group: 'state' as const, value: v, label: v })),
   ];
   return (
-    <Box
-      sx={{
-        display: 'grid',
-        gridTemplateColumns: { xs: 'minmax(0, 1fr)', lg: 'minmax(0, 3fr) minmax(320px, 2fr)' },
-        minHeight: 'calc(100vh - 65px)',
-      }}
-    >
-      <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
-        <Autocomplete
-          multiple
-          size="small"
-          options={options}
-          value={tags}
-          groupBy={(o) => o.group}
-          getOptionLabel={(o) => o.label}
-          isOptionEqualToValue={(o, v) => o.group === v.group && o.value === v.value}
-          onChange={(_, next) => {
-            // One tag per group: a newer one replaces the older.
-            setTags(next.filter((t, i) => !next.slice(i + 1).some((u) => u.group === t.group)));
-            setSelected(null);
-          }}
-          renderValue={(value, getItemProps) =>
-            value.map((t, index) => (
-              <Chip
-                {...getItemProps({ index })}
-                key={`${t.group}:${t.value}`}
-                size="small"
-                label={
-                  <>
-                    <Box component="span" sx={{ color: 'text.secondary', mr: 0.5 }}>
-                      {t.group}
-                    </Box>
-                    {t.label}
-                  </>
-                }
-                sx={{ borderRadius: '6px', bgcolor: 'grey.100', fontSize: 12 }}
-              />
-            ))
-          }
-          renderInput={(params) => (
-            <TextField
-              {...params}
-              placeholder={tags.length === 0 ? 'Filter by network, kind or state' : ''}
-              slotProps={{
-                ...params.slotProps,
-                input: {
-                  ...params.slotProps.input,
-                  startAdornment: (
+    <Split
+      columns="minmax(0, 3fr) minmax(320px, 2fr)"
+      wide="lg"
+      open={selected !== null}
+      onClose={() => setSelected(null)}
+      list={
+        <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
+          <Autocomplete
+            multiple
+            size="small"
+            options={options}
+            value={tags}
+            groupBy={(o) => o.group}
+            getOptionLabel={(o) => o.label}
+            isOptionEqualToValue={(o, v) => o.group === v.group && o.value === v.value}
+            onChange={(_, next) => {
+              // One tag per group: a newer one replaces the older.
+              setTags(next.filter((t, i) => !next.slice(i + 1).some((u) => u.group === t.group)));
+              setSelected(null);
+            }}
+            renderValue={(value, getItemProps) =>
+              value.map((t, index) => (
+                <Chip
+                  {...getItemProps({ index })}
+                  key={`${t.group}:${t.value}`}
+                  size="small"
+                  label={
                     <>
-                      <FilterList
-                        fontSize="small"
-                        aria-hidden
-                        sx={{ color: 'text.secondary', ml: 0.5, mr: 0.25 }}
-                      />
-                      {params.slotProps.input.startAdornment}
+                      <Box component="span" sx={{ color: 'text.secondary', mr: 0.5 }}>
+                        {t.group}
+                      </Box>
+                      {t.label}
                     </>
-                  ),
-                },
-                htmlInput: { ...params.slotProps.htmlInput, 'aria-label': 'Filter jobs' },
-              }}
-              sx={{ '& .MuiOutlinedInput-root': { gap: 0.5, fontSize: 13 } }}
-            />
-          )}
-          sx={{ mb: 2, maxWidth: 720 }}
-        />
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell>Job</TableCell>
-              <TableCell>Kind</TableCell>
-              <TableCell>Network</TableCell>
-              <TableCell>Created</TableCell>
-              <TableCell>Updated</TableCell>
-              <TableCell>Next run</TableCell>
-              <TableCell>Attempts</TableCell>
-              <TableCell>Reason</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {jobs.length === 0 && <EmptyRow columns={8} message="No job matches." />}
-            {jobs.map((j) => (
-              <TableRow
-                key={j.id}
-                hover
-                selected={j.id === selected}
-                onClick={() => setSelected(j.id)}
-                sx={{ cursor: 'pointer' }}
-              >
-                <TableCell sx={{ ...figures, whiteSpace: 'nowrap' }} title={j.id}>
-                  <Dot state={j.state} /> {shorten(j.id)}
-                </TableCell>
-                <TableCell>{labelOf(j.kind)}</TableCell>
-                <TableCell sx={figures}>{networkOf(j)}</TableCell>
-                <TableCell sx={figures}>
-                  <When at={j.created_at} />
-                </TableCell>
-                <TableCell sx={figures}>
-                  <When at={j.updated_at} />
-                </TableCell>
-                <TableCell sx={figures}>{next(j)}</TableCell>
-                <TableCell sx={figures}>{j.attempts}</TableCell>
-                <TableCell
-                  sx={{
-                    ...figures,
-                    color: j.state === 'failed' ? 'error.main' : 'text.secondary',
-                    maxWidth: 280,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {j.reason ?? ''}
-                </TableCell>
+                  }
+                  sx={{ borderRadius: '6px', bgcolor: 'grey.100', fontSize: 12 }}
+                />
+              ))
+            }
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                placeholder={tags.length === 0 ? 'Filter by network, kind or state' : ''}
+                slotProps={{
+                  ...params.slotProps,
+                  input: {
+                    ...params.slotProps.input,
+                    startAdornment: (
+                      <>
+                        <FilterList
+                          fontSize="small"
+                          aria-hidden
+                          sx={{ color: 'text.secondary', ml: 0.5, mr: 0.25 }}
+                        />
+                        {params.slotProps.input.startAdornment}
+                      </>
+                    ),
+                  },
+                  htmlInput: { ...params.slotProps.htmlInput, 'aria-label': 'Filter jobs' },
+                }}
+                sx={{ '& .MuiOutlinedInput-root': { gap: 0.5, fontSize: 13 } }}
+              />
+            )}
+            sx={{ mb: 2, maxWidth: 720 }}
+          />
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Job</TableCell>
+                <TableCell>Kind</TableCell>
+                <TableCell>Network</TableCell>
+                <TableCell>Created</TableCell>
+                <TableCell>Updated</TableCell>
+                <TableCell>Next run</TableCell>
+                <TableCell>Attempts</TableCell>
+                <TableCell>Reason</TableCell>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </Box>
-
-      <Box
-        component="aside"
-        sx={(t) => ({
-          px: { xs: 2, md: 3 },
-          py: { xs: 2.5, md: 3.5 },
-          minWidth: 0,
-          borderTop: `1px solid ${t.palette.divider}`,
-          [t.breakpoints.up('lg')]: { borderTop: 0, borderLeft: `1px solid ${t.palette.divider}` },
-        })}
-      >
-        {/* Held in view while the list beside it scrolls. */}
-        <Box
-          sx={{
-            position: { lg: 'sticky' },
-            top: { lg: 88 },
-            height: { lg: 'calc(100vh - 120px)' },
-            overflowY: { lg: 'auto' },
-          }}
-        >
-          {current ? (
-            <Detail job={current} />
-          ) : (
-            <Empty icon={<WorkHistory />} title="Jobs">
-              A job is a piece of background work, like indexing a network, checking triggers or
-              sending a payment, retried until it is done. Pick one to see its input, progress and
-              why it last stopped.
-            </Empty>
-          )}
+            </TableHead>
+            <TableBody>
+              {jobs.length === 0 && <EmptyRow columns={8} message="No job matches." />}
+              {jobs.map((j) => (
+                <TableRow
+                  key={j.id}
+                  hover
+                  selected={j.id === selected}
+                  onClick={() => setSelected(j.id)}
+                  sx={{ cursor: 'pointer' }}
+                >
+                  <TableCell sx={{ ...figures, whiteSpace: 'nowrap' }} title={j.id}>
+                    <Dot state={j.state} /> {shorten(j.id)}
+                  </TableCell>
+                  <TableCell>{labelOf(j.kind)}</TableCell>
+                  <TableCell sx={figures}>{networkOf(j)}</TableCell>
+                  <TableCell sx={figures}>
+                    <When at={j.created_at} />
+                  </TableCell>
+                  <TableCell sx={figures}>
+                    <When at={j.updated_at} />
+                  </TableCell>
+                  <TableCell sx={figures}>{next(j)}</TableCell>
+                  <TableCell sx={figures}>{j.attempts}</TableCell>
+                  <TableCell
+                    sx={{
+                      ...figures,
+                      color: j.state === 'failed' ? 'error.main' : 'text.secondary',
+                      maxWidth: 280,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {j.reason ?? ''}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </Box>
-      </Box>
-    </Box>
+      }
+      detail={
+        <Box
+          component="aside"
+          sx={(t) => ({
+            px: { xs: 2, md: 3 },
+            py: { xs: 2.5, md: 3.5 },
+            minWidth: 0,
+            borderTop: `1px solid ${t.palette.divider}`,
+            [t.breakpoints.up('lg')]: {
+              borderTop: 0,
+              borderLeft: `1px solid ${t.palette.divider}`,
+            },
+          })}
+        >
+          {/* Held in view while the list beside it scrolls. */}
+          <Box
+            sx={{
+              position: { lg: 'sticky' },
+              top: { lg: 88 },
+              height: { lg: 'calc(100vh - 120px)' },
+              overflowY: { lg: 'auto' },
+            }}
+          >
+            {current ? (
+              <Detail job={current} />
+            ) : (
+              <Empty icon={<WorkHistory />} title="Jobs">
+                A job is a piece of background work, like indexing a network, checking triggers or
+                sending a payment, retried until it is done. Pick one to see its input, progress and
+                why it last stopped.
+              </Empty>
+            )}
+          </Box>
+        </Box>
+      }
+    />
   );
 }
 

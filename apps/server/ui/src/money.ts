@@ -84,3 +84,10 @@ export function decimalsOf(wallet: Wallet, listings: Listing[]): number {
 }
 
 export { shorten } from '@/_components/trim';
+
+/** The tickers of every asset `wallet` is indexed in, native first; its unit when none. */
+export function tickersOf(wallet: Wallet, listings: Listing[]): string[] {
+  const assets = assetsOf(wallet).sort((a, b) => Number(b === 'native') - Number(a === 'native'));
+  if (assets.length === 0) return [unitOf(wallet, listings)];
+  return assets.map((asset) => assetName(listings, wallet.chain, wallet.network, asset));
+}

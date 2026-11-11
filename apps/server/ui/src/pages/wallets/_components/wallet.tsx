@@ -1,3 +1,4 @@
+import Decimal from 'decimal.js';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import ButtonGroup from '@mui/material/ButtonGroup';
@@ -8,35 +9,28 @@ import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
 import Link from '@mui/material/Link';
 import Stack from '@mui/material/Stack';
-import Tab from '@mui/material/Tab';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
 import TableCell from '@mui/material/TableCell';
 import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
-import Tabs from '@mui/material/Tabs';
+import ToggleButton from '@mui/material/ToggleButton';
+import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
+import { useTheme } from '@mui/material/styles';
+import useMediaQuery from '@mui/material/useMediaQuery';
 import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
 import { call, client, type Movement, type Wallet as Account } from '@/api/client';
 import { Address } from '@/_components/address';
-import { Currency } from '@/_components/currency';
+import { Currencies, Currency } from '@/_components/currency';
 import { format } from '@/_components/format';
 import { Money } from '@/_components/money';
 import { EmptyRow } from '@/_components/table';
 import { Transaction as Tx } from '@/_components/transaction';
 import type { Shell } from '@/layout';
-import {
-  assetName,
-  assetOf,
-  assetsOf,
-  decimalsOf,
-  displayOf,
-  listingOf,
-  networkOf,
-  unitOf,
-} from '@/money';
+import { assetName, assetOf, assetsOf, listingOf, networkOf, tickersOf } from '@/money';
 import { go, href } from '@/route';
 import { mono } from '@/theme';
 import { Send } from './send';
@@ -46,25 +40,25 @@ import { haltOf, progressOf } from './watching';
 /** A leg's `kind`: 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward. */
 const KIND = ['received', 'spent', 'burned', 'minted', 'fee', 'reward'];
 
-/** The wallet's confirmed balance in its asset, in atomic units, as `GET /v1/wallets/{id}` reports it. */
-function amountOf(wallet: Account): string {
-  return wallet.indexes[assetOf(wallet)]?.balance_confirmed ?? '0';
+/** The wallet's confirmed balance in `asset`, in atomic units, as `GET /v1/wallets/{id}` reports it. */
+function amountOf(wallet: Account, asset: string): string {
+  return wallet.indexes[asset]?.balance_confirmed ?? '0';
 }
 
 /** What it will hold once everything in flight lands: the newest block, with what this server sent and is not mined yet. */
-function pendingOf(wallet: Account): string {
-  return wallet.indexes[assetOf(wallet)]?.balance_pending ?? '0';
+function pendingOf(wallet: Account, asset: string): string {
+  return wallet.indexes[asset]?.balance_pending ?? '0';
 }
 
-/** What a wallet's balance says about the history behind it. */
-function claimOf(wallet: Account): { text: string; color: string } {
-  if (amountOf(wallet).startsWith('-')) {
+/** What a wallet's balance in `asset` says about the history behind it. */
+function claimOf(wallet: Account, asset: string): { text: string; color: string } {
+  if (amountOf(wallet, asset).startsWith('-')) {
     return {
       text: 'More left this address than ever reached it: credits are missing.',
       color: 'error.main',
     };
   }
-  const index = wallet.indexes[assetOf(wallet)];
+  const index = wallet.indexes[asset];
   const through = index?.indexed_through;
   if (through == null) {
     return { text: 'Not indexed yet.', color: 'warning.main' };
@@ -77,6 +71,13 @@ function claimOf(wallet: Account): { text: string; color: string } {
     };
   }
   return { text: `Indexed through ${through}.`, color: 'text.secondary' };
+}
+
+/** `amount` with its sign: `+` above zero, `-` below, none at zero. */
+function signed(amount: Decimal, units: { decimals: number; display: number | null }): string {
+  const text = format(amount.abs(), units);
+  if (amount.isZero()) return text;
+  return `${amount.isNegative() ? '-' : '+'}${text}`;
 }
 
 const figures = { fontFamily: mono, fontWeight: 300, fontVariantNumeric: 'tabular-nums' } as const;
@@ -97,9 +98,6 @@ export function Wallet({
   /** Called with the wallet after it is watched in more assets. */
   onWatched: (wallet: Account) => void;
 }) {
-  const decimals = decimalsOf(wallet, shell.listings);
-  const unit = unitOf(wallet, shell.listings);
-  const display = displayOf(wallet, shell.listings);
   const [fresh, setFresh] = useState<Account | null>(null);
   const [picked, setPicked] = useState(assetOf(wallet));
   const asset = picked in wallet.indexes ? picked : assetOf(wallet);
@@ -114,6 +112,7 @@ export function Wallet({
   const [legsCursor, setLegsCursor] = useState<string | null>(null);
   const [watchOpen, setWatchOpen] = useState(false);
   const [tagOpen, setTagOpen] = useState(false);
+  const [sendOpen, setSendOpen] = useState(false);
 
   const refresh = useCallback(() => {
     const id = { path: { id: wallet.id } };
@@ -145,8 +144,37 @@ export function Wallet({
       .catch(shell.fail);
   };
 
-  const claim = fresh ? claimOf(fresh) : null;
+  const theme = useTheme();
+  const compact = !useMediaQuery(theme.breakpoints.up('sm'));
+
+  /** `id`'s confirmed balance and what is pending on top of it. */
+  const balanceOf = (id: string) => {
+    const listed = listingOf(wallet, shell.listings, id)?.metadata;
+    const units = { decimals: listed?.decimals ?? 0, display: listed?.display_decimals ?? null };
+    const confirmed = fresh ? amountOf(fresh, id) : null;
+    const pending = fresh ? pendingOf(fresh, id) : null;
+    return (
+      <Box sx={{ textAlign: 'left', fontVariantNumeric: 'tabular-nums' }}>
+        <Typography sx={{ fontSize: 18, lineHeight: 1.2, color: 'text.primary' }}>
+          {confirmed === null ? '—' : format(confirmed, units)}{' '}
+          <Box component="span" sx={{ fontSize: 12, color: 'text.secondary' }}>
+            {assetName(shell.listings, wallet.chain, wallet.network, id)}
+          </Box>
+        </Typography>
+        <Typography sx={{ fontSize: 11, color: 'text.secondary' }}>
+          {pending === null || confirmed === null
+            ? '—'
+            : signed(new Decimal(pending).minus(confirmed), units)}{' '}
+          pending
+        </Typography>
+      </Box>
+    );
+  };
+
+  const claim = fresh ? claimOf(fresh, asset) : null;
   const halt = haltOf(wallet);
+  const index = wallet.indexes[asset];
+  const progress = index ? progressOf(index) : null;
 
   /** Pauses every index of the wallet, or resumes them when one is stopped. */
   const toggle = () => {
@@ -179,7 +207,7 @@ export function Wallet({
           sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}
         >
           <Box sx={{ display: 'flex', fontSize: 22 }}>
-            <Currency chain={wallet.chain} ticker={unit} label={false} />
+            <Currencies chain={wallet.chain} tickers={tickersOf(wallet, shell.listings)} />
           </Box>
           <Box sx={{ minWidth: 0 }}>
             <Box sx={{ fontSize: 15 }}>
@@ -199,75 +227,96 @@ export function Wallet({
                 External ID: {wallet.external_id}
               </Typography>
             )}
-            {Object.values(wallet.indexes).map((index) => {
-              const progress = progressOf(index);
-              const name = assetName(shell.listings, wallet.chain, wallet.network, index.asset);
-              return (
-                <Typography key={index.asset} sx={{ fontSize: 11, color: progress.color }}>
-                  {name}: {progress.text}
-                </Typography>
-              );
-            })}
           </Box>
-          <Tags
-            shell={shell}
-            wallet={wallet}
-            tags={tags}
-            adding={tagOpen}
-            onClose={() => setTagOpen(false)}
-            onTagged={onTagged}
-          />
           <Box sx={{ flexGrow: 1 }} />
-          <Typography
-            variant="h3"
-            component="p"
-            title={claim?.text}
-            sx={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}
-          >
-            {fresh ? format(amountOf(fresh), { decimals, display }) : '—'}{' '}
-            <Box component="span" sx={{ fontSize: '0.6em', color: 'text.secondary' }}>
-              {unit}
-            </Box>
-            {fresh && pendingOf(fresh) !== amountOf(fresh) && (
-              <Box component="span" sx={{ fontSize: '0.4em', color: 'text.secondary', ml: 1 }}>
-                {format(pendingOf(fresh), { decimals, display })} pending
-              </Box>
-            )}
-          </Typography>
-          <ButtonGroup size="small" variant="outlined" aria-label="Wallet actions">
-            <Button onClick={() => setWatchOpen(true)}>
-              {assetsOf(wallet).length === 0 ? 'Watch' : 'Watch more'}
-            </Button>
-            <Button onClick={() => setTagOpen(true)}>Add tag</Button>
-            {assetsOf(wallet).length > 0 && (
-              <Button onClick={toggle}>{halt ? 'Resume' : 'Pause'}</Button>
-            )}
-          </ButtonGroup>
+          <Stack spacing={1} sx={{ alignItems: 'flex-end' }}>
+            <ButtonGroup
+              size="small"
+              variant="outlined"
+              aria-label="Wallet actions"
+              sx={{ flexWrap: 'wrap' }}
+            >
+              {wallet.keyed && assetsOf(wallet).length > 0 && (
+                <Button onClick={() => setSendOpen(true)}>Send</Button>
+              )}
+              <Button onClick={() => setWatchOpen(true)}>
+                {assetsOf(wallet).length === 0 ? 'Watch' : 'Watch more'}
+              </Button>
+              <Button onClick={() => setTagOpen(true)}>Add tag</Button>
+              {assetsOf(wallet).length > 0 && (
+                <Button onClick={toggle}>{halt ? 'Resume' : 'Pause'}</Button>
+              )}
+            </ButtonGroup>
+            <Tags
+              shell={shell}
+              wallet={wallet}
+              tags={tags}
+              adding={tagOpen}
+              onClose={() => setTagOpen(false)}
+              onTagged={onTagged}
+            />
+          </Stack>
         </Stack>
-        {claim && claim.color !== 'text.secondary' && (
-          <Typography sx={{ fontSize: 12, color: claim.color, mt: 0.75, textAlign: 'right' }}>
-            {claim.text}
-          </Typography>
-        )}
       </Box>
 
       {wallet.keyed && (
-        <Send shell={shell} wallet={wallet} onSent={() => window.setTimeout(refresh, 2500)} />
+        <Send
+          shell={shell}
+          wallet={wallet}
+          asset={asset}
+          open={sendOpen}
+          onClose={() => setSendOpen(false)}
+          onSent={refresh}
+        />
       )}
 
-      <Typography variant="h3" component="h3" sx={{ mt: 3.5, mb: 1 }}>
-        Movements
-      </Typography>
-      {assetsOf(wallet).length > 1 && (
-        <Tabs value={asset} onChange={(_, value: string) => setPicked(value)}>
-          {assetsOf(wallet).map((id) => (
-            <Tab
-              key={id}
-              value={id}
-              label={assetName(shell.listings, wallet.chain, wallet.network, id)}
-            />
-          ))}
-        </Tabs>
+      {assetsOf(wallet).length > 0 && (
+        // Each asset with its balance; the one picked shows its progress and movements. Native
+        // first. On a phone the buttons are its icons, and the picked one's balance shows below.
+        <ToggleButtonGroup
+          exclusive
+          value={asset}
+          onChange={(_, value: string | null) => value && setPicked(value)}
+          aria-label="Asset"
+          sx={{ mt: 3, flexWrap: 'wrap', maxWidth: '100%' }}
+        >
+          {assetsOf(wallet)
+            .sort((a, b) => Number(b === 'native') - Number(a === 'native'))
+            .map((id) => (
+              <ToggleButton
+                key={id}
+                value={id}
+                aria-label={assetName(shell.listings, wallet.chain, wallet.network, id)}
+                sx={{
+                  px: compact ? 1.5 : 2.5,
+                  py: 1,
+                  minWidth: compact ? 0 : 220,
+                  justifyContent: 'flex-start',
+                  gap: 1.5,
+                  textTransform: 'none',
+                  alignItems: 'center',
+                }}
+              >
+                <Box sx={{ display: 'flex', fontSize: 22 }}>
+                  <Currency
+                    chain={wallet.chain}
+                    ticker={assetName(shell.listings, wallet.chain, wallet.network, id)}
+                    label={false}
+                  />
+                </Box>
+                {!compact && balanceOf(id)}
+              </ToggleButton>
+            ))}
+        </ToggleButtonGroup>
+      )}
+      {compact && assetsOf(wallet).length > 0 && <Box sx={{ mt: 1.5 }}>{balanceOf(asset)}</Box>}
+      {claim && claim.color !== 'text.secondary' && (
+        <Typography sx={{ fontSize: 12, color: claim.color, mt: 0.5 }}>{claim.text}</Typography>
+      )}
+      {progress && (
+        <Typography sx={{ fontSize: 11, color: progress.color, mt: 1.5, mb: 1 }}>
+          {progress.text}
+        </Typography>
       )}
       <TableContainer>
         <Table>

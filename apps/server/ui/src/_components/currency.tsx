@@ -44,3 +44,25 @@ export function Currency({
     </Box>
   );
 }
+
+/** Several assets of `chain` as one mark: the first in front, the rest tucked behind, each ringed. */
+export function Currencies({ chain, tickers }: { chain: string; tickers: string[] }) {
+  return (
+    <Box sx={{ display: 'flex', flex: 'none', width: '1.6em', isolation: 'isolate' }}>
+      {tickers.map((ticker, i) => (
+        <Box
+          key={ticker}
+          sx={(t) => ({
+            display: 'flex',
+            ml: i === 0 ? 0 : '-0.75em',
+            zIndex: tickers.length - i,
+            borderRadius: '50%',
+            boxShadow: `0 0 0 1.5px ${t.palette.background.paper}`,
+          })}
+        >
+          <Currency chain={chain} ticker={ticker} label={false} />
+        </Box>
+      ))}
+    </Box>
+  );
+}

@@ -12,6 +12,7 @@ import { Operation } from './_components/operation';
 import { Rail } from './_components/rail';
 import { groups, isDocument, type Document, type Group } from './_components/spec';
 import { Verb } from './_components/verb';
+import { Split } from '@/_components/split';
 
 /** The operation named after `docs/` in the address, so a reload or a shared link lands on it. */
 function linked(): string | null {
@@ -87,28 +88,29 @@ export function Docs({ shell, secured }: Props) {
     );
   }
   return (
-    <Box
-      sx={{
-        display: 'grid',
-        gridTemplateColumns: { xs: 'minmax(0, 1fr)', md: 'minmax(260px, 320px) minmax(0, 1fr)' },
-        minHeight: 'calc(100vh - 65px)',
-      }}
-    >
-      <Rail document={document} groups={all} selected={endpoint?.id ?? null} onSelect={select} />
-      <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
-        {endpoint ? (
-          <Operation
-            key={endpoint.id}
-            document={document}
-            endpoint={endpoint}
-            secured={secured}
-            onNotify={shell.notify}
-          />
-        ) : (
-          <Overview document={document} groups={all} secured={secured} onSelect={select} />
-        )}
-      </Box>
-    </Box>
+    <Split
+      columns="minmax(260px, 320px) minmax(0, 1fr)"
+      open={endpoint != null}
+      onClose={() => select(null)}
+      list={
+        <Rail document={document} groups={all} selected={endpoint?.id ?? null} onSelect={select} />
+      }
+      detail={
+        <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
+          {endpoint ? (
+            <Operation
+              key={endpoint.id}
+              document={document}
+              endpoint={endpoint}
+              secured={secured}
+              onNotify={shell.notify}
+            />
+          ) : (
+            <Overview document={document} groups={all} secured={secured} onSelect={select} />
+          )}
+        </Box>
+      }
+    />
   );
 }
 

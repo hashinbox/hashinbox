@@ -17,6 +17,7 @@ import { mono } from '@/theme';
 import { Nodes } from './_components/nodes';
 import { Chain } from './_components/chain';
 import { AddNodes } from './_components/add';
+import { Split } from '@/_components/split';
 
 const BEAT_MS = 4000;
 
@@ -71,121 +72,122 @@ export function Networks({ shell }: { shell: Shell }) {
   const current = networks.find((n) => nameOf(n) === selected) ?? null;
 
   return (
-    <Box
-      sx={{
-        display: 'grid',
-        gridTemplateColumns: { xs: 'minmax(0, 1fr)', md: 'minmax(220px, 280px) minmax(0, 1fr)' },
-        minHeight: 'calc(100vh - 65px)',
-      }}
-    >
-      <Box
-        component="aside"
-        sx={(t) => ({
-          p: 2.5,
-          minWidth: 0,
-          borderBottom: `1px solid ${t.palette.divider}`,
-          [t.breakpoints.up('md')]: {
-            borderBottom: 0,
-            borderRight: `1px solid ${t.palette.divider}`,
-          },
-        })}
-      >
-        <Stack direction="row" sx={{ alignItems: 'center', mb: 1.5 }}>
-          <Typography variant="h3" sx={{ flexGrow: 1 }}>
-            Networks
-          </Typography>
-          <Tooltip title="Add a provider to every network">
-            <IconButton
-              size="small"
-              aria-label="Add RPC nodes"
-              onClick={(e) => {
-                e.currentTarget.blur();
-                setAdding(true);
-              }}
-            >
-              <Add fontSize="small" />
-            </IconButton>
-          </Tooltip>
-        </Stack>
-        <List disablePadding aria-label="Networks">
-          {networks.map((n) => (
-            <ListItemButton
-              key={nameOf(n)}
-              selected={current !== null && nameOf(n) === nameOf(current)}
-              onClick={() => go(['networks', n.chain, n.network])}
-              sx={{ py: 1.25, px: 1, display: 'block' }}
-            >
-              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                <Typography noWrap sx={{ fontFamily: mono, fontSize: 13, flexGrow: 1 }}>
-                  {nameOf(n)}
-                </Typography>
-                <Box sx={{ width: 20, mr: -0.5, display: 'flex', justifyContent: 'center' }}>
-                  <Dot sync={syncOf(n)} />
-                </Box>
-              </Stack>
-              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary', flexGrow: 1 }}>
-                  {n.endpoints.length} node{n.endpoints.length === 1 ? '' : 's'} · indexed #
-                  {n.index?.indexed ?? '—'} · tip #{n.tip_live ?? '—'}
-                </Typography>
-                <Tooltip title="Settings">
-                  <IconButton
-                    size="small"
-                    aria-label={`${nameOf(n)} settings`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      go(['networks', n.chain, n.network, 'settings']);
-                    }}
-                    sx={{
-                      p: 0.25,
-                      mr: -0.5,
-                      color:
-                        settings && current !== null && nameOf(n) === nameOf(current)
-                          ? 'text.primary'
-                          : 'text.secondary',
-                    }}
-                  >
-                    <Settings sx={{ fontSize: 16 }} />
-                  </IconButton>
-                </Tooltip>
-              </Stack>
-              {n.index_job_reason && (
-                <Typography sx={{ fontFamily: mono, fontSize: 11, color: 'error.main' }}>
-                  {n.index_job_reason}
+    <>
+      <Split
+        columns="minmax(220px, 280px) minmax(0, 1fr)"
+        open={current !== null}
+        onClose={() => go(['networks'])}
+        list={
+          <Box
+            component="aside"
+            sx={(t) => ({
+              p: 2.5,
+              minWidth: 0,
+              borderBottom: `1px solid ${t.palette.divider}`,
+              [t.breakpoints.up('md')]: {
+                borderBottom: 0,
+                borderRight: `1px solid ${t.palette.divider}`,
+              },
+            })}
+          >
+            <Stack direction="row" sx={{ alignItems: 'center', mb: 1.5 }}>
+              <Typography variant="h3" sx={{ flexGrow: 1 }}>
+                Networks
+              </Typography>
+              <Tooltip title="Add a provider to every network">
+                <IconButton
+                  size="small"
+                  aria-label="Add RPC nodes"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    setAdding(true);
+                  }}
+                >
+                  <Add fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+            <List disablePadding aria-label="Networks">
+              {networks.map((n) => (
+                <ListItemButton
+                  key={nameOf(n)}
+                  selected={current !== null && nameOf(n) === nameOf(current)}
+                  onClick={() => go(['networks', n.chain, n.network])}
+                  sx={{ py: 1.25, px: 1, display: 'block' }}
+                >
+                  <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                    <Typography noWrap sx={{ fontFamily: mono, fontSize: 13, flexGrow: 1 }}>
+                      {nameOf(n)}
+                    </Typography>
+                    <Box sx={{ width: 20, mr: -0.5, display: 'flex', justifyContent: 'center' }}>
+                      <Dot sync={syncOf(n)} />
+                    </Box>
+                  </Stack>
+                  <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+                    <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary', flexGrow: 1 }}>
+                      {n.endpoints.length} node{n.endpoints.length === 1 ? '' : 's'} · indexed #
+                      {n.index?.indexed ?? '—'} · tip #{n.tip_live ?? '—'}
+                    </Typography>
+                    <Tooltip title="Settings">
+                      <IconButton
+                        size="small"
+                        aria-label={`${nameOf(n)} settings`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          go(['networks', n.chain, n.network, 'settings']);
+                        }}
+                        sx={{
+                          p: 0.25,
+                          mr: -0.5,
+                          color:
+                            settings && current !== null && nameOf(n) === nameOf(current)
+                              ? 'text.primary'
+                              : 'text.secondary',
+                        }}
+                      >
+                        <Settings sx={{ fontSize: 16 }} />
+                      </IconButton>
+                    </Tooltip>
+                  </Stack>
+                  {n.index_job_reason && (
+                    <Typography sx={{ fontFamily: mono, fontSize: 11, color: 'error.main' }}>
+                      {n.index_job_reason}
+                    </Typography>
+                  )}
+                </ListItemButton>
+              ))}
+              {networks.length === 0 && (
+                <Typography color="text.secondary" sx={{ py: 2, fontSize: 13 }}>
+                  No network is configured.
                 </Typography>
               )}
-            </ListItemButton>
-          ))}
-          {networks.length === 0 && (
-            <Typography color="text.secondary" sx={{ py: 2, fontSize: 13 }}>
-              No network is configured.
-            </Typography>
-          )}
-        </List>
-      </Box>
-
-      <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
-        {current && settings ? (
-          <Nodes key={nameOf(current)} shell={shell} network={current} onChanged={refresh} />
-        ) : current ? (
-          <Chain
-            key={nameOf(current)}
-            shell={shell}
-            network={current}
-            picked={page === 'blocks' && position ? Number(position) : null}
-            onPick={(picked) => {
-              const at = ['networks', current.chain, current.network];
-              go(picked === null ? [...at, 'mempool'] : [...at, 'blocks', String(picked)]);
-            }}
-          />
-        ) : (
-          <Empty icon={<Hub />} title="Networks">
-            A network is a blockchain this server watches through its RPC nodes. Pick one to see its
-            latest blocks, waiting transactions and node settings.
-          </Empty>
-        )}
-      </Box>
-
+            </List>
+          </Box>
+        }
+        detail={
+          <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
+            {current && settings ? (
+              <Nodes key={nameOf(current)} shell={shell} network={current} onChanged={refresh} />
+            ) : current ? (
+              <Chain
+                key={nameOf(current)}
+                shell={shell}
+                network={current}
+                picked={page === 'blocks' && position ? Number(position) : null}
+                onPick={(picked) => {
+                  const at = ['networks', current.chain, current.network];
+                  go(picked === null ? [...at, 'mempool'] : [...at, 'blocks', String(picked)]);
+                }}
+              />
+            ) : (
+              <Empty icon={<Hub />} title="Networks">
+                A network is a blockchain this server watches through its RPC nodes. Pick one to see
+                its latest blocks, waiting transactions and node settings.
+              </Empty>
+            )}
+          </Box>
+        }
+      />
       <AddNodes
         shell={shell}
         networks={networks}
@@ -199,7 +201,7 @@ export function Networks({ shell }: { shell: Shell }) {
           refresh();
         }}
       />
-    </Box>
+    </>
   );
 }
 
