@@ -130,7 +130,9 @@ impl Client {
                         json!([slot, {
                             "commitment": CONFIRMED,
                             "encoding": "json",
-                            "transactionDetails": "full",
+                            // Accounts, fee, status and balances: what the
+                            // legs are read from; no instructions or logs.
+                            "transactionDetails": "accounts",
                             "maxSupportedTransactionVersion": 1,
                             "rewards": true,
                         }]),

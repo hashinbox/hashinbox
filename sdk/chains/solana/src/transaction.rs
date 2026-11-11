@@ -97,7 +97,13 @@ impl Transaction {
             .clone();
         let meta = wire.meta.context("Solana transaction has no metadata")?;
         let succeeded = meta.err.is_null();
-        let legs = legs(wire.transaction.message.account_keys, meta, network, tokens)?;
+        let keys = wire
+            .transaction
+            .account_keys
+            .into_iter()
+            .map(|key| key.pubkey)
+            .collect();
+        let legs = legs(keys, meta, network, tokens)?;
         let state = if succeeded {
             TransactionState::Succeeded
         } else {
@@ -259,16 +265,19 @@ struct Wire {
     meta: Option<Meta>,
 }
 
+/// A transaction as `transactionDetails: "accounts"` gives it: its
+/// signatures, and every account it touches in order, those its address
+/// lookup tables loaded included.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Signed {
     signatures: Vec<String>,
-    message: Keys,
+    account_keys: Vec<Key>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Keys {
-    account_keys: Vec<String>,
+struct Key {
+    pubkey: String,
 }
 
 #[derive(Deserialize)]
@@ -279,15 +288,8 @@ struct Meta {
     fee: u64,
     pre_balances: Vec<u64>,
     post_balances: Vec<u64>,
-    loaded_addresses: Option<Loaded>,
     pre_token_balances: Option<Vec<TokenBalance>>,
     post_token_balances: Option<Vec<TokenBalance>>,
-}
-
-#[derive(Deserialize)]
-struct Loaded {
-    writable: Vec<String>,
-    readonly: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -315,7 +317,7 @@ struct TokenAmount {
 /// A failed transaction moved nothing but its fee. Mints and burns show as
 /// balance changes, not `Minted`/`Burned` legs.
 fn legs(
-    mut keys: Vec<String>,
+    keys: Vec<String>,
     meta: Meta,
     network: &Network,
     tokens: &Tokens,
@@ -323,10 +325,6 @@ fn legs(
     let network = base::Network::from(network);
     let address = |text: &str| base::Address::new(network.clone(), text);
     let sol = Asset::native(network.clone());
-    if let Some(loaded) = meta.loaded_addresses {
-        keys.extend(loaded.writable);
-        keys.extend(loaded.readonly);
-    }
     let payer = keys
         .first()
         .context("Solana transaction has no fee payer")?;

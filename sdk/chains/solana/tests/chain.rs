@@ -76,7 +76,7 @@ fn tips_are_confirmed_produced_and_rooted_final() {
 fn a_block_becomes_balance_legs_fees_and_rewards() {
     let (payer, recipient, program) = (base58(1, 32), base58(2, 32), base58(3, 32));
     let transfer = json!({
-        "transaction": { "signatures": [base58(4, 64)], "message": { "accountKeys": [payer, recipient, program] } },
+        "transaction": { "signatures": [base58(4, 64)], "accountKeys": [{ "pubkey": payer }, { "pubkey": recipient }, { "pubkey": program }] },
         "meta": {
             "err": null, "fee": 5000,
             "preBalances": [1_000_000, 0, 1], "postBalances": [994_900, 100, 1],
@@ -91,7 +91,7 @@ fn a_block_becomes_balance_legs_fees_and_rewards() {
         },
     });
     let failed = json!({
-        "transaction": { "signatures": [base58(5, 64)], "message": { "accountKeys": [payer, recipient] } },
+        "transaction": { "signatures": [base58(5, 64)], "accountKeys": [{ "pubkey": payer }, { "pubkey": recipient }] },
         "meta": { "err": { "InstructionError": [0, "Custom"] }, "fee": 5000,
                   "preBalances": [994_900, 100], "postBalances": [989_900, 100] },
     });
@@ -181,8 +181,8 @@ fn a_block_becomes_balance_legs_fees_and_rewards() {
     script.exhausted();
 }
 
-/// A real devnet block (slot 520749165), trimmed to one legacy, one v0 and
-/// one v1 transaction, their log messages dropped.
+/// A real devnet block (slot 520749165) as `transactionDetails: "accounts"`
+/// gives it, trimmed to one legacy, one v0 and one v1 transaction.
 const DEVNET_BLOCK: &str = include_str!("fixtures/devnet-520749165.json");
 
 #[test]
@@ -194,7 +194,7 @@ fn a_block_with_version_1_transactions_is_read() {
         get_block(fixture.clone()).expecting(json!([slot, {
             "commitment": "confirmed",
             "encoding": "json",
-            "transactionDetails": "full",
+            "transactionDetails": "accounts",
             "maxSupportedTransactionVersion": 1,
             "rewards": true,
         }])),
@@ -213,7 +213,7 @@ fn a_block_with_version_1_transactions_is_read() {
         .collect();
     assert_eq!(ids, expected, "legacy, v0 and v1, in block order");
     // The v1 transaction only paid its fee.
-    let payer = sent[2]["transaction"]["message"]["accountKeys"][0]
+    let payer = sent[2]["transaction"]["accountKeys"][0]["pubkey"]
         .as_str()
         .unwrap();
     assert_eq!(
