@@ -1,7 +1,7 @@
 # 077: `sdk/trigger`: the trigger engine as composable pieces
 
-Status: package built (`sdk/trigger`, steps 1–3 of section 7); the server
-is not switched yet. Section 9 lists where the code differs from this design.
+Status: package built (`sdk/trigger`, steps 1–3 of section 7) and the server
+switched to it (step 4). Section 9 lists where the code differs from this design.
 Paths under `apps/server/` unless noted;
 line numbers are as of `bcbf1db`.
 
@@ -241,7 +241,7 @@ match on them do not change. The API maps the class to a status:
 | `Redundant` | a "not" right inside a "not" (selector or condition) | 400 |
 | `OutOfRange` | a count against a fractional number, a `times` factor ≤ 0 | 400 |
 | `FilterIgnoresWallet` | a filter condition that never reads the wallet it tests | 400 |
-| `UnknownAction` | no action of the name is registered | 404 |
+| `UnknownAction` | no action of the name is registered | 400 |
 | `BadInput` | an action's input does not decode (`"send input: …"`) | 400 |
 | `Refused` | an action refuses its input | 400 |
 | `NotConfigured` | an action's input names an asset not configured here | 404 |
@@ -730,8 +730,9 @@ templates as stored JSON, and a `World` of Sepolia wallets.
 
 - Errors are one `error::Error { class, message }` (section 2), not one
   enum per domain; the selection's two "no wallet" texts stay distinct.
-  `UnknownAction` maps to 404, as asked in review; the API answers 400
-  for it today, so the switch changes that one status.
+  `UnknownAction` was to map to 404, as asked in review; the server keeps
+  today's 400 (an unknown action name is a malformed body, not a missing
+  resource), so the switch changes no status.
 - The read-once cache is `CachedStore` in `store.rs`, a crate-private
   `Store` over the caller's, keyed by selector and by (address, asset) pairs, for the
   whole round. `Context` itself reads straight through, so one used

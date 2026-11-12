@@ -2,7 +2,9 @@
 
 use diesel::{prelude::*, sqlite::Sqlite};
 
-use super::{Json, schema::trigger_run, trigger::Stats};
+use ::trigger::Stats;
+
+use super::{Json, schema::trigger_run};
 
 /// One run of a trigger.
 #[derive(Clone, Debug, Queryable, Selectable, Insertable)]

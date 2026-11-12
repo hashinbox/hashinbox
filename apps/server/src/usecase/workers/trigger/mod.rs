@@ -1,6 +1,7 @@
-//! Triggers (docs/design/065-pipes.md, eval.md): the [`Round`] job, one
-//! round of a network's triggers, queued by the index job at the tip. Each
-//! trigger decides in `usecase::trigger`; this worker runs its action.
+//! Triggers (docs/design/065-pipes.md, 077): the [`Round`] job, one round
+//! of a network's triggers, queued by the index job at the tip. The round
+//! itself is the `trigger` package's; this worker reads it over SQLite,
+//! writes what it decided, and its actions are [`actions`].
 //!
 //! A round's topic is the whole network (`chain:network`), so it never runs
 //! beside a broadcast of that network, and the jobs it starts run after it:
@@ -13,24 +14,17 @@ pub(crate) mod actions;
 
 use std::{num::NonZeroUsize, sync::Arc};
 
+use ::trigger::{Decision, actions::Registry};
+use diesel::SqliteConnection;
 use logging::{Level, Logger};
 use payments::Payments;
-use tasks::{Ack, OnLock, Policy, Topic, Worker};
-
-pub(crate) use actions::{Actions, Invocation};
+use tasks::{Ack, Job, OnLock, Policy, Topic, Worker};
 
 use super::{TIMEOUT, index::Target};
 use crate::{
     db::Db,
-    models::{
-        Json, Task as Row, TriggerRun, task,
-        trigger::{self, LastRound},
-        trigger_run,
-    },
-    usecase::{
-        tasks::Queue,
-        trigger::{Context as Snapshot, Triggers},
-    },
+    models::{Json, Task as Row, TriggerRun, int, network_index, task, trigger, trigger_run, uint},
+    usecase::{tasks::Queue, trigger::Sqlite},
 };
 
 /// The job kind.
@@ -41,17 +35,23 @@ pub(crate) struct Round {
     payments: Arc<Payments>,
     db: Db,
     queue: Queue,
-    actions: Arc<Actions>,
+    actions: Arc<Registry<Job>>,
     logger: Logger,
 }
 
 impl Round {
-    pub(crate) fn new(payments: Arc<Payments>, db: Db, queue: Queue, logger: Logger) -> Self {
+    pub(crate) fn new(
+        payments: Arc<Payments>,
+        db: Db,
+        queue: Queue,
+        actions: Arc<Registry<Job>>,
+        logger: Logger,
+    ) -> Self {
         Self {
             payments,
             db,
             queue,
-            actions: Arc::new(Actions::new().add(actions::Transfer)),
+            actions,
             logger,
         }
     }
@@ -78,104 +78,66 @@ impl Worker for Round {
 
     /// One round: every enabled trigger decides at the last kept block, on
     /// spendable balances (pending sends already taken off); each action's
-    /// started jobs become one run with them, every run of the round kept
-    /// in one write.
+    /// jobs become one run with them, every run of the round kept in one
+    /// write.
     async fn run(&self, cx: tasks::Context<'_, Target, ()>) -> Ack {
         let network = cx.input().network();
         let round = async {
-            let now = i64::try_from(tasks::now())?;
-
-            // Every enabled trigger decides on one snapshot.
             let service = self.payments.service(&network)?;
-            let context = Snapshot {
-                assets: service.assets.clone(),
-                estimator: service.wallets.factory.fees(),
-                runtime: tokio::runtime::Handle::current(),
-                now,
-            };
-            let (deciding, actions) = (network.clone(), self.actions.clone());
-            let (confirmed, verdicts) = self
-                .db
-                .read(move |connection| {
-                    let triggers = Triggers::new(connection, &deciding)?;
-                    let verdicts = triggers.decide(connection, &context, |decision| {
-                        let mut invocation =
-                            Invocation::new(decision.network, decision.this, decision.trigger);
-                        let action = decision.action;
-                        actions.run(&action.name, &action.input, &mut invocation)?;
-                        Ok(invocation.started())
-                    });
-                    Ok((triggers.confirmed(), verdicts))
-                })
-                .await?;
-            let Some(confirmed) = confirmed else {
-                return anyhow::Ok(Ack::Idle);
-            };
-
-            // What each trigger saw; refusals are logged too, and the rest
-            // that started jobs act.
-            let mut rounds = Vec::new();
-            let mut acting = Vec::new();
-            for (id, mut stats, verdict) in verdicts {
-                let mut refused = None;
-                match verdict {
-                    Ok(Some(jobs)) if !jobs.is_empty() => {
-                        stats.jobs = jobs.len();
-                        acting.push((id.clone(), stats, jobs));
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        let why = format!("{error:#}");
-                        self.logger.event(
-                            Level::Warn,
-                            "trigger.refused",
-                            &format!("{id}: {why}"),
-                            &[
-                                ("chain", network.chain.as_str()),
-                                ("network", &network.name),
-                            ],
-                        );
-                        refused = Some(why);
-                    }
-                }
-                let round = LastRound {
-                    at: now,
-                    confirmed,
-                    stats,
-                    refused,
+            let (actions, fees, assets) = (
+                self.actions.clone(),
+                service.wallets.factory.fees(),
+                service.assets.clone(),
+            );
+            let (now, runtime, at) = (
+                tasks::now(),
+                tokio::runtime::Handle::current(),
+                network.clone(),
+            );
+            // One read: the confirmed position, the triggers and every
+            // wallet read agree.
+            let decided = self.db.read(move |connection| {
+                let Some(confirmed) = network_index::db::find_confirmed(connection, &at)? else {
+                    return Ok(None);
                 };
-                rounds.push((id, round));
+                let triggers = trigger::db::find_enabled(connection, &at)?;
+                let round = ::trigger::Round::new(
+                    &actions,
+                    fees,
+                    &assets,
+                    at.clone(),
+                    uint(confirmed)?,
+                    now,
+                );
+                let mut store = Sqlite::new(connection, at, confirmed);
+                Ok(Some(runtime.block_on(round.run(&mut store, triggers))))
+            });
+            let Some(decided) = decided.await? else {
+                return anyhow::Ok(Ack::Idle);
+            };
+            for one in &decided {
+                let Some(why) = &one.last.refused else {
+                    continue;
+                };
+                self.logger.event(
+                    Level::Warn,
+                    "trigger.refused",
+                    &format!("{}: {why}", one.trigger),
+                    &[
+                        ("chain", network.chain.as_str()),
+                        ("network", &network.name),
+                    ],
+                );
             }
-            if rounds.is_empty() {
+            if decided.is_empty() {
                 return anyhow::Ok(Ack::Idle);
             }
-
             // What every trigger saw, and every acting trigger's jobs and
             // run, in one write: all or none, so a rerun never decides again
-            // what this one kept. The one write to the queue outside its
-            // store, allowed because the jobs are not unique: each is
-            // admitted.
-            let acted = !acting.is_empty();
+            // what this one kept.
+            let acted = decided.iter().any(|one| !one.effects.is_empty());
             self.db
-                .write(move |connection| {
-                    for (id, round) in &rounds {
-                        trigger::db::set_last_round(connection, id, round)?;
-                    }
-                    for (id, stats, jobs) in &acting {
-                        let mut ids = Vec::new();
-                        for job in jobs {
-                            let queued = task::db::insert(connection, &Row::try_from(job)?, now)?;
-                            ids.push(queued.to_string());
-                        }
-                        let run = TriggerRun {
-                            jobs: Json(ids),
-                            stats: Json(*stats),
-                            ..TriggerRun::new(id, now)
-                        };
-                        trigger_run::db::insert(connection, &run)?;
-                    }
-                    Ok(())
-                })
+                .write(move |connection| save(connection, now, &decided))
                 .await?;
             if !acted {
                 return anyhow::Ok(Ack::Idle);
@@ -183,9 +145,37 @@ impl Worker for Round {
             self.queue.notify();
             anyhow::Ok(Ack::Done)
         };
-        match round.await {
-            Ok(ack) => ack,
-            Err(error) => Ack::Retry(format!("{error:#}")),
-        }
+        round
+            .await
+            .unwrap_or_else(|error| Ack::Retry(format!("{error:#}")))
     }
+}
+
+/// Every trigger's last round, and each acting one's jobs and run, at
+/// `now`. The one write to the queue outside its store, allowed because
+/// the jobs are not unique: each is admitted.
+fn save(
+    connection: &mut SqliteConnection,
+    now: u64,
+    decided: &[Decision<Job>],
+) -> anyhow::Result<()> {
+    let now = int(now)?;
+    for one in decided {
+        trigger::db::set_last_round(connection, &one.trigger, &one.last)?;
+        if one.effects.is_empty() {
+            continue;
+        }
+        let jobs = one
+            .effects
+            .iter()
+            .map(|job| Ok(task::db::insert(connection, &Row::try_from(job)?, now)?.to_string()))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let run = TriggerRun {
+            jobs: Json(jobs),
+            stats: Json(one.last.stats),
+            ..TriggerRun::new(&one.trigger, now)
+        };
+        trigger_run::db::insert(connection, &run)?;
+    }
+    Ok(())
 }

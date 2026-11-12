@@ -3380,12 +3380,14 @@
               "at": {
                 "type": "integer",
                 "format": "int64",
-                "description": "When it decided, Unix ms."
+                "description": "When it decided, Unix ms.",
+                "minimum": 0
               },
               "confirmed": {
                 "type": "integer",
                 "format": "int64",
-                "description": "The confirmed block position it decided at."
+                "description": "The confirmed block position it decided at.",
+                "minimum": 0
               },
               "refused": {
                 "type": [
@@ -4610,7 +4612,7 @@
       },
       "TriggerStats": {
         "type": "object",
-        "description": "What one round saw of a trigger: how many wallet indexes its selector\npicked, how many of them its filter kept, whether its check held over\nthose, and how many send jobs its action queued.",
+        "description": "What one round saw of a trigger: how many wallet indexes its selector\npicked, how many of them its filter kept, whether its check held over\nthose, and how many effects its action returned.",
         "required": [
           "selected",
           "kept",
@@ -4624,7 +4626,7 @@
           },
           "jobs": {
             "type": "integer",
-            "description": "Send jobs its action queued.",
+            "description": "Effects (jobs) its action returned.",
             "minimum": 0
           },
           "kept": {

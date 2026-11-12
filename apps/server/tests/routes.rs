@@ -104,6 +104,7 @@ async fn wallets_balance_legs_and_sends() {
         payments,
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -318,6 +319,7 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
         payments,
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -416,6 +418,7 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         payments,
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -637,6 +640,7 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
         payments,
         db: db.clone(),
         queue,
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -682,6 +686,7 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
         payments,
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -716,6 +721,7 @@ async fn a_count_compares_with_a_whole_number_or_the_trigger_is_refused() {
         payments,
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),

@@ -43,6 +43,9 @@ libsqlite3-sys.workspace = true
 # The job queue contract and runner; its SQLite store is `src/usecase/tasks.rs`.
 tasks = { path = "../../packages/tasks", features = ["runner"] }
 tokio = { workspace = true, features = ["fs", "net", "process", "rt", "signal", "sync", "time"] }
+# The trigger engine: its language's building blocks, the round, the stats
+# the API shows (`openapi`); the server adds storage and its actions.
+trigger = { path = "../../sdk/trigger", features = ["openapi"] }
 # One UUIDv7 per trigger batch: its group id.
 uuid.workspace = true
 utoipa = { version = "=5.5.0", features = ["axum_extras"] }
@@ -67,6 +70,8 @@ tasks = { path = "../../packages/tasks", features = ["runner"] }
 reqwest.workspace = true
 sha2.workspace = true
 tempfile = "=3.27.0"
+# A fixed-price fee estimator for `send` over the SQLite store (`tests/pipe.rs`).
+trigger = { path = "../../sdk/trigger", features = ["openapi", "testing"] }
 tower = { version = "=0.5.2", features = ["util"] }
 
 [lints]

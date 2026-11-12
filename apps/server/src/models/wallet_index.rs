@@ -1,8 +1,9 @@
 //! `wallet_index`: one asset of one address being indexed, with its
 //! birthday and the block it is indexed through.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
+use ::trigger::selection::{Index, Selector};
 use anyhow::{Context as _, bail, ensure};
 use base::{Address, Addressed, Asset, BlockHeader, Decimal, Network, Networked, WalletIndexState};
 use diesel::{
@@ -16,9 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     Block, Wallet, child, int,
     schema::{block, wallet, wallet_index, wallet_index_with_balance},
-    trigger::{Balance, Target, This},
     uint,
-    wallet_index_selector::Selector,
 };
 
 /// Whether an index is scanned.
@@ -149,119 +148,24 @@ impl WalletIndex {
             .context("a stored balance does not decode")
     }
 
-    /// The balance a trigger reads as `balance`: [`Self::spendable`], or what
-    /// it will hold once every pending transaction lands.
+    /// It as a trigger reads it: what it can spend ([`Self::spendable`]),
+    /// and what it will hold once every pending transaction lands.
     ///
     /// # Errors
     ///
     /// When a stored amount does not decode.
-    pub(crate) fn held(&self, balance: Balance) -> anyhow::Result<Decimal> {
-        match balance {
-            Balance::Confirmed => self.spendable(),
-            Balance::Pending => self
+    pub(crate) fn index(self) -> anyhow::Result<Index> {
+        Ok(Index {
+            confirmed: self.spendable()?,
+            pending: self
                 .balance_pending
                 .parse()
-                .context("a stored balance does not decode"),
-        }
-    }
-}
-
-/// Wallet indexes of one network read at one final block, by id: what a
-/// trigger selects and decides on (`This`). Their legs are the pending ones
-/// only: what [`WalletIndex::spendable`] reads.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Selection {
-    network: Network,
-    /// The final block position the balances are at.
-    confirmed: i64,
-    indexes: BTreeMap<String, WalletIndex>,
-}
-
-impl Selection {
-    /// None yet, of `network` at final block `confirmed`.
-    pub(crate) fn new(network: Network, confirmed: i64) -> Self {
-        Self {
-            network,
-            confirmed,
-            indexes: BTreeMap::new(),
-        }
-    }
-
-    /// The final block position the balances are at.
-    pub(crate) fn confirmed_at(&self) -> i64 {
-        self.confirmed
-    }
-
-    /// `one` alone, of the same network at the same block.
-    ///
-    /// # Errors
-    ///
-    /// When it is of another network.
-    pub(crate) fn only(&self, one: &WalletIndex) -> anyhow::Result<Self> {
-        let mut alone = Self::new(self.network.clone(), self.confirmed);
-        alone.insert(one.clone())?;
-        Ok(alone)
-    }
-
-    /// Adds `one`.
-    ///
-    /// # Errors
-    ///
-    /// When it is of another network.
-    pub(crate) fn insert(&mut self, one: WalletIndex) -> anyhow::Result<()> {
-        ensure!(
-            *one.network() == self.network,
-            "a wallet index is of another network"
-        );
-        self.indexes.insert(one.id.clone(), one);
-        Ok(())
-    }
-
-    /// Their ids, in order.
-    pub(crate) fn ids(&self) -> Vec<String> {
-        self.indexes.keys().cloned().collect()
-    }
-
-    /// What sending everything each one holds to `to` (`None`: a new
-    /// address) is: one spend per index with a spendable balance. One that
-    /// holds nothing sends nothing, so it is left out: its fee is none.
-    ///
-    /// # Errors
-    ///
-    /// When a stored balance does not decode.
-    pub(crate) fn spends(&self, to: Option<&Address>) -> anyhow::Result<base::Spends> {
-        let mut spends = base::Spends::default();
-        for one in self.indexes.values() {
-            if one.spendable()? > Decimal::zero() {
-                spends.push(base::Spend {
-                    from: one.address.clone(),
-                    asset: one.asset.clone(),
-                    to: to.cloned(),
-                });
-            }
-        }
-        Ok(spends)
-    }
-
-    /// The one address all of them are of, if they share one.
-    pub(crate) fn address(&self) -> Option<&Address> {
-        let mut addresses = self.indexes.values().map(|one| &one.address);
-        let first = addresses.next()?;
-        addresses.all(|other| other == first).then_some(first)
-    }
-}
-
-impl std::ops::Deref for Selection {
-    type Target = BTreeMap<String, WalletIndex>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.indexes
-    }
-}
-
-impl Networked for Selection {
-    fn network(&self) -> &Network {
-        &self.network
+                .context("a stored balance does not decode")?,
+            id: self.id,
+            address: self.address,
+            asset: self.asset,
+            keyed: self.keyed,
+        })
     }
 }
 
@@ -737,7 +641,7 @@ pub(crate) mod db {
     /// The fully indexed indexes of `network` that `selector` picks:
     /// indexed through a live block at or above `confirmed`, the network's
     /// confirmed position (the universe, so `Not` is relative to it), with
-    /// the view's balances there (what [`WalletIndex::spendable`] reads), in
+    /// the view's balances there (what [`WalletIndex::index`] reads), in
     /// one query.
     ///
     /// # Errors
@@ -749,12 +653,34 @@ pub(crate) mod db {
         network: &Network,
         selector: &Selector,
         confirmed: i64,
-    ) -> anyhow::Result<Selection> {
-        read(connection, network, selector, confirmed, true)
+    ) -> anyhow::Result<Vec<Index>> {
+        read(connection, network, selector, confirmed, true)?
+            .into_iter()
+            .map(WalletIndex::index)
+            .collect()
+    }
+
+    /// Of `wanted` (address, asset) on `network`, the fully indexed indexes,
+    /// as [`select`] reads them; the rest are left out.
+    ///
+    /// # Errors
+    ///
+    /// As [`select`], or when a part of a pair holds a dot.
+    pub(crate) fn find(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        wanted: &[(Address, Asset)],
+        confirmed: i64,
+    ) -> anyhow::Result<Vec<Index>> {
+        let ids = wanted
+            .iter()
+            .map(|(address, asset)| WalletIndex::id(address, asset))
+            .collect::<anyhow::Result<_>>()?;
+        select(connection, network, &Selector::Ids(ids), confirmed)
     }
 
     /// The indexes `ids` of `network` (kept ones; fully indexed or not), as
-    /// [`select`] reads them.
+    /// [`select`] reads them, by id.
     ///
     /// # Errors
     ///
@@ -765,14 +691,10 @@ pub(crate) mod db {
         network: &Network,
         ids: &[String],
         confirmed: i64,
-    ) -> anyhow::Result<Selection> {
-        read(
-            connection,
-            network,
-            &Selector::Ids(ids.to_vec()),
-            confirmed,
-            false,
-        )
+    ) -> anyhow::Result<std::collections::BTreeMap<String, WalletIndex>> {
+        let picked = Selector::Ids(ids.to_vec());
+        let found = read(connection, network, &picked, confirmed, false)?;
+        Ok(found.into_iter().map(|one| (one.id.clone(), one)).collect())
     }
 
     /// The indexes of `network` that `selector` picks, only those indexed
@@ -784,9 +706,9 @@ pub(crate) mod db {
         selector: &Selector,
         confirmed: i64,
         fully_indexed: bool,
-    ) -> anyhow::Result<Selection> {
+    ) -> anyhow::Result<Vec<WalletIndex>> {
         let mut binds = Vec::new();
-        let picked = selector.sql(&mut binds);
+        let picked = picked(selector, &mut binds);
         let indexed = if fully_indexed {
             "wi.indexed_through >= ?"
         } else {
@@ -832,48 +754,47 @@ pub(crate) mod db {
             query = query.bind::<Text, _>(value);
         }
         let rows: Vec<IndexRow> = query.load(connection)?;
-        let mut found = Selection::new(network.clone(), confirmed);
-        for row in rows {
-            let index = WalletIndex::try_from((network, row))?;
-            let negative = index
-                .balance_confirmed
-                .as_deref()
-                .is_some_and(|total| total.starts_with('-'));
-            ensure!(!negative, "a confirmed balance is negative");
-            found.insert(index)?;
-        }
-        Ok(found)
+        rows.into_iter()
+            .map(|row| {
+                let index = WalletIndex::try_from((network, row))?;
+                let negative = index
+                    .balance_confirmed
+                    .as_deref()
+                    .is_some_and(|total| total.starts_with('-'));
+                ensure!(!negative, "a confirmed balance is negative");
+                Ok(index)
+            })
+            .collect()
     }
 
-    /// What `target` names on `this`'s network at its final block, with
-    /// `this` as `This`, in one query; `None` when a sibling is not fully
-    /// indexed.
-    ///
-    /// # Errors
-    ///
-    /// As [`select`].
-    pub(crate) fn find_by_target(
-        connection: &mut SqliteConnection,
-        this: &Selection,
-        target: &Target,
-    ) -> anyhow::Result<Option<Selection>> {
-        let network = this.network();
-        let confirmed = this.confirmed_at();
-        Ok(match target {
-            Target::This(This { asset: None }) => Some(this.clone()),
-            Target::This(This { asset: Some(asset) }) => {
-                // The `asset` index of each wallet of `this`, once.
-                let siblings: BTreeSet<String> = this
-                    .values()
-                    .map(|one| format!("{}.{asset}", one.wallet_id))
-                    .collect();
-                let wanted = siblings.len();
-                let picked = Selector::Ids(siblings.into_iter().collect());
-                let found = read(connection, network, &picked, confirmed, true)?;
-                // Fewer fully indexed than wallets: a sibling is missing.
-                (found.len() == wanted).then_some(found)
+    /// `selector` as one SQL condition over `wi` (`wallet_index_with_balance`),
+    /// its values pushed to `binds` in placeholder order: `All` is AND
+    /// (empty: true), `Any` OR (empty: false), `Not` NOT.
+    fn picked(selector: &Selector, binds: &mut Vec<String>) -> String {
+        let group = |many: &[Selector], binds: &mut Vec<String>, join: &str, empty: &str| {
+            if many.is_empty() {
+                return empty.to_owned();
             }
-            Target::Select(selector) => Some(select(connection, network, selector, confirmed)?),
-        })
+            let parts: Vec<String> = many.iter().map(|one| picked(one, binds)).collect();
+            format!("({})", parts.join(join))
+        };
+        match selector {
+            Selector::Ids(ids) => {
+                binds.extend(ids.iter().cloned());
+                format!("wi.id IN ({})", vec!["?"; ids.len()].join(", "))
+            }
+            Selector::Asset(asset) => {
+                binds.push(asset.clone());
+                "wi.asset = ?".to_owned()
+            }
+            Selector::Tag(name) => {
+                binds.push(name.clone());
+                "EXISTS (SELECT 1 FROM json_each(wi.tags) j WHERE j.value = ?)".to_owned()
+            }
+            Selector::Untagged {} => "json_array_length(wi.tags) = 0".to_owned(),
+            Selector::All(all) => group(all, binds, " AND ", "1"),
+            Selector::Any(any) => group(any, binds, " OR ", "0"),
+            Selector::Not(inner) => format!("NOT ({})", picked(inner, binds)),
+        }
     }
 }

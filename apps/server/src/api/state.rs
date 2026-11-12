@@ -14,4 +14,6 @@ pub(crate) struct AppState {
     pub(crate) db: crate::db::Db,
     /// The job queue: sends are enqueued, jobs read.
     pub(crate) queue: crate::usecase::tasks::Queue,
+    /// Every action a trigger may call: a trigger is checked against them.
+    pub(crate) actions: Arc<trigger::actions::Registry<tasks::Job>>,
 }

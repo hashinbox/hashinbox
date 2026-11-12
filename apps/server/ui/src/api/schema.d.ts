@@ -1433,12 +1433,12 @@ export interface components {
         /**
          * @description What one round saw of a trigger: how many wallet indexes its selector
          *     picked, how many of them its filter kept, whether its check held over
-         *     those, and how many send jobs its action queued.
+         *     those, and how many effects its action returned.
          */
         TriggerStats: {
             /** @description Whether its check held over the kept ones. */
             checked: boolean;
-            /** @description Send jobs its action queued. */
+            /** @description Effects (jobs) its action returned. */
             jobs: number;
             /** @description How many of them its filter kept (all of them without a filter). */
             kept: number;

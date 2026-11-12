@@ -65,7 +65,6 @@ pub(crate) mod trigger;
 pub(crate) mod trigger_run;
 pub(crate) mod wallet;
 pub(crate) mod wallet_index;
-pub(crate) mod wallet_index_selector;
 
 pub(crate) use asset::Asset;
 pub(crate) use block::Block;

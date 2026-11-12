@@ -20,17 +20,17 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+use ::trigger::{Class, Stats, actions::Call, conditions::Logic, selection::Selector};
+
 use super::{Error, ErrorBody, IndexParams, jobs::JobState};
 use crate::{
     api::AppState,
     db::Paged as _,
     models::{
         self, Trigger,
-        trigger::{self as triggers, Action, Filter, Gate, Logic, Stats},
+        trigger::{self as triggers, Check, Filter},
         trigger_run,
-        wallet_index_selector::Selector,
     },
-    usecase::workers::trigger::actions::SendInput,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -101,9 +101,9 @@ struct Definition {
     #[schema(value_type = Option<Object>)]
     filter: Option<Logic<Filter>>,
     #[schema(value_type = Object)]
-    check: Logic<Gate>,
+    check: Logic<Check>,
     #[schema(value_type = Object)]
-    action: Action,
+    action: Call,
     /// Absent means `true`.
     #[serde(default = "enabled")]
     enabled: bool,
@@ -114,30 +114,19 @@ fn enabled() -> bool {
 }
 
 impl Definition {
-    /// The trigger this definition describes as trigger `id`; a 400 for one
-    /// the model refuses ([`models::Trigger::validate`]) or a send from `This`
-    /// to `This`, a 404 for an unconfigured network or sent asset.
+    /// The trigger this definition describes as trigger `id`; a 404 for an
+    /// unconfigured network, else the status of the first rule it breaks
+    /// ([`models::Trigger::validate`], [`refused`]).
     fn trigger(
         self,
-        payments: &payments::Payments,
+        state: &AppState,
         id: String,
         group_id: String,
         created_at: i64,
         updated_at: i64,
     ) -> Result<models::Trigger, Error> {
         let network = base::Network::new(base::Chain::new(&self.chain), self.network.clone());
-        payments.service(&network)?;
-        if self.action.name != "send" {
-            return Err(Error::invalid_request(format!(
-                "unknown action {}",
-                self.action.name
-            )));
-        }
-        let send = SendInput::deserialize(&self.action.input)
-            .map_err(|error| Error::invalid_request(format!("send input: {error}")))?;
-        super::asset_info(payments, &network, &send.asset)?;
-        send.validate()
-            .map_err(|invalid| Error::invalid_request(invalid.to_string()))?;
+        let assets = &state.payments.service(&network)?.assets;
         let trigger = models::Trigger {
             id,
             chain: self.chain,
@@ -154,9 +143,19 @@ impl Definition {
         };
         // The model's own rules, before it is ever kept.
         trigger
-            .validate()
-            .map_err(|invalid| Error::invalid_request(invalid.to_string()))?;
+            .validate(&state.actions, &network, assets)
+            .map_err(refused)?;
         Ok(trigger)
+    }
+}
+
+/// The answer to a trigger that breaks a rule: 404 when its action's input
+/// names something not configured here, 400 for every other rule (an
+/// unknown action is a malformed body, as before the `trigger` package).
+fn refused(error: ::trigger::Error) -> Error {
+    match error.class {
+        Class::NotConfigured => Error::not_found(error.message()),
+        _ => Error::invalid_request(error.message()),
     }
 }
 
@@ -175,7 +174,7 @@ impl BatchRequest {
     /// `id`, all on one network.
     fn triggers(
         self,
-        payments: &payments::Payments,
+        state: &AppState,
         group_id: &str,
         now: i64,
     ) -> Result<Vec<models::Trigger>, Error> {
@@ -199,7 +198,7 @@ impl BatchRequest {
                     "every trigger of a batch is on one network",
                 ));
             }
-            rows.push(definition.trigger(payments, id, group_id.to_owned(), now, now)?);
+            rows.push(definition.trigger(state, id, group_id.to_owned(), now, now)?);
         }
         Ok(rows)
     }
@@ -243,7 +242,7 @@ async fn create(
     let now = now()?;
     // One group for the whole batch, so it can be found (and removed) together.
     let group = uuid::Uuid::now_v7().to_string();
-    let rows = request.triggers(&state.payments, &group, now)?;
+    let rows = request.triggers(&state, &group, now)?;
     let kept = rows.clone();
     let taken = state
         .db
@@ -344,13 +343,7 @@ async fn replace(
         .await?
         .ok_or_else(|| Error::not_found("no such trigger"))?;
     // A replace keeps its id, creation time and group.
-    let row = definition.trigger(
-        &state.payments,
-        path.id,
-        kept.group_id,
-        kept.created_at,
-        now()?,
-    )?;
+    let row = definition.trigger(&state, path.id, kept.group_id, kept.created_at, now()?)?;
     let replaced = row.clone();
     let changed = state
         .db

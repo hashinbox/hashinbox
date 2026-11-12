@@ -1,110 +1,28 @@
-//! What a trigger does once its check passes: a named [`Action`] run with
-//! an [`Invocation`] (the trigger, what it fired on) and its own static
-//! input. Effects go through the invocation; starting jobs is the usual one,
-//! never an obligation.
+//! What a trigger does once its check passes: this server's actions, each a
+//! `trigger` package [`Action`] returning the jobs to start, never starting
+//! one itself. `send` ([`Transfer`]) is the one there is.
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context as _, bail, ensure};
-use base::{Address, Decimal, Network};
+use ::trigger::{
+    Class, Context, Error,
+    actions::{Action, Registry},
+    amounts::Amount as _,
+    selection::Target,
+};
+use anyhow::{bail, ensure};
+use base::{Address, Asset, Assets, Decimal, Future, Network};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tasks::{Job, Worker as _};
 
 use crate::{
-    models::{
-        trigger::{Amount, Target},
-        wallet_index::Selection,
-    },
-    usecase::{
-        trigger::Trigger,
-        workers::broadcast::{Broadcast, Payment, SendIntent},
-    },
+    models::trigger::Amount,
+    usecase::workers::broadcast::{Broadcast, Payment, SendIntent},
 };
 
-/// What an action sees, and what it asks the run to do.
-pub(crate) struct Invocation<'a, 'c> {
-    /// The trigger's network.
-    pub(crate) network: &'a Network,
-    /// The wallet indexes it fired on (`This`), with balances.
-    pub(crate) this: &'a Selection,
-    /// The trigger deciding: amounts and targets, read at the decided block.
-    pub(crate) trigger: &'a mut Trigger<'c>,
-    started: Vec<Job>,
-}
-
-impl<'a, 'c> Invocation<'a, 'c> {
-    pub(crate) const fn new(
-        network: &'a Network,
-        this: &'a Selection,
-        trigger: &'a mut Trigger<'c>,
-    ) -> Self {
-        Self {
-            network,
-            this,
-            trigger,
-            started: Vec::new(),
-        }
-    }
-
-    /// Asks the run to start `job`.
-    pub(crate) fn start(&mut self, job: Job) {
-        self.started.push(job);
-    }
-
-    /// What the action asked to start; empty: nothing to do.
-    pub(crate) fn started(self) -> Vec<Job> {
-        self.started
-    }
-}
-
-/// One kind of action. Its input is its static settings, stored on the
-/// trigger; it decodes them itself.
-pub(crate) trait Action: Send + Sync {
-    /// Its name, as stored on the trigger.
-    fn name(&self) -> &'static str;
-
-    /// Decides what to do now; effects only through `invocation`.
-    ///
-    /// # Errors
-    ///
-    /// When `input` does not decode, a read fails, or it refuses.
-    fn run(&self, invocation: &mut Invocation<'_, '_>, input: &Value) -> anyhow::Result<()>;
-}
-
-/// Every action by name; built by the trigger worker.
-#[derive(Default)]
-pub(crate) struct Actions(BTreeMap<&'static str, Box<dyn Action>>);
-
-impl Actions {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    /// Adds `action` under its name.
-    #[must_use]
-    pub(crate) fn add(mut self, action: impl Action + 'static) -> Self {
-        self.0.insert(action.name(), Box::new(action));
-        self
-    }
-
-    /// Runs the action `name` with `input`.
-    ///
-    /// # Errors
-    ///
-    /// An unknown name, or the action's error.
-    pub(crate) fn run(
-        &self,
-        name: &str,
-        input: &Value,
-        invocation: &mut Invocation<'_, '_>,
-    ) -> anyhow::Result<()> {
-        let action = self
-            .0
-            .get(name)
-            .with_context(|| format!("unknown action {name}"))?;
-        action.run(invocation, input)
-    }
+/// Every action a trigger of this server may call.
+pub(crate) fn registry() -> Registry<Job> {
+    Registry::new().add(Transfer)
 }
 
 /// `send`: moves funds, one broadcast job per sender.
@@ -128,31 +46,29 @@ pub(crate) struct SendInput {
     pub(crate) amount: Amount,
 }
 
-impl SendInput {
-    /// Whether it may be kept: its wallet sets name wallets on purpose, and
-    /// it is not many to many (`This` to `This`).
-    ///
-    /// # Errors
-    ///
-    /// The first rule it breaks.
-    pub(crate) fn validate(&self) -> Result<(), crate::models::trigger::Invalid> {
-        use crate::models::trigger::Invalid;
-        self.source.validate()?;
-        self.destination.validate()?;
-        self.amount.validate()?;
-        if matches!(
-            (&self.source, &self.destination),
-            (Target::This(_), Target::This(_))
-        ) {
-            return Err(Invalid::new("a send from This to This is many to many"));
+impl Action<Job> for Transfer {
+    const NAME: &'static str = "send";
+    type Input = SendInput;
+
+    /// The sent asset is configured on `network` (`NotConfigured`), its
+    /// wallet sets name wallets on purpose, and it is not many to many
+    /// (`This` to `This`).
+    fn validate(&self, send: &SendInput, network: &Network, assets: &Assets) -> Result<(), Error> {
+        let asset = Asset {
+            network: network.clone(),
+            id: send.asset.clone(),
+        };
+        if assets.get(&asset).is_none() {
+            return Err(Error::new(Class::NotConfigured, "asset is not configured"));
+        }
+        send.source.validate()?;
+        send.destination.validate()?;
+        send.amount.validate()?;
+        if send.source.is_this() && send.destination.is_this() {
+            let why = "a send from This to This is many to many";
+            return Err(Error::new(Class::Refused, why));
         }
         Ok(())
-    }
-}
-
-impl Action for Transfer {
-    fn name(&self) -> &'static str {
-        "send"
     }
 
     /// Many sources pay one destination, `amount` evaluated per source; one
@@ -164,72 +80,83 @@ impl Action for Transfer {
     /// Refuses many sources and many destinations, a source in another
     /// asset than the send's, a target not fully indexed, and a source not
     /// keyed here.
-    fn run(&self, invocation: &mut Invocation<'_, '_>, input: &Value) -> anyhow::Result<()> {
-        let send = SendInput::deserialize(input).context("send input")?;
-        let (trigger, this) = (&mut *invocation.trigger, invocation.this);
-        let Some(sources) = trigger.target(&send.source, this)? else {
-            bail!("a source is not fully indexed");
-        };
-        let Some(destinations) = trigger.target(&send.destination, this)? else {
-            bail!("a destination is not fully indexed");
-        };
-        ensure!(
-            sources.values().all(|one| one.asset.id == send.asset),
-            "a source is not in the sent asset"
-        );
-        ensure!(
-            sources.len() <= 1 || destinations.len() <= 1,
-            "a send has many sources and many destinations"
-        );
-        // The side that is many is walked, the other is its one address; one
-        // to one is walked on the side the send names as `This`.
-        let per_source = match (sources.len(), destinations.len()) {
-            (1, 1) => !matches!(send.destination, Target::This(_)),
-            (_, destinations) => destinations <= 1,
-        };
-        let (each, other) = if per_source {
-            (&sources, &destinations)
-        } else {
-            (&destinations, &sources)
-        };
-        let Some(other) = other.values().next() else {
-            return Ok(());
-        };
-        let mut by_sender: BTreeMap<Address, Vec<Payment>> = BTreeMap::new();
-        for one in each.values() {
-            let alone = each.only(one)?;
-            let amount = trigger.amount(&send.amount, &alone, &send.asset)?;
-            let Some(amount) = amount.filter(|amount| *amount > Decimal::zero()) else {
-                continue;
+    fn run<'a>(
+        &'a self,
+        send: &'a SendInput,
+        on: &'a mut Context<'_>,
+    ) -> Future<'a, anyhow::Result<Vec<Job>>> {
+        Box::pin(async move {
+            let Some(sources) = on.wallets(&send.source).await? else {
+                bail!("a source is not fully indexed");
             };
-            let (from, to) = if per_source {
-                (one, other)
-            } else {
-                (other, one)
+            let Some(destinations) = on.wallets(&send.destination).await? else {
+                bail!("a destination is not fully indexed");
             };
             ensure!(
-                from.keyed,
-                "source {} is not keyed here",
-                from.address.value
+                sources.values().all(|one| one.asset.id == send.asset),
+                "a source is not in the sent asset"
             );
-            by_sender
-                .entry(from.address.clone())
-                .or_default()
-                .push(Payment {
-                    to: to.address.value.clone(),
-                    amount: amount.to_string(),
-                });
-        }
-        for (from, transfers) in by_sender {
-            let intent = SendIntent {
-                chain: invocation.network.chain.as_str().to_owned(),
-                network: invocation.network.name.clone(),
-                address: from.value,
-                asset: send.asset.clone(),
-                transfers,
+            ensure!(
+                sources.len() <= 1 || destinations.len() <= 1,
+                "a send has many sources and many destinations"
+            );
+            // The side that is many is walked, the other is its one address;
+            // one to one is walked on the side the send names as `This`.
+            let per_source = match (sources.len(), destinations.len()) {
+                (1, 1) => !send.destination.is_this(),
+                (_, destinations) => destinations <= 1,
             };
-            invocation.start(Broadcast::job(&intent)?);
-        }
-        Ok(())
+            let (each, other) = if per_source {
+                (&sources, &destinations)
+            } else {
+                (&destinations, &sources)
+            };
+            let Some(other) = other.values().next() else {
+                return Ok(Vec::new());
+            };
+            let network = on.network().clone();
+            let asset = Asset {
+                network: network.clone(),
+                id: send.asset.clone(),
+            };
+            let mut by_sender: BTreeMap<Address, Vec<Payment>> = BTreeMap::new();
+            for one in each.values() {
+                let mut alone = on.with(each.only(one)?);
+                let amount = send.amount.atomic(&mut alone, &asset).await?;
+                let Some(amount) = amount.filter(|amount| *amount > Decimal::zero()) else {
+                    continue;
+                };
+                let (from, to) = if per_source {
+                    (one, other)
+                } else {
+                    (other, one)
+                };
+                ensure!(
+                    from.keyed,
+                    "source {} is not keyed here",
+                    from.address.value
+                );
+                by_sender
+                    .entry(from.address.clone())
+                    .or_default()
+                    .push(Payment {
+                        to: to.address.value.clone(),
+                        amount: amount.to_string(),
+                    });
+            }
+            by_sender
+                .into_iter()
+                .map(|(from, transfers)| {
+                    let intent = SendIntent {
+                        chain: network.chain.as_str().to_owned(),
+                        network: network.name.clone(),
+                        address: from.value,
+                        asset: send.asset.clone(),
+                        transfers,
+                    };
+                    Ok(Broadcast::job(&intent)?)
+                })
+                .collect()
+        })
     }
 }

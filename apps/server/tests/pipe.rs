@@ -1,33 +1,33 @@
-//! Pipes' Select and Check steps on a SQLite temp file: tags, selector
-//! resolution in `models::WalletIndex`, confirmed balances, compares,
-//! amounts, fees and run gates, and the JSON form.
+//! Triggers on a SQLite temp file: tags, selector resolution in
+//! `models::WalletIndex`, confirmed and pending balances, the store a round
+//! reads (`usecase::trigger::Sqlite`), `send` over it, the stored JSON and
+//! the rows. How a trigger evaluates is the `trigger` package's own tests.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::collections::BTreeMap;
+
+use ::trigger::{
+    Context,
+    actions::Action as _,
+    amounts::{self, Arithmetic},
+    conditions::{self, Aggregate, Logic, Operator},
+    selection::{BalanceKind, Selector, Target, This},
+    testing::Fees,
 };
-
-use base::{Address, Asset, Chain, Decimal, FeeEstimator, Future, Network, Networked};
+use base::{Address, Asset, Chain, Decimal, Network};
 use diesel::{Connection as _, SqliteConnection, connection::SimpleConnection as _};
 
 use crate::{
     models::{
         Json, Trigger, TriggerRun, Wallet, int, trigger,
-        trigger::{
-            Aggregate, Amount, Balance, Compare, Filter, Gate, Logic, Operator, Target, This,
-        },
+        trigger::{Amount, AmountTerm, Check, Compare, Filter},
         trigger_run, wallet, wallet_index,
-        wallet_index::Selection,
-        wallet_index_selector::Selector,
+        wallet_index::WalletIndex,
     },
     usecase::{
-        trigger::{Context, Trigger as Deciding},
+        trigger::Sqlite,
         workers::{
             broadcast::SendIntent,
-            trigger::{
-                Invocation,
-                actions::{Action as _, SendInput, Transfer},
-            },
+            trigger::actions::{SendInput, Transfer},
         },
     },
 };
@@ -157,9 +157,8 @@ fn id(address: &str, asset: &str) -> String {
 }
 
 fn ids(selector: &Selector, connection: &mut SqliteConnection) -> Vec<String> {
-    wallet_index::db::select(connection, &network(), selector, 2)
-        .unwrap()
-        .ids()
+    let found = wallet_index::db::select(connection, &network(), selector, 2).unwrap();
+    found.into_iter().map(|one| one.id).collect()
 }
 
 fn tag(name: &str) -> Selector {
@@ -366,102 +365,14 @@ fn a_pending_send_is_taken_off_what_its_sender_can_spend() {
     );
 }
 
-/// A fee estimator answering a fixed fee per spend, counting its calls and
-/// keeping the recipients it was asked about.
-struct Fees {
-    network: Network,
-    fee: Decimal,
-    calls: AtomicUsize,
-    to: std::sync::Mutex<Vec<Option<Address>>>,
-}
-
-impl Networked for Fees {
-    fn network(&self) -> &Network {
-        &self.network
-    }
-}
-
-impl FeeEstimator for Fees {
-    fn estimate<'a>(&'a self, spends: &'a base::Spends) -> Future<'a, anyhow::Result<Decimal>> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.to
-            .lock()
-            .unwrap()
-            .extend(spends.iter().map(|spend| spend.to.clone()));
-        let fee = self.fee.clone() * Decimal::from(spends.len() as u64);
-        Box::pin(async move { Ok(fee) })
-    }
-}
-
-fn fees(fee: &str) -> Arc<Fees> {
-    Arc::new(Fees {
-        network: network(),
-        fee: decimal(fee),
-        calls: AtomicUsize::new(0),
-        to: std::sync::Mutex::default(),
-    })
-}
-
-fn open<'a>(
-    connection: &'a mut SqliteConnection,
-    runtime: &tokio::runtime::Runtime,
-    fees: Arc<Fees>,
-    run: Option<TriggerRun>,
-) -> Deciding<'a> {
-    let row = Trigger {
-        id: "t".to_owned(),
-        chain: "bitcoin".to_owned(),
-        network: "regtest".to_owned(),
-        group_id: "group".to_owned(),
-        selector: Json(Selector::Ids(Vec::new())),
-        filter: None,
-        check: Json(Logic::All(Vec::new())),
-        action: Json(serde_json::from_str(r#"{"name":"none"}"#).unwrap()),
-        enabled: true,
-        created_at: 1,
-        updated_at: 1,
-        last_round: None,
-    };
-    let assets = [("native", 8), ("tok", 2)]
-        .into_iter()
-        .map(|(id, decimals)| {
-            base::AssetInfo::token(
-                Asset {
-                    network: network(),
-                    id: id.to_owned(),
-                },
-                decimals,
-            )
-        })
-        .collect();
-    let context = Context {
-        assets,
-        estimator: fees,
-        runtime: runtime.handle().clone(),
-        now: 100_000,
-    };
-    Deciding::new(row, connection, context, run)
-}
-
-/// A run of the test trigger started at `started_at`.
-fn run(started_at: i64) -> TriggerRun {
-    TriggerRun::new("t", started_at)
-}
-
-fn compares(
-    evaluation: &mut Deciding<'_>,
-    compare: &Compare,
-    this: &Selection,
-) -> anyhow::Result<bool> {
-    evaluation.check(&Logic::Leaf(Gate::Compare(compare.clone())), this)
-}
-
-fn checks(
-    evaluation: &mut Deciding<'_>,
-    check: &Logic<Gate>,
-    this: &Selection,
-) -> anyhow::Result<bool> {
-    evaluation.check(check, this)
+/// The balance of index `id` of `balances` at its final block.
+fn confirmed(balances: &BTreeMap<String, WalletIndex>, id: &str) -> Decimal {
+    balances[id]
+        .balance_confirmed
+        .as_deref()
+        .unwrap_or("0")
+        .parse()
+        .unwrap()
 }
 
 fn this(asset: Option<&str>) -> Target {
@@ -470,280 +381,20 @@ fn this(asset: Option<&str>) -> Target {
     })
 }
 
-fn compare(of: Target, aggregate: Aggregate, operator: Operator, value: Amount) -> Compare {
-    Compare {
-        of,
-        aggregate,
-        balance: Balance::Confirmed,
-        operator,
-        value,
-    }
-}
-
 fn value(text: &str) -> Amount {
-    Amount::Value(decimal(text))
+    Arithmetic::Term(AmountTerm::Value(amounts::Value(decimal(text))))
 }
 
-/// The kept wallet indexes `ids` with their balances at the tip, as Select
-/// would hand them on (fully indexed or not).
-fn selection(connection: &mut SqliteConnection, ids: &[String]) -> Selection {
-    wallet_index::db::find_by_ids(connection, &network(), ids, int(TIP).unwrap()).unwrap()
+/// The confirmed balance of `This`.
+fn balance() -> Box<Amount> {
+    Box::new(Arithmetic::Term(AmountTerm::Balance(
+        amounts::Balance::default(),
+    )))
 }
 
-/// The balance of index `id` of `selection` at its final block.
-fn confirmed(selection: &Selection, id: &str) -> Decimal {
-    selection[id]
-        .balance_confirmed
-        .as_deref()
-        .unwrap_or("0")
-        .parse()
-        .unwrap()
-}
-
-#[test]
-fn aggregates_and_operators() {
-    let (_directory, runtime, mut connection) = seeded();
-    let both = selection(&mut connection, &[id("a", "native"), id("b", "native")]);
-    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
-    let empty = Selection::new(network(), int(TIP).unwrap());
-    let native = || Target::Select(asset("native"));
-    let mut holds = |of: Target, aggregate, operator, amount, on: &Selection| {
-        compares(
-            &mut evaluation,
-            &compare(of, aggregate, operator, amount),
-            on,
-        )
-        .unwrap()
-    };
-    // a 690, b 50 sats; 0.0000074 BTC is 740 sats.
-    assert!(holds(
-        this(None),
-        Aggregate::Sum,
-        Operator::Equal,
-        value("0.0000074"),
-        &both
-    ));
-    assert!(holds(
-        this(None),
-        Aggregate::Min,
-        Operator::Equal,
-        value("0.0000005"),
-        &both
-    ));
-    assert!(holds(
-        this(None),
-        Aggregate::Max,
-        Operator::Equal,
-        value("0.0000069"),
-        &both
-    ));
-    assert!(holds(
-        this(None),
-        Aggregate::Count,
-        Operator::Equal,
-        value("2"),
-        &both
-    ));
-    assert!(holds(
-        native(),
-        Aggregate::Sum,
-        Operator::AtLeast,
-        value("0.0000074"),
-        &empty
-    ));
-    assert!(!holds(
-        native(),
-        Aggregate::Sum,
-        Operator::Above,
-        value("0.0000074"),
-        &empty
-    ));
-    assert!(holds(
-        native(),
-        Aggregate::Sum,
-        Operator::AtMost,
-        value("0.0000074"),
-        &empty
-    ));
-    assert!(!holds(
-        native(),
-        Aggregate::Sum,
-        Operator::Below,
-        value("0.0000074"),
-        &empty
-    ));
-    // Empty: Sum and Count are 0, Min and Max have no value.
-    let none = Target::Select(Selector::Ids(vec![]));
-    assert!(holds(
-        none.clone(),
-        Aggregate::Count,
-        Operator::Equal,
-        value("0"),
-        &empty
-    ));
-    assert!(holds(
-        Target::Select(Selector::All(vec![asset("native"), Selector::Ids(vec![])])),
-        Aggregate::Sum,
-        Operator::Equal,
-        value("0"),
-        &empty
-    ));
-    assert!(!holds(
-        none.clone(),
-        Aggregate::Min,
-        Operator::AtLeast,
-        value("0"),
-        &empty
-    ));
-    assert!(!holds(
-        none,
-        Aggregate::Max,
-        Operator::AtLeast,
-        value("0"),
-        &empty
-    ));
-}
-
-#[test]
-fn values_must_fit_their_asset() {
-    let (_directory, runtime, mut connection) = seeded();
-    let a = selection(&mut connection, &[id("a", "native")]);
-    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
-    let too_fine = compare(
-        this(None),
-        Aggregate::Sum,
-        Operator::Above,
-        value("0.000000001"),
-    );
-    assert!(compares(&mut evaluation, &too_fine, &a).is_err());
-    let fraction = compare(this(None), Aggregate::Count, Operator::Above, value("0.5"));
-    assert!(compares(&mut evaluation, &fraction, &a).is_err());
-}
-
-#[test]
-fn amounts_evaluate_in_atomic_units() {
-    let (_directory, runtime, mut connection) = seeded();
-    let a = selection(&mut connection, &[id("a", "native")]);
-    let mut evaluation = open(&mut connection, &runtime, fees("100"), None);
-    let balance = || {
-        Box::new(Amount::Balance {
-            of: this(None),
-            balance: Balance::Confirmed,
-        })
-    };
-    let fee = || {
-        Box::new(Amount::Fee {
-            of: this(None),
-            to: None,
-        })
-    };
-    // 690 - 100 = 590; 590 + 10 = 600; min(690, 5 sats) = 5; max(-…, 0) = 0.
-    let cases = [
-        (Amount::Sub(balance(), fee()), "590"),
-        (
-            Amount::Add(
-                Box::new(Amount::Sub(balance(), fee())),
-                Box::new(value("0.0000001")),
-            ),
-            "600",
-        ),
-        (Amount::Min(balance(), Box::new(value("0.00000005"))), "5"),
-        // Headroom over a fee: 100 × 1.25; 100 × 1.005 = 100.5, rounded up.
-        (Amount::Times(fee(), decimal("1.25")), "125"),
-        (Amount::Times(fee(), decimal("1.005")), "101"),
-        (
-            Amount::Max(
-                Box::new(Amount::Sub(fee(), Box::new(value("1")))),
-                Box::new(value("0")),
-            ),
-            "0",
-        ),
-    ];
-    for (amount, atomic) in cases {
-        // Sum of `a` compared with the amount plus the difference.
-        let atomic = decimal(atomic);
-        let gap = decimal("690") - atomic;
-        let gap_value = Amount::Value(gap.checked_div(&decimal("100000000")).unwrap());
-        let total = Amount::Add(Box::new(amount), Box::new(gap_value));
-        assert!(
-            compares(
-                &mut evaluation,
-                &compare(this(None), Aggregate::Sum, Operator::Equal, total),
-                &a
-            )
-            .unwrap()
-        );
-    }
-    // Below zero compares as negative.
-    let short = Amount::Sub(fee(), Box::new(value("0.00001")));
-    assert!(
-        compares(
-            &mut evaluation,
-            &compare(this(None), Aggregate::Sum, Operator::Above, short),
-            &a
-        )
-        .unwrap()
-    );
-}
-
-#[test]
-fn a_fee_is_priced_for_its_one_recipient_or_a_new_address() {
-    let (_directory, runtime, mut connection) = seeded();
-    let a = selection(&mut connection, &[id("a", "native")]);
-    let estimator = fees("100");
-    let mut evaluation = open(&mut connection, &runtime, estimator.clone(), None);
-    let fee_to = |to: Option<Selector>| Amount::Fee {
-        of: this(None),
-        to: to.map(Target::Select),
-    };
-    let one = Selector::Ids(vec![id("b", "native")]);
-    let two = Selector::Ids(vec![id("b", "native"), id("c", "tok")]);
-    for to in [Some(one), Some(two), None] {
-        let fee = fee_to(to);
-        assert!(
-            compares(
-                &mut evaluation,
-                &compare(this(None), Aggregate::Sum, Operator::Above, fee),
-                &a
-            )
-            .unwrap()
-        );
-    }
-    // `b` alone is its recipient; two addresses, or none, a new address.
-    let asked: Vec<Option<String>> = estimator
-        .to
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|to| to.as_ref().map(|to| to.value.clone()))
-        .collect();
-    assert_eq!(asked, [Some("b".to_owned()), None, None]);
-}
-
-#[test]
-fn a_wallet_holding_nothing_costs_no_fee_and_asks_nothing() {
-    let (_directory, runtime, mut connection) = seeded();
-    // c's native index has no legs: it holds nothing.
-    let c = selection(&mut connection, &[id("c", "native")]);
-    let estimator = fees("100");
-    let mut evaluation = open(&mut connection, &runtime, estimator.clone(), None);
-    let fee = Amount::Fee {
-        of: this(None),
-        to: None,
-    };
-    assert!(
-        compares(
-            &mut evaluation,
-            &compare(this(None), Aggregate::Sum, Operator::Equal, fee),
-            &c
-        )
-        .unwrap()
-    );
-    assert_eq!(
-        estimator.calls.load(Ordering::SeqCst),
-        0,
-        "no estimate asked"
-    );
+/// The fee of sending everything `This` holds to a new address.
+fn fee() -> Box<Amount> {
+    Box::new(Arithmetic::Term(AmountTerm::Fee(amounts::Fee::default())))
 }
 
 #[test]
@@ -787,100 +438,14 @@ fn holders_are_keyed_wallets_with_a_balance_of_the_asset() {
 }
 
 #[test]
-fn counterparts_must_be_fully_indexed() {
-    let (_directory, runtime, mut connection) = seeded();
-    let toks = selection(&mut connection, &[id("a", "tok"), id("b", "tok")]);
-    let with_c = selection(&mut connection, &[id("a", "tok"), id("c", "tok")]);
-    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
-    // The tok indexes read in native: a 690, b 50.
-    let in_native = compare(
-        this(Some("native")),
-        Aggregate::Sum,
-        Operator::Equal,
-        value("0.0000074"),
-    );
-    assert!(compares(&mut evaluation, &in_native, &toks).unwrap());
-    // c's native index is behind the tip: unknown, the compare fails, under Not too.
-    let any = compare(
-        this(Some("native")),
-        Aggregate::Sum,
-        Operator::AtLeast,
-        value("0"),
-    );
-    assert!(!compares(&mut evaluation, &any, &with_c).unwrap());
-    let check = Logic::Leaf(Gate::Compare(any));
-    assert!(!checks(&mut evaluation, &check, &with_c).unwrap());
-}
-
-#[test]
-fn logic_stops_early_and_errors_stay_errors() {
-    let leaves = Logic::All(vec![Logic::Leaf(false), Logic::Leaf(true)]);
-    let mut seen = 0;
-    assert!(
-        !leaves
-            .eval(&mut |leaf| {
-                seen += 1;
-                Ok(*leaf)
-            })
-            .unwrap()
-    );
-    assert_eq!(seen, 1);
-    let leaves = Logic::Any(vec![Logic::Leaf(true), Logic::Leaf(false)]);
-    let mut seen = 0;
-    assert!(
-        leaves
-            .eval(&mut |leaf| {
-                seen += 1;
-                Ok(*leaf)
-            })
-            .unwrap()
-    );
-    assert_eq!(seen, 1);
-    assert!(Logic::<bool>::All(vec![]).eval(&mut |_| Ok(false)).unwrap());
-    assert!(!Logic::<bool>::Any(vec![]).eval(&mut |_| Ok(true)).unwrap());
-    let not = Logic::Not(Box::new(Logic::Leaf(true)));
-    assert!(not.eval(&mut |_| anyhow::bail!("read failed")).is_err());
-
-    // A run too recent stops the check before the fee is read (now is
-    // 100 000 ms).
-    let (_directory, runtime, mut connection) = seeded();
-    let estimator = fees("1");
-    let a = selection(&mut connection, &[id("a", "native")]);
-    let mut evaluation = open(
-        &mut connection,
-        &runtime,
-        estimator.clone(),
-        Some(run(50_000)),
-    );
-    let check = Logic::All(vec![
-        Logic::Leaf(Gate::Since { seconds: 60 }),
-        Logic::Leaf(Gate::Compare(compare(
-            this(None),
-            Aggregate::Sum,
-            Operator::Above,
-            Amount::Fee {
-                of: this(None),
-                to: None,
-            },
-        ))),
-    ]);
-    assert!(!checks(&mut evaluation, &check, &a).unwrap());
-    assert_eq!(estimator.calls.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn since_reads_the_last_run() {
-    let (_directory, runtime, mut connection) = seeded();
-    let empty = Selection::new(network(), int(TIP).unwrap());
-    let since = |seconds| Logic::Leaf(Gate::Since { seconds });
-    // now is 100 000 ms.
-    for (started_at, passes) in [(40_001, false), (40_000, true)] {
-        let last = Some(run(started_at));
-        let mut evaluation = open(&mut connection, &runtime, fees("1"), last);
-        assert_eq!(checks(&mut evaluation, &since(60), &empty).unwrap(), passes);
-    }
-    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
-    assert!(checks(&mut evaluation, &since(60), &empty).unwrap());
+fn a_pair_is_found_only_fully_indexed() {
+    let (_directory, _runtime, mut connection) = seeded();
+    let native = |name: &str| (address(name), Asset::native(network()));
+    // c's native index is behind the confirmed block, d's never indexed.
+    let wanted = [native("a"), native("b"), native("c"), native("d")];
+    let found = wallet_index::db::find(&mut connection, &network(), &wanted, 2).unwrap();
+    let found: Vec<String> = found.into_iter().map(|one| one.id).collect();
+    assert_eq!(found, [id("a", "native"), id("b", "native")]);
 }
 
 #[test]
@@ -897,32 +462,25 @@ fn the_sweep_trigger_round_trips_through_json() {
     let parsed: Logic<Filter> = serde_json::from_str(filter).unwrap();
     assert_eq!(
         parsed,
-        Logic::Leaf(Filter::Compare(compare(
-            this(Some("native")),
-            Aggregate::Sum,
-            Operator::AtLeast,
-            Amount::Fee {
-                of: this(None),
-                to: None
-            }
-        )))
+        Logic::One(Filter::Compare(Compare {
+            of: this(Some("native")),
+            aggregate: Aggregate::Sum,
+            balance: BalanceKind::Confirmed,
+            operator: Operator::AtLeast,
+            value: *fee(),
+        }))
     );
     assert_eq!(serde_json::to_string(&parsed).unwrap(), filter);
-    let parsed: Logic<Gate> = serde_json::from_str(check).unwrap();
-    assert_eq!(parsed, Logic::Leaf(Gate::Since { seconds: 60 }));
+    let parsed: Logic<Check> = serde_json::from_str(check).unwrap();
+    let since = conditions::Since { seconds: 60 };
+    assert_eq!(parsed, Logic::One(Check::Since(since)));
     assert_eq!(serde_json::to_string(&parsed).unwrap(), check);
     // Combinators, Since and decimal strings; `{"balance":{}}` is This.
     let full = r#"{"all":[{"since":{"seconds":60}},{"not":{"compare":{"of":{"select":{"ids":["x"]}},"aggregate":"max","operator":"at_most","value":{"max":[{"sub":[{"balance":{"of":{"this":{}}}},{"value":"1.25"}]},{"value":"0"}]}}}}]}"#;
-    let parsed: Logic<Gate> = serde_json::from_str(full).unwrap();
+    let parsed: Logic<Check> = serde_json::from_str(full).unwrap();
     assert_eq!(serde_json::to_string(&parsed).unwrap(), full);
     let short: Amount = serde_json::from_str(r#"{"balance":{}}"#).unwrap();
-    assert_eq!(
-        short,
-        Amount::Balance {
-            of: this(None),
-            balance: Balance::Confirmed,
-        }
-    );
+    assert_eq!(short, *balance());
     assert!(serde_json::from_str::<Amount>(r#"{"value":1.5}"#).is_err());
 }
 
@@ -947,15 +505,14 @@ fn triggers_and_their_runs_are_stored() {
     assert!(trigger::db::insert(&mut connection, &trigger).is_err());
     let found = trigger::db::find_enabled(&mut connection, &network()).unwrap();
     assert_eq!(found.len(), 1);
-    assert_eq!(found[0].0.selector, trigger.selector);
-    assert_eq!(found[0].0.filter, None);
-    assert_eq!(found[0].0.check, trigger.check);
-    assert!(found[0].1.is_none(), "never run");
+    assert_eq!(found[0].trigger, trigger.definition());
+    assert_eq!(found[0].trigger.filter, None);
+    assert!(found[0].last_run.is_none(), "never run");
 
     start_run(&mut connection, "sweep", 10).unwrap();
     start_run(&mut connection, "sweep", 20).unwrap();
     let found = trigger::db::find_enabled(&mut connection, &network()).unwrap();
-    assert_eq!(found[0].1.as_ref().map(|run| run.started_at), Some(20));
+    assert_eq!(found[0].last_run, Some(20));
     assert!(start_run(&mut connection, "missing", 10).is_err());
 
     assert_eq!(trigger::db::delete(&mut connection, "sweep").unwrap(), 1);
@@ -978,33 +535,15 @@ fn a_tag_picks_its_wallets_indexes_on_their_network_only() {
     let (_directory, _runtime, mut connection) = seeded();
     let c = &mut connection;
     let other = Network::new(Chain::new("bitcoin"), "other");
-    let picked = |c: &mut SqliteConnection, selector: &Selector| {
-        wallet_index::db::select(c, &other, selector, 3)
-            .unwrap()
-            .ids()
+    let picked = |c: &mut SqliteConnection, selector: &Selector| -> Vec<String> {
+        let found = wallet_index::db::select(c, &other, selector, 3).unwrap();
+        found.into_iter().map(|one| one.id).collect()
     };
     tag_with(c, &address("a"), "hot").unwrap();
     assert_eq!(ids(&tag("hot"), c), [id("a", "native"), id("a", "tok")]);
     // The tag is on regtest's a, not on other's; other's a is still picked.
     assert!(picked(c, &tag("hot")).is_empty());
     assert_eq!(picked(c, &asset("native")), ["bitcoin.other.a.native"]);
-}
-
-#[test]
-fn a_filter_keeps_each_index_on_its_own() {
-    let (_directory, runtime, mut connection) = seeded();
-    let both = selection(&mut connection, &[id("a", "native"), id("b", "native")]);
-    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
-    // a 690, b 50 sats: only a holds more than 100 sats; together they would.
-    let filter = Logic::Leaf(Filter::Compare(compare(
-        this(None),
-        Aggregate::Sum,
-        Operator::Above,
-        value("0.000001"),
-    )));
-    let kept = evaluation.filter(&filter, &both).unwrap();
-    assert_eq!(kept.ids(), vec![id("a", "native")]);
-    assert_eq!(kept.confirmed_at(), both.confirmed_at());
 }
 
 fn send(source: Target, destination: Target, amount: Amount) -> SendInput {
@@ -1022,101 +561,102 @@ fn ids_of(names: &[&str]) -> Target {
     ))
 }
 
+/// Each started job's sender and its (recipient, amount) transfers.
+type Plan = Vec<(String, Vec<(String, String)>)>;
+
+/// The jobs `send` starts over the store with `this` (native indexes by
+/// name) kept, each spend priced 100 sats.
+fn plan(
+    connection: &mut SqliteConnection,
+    send: &SendInput,
+    this: &[&str],
+) -> anyhow::Result<Plan> {
+    let network = network();
+    let assets = [("native", 8), ("tok", 2)]
+        .into_iter()
+        .map(|(id, decimals)| {
+            let id = id.to_owned();
+            base::AssetInfo::token(
+                Asset {
+                    network: network.clone(),
+                    id,
+                },
+                decimals,
+            )
+        })
+        .collect();
+    let fees = Fees::new(network.clone(), decimal("100"));
+    let mut store = Sqlite::new(connection, network.clone(), int(TIP)?);
+    let mut on = Context::new(&mut store, &fees, &assets, &network, 100_000, None);
+    let Target::Select(kept) = ids_of(this) else {
+        unreachable!("ids are a selector")
+    };
+    let kept = futures_executor::block_on(on.select(&kept))?;
+    let jobs = futures_executor::block_on(Transfer.run(send, &mut on.with(kept)))?;
+    let sends = jobs.into_iter().map(|job| {
+        let intent: SendIntent = serde_json::from_value(job.input).unwrap();
+        let paid = intent
+            .transfers
+            .into_iter()
+            .map(|p| (p.to, p.amount))
+            .collect();
+        (intent.address, paid)
+    });
+    Ok(sends.collect())
+}
+
 #[test]
 fn a_send_pays_per_source_or_per_destination() {
-    let (_directory, runtime, mut connection) = seeded();
+    let (_directory, _runtime, mut connection) = seeded();
     // Only a keyed source sends.
     for name in ["a", "b"] {
         let key = crypto::SecretBytes::new(vec![1]);
         let keyed = Wallet::new(&address(name), crypto::Curve::Secp256k1, key).unwrap();
         wallet::db::insert(&mut connection, &keyed).unwrap();
     }
-    let both = selection(&mut connection, &[id("a", "native"), id("b", "native")]);
-    let b = selection(&mut connection, &[id("b", "native")]);
-    let mut evaluation = open(&mut connection, &runtime, fees("100"), None);
-    let balance = || {
-        Box::new(Amount::Balance {
-            of: this(None),
-            balance: Balance::Confirmed,
-        })
-    };
-    let fee = || {
-        Box::new(Amount::Fee {
-            of: this(None),
-            to: None,
-        })
-    };
-
-    // Many sources to one: everything less the fee, each source alone;
-    // b's 50 sats do not cover its 100 sat fee, so it is skipped.
-    let sweep = send(this(None), ids_of(&["b"]), Amount::Sub(balance(), fee()));
-    // Each started job's sender and its (recipient, amount) transfers.
-    let mut plan = |send: &SendInput, this: &Selection| {
-        let mut invocation = Invocation::new(this.network(), this, &mut evaluation);
-        Transfer.run(&mut invocation, &serde_json::to_value(send)?)?;
-        let sends = invocation.started().into_iter().map(|job| {
-            let intent: SendIntent = serde_json::from_value(job.input).unwrap();
-            let paid = intent
-                .transfers
-                .into_iter()
-                .map(|p| (p.to, p.amount))
-                .collect();
-            (intent.address, paid)
-        });
-        anyhow::Ok(sends.collect::<Vec<(String, Vec<(String, String)>)>>())
-    };
+    let c = &mut connection;
     let sent = |from: &str, to: &str, amount: &str| {
         vec![(
             address(from).value,
             vec![(address(to).value, amount.to_owned())],
         )]
     };
-    assert_eq!(plan(&sweep, &both).unwrap(), sent("a", "b", "590"));
+
+    // Many sources to one: everything less the fee, each source alone;
+    // b's 50 sats do not cover its 100 sat fee, so it is skipped.
+    let sweep = send(
+        this(None),
+        ids_of(&["b"]),
+        Arithmetic::Sub(balance(), fee()),
+    );
+    assert_eq!(plan(c, &sweep, &["a", "b"]).unwrap(), sent("a", "b", "590"));
 
     // One source to many: each destination's shortfall up to 100 sats.
-    let shortfall = Amount::Max(
-        Box::new(Amount::Sub(Box::new(value("0.000001")), balance())),
+    let shortfall = Arithmetic::Max(
+        Box::new(Arithmetic::Sub(Box::new(value("0.000001")), balance())),
         Box::new(value("0")),
     );
     let fund = send(ids_of(&["a"]), this(None), shortfall);
-    assert_eq!(plan(&fund, &b).unwrap(), sent("a", "b", "50"));
+    assert_eq!(plan(c, &fund, &["b"]).unwrap(), sent("a", "b", "50"));
 
     // Many to many is refused.
-    let tangled = send(
-        this(None),
-        ids_of(&["a", "b"]),
-        Amount::Balance {
-            of: this(None),
-            balance: Balance::Confirmed,
-        },
-    );
-    assert!(plan(&tangled, &both).is_err());
+    let tangled = send(this(None), ids_of(&["a", "b"]), *balance());
+    assert!(plan(c, &tangled, &["a", "b"]).is_err());
 }
 
 #[test]
 fn a_pending_balance_counts_what_is_already_on_its_way() {
-    let (_directory, runtime, mut connection) = seeded();
+    let (_directory, _runtime, mut connection) = seeded();
     pending_send(&mut connection);
-    let balances = selection(&mut connection, &[id("a", "native"), id("b", "native")]);
-    let held = |name: &str, balance| balances[&id(name, "native")].held(balance).unwrap();
-    // a: 695 at the last block (the reward included) less 105 on its way out.
-    assert_eq!(held("a", Balance::Pending), decimal("590"));
-    // b: 50, and 100 on its way in.
-    assert_eq!(held("b", Balance::Confirmed), decimal("50"));
-    assert_eq!(held("b", Balance::Pending), decimal("150"));
-    // A prefund of b while it holds under 100 sats: the confirmed balance
-    // says it is short; the pending one, with 100 on its way, does not.
-    let only_b = selection(&mut connection, &[id("b", "native")]);
-    let mut evaluation = open(&mut connection, &runtime, fees("1"), None);
-    let short = |balance| Compare {
-        balance,
-        ..compare(
-            this(None),
-            Aggregate::Sum,
-            Operator::Below,
-            value("0.000001"),
-        )
+    let ids = [id("a", "native"), id("b", "native")];
+    let balances = wallet_index::db::find_by_ids(&mut connection, &network(), &ids, 2).unwrap();
+    let held = |name: &str, kind| {
+        let index = balances[&id(name, "native")].clone().index().unwrap();
+        index.held(kind).clone()
     };
-    assert!(compares(&mut evaluation, &short(Balance::Confirmed), &only_b).unwrap());
-    assert!(!compares(&mut evaluation, &short(Balance::Pending), &only_b).unwrap());
+    // a: 695 at the last block (the reward included) less 105 on its way out.
+    assert_eq!(held("a", BalanceKind::Pending), decimal("590"));
+    // b: 50, and 100 on its way in.
+    assert_eq!(held("b", BalanceKind::Confirmed), decimal("50"));
+    assert_eq!(held("b", BalanceKind::Pending), decimal("150"));
 }

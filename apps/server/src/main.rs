@@ -130,7 +130,9 @@ pub(crate) async fn boot(
     // the tip queues a triggers job (locking the whole network), whose sends
     // are broadcast jobs (one topic per sender); every network's expire job
     // frees what pending transactions held; one prune job deletes old
-    // succeeded jobs.
+    // succeeded jobs. A trigger acts through `actions`, which the API
+    // checks a trigger against too.
+    let actions = Arc::new(trigger::actions::registry());
     let executor = Executor::new(queue.clone(), tick)
         .add(index::Index::new(
             payments.clone(),
@@ -144,12 +146,14 @@ pub(crate) async fn boot(
             payments.clone(),
             db.clone(),
             queue.clone(),
+            actions.clone(),
             logger,
         ));
     let state = Arc::new(AppState {
         payments,
         db,
         queue,
+        actions,
     });
     Ok((state, executor))
 }

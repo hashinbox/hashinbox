@@ -3,8 +3,8 @@
 
 use std::fmt;
 
-/// What kind of thing is wrong. The API answers 404 for
-/// [`Class::UnknownAction`] and [`Class::NotConfigured`], 400 for the rest.
+/// What kind of thing is wrong. The server's API answers 404 for
+/// [`Class::NotConfigured`], 400 for the rest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Class {
     /// A selection that picks nothing or everything: an empty id list, an
@@ -22,7 +22,7 @@ pub enum Class {
     /// A filter condition that never reads the wallet it tests: it keeps
     /// all or none, so it belongs in the check. 400.
     FilterIgnoresWallet,
-    /// No action of the name is registered. 404.
+    /// No action of the name is registered. 400.
     UnknownAction,
     /// An action's input does not decode. 400.
     BadInput,
