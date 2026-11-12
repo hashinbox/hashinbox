@@ -54,7 +54,7 @@ pub(crate) struct RpcNode {
 }
 
 impl RpcNode {
-    fn new(index: usize, (url, parts, bounds): (String, rpc::Parts, rpc::Bounds)) -> Self {
+    fn new(index: usize, (url, parts, params): (String, rpc::Parts, rpc::HttpParams)) -> Self {
         Self {
             index,
             url,
@@ -74,9 +74,9 @@ impl RpcNode {
                     header: parameter.header,
                 })
                 .collect(),
-            timeout_ms: bounds.timeout_ms,
-            max_request_bytes: bounds.max_request_bytes,
-            max_response_bytes: bounds.max_response_bytes,
+            timeout_ms: params.timeout_ms,
+            max_request_bytes: params.max_request_bytes,
+            max_response_bytes: params.max_response_bytes,
         }
     }
 }
@@ -106,10 +106,14 @@ impl RpcEndpoints {
     }
 
     /// Each one's shown form, in failover order; one whose URL does not
-    /// parse is left out.
+    /// parse or check is left out.
     pub(crate) fn shown(&self) -> Vec<RpcNode> {
         let views = self.0.iter().filter_map(|endpoint| {
-            Some((endpoint.url.clone(), endpoint.parts()?, endpoint.bounds))
+            Some((
+                endpoint.url.clone(),
+                endpoint.parts()?,
+                rpc::HttpParams::try_from(&endpoint.parse().ok()?).ok()?,
+            ))
         });
         views
             .enumerate()

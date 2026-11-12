@@ -8,7 +8,7 @@ mod api;
 use std::{future::Future, sync::Arc, time::Duration};
 
 use base::{
-    NetworkConfig,
+    Cluster, NetworkConfig, Policy,
     testing::{TestChain, Topology},
 };
 use diesel::{
@@ -16,7 +16,7 @@ use diesel::{
     connection::SimpleConnection as _,
     sql_types::{BigInt, Bool, Integer, Nullable, Text},
 };
-use rpc::{Backoff, Cluster, Policy, Retry};
+use rpc::{Backoff, Retry};
 
 pub(crate) use api::{Api, Wallet};
 
@@ -108,7 +108,8 @@ async fn connect<T: TestChain>(
     if nodes.len() < 2 {
         return Ok(nodes.into_iter().next());
     }
-    let cluster = Cluster::new(nodes, |node| T::height(node), Policy::default())?;
+    let nodes = nodes.into_iter().map(T::client).collect();
+    let cluster = Cluster::new(nodes, Policy::default())?;
     let retry = Retry::new(cluster).with_backoff(Backoff::Fixed(TICK));
     Ok(Some(Arc::new(retry)))
 }

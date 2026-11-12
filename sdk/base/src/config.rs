@@ -7,7 +7,7 @@ use std::{fmt, sync::Arc, time::Duration};
 use serde_json::Value;
 
 use crate::{
-    Assets, BlockStore, Dated, Future, Holdings, Indexer, InputStore, Network,
+    Assets, BlockStore, Dated, Future, Holdings, Indexer, InputStore, Network, Tip,
     WalletFactoryBroadcaster, WalletIndexStore, WalletStore,
 };
 
@@ -132,25 +132,13 @@ pub struct NodeInfo {
     pub tip: u64,
 }
 
-/// Reads one node's tip in the chain's own unit (blocks, slots).
-pub type Height = for<'a> fn(&'a rpc::Http) -> rpc::BoxFuture<'a, Result<u64, rpc::CallError>>;
-
 /// A chain's configuration of one network.
 pub trait Config: Send + Sync {
     /// The network it configures.
     fn network(&self) -> Network;
 
-    /// How a node's tip is read: what a cluster of the network's nodes
-    /// ranks them by.
-    fn height(&self) -> Height;
-
-    /// What the node behind `client` serves; asked once, when a node is
-    /// added, never while running.
-    ///
-    /// # Errors
-    ///
-    /// A node failure, or a node of another chain.
-    fn info(&self, client: Arc<dyn rpc::Client>) -> Future<'_, anyhow::Result<NodeInfo>>;
+    /// The chain's client over one node, which a [`crate::Cluster`] ranks.
+    fn node(&self, client: Arc<dyn rpc::Client>) -> Arc<dyn Tip>;
 
     /// Validates and builds the service over `storage`, every part of it reaching the
     /// nodes through `client` (typically a [`rpc::Swap`] the caller

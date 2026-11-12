@@ -15,7 +15,7 @@ use rpc::Endpoint;
 
 async fn ethereum(storage: Storage) -> anyhow::Result<()> {
     let config = Config::new(Network::new(1, "mainnet"));
-    let node: Arc<dyn rpc::Client> = Arc::new(Endpoint::new("https://node.invalid/v3/KEY").connect()?);
+    let node: Arc<dyn rpc::Client> = Arc::new(rpc::node(&Endpoint::new("https://node.invalid/v3/KEY"), Default::default())?);
     // The one entry point a container uses: indexer, factory, broadcaster,
     // and assets over the application's stores.
     let _service = config.build(&storage, node.clone()).await?;
@@ -55,10 +55,11 @@ rate-limits) (each absent one its default).
   and returns the `base::Service`, asking no node. The indexer wakes every
   `interval_ms` milliseconds (default 12,000).
 - The config holds no endpoints: `build(&storage, client)` builds every
-  part over the given transport, asking no node; `payments` clusters a
-  network's nodes by `height()`. `info(client)` asks a node its chain and
-  tip, once, when it is added. Pass a `rpc::Swap` and keep it to change
-  nodes live.
+  part over the given transport, asking no node. `node(client)` is the
+  `Client` over one node, a `base::Tip`: `tip()` is `eth_blockNumber`, `info()` its
+  chain and tip, asked once when a node is added; `payments` clusters a
+  network's nodes by `tip()` (`base::Cluster`). Pass a `rpc::Swap` and keep
+  it to change nodes live.
 - Position and height are the block number. A block is confirmed once it is at
   or below the node's `finalized` block; a node that serves none yet (syncing,
   a development chain) fails `tips`.

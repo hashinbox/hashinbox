@@ -2,13 +2,11 @@
 
 use std::sync::Arc;
 
-use ::rpc::{
-    BoxFuture, CallError, Cluster, Policy,
-    testing::{Reply, Script},
-};
+use ::rpc::testing::{Reply, Script};
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, Signer, TransactionErrorKind,
-    TransactionState, Transfer, Wallet, WalletError, WalletErrorKind, WalletFactory as _,
+    Asset, Broadcaster as _, BuilderExt as _, Cluster, Decimal, Leg, Policy, Signer, Tip,
+    TransactionErrorKind, TransactionState, Transfer, Wallet, WalletError, WalletErrorKind,
+    WalletFactory as _,
 };
 use chain_solana::{Client, Config};
 use crypto::SecretBytes;
@@ -294,10 +292,6 @@ fn signed(script: &Script) -> base::Transaction {
     block_on(builder.sign()).unwrap().0.remove(0)
 }
 
-fn probe(_: &Script) -> BoxFuture<'_, Result<u64, CallError>> {
-    Box::pin(async { Ok(0) })
-}
-
 #[test]
 fn broadcast_sends_the_exact_bytes_to_every_node() {
     let transaction = signed(&Script::new(signing_replies()));
@@ -307,7 +301,11 @@ fn broadcast_sends_the_exact_bytes_to_every_node() {
                 .once_only("sendTransaction")
         })
         .collect();
-    let cluster = Cluster::new(nodes.clone(), probe, Policy::default()).unwrap();
+    let tips = nodes
+        .iter()
+        .map(|node| Arc::new(client(node.clone())) as Arc<dyn Tip>)
+        .collect();
+    let cluster = Cluster::new(tips, Policy::default()).unwrap();
     let broadcaster = client(cluster);
 
     block_on(broadcaster.broadcast(&transaction)).unwrap();

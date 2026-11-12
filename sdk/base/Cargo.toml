@@ -19,7 +19,7 @@ decimal = { path = "../../packages/decimal" }
 rpc = { path = "../../packages/rpc" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
 # This crate on itself: turns `testing` on for its own tests.

@@ -746,16 +746,6 @@ export interface components {
              */
             start?: number;
         };
-        /** @description A node with its own bounds. */
-        DetailedEndpoint: {
-            /**
-             * @description Per-call limits: `timeout_ms`, `max_request_bytes`,
-             *     `max_response_bytes`; each defaults when absent.
-             */
-            bounds?: Record<string, never> | null;
-            /** @description `http` or `https` URL naming a host, without a fragment. */
-            url: string;
-        };
         /**
          * @description The body of every error response: `message` is always present, the
          *     failing transfer's index only when one transfer of a send failed.
@@ -1067,7 +1057,8 @@ export interface components {
         /** @description One node to add, and its network. */
         NetworkNode: {
             chain: string;
-            endpoint: components["schemas"]["RpcEndpoint"];
+            /** @description The node's URL, written as `endpoints` writes one. */
+            endpoint: string;
             network: string;
         };
         /** @description `GET /v1/networks/{chain}/{network}/transactions`: a page of transactions. */
@@ -1092,12 +1083,6 @@ export interface components {
             /** @description Nodes to append, each after its network's current ones, in order. */
             nodes: components["schemas"]["NetworkNode"][];
         };
-        /**
-         * @description One RPC node, written as the configuration file's `endpoints` writes it.
-         *     The URL carries everything: userinfo (HTTP Basic), query keys, a key in
-         *     the path, or `header.<Name>=value` parameters sent as headers.
-         */
-        RpcEndpoint: string | components["schemas"]["DetailedEndpoint"];
         /** @description One RPC node: its URL, parsed. */
         RpcNode: {
             host: string;
@@ -1138,8 +1123,13 @@ export interface components {
         };
         /** @description `POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body. */
         RpcNodes: {
-            /** @description One to 16 nodes, in failover order. */
-            endpoints: components["schemas"]["RpcEndpoint"][];
+            /**
+             * @description One to 16 node URLs, in failover order. A URL carries everything:
+             *     userinfo (HTTP Basic), query keys, a key in the path,
+             *     `header.<Name>=value` parameters sent as headers, and `rpc.` settings
+             *     (`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`).
+             */
+            endpoints: string[];
         };
         /** @description One query parameter of a node's URL. */
         RpcParameter: {

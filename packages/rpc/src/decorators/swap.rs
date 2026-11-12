@@ -3,12 +3,12 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use crate::{Batch, BoxFuture, CallError, CallResult, Client, Error, Request, Statistics};
+use crate::{Answer, Batch, BoxFuture, Client, Error, RawJson, Request, Statistics};
 
 /// A client whose nodes can be replaced while every holder keeps the same
 /// handle.
 ///
-/// A chain composed over a `Swap` never learns that its nodes changed:
+/// A caller composed over a `Swap` never learns that its nodes changed:
 /// [`Self::replace`] installs another transport, with that transport's
 /// per-node [`Statistics`], in one step. Each call takes the transport current
 /// when it starts and finishes on it, so a call in flight during a replacement
@@ -71,17 +71,17 @@ impl fmt::Debug for Swap {
 }
 
 impl Client for Swap {
-    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<RawJson, Error>> {
         let transport = self.current();
         Box::pin(async move { transport.request(request).await })
     }
 
-    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>> {
         let transport = self.current();
         Box::pin(async move { transport.batch(batch).await })
     }
 
-    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), CallError>> {
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
         let transport = self.current();
         Box::pin(async move { transport.broadcast(request).await })
     }
@@ -100,12 +100,12 @@ mod tests {
         let swap = Arc::new(Swap::new(Arc::new(old.clone()), Vec::new()));
         let holder: Arc<dyn Client> = swap.clone();
         let reply = holder.request(Request::new("m", json!([]))).await;
-        assert_eq!(reply.unwrap().unwrap().deserialize::<u64>().unwrap(), 1);
+        assert_eq!(reply.unwrap().deserialize::<u64>().unwrap(), 1);
 
         let next = Script::new([Reply::ok("m", json!(2))]);
         swap.replace(Arc::new(next.clone()), Vec::new());
         let reply = holder.request(Request::new("m", json!([]))).await;
-        assert_eq!(reply.unwrap().unwrap().deserialize::<u64>().unwrap(), 2);
+        assert_eq!(reply.unwrap().deserialize::<u64>().unwrap(), 2);
         old.exhausted();
         next.exhausted();
     }

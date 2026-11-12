@@ -1,7 +1,7 @@
 //! [`Recording`]: one reply a real node gave, and the shapes check a mock's
 //! answer to the same request must pass.
 
-use rpc::{CallResult, Failure, RawJson};
+use rpc::{Answer, Failure, RawJson};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -82,7 +82,7 @@ impl Recording {
     /// # Errors
     ///
     /// Every difference, one per line.
-    pub fn check(&self, answer: &CallResult) -> Result<(), String> {
+    pub fn check(&self, answer: &Answer) -> Result<(), String> {
         let mut differences = Vec::new();
         match (&self.error, answer) {
             (Some(_), Err(failure)) => {
@@ -172,7 +172,7 @@ mod tests {
         }
     }
 
-    fn raw(value: Value) -> CallResult {
+    fn raw(value: Value) -> Answer {
         Ok(RawJson::from_serializable(&value).unwrap())
     }
 

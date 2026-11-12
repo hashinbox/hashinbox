@@ -11,8 +11,8 @@ through. It names no chain; every call is keyed by network.
   `with_network(config, endpoints)` adds a chain's own config over its
   nodes; `with_client(network, client)` reaches that network through
   `client` instead; `with_storage(base::Storage)` (required). `build()`
-  clusters each network's nodes (primary by the chain's `height()`,
-  transport failures retried), wraps that in a `Swap` and builds the service
+  clusters each network's nodes (`base::Cluster` of each node's
+  `Config::node`, primary by its `tip()`; `rpc::Error::is_retryable` errors retried), wraps that in a `Swap` and builds the service
   over it, asking no node; a network that does not build is left out and
   `service(network)` says why.
 - `Payments`:

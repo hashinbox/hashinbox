@@ -436,7 +436,7 @@ fn a_refused_log_range_is_halved_and_logs_must_be_of_the_fetched_blocks() {
     script.push([
         Reply::result(
             "eth_getLogs",
-            Err(::rpc::Error {
+            Err(::rpc::Error::Transport {
                 kind: ::rpc::ErrorKind::ResponseTooLarge,
                 message: "JSON-RPC response exceeded its configured limit".to_owned(),
             }),

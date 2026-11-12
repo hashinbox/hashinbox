@@ -1,16 +1,15 @@
-use std::{fmt, time::Duration};
+use std::{collections::BTreeMap, str::FromStr};
 
-use serde::{Deserialize, Deserializer, Serialize, de};
-use url::Url;
+use serde::{Deserialize, Serialize};
 
-use std::collections::HashMap;
-
-use jsonrpsee::http_client::HeaderMap;
-
-use crate::{Error, ErrorKind, Http};
+use crate::{Error, ErrorKind};
 
 /// The query parameter prefix naming a static header.
 const HEADER: &str = "header.";
+
+/// The query parameter prefix of this client's own settings for the node,
+/// never sent to it; each layer of [`crate::node`] reads its own params.
+const SETTING: &str = "rpc.";
 
 /// An endpoint URL's parts ([`Endpoint::parts`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,123 +41,178 @@ pub struct Parameter {
     pub value: String,
     /// Whether every call sends it as a header instead of in the URL.
     pub header: bool,
+    /// Whether it is an `rpc.` setting, never sent to the node.
+    pub setting: bool,
 }
 
-/// What one call to one node may take and carry: 15 s, 10 MiB requests,
-/// 64 MiB responses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Bounds {
-    /// How long one execution may take.
-    pub timeout_ms: u64,
-    /// The largest request body this node accepts.
-    pub max_request_bytes: u32,
-    /// The largest response body this node may return.
-    pub max_response_bytes: u32,
+/// A node URL, parsed: what reaches the node, and every query parameter.
+///
+/// ```
+/// let url = rpc::Url::parse("https://node.invalid/v1?key=K&rpc.max_batch=1").unwrap();
+/// assert_eq!(url.node.as_str(), "https://node.invalid/v1?key=K");
+/// assert_eq!(url.params.get_int::<u32>("rpc.max_batch").unwrap(), Some(1));
+/// assert_eq!(url.params.namespace("rpc").get_int::<u32>("max_batch").unwrap(), Some(1));
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Url {
+    /// The URL as sent: without its `header.` and `rpc.` parameters.
+    pub node: url::Url,
+    /// Every query parameter, by name.
+    pub params: Params,
 }
 
-impl Default for Bounds {
-    fn default() -> Self {
-        Self {
-            timeout_ms: 15_000,
-            max_request_bytes: 10 * 1024 * 1024,
-            max_response_bytes: 64 * 1024 * 1024,
-        }
-    }
-}
-
-impl Bounds {
-    pub(crate) const fn timeout(self) -> Duration {
-        Duration::from_millis(self.timeout_ms)
-    }
-
-    /// Rejects a bound that would make every call fail.
+impl Url {
+    /// `text` parsed; an `http` or `https` URL naming a host, with no
+    /// fragment, naming no parameter twice.
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::InvalidConfiguration`] when a bound is zero; the message
-    /// names the bound and never a URL.
-    pub fn validate(&self) -> Result<(), Error> {
-        for (name, value) in [
-            ("timeout_ms", self.timeout_ms),
-            ("max_request_bytes", u64::from(self.max_request_bytes)),
-            ("max_response_bytes", u64::from(self.max_response_bytes)),
-        ] {
-            if value == 0 {
-                return Err(Error::new(
-                    ErrorKind::InvalidConfiguration,
-                    format!("JSON-RPC endpoint `{name}` must be a positive integer"),
-                ));
+    /// [`ErrorKind::InvalidConfiguration`] otherwise.
+    pub fn parse(text: &str) -> Result<Self, Error> {
+        let mut node =
+            url::Url::parse(text).map_err(|_| invalid("JSON-RPC endpoint URL is invalid"))?;
+        if !matches!(node.scheme(), "http" | "https") {
+            return Err(invalid("JSON-RPC endpoint scheme must be http or https"));
+        }
+        if node.host_str().is_none() {
+            return Err(invalid("JSON-RPC endpoint must name a host"));
+        }
+        if node.fragment().is_some() {
+            return Err(invalid("JSON-RPC endpoint must not carry a fragment"));
+        }
+        let mut params = Params::default();
+        for (key, value) in node.query_pairs() {
+            if params
+                .values
+                .insert(key.to_string(), value.into_owned())
+                .is_some()
+            {
+                return Err(invalid(format!("JSON-RPC endpoint names `{key}` twice")));
             }
         }
-        Ok(())
+        let kept: Vec<(String, String)> = node
+            .query_pairs()
+            .filter(|(key, _)| !key.starts_with(HEADER) && !key.starts_with(SETTING))
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        if kept.is_empty() {
+            node.set_query(None);
+        } else {
+            node.query_pairs_mut().clear().extend_pairs(kept);
+        }
+        Ok(Self { node, params })
     }
 }
 
-/// One node: its URL, and the [`Bounds`] one call runs under.
+/// Query parameters by name, or those under one prefix ([`Self::namespace`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Params {
+    /// What [`Self::namespace`] stripped, so errors name the parameter.
+    prefix: String,
+    values: BTreeMap<String, String>,
+}
+
+impl Params {
+    /// The value of `name`.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(String::as_str)
+    }
+
+    /// The value of `name` as a number; `None` when absent.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidConfiguration`] when it is not a `T`.
+    pub fn get_int<T: FromStr>(&self, name: &str) -> Result<Option<T>, Error> {
+        let Some(value) = self.get(name) else {
+            return Ok(None);
+        };
+        let parsed = value.parse().map_err(|_| {
+            invalid(format!(
+                "JSON-RPC endpoint `{}{name}` must be a positive integer",
+                self.prefix
+            ))
+        })?;
+        Ok(Some(parsed))
+    }
+
+    /// The parameters named `<prefix>.<name>`, by `<name>`.
+    #[must_use]
+    pub fn namespace(&self, prefix: &str) -> Self {
+        let prefix = format!("{}{prefix}.", self.prefix);
+        let values = self
+            .iter()
+            .filter_map(|(name, value)| {
+                let name = format!("{}{name}", self.prefix);
+                Some((name.strip_prefix(&prefix)?.to_owned(), value.to_owned()))
+            })
+            .collect();
+        Self { prefix, values }
+    }
+
+    /// Every parameter: name and value, by name.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+    }
+
+    /// Refuses a parameter whose name is not in `known`.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidConfiguration`] naming the first unknown one.
+    pub fn only(&self, known: &[&str]) -> Result<(), Error> {
+        let Some((name, _)) = self.iter().find(|(name, _)| !known.contains(name)) else {
+            return Ok(());
+        };
+        Err(invalid(format!(
+            "JSON-RPC endpoint names an unknown setting `{}{name}`",
+            self.prefix
+        )))
+    }
+}
+
+/// One node: its URL. Serializes as the URL.
 ///
 /// The URL carries everything, like a database URI: scheme, host, port, path,
 /// `user:password` userinfo (sent as HTTP Basic authorization) and query
 /// parameters (API keys). A query parameter named `header.<Name>` is not sent
 /// in the URL: every call carries it as the static header `<Name>` instead
-/// (`?header.x-api-key=KEY`). The rest reaches the node unaltered.
-///
-/// A deployment document writes either the URL alone or the full object:
-///
-/// ```json
-/// ["https://node.invalid/v3/KEY",
-///  {"url": "http://user:pass@node.invalid/", "bounds": {"timeout_ms": 20000}}]
-/// ```
-/// It serializes as the object form.
-#[derive(Clone, PartialEq, Eq, Serialize)]
+/// (`?header.x-api-key=KEY`). One named `rpc.<setting>` is not sent either:
+/// it sets how this client talks to the node ([`crate::HttpParams`],
+/// [`crate::SplitParams`]). The rest reaches
+/// the node unaltered. [`crate::node`] builds the client.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Endpoint {
     /// The node's URL: `http` or `https`, a host, and no fragment.
     pub url: String,
-    /// What one call may take and carry.
-    pub bounds: Bounds,
 }
 
-impl fmt::Debug for Endpoint {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Endpoint")
-            .field("url", &self.url)
-            .field("bounds", &self.bounds)
-            .finish()
-    }
-}
-
-impl fmt::Display for Endpoint {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for Endpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.url)
     }
 }
 
 impl Endpoint {
-    /// One node at `url`, with the default bounds.
+    /// One node at `url`.
     #[must_use]
     pub fn new(url: impl Into<String>) -> Self {
-        Self {
-            url: url.into(),
-            bounds: Bounds::default(),
-        }
-    }
-
-    /// The same node, under `bounds`.
-    #[must_use]
-    pub const fn with_bounds(mut self, bounds: Bounds) -> Self {
-        self.bounds = bounds;
-        self
+        Self { url: url.into() }
     }
 
     /// The URL's parts; `None` when it does not parse.
     #[must_use]
     pub fn parts(&self) -> Option<Parts> {
-        let url = Url::parse(&self.url).ok()?;
+        let url = url::Url::parse(&self.url).ok()?;
         let parameters = url
             .query_pairs()
             .map(|(key, value)| Parameter {
                 header: key.starts_with(HEADER),
+                setting: key.starts_with(SETTING),
                 name: key.strip_prefix(HEADER).unwrap_or(&key).to_owned(),
                 value: value.into_owned(),
             })
@@ -175,129 +229,28 @@ impl Endpoint {
         })
     }
 
-    /// Rejects an unusable node.
+    /// The URL parsed ([`Url::parse`]); its params are read by their owners.
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::InvalidConfiguration`] when the URL is not an `http` or
-    /// `https` URL naming a host, when it carries a fragment, or when a bound
-    /// is zero.
+    /// As [`Url::parse`].
+    pub fn parse(&self) -> Result<Url, Error> {
+        Url::parse(&self.url)
+    }
+
+    /// Rejects an unusable node: builds its client ([`crate::node`]), which
+    /// does no I/O, so every param is read by the layer that owns it.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::node`].
     pub fn validate(&self) -> Result<(), Error> {
-        Self::check_url(&self.url)?;
-        self.bounds.validate()
-    }
-
-    /// The client for this node; does no I/O.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::validate`].
-    pub fn connect(&self) -> Result<Http, Error> {
-        let mut url = Self::check_url(&self.url)?;
-        self.bounds.validate()?;
-        let headers = Self::headers(&url)?;
-        let kept: Vec<(String, String)> = url
-            .query_pairs()
-            .filter(|(key, _)| !key.starts_with(HEADER))
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
-            .collect();
-        if kept.is_empty() {
-            url.set_query(None);
-        } else {
-            url.query_pairs_mut().clear().extend_pairs(kept);
-        }
-        Http::build(url.as_str(), self.url.clone(), self.bounds, headers)
-    }
-
-    /// The static headers `url`'s `header.` parameters name.
-    fn headers(url: &Url) -> Result<HeaderMap, Error> {
-        let mut named = HashMap::new();
-        for (key, value) in url.query_pairs() {
-            let Some(name) = key.strip_prefix(HEADER) else {
-                continue;
-            };
-            if named
-                .insert(name.to_ascii_lowercase(), value.into_owned())
-                .is_some()
-            {
-                return Err(Self::invalid("JSON-RPC endpoint names a header twice"));
-            }
-        }
-        HeaderMap::try_from(&named)
-            .map_err(|_| Self::invalid("JSON-RPC endpoint header is invalid"))
-    }
-
-    /// The URL, with its `header.` parameters checked.
-    fn check_url(text: &str) -> Result<Url, Error> {
-        let url =
-            Url::parse(text).map_err(|_| Self::invalid("JSON-RPC endpoint URL is invalid"))?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(Self::invalid(
-                "JSON-RPC endpoint scheme must be http or https",
-            ));
-        }
-        if url.host_str().is_none() {
-            return Err(Self::invalid("JSON-RPC endpoint must name a host"));
-        }
-        if url.fragment().is_some() {
-            return Err(Self::invalid("JSON-RPC endpoint must not carry a fragment"));
-        }
-        Self::headers(&url)?;
-        Ok(url)
-    }
-
-    fn invalid(message: &'static str) -> Error {
-        Error::new(ErrorKind::InvalidConfiguration, message)
+        crate::node(self, logging::Logger::default()).map(drop)
     }
 }
 
-/// The URL alone, or the object naming its bounds.
-impl<'de> Deserialize<'de> for Endpoint {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(Form)
-    }
-}
-
-/// The two forms a deployment document writes one node in.
-// linter:disable rust/empty-struct -- serde's visitor seam: the endpoint it builds is its state.
-struct Form;
-
-impl Form {
-    const FIELDS: [&'static str; 2] = ["url", "bounds"];
-}
-
-impl<'de> de::Visitor<'de> for Form {
-    type Value = Endpoint;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a node URL, or an object with `url` and `bounds`")
-    }
-
-    fn visit_str<E: de::Error>(self, url: &str) -> Result<Endpoint, E> {
-        Ok(Endpoint::new(url))
-    }
-
-    fn visit_map<M: de::MapAccess<'de>>(self, mut map: M) -> Result<Endpoint, M::Error> {
-        let mut url = None;
-        let mut bounds = None;
-        while let Some(key) = map.next_key::<String>()? {
-            let field = Self::FIELDS
-                .iter()
-                .find(|name| **name == key)
-                .ok_or_else(|| de::Error::unknown_field(&key, &Self::FIELDS))?;
-            let written = match *field {
-                "url" => url.replace(map.next_value()?).is_some(),
-                _ => bounds.replace(map.next_value()?).is_some(),
-            };
-            if written {
-                return Err(de::Error::duplicate_field(field));
-            }
-        }
-        Ok(Endpoint {
-            url: url.ok_or_else(|| de::Error::missing_field("url"))?,
-            bounds: bounds.unwrap_or_default(),
-        })
-    }
+pub(crate) fn invalid(message: impl Into<String>) -> Error {
+    Error::transport(ErrorKind::InvalidConfiguration, message)
 }
 
 #[cfg(test)]
@@ -307,11 +260,11 @@ mod tests {
     #[test]
     fn header_parameters_become_headers() {
         let endpoint = Endpoint::new("https://node.invalid/v1?apikey=A&header.x-api-key=B");
-        let url = url::Url::parse(&endpoint.url).unwrap();
-        let headers = Endpoint::headers(&url).unwrap();
+        let url = endpoint.parse().unwrap();
+        let headers = crate::HttpParams::try_from(&url).unwrap().headers;
         assert_eq!(headers.len(), 1);
         assert_eq!(headers["x-api-key"], "B");
-        assert!(endpoint.connect().is_ok());
+        assert_eq!(url.node.as_str(), "https://node.invalid/v1?apikey=A");
         let parts = Endpoint::new("https://u:p@node.invalid/v2/KEY?header.x-k=B")
             .parts()
             .unwrap();

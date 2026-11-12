@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use ::rpc::{Batch, Call, CallError, CallResult, Client as _, ErrorKind, Failure, Request};
+use ::rpc::{Answer, Batch, Call, Client as _, ErrorKind, Failure, RawJson, Request};
 use alloy_consensus::TxEip1559;
 use alloy_primitives::{B256, Bytes, U64, U256, hex, keccak256};
 use alloy_rpc_types_eth::Block as RpcBlock;
@@ -188,8 +188,7 @@ impl Client {
             .0
             .transport
             .request(Request::new(method, json!([format!("{height:#x}"), false])))
-            .await
-            .with_context(|| format!("Ethereum {method}"))?;
+            .await;
         expired(height, &reply)?;
         let timed: Option<Timed> = decode(method, reply)?;
         let timed =
@@ -262,42 +261,38 @@ impl Client {
             "latest",
             { from.to_string(): { "balance": "0xffffffffffffffffffffffff" } },
         ]);
-        let reply = match self
+        let reply = self
             .0
             .transport
             .request(Request::new("eth_estimateGas", params))
-            .await
-        {
-            Ok(reply) => reply,
+            .await;
+        let failure = match reply {
+            Ok(raw) => {
+                let gas = raw.deserialize::<U64>().map_err(TransactionError::failed)?;
+                return Ok(gas.to());
+            }
             Err(error) if error.is_retryable() => {
                 return Err(TransactionError::unavailable(format!(
                     "Ethereum eth_estimateGas: {error}"
                 )));
             }
+            Err(::rpc::Error::Remote(failure)) => failure,
             Err(error) => {
                 return Err(TransactionError::failed(format!(
                     "Ethereum eth_estimateGas: {error}"
                 )));
             }
         };
-        match reply {
-            Ok(raw) => Ok(raw
-                .deserialize::<U64>()
-                .map_err(TransactionError::failed)?
-                .to()),
-            Err(failure) => {
-                let message = failure.message.to_ascii_lowercase();
-                let failed = TransactionError::failed(CallError::Remote(failure.clone()));
-                if message.contains("execution reverted") {
-                    Err(failed.with_reason(Reason::Reverted))
-                } else if let Some(reason) = reason(&message) {
-                    Err(failed.with_reason(reason))
-                } else if failure.is_server_error() {
-                    Err(TransactionError::unavailable(CallError::Remote(failure)))
-                } else {
-                    Err(failed)
-                }
-            }
+        let message = failure.message.to_ascii_lowercase();
+        let failed = TransactionError::failed(&failure);
+        if message.contains("execution reverted") {
+            Err(failed.with_reason(Reason::Reverted))
+        } else if let Some(reason) = reason(&message) {
+            Err(failed.with_reason(reason))
+        } else if failure.is_server_error() {
+            Err(TransactionError::unavailable(&failure))
+        } else {
+            Err(failed)
         }
     }
 
@@ -331,8 +326,8 @@ impl Client {
         .with_timeout(::rpc::SEND_TIMEOUT);
         let failure = match self.0.transport.broadcast(request).await {
             Ok(()) => return Ok(()),
-            Err(::rpc::CallError::Remote(failure)) => failure,
-            Err(::rpc::CallError::Transport(error)) => {
+            Err(::rpc::Error::Remote(failure)) => failure,
+            Err(error) => {
                 return Err(TransactionError::unavailable(format!(
                     "Ethereum eth_sendRawTransaction: {error}"
                 )));
@@ -437,9 +432,10 @@ impl Client {
                 .request(Request::new("eth_getLogs", filter))
                 .await;
             let refused = match &reply {
-                Ok(Err(_)) => true,
-                Err(error) => error.kind == ErrorKind::ResponseTooLarge,
-                Ok(Ok(_)) => false,
+                Ok(_) => false,
+                Err(error) if error.is_rate_limited() => false,
+                Err(::rpc::Error::Remote(_)) => true,
+                Err(error) => error.kind() == Some(ErrorKind::ResponseTooLarge),
             };
             if refused && from < to {
                 let middle = from + (to - from) / 2;
@@ -448,12 +444,11 @@ impl Client {
                 continue;
             }
             // Lower halves go first, so every range left is above this one.
-            if let Ok(Err(failure)) = &reply
+            if let Err(::rpc::Error::Remote(failure)) = &reply
                 && is_ahead(failure)
             {
                 return Ok((transfers, Some(from)));
             }
-            let reply = reply.context("Ethereum eth_getLogs")?;
             expired(from, &reply)?;
             for log in decode::<Vec<Log>>("eth_getLogs", reply)? {
                 let height = log.block_number.to::<u64>();
@@ -471,17 +466,13 @@ impl Client {
 
     /// One repeatable call, decoded.
     async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> anyhow::Result<T> {
-        let reply = self
-            .0
-            .transport
-            .request(Request::new(method, params))
-            .await
-            .with_context(|| format!("Ethereum {method}"))?;
+        let reply = self.0.transport.request(Request::new(method, params)).await;
         decode(method, reply)
     }
 
-    /// Repeatable calls as one batch; one answer per call, in call order.
-    async fn batch(&self, calls: Vec<Call>) -> anyhow::Result<Vec<CallResult>> {
+    /// Repeatable calls as one batch; one answer per call, in call order,
+    /// an error object as the [`::rpc::Error`] a single call returns.
+    async fn batch(&self, calls: Vec<Call>) -> anyhow::Result<Vec<Result<RawJson, ::rpc::Error>>> {
         let count = calls.len();
         let replies = self
             .0
@@ -494,7 +485,8 @@ impl Client {
             "Ethereum JSON-RPC batch answered {} of {count} calls",
             replies.len()
         );
-        Ok(replies)
+        let replies = replies.into_iter().map(|reply| reply.map_err(Into::into));
+        Ok(replies.collect())
     }
 }
 
@@ -508,19 +500,39 @@ impl base::Broadcaster for Client {
     }
 }
 
-/// A node's height (`eth_blockNumber`): how a [`::rpc::Cluster`] picks its
-/// primary, over any node client.
-///
-/// # Errors
-///
-/// The node's failure, or an answer that is not a height.
-pub fn height<C: ::rpc::Client + ?Sized>(node: &C) -> ::rpc::BoxFuture<'_, Result<u64, CallError>> {
-    Box::pin(async move {
-        let raw = node
-            .request(Request::new("eth_blockNumber", json!([])).with_timeout(::rpc::PROBE_TIMEOUT))
-            .await??;
-        Ok(raw.deserialize::<U64>()?.to())
-    })
+/// The node it reaches, as is.
+impl ::rpc::Client for Client {
+    fn request<'a>(
+        &'a self,
+        request: Request,
+    ) -> ::rpc::BoxFuture<'a, Result<RawJson, ::rpc::Error>> {
+        self.0.transport.request(request)
+    }
+
+    fn batch<'a>(
+        &'a self,
+        batch: Batch,
+    ) -> ::rpc::BoxFuture<'a, Result<Vec<Answer>, ::rpc::Error>> {
+        self.0.transport.batch(batch)
+    }
+
+    fn broadcast<'a>(&'a self, request: Request) -> ::rpc::BoxFuture<'a, Result<(), ::rpc::Error>> {
+        self.0.transport.broadcast(request)
+    }
+}
+
+/// The tip is `eth_blockNumber`.
+impl base::Tip for Client {
+    fn tip(&self) -> base::Future<'_, anyhow::Result<u64>> {
+        Box::pin(async move {
+            let tip: U64 = self.call("eth_blockNumber", json!([])).await?;
+            Ok(tip.to())
+        })
+    }
+
+    fn info(&self) -> base::Future<'_, anyhow::Result<NodeInfo>> {
+        Box::pin(Self::info(self))
+    }
 }
 
 /// `wire` with its receipts and token logs, as a base block; withdrawals are
@@ -603,7 +615,7 @@ fn calls(wires: &[WireBlock], by_transaction: bool) -> Vec<Call> {
 fn collect(
     wires: &[WireBlock],
     by_transaction: bool,
-    replies: Vec<CallResult>,
+    replies: Vec<Result<RawJson, ::rpc::Error>>,
 ) -> anyhow::Result<Option<Vec<Option<Vec<Value>>>>> {
     let mut replies = replies.into_iter();
     let mut next = || {
@@ -629,10 +641,10 @@ fn collect(
                 .collect::<anyhow::Result<Option<Vec<_>>>>()?
         } else {
             match next()? {
-                Err(Failure {
+                Err(::rpc::Error::Remote(Failure {
                     code: METHOD_NOT_FOUND,
                     ..
-                }) => return Ok(None),
+                })) => return Ok(None),
                 reply => {
                     expired(height, &reply)?;
                     decode::<Option<Vec<Value>>>("eth_getBlockReceipts", reply)?
@@ -652,19 +664,21 @@ fn is_ahead(failure: &Failure) -> bool {
 
 /// [`NotServed`] when `reply` says the node keeps no history for block
 /// `height` (EIP-4444).
-fn expired(height: u64, reply: &CallResult) -> Result<(), NotServed> {
+fn expired(height: u64, reply: &Result<RawJson, ::rpc::Error>) -> Result<(), NotServed> {
     match reply {
-        Err(failure) if failure.code == HISTORY_EXPIRED => Err(NotServed { position: height }),
+        Err(::rpc::Error::Remote(failure)) if failure.code == HISTORY_EXPIRED => {
+            Err(NotServed { position: height })
+        }
         _ => Ok(()),
     }
 }
 
-/// A call's result decoded as `T`; a node error object is an error that
-/// keeps its [`CallError`].
-fn decode<T: DeserializeOwned>(method: &str, reply: CallResult) -> anyhow::Result<T> {
-    let raw = reply
-        .map_err(CallError::Remote)
-        .with_context(|| format!("Ethereum {method}"))?;
+/// A call's result decoded as `T`; an error keeps its [`::rpc::Error`].
+fn decode<T: DeserializeOwned>(
+    method: &str,
+    reply: Result<RawJson, ::rpc::Error>,
+) -> anyhow::Result<T> {
+    let raw = reply.with_context(|| format!("Ethereum {method}"))?;
     raw.deserialize()
         .with_context(|| format!("Ethereum {method} result"))
 }

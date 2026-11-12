@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use ::rpc::{CallResult, Failure, RawJson};
+use ::rpc::{Answer, Failure, RawJson};
 use alloy_consensus::{Transaction as _, TxEnvelope, transaction::SignerRecoverable as _};
 use alloy_eips::Decodable2718 as _;
 use alloy_primitives::{Address, B256, Bytes, Signature, U256, hex, keccak256};
@@ -153,7 +153,7 @@ impl Model {
     /// `eth_sendRawTransaction`, refusing as the recorded node does: bytes,
     /// chain, then funds; `already known`, `nonce too low` and the fee cap
     /// are modeled (an empty key cannot provoke them).
-    fn send(&self, view: &mut View<'_, Self>, params: &Value) -> CallResult {
+    fn send(&self, view: &mut View<'_, Self>, params: &Value) -> Answer {
         let bytes = params[0]
             .as_str()
             .and_then(|text| hex::decode(text).ok())
@@ -216,7 +216,7 @@ impl Model {
 
     /// `eth_estimateGas` of an ether or token transfer; a token transfer
     /// beyond the sender's balance reverts as recorded.
-    fn estimate(&self, view: &View<'_, Self>, params: &Value) -> CallResult {
+    fn estimate(&self, view: &View<'_, Self>, params: &Value) -> Answer {
         let call = &params[0];
         let data = call["data"]
             .as_str()
@@ -412,7 +412,7 @@ impl base::testing::Model for Model {
         Seal { hash, parent }
     }
 
-    fn answer(&self, view: &mut View<'_, Self>, method: &str, params: &Value) -> CallResult {
+    fn answer(&self, view: &mut View<'_, Self>, method: &str, params: &Value) -> Answer {
         let result = match method {
             "eth_chainId" => recording("eth_chainId").result().clone(),
             "eth_blockNumber" => json!(format!("{:#x}", view.head())),

@@ -273,6 +273,47 @@ impl base::Dated for Days {
     }
 }
 
+/// One node of the scripted network: regtest at tip 0, whatever it is.
+struct Node(Arc<dyn rpc::Client>);
+
+impl rpc::Client for Node {
+    fn request<'a>(
+        &'a self,
+        request: rpc::Request,
+    ) -> rpc::BoxFuture<'a, Result<rpc::RawJson, rpc::Error>> {
+        self.0.request(request)
+    }
+
+    fn batch<'a>(
+        &'a self,
+        batch: rpc::Batch,
+    ) -> rpc::BoxFuture<'a, Result<Vec<rpc::Answer>, rpc::Error>> {
+        self.0.batch(batch)
+    }
+
+    fn broadcast<'a>(
+        &'a self,
+        request: rpc::Request,
+    ) -> rpc::BoxFuture<'a, Result<(), rpc::Error>> {
+        self.0.broadcast(request)
+    }
+}
+
+impl base::Tip for Node {
+    fn tip(&self) -> Future<'_, anyhow::Result<u64>> {
+        Box::pin(async { Ok(0) })
+    }
+
+    fn info(&self) -> Future<'_, anyhow::Result<base::NodeInfo>> {
+        Box::pin(async {
+            Ok(base::NodeInfo {
+                chain_id: "regtest".to_owned(),
+                tip: 0,
+            })
+        })
+    }
+}
+
 /// The scripted network's configuration, and its history limit (found by
 /// time over [`Days`]).
 struct Config(Arc<Script>, Option<Duration>);
@@ -282,20 +323,8 @@ impl base::Config for Config {
         network()
     }
 
-    fn height(&self) -> base::Height {
-        fn zero(_: &rpc::Http) -> rpc::BoxFuture<'_, Result<u64, rpc::CallError>> {
-            Box::pin(async { Ok(0) })
-        }
-        zero
-    }
-
-    fn info(&self, _: Arc<dyn rpc::Client>) -> Future<'_, anyhow::Result<base::NodeInfo>> {
-        Box::pin(async {
-            Ok(base::NodeInfo {
-                chain_id: "regtest".to_owned(),
-                tip: 0,
-            })
-        })
+    fn node(&self, client: Arc<dyn rpc::Client>) -> Arc<dyn base::Tip> {
+        Arc::new(Node(client))
     }
 
     fn build<'a>(

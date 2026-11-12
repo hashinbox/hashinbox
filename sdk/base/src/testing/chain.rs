@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use rpc::CallResult;
+use rpc::Answer;
 use serde_json::Value;
 
 use super::{Node, View};
@@ -32,7 +32,7 @@ pub trait Model: Send + Sync + Sized + 'static {
 
     /// A node's answer to `method` with `params`, over its `view`; an
     /// unknown method gets the chain's recorded method-not-found error.
-    fn answer(&self, view: &mut View<'_, Self>, method: &str, params: &Value) -> CallResult;
+    fn answer(&self, view: &mut View<'_, Self>, method: &str, params: &Value) -> Answer;
 }
 
 /// One block of the tree.
@@ -313,7 +313,7 @@ mod tests {
             (branch, height)
         }
 
-        fn answer(&self, view: &mut View<'_, Self>, method: &str, params: &Value) -> CallResult {
+        fn answer(&self, view: &mut View<'_, Self>, method: &str, params: &Value) -> Answer {
             let answer = match method {
                 "head" => json!([view.head(), view.finalized(), view.head_state()]),
                 "send" => json!(view.submit(params[0].as_u64().unwrap_or(0)) == Submitted::New),
@@ -325,7 +325,7 @@ mod tests {
 
     fn ask(node: &Node<Sum>, method: &str, params: Value) -> Value {
         let reply = futures_executor::block_on(node.request(Request::new(method, params)));
-        reply.unwrap().unwrap().deserialize().unwrap()
+        reply.unwrap().deserialize().unwrap()
     }
 
     #[test]

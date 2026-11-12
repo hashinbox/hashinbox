@@ -1,12 +1,30 @@
+//! Why a call returned no result, and the one retry and rate-limit policy.
+
 use std::{error::Error as StdError, fmt};
 
-use crate::Failure;
+use crate::RawJson;
 
-/// Classification of a transport [`Error`].
+/// Why a call returned no result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The node answered with a JSON-RPC error object.
+    Remote(Failure),
+    /// No answer to interpret: configuration, a local request check, a
+    /// timeout, an unreachable node, an HTTP status, an oversized or invalid
+    /// body.
+    Transport {
+        /// What went wrong, for callers to branch on.
+        kind: ErrorKind,
+        /// Human-readable context; never contains endpoint URLs.
+        message: String,
+    },
+}
+
+/// Classification of a [`Error::Transport`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// An [`crate::Endpoint`] — its URL or a bound — or an endpoint list is
-    /// invalid.
+    /// An [`crate::Endpoint`] — its URL or a setting — or a composition (a
+    /// route) is invalid.
     InvalidConfiguration,
     /// The request was rejected locally before sending (params, empty batch).
     InvalidRequest,
@@ -16,150 +34,248 @@ pub enum ErrorKind {
     Unavailable,
     /// The endpoint answered with a non-success HTTP status (429/502/503/504 retryable).
     HttpStatus(u16),
-    /// A body exceeded the endpoint's configured [`crate::Bounds`].
+    /// A response exceeded the endpoint's `rpc.max_response_bytes`.
     ResponseTooLarge,
     /// The response is not valid JSON-RPC or does not decode into the requested type.
     InvalidResponse,
-    /// The node answered a rate or size limit error object with this code
-    /// ([`Failure::is_rate_limited`]; retryable).
-    RateLimited(i64),
 }
 
-/// A transport failure: the call produced no server answer to interpret.
+/// A JSON-RPC error object returned by the server for one call.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Error {
-    /// What went wrong, for callers to branch on.
-    pub kind: ErrorKind,
-    /// Human-readable context; never contains endpoint URLs.
+pub struct Failure {
+    /// JSON-RPC error code.
+    pub code: i64,
+    /// Server-controlled message; operators see it (truncated) in
+    /// [`fmt::Display`], end users should not.
     pub message: String,
+    /// Optional server-controlled detail.
+    pub data: Option<RawJson>,
 }
 
 impl Error {
-    pub(crate) fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self {
+    pub(crate) fn transport(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self::Transport {
             kind,
             message: message.into(),
         }
     }
 
-    /// Whether repeating the request may succeed: timeouts, unavailable
-    /// endpoints, HTTP 429/502/503/504, and rate-limited answers.
+    /// The transport kind; `None` for an error object.
     #[must_use]
-    pub const fn is_retryable(&self) -> bool {
+    pub const fn kind(&self) -> Option<ErrorKind> {
+        match self {
+            Self::Transport { kind, .. } => Some(*kind),
+            Self::Remote(_) => None,
+        }
+    }
+
+    /// Whether repeating the request may succeed: a timeout, an unreachable
+    /// node, HTTP 429/502/503/504, or a rate limit ([`Self::is_rate_limited`]).
+    /// Any other error object is the node's answer, so repeating it repeats
+    /// the answer.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Transport { kind, .. } => matches!(
+                kind,
+                ErrorKind::Timeout
+                    | ErrorKind::Unavailable
+                    | ErrorKind::HttpStatus(429 | 502 | 503 | 504)
+            ),
+            Self::Remote(failure) => failure.is_rate_limited(),
+        }
+    }
+
+    /// Whether the node refused for a rate limit: HTTP 429, or an error
+    /// object [`Failure::is_rate_limited`] says is one.
+    #[must_use]
+    pub fn is_rate_limited(&self) -> bool {
+        match self {
+            Self::Transport { kind, .. } => *kind == ErrorKind::HttpStatus(429),
+            Self::Remote(failure) => failure.is_rate_limited(),
+        }
+    }
+
+    /// Whether the work was refused before sending, so no node was asked.
+    pub(crate) const fn is_local(&self) -> bool {
         matches!(
-            self.kind,
-            ErrorKind::Timeout
-                | ErrorKind::Unavailable
-                | ErrorKind::HttpStatus(429 | 502 | 503 | 504)
-                | ErrorKind::RateLimited(_)
+            self,
+            Self::Transport {
+                kind: ErrorKind::InvalidRequest,
+                ..
+            }
         )
     }
 
-    /// `failure` as a retryable transport error when it is rate-limited, so
-    /// [`crate::Retry`] backs off and [`crate::Failover`] moves on.
-    pub(crate) fn limited(failure: Failure) -> Result<Failure, Self> {
-        if !failure.is_rate_limited() {
-            return Ok(failure);
-        }
-        Err(Self::new(
-            ErrorKind::RateLimited(failure.code),
-            failure.to_string(),
-        ))
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl StdError for Error {}
-
-/// Why one JSON-RPC call returned no result.
-///
-/// The transport either failed locally ([`Error`]) or the server answered with
-/// a JSON-RPC error object ([`Failure`]). Both convert with `From`, so a call
-/// flattens with `client.request(method, params).await??`. Chains keep their
-/// own retry policy for remote codes and map this into their native error.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CallError {
-    /// The transport failed locally.
-    Transport(Error),
-    /// The server returned a JSON-RPC error object.
-    Remote(Failure),
-}
-
-impl CallError {
-    /// The server's JSON-RPC error code; `None` for a local transport failure.
-    #[must_use]
-    pub const fn remote_code(&self) -> Option<i64> {
+    /// What a log shows: the kind, or the node's code and truncated message;
+    /// never the transport's own message.
+    pub(crate) fn summary(&self) -> String {
         match self {
-            Self::Transport(_) => None,
-            Self::Remote(failure) => Some(failure.code),
+            Self::Transport { kind, .. } => kind.to_string(),
+            Self::Remote(failure) => failure.to_string(),
         }
     }
 
-    /// Default policy: retryable transport failures and implementation-defined
-    /// server errors (`-32099..=-32000`) may be retried.
-    #[must_use]
-    pub const fn is_retryable(&self) -> bool {
+    /// This error as one nonzero number, for lock-free counters: the kind's
+    /// [`ErrorKind::code`], or [`REMOTE`] plus the error object's code.
+    pub(crate) fn code(&self) -> u64 {
         match self {
-            Self::Transport(error) => error.is_retryable(),
-            Self::Remote(failure) => failure.is_server_error(),
+            Self::Transport { kind, .. } => kind.code(),
+            Self::Remote(failure) => REMOTE | u64::from(failure.code as u32),
         }
     }
-}
 
-impl From<Error> for CallError {
-    fn from(error: Error) -> Self {
-        Self::Transport(error)
+    /// What a [`Self::code`] says, with no message from the node; `None` for
+    /// zero or a code no error has.
+    pub(crate) fn describe(code: u64) -> Option<String> {
+        if code & REMOTE != 0 {
+            let code = code as u32 as i32;
+            return Some(format!("JSON-RPC call failed with code {code}"));
+        }
+        ErrorKind::from_code(code).map(|kind| kind.to_string())
     }
 }
 
-impl From<Failure> for CallError {
+/// The bit of an [`Error::code`] that marks an error object's code.
+const REMOTE: u64 = 1 << 32;
+
+/// The bit of an [`ErrorKind::code`] that marks an HTTP status, in its low 16 bits.
+const HTTP: u64 = 1 << 16;
+
+/// Each kind's code but [`ErrorKind::HttpStatus`], which is `HTTP | status`.
+const CODES: [(ErrorKind, u64); 6] = [
+    (ErrorKind::InvalidConfiguration, 1),
+    (ErrorKind::InvalidRequest, 2),
+    (ErrorKind::Timeout, 3),
+    (ErrorKind::Unavailable, 4),
+    (ErrorKind::ResponseTooLarge, 5),
+    (ErrorKind::InvalidResponse, 6),
+];
+
+impl ErrorKind {
+    /// This kind as a number, by [`CODES`].
+    fn code(self) -> u64 {
+        if let Self::HttpStatus(status) = self {
+            return HTTP | u64::from(status);
+        }
+        CODES
+            .iter()
+            .find(|(kind, _)| *kind == self)
+            .map_or(0, |(_, code)| *code)
+    }
+
+    /// The kind a [`Self::code`] was made from.
+    fn from_code(code: u64) -> Option<Self> {
+        if code & !0xFFFF == HTTP {
+            return Some(Self::HttpStatus(code as u16));
+        }
+        CODES
+            .iter()
+            .find(|(_, known)| *known == code)
+            .map(|(kind, _)| *kind)
+    }
+}
+
+impl From<Failure> for Error {
     fn from(failure: Failure) -> Self {
         Self::Remote(failure)
     }
 }
 
-/// A remote failure shows its code and the node's message, truncated; never
-/// its data.
-impl fmt::Display for CallError {
+/// A transport error shows its message; an error object its code and the
+/// node's message, truncated, never its data.
+impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Transport(error) => fmt::Display::fmt(error, formatter),
+            Self::Transport { message, .. } => formatter.write_str(message),
             Self::Remote(failure) => fmt::Display::fmt(failure, formatter),
         }
     }
 }
 
-impl StdError for CallError {}
+impl StdError for Error {}
+
+/// The classification, without detail.
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            Self::InvalidConfiguration => "JSON-RPC endpoint configuration is invalid",
+            Self::InvalidRequest => "JSON-RPC request is invalid",
+            Self::Timeout => "JSON-RPC request timed out",
+            Self::Unavailable => "JSON-RPC transport is unavailable",
+            Self::HttpStatus(status) => {
+                return write!(formatter, "JSON-RPC endpoint returned HTTP {status}");
+            }
+            Self::ResponseTooLarge => "JSON-RPC response exceeded its configured limit",
+            Self::InvalidResponse => "JSON-RPC endpoint returned an invalid response",
+        };
+        formatter.write_str(text)
+    }
+}
+
+/// The most characters of a node's message a [`Failure`] shows.
+const SHOWN: usize = 200;
+
+impl Failure {
+    /// Whether the code is in the implementation-defined server range `-32099..=-32000`.
+    #[must_use]
+    pub const fn is_server_error(&self) -> bool {
+        self.code >= -32_099 && self.code <= -32_000
+    }
+
+    /// Whether the node refused for a rate or size limit, so the same call
+    /// may succeed later: `-32005` ("limit exceeded"), or `-32003` when its
+    /// message says "rate limit" or "request limit".
+    #[must_use]
+    pub fn is_rate_limited(&self) -> bool {
+        let message = self.message.to_ascii_lowercase();
+        match self.code {
+            -32_005 => true,
+            -32_003 => message.contains("rate limit") || message.contains("request limit"),
+            _ => false,
+        }
+    }
+}
+
+/// The code and the node's message, cut to its first 200 characters.
+impl fmt::Display for Failure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let shown: String = self.message.chars().take(SHOWN).collect();
+        let cut = if shown.len() < self.message.len() {
+            "…"
+        } else {
+            ""
+        };
+        write!(
+            formatter,
+            "JSON-RPC call failed with code {}: {shown}{cut}",
+            self.code
+        )
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use super::{CallError, Error, ErrorKind};
-    use crate::{Failure, Statistics};
+    use super::{Error, ErrorKind, Failure};
 
-    fn failure(code: i64, message: &str) -> Failure {
-        Failure {
+    fn failure(code: i64, message: &str) -> Error {
+        Error::Remote(Failure {
             code,
             message: message.to_owned(),
             data: None,
-        }
+        })
     }
 
     #[test]
-    fn rate_limits_become_retryable_transport_errors() {
+    fn a_rate_limit_stays_remote_and_is_retryable() {
         for (code, message) in [
             (-32_005, "Rate limit exceeded"),
             (-32_005, "query returned more than 10000 results"),
             (-32_003, "daily request limit reached"),
         ] {
-            let error = Error::limited(failure(code, message)).unwrap_err();
-            assert_eq!(error.kind, ErrorKind::RateLimited(code));
-            assert!(error.is_retryable(), "{code} {message}");
-            assert!(error.message.ends_with(message), "{}", error.message);
+            let error = failure(code, message);
+            assert!(error.is_rate_limited() && error.is_retryable(), "{message}");
+            assert_eq!(error.kind(), None);
         }
         for (code, message) in [
             (-32_003, "transaction rejected"),
@@ -167,34 +283,53 @@ mod tests {
             (-32_000, "execution reverted"),
             (-32_601, "the method does not exist"),
         ] {
-            assert_eq!(
-                Error::limited(failure(code, message)),
-                Ok(failure(code, message))
+            let error = failure(code, message);
+            assert!(
+                !error.is_rate_limited() && !error.is_retryable(),
+                "{message}"
             );
         }
-        assert!(Error::new(ErrorKind::HttpStatus(429), "slow down").is_retryable());
+        let slow = Error::transport(ErrorKind::HttpStatus(429), "slow down");
+        assert!(slow.is_retryable() && slow.is_rate_limited());
+        let busy = Error::transport(ErrorKind::HttpStatus(503), "busy");
+        assert!(busy.is_retryable() && !busy.is_rate_limited());
+    }
+
+    #[test]
+    fn every_kind_and_remote_code_round_trips() {
+        for kind in [
+            ErrorKind::InvalidConfiguration,
+            ErrorKind::InvalidRequest,
+            ErrorKind::Timeout,
+            ErrorKind::Unavailable,
+            ErrorKind::HttpStatus(429),
+            ErrorKind::HttpStatus(u16::MAX),
+            ErrorKind::ResponseTooLarge,
+            ErrorKind::InvalidResponse,
+        ] {
+            let code = Error::transport(kind, "detail").code();
+            assert_ne!(code, 0);
+            assert_eq!(ErrorKind::from_code(code), Some(kind));
+            assert_eq!(Error::describe(code), Some(kind.to_string()));
+        }
+        for code in [-32_000, -32_601, 0, 1, i64::from(i32::MIN)] {
+            let shown = Error::describe(failure(code, "secret").code());
+            assert_eq!(
+                shown,
+                Some(format!("JSON-RPC call failed with code {code}"))
+            );
+        }
+        assert_eq!(Error::describe(0), None);
     }
 
     #[test]
     fn a_remote_failure_shows_the_nodes_message_truncated() {
-        let shown = CallError::Remote(failure(-32_005, "Rate limit exceeded")).to_string();
+        let shown = failure(-32_005, "Rate limit exceeded").to_string();
         assert_eq!(
             shown,
             "JSON-RPC call failed with code -32005: Rate limit exceeded"
         );
-        let long = CallError::Remote(failure(-32_000, &"x".repeat(500))).to_string();
+        let long = failure(-32_000, &"x".repeat(500)).to_string();
         assert!(long.ends_with(&format!("{}…", "x".repeat(200))), "{long}");
-    }
-
-    #[test]
-    fn a_rate_limit_counts_as_the_nodes_code() {
-        let statistics = Statistics::default();
-        let error = Error::limited(failure(-32_005, "Rate limit exceeded")).unwrap_err();
-        let text = statistics.call(&Err(error));
-        assert_eq!(
-            text.as_deref(),
-            Some("JSON-RPC call failed with code -32005: Rate limit exceeded")
-        );
-        assert!(statistics.limited(&[crate::Limit::Remote(-32_005)]));
     }
 }

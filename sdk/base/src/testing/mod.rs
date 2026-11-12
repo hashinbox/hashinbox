@@ -83,8 +83,8 @@ pub trait TestChain: Sized + Send + Sync + 'static {
     fn start(nodes: usize) -> Self;
     /// Its nodes, in order.
     fn nodes(&self) -> Vec<Arc<dyn rpc::Client>>;
-    /// The chain's own tip probe, which its cluster picks a primary by.
-    fn height(node: &Arc<dyn rpc::Client>) -> rpc::BoxFuture<'_, Result<u64, rpc::CallError>>;
+    /// The chain's client over one of its nodes, which its cluster ranks.
+    fn client(node: Arc<dyn rpc::Client>) -> Arc<dyn crate::Tip>;
     /// The network as the server stores it; endpoints are left to the caller.
     fn network(&self) -> NetworkConfig;
     /// Pays `amount` of `asset` to `to`, mined by the next [`Self::mine`].

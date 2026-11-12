@@ -2,14 +2,11 @@
 
 use std::sync::Arc;
 
-use ::rpc::{
-    Cluster, Policy,
-    testing::{Reply, Script},
-};
+use ::rpc::testing::{Reply, Script};
 use base::{
-    Address, Asset, Broadcaster as _, BuilderExt as _, Coin, Future, Input, InputStore, Inputs,
-    Leg, Reason, Signer, TransactionErrorKind, TransactionId, TransactionState, Transfer,
-    WalletError, WalletErrorKind, WalletFactory as _,
+    Address, Asset, Broadcaster as _, BuilderExt as _, Cluster, Coin, Future, Input, InputStore,
+    Inputs, Leg, Policy, Reason, Signer, Tip, TransactionErrorKind, TransactionId,
+    TransactionState, Transfer, WalletError, WalletErrorKind, WalletFactory as _,
 };
 use bitcoin::{Transaction, consensus};
 use chain_bitcoin::{AddressType, Client, Config, Factory, Network};
@@ -238,16 +235,6 @@ async fn refuses_what_it_cannot_send() {
     assert!(empty.sign().await.is_err(), "no transfers");
 }
 
-fn probe(node: &Script) -> ::rpc::BoxFuture<'_, Result<u64, ::rpc::CallError>> {
-    use ::rpc::Client as _;
-    Box::pin(async move {
-        let reply = node
-            .request(::rpc::Request::new("getblockcount", json!([])))
-            .await??;
-        Ok(reply.deserialize()?)
-    })
-}
-
 #[tokio::test]
 async fn broadcasts_exact_bytes_to_every_node() {
     let bytes = hex_transaction();
@@ -261,7 +248,11 @@ async fn broadcasts_exact_bytes_to_every_node() {
             .once_only("sendrawtransaction")
         })
         .collect();
-    let cluster = Cluster::new(nodes.clone(), probe, Policy::default()).expect("cluster");
+    let tips = nodes
+        .iter()
+        .map(|node| Arc::new(Client::new(Arc::new(node.clone()), Network::Regtest)) as Arc<dyn Tip>)
+        .collect();
+    let cluster = Cluster::new(tips, Policy::default()).expect("cluster");
     let rpc = Client::new(Arc::new(cluster), Network::Regtest);
     let broadcaster = rpc;
     broadcaster

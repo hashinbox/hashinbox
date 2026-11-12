@@ -28,7 +28,7 @@ built by its chain (`TryFrom<&base::NetworkConfig>`), and one that fails
 verification stops the start.
 
 `PUT /v1/networks/{chain}/{network}/rpc` stores a list and moves every later call
-of the network to it at once (`rpc::Failover` behind the network's
+of the network to it at once (`base::Cluster` behind the network's
 `rpc::Swap`), unverified; the chain verifies it on the next start.
 
 The server also serves a browser page at `/` (`--brand`, `PAYMENT_UI_API_BASE`).

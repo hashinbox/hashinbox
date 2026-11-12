@@ -628,6 +628,10 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
     let reason = job.reason.clone().unwrap_or_default();
     assert!(reason.contains("no such table: block"), "{job:?}");
     assert_eq!(job.status, tasks::Status::Pending);
+    // Retried by the queue, which backs off: the failure counts as an
+    // attempt, and the next one waits for it (1 s per failure in a row).
+    assert_eq!(job.attempts, 1, "{job:?}");
+    assert!(job.run_at >= now + 1_000, "{job:?}");
 
     let state = Arc::new(AppState {
         payments,

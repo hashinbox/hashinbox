@@ -5,7 +5,7 @@
 
 use std::{path::Path, time::SystemTime};
 
-use ::rpc::{Client as _, Endpoint, Http, Request};
+use ::rpc::{Client as _, Endpoint, Node, Request};
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope};
 use alloy_eips::Encodable2718 as _;
 use alloy_primitives::{Bytes, Signature, TxKind, U256, hex, keccak256};
@@ -25,7 +25,7 @@ const PRUNED: u64 = 5_000_000;
 
 /// The node and the date every recording carries.
 struct Recorder {
-    node: Http,
+    node: Node,
     provider: String,
     date: String,
     directory: std::path::PathBuf,
@@ -37,17 +37,17 @@ impl Recorder {
         let reply = self
             .node
             .request(Request::new(method, params.clone()))
-            .await
-            .with_context(|| method.to_owned())?;
+            .await;
         let (result, error) = match reply {
             Ok(raw) => (Some(raw.deserialize::<Value>()?), None),
-            Err(failure) => {
+            Err(::rpc::Error::Remote(failure)) => {
                 let mut error = json!({"code": failure.code, "message": failure.message});
                 if let Some(data) = failure.data {
                     error["data"] = data.deserialize()?;
                 }
                 (None, Some(error))
             }
+            Err(error) => return Err(error).with_context(|| method.to_owned()),
         };
         Ok(Recording {
             provider: self.provider.clone(),
@@ -90,7 +90,7 @@ pub async fn record(url: &str, directory: &Path) -> anyhow::Result<()> {
     let endpoint = Endpoint::new(url);
     let provider = endpoint.parts().map(|parts| parts.host).unwrap_or_default();
     let recorder = Recorder {
-        node: endpoint.connect()?,
+        node: ::rpc::node(&endpoint, Default::default())?,
         provider,
         date: today(),
         directory: directory.to_owned(),

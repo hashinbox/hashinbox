@@ -13,8 +13,11 @@ use serde_json::{Value, json};
 const HOLDER: &str = "0x00000000000000000000000000000000000000b1";
 
 /// Asks node 0 of `ethereum`.
-fn ask(ethereum: &Ethereum, method: &str, params: Value) -> rpc::CallResult {
-    block_on(ethereum.mock(0).request(Request::new(method, params))).expect("the mock answers")
+fn ask(ethereum: &Ethereum, method: &str, params: Value) -> rpc::Answer {
+    match block_on(ethereum.mock(0).request(Request::new(method, params))) {
+        Err(rpc::Error::Remote(failure)) => Err(failure),
+        reply => Ok(reply.expect("the mock answers")),
+    }
 }
 
 /// For every recording, the mock answers the same request on an

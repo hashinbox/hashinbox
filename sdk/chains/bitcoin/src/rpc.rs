@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use ::rpc::{Batch, Call, CallResult, Failure, Request};
+use ::rpc::{Answer, Batch, Call, Failure, RawJson, Request};
 use anyhow::{Context as _, bail, ensure};
 use base::{
     Block, BlockHash, BlockHeader, BlockParent, Blocks, NodeInfo, NotServed, Reason, Tips,
@@ -174,8 +174,8 @@ impl Client {
             .with_timeout(::rpc::SEND_TIMEOUT);
         match self.transport.broadcast(request).await {
             Ok(()) => Ok(()),
-            Err(::rpc::CallError::Remote(failure)) => refusal(&failure),
-            Err(::rpc::CallError::Transport(error)) => Err(TransactionError::new(
+            Err(::rpc::Error::Remote(failure)) => refusal(&failure),
+            Err(error) => Err(TransactionError::new(
                 TransactionErrorKind::Unavailable,
                 format!("Bitcoin sendrawtransaction: {error}"),
             )),
@@ -235,11 +235,7 @@ impl Client {
 
     /// One repeatable call, decoded.
     async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> anyhow::Result<T> {
-        let reply = self
-            .transport
-            .request(Request::new(method, params))
-            .await
-            .with_context(|| format!("Bitcoin {method}"))?;
+        let reply = self.transport.request(Request::new(method, params)).await;
         decode(method, reply)
     }
 
@@ -248,7 +244,7 @@ impl Client {
         &self,
         method: &str,
         params: impl IntoIterator<Item = Value>,
-    ) -> anyhow::Result<Vec<CallResult>> {
+    ) -> anyhow::Result<Vec<Answer>> {
         let calls = params
             .into_iter()
             .map(|params| Call::new(method, params))
@@ -260,10 +256,20 @@ impl Client {
     }
 }
 
-/// A call's result decoded as `T`; a node error object is an error.
-fn decode<T: DeserializeOwned>(method: &str, reply: CallResult) -> anyhow::Result<T> {
-    let raw = reply
-        .map_err(|failure| anyhow::anyhow!("Bitcoin {method} failed with code {}", failure.code))?;
+/// A call's result decoded as `T`, a call's or a batch entry's; a node error
+/// object is an error naming its code.
+fn decode<T, E>(method: &str, reply: Result<RawJson, E>) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+    E: Into<::rpc::Error>,
+{
+    let raw = match reply.map_err(Into::into) {
+        Ok(raw) => raw,
+        Err(::rpc::Error::Remote(failure)) => {
+            anyhow::bail!("Bitcoin {method} failed with code {}", failure.code)
+        }
+        Err(error) => return Err(anyhow::Error::new(error).context(format!("Bitcoin {method}"))),
+    };
     raw.deserialize()
         .with_context(|| format!("Bitcoin {method} result"))
 }
@@ -319,5 +325,37 @@ impl base::Broadcaster for Client {
         transaction: &'a base::Transaction,
     ) -> base::Future<'a, Result<(), TransactionError>> {
         Box::pin(self.send(&transaction.bytes))
+    }
+}
+
+/// The node it reaches, as is.
+impl ::rpc::Client for Client {
+    fn request<'a>(
+        &'a self,
+        request: Request,
+    ) -> ::rpc::BoxFuture<'a, Result<RawJson, ::rpc::Error>> {
+        self.transport.request(request)
+    }
+
+    fn batch<'a>(
+        &'a self,
+        batch: Batch,
+    ) -> ::rpc::BoxFuture<'a, Result<Vec<Answer>, ::rpc::Error>> {
+        self.transport.batch(batch)
+    }
+
+    fn broadcast<'a>(&'a self, request: Request) -> ::rpc::BoxFuture<'a, Result<(), ::rpc::Error>> {
+        self.transport.broadcast(request)
+    }
+}
+
+/// The tip is `getblockcount`.
+impl base::Tip for Client {
+    fn tip(&self) -> base::Future<'_, anyhow::Result<u64>> {
+        Box::pin(self.call("getblockcount", json!([])))
+    }
+
+    fn info(&self) -> base::Future<'_, anyhow::Result<NodeInfo>> {
+        Box::pin(Self::info(self))
     }
 }

@@ -2,7 +2,6 @@
 
 use std::{sync::Arc, time::Duration};
 
-use ::rpc::{BoxFuture, CallError, Client as _, Http, Request};
 use anyhow::{Context as _, ensure};
 use base::{
     Asset, AssetInfo, AssetKind, Future, Indexer, InputStore, Service, Storage,
@@ -203,12 +202,8 @@ impl base::Config for Config {
         self.network.into()
     }
 
-    fn height(&self) -> base::Height {
-        height
-    }
-
-    fn info(&self, client: Arc<dyn ::rpc::Client>) -> Future<'_, anyhow::Result<base::NodeInfo>> {
-        Box::pin(async move { self.open(client)?.info().await })
+    fn node(&self, client: Arc<dyn ::rpc::Client>) -> Arc<dyn base::Tip> {
+        Arc::new(Client::new(client, self.network))
     }
 
     fn build<'a>(
@@ -244,14 +239,4 @@ impl base::Config for Config {
             })
         })
     }
-}
-
-/// A node's tip, which picks the cluster's primary.
-fn height(node: &Http) -> BoxFuture<'_, Result<u64, CallError>> {
-    Box::pin(async move {
-        let reply = node
-            .request(Request::new("getblockcount", json!([])).with_timeout(::rpc::PROBE_TIMEOUT))
-            .await??;
-        Ok(reply.deserialize()?)
-    })
 }

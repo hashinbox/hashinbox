@@ -1,12 +1,13 @@
-//! `Http` alone against a loopback node: the bytes on the wire, and how each
-//! answer maps to a result, a `Failure` or an `Error` kind.
+//! A node as `rpc::node` builds it against a loopback node: the bytes on the
+//! wire, how each answer maps to a result, a `Failure` or an `Error` kind,
+//! and the URL's `rpc.` settings.
 
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use rpc::{Batch, Bounds, Call, CallResult, Client, Endpoint, Error, ErrorKind, Failure, Http};
+use rpc::{Answer, Batch, Call, Client, Endpoint, Error, ErrorKind, Failure, Node, RawJson};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -20,7 +21,7 @@ struct Seen {
 }
 
 /// What the node writes back: raw bytes, `None` to hang, `Reset` to abort.
-enum Answer {
+enum Reply {
     Bytes(Vec<u8>),
     Hang,
     Reset(Vec<u8>),
@@ -28,7 +29,7 @@ enum Answer {
 
 /// Starts a node on `127.0.0.1:0`; every connection gets one `reply`, then
 /// closes. Returns its base URL and the requests it saw.
-async fn node(reply: fn(&Seen) -> Answer) -> (String, Arc<Mutex<Vec<Seen>>>) {
+async fn node(reply: fn(&Seen) -> Reply) -> (String, Arc<Mutex<Vec<Seen>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -42,9 +43,9 @@ async fn node(reply: fn(&Seen) -> Answer) -> (String, Arc<Mutex<Vec<Seen>>>) {
                 let answer = reply(&request);
                 log.lock().unwrap().push(request);
                 match answer {
-                    Answer::Bytes(bytes) => stream.write_all(&bytes).await.unwrap(),
-                    Answer::Hang => tokio::time::sleep(Duration::from_secs(30)).await,
-                    Answer::Reset(bytes) => {
+                    Reply::Bytes(bytes) => stream.write_all(&bytes).await.unwrap(),
+                    Reply::Hang => tokio::time::sleep(Duration::from_secs(30)).await,
+                    Reply::Reset(bytes) => {
                         stream.write_all(&bytes).await.unwrap();
                         #[allow(deprecated)]
                         stream.set_linger(Some(Duration::ZERO)).unwrap();
@@ -79,8 +80,8 @@ async fn read(stream: &mut TcpStream) -> Seen {
 }
 
 /// A full HTTP/1.1 response with a correct `content-length`.
-fn http(status: &str, body: &str) -> Answer {
-    Answer::Bytes(
+fn http(status: &str, body: &str) -> Reply {
+    Reply::Bytes(
         format!(
             "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
@@ -89,7 +90,7 @@ fn http(status: &str, body: &str) -> Answer {
     )
 }
 
-fn ok(body: &Value) -> Answer {
+fn ok(body: &Value) -> Reply {
     http("200 OK", &body.to_string())
 }
 
@@ -110,30 +111,37 @@ fn items(seen: &Seen) -> &Vec<Value> {
     seen.body.as_array().unwrap()
 }
 
-fn connect(url: &str, bounds: Bounds) -> Http {
-    Endpoint::new(url).with_bounds(bounds).connect().unwrap()
+fn connect(url: &str) -> Node {
+    rpc::node(&Endpoint::new(url), Default::default()).unwrap()
 }
 
-async fn call(url: &str) -> Result<CallResult, Error> {
-    connect(url, Bounds::default())
+async fn call(url: &str) -> Result<RawJson, Error> {
+    connect(url)
         .request(rpc::Request::new("ping", json!([1])))
         .await
 }
 
-async fn batch(url: &str) -> Result<Vec<CallResult>, Error> {
+async fn batch(url: &str) -> Result<Vec<Answer>, Error> {
     let calls = vec![Call::new("a", json!([])), Call::new("b", json!([]))];
-    connect(url, Bounds::default())
-        .batch(Batch::new(calls).unwrap())
-        .await
+    connect(url).batch(Batch::new(calls).unwrap()).await
 }
 
-fn raw(text: &str) -> CallResult {
-    Ok(rpc::RawJson::new(text.as_bytes().to_vec()).unwrap())
+fn raw(text: &str) -> RawJson {
+    RawJson::new(text.as_bytes().to_vec()).unwrap()
 }
 
 fn kind(outcome: Result<impl std::fmt::Debug, Error>) -> (ErrorKind, bool) {
     let error = outcome.unwrap_err();
-    (error.kind, error.is_retryable())
+    let kind = error.kind().expect("a transport error");
+    (kind, error.is_retryable())
+}
+
+/// The error object `outcome` failed with.
+fn remote(outcome: Result<RawJson, Error>) -> Failure {
+    let Err(Error::Remote(failure)) = outcome else {
+        panic!("not an error object: {outcome:?}");
+    };
+    failure
 }
 
 #[tokio::test]
@@ -151,7 +159,7 @@ async fn single_call_returns_result_bytes() {
 async fn request_carries_json_content_type_auth_and_header_parameters() {
     let (url, seen) = node(|seen| ok(&result(&seen.body["id"], json!(null)))).await;
     let url = url.replace("http://", "http://user:pass@") + "/v1?key=K&header.x-api-key=SECRET";
-    call(&url).await.unwrap().unwrap();
+    call(&url).await.unwrap();
     let seen = seen.lock().unwrap();
     let head = &seen[0].head;
     assert!(head.starts_with("post /v1?key=k http/1.1"), "{head}");
@@ -164,7 +172,7 @@ async fn request_carries_json_content_type_auth_and_header_parameters() {
 #[tokio::test]
 async fn error_object_keeps_code_message_and_data() {
     let (url, _) = node(|seen| ok(&error(&seen.body["id"], -32000, "header not found"))).await;
-    let failure = call(&url).await.unwrap().unwrap_err();
+    let failure = remote(call(&url).await);
     assert_eq!(
         failure,
         Failure {
@@ -181,7 +189,7 @@ async fn error_object_keeps_code_message_and_data() {
 }
 
 #[tokio::test]
-async fn rate_limit_error_objects_are_retryable_transport_errors() {
+async fn rate_limit_error_objects_stay_remote_and_are_retryable() {
     let (url, _) = node(|seen| match path(seen) {
         "/32005" => ok(&error(&seen.body["id"], -32005, "limit exceeded")),
         "/32003-limit" => ok(&error(&seen.body["id"], -32003, "Request Limit reached")),
@@ -189,24 +197,30 @@ async fn rate_limit_error_objects_are_retryable_transport_errors() {
     })
     .await;
     let limited = call(&format!("{url}/32005")).await.unwrap_err();
-    assert_eq!(limited.kind, ErrorKind::RateLimited(-32005));
-    assert!(limited.is_retryable());
+    assert!(limited.is_rate_limited() && limited.is_retryable());
     assert_eq!(
-        limited.message,
+        limited.to_string(),
         "JSON-RPC call failed with code -32005: limit exceeded"
     );
-    let outcome = call(&format!("{url}/32003-limit")).await;
-    assert_eq!(kind(outcome), (ErrorKind::RateLimited(-32003), true));
-    let failure = call(&format!("{url}/32003")).await.unwrap().unwrap_err();
-    assert_eq!(failure.code, -32003);
+    let limited = call(&format!("{url}/32003-limit")).await.unwrap_err();
+    assert!(matches!(
+        &limited,
+        Error::Remote(Failure { code: -32003, .. })
+    ));
+    assert!(limited.is_rate_limited() && limited.is_retryable());
+    let refused = call(&format!("{url}/32003")).await.unwrap_err();
+    assert!(matches!(
+        &refused,
+        Error::Remote(Failure { code: -32003, .. })
+    ));
+    assert!(!refused.is_rate_limited() && !refused.is_retryable());
 }
 
 #[tokio::test]
 async fn a_pool_rejection_mentioning_a_limit_is_not_a_rate_limit() {
     let (url, _) =
         node(|seen| ok(&error(&seen.body["id"], -32003, "exceeds block gas limit"))).await;
-    let failure = call(&url).await.unwrap().unwrap_err();
-    assert!(!failure.is_rate_limited());
+    assert!(!remote(call(&url).await).is_rate_limited());
 }
 
 #[tokio::test]
@@ -222,7 +236,7 @@ async fn batch_results_follow_request_order() {
     .await;
     assert_eq!(
         batch(&url).await.unwrap(),
-        vec![raw(r#""a""#), raw(r#""b""#)]
+        vec![Ok(raw(r#""a""#)), Ok(raw(r#""b""#))]
     );
     assert_eq!(items(&seen.lock().unwrap()[0]).len(), 2);
 }
@@ -238,7 +252,7 @@ async fn batch_with_one_failed_item() {
     })
     .await;
     let results = batch(&url).await.unwrap();
-    assert_eq!(results[0], raw("1"));
+    assert_eq!(results[0], Ok(raw("1")));
     assert_eq!(results[1].as_ref().unwrap_err().code, -32601);
     assert_eq!(results.len(), 2);
 }
@@ -253,10 +267,12 @@ async fn batch_with_one_rate_limited_item_fails_whole() {
         ]))
     })
     .await;
-    assert_eq!(
-        kind(batch(&url).await),
-        (ErrorKind::RateLimited(-32005), true)
-    );
+    let error = batch(&url).await.unwrap_err();
+    assert!(matches!(
+        &error,
+        Error::Remote(Failure { code: -32005, .. })
+    ));
+    assert!(error.is_retryable());
 }
 
 #[tokio::test]
@@ -343,25 +359,21 @@ async fn duplicate_batch_id_is_invalid_response() {
 }
 
 #[tokio::test]
-async fn slow_node_times_out() {
-    let (url, _) = node(|_| Answer::Hang).await;
-    let http = connect(
-        &url,
-        Bounds {
-            timeout_ms: 100,
-            ..Bounds::default()
-        },
-    );
+async fn rpc_timeout_ms_is_applied_and_never_sent() {
+    let (url, seen) = node(|_| Reply::Hang).await;
+    let http = connect(&format!("{url}/?key=K&rpc.timeout_ms=100"));
     let start = Instant::now();
     let outcome = http.request(rpc::Request::new("ping", json!([]))).await;
     assert_eq!(kind(outcome), (ErrorKind::Timeout, true));
     assert!(start.elapsed() < Duration::from_millis(500));
+    let head = &seen.lock().unwrap()[0].head;
+    assert!(head.starts_with("post /?key=k http/1.1"), "{head}");
 }
 
 #[tokio::test]
 async fn a_request_or_batch_times_out_at_its_own_limit() {
-    let (url, _) = node(|_| Answer::Hang).await;
-    let http = connect(&url, Bounds::default());
+    let (url, _) = node(|_| Reply::Hang).await;
+    let http = connect(&url);
     let start = Instant::now();
     let short = rpc::Request::new("ping", json!([])).with_timeout(Duration::from_millis(100));
     assert_eq!(kind(http.request(short).await), (ErrorKind::Timeout, true));
@@ -395,9 +407,9 @@ async fn refused_connection_is_unavailable() {
 async fn connection_cut_mid_response_is_unavailable() {
     let (url, _) = node(|seen| match path(seen) {
         "/reset" => {
-            Answer::Reset(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{\"jsonrpc\"".to_vec())
+            Reply::Reset(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{\"jsonrpc\"".to_vec())
         }
-        _ => Answer::Bytes(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{\"jsonrpc\"".to_vec()),
+        _ => Reply::Bytes(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{\"jsonrpc\"".to_vec()),
     })
     .await;
     for case in ["reset", "closed"] {
@@ -409,13 +421,7 @@ async fn connection_cut_mid_response_is_unavailable() {
 #[tokio::test]
 async fn oversized_response_is_too_large() {
     let (url, _) = node(|seen| ok(&result(&seen.body["id"], json!("x".repeat(1000))))).await;
-    let http = connect(
-        &url,
-        Bounds {
-            max_response_bytes: 256,
-            ..Bounds::default()
-        },
-    );
+    let http = connect(&format!("{url}/?rpc.max_response_bytes=256"));
     let outcome = http.request(rpc::Request::new("ping", json!([]))).await;
     assert_eq!(kind(outcome), (ErrorKind::ResponseTooLarge, false));
 }
@@ -423,16 +429,144 @@ async fn oversized_response_is_too_large() {
 #[tokio::test]
 async fn oversized_request_is_invalid_request() {
     let (url, seen) = node(|seen| ok(&result(&seen.body["id"], json!(null)))).await;
-    let http = connect(
-        &url,
-        Bounds {
-            max_request_bytes: 64,
-            ..Bounds::default()
-        },
-    );
+    let http = connect(&format!("{url}/?rpc.max_request_bytes=64"));
     let outcome = http
         .request(rpc::Request::new("ping", json!(["x".repeat(1000)])))
         .await;
     assert_eq!(kind(outcome), (ErrorKind::InvalidRequest, false));
     assert!(seen.lock().unwrap().is_empty());
+}
+
+/// A node answering a batch in order, and a single call alone; it echoes
+/// each call's method.
+fn echo(seen: &Seen) -> Reply {
+    let one = |item: &Value| result(&item["id"], item["method"].clone());
+    match &seen.body {
+        Value::Array(items) => ok(&Value::Array(items.iter().map(one).collect())),
+        item => ok(&one(item)),
+    }
+}
+
+/// `count` calls named `c0`, `c1`, … as one batch to `url`.
+async fn batch_of(url: &str, count: usize) -> Result<Vec<Answer>, Error> {
+    let calls = (0..count)
+        .map(|n| Call::new(format!("c{n}"), json!([])))
+        .collect();
+    connect(url).batch(Batch::new(calls).unwrap()).await
+}
+
+#[tokio::test]
+async fn a_batch_larger_than_max_batch_goes_in_several_requests_in_order() {
+    let (url, seen) = node(echo).await;
+    let url = url + "/?rpc.max_batch=2";
+    let results = batch_of(&url, 5).await.unwrap();
+    let methods: Vec<Answer> = (0..5).map(|n| Ok(raw(&format!(r#""c{n}""#)))).collect();
+    assert_eq!(results, methods, "every answer, in call order");
+    let seen = seen.lock().unwrap();
+    let sizes: Vec<usize> = seen.iter().map(|one| items(one).len()).collect();
+    assert_eq!(sizes, [2, 2, 1], "requests of at most 2 calls, in order");
+    assert!(
+        seen.iter().all(|one| !one.head.contains("rpc.max_batch")),
+        "never sent to the node"
+    );
+}
+
+#[tokio::test]
+async fn max_batch_1_sends_each_call_alone_never_a_batch() {
+    let (url, seen) = node(echo).await;
+    let url = url + "/?key=K&rpc.max_batch=1";
+    let results = batch_of(&url, 3).await.unwrap();
+    assert_eq!(
+        results,
+        vec![Ok(raw(r#""c0""#)), Ok(raw(r#""c1""#)), Ok(raw(r#""c2""#))]
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    for one in seen.iter() {
+        assert!(
+            one.body.is_object(),
+            "a single call, not a batch: {}",
+            one.body
+        );
+        assert!(
+            one.head.starts_with("post /?key=k http/1.1"),
+            "{}",
+            one.head
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_batch_within_max_batch_is_one_request() {
+    let (url, seen) = node(echo).await;
+    batch_of(&(url + "/?rpc.max_batch=10"), 3).await.unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(items(&seen[0]).len(), 3);
+}
+
+#[tokio::test]
+async fn a_failing_request_fails_the_split_batch() {
+    let (url, _) = node(|seen| {
+        if seen
+            .body
+            .as_array()
+            .is_some_and(|items| items[0]["method"] == "c2")
+        {
+            return http("429 Too Many Requests", "");
+        }
+        echo(seen)
+    })
+    .await;
+    let outcome = batch_of(&(url + "/?rpc.max_batch=2"), 4).await;
+    assert_eq!(kind(outcome), (ErrorKind::HttpStatus(429), true));
+}
+
+#[test]
+fn rpc_settings_are_read_and_checked() {
+    for bad in [
+        "http://node.invalid/?rpc.max_batch=0",
+        "http://node.invalid/?rpc.max_batch=x",
+        "http://node.invalid/?rpc.max_batch=1&rpc.max_batch=2",
+        "http://node.invalid/?rpc.timeout_ms=0",
+        "http://node.invalid/?rpc.max_request_bytes=-1",
+        "http://node.invalid/?rpc.max_response_bytes=4294967296",
+    ] {
+        let error = Endpoint::new(bad).validate().unwrap_err();
+        assert_eq!(error.kind(), Some(ErrorKind::InvalidConfiguration), "{bad}");
+    }
+    let endpoint = Endpoint::new(
+        "http://node.invalid/?rpc.timeout_ms=20000&rpc.max_request_bytes=1&rpc.max_response_bytes=2&rpc.max_batch=3",
+    );
+    let url = endpoint.parse().unwrap();
+    let params = rpc::HttpParams::try_from(&url).unwrap();
+    assert_eq!(
+        (
+            params.timeout_ms,
+            params.max_request_bytes,
+            params.max_response_bytes
+        ),
+        (20_000, 1, 2)
+    );
+    let split = rpc::SplitParams::try_from(&url).unwrap();
+    assert_eq!(split.max_batch.map(|max| max.get()), Some(3));
+    let rpc = url.params.namespace("rpc");
+    assert_eq!(rpc.get_int::<usize>("max_batch"), Ok(Some(3)));
+    assert_eq!(url.params.get_int::<usize>("rpc.max_batch"), Ok(Some(3)));
+    assert_eq!(rpc.get("absent"), None);
+    let plain = Endpoint::new("http://node.invalid/").parse().unwrap();
+    assert_eq!(
+        rpc::HttpParams::try_from(&plain),
+        Ok(rpc::HttpParams::default())
+    );
+    let parts = endpoint.parts().unwrap();
+    assert!(parts.parameters.iter().all(|parameter| parameter.setting));
+}
+
+#[test]
+fn an_endpoint_is_its_url_in_json() {
+    let endpoint = Endpoint::new("http://node.invalid/?rpc.max_batch=1");
+    let json = serde_json::to_string(&endpoint).unwrap();
+    assert_eq!(json, r#""http://node.invalid/?rpc.max_batch=1""#);
+    assert_eq!(serde_json::from_str::<Endpoint>(&json).unwrap(), endpoint);
 }

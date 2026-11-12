@@ -5,13 +5,15 @@ use std::{
 
 use serde_json::Value;
 
-use crate::{Batch, BoxFuture, CallResult, Client, Error, Failure, RawJson, Repetition, Request};
+use crate::{
+    Answer, Batch, BoxFuture, Client, Error, Failure, RawJson, Repetition, Request, client::answer,
+};
 
 /// One expected call and the reply it gets.
 pub struct Reply {
     method: &'static str,
     params: Option<Value>,
-    result: Result<CallResult, Error>,
+    result: Result<RawJson, Error>,
 }
 
 impl Reply {
@@ -23,7 +25,7 @@ impl Reply {
     #[must_use]
     pub fn ok(method: &'static str, value: Value) -> Self {
         let raw = RawJson::from_serializable(&value).expect("a scripted result must serialize");
-        Self::result(method, Ok(Ok(raw)))
+        Self::result(method, Ok(raw))
     }
 
     /// Replies with exact bytes, which must be one valid JSON value.
@@ -34,10 +36,10 @@ impl Reply {
     #[must_use]
     pub fn raw(method: &'static str, bytes: Vec<u8>) -> Self {
         let raw = RawJson::new(bytes).expect("a scripted result must be valid JSON");
-        Self::result(method, Ok(Ok(raw)))
+        Self::result(method, Ok(raw))
     }
 
-    /// Replies with a server error object: a result, not a transport failure.
+    /// Replies with a server error object ([`Error::Remote`]).
     #[must_use]
     pub fn failure(method: &'static str, code: i64, message: &str) -> Self {
         let failure = Failure {
@@ -45,12 +47,13 @@ impl Reply {
             message: message.to_owned(),
             data: None,
         };
-        Self::result(method, Ok(Err(failure)))
+        Self::result(method, Err(Error::Remote(failure)))
     }
 
-    /// Replies with any outcome, a transport [`Error`] included.
+    /// Replies with any outcome, a transport [`Error`] included. In a batch,
+    /// an error object stays with its call; any other error fails the batch.
     #[must_use]
-    pub fn result(method: &'static str, result: Result<CallResult, Error>) -> Self {
+    pub fn result(method: &'static str, result: Result<RawJson, Error>) -> Self {
         Self {
             method,
             params: None,
@@ -90,7 +93,7 @@ impl Script {
 
     /// The same script, with `method` pinned to exactly one execution: a
     /// request for it that carries [`Repetition::Permitted`] fails the test.
-    /// A chain names its submission method here, which is the assertion that
+    /// An adapter names its submission method here, which is the assertion that
     /// its submitter never lets a decorator replay an envelope.
     #[must_use]
     pub fn once_only(mut self, method: &'static str) -> Self {
@@ -131,7 +134,7 @@ impl Script {
         self.state.lock().expect("script lock must be healthy")
     }
 
-    fn take(&self, method: &str, params: Value) -> Result<CallResult, Error> {
+    fn take(&self, method: &str, params: Value) -> Result<RawJson, Error> {
         let mut state = self.state();
         let reply = state
             .replies
@@ -154,7 +157,7 @@ impl Script {
 }
 
 impl Client for Script {
-    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<RawJson, Error>> {
         let repetition = request.repetition();
         let call = request.into_call();
         self.pinned(&call.method, repetition);
@@ -162,14 +165,14 @@ impl Client for Script {
         Box::pin(async move { result })
     }
 
-    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>> {
         let repetition = batch.repetition();
         let results = batch
             .into_calls()
             .into_iter()
             .map(|call| {
                 self.pinned(&call.method, repetition);
-                self.take(&call.method, call.params)
+                answer(self.take(&call.method, call.params))
             })
             .collect::<Result<Vec<_>, _>>();
         Box::pin(async move { results })

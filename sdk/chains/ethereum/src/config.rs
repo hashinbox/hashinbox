@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::{
     Chain, Client, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Factory, FeeLimits, Network, Tokens,
-    fee::Estimator, fee_cache::Cached, rpc,
+    fee::Estimator, fee_cache::Cached,
 };
 
 /// Everything one Ethereum network needs; built in code with
@@ -255,12 +255,8 @@ impl base::Config for Config {
         (&self.native()).into()
     }
 
-    fn height(&self) -> base::Height {
-        rpc::height
-    }
-
-    fn info(&self, client: Arc<dyn ::rpc::Client>) -> Future<'_, anyhow::Result<base::NodeInfo>> {
-        Box::pin(async move { self.open(client)?.info().await })
+    fn node(&self, client: Arc<dyn ::rpc::Client>) -> Arc<dyn base::Tip> {
+        Arc::new(Client::new(client, self.native()))
     }
 
     fn build<'a>(

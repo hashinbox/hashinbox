@@ -5,12 +5,12 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Address, Asset, Assets, Birthday, Chain, Config, Network, NetworkConfig, NodeInfo, Service,
-    Stats, Storage, TransactionError, TransactionErrorKind, Wallet, WalletError, WalletErrorKind,
-    WalletFactories,
+    Address, Asset, Assets, Birthday, Chain, Cluster, Config, Network, NetworkConfig, NodeInfo,
+    Policy, Service, Stats, Storage, TransactionError, TransactionErrorKind, Wallet, WalletError,
+    WalletErrorKind, WalletFactories,
 };
 use crypto::SecretBytes;
-use rpc::{Cluster, Policy, Retry, Swap};
+use rpc::{Retry, Swap};
 
 /// Builds a registered chain's configuration from a [`NetworkConfig`].
 type Parser = Box<dyn Fn(&NetworkConfig) -> anyhow::Result<Box<dyn Config>> + Send + Sync>;
@@ -27,7 +27,7 @@ pub struct Payments {
     services: BTreeMap<Network, Service>,
     clients: BTreeMap<Network, Arc<Swap>>,
     /// Each built network's configuration, for [`Payments::info`].
-    configs: BTreeMap<Network, Box<dyn Config>>,
+    configs: BTreeMap<Network, Arc<dyn Config>>,
     /// Why each network that did not build did not.
     failures: BTreeMap<Network, String>,
 }
@@ -104,7 +104,8 @@ impl Payments {
         endpoint: &rpc::Endpoint,
     ) -> anyhow::Result<NodeInfo> {
         let config = self.configs.get(network).ok_or_else(unsupported)?;
-        config.info(Arc::new(endpoint.connect()?)).await
+        let node = rpc::node(endpoint, Default::default())?;
+        config.node(Arc::new(node)).info().await
     }
 
     /// Sends every later call of `network` (indexer, factory, wallets,
@@ -120,7 +121,7 @@ impl Payments {
         endpoints: &[rpc::Endpoint],
     ) -> anyhow::Result<()> {
         let config = self.configs.get(network).ok_or_else(unsupported)?;
-        let (transport, statistics) = cluster(&**config, endpoints)?;
+        let (transport, statistics) = cluster(config, endpoints)?;
         self.client(network)?.replace(transport, statistics);
         Ok(())
     }
@@ -367,6 +368,7 @@ impl Builder {
         }
 
         for (config, endpoints) in configs {
+            let config: Arc<dyn Config> = Arc::from(config);
             let network = config.network();
             let label = format!("{}/{}", network.chain, network.name);
             ensure!(
@@ -375,7 +377,7 @@ impl Builder {
                 "network {label} is configured twice"
             );
             let given = given.remove(&network);
-            match open(&*config, &endpoints, given, &storage)
+            match open(&config, &endpoints, given, &storage)
                 .await
                 .context(label)
             {
@@ -395,7 +397,7 @@ impl Builder {
 
 /// `config` built over a [`Swap`] of `given`, or of a cluster of `endpoints`.
 async fn open(
-    config: &dyn Config,
+    config: &Arc<dyn Config>,
     endpoints: &[rpc::Endpoint],
     given: Option<Arc<dyn rpc::Client>>,
     storage: &Storage,
@@ -409,19 +411,22 @@ async fn open(
     Ok((service, client))
 }
 
-/// One transport over every node of `endpoints`, primary chosen by
-/// `config`'s height and transport failures retried, and each node's
-/// counters; asks no node.
+/// One transport over every node of `endpoints`, primary chosen by the
+/// chain's tip and transport failures retried, and each node's counters;
+/// asks no node.
 fn cluster(
-    config: &dyn Config,
+    config: &Arc<dyn Config>,
     endpoints: &[rpc::Endpoint],
 ) -> anyhow::Result<(Arc<dyn rpc::Client>, Vec<rpc::Statistics>)> {
-    let nodes = endpoints
-        .iter()
-        .map(rpc::Endpoint::connect)
-        .collect::<Result<Vec<_>, _>>()?;
-    let statistics = nodes.iter().map(rpc::Http::statistics).collect();
-    let cluster = Cluster::new(nodes, config.height(), Policy::default())?;
+    let mut nodes = Vec::new();
+    let mut statistics = Vec::new();
+    for endpoint in endpoints {
+        // No sink yet: nothing reads RPC failure events.
+        let node = rpc::node(endpoint, Default::default())?;
+        statistics.push(node.statistics());
+        nodes.push(config.node(Arc::new(node)));
+    }
+    let cluster = Cluster::new(nodes, Policy::default())?;
     Ok((Arc::new(Retry::new(cluster)), statistics))
 }
 

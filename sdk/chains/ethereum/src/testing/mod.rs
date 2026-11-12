@@ -8,7 +8,6 @@ mod render;
 
 use std::{sync::Arc, time::Duration};
 
-use ::rpc::{BoxFuture, CallError};
 use alloy_primitives::{Address, U256};
 use base::{
     AssetConfig, AssetKind, NetworkConfig,
@@ -202,8 +201,11 @@ impl TestChain for Ethereum {
             .collect()
     }
 
-    fn height(node: &Arc<dyn ::rpc::Client>) -> BoxFuture<'_, Result<u64, CallError>> {
-        crate::height(node)
+    fn client(node: Arc<dyn ::rpc::Client>) -> Arc<dyn base::Tip> {
+        Arc::new(crate::Client::new(
+            node,
+            crate::Network::new(model::CHAIN_ID, "sepolia"),
+        ))
     }
 
     fn network(&self) -> NetworkConfig {

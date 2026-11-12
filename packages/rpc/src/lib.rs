@@ -1,14 +1,11 @@
 #![doc = include_str!("../README.md")]
 
 mod client;
-mod cluster;
+mod decorators;
 mod endpoint;
 mod error;
-mod failover;
 mod http;
-mod retry;
-mod statistics;
-mod swap;
+mod node;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod value;
@@ -16,18 +13,16 @@ mod value;
 use serde_json::Value;
 
 pub use client::{
-    BATCH_BASE, BATCH_PER_CALL, Batch, BoxFuture, Client, PROBE_TIMEOUT, Repetition, Request,
-    SEND_TIMEOUT,
+    Answer, BATCH_BASE, BATCH_PER_CALL, Batch, BoxFuture, Client, Repetition, Request, SEND_TIMEOUT,
 };
-pub use cluster::{Cluster, Limit, Policy};
-pub use endpoint::{Bounds, Endpoint, Parameter, Parts};
-pub use error::{CallError, Error, ErrorKind};
-pub use failover::Failover;
-pub use http::Http;
-pub use retry::{Backoff, Retry, Trigger};
-pub use statistics::{Snapshot, Statistics};
-pub use swap::Swap;
-pub use value::{CallResult, Failure, RawJson};
+pub use decorators::{
+    Backoff, Counted, Logged, Retry, Router, Snapshot, Split, SplitParams, Statistics, Swap,
+};
+pub use endpoint::{Endpoint, Parameter, Params, Parts, Url};
+pub use error::{Error, ErrorKind, Failure};
+pub use http::{Http, HttpParams};
+pub use node::{Node, node};
+pub use value::RawJson;
 
 /// One request of a [`Batch`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,5 +43,3 @@ impl Call {
         }
     }
 }
-
-mod events;

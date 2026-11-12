@@ -3171,27 +3171,6 @@
         },
         "additionalProperties": false
       },
-      "DetailedEndpoint": {
-        "type": "object",
-        "description": "A node with its own bounds.",
-        "required": [
-          "url"
-        ],
-        "properties": {
-          "bounds": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "description": "Per-call limits: `timeout_ms`, `max_request_bytes`,\n`max_response_bytes`; each defaults when absent."
-          },
-          "url": {
-            "type": "string",
-            "description": "`http` or `https` URL naming a host, without a fragment."
-          }
-        },
-        "additionalProperties": false
-      },
       "ErrorBody": {
         "type": "object",
         "description": "The body of every error response: `message` is always present, the\nfailing transfer's index only when one transfer of a send failed.",
@@ -3842,7 +3821,8 @@
             "type": "string"
           },
           "endpoint": {
-            "$ref": "#/components/schemas/RpcEndpoint"
+            "type": "string",
+            "description": "The node's URL, written as `endpoints` writes one."
           },
           "network": {
             "type": "string"
@@ -3913,19 +3893,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "RpcEndpoint": {
-        "oneOf": [
-          {
-            "type": "string",
-            "description": "The node's URL, with default bounds."
-          },
-          {
-            "$ref": "#/components/schemas/DetailedEndpoint",
-            "description": "The node's URL and bounds."
-          }
-        ],
-        "description": "One RPC node, written as the configuration file's `endpoints` writes it.\nThe URL carries everything: userinfo (HTTP Basic), query keys, a key in\nthe path, or `header.<Name>=value` parameters sent as headers."
       },
       "RpcNode": {
         "type": "object",
@@ -4025,9 +3992,9 @@
           "endpoints": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/RpcEndpoint"
+              "type": "string"
             },
-            "description": "One to 16 nodes, in failover order.",
+            "description": "One to 16 node URLs, in failover order. A URL carries everything:\nuserinfo (HTTP Basic), query keys, a key in the path,\n`header.<Name>=value` parameters sent as headers, and `rpc.` settings\n(`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`).",
             "maxItems": 16,
             "minItems": 1
           }

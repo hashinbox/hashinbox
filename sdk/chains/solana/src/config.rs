@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::{
     Chain, Client, Factory, GenesisHash, Network, SOL_DECIMALS, SOL_NAME, SOL_TICKER, Tokens,
-    fee::Estimator, fee_cache::Cached, rpc,
+    fee::Estimator, fee_cache::Cached,
 };
 
 /// Everything one Solana cluster needs; built in code with [`Config::new`]
@@ -243,12 +243,8 @@ impl base::Config for Config {
         (&self.native()).into()
     }
 
-    fn height(&self) -> base::Height {
-        rpc::height
-    }
-
-    fn info(&self, client: Arc<dyn ::rpc::Client>) -> Future<'_, anyhow::Result<base::NodeInfo>> {
-        Box::pin(async move { self.open(client)?.info().await })
+    fn node(&self, client: Arc<dyn ::rpc::Client>) -> Arc<dyn base::Tip> {
+        Arc::new(Client::new(client, self.native()))
     }
 
     fn build<'a>(

@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rpc::{
-    Batch, BoxFuture, CallError, CallResult, Client, Error, Request,
+    Answer, Batch, BoxFuture, Client, Error, RawJson, Request,
     testing::{Faults, Switch},
 };
 use serde_json::Value;
@@ -180,7 +180,7 @@ struct Answering<M: Model> {
 }
 
 impl<M: Model> Answering<M> {
-    fn answer(&self, method: &str, params: &Value) -> CallResult {
+    fn answer(&self, method: &str, params: &Value) -> Answer {
         let mut settings = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
         self.chain.with(|model, inner| {
             let canonical = *inner.canonical.last().unwrap_or(&0);
@@ -210,13 +210,13 @@ impl<M: Model> Answering<M> {
 }
 
 impl<M: Model> Client for Answering<M> {
-    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<RawJson, Error>> {
         let call = request.into_call();
         let answer = self.answer(&call.method, &call.params);
-        Box::pin(async move { Ok(answer) })
+        Box::pin(async move { answer.map_err(Error::Remote) })
     }
 
-    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>> {
         let answers = batch
             .into_calls()
             .iter()
@@ -255,15 +255,15 @@ impl<M: Model> Node<M> {
 }
 
 impl<M: Model> Client for Node<M> {
-    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<RawJson, Error>> {
         self.faults.request(request)
     }
 
-    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>> {
         self.faults.batch(batch)
     }
 
-    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), CallError>> {
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
         self.faults.broadcast(request)
     }
 }

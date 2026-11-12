@@ -20,7 +20,8 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     let side = app.api.legs(&wallet, "native").await[0]["block"].clone();
     chain.node(0).fork(true);
     let primary = chain.nodes()[0].clone();
-    T::height(&primary)
+    T::client(primary)
+        .tip()
         .await
         .expect("the primary pins its branch");
     chain.reorg(1, 2);

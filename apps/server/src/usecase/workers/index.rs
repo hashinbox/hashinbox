@@ -136,8 +136,10 @@ impl Worker for Index {
     /// Up to [`STEPS`] steps of the indexer, each written to its
     /// `network_index` row. At the tip it queues a triggers job (none while
     /// one is unfinished) and runs again an interval later; still behind, it
-    /// runs again at once. A failed step or row write waits an interval and
-    /// tries again, its error the job's `reason`: the job never ends.
+    /// runs again at once. A failed step or row write is retried by the
+    /// queue, which waits longer after each failure in a row (a node
+    /// answering 429, say, gets time to recover), its error the job's
+    /// `reason`: the job never ends.
     async fn run(&self, cx: Context<'_, Target, ()>) -> Ack {
         let target = cx.input().clone();
         let network = target.network();
@@ -159,7 +161,7 @@ impl Worker for Index {
                 .write(move |connection| models::network_index::db::save(connection, &at, &step))
                 .await;
             if let Err(error) = saved {
-                return Ack::Again(later, Some(format!("{error:#}")));
+                return Ack::Retry(format!("{error:#}"));
             }
             self.saved().insert(network.clone(), after);
             match next {
@@ -169,7 +171,7 @@ impl Worker for Index {
                     let reason = queued.err().map(|error| error.to_string());
                     return Ack::Again(later, reason);
                 }
-                Err(error) => return Ack::Again(later, Some(format!("{error:#}"))),
+                Err(error) => return Ack::Retry(format!("{error:#}")),
             }
         }
         Ack::Again(now, None)

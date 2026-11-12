@@ -7,8 +7,8 @@ use std::{
 };
 
 use crate::{
-    Batch, BoxFuture, Call, CallError, CallResult, Client, Error, ErrorKind, Failure, RawJson,
-    Request, client::narrow,
+    Answer, Batch, BoxFuture, Call, Client, Error, ErrorKind, Failure, RawJson, Request,
+    client::answer as entry,
 };
 
 /// What a [`Faults`] answers instead of its client.
@@ -139,32 +139,41 @@ impl<C: Client> Faults<C> {
         self.switch.clone()
     }
 
-    async fn one(&self, call: Call, fault: Option<Fault>, request: Request) -> CallOutcome {
+    async fn one(
+        &self,
+        call: Call,
+        fault: Option<Fault>,
+        request: Request,
+    ) -> Result<RawJson, Error> {
         match fault {
             None => self.client.request(request).await,
             Some(Fault::Lost) => {
                 let _ = self.client.request(request).await;
                 Err(lost())
             }
-            Some(Fault::Broken) => self.client.request(request).await.map(|_| Ok(broken())),
+            Some(Fault::Broken) => match self.client.request(request).await {
+                Err(error @ Error::Transport { .. }) => Err(error),
+                _ => Ok(broken()),
+            },
             Some(fault) => answer(&call, fault),
         }
     }
 }
 
-type CallOutcome = Result<CallResult, Error>;
-
 /// `fault` as an answer that never reached a node.
-fn answer(call: &Call, fault: Fault) -> CallOutcome {
+fn answer(call: &Call, fault: Fault) -> Result<RawJson, Error> {
     match fault {
-        Fault::Transport(kind) => Err(Error::new(kind, format!("{} failed (fault)", call.method))),
-        Fault::Remote(code, message) => Ok(Err(Failure {
+        Fault::Transport(kind) => Err(Error::transport(
+            kind,
+            format!("{} failed (fault)", call.method),
+        )),
+        Fault::Remote(code, message) => Err(Error::Remote(Failure {
             code,
             message,
             data: None,
         })),
         Fault::Lost => Err(lost()),
-        Fault::Broken => Ok(Ok(broken())),
+        Fault::Broken => Ok(broken()),
     }
 }
 
@@ -177,7 +186,7 @@ async fn pause(delay: Duration) {
 }
 
 fn lost() -> Error {
-    Error::new(ErrorKind::Timeout, "the answer was lost (fault)")
+    Error::transport(ErrorKind::Timeout, "the answer was lost (fault)")
 }
 
 fn broken() -> RawJson {
@@ -185,7 +194,7 @@ fn broken() -> RawJson {
 }
 
 impl<C: Client> Client for Faults<C> {
-    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, CallOutcome> {
+    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<RawJson, Error>> {
         Box::pin(async move {
             let call = request.clone().into_call();
             let (delay, whole) = self.switch.begin(&[&call.method]);
@@ -195,7 +204,7 @@ impl<C: Client> Client for Faults<C> {
         })
     }
 
-    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>> {
         Box::pin(async move {
             let calls = batch.clone().into_calls();
             let methods: Vec<&str> = calls.iter().map(|call| call.method.as_str()).collect();
@@ -204,7 +213,7 @@ impl<C: Client> Client for Faults<C> {
             if let Some(fault) = whole {
                 return calls
                     .iter()
-                    .map(|call| answer(call, fault.clone()))
+                    .map(|call| entry(answer(call, fault.clone())))
                     .collect();
             }
             let faults: Vec<_> = calls.iter().map(|c| self.switch.take(&c.method)).collect();
@@ -217,14 +226,14 @@ impl<C: Client> Client for Faults<C> {
                 match fault {
                     None => {}
                     Some(Fault::Broken) => *answer = Ok(broken()),
-                    Some(fault) => *answer = self::answer(call, fault)?,
+                    Some(fault) => *answer = entry(self::answer(call, fault))?,
                 }
             }
             Ok(answers)
         })
     }
 
-    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), CallError>> {
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move {
             let call = request.clone().into_call();
             let (delay, whole) = self.switch.begin(&[&call.method]);
@@ -233,9 +242,9 @@ impl<C: Client> Client for Faults<C> {
                 None => self.client.broadcast(request).await,
                 Some(Fault::Lost) => {
                     let _ = self.client.broadcast(request).await;
-                    Err(CallError::Transport(lost()))
+                    Err(lost())
                 }
-                Some(fault) => narrow(answer(&call, fault)),
+                Some(fault) => answer(&call, fault).map(drop),
             }
         })
     }

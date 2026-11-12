@@ -22,6 +22,6 @@ pub use erc20::Tokens;
 pub use fee::{FeeLimits, Fees};
 pub use key::KeyPair;
 pub use network::{CHAIN_NAME, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Network};
-pub use rpc::{Client, height};
+pub use rpc::Client;
 pub use transaction::Transaction;
 pub use wallet::Factory;

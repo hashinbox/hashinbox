@@ -1,5 +1,10 @@
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    num::{NonZeroU32, NonZeroU64},
+    time::Duration,
+};
 
+use http::{HeaderMap, HeaderName, HeaderValue};
 use jsonrpsee::{
     core::{
         client::{ClientT, Error as RpcError},
@@ -7,27 +12,82 @@ use jsonrpsee::{
         params::BatchRequestBuilder,
         traits::ToRpcParams,
     },
-    http_client::{HeaderMap, HttpClient, HttpClientBuilder, transport},
+    http_client::{HttpClient, HttpClientBuilder, transport},
     types::ErrorObjectOwned,
 };
 use serde_json::{Value, value::RawValue};
 
-use crate::{
-    Batch, Bounds, BoxFuture, CallResult, Client, Error, ErrorKind, Failure, RawJson, Request,
-    Statistics,
-};
+use crate::{Answer, Batch, BoxFuture, Client, Error, ErrorKind, Failure, RawJson, Request, Url};
 
-/// JSON-RPC over HTTP against one endpoint: one execution per call, no retry
-/// and no failover. Compose [`crate::Retry`] and [`crate::Failover`] around it
-/// for those. Cheap to clone; clones share the connection pool.
+/// What [`Http`] reads from a node's URL: by default 15 s, 10 MiB
+/// requests, 64 MiB responses and no headers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpParams {
+    /// `rpc.timeout_ms`: how long one execution may take.
+    pub timeout_ms: u64,
+    /// `rpc.max_request_bytes`: the largest request body this node accepts.
+    pub max_request_bytes: u32,
+    /// `rpc.max_response_bytes`: the largest response body it may return.
+    pub max_response_bytes: u32,
+    /// `header.<Name>`: static headers every call carries. Names ignore
+    /// case, so naming one twice in any case is refused, as is a name or
+    /// value HTTP does not allow.
+    pub headers: HeaderMap,
+}
+
+impl Default for HttpParams {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 15_000,
+            max_request_bytes: 10 * 1024 * 1024,
+            max_response_bytes: 64 * 1024 * 1024,
+            headers: HeaderMap::new(),
+        }
+    }
+}
+
+impl TryFrom<&Url> for HttpParams {
+    type Error = Error;
+
+    fn try_from(url: &Url) -> Result<Self, Error> {
+        let rpc = url.params.namespace("rpc");
+        let default = Self::default();
+        let mut headers = HeaderMap::new();
+        for (name, value) in url.params.namespace("header").iter() {
+            let invalid = || crate::endpoint::invalid("JSON-RPC endpoint header is invalid");
+            let name = HeaderName::try_from(name).map_err(|_| invalid())?;
+            let value = HeaderValue::try_from(value).map_err(|_| invalid())?;
+            if headers.insert(name, value).is_some() {
+                return Err(crate::endpoint::invalid(
+                    "JSON-RPC endpoint names a header twice",
+                ));
+            }
+        }
+        Ok(Self {
+            timeout_ms: rpc
+                .get_int::<NonZeroU64>("timeout_ms")?
+                .map_or(default.timeout_ms, NonZeroU64::get),
+            max_request_bytes: rpc
+                .get_int::<NonZeroU32>("max_request_bytes")?
+                .map_or(default.max_request_bytes, NonZeroU32::get),
+            max_response_bytes: rpc
+                .get_int::<NonZeroU32>("max_response_bytes")?
+                .map_or(default.max_response_bytes, NonZeroU32::get),
+            headers,
+        })
+    }
+}
+
+/// JSON-RPC over HTTP to one node: one execution per call, the node's
+/// answers mapped to results, error objects and [`Error`] kinds. Nothing
+/// else: [`crate::node`] stacks splitting, logging and counting on it. Cheap
+/// to clone; clones share the connection pool.
 ///
 /// `Debug` shows its URL.
 #[derive(Clone)]
 pub struct Http {
     client: HttpClient,
     url: String,
-    statistics: Statistics,
-    events: Arc<crate::events::Events>,
 }
 
 impl fmt::Debug for Http {
@@ -40,66 +100,38 @@ impl fmt::Debug for Http {
 }
 
 impl Http {
-    /// Builds the client; does no I/O. Userinfo in `target` becomes HTTP
-    /// Basic authorization; every call carries `headers`.
-    pub(crate) fn build(
-        target: &str,
-        url: String,
-        bounds: Bounds,
-        headers: HeaderMap,
-    ) -> Result<Self, Error> {
+    /// The client of `url`, shown as `shown`, under its [`HttpParams`];
+    /// does no I/O. Userinfo becomes HTTP Basic authorization.
+    pub(crate) fn new(url: &Url, shown: String) -> Result<Self, Error> {
+        let params = HttpParams::try_from(url)?;
         let client = HttpClientBuilder::default()
-            .set_headers(headers)
-            .request_timeout(bounds.timeout())
-            .max_request_size(bounds.max_request_bytes)
-            .max_response_size(bounds.max_response_bytes)
-            .build(target)
-            .map_err(Error::from_rpc)?;
-        Ok(Self {
-            client,
-            url,
-            statistics: Statistics::default(),
-            events: Arc::default(),
-        })
+            .set_headers(params.headers)
+            .request_timeout(Duration::from_millis(params.timeout_ms))
+            .max_request_size(params.max_request_bytes)
+            .max_response_size(params.max_response_bytes)
+            .build(url.node.as_str())
+            .map_err(translate)?;
+        Ok(Self { client, url: shown })
     }
 
-    /// A handle to this endpoint's attempts and outcomes, shared by every clone.
-    #[must_use]
-    pub fn statistics(&self) -> Statistics {
-        self.statistics.clone()
-    }
-
-    /// Attaches an injected sink scoped to this node. Clones share failure grouping.
-    #[must_use]
-    pub fn with_logger(mut self, logger: logging::Logger) -> Self {
-        self.events = Arc::new(crate::events::Events::new(logger));
-        self
-    }
-
-    async fn execute(&self, request: Request) -> Result<CallResult, Error> {
+    async fn execute(&self, request: Request) -> Result<RawJson, Error> {
         let limit = request.timeout();
         let call = request.into_call();
         let params = Params::new(call.params)?;
-        self.statistics.begin();
         let sent = self
             .client
             .request::<Box<RawValue>, _>(&call.method, params);
-        let result = match within(limit, sent).await {
-            Ok(value) => Ok(Ok(RawJson(value.get().as_bytes().to_vec()))),
-            Err(RpcError::Call(error)) => Failure::try_from(error).map(Err),
-            Err(source) => Err(Error::from_rpc(source)),
-        };
-        self.events.outcome(self.statistics.call(&result));
-        // Counted as the node's answer above; repeated as a transport failure.
-        let Ok(Err(failure)) = result else {
-            return result;
-        };
-        Error::limited(failure).map(Err)
+        match within(limit, sent).await {
+            Ok(value) => Ok(RawJson(value.get().as_bytes().to_vec())),
+            Err(RpcError::Call(error)) => Err(Error::Remote(Failure::try_from(error)?)),
+            Err(source) => Err(translate(source)),
+        }
     }
 
-    /// Every call is serialized before the first byte leaves, so an invalid
-    /// parameter fails without contacting the node.
-    async fn execute_batch(&self, batch: Batch) -> Result<Vec<CallResult>, Error> {
+    /// `batch` as one JSON-RPC batch. Every call is serialized before the
+    /// first byte leaves, so an invalid parameter fails without contacting
+    /// the node.
+    async fn execute_batch(&self, batch: Batch) -> Result<Vec<Answer>, Error> {
         let limit = batch.timeout();
         let calls = batch.into_calls();
         let mut builder = BatchRequestBuilder::new();
@@ -107,49 +139,40 @@ impl Http {
             builder
                 .insert(call.method.as_str(), Params::new(call.params.clone())?)
                 .map_err(|_| {
-                    Error::new(
+                    Error::transport(
                         ErrorKind::InvalidRequest,
                         "JSON-RPC parameters could not be serialized",
                     )
                 })?;
         }
-        self.statistics.begin();
         let sent = self.client.batch_request::<Box<RawValue>>(builder);
-        let result = within(Some(limit), sent)
-            .await
-            .map_err(Error::from_rpc)
-            .and_then(|responses| {
-                // A call answered twice leaves another unanswered: nothing usable.
-                let mut results = Vec::with_capacity(calls.len());
-                for entry in responses {
-                    results.push(match entry {
-                        Ok(value) => Ok(RawJson(value.get().as_bytes().to_vec())),
-                        Err(error) => Err(Failure::try_from(error.into_owned())?),
-                    });
-                }
-                Ok(results)
+        let responses = within(Some(limit), sent).await.map_err(translate)?;
+        // A call answered twice leaves another unanswered: nothing usable.
+        let mut results = Vec::new();
+        for entry in responses {
+            results.push(match entry {
+                Ok(value) => Ok(RawJson(value.get().as_bytes().to_vec())),
+                Err(error) => Err(Failure::try_from(error.into_owned())?),
             });
-        self.events.outcome(self.statistics.batch(&result));
+        }
         // One rate-limited answer fails the batch, so a retry repeats it whole.
-        let results = result?;
-        if let Some(failure) = results.iter().find_map(|entry| {
-            entry
-                .as_ref()
-                .err()
-                .filter(|failure| failure.is_rate_limited())
-        }) {
-            Error::limited(failure.clone())?;
+        let limited = results
+            .iter()
+            .filter_map(|entry| entry.as_ref().err())
+            .find(|failure| failure.is_rate_limited());
+        if let Some(failure) = limited {
+            return Err(Error::Remote(failure.clone()));
         }
         Ok(results)
     }
 }
 
 impl Client for Http {
-    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<RawJson, Error>> {
         Box::pin(self.execute(request))
     }
 
-    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>> {
         Box::pin(self.execute_batch(batch))
     }
 }
@@ -157,7 +180,7 @@ impl Client for Http {
 /// `sent`, given up past `limit` as a timeout; the client's own bound still
 /// applies.
 async fn within<T>(
-    limit: Option<std::time::Duration>,
+    limit: Option<Duration>,
     sent: impl std::future::Future<Output = Result<T, RpcError>>,
 ) -> Result<T, RpcError> {
     let Some(limit) = limit else {
@@ -174,7 +197,7 @@ struct Params(Option<Box<RawValue>>);
 impl Params {
     fn new(value: Value) -> Result<Self, Error> {
         if !matches!(value, Value::Array(_) | Value::Object(_)) {
-            return Err(Error::new(
+            return Err(Error::transport(
                 ErrorKind::InvalidRequest,
                 "JSON-RPC parameters must be an array or object",
             ));
@@ -183,7 +206,7 @@ impl Params {
             .map(Some)
             .map(Self)
             .map_err(|_| {
-                Error::new(
+                Error::transport(
                     ErrorKind::InvalidRequest,
                     "JSON-RPC parameters could not be serialized",
                 )
@@ -204,7 +227,7 @@ impl TryFrom<ErrorObjectOwned> for Failure {
 
     fn try_from(error: ErrorObjectOwned) -> Result<Self, Error> {
         if error.code() == 0 && error.message().is_empty() {
-            return Err(Error::new(
+            return Err(Error::transport(
                 ErrorKind::InvalidResponse,
                 "JSON-RPC answer left a call unanswered",
             ));
@@ -219,38 +242,41 @@ impl TryFrom<ErrorObjectOwned> for Failure {
     }
 }
 
-impl Error {
-    fn from_rpc(error: RpcError) -> Self {
-        match error {
-            RpcError::Call(error) => match Failure::try_from(error) {
-                Ok(failure) => Self::new(ErrorKind::InvalidResponse, failure.to_string()),
-                Err(unanswered) => unanswered,
-            },
-            RpcError::RequestTimeout => Self::new(ErrorKind::Timeout, "JSON-RPC request timed out"),
-            RpcError::Transport(source) => match source.downcast_ref::<transport::Error>() {
-                Some(transport::Error::Rejected { status_code }) => Self::new(
-                    ErrorKind::HttpStatus(*status_code),
-                    "JSON-RPC endpoint rejected the request",
-                ),
-                Some(transport::Error::Http(HttpError::TooLarge)) => Self::new(
-                    ErrorKind::ResponseTooLarge,
-                    "JSON-RPC response exceeded its configured limit",
-                ),
-                Some(transport::Error::RequestTooLarge) => Self::new(
-                    ErrorKind::InvalidRequest,
-                    "JSON-RPC request exceeded its configured limit",
-                ),
-                Some(transport::Error::Http(HttpError::Malformed)) => Self::new(
-                    ErrorKind::InvalidResponse,
-                    "JSON-RPC endpoint returned an invalid response",
-                ),
-                _ => Self::new(ErrorKind::Unavailable, "JSON-RPC transport is unavailable"),
-            },
-            RpcError::ParseError(_) | RpcError::InvalidRequestId(_) => Self::new(
+/// What jsonrpsee reports, as a transport [`Error`]. A call's error object
+/// is [`Error::Remote`] before this is asked; one answering a whole batch is
+/// an invalid response.
+fn translate(error: RpcError) -> Error {
+    match error {
+        RpcError::Call(error) => match Failure::try_from(error) {
+            Ok(failure) => Error::transport(ErrorKind::InvalidResponse, failure.to_string()),
+            Err(unanswered) => unanswered,
+        },
+        RpcError::RequestTimeout => {
+            Error::transport(ErrorKind::Timeout, "JSON-RPC request timed out")
+        }
+        RpcError::Transport(source) => match source.downcast_ref::<transport::Error>() {
+            Some(transport::Error::Rejected { status_code }) => Error::transport(
+                ErrorKind::HttpStatus(*status_code),
+                "JSON-RPC endpoint rejected the request",
+            ),
+            Some(transport::Error::Http(HttpError::TooLarge)) => Error::transport(
+                ErrorKind::ResponseTooLarge,
+                "JSON-RPC response exceeded its configured limit",
+            ),
+            Some(transport::Error::RequestTooLarge) => Error::transport(
+                ErrorKind::InvalidRequest,
+                "JSON-RPC request exceeded its configured limit",
+            ),
+            Some(transport::Error::Http(HttpError::Malformed)) => Error::transport(
                 ErrorKind::InvalidResponse,
                 "JSON-RPC endpoint returned an invalid response",
             ),
-            _ => Self::new(ErrorKind::InvalidResponse, "JSON-RPC request failed"),
-        }
+            _ => Error::transport(ErrorKind::Unavailable, "JSON-RPC transport is unavailable"),
+        },
+        RpcError::ParseError(_) | RpcError::InvalidRequestId(_) => Error::transport(
+            ErrorKind::InvalidResponse,
+            "JSON-RPC endpoint returned an invalid response",
+        ),
+        _ => Error::transport(ErrorKind::InvalidResponse, "JSON-RPC request failed"),
     }
 }

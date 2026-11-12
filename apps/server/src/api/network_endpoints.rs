@@ -28,40 +28,6 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(remove))
 }
 
-/// One RPC node, written as the configuration file's `endpoints` writes it.
-/// The URL carries everything: userinfo (HTTP Basic), query keys, a key in
-/// the path, or `header.<Name>=value` parameters sent as headers.
-#[derive(Clone, Deserialize, utoipa::ToSchema)]
-#[serde(untagged)]
-enum RpcEndpoint {
-    /// The node's URL, with default bounds.
-    Url(String),
-    /// The node's URL and bounds.
-    Detailed(DetailedEndpoint),
-}
-
-/// A node with its own bounds.
-#[derive(Clone, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-struct DetailedEndpoint {
-    /// `http` or `https` URL naming a host, without a fragment.
-    url: String,
-    /// Per-call limits: `timeout_ms`, `max_request_bytes`,
-    /// `max_response_bytes`; each defaults when absent.
-    #[serde(default)]
-    #[schema(value_type = Option<Object>)]
-    bounds: rpc::Bounds,
-}
-
-impl From<RpcEndpoint> for rpc::Endpoint {
-    fn from(endpoint: RpcEndpoint) -> Self {
-        match endpoint {
-            RpcEndpoint::Url(url) => Self::new(url),
-            RpcEndpoint::Detailed(detailed) => Self::new(detailed.url).with_bounds(detailed.bounds),
-        }
-    }
-}
-
 /// A network's nodes.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = NetworkEndpoints)]
@@ -108,15 +74,18 @@ async fn list(
 #[schema(as = RpcNodes)]
 #[serde(deny_unknown_fields)]
 struct NodesRequest {
-    /// One to 16 nodes, in failover order.
+    /// One to 16 node URLs, in failover order. A URL carries everything:
+    /// userinfo (HTTP Basic), query keys, a key in the path,
+    /// `header.<Name>=value` parameters sent as headers, and `rpc.` settings
+    /// (`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`).
     #[schema(min_items = 1, max_items = 16)]
-    endpoints: Vec<RpcEndpoint>,
+    endpoints: Vec<String>,
 }
 
 impl NodesRequest {
     /// The nodes, in order.
     fn nodes(self) -> Vec<rpc::Endpoint> {
-        self.endpoints.into_iter().map(Into::into).collect()
+        self.endpoints.into_iter().map(rpc::Endpoint::new).collect()
     }
 }
 
@@ -199,7 +168,8 @@ async fn replace(
 struct NetworkNode {
     chain: String,
     network: String,
-    endpoint: RpcEndpoint,
+    /// The node's URL, written as `endpoints` writes one.
+    endpoint: String,
 }
 
 /// `POST /v1/networks/endpoints` body.
@@ -254,7 +224,7 @@ async fn add_many(
     for node in request.nodes {
         let network = base::Network::new(base::Chain::new(node.chain), node.network);
         state.payments.service(&network)?;
-        let endpoint = rpc::Endpoint::from(node.endpoint);
+        let endpoint = rpc::Endpoint::new(node.endpoint);
         added.push((network.clone(), endpoint.clone()));
         lists
             .entry(network.clone())

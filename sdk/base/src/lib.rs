@@ -5,6 +5,7 @@ mod asset;
 mod block;
 mod cache;
 mod chain;
+mod cluster;
 mod config;
 mod fee;
 mod indexer;
@@ -25,9 +26,8 @@ pub use block::{
 };
 pub use cache::Cache;
 pub use chain::Chain;
-pub use config::{
-    AssetConfig, AssetKind, Config, Height, NetworkConfig, NodeInfo, Service, Storage,
-};
+pub use cluster::{Cluster, Policy, Tip};
+pub use config::{AssetConfig, AssetKind, Config, NetworkConfig, NodeInfo, Service, Storage};
 pub use decimal::{Decimal, Error as DecimalError};
 pub use fee::{Estimator as FeeEstimator, Holdings, NoHoldings, Spend, Spends};
 pub use indexer::{Birthday, DEFAULT_BATCH, Indexer, Next, Stats};

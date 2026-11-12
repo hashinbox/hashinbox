@@ -3,7 +3,7 @@
 
 use std::{str::FromStr as _, sync::Arc};
 
-use ::rpc::{Batch, Call, CallError, CallResult, Client as _, Request};
+use ::rpc::{Answer, Batch, Call, Client as _, RawJson, Request};
 use anyhow::{Context as _, anyhow, bail, ensure};
 use base::{
     Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, NodeInfo, NotServed,
@@ -171,11 +171,12 @@ impl Client {
             .0
             .transport
             .request(Request::new("getBlockTime", json!([slot])))
-            .await
-            .context("Solana getBlockTime")?;
+            .await;
         match &reply {
-            Err(failure) if SKIPPED.contains(&failure.code) => Ok(None),
-            Err(failure) if failure.code == CLEANED_UP => Err(NotServed { position: slot }.into()),
+            Err(::rpc::Error::Remote(failure)) if SKIPPED.contains(&failure.code) => Ok(None),
+            Err(::rpc::Error::Remote(failure)) if failure.code == CLEANED_UP => {
+                Err(NotServed { position: slot }.into())
+            }
             _ => decode("getBlockTime", reply),
         }
     }
@@ -262,8 +263,8 @@ impl Client {
         .with_timeout(::rpc::SEND_TIMEOUT);
         let failure = match self.0.transport.broadcast(request).await {
             Ok(()) => return Ok(()),
-            Err(::rpc::CallError::Remote(failure)) => failure,
-            Err(::rpc::CallError::Transport(error)) => {
+            Err(::rpc::Error::Remote(failure)) => failure,
+            Err(error) => {
                 return Err(TransactionError::unavailable(format!(
                     "Solana sendTransaction: {error}"
                 )));
@@ -314,17 +315,12 @@ impl Client {
 
     /// One repeatable call, decoded.
     async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> anyhow::Result<T> {
-        let reply = self
-            .0
-            .transport
-            .request(Request::new(method, params))
-            .await
-            .with_context(|| format!("Solana {method}"))?;
+        let reply = self.0.transport.request(Request::new(method, params)).await;
         decode(method, reply)
     }
 
     /// Repeatable calls as one batch; one answer per call, in call order.
-    async fn batch(&self, calls: Vec<Call>) -> anyhow::Result<Vec<CallResult>> {
+    async fn batch(&self, calls: Vec<Call>) -> anyhow::Result<Vec<Answer>> {
         let count = calls.len();
         let replies = self
             .0
@@ -351,17 +347,36 @@ impl base::Broadcaster for Client {
     }
 }
 
-/// A node's confirmed slot: how a [`::rpc::Cluster`] picks its primary.
-pub(crate) fn height(node: &::rpc::Http) -> ::rpc::BoxFuture<'_, Result<u64, CallError>> {
-    Box::pin(async move {
-        let raw = node
-            .request(
-                Request::new("getSlot", json!([{ "commitment": CONFIRMED }]))
-                    .with_timeout(::rpc::PROBE_TIMEOUT),
-            )
-            .await??;
-        Ok(raw.deserialize()?)
-    })
+/// The node it reaches, as is.
+impl ::rpc::Client for Client {
+    fn request<'a>(
+        &'a self,
+        request: Request,
+    ) -> ::rpc::BoxFuture<'a, Result<RawJson, ::rpc::Error>> {
+        self.0.transport.request(request)
+    }
+
+    fn batch<'a>(
+        &'a self,
+        batch: Batch,
+    ) -> ::rpc::BoxFuture<'a, Result<Vec<Answer>, ::rpc::Error>> {
+        self.0.transport.batch(batch)
+    }
+
+    fn broadcast<'a>(&'a self, request: Request) -> ::rpc::BoxFuture<'a, Result<(), ::rpc::Error>> {
+        self.0.transport.broadcast(request)
+    }
+}
+
+/// The tip is `getSlot` at `confirmed`.
+impl base::Tip for Client {
+    fn tip(&self) -> base::Future<'_, anyhow::Result<u64>> {
+        Box::pin(self.call("getSlot", json!([{ "commitment": CONFIRMED }])))
+    }
+
+    fn info(&self) -> base::Future<'_, anyhow::Result<NodeInfo>> {
+        Box::pin(Self::info(self))
+    }
 }
 
 /// `wire`, produced at `slot`, as a base block: position is the slot, height
@@ -419,11 +434,15 @@ fn hash(text: &str) -> anyhow::Result<BlockHash> {
     Ok(BlockHash(hash.to_bytes().to_vec()))
 }
 
-/// A call's result decoded as `T`; a node error object is an error that
-/// keeps its [`CallError`].
-fn decode<T: DeserializeOwned>(method: &str, reply: CallResult) -> anyhow::Result<T> {
+/// A call's result decoded as `T`, a call's or a batch entry's; an error
+/// keeps its [`::rpc::Error`].
+fn decode<T, E>(method: &str, reply: Result<RawJson, E>) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+    E: Into<::rpc::Error>,
+{
     let raw = reply
-        .map_err(CallError::Remote)
+        .map_err(Into::into)
         .with_context(|| format!("Solana {method}"))?;
     raw.deserialize()
         .with_context(|| format!("Solana {method} result"))

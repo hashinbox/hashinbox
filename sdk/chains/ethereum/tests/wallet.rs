@@ -3,17 +3,14 @@
 
 use std::sync::Arc;
 
-use ::rpc::{
-    BoxFuture, CallError, Cluster, Policy,
-    testing::{Reply, Script},
-};
+use ::rpc::testing::{Reply, Script};
 use alloy_consensus::{Transaction as _, TxEnvelope};
 use alloy_eips::Decodable2718 as _;
 use alloy_primitives::{hex, keccak256};
 use alloy_sol_types::{SolCall as _, sol};
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, Reason, Signer, TransactionErrorKind,
-    TransactionState, Transfer, WalletFactory as _,
+    Asset, Broadcaster as _, BuilderExt as _, Cluster, Decimal, Leg, Policy, Reason, Signer, Tip,
+    TransactionErrorKind, TransactionState, Transfer, WalletFactory as _,
 };
 use chain_ethereum::{Client, Config, Factory, Network, Token};
 use crypto::SecretBytes;
@@ -295,16 +292,15 @@ fn a_reverting_transfer_fails_before_signing() {
     assert_eq!(error.reason, Some(Reason::Reverted));
 }
 
-/// Every node is equally high.
-fn height(_: &Script) -> BoxFuture<'_, Result<u64, CallError>> {
-    Box::pin(async { Ok(1) })
-}
-
 #[test]
 fn a_broadcast_reaches_every_node_once() {
     let nodes =
         [Script::new([]), Script::new([])].map(|node| node.once_only("eth_sendRawTransaction"));
-    let cluster = Cluster::new(nodes.to_vec(), height, Policy::default()).unwrap();
+    let tips = nodes
+        .iter()
+        .map(|node| Arc::new(connect(Arc::new(node.clone()))) as Arc<dyn Tip>)
+        .collect();
+    let cluster = Cluster::new(tips, Policy::default()).unwrap();
     let broadcaster = connect(Arc::new(cluster));
     let bytes = b"\x02signed".to_vec();
     let id = hex::encode_prefixed(keccak256(&bytes));

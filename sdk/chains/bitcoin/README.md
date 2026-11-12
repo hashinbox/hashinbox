@@ -22,7 +22,7 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
     let mut config = Config::new(Network::Regtest);
     config.address_type = AddressType::Taproot;
     let node: Arc<dyn rpc::Client> =
-        Arc::new(Endpoint::new("http://bitcoin:bitcoin@127.0.0.1:18443").connect()?);
+        Arc::new(rpc::node(&Endpoint::new("http://bitcoin:bitcoin@127.0.0.1:18443"), Default::default())?);
 
     // The one entry point a container uses: indexer, factory, broadcaster
     // and assets over the application's stores.
@@ -61,10 +61,11 @@ per step (default 100) (each absent one its default).
   and returns the `base::Service`, asking no node. The indexer wakes every
   `interval_ms` milliseconds (default 30,000).
 - The config holds no endpoints: `build(&storage, client)` builds every
-  part over the given transport, asking no node; `payments` clusters a
-  network's nodes by `height()`. `info(client)` asks a node its chain and
-  tip, once, when it is added. Pass a `rpc::Swap` and keep it to change
-  nodes live.
+  part over the given transport, asking no node. `node(client)` is the
+  `Client` over one node, a `base::Tip`: `tip()` is `getblockcount`, `info()` its
+  chain and tip, asked once when a node is added; `payments` clusters a
+  network's nodes by `tip()` (`base::Cluster`). Pass a `rpc::Swap` and keep
+  it to change nodes live.
 - Position and height are both the block height. `confirmation_depth`
   (1 to 1000, default 6) makes a block final once that many blocks, itself
   included, are on the chain: `confirmed = produced - (depth - 1)`. Bitcoin

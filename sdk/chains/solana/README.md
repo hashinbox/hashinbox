@@ -16,7 +16,7 @@ use rpc::Endpoint;
 async fn solana(storage: Storage) -> anyhow::Result<()> {
     let genesis = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d".parse()?;
     let config = Config::new(Network::new(genesis, "mainnet-beta"));
-    let node: Arc<dyn rpc::Client> = Arc::new(Endpoint::new("http://127.0.0.1:8899").connect()?);
+    let node: Arc<dyn rpc::Client> = Arc::new(rpc::node(&Endpoint::new("http://127.0.0.1:8899"), Default::default())?);
     // The one entry point a container uses: indexer, factory, broadcaster,
     // and assets over the application's stores.
     let _service = config.build(&storage, node.clone()).await?;
@@ -54,10 +54,11 @@ the indexer fetches per step (default 100) (each absent one its default).
   and returns the `base::Service`, asking no node. The indexer wakes every
   `interval_ms` milliseconds (default 1,000).
 - The config holds no endpoints: `build(&storage, client)` builds every
-  part over the given transport, asking no node; `payments` clusters a
-  network's nodes by `height()`. `info(client)` asks a node its chain and
-  tip, once, when it is added. Pass a `rpc::Swap` and keep it to change
-  nodes live.
+  part over the given transport, asking no node. `node(client)` is the
+  `Client` over one node, a `base::Tip`: `tip()` is `getSlot` at `confirmed`, `info()` its
+  chain and tip, asked once when a node is added; `payments` clusters a
+  network's nodes by `tip()` (`base::Cluster`). Pass a `rpc::Swap` and keep
+  it to change nodes live.
 - Position is the slot; a skipped slot holds no block. `Header.height` is the
   block height. Blocks are read at `confirmed` commitment; `Tips.produced` is
   the newest confirmed slot, `Tips.confirmed` the newest rooted (`finalized`)

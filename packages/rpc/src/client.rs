@@ -1,68 +1,67 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc, time::Duration};
 
 use serde_json::Value;
 
-use crate::{Call, CallError, CallResult, Error, ErrorKind};
+use crate::{Call, Error, ErrorKind, Failure, RawJson};
+
+/// One call's outcome in a [`Batch`]: its result, or the node's error object
+/// for that call alone.
+pub type Answer = Result<RawJson, Failure>;
+
+/// A call's outcome as a batch's [`Answer`]: an error object stays with its
+/// call; a rate limit fails the batch, as one in a sent batch does, and so
+/// does a transport error.
+pub(crate) fn answer(outcome: Result<RawJson, Error>) -> Result<Answer, Error> {
+    match outcome {
+        Ok(raw) => Ok(Ok(raw)),
+        Err(error) if error.is_rate_limited() => Err(error),
+        Err(Error::Remote(failure)) => Ok(Err(failure)),
+        Err(error) => Err(error),
+    }
+}
 
 /// Boxed `Send` future returned by [`Client`]; keeps the trait object-safe.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Minimal execution boundary used by chain adapters, decorators, and
+/// Minimal execution boundary used by adapters, decorators, and
 /// deterministic doubles.
 ///
 /// Every layer has the same contract, so a decorated client is still a
-/// `Client`: `Retry::new(Failover::new(vec![http])?)`. What may be executed
+/// `Client`: `Retry::new(node)`. What may be executed
 /// more than once is a property of the work, not of the layer — the caller
 /// states it with [`Repetition`], and no layer may override it.
 pub trait Client: Send + Sync {
     /// Executes one request under this implementation's policy.
-    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>>;
+    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<RawJson, Error>>;
 
-    /// Executes one batch under this implementation's policy.
-    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>>;
+    /// Executes one batch under this implementation's policy: one outcome
+    /// per call, in call order, since one call can fail alone.
+    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>>;
 
     /// Sends `request` (a signed transaction) once to every node this client
     /// reaches: success or failure only, since the transaction's id is known
-    /// before it is sent. A node's error object is [`CallError::Remote`]. A
+    /// before it is sent. A node's error object is [`Error::Remote`]. A
     /// single node is reached once, so the default is [`Self::request`]. A
     /// decorator forwards this method rather than inheriting the default,
-    /// which would silently narrow a broadcast to one node;
-    /// [`crate::Cluster`] is the implementation that fans out.
-    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), CallError>> {
-        Box::pin(async move { narrow(self.request(request).await) })
+    /// which would silently narrow a broadcast to one node of a client that
+    /// fans out.
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
+        Box::pin(async move { self.request(request).await.map(drop) })
     }
 }
 
-/// A shared client is a client, so one decorated handle serves every chain.
+/// A shared client is a client, so one decorated handle serves every holder.
 impl<C: Client + ?Sized> Client for Arc<C> {
-    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<CallResult, Error>> {
+    fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<RawJson, Error>> {
         (**self).request(request)
     }
 
-    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<CallResult>, Error>> {
+    fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>> {
         (**self).batch(batch)
     }
 
-    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), CallError>> {
+    fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
         (**self).broadcast(request)
-    }
-}
-
-/// A call's outcome as a broadcast's: the answer is dropped.
-pub(crate) fn narrow(outcome: Result<CallResult, Error>) -> Result<(), CallError> {
-    match outcome {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(failure)) => Err(CallError::Remote(failure)),
-        Err(error) => Err(CallError::Transport(error)),
-    }
-}
-
-/// A broadcast's outcome as a call's, for the layers that judge calls.
-pub(crate) fn widen(outcome: Result<(), CallError>) -> Result<CallResult, Error> {
-    match outcome {
-        Ok(()) => Ok(Ok(crate::RawJson(b"null".to_vec()))),
-        Err(CallError::Remote(failure)) => Ok(Err(failure)),
-        Err(CallError::Transport(error)) => Err(error),
     }
 }
 
@@ -87,7 +86,7 @@ pub struct Request {
 }
 
 impl Request {
-    /// A repeatable request: retry and failover apply.
+    /// A repeatable request: retry and routing apply.
     #[must_use]
     pub fn new(method: impl Into<String>, params: Value) -> Self {
         Self {
@@ -132,6 +131,11 @@ impl Request {
     pub fn into_call(self) -> Call {
         self.call
     }
+
+    /// The method it calls.
+    pub(crate) fn method(&self) -> &str {
+        &self.call.method
+    }
 }
 
 /// Several calls executed as one JSON-RPC batch, whether a decorator may
@@ -149,9 +153,6 @@ pub const BATCH_BASE: Duration = Duration::from_secs(5);
 
 /// What each call adds to a batch's timeout.
 pub const BATCH_PER_CALL: Duration = Duration::from_secs(1);
-
-/// What a tip probe may take: a node slower than this is not one to pick.
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// What one node may take to answer a submission.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -202,9 +203,42 @@ impl Batch {
         self.calls
     }
 
+    /// The method every call names, if they all name one.
+    pub(crate) fn method(&self) -> Option<&str> {
+        let (first, rest) = self.calls.split_first()?;
+        rest.iter()
+            .all(|call| call.method == first.method)
+            .then_some(first.method.as_str())
+    }
+
+    /// Batches of at most `max` calls, in order, each keeping this one's
+    /// repetition and timeout.
+    pub(crate) fn chunks(self, max: NonZeroUsize) -> Vec<Self> {
+        self.calls
+            .chunks(max.get())
+            .map(|calls| Self {
+                calls: calls.to_vec(),
+                ..self
+            })
+            .collect()
+    }
+
+    /// Each call as a request of its own, keeping this one's repetition and
+    /// timeout.
+    pub(crate) fn requests(self) -> Vec<Request> {
+        self.calls
+            .into_iter()
+            .map(|call| Request {
+                call,
+                repetition: self.repetition,
+                timeout: Some(self.timeout),
+            })
+            .collect()
+    }
+
     fn build(calls: Vec<Call>, repetition: Repetition) -> Result<Self, Error> {
         if calls.is_empty() {
-            return Err(Error::new(
+            return Err(Error::transport(
                 ErrorKind::InvalidRequest,
                 "JSON-RPC batch must not be empty",
             ));
