@@ -80,7 +80,6 @@ parameter by name (`get`, `get_int`, and `namespace("rpc")` for those under
 one prefix). Each setting is read from it by its owner:
 `HttpParams` in `http.rs`, `SplitParams` in `decorators/split.rs`, each
 `TryFrom<&Url>`. `Endpoint::validate` builds the node, which does no I/O.
-`Endpoint::parts` splits the URL for display.
 Retry, routes and the logger never go in a URL.
 
 ## Router

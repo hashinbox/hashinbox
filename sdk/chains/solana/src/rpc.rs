@@ -6,16 +6,21 @@ use std::{str::FromStr as _, sync::Arc};
 use ::rpc::{Answer, Batch, Call, Client as _, RawJson, Request};
 use anyhow::{Context as _, anyhow, bail, ensure};
 use base::{
-    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, NodeInfo, NotServed,
-    Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
+    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, InfoClient, NodeInfo,
+    NotServed, Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use solana_hash::Hash;
 use solana_message::Message;
 
-use crate::{Network, Tokens, spl, transaction::Transaction};
+use crate::{
+    Info, Network, Tokens,
+    rpc_info::{CONFIRMED, decode},
+    spl,
+    transaction::Transaction,
+};
 
 /// `getBlock` and `getBlockTime` codes meaning no block was produced at the
 /// slot.
@@ -24,50 +29,23 @@ const SKIPPED: [i64; 2] = [-32_007, -32_009];
 const CLEANED_UP: i64 = -32_001;
 /// Blocks requested per JSON-RPC batch: a full block is large.
 const BATCH: usize = 10;
-/// Reads see blocks a supermajority voted on.
-const CONFIRMED: &str = "confirmed";
 
-/// A Solana JSON-RPC client of one cluster; cheap to clone, clones share it.
+/// A Solana JSON-RPC client of one cluster: its [`Info`] client and every
+/// call this crate makes; cheap to clone, clones share it.
 #[derive(Clone)]
-pub struct Client(Arc<Inner>);
-
-struct Inner {
-    transport: Arc<dyn ::rpc::Client>,
-    network: Network,
-}
+pub struct Client(Arc<Info>);
 
 impl Client {
-    /// A client of `network` over `transport`; [`Self::verify`] checks the node.
+    /// A client of `network` over `transport`; [`InfoClient::info`] checks the node.
     #[must_use]
     pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
-        Self(Arc::new(Inner { transport, network }))
+        Self(Arc::new(Info::new(transport, network)))
     }
 
     /// The network it serves.
     #[must_use]
     pub fn network(&self) -> &Network {
-        &self.0.network
-    }
-
-    /// The genesis hash the node serves and its newest confirmed slot.
-    ///
-    /// # Errors
-    ///
-    /// A node failure, or a node of another cluster.
-    pub async fn info(&self) -> anyhow::Result<NodeInfo> {
-        let genesis: String = self.call("getGenesisHash", json!([])).await?;
-        let expected = &self.network().genesis_hash;
-        ensure!(
-            genesis == expected.to_string(),
-            "Solana node serves genesis {genesis}, not the configured {expected}"
-        );
-        let tip: u64 = self
-            .call("getSlot", json!([{ "commitment": CONFIRMED }]))
-            .await?;
-        Ok(NodeInfo {
-            chain_id: genesis,
-            tip,
-        })
+        self.0.network()
     }
 
     /// The newest confirmed slot as produced, and the newest rooted
@@ -108,6 +86,7 @@ impl Client {
             return Ok(run);
         }
         let slots: Vec<u64> = self
+            .0
             .call(
                 "getBlocks",
                 json!([start, end, { "commitment": CONFIRMED }]),
@@ -116,7 +95,7 @@ impl Client {
         // A node lists no slot below the first block it keeps: unless `start`
         // is listed, it may be one it no longer serves, not a skipped one.
         if slots.first() != Some(&start) {
-            let first: u64 = self.call("getFirstAvailableBlock", json!([])).await?;
+            let first: u64 = self.0.call("getFirstAvailableBlock", json!([])).await?;
             if start < first {
                 return Err(NotServed { position: start }.into());
             }
@@ -169,7 +148,6 @@ impl Client {
     pub async fn time(&self, slot: u64) -> anyhow::Result<Option<u64>> {
         let reply = self
             .0
-            .transport
             .request(Request::new("getBlockTime", json!([slot])))
             .await;
         match &reply {
@@ -188,6 +166,7 @@ impl Client {
     /// A node failure.
     pub async fn blockhash(&self) -> anyhow::Result<Hash> {
         let latest: Context<Latest> = self
+            .0
             .call("getLatestBlockhash", json!([{ "commitment": CONFIRMED }]))
             .await?;
         Hash::from_str(&latest.value.blockhash)
@@ -203,6 +182,7 @@ impl Client {
     /// unknown to the node).
     pub async fn fee(&self, message: &Message) -> anyhow::Result<u64> {
         let fee: Context<Option<u64>> = self
+            .0
             .call(
                 "getFeeForMessage",
                 json!([STANDARD.encode(message.serialize()), { "commitment": CONFIRMED }]),
@@ -217,7 +197,8 @@ impl Client {
     ///
     /// A node failure.
     pub(crate) async fn rent(&self, bytes: u64) -> anyhow::Result<u64> {
-        self.call("getMinimumBalanceForRentExemption", json!([bytes]))
+        self.0
+            .call("getMinimumBalanceForRentExemption", json!([bytes]))
             .await
     }
 
@@ -261,7 +242,7 @@ impl Client {
             }]),
         )
         .with_timeout(::rpc::SEND_TIMEOUT);
-        let failure = match self.0.transport.broadcast(request).await {
+        let failure = match self.0.broadcast(request).await {
             Ok(()) => return Ok(()),
             Err(::rpc::Error::Remote(failure)) => failure,
             Err(error) => {
@@ -296,6 +277,7 @@ impl Client {
     /// The finalized account at `address`; `None` when it does not exist.
     async fn account(&self, address: &solana_address::Address) -> anyhow::Result<Option<Account>> {
         let account: Context<Option<Account>> = self
+            .0
             .call(
                 "getAccountInfo",
                 json!([address.to_string(), { "commitment": "finalized", "encoding": "base64" }]),
@@ -313,18 +295,11 @@ impl Client {
         Ok(self.account(address).await?.is_some())
     }
 
-    /// One repeatable call, decoded.
-    async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> anyhow::Result<T> {
-        let reply = self.0.transport.request(Request::new(method, params)).await;
-        decode(method, reply)
-    }
-
     /// Repeatable calls as one batch; one answer per call, in call order.
     async fn batch(&self, calls: Vec<Call>) -> anyhow::Result<Vec<Answer>> {
         let count = calls.len();
         let replies = self
             .0
-            .transport
             .batch(Batch::new(calls)?)
             .await
             .context("Solana JSON-RPC batch")?;
@@ -353,29 +328,29 @@ impl ::rpc::Client for Client {
         &'a self,
         request: Request,
     ) -> ::rpc::BoxFuture<'a, Result<RawJson, ::rpc::Error>> {
-        self.0.transport.request(request)
+        self.0.request(request)
     }
 
     fn batch<'a>(
         &'a self,
         batch: Batch,
     ) -> ::rpc::BoxFuture<'a, Result<Vec<Answer>, ::rpc::Error>> {
-        self.0.transport.batch(batch)
+        self.0.batch(batch)
     }
 
     fn broadcast<'a>(&'a self, request: Request) -> ::rpc::BoxFuture<'a, Result<(), ::rpc::Error>> {
-        self.0.transport.broadcast(request)
+        self.0.broadcast(request)
     }
 }
 
-/// The tip is `getSlot` at `confirmed`.
-impl base::Tip for Client {
+/// Its [`Info`]'s.
+impl InfoClient for Client {
     fn tip(&self) -> base::Future<'_, anyhow::Result<u64>> {
-        Box::pin(self.call("getSlot", json!([{ "commitment": CONFIRMED }])))
+        self.0.tip()
     }
 
     fn info(&self) -> base::Future<'_, anyhow::Result<NodeInfo>> {
-        Box::pin(Self::info(self))
+        self.0.info()
     }
 }
 
@@ -432,20 +407,6 @@ fn hash(text: &str) -> anyhow::Result<BlockHash> {
         .ok()
         .context("Solana blockhash is not Base58")?;
     Ok(BlockHash(hash.to_bytes().to_vec()))
-}
-
-/// A call's result decoded as `T`, a call's or a batch entry's; an error
-/// keeps its [`::rpc::Error`].
-fn decode<T, E>(method: &str, reply: Result<RawJson, E>) -> anyhow::Result<T>
-where
-    T: DeserializeOwned,
-    E: Into<::rpc::Error>,
-{
-    let raw = reply
-        .map_err(Into::into)
-        .with_context(|| format!("Solana {method}"))?;
-    raw.deserialize()
-        .with_context(|| format!("Solana {method} result"))
 }
 
 /// A reply read at a slot: `{ context, value }`; only the value is kept.

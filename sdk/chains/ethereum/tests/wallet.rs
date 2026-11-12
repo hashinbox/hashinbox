@@ -9,7 +9,7 @@ use alloy_eips::Decodable2718 as _;
 use alloy_primitives::{hex, keccak256};
 use alloy_sol_types::{SolCall as _, sol};
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Cluster, Decimal, Leg, Policy, Reason, Signer, Tip,
+    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, Reason, ServiceFactory as _, Signer,
     TransactionErrorKind, TransactionState, Transfer, WalletFactory as _,
 };
 use chain_ethereum::{Client, Config, Factory, Network, Token};
@@ -296,12 +296,11 @@ fn a_reverting_transfer_fails_before_signing() {
 fn a_broadcast_reaches_every_node_once() {
     let nodes =
         [Script::new([]), Script::new([])].map(|node| node.once_only("eth_sendRawTransaction"));
-    let tips = nodes
+    let transports = nodes
         .iter()
-        .map(|node| Arc::new(connect(Arc::new(node.clone()))) as Arc<dyn Tip>)
+        .map(|node| Arc::new(node.clone()) as Arc<dyn ::rpc::Client>)
         .collect();
-    let cluster = Cluster::new(tips, Policy::default()).unwrap();
-    let broadcaster = connect(Arc::new(cluster));
+    let broadcaster = connect(config().info(transports).unwrap());
     let bytes = b"\x02signed".to_vec();
     let id = hex::encode_prefixed(keccak256(&bytes));
     for node in &nodes {

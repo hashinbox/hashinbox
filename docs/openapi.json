@@ -745,7 +745,7 @@
           "networks"
         ],
         "summary": "List a network's RPC nodes",
-        "description": "Its stored nodes in failover order, each URL parsed.",
+        "description": "Its stored node URLs in failover order, as `PUT` takes them.",
         "operationId": "list_network_endpoints",
         "parameters": [
           {
@@ -3043,9 +3043,9 @@
           "endpoints": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/RpcNode"
+              "type": "string"
             },
-            "description": "Its nodes in failover order."
+            "description": "Its node URLs as stored, in failover order."
           },
           "explorer_address": {
             "type": [
@@ -3675,9 +3675,9 @@
           "endpoints": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/RpcNode"
+              "type": "string"
             },
-            "description": "Its nodes in failover order."
+            "description": "Its node URLs as stored, in failover order; a node's index is its\nposition here."
           },
           "network": {
             "$ref": "#/components/schemas/Network"
@@ -3896,94 +3896,6 @@
         },
         "additionalProperties": false
       },
-      "RpcNode": {
-        "type": "object",
-        "description": "One RPC node: its URL, parsed.",
-        "required": [
-          "index",
-          "url",
-          "origin",
-          "scheme",
-          "host",
-          "port",
-          "path",
-          "username",
-          "password",
-          "parameters",
-          "timeout_ms",
-          "max_request_bytes",
-          "max_response_bytes"
-        ],
-        "properties": {
-          "host": {
-            "type": "string"
-          },
-          "index": {
-            "type": "integer",
-            "description": "Its position in failover order; what removing it takes.",
-            "minimum": 0
-          },
-          "max_request_bytes": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Largest request body, in bytes.",
-            "minimum": 0
-          },
-          "max_response_bytes": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Largest response body, in bytes.",
-            "minimum": 0
-          },
-          "origin": {
-            "type": "string",
-            "description": "Scheme, host and port."
-          },
-          "parameters": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RpcParameter"
-            },
-            "description": "Its query parameters, in order."
-          },
-          "password": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Always present."
-          },
-          "path": {
-            "type": "string"
-          },
-          "port": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "The port, the scheme's default when unwritten; always present.",
-            "minimum": 0
-          },
-          "scheme": {
-            "type": "string"
-          },
-          "timeout_ms": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Longest one call may take, in milliseconds.",
-            "minimum": 0
-          },
-          "url": {
-            "type": "string",
-            "description": "The URL as stored."
-          },
-          "username": {
-            "type": "string",
-            "description": "The user of `user:password`, sent as HTTP Basic; empty when none."
-          }
-        }
-      },
       "RpcNodes": {
         "type": "object",
         "description": "`POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body.",
@@ -4002,28 +3914,6 @@
           }
         },
         "additionalProperties": false
-      },
-      "RpcParameter": {
-        "type": "object",
-        "description": "One query parameter of a node's URL.",
-        "required": [
-          "name",
-          "value",
-          "header"
-        ],
-        "properties": {
-          "header": {
-            "type": "boolean",
-            "description": "Whether every call sends it as a header instead of in the URL."
-          },
-          "name": {
-            "type": "string",
-            "description": "The parameter's name, or for a `header.<Name>` one, the header's."
-          },
-          "value": {
-            "type": "string"
-          }
-        }
       },
       "RunJob": {
         "type": "object",

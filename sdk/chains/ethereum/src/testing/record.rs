@@ -88,7 +88,10 @@ impl Recorder {
 /// A node failure, or no recent block with an ether and a token transfer.
 pub async fn record(url: &str, directory: &Path) -> anyhow::Result<()> {
     let endpoint = Endpoint::new(url);
-    let provider = endpoint.parts().map(|parts| parts.host).unwrap_or_default();
+    let provider = endpoint
+        .parse()
+        .map(|url| url.node.host_str().unwrap_or_default().to_owned())
+        .unwrap_or_default();
     let recorder = Recorder {
         node: ::rpc::node(&endpoint, Default::default())?,
         provider,

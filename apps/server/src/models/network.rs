@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{NetworkAsset, NetworkIndex, RpcNode};
+use super::{NetworkAsset, NetworkIndex};
 
 /// The chain and network a wallet, address, or transaction belongs to. It
 /// always ships as one nested object, never as two sibling fields.
@@ -69,8 +69,9 @@ pub(crate) struct Network {
     pub(crate) settings: Value,
     /// Its native currency and tokens.
     pub(crate) assets: Vec<NetworkAsset>,
-    /// Its nodes in failover order.
-    pub(crate) endpoints: Vec<RpcNode>,
+    /// Its node URLs as stored, in failover order.
+    #[schema(value_type = Vec<String>)]
+    pub(crate) endpoints: Vec<rpc::Endpoint>,
     /// Its indexing; always present, null: not indexed.
     #[schema(required)]
     pub(crate) index: Option<NetworkIndex>,
@@ -85,9 +86,6 @@ pub(crate) struct Network {
     /// Why asking the node failed; always present, null when it answered.
     #[schema(required)]
     pub(crate) tip_error: Option<String>,
-    /// The nodes, for the chain.
-    #[serde(skip)]
-    pub(crate) nodes: Vec<rpc::Endpoint>,
 }
 
 impl Network {
@@ -113,7 +111,7 @@ impl From<&Network> for base::NetworkConfig {
             explorer_transaction: network.explorer_transaction.clone(),
             settings: network.settings.clone(),
             assets: network.assets.iter().map(Into::into).collect(),
-            endpoints: network.nodes.clone(),
+            endpoints: network.endpoints.clone(),
         }
     }
 }
@@ -170,7 +168,6 @@ pub(crate) mod db {
                 index_job_reason: None,
                 tip_live: None,
                 tip_error: None,
-                nodes: Vec::new(),
             })
         }
     }
@@ -195,10 +192,7 @@ pub(crate) mod db {
             let mut network = Network::try_from(row)?;
             let key = network.key();
             network.assets = assets.remove(&key).unwrap_or_default();
-            if let Some(nodes) = endpoints.rows().get(&key) {
-                network.endpoints = nodes.shown();
-                network.nodes = nodes.nodes().to_vec();
-            }
+            network.endpoints = endpoints.nodes(&key);
             network.index = indexes.remove(&key);
             network.tip_live = network.index.as_ref().and_then(|index| index.tip);
             networks.push(network);

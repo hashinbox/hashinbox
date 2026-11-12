@@ -18,7 +18,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::{Error, ErrorBody, networks::NetworkPath};
 use crate::{
     api::AppState,
-    models::{NetworkName, RpcEndpoints, RpcNode, endpoint},
+    models::{NetworkName, RpcEndpoints, endpoint},
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -33,8 +33,10 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 #[schema(as = NetworkEndpoints)]
 struct EndpointsResponse {
     network: NetworkName,
-    /// Its nodes in failover order.
-    endpoints: Vec<RpcNode>,
+    /// Its node URLs as stored, in failover order; a node's index is its
+    /// position here.
+    #[schema(value_type = Vec<String>)]
+    endpoints: Vec<rpc::Endpoint>,
 }
 
 #[utoipa::path(
@@ -42,7 +44,7 @@ struct EndpointsResponse {
     path = "/v1/networks/{chain}/{network}/endpoints",
     operation_id = "list_network_endpoints",
     summary = "List a network's RPC nodes",
-    description = "Its stored nodes in failover order, each URL parsed.",
+    description = "Its stored node URLs in failover order, as `PUT` takes them.",
     params(NetworkPath),
     security(("bearerAuth" = [])),
     responses(
@@ -60,11 +62,7 @@ async fn list(
     let network = path.network(&state.payments)?;
     let stored = state.db.read(endpoint::db::find_all).await?;
     Ok(Json(EndpointsResponse {
-        endpoints: stored
-            .rows()
-            .get(&network)
-            .map(RpcEndpoints::shown)
-            .unwrap_or_default(),
+        endpoints: stored.nodes(&network),
         network: network.into(),
     }))
 }
@@ -347,7 +345,7 @@ fn install(
 ) -> Result<EndpointsResponse, Error> {
     state.payments.set_endpoints(&network, nodes.nodes())?;
     Ok(EndpointsResponse {
-        endpoints: nodes.shown(),
+        endpoints: nodes.nodes().to_vec(),
         network: network.into(),
     })
 }

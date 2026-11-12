@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ::rpc::testing::{Reply, Script};
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Cluster, Decimal, Leg, Policy, Signer, Tip,
+    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, ServiceFactory as _, Signer,
     TransactionErrorKind, TransactionState, Transfer, Wallet, WalletError, WalletErrorKind,
     WalletFactory as _,
 };
@@ -301,12 +301,11 @@ fn broadcast_sends_the_exact_bytes_to_every_node() {
                 .once_only("sendTransaction")
         })
         .collect();
-    let tips = nodes
+    let transports = nodes
         .iter()
-        .map(|node| Arc::new(client(node.clone())) as Arc<dyn Tip>)
+        .map(|node| Arc::new(node.clone()) as Arc<dyn ::rpc::Client>)
         .collect();
-    let cluster = Cluster::new(tips, Policy::default()).unwrap();
-    let broadcaster = client(cluster);
+    let broadcaster = client(config().info(transports).unwrap());
 
     block_on(broadcaster.broadcast(&transaction)).unwrap();
 

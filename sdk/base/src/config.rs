@@ -7,7 +7,7 @@ use std::{fmt, sync::Arc, time::Duration};
 use serde_json::Value;
 
 use crate::{
-    Assets, BlockStore, Dated, Future, Holdings, Indexer, InputStore, Network, Tip,
+    Assets, BlockStore, Dated, Future, Holdings, Indexer, InfoClient, InputStore, Network,
     WalletFactoryBroadcaster, WalletIndexStore, WalletStore,
 };
 
@@ -122,23 +122,18 @@ impl fmt::Debug for Service {
     }
 }
 
-/// What a node says about itself: which chain it serves and its tip.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NodeInfo {
-    /// The chain it serves, as the network's `chain_id` writes it (EVM chain
-    /// ID, Solana genesis hash, Bitcoin Core chain name).
-    pub chain_id: String,
-    /// Its newest block (or slot).
-    pub tip: u64,
-}
-
-/// A chain's configuration of one network.
-pub trait Config: Send + Sync {
+/// What a chain builds for one network: its info clients and its service.
+pub trait ServiceFactory: Send + Sync {
     /// The network it configures.
     fn network(&self) -> Network;
 
-    /// The chain's client over one node, which a [`crate::Cluster`] ranks.
-    fn node(&self, client: Arc<dyn rpc::Client>) -> Arc<dyn Tip>;
+    /// The network's nodes as one info client: each wrapped in this chain's
+    /// info client, clustered by tip ([`crate::Cluster`]); asks no node.
+    ///
+    /// # Errors
+    ///
+    /// When `nodes` is empty.
+    fn info(&self, nodes: Vec<Arc<dyn rpc::Client>>) -> anyhow::Result<Arc<dyn InfoClient>>;
 
     /// Validates and builds the service over `storage`, every part of it reaching the
     /// nodes through `client` (typically a [`rpc::Swap`] the caller

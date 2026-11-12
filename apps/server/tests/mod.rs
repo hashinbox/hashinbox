@@ -18,10 +18,10 @@ use std::{
 };
 
 use base::{
-    Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Future,
-    Indexer, Network, Networked, Service, Signer, Tips, Transaction, TransactionError,
-    TransactionErrorKind, TransactionId, TransactionState, Transactions, Transfer, Wallet,
-    WalletFactory, WalletFactoryBroadcaster,
+    Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Cluster,
+    Future, Indexer, InfoClient, Network, Networked, Policy, Service, Signer, Tips, Transaction,
+    TransactionError, TransactionErrorKind, TransactionId, TransactionState, Transactions,
+    Transfer, Wallet, WalletFactory, WalletFactoryBroadcaster,
 };
 use crypto::{Curve, SecretBytes};
 use payments::Payments;
@@ -299,7 +299,7 @@ impl rpc::Client for Node {
     }
 }
 
-impl base::Tip for Node {
+impl InfoClient for Node {
     fn tip(&self) -> Future<'_, anyhow::Result<u64>> {
         Box::pin(async { Ok(0) })
     }
@@ -318,13 +318,17 @@ impl base::Tip for Node {
 /// time over [`Days`]).
 struct Config(Arc<Script>, Option<Duration>);
 
-impl base::Config for Config {
+impl base::ServiceFactory for Config {
     fn network(&self) -> Network {
         network()
     }
 
-    fn node(&self, client: Arc<dyn rpc::Client>) -> Arc<dyn base::Tip> {
-        Arc::new(Node(client))
+    fn info(&self, nodes: Vec<Arc<dyn rpc::Client>>) -> anyhow::Result<Arc<dyn InfoClient>> {
+        let nodes = nodes
+            .into_iter()
+            .map(|node| Arc::new(Node(node)) as Arc<dyn InfoClient>)
+            .collect();
+        Ok(Arc::new(Cluster::new(nodes, Policy::default())?))
     }
 
     fn build<'a>(

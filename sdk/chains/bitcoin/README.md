@@ -11,7 +11,7 @@ rest of the SDK.
 use std::sync::Arc;
 
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Chained as _, Config as _, Storage, WalletFactory as _,
+    Asset, Broadcaster as _, BuilderExt as _, Chained as _, ServiceFactory as _, Storage, WalletFactory as _,
 };
 use chain_bitcoin::{AddressType, Client, Config, Network};
 use rpc::Endpoint;
@@ -57,15 +57,16 @@ per step (default 100) (each absent one its default).
 
 ## Notes
 
-- `Config` implements `base::Config`: `build(&storage, client)` validates
+- `Config` implements `base::ServiceFactory`: `build(&storage, client)` validates
   and returns the `base::Service`, asking no node. The indexer wakes every
   `interval_ms` milliseconds (default 30,000).
 - The config holds no endpoints: `build(&storage, client)` builds every
-  part over the given transport, asking no node. `node(client)` is the
-  `Client` over one node, a `base::Tip`: `tip()` is `getblockcount`, `info()` its
-  chain and tip, asked once when a node is added; `payments` clusters a
-  network's nodes by `tip()` (`base::Cluster`). Pass a `rpc::Swap` and keep
-  it to change nodes live.
+  part over the given transport, asking no node. `info(nodes)` is the
+  network's nodes as one client: each wrapped in `Info`, the chain's
+  `base::InfoClient` (`tip()` is `getblockcount`, `info()` its chain and tip, asked
+  once when a node is added), clustered by `tip()` (`base::Cluster`).
+  `Client` extends `Info` with every other call and is an `InfoClient` too.
+  Pass a `rpc::Swap` and keep it to change nodes live.
 - Position and height are both the block height. `confirmation_depth`
   (1 to 1000, default 6) makes a block final once that many blocks, itself
   included, are on the chain: `confirmed = produced - (depth - 1)`. Bitcoin

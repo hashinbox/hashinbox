@@ -1,5 +1,5 @@
 //! [`Cluster`]: nodes of one network acting as one [`rpc::Client`], the
-//! freshest by [`Tip::tip`] serving, as its [`Policy`] selects.
+//! freshest by [`InfoClient::tip`] serving, as its [`Policy`] selects.
 
 use std::{
     fmt,
@@ -16,23 +16,10 @@ use std::{
 use anyhow::ensure;
 use rpc::{Answer, Batch, BoxFuture, Error, RawJson, Request};
 
-use crate::{Future, NodeInfo};
+use crate::{Future, InfoClient, NodeInfo};
 
 /// No node is waiting to be demoted.
 const NONE: usize = usize::MAX;
-
-/// A chain's client over one node: what a [`Cluster`] ranks.
-pub trait Tip: rpc::Client {
-    /// The node's newest block (or slot).
-    fn tip(&self) -> Future<'_, anyhow::Result<u64>>;
-
-    /// Its chain and tip.
-    ///
-    /// # Errors
-    ///
-    /// A node failure, or a node of another chain than configured.
-    fn info(&self) -> Future<'_, anyhow::Result<NodeInfo>>;
-}
 
 /// The tunables of a [`Cluster`]'s primary selection.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,7 +56,7 @@ impl Default for Policy {
 /// reaches every node exactly once, concurrently, and waits for all of them,
 /// so no node's execution is cancelled by an earlier answer.
 ///
-/// The primary is chosen by every node's [`Tip::tip`] at the first call and
+/// The primary is chosen by every node's [`InfoClient::tip`] at the first call and
 /// whenever a call arrives after a trigger: a transport failure brought the
 /// primary to [`Policy::failure_threshold`] consecutive failed calls, it was
 /// rate-limited ([`Error::is_rate_limited`]), or [`Policy::refresh`]
@@ -80,11 +67,11 @@ impl Default for Policy {
 /// [`Policy::probe_timeout`] only makes that node ineligible. Probing runs
 /// inside a call, never in a task of its own, and one call probes at a time.
 ///
-/// It is a [`Tip`] too, the primary's, so clusters nest. The primary is
+/// It is an [`InfoClient`] too, the primary's, so clusters nest. The primary is
 /// identified by its index in the order given to [`Self::new`]; `Debug`
 /// shows the node count and that index only.
 pub struct Cluster {
-    nodes: Vec<Arc<dyn Tip>>,
+    nodes: Vec<Arc<dyn InfoClient>>,
     policy: Policy,
     primary: AtomicUsize,
     /// The primary's consecutive failed calls, as forwarded.
@@ -114,7 +101,7 @@ impl Cluster {
     /// # Errors
     ///
     /// When `nodes` is empty.
-    pub fn new(nodes: Vec<Arc<dyn Tip>>, policy: Policy) -> anyhow::Result<Self> {
+    pub fn new(nodes: Vec<Arc<dyn InfoClient>>, policy: Policy) -> anyhow::Result<Self> {
         ensure!(!nodes.is_empty(), "a cluster needs at least one node");
         Ok(Self {
             nodes,
@@ -170,7 +157,7 @@ impl Cluster {
     }
 
     /// The primary after any due selection.
-    async fn current(&self) -> (usize, &dyn Tip) {
+    async fn current(&self) -> (usize, &dyn InfoClient) {
         let demoted = self.demoted.load(Ordering::Acquire);
         if demoted != NONE || self.refresh_due() {
             self.select(demoted).await;
@@ -228,7 +215,7 @@ impl Cluster {
     }
 
     /// `node`'s tip; `None` when it fails or is too slow.
-    fn probe<'a>(&self, node: &'a dyn Tip) -> BoxFuture<'a, Option<u64>> {
+    fn probe<'a>(&self, node: &'a dyn InfoClient) -> BoxFuture<'a, Option<u64>> {
         let timeout = self.policy.probe_timeout;
         Box::pin(async move { tokio::time::timeout(timeout, node.tip()).await.ok()?.ok() })
     }
@@ -257,7 +244,7 @@ impl rpc::Client for Cluster {
 }
 
 /// The primary's.
-impl Tip for Cluster {
+impl InfoClient for Cluster {
     fn tip(&self) -> Future<'_, anyhow::Result<u64>> {
         Box::pin(async move { self.current().await.1.tip().await })
     }
@@ -325,8 +312,8 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{Cluster, Policy, Tip};
-    use crate::{Future, NodeInfo};
+    use super::{Cluster, Policy};
+    use crate::{Future, InfoClient, NodeInfo};
 
     /// A scripted node whose tip is its `tip` call.
     struct Node(Counted<Faults<Script>>);
@@ -345,7 +332,7 @@ mod tests {
         }
     }
 
-    impl Tip for Node {
+    impl InfoClient for Node {
         fn tip(&self) -> Future<'_, anyhow::Result<u64>> {
             Box::pin(async move {
                 let raw = self.request(Request::new("tip", json!([]))).await?;

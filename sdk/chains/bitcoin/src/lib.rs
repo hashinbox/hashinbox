@@ -9,6 +9,7 @@ mod fee_cache;
 mod key;
 mod network;
 mod rpc;
+mod rpc_info;
 mod transaction;
 mod wallet;
 
@@ -19,5 +20,6 @@ pub use fee::FeeRate;
 pub use key::KeyPair;
 pub use network::{BTC_DECIMALS, BTC_NAME, BTC_TICKER, CHAIN_NAME, Network};
 pub use rpc::Client;
+pub use rpc_info::Info;
 pub use transaction::Transaction;
 pub use wallet::Factory;

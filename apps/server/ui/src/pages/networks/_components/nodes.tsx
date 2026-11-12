@@ -10,13 +10,21 @@ import TableCell from '@mui/material/TableCell';
 import TableRow from '@mui/material/TableRow';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
-import { call, client, type ConfiguredNetwork, type Schemas } from '@/api/client';
+import { call, client, type ConfiguredNetwork } from '@/api/client';
 import { Confirm } from '@/_components/confirm';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { AddNode } from './add';
 
-type Node = Schemas['RpcNode'];
+/** A stored node URL, parsed by the browser; `index` is its position. */
+interface Node {
+  index: number;
+  text: string;
+  url: URL;
+}
+
+const HEADER = 'header.';
+const SETTING = 'rpc.';
 
 /** A network's nodes in failover order, and the one picked, parsed. */
 export function Nodes({
@@ -31,7 +39,8 @@ export function Nodes({
   const [picked, setPicked] = useState(0);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<Node | null>(null);
-  const node = network.endpoints[picked] ?? network.endpoints[0] ?? null;
+  const nodes = network.endpoints.map((text, index): Node => ({ index, text, url: new URL(text) }));
+  const node = nodes[picked] ?? nodes[0] ?? null;
   const name = `${network.chain}/${network.network}`;
 
   const remove = (target: Node) => {
@@ -41,7 +50,7 @@ export function Nodes({
     };
     call(client.DELETE('/v1/networks/{chain}/{network}/endpoints/{index}', { params }))
       .then(() => {
-        shell.notify(`${target.origin} removed from ${name}.`);
+        shell.notify(`${target.url.origin} removed from ${name}.`);
         setPicked(0);
         onChanged();
       })
@@ -74,7 +83,7 @@ export function Nodes({
           aria-label="Nodes"
           sx={{ border: 1, borderColor: 'divider', borderRadius: 1 }}
         >
-          {network.endpoints.map((n) => (
+          {nodes.map((n) => (
             <ListItemButton
               key={n.index}
               selected={node?.index === n.index}
@@ -86,27 +95,25 @@ export function Nodes({
                   #{n.index + 1}
                 </Typography>
                 <Typography noWrap sx={{ fontFamily: mono, fontSize: 13, flexGrow: 1 }}>
-                  {n.host}
+                  {n.url.hostname}
                 </Typography>
-                {n.parameters.some((p) => p.header) && <Chip size="small" label="header key" />}
+                {[...n.url.searchParams.keys()].some((k) => k.startsWith(HEADER)) && (
+                  <Chip size="small" label="header key" />
+                )}
               </Stack>
               <Typography noWrap sx={{ fontFamily: mono, fontSize: 11.5, color: 'text.secondary' }}>
-                {n.url}
+                {n.text}
               </Typography>
             </ListItemButton>
           ))}
-          {network.endpoints.length === 0 && (
+          {nodes.length === 0 && (
             <Typography color="text.secondary" sx={{ p: 2, fontSize: 13 }}>
               No stored nodes.
             </Typography>
           )}
         </List>
         {node && (
-          <Detail
-            node={node}
-            onRemove={() => setRemoving(node)}
-            last={network.endpoints.length === 1}
-          />
+          <Detail node={node} onRemove={() => setRemoving(node)} last={nodes.length === 1} />
         )}
       </Box>
       <AddNode
@@ -122,8 +129,8 @@ export function Nodes({
       />
       <Confirm
         open={removing !== null}
-        title={`Remove ${removing?.host ?? ''}`}
-        phrase={removing?.host ?? ''}
+        title={`Remove ${removing?.url.hostname ?? ''}`}
+        phrase={removing?.url.hostname ?? ''}
         action="Remove"
         onClose={() => setRemoving(null)}
         onConfirm={() => {
@@ -136,7 +143,7 @@ export function Nodes({
   );
 }
 
-/** One node's URL, parsed. */
+/** One node's URL, parsed: an unwritten port or `rpc.` setting is the default. */
 function Detail({ node, onRemove, last }: { node: Node; onRemove: () => void; last: boolean }) {
   const row = (label: string, value: string) => (
     <TableRow>
@@ -146,31 +153,40 @@ function Detail({ node, onRemove, last }: { node: Node; onRemove: () => void; la
       </TableCell>
     </TableRow>
   );
-  const query = node.parameters.filter((p) => !p.header);
-  const headers = node.parameters.filter((p) => p.header);
+  const { url } = node;
+  const params = [...url.searchParams];
+  const query = params.filter(([k]) => !k.startsWith(HEADER) && !k.startsWith(SETTING));
+  const headers = params.filter(([k]) => k.startsWith(HEADER));
+  const setting = (name: string, unit: string) => {
+    const value = url.searchParams.get(SETTING + name);
+    return value === null ? 'default' : `${value}${unit}`;
+  };
   return (
     <Box>
       <Table size="small">
         <TableBody>
-          {row('URL', node.url)}
-          {row('Scheme', node.scheme)}
-          {row('Host', node.host)}
-          {row('Port', node.port == null ? '—' : String(node.port))}
-          {row('Path', node.path || '/')}
+          {row('URL', node.text)}
+          {row('Scheme', url.protocol.replace(/:$/, ''))}
+          {row('Host', url.hostname)}
+          {row('Port', url.port || 'default')}
+          {row('Path', url.pathname)}
           {row(
             'User and password',
-            node.username || node.password
-              ? `${node.username}:${node.password ?? ''} (HTTP Basic)`
+            url.username || url.password
+              ? `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)} (HTTP Basic)`
               : 'none',
           )}
-          {row('Query', query.length ? query.map((p) => `${p.name}=${p.value}`).join(' ') : 'none')}
+          {row('Query', query.length ? query.map(([k, v]) => `${k}=${v}`).join(' ') : 'none')}
           {row(
             'Headers',
-            headers.length ? headers.map((p) => `${p.name}: ${p.value}`).join(', ') : 'none',
+            headers.length
+              ? headers.map(([k, v]) => `${k.slice(HEADER.length)}: ${v}`).join(', ')
+              : 'none',
           )}
-          {row('Timeout', `${node.timeout_ms} ms`)}
-          {row('Request limit', `${node.max_request_bytes} bytes`)}
-          {row('Response limit', `${node.max_response_bytes} bytes`)}
+          {row('Timeout', setting('timeout_ms', ' ms'))}
+          {row('Request limit', setting('max_request_bytes', ' bytes'))}
+          {row('Response limit', setting('max_response_bytes', ' bytes'))}
+          {row('Max batch', setting('max_batch', ' calls'))}
         </TableBody>
       </Table>
       <Button color="error" sx={{ mt: 1.5 }} disabled={last} onClick={onRemove}>

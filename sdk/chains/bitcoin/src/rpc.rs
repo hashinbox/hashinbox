@@ -3,17 +3,17 @@
 
 use std::sync::Arc;
 
-use ::rpc::{Answer, Batch, Call, Failure, RawJson, Request};
+use ::rpc::{Answer, Batch, Call, Client as _, Failure, RawJson, Request};
 use anyhow::{Context as _, bail, ensure};
 use base::{
-    Block, BlockHash, BlockHeader, BlockParent, Blocks, NodeInfo, NotServed, Reason, Tips,
-    TransactionError, TransactionErrorKind, Transactions,
+    Block, BlockHash, BlockHeader, BlockParent, Blocks, InfoClient, NodeInfo, NotServed, Reason,
+    Tips, TransactionError, TransactionErrorKind, Transactions,
 };
 use bitcoin::{Amount, Denomination, hashes::Hash as _, hex::DisplayHex as _};
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{FeeRate, Network, transaction::Transaction};
+use crate::{FeeRate, Info, Network, rpc_info::decode, transaction::Transaction};
 
 /// `RPC_INVALID_PARAMETER`: `getblockhash` above the tip.
 const OUT_OF_RANGE: i64 = -8;
@@ -28,47 +28,26 @@ const REJECTED: i64 = -26;
 /// `RPC_VERIFY_ALREADY_IN_CHAIN`: it is already mined.
 const ALREADY_IN_CHAIN: i64 = -27;
 
-/// A Bitcoin Core client of one network; cheap to clone, clones share
-/// whether the node is verified.
+/// A Bitcoin Core client of one network: its [`Info`] client and every
+/// call this crate makes; cheap to clone.
 #[derive(Clone)]
 pub struct Client {
-    transport: Arc<dyn ::rpc::Client>,
-    network: Network,
+    node: Info,
 }
 
 impl Client {
-    /// A client of `network` over `transport`; [`Self::verify`] checks the node.
+    /// A client of `network` over `transport`; [`InfoClient::info`] checks the node.
     #[must_use]
     pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
-        Self { transport, network }
+        Self {
+            node: Info::new(transport, network),
+        }
     }
 
     /// The network it serves.
     #[must_use]
     pub const fn network(&self) -> Network {
-        self.network
-    }
-
-    /// The chain the node serves (Bitcoin Core's name) and its newest block.
-    ///
-    /// # Errors
-    ///
-    /// A node failure, or a node of another network.
-    pub async fn info(&self) -> anyhow::Result<NodeInfo> {
-        let chain: Value = self.call("getblockchaininfo", json!([])).await?;
-        let name = chain["chain"].as_str().unwrap_or_default();
-        let expected = self.network.native().to_core_arg();
-        ensure!(
-            Network::from_core_chain(name) == Some(self.network),
-            "Bitcoin node serves {name}, not the configured {expected}"
-        );
-        let tip = chain["blocks"]
-            .as_u64()
-            .context("Bitcoin getblockchaininfo has no blocks")?;
-        Ok(NodeInfo {
-            chain_id: name.to_owned(),
-            tip,
-        })
+        self.node.network()
     }
 
     /// The node's best height, and the height `depth` blocks deep (`depth` 1
@@ -78,7 +57,7 @@ impl Client {
     ///
     /// A node failure.
     pub async fn tips(&self, depth: u64) -> anyhow::Result<Tips> {
-        let produced: u64 = self.call("getblockcount", json!([])).await?;
+        let produced: u64 = self.node.call("getblockcount", json!([])).await?;
         Ok(Tips {
             produced,
             confirmed: produced.saturating_sub(depth.saturating_sub(1)),
@@ -95,7 +74,7 @@ impl Client {
     /// chain moved mid-fetch; retry).
     pub async fn blocks(&self, start: u64, end: u64) -> anyhow::Result<Blocks> {
         let hashes = self.hashes(start, end).await?;
-        let mut run = Blocks::new(self.network.into());
+        let mut run = Blocks::new(self.network().into());
         if hashes.is_empty() {
             return Ok(run);
         }
@@ -134,8 +113,11 @@ impl Client {
     ///
     /// A node failure, or a height above the node's tip.
     pub async fn time(&self, height: u64) -> anyhow::Result<u64> {
-        let hash: String = self.call("getblockhash", json!([height])).await?;
-        let header: WireHeader = self.call("getblockheader", json!([hash, true])).await?;
+        let hash: String = self.node.call("getblockhash", json!([height])).await?;
+        let header: WireHeader = self
+            .node
+            .call("getblockheader", json!([hash, true]))
+            .await?;
         ensure!(
             header.height == height,
             "Bitcoin node returned another header for {height}"
@@ -151,6 +133,7 @@ impl Client {
     /// A node failure or an unreadable rate.
     pub async fn fee_rate(&self, target: u16) -> anyhow::Result<Option<FeeRate>> {
         let reply: Value = self
+            .node
             .call("estimatesmartfee", json!([target, "conservative"]))
             .await?;
         let Some(rate) = reply.get("feerate").and_then(Value::as_number) else {
@@ -172,7 +155,7 @@ impl Client {
     pub async fn send(&self, bytes: &[u8]) -> Result<(), TransactionError> {
         let request = Request::once("sendrawtransaction", json!([bytes.to_lower_hex_string()]))
             .with_timeout(::rpc::SEND_TIMEOUT);
-        match self.transport.broadcast(request).await {
+        match self.node.broadcast(request).await {
             Ok(()) => Ok(()),
             Err(::rpc::Error::Remote(failure)) => refusal(&failure),
             Err(error) => Err(TransactionError::new(
@@ -223,20 +206,14 @@ impl Client {
         };
         let transactions = (0_u64..)
             .zip(&wire.tx)
-            .map(|(order, json)| Ok(Transaction::from_core(json, self.network, order)?.into()))
+            .map(|(order, json)| Ok(Transaction::from_core(json, self.network(), order)?.into()))
             .collect::<anyhow::Result<_>>()?;
         Ok(Block {
-            network: self.network.into(),
+            network: self.network().into(),
             header,
             transactions: Transactions(transactions),
             rewards: Vec::new(),
         })
-    }
-
-    /// One repeatable call, decoded.
-    async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> anyhow::Result<T> {
-        let reply = self.transport.request(Request::new(method, params)).await;
-        decode(method, reply)
     }
 
     /// One repeatable batch of `method`, one call per parameter list.
@@ -249,29 +226,11 @@ impl Client {
             .into_iter()
             .map(|params| Call::new(method, params))
             .collect();
-        self.transport
+        self.node
             .batch(Batch::new(calls)?)
             .await
             .with_context(|| format!("Bitcoin {method} batch"))
     }
-}
-
-/// A call's result decoded as `T`, a call's or a batch entry's; a node error
-/// object is an error naming its code.
-fn decode<T, E>(method: &str, reply: Result<RawJson, E>) -> anyhow::Result<T>
-where
-    T: DeserializeOwned,
-    E: Into<::rpc::Error>,
-{
-    let raw = match reply.map_err(Into::into) {
-        Ok(raw) => raw,
-        Err(::rpc::Error::Remote(failure)) => {
-            anyhow::bail!("Bitcoin {method} failed with code {}", failure.code)
-        }
-        Err(error) => return Err(anyhow::Error::new(error).context(format!("Bitcoin {method}"))),
-    };
-    raw.deserialize()
-        .with_context(|| format!("Bitcoin {method} result"))
 }
 
 /// What a node's refusal means: accepted after all, transient, or definite.
@@ -334,28 +293,28 @@ impl ::rpc::Client for Client {
         &'a self,
         request: Request,
     ) -> ::rpc::BoxFuture<'a, Result<RawJson, ::rpc::Error>> {
-        self.transport.request(request)
+        self.node.request(request)
     }
 
     fn batch<'a>(
         &'a self,
         batch: Batch,
     ) -> ::rpc::BoxFuture<'a, Result<Vec<Answer>, ::rpc::Error>> {
-        self.transport.batch(batch)
+        self.node.batch(batch)
     }
 
     fn broadcast<'a>(&'a self, request: Request) -> ::rpc::BoxFuture<'a, Result<(), ::rpc::Error>> {
-        self.transport.broadcast(request)
+        self.node.broadcast(request)
     }
 }
 
-/// The tip is `getblockcount`.
-impl base::Tip for Client {
+/// Its [`Info`]'s.
+impl InfoClient for Client {
     fn tip(&self) -> base::Future<'_, anyhow::Result<u64>> {
-        Box::pin(self.call("getblockcount", json!([])))
+        self.node.tip()
     }
 
     fn info(&self) -> base::Future<'_, anyhow::Result<NodeInfo>> {
-        Box::pin(Self::info(self))
+        self.node.info()
     }
 }

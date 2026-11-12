@@ -308,6 +308,23 @@ async fn wallets_balance_legs_and_sends() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, health) = call(&router, Method::GET, "/health", None).await;
     assert_eq!((status, &health["ready"]), (StatusCode::OK, &json!(true)));
+
+    let stored = json!([
+        "http://a.invalid/",
+        "https://u:p@b.invalid:8443/v2/K?key=1&header.x-api-key=K&rpc.max_batch=1"
+    ]);
+    let nodes = serde_json::from_value(stored.clone()).unwrap();
+    let nodes = crate::models::RpcEndpoints::new(nodes).unwrap();
+    let network = base::Network::new(base::Chain::new("bitcoin"), "regtest");
+    db.write(move |connection| crate::models::endpoint::db::upsert(connection, &network, &nodes))
+        .await
+        .unwrap();
+    let (status, listed) = call(&router, Method::GET, endpoints, None).await;
+    assert_eq!((status, &listed["endpoints"]), (StatusCode::OK, &stored));
+    let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
+    assert_eq!(networks["networks"][0]["endpoints"], stored);
+    let (status, _) = call(&router, Method::DELETE, &format!("{endpoints}/2"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]

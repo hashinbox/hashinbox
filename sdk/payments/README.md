@@ -1,25 +1,26 @@
 # payments
 
 The container: every configured network built over the application's
-stores. Per network it keeps the `base::Service` its chain's `base::Config`
+stores. Per network it keeps the `base::Service` its chain's `base::ServiceFactory`
 built, and the `rpc::Swap` every part of that service reaches its nodes
 through. It names no chain; every call is keyed by network.
 
 - `Payments::builder()`: `with_chain::<C>(chain)` registers the chain's
-  `base::Config`, built from a `base::NetworkConfig` (`C: TryFrom<&NetworkConfig>`);
+  `base::ServiceFactory`, built from a `base::NetworkConfig` (`C: TryFrom<&NetworkConfig>`);
   `with_network_config(config)` adds a network its chain builds;
   `with_network(config, endpoints)` adds a chain's own config over its
   nodes; `with_client(network, client)` reaches that network through
   `client` instead; `with_storage(base::Storage)` (required). `build()`
-  clusters each network's nodes (`base::Cluster` of each node's
-  `Config::node`, primary by its `tip()`; `rpc::Error::is_retryable` errors retried), wraps that in a `Swap` and builds the service
+  clusters each network's nodes (`ServiceFactory::info`, primary by its `tip()`;
+  `rpc::Error::is_retryable` errors retried), wraps that in a `Swap` and builds the service
   over it, asking no node; a network that does not build is left out and
   `service(network)` says why.
 - `Payments`:
   - services: `service(network)`, `services()`, `networks()`, `assets()`
     (merged), `client(network)` (the `Swap`), `set_endpoints(network,
     endpoints)` (moves every part to a cluster of other nodes, asking none),
-    `info(network, endpoint)` (asks one node its chain and tip);
+    `info(network, endpoint)` (asks one node, as a one-node cluster, its chain
+    and tip);
   - indexing: each service's `indexer` (the caller steps `next()`, about
     every `interval()`), `watch(address, asset, birthday)` on the address's
     network, `stats()`;
@@ -30,7 +31,7 @@ through. It names no chain; every call is keyed by network.
 ```rust
 use std::sync::Arc;
 
-use base::{Chain, Config, NetworkConfig, Storage};
+use base::{Chain, NetworkConfig, ServiceFactory, Storage};
 use payments::Payments;
 
 /// `C` builds `network`'s chain's configuration.
@@ -40,7 +41,7 @@ async fn serve<C>(
     other_nodes: Arc<dyn rpc::Client>,
 ) -> anyhow::Result<()>
 where
-    C: Config + for<'a> TryFrom<&'a NetworkConfig, Error = anyhow::Error> + 'static,
+    C: ServiceFactory + for<'a> TryFrom<&'a NetworkConfig, Error = anyhow::Error> + 'static,
 {
     let payments = Payments::builder()
         .with_chain::<C>(Chain::from_static("bitcoin"))

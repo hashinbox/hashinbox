@@ -204,7 +204,7 @@ export interface paths {
         };
         /**
          * List a network's RPC nodes
-         * @description Its stored nodes in failover order, each URL parsed.
+         * @description Its stored node URLs in failover order, as `PUT` takes them.
          */
         get: operations["list_network_endpoints"];
         /**
@@ -668,8 +668,8 @@ export interface components {
             confirmations: number;
             /** @description Whether the server starts indexing it. */
             enabled: boolean;
-            /** @description Its nodes in failover order. */
-            endpoints: components["schemas"]["RpcNode"][];
+            /** @description Its node URLs as stored, in failover order. */
+            endpoints: string[];
             /**
              * @description An address's explorer page, `{address}` filled in; always present,
              *     null: none.
@@ -986,8 +986,11 @@ export interface components {
         NetworkAssetKind: "native" | "contract";
         /** @description A network's nodes. */
         NetworkEndpoints: {
-            /** @description Its nodes in failover order. */
-            endpoints: components["schemas"]["RpcNode"][];
+            /**
+             * @description Its node URLs as stored, in failover order; a node's index is its
+             *     position here.
+             */
+            endpoints: string[];
             network: components["schemas"]["Network"];
         };
         /** @description The networks a change touched. */
@@ -1083,44 +1086,6 @@ export interface components {
             /** @description Nodes to append, each after its network's current ones, in order. */
             nodes: components["schemas"]["NetworkNode"][];
         };
-        /** @description One RPC node: its URL, parsed. */
-        RpcNode: {
-            host: string;
-            /** @description Its position in failover order; what removing it takes. */
-            index: number;
-            /**
-             * Format: int32
-             * @description Largest request body, in bytes.
-             */
-            max_request_bytes: number;
-            /**
-             * Format: int32
-             * @description Largest response body, in bytes.
-             */
-            max_response_bytes: number;
-            /** @description Scheme, host and port. */
-            origin: string;
-            /** @description Its query parameters, in order. */
-            parameters: components["schemas"]["RpcParameter"][];
-            /** @description Always present. */
-            password: string | null;
-            path: string;
-            /**
-             * Format: int32
-             * @description The port, the scheme's default when unwritten; always present.
-             */
-            port: number | null;
-            scheme: string;
-            /**
-             * Format: int64
-             * @description Longest one call may take, in milliseconds.
-             */
-            timeout_ms: number;
-            /** @description The URL as stored. */
-            url: string;
-            /** @description The user of `user:password`, sent as HTTP Basic; empty when none. */
-            username: string;
-        };
         /** @description `POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body. */
         RpcNodes: {
             /**
@@ -1130,14 +1095,6 @@ export interface components {
              *     (`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`).
              */
             endpoints: string[];
-        };
-        /** @description One query parameter of a node's URL. */
-        RpcParameter: {
-            /** @description Whether every call sends it as a header instead of in the URL. */
-            header: boolean;
-            /** @description The parameter's name, or for a `header.<Name>` one, the header's. */
-            name: string;
-            value: string;
         };
         /** @description One send job of a run. */
         RunJob: {

@@ -11,40 +11,6 @@ const HEADER: &str = "header.";
 /// never sent to it; each layer of [`crate::node`] reads its own params.
 const SETTING: &str = "rpc.";
 
-/// An endpoint URL's parts ([`Endpoint::parts`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Parts {
-    /// Scheme, host and port.
-    pub origin: String,
-    /// `http` or `https`.
-    pub scheme: String,
-    /// The host name or address.
-    pub host: String,
-    /// The port, the scheme's default when unwritten.
-    pub port: Option<u16>,
-    /// The path.
-    pub path: String,
-    /// The user of `user:password` (sent as HTTP Basic); empty when none.
-    pub username: String,
-    /// The password of `user:password`.
-    pub password: Option<String>,
-    /// The query parameters, in order.
-    pub parameters: Vec<Parameter>,
-}
-
-/// One query parameter of an endpoint URL.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Parameter {
-    /// Its name, or for a `header.<Name>` parameter, the header's.
-    pub name: String,
-    /// Its value.
-    pub value: String,
-    /// Whether every call sends it as a header instead of in the URL.
-    pub header: bool,
-    /// Whether it is an `rpc.` setting, never sent to the node.
-    pub setting: bool,
-}
-
 /// A node URL, parsed: what reaches the node, and every query parameter.
 ///
 /// ```
@@ -204,31 +170,6 @@ impl Endpoint {
         Self { url: url.into() }
     }
 
-    /// The URL's parts; `None` when it does not parse.
-    #[must_use]
-    pub fn parts(&self) -> Option<Parts> {
-        let url = url::Url::parse(&self.url).ok()?;
-        let parameters = url
-            .query_pairs()
-            .map(|(key, value)| Parameter {
-                header: key.starts_with(HEADER),
-                setting: key.starts_with(SETTING),
-                name: key.strip_prefix(HEADER).unwrap_or(&key).to_owned(),
-                value: value.into_owned(),
-            })
-            .collect();
-        Some(Parts {
-            origin: url.origin().ascii_serialization(),
-            scheme: url.scheme().to_owned(),
-            host: url.host_str().unwrap_or_default().to_owned(),
-            port: url.port_or_known_default(),
-            path: url.path().to_owned(),
-            username: url.username().to_owned(),
-            password: url.password().map(str::to_owned),
-            parameters,
-        })
-    }
-
     /// The URL parsed ([`Url::parse`]); its params are read by their owners.
     ///
     /// # Errors
@@ -265,20 +206,6 @@ mod tests {
         assert_eq!(headers.len(), 1);
         assert_eq!(headers["x-api-key"], "B");
         assert_eq!(url.node.as_str(), "https://node.invalid/v1?apikey=A");
-        let parts = Endpoint::new("https://u:p@node.invalid/v2/KEY?header.x-k=B")
-            .parts()
-            .unwrap();
-        assert_eq!(
-            (
-                parts.path.as_str(),
-                parts.username.as_str(),
-                parts.password.as_deref()
-            ),
-            ("/v2/KEY", "u", Some("p"))
-        );
-        assert_eq!(parts.port, Some(443));
-        assert!(parts.parameters[0].header && parts.parameters[0].name == "x-k");
-        assert_eq!(parts.parameters[0].value, "B");
         for bad in [
             "https://node.invalid/?header.x-key=1&header.X-Key=2",
             "https://node.invalid/?header.bad%20name=1",

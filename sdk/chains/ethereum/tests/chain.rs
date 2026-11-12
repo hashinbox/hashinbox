@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use ::rpc::testing::{Faults, Reply, Script};
 use base::{
-    Asset, Chained as _, Dated as _, Decimal, Leg, NotServed, Reason, Reward, Tips,
-    TransactionState,
+    Asset, Chained as _, Dated as _, Decimal, InfoClient as _, Leg, NotServed, Reason, Reward,
+    Tips, TransactionState,
 };
 use chain_ethereum::{Chain, Client, Config, Network, Token};
 use futures_executor::block_on;
@@ -612,7 +612,7 @@ impl base::WalletStore for Fresh {
 
 #[test]
 fn the_settings_batch_is_the_indexers_step() {
-    use base::Config as _;
+    use base::ServiceFactory as _;
 
     let stored = base::NetworkConfig {
         network: network(),
@@ -670,7 +670,7 @@ fn the_settings_batch_is_the_indexers_step() {
 
 #[test]
 fn a_network_builds_with_its_node_down_and_asks_it_nothing() {
-    use base::Config as _;
+    use base::ServiceFactory as _;
 
     let script = Script::new([]);
     let node = Faults::new(script.clone());

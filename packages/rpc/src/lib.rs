@@ -18,7 +18,7 @@ pub use client::{
 pub use decorators::{
     Backoff, Counted, Logged, Retry, Router, Snapshot, Split, SplitParams, Statistics, Swap,
 };
-pub use endpoint::{Endpoint, Parameter, Params, Parts, Url};
+pub use endpoint::{Endpoint, Params, Url};
 pub use error::{Error, ErrorKind, Failure};
 pub use http::{Http, HttpParams};
 pub use node::{Node, node};

@@ -16,7 +16,7 @@ pub const CHAIN_NAME: Chain = Chain::from_static("ethereum");
 /// An EVM chain's numeric identity and stable application network name.
 ///
 /// The chain ID is checked against the node by
-/// [`Client::verify`](crate::Client::verify). The slug names stored networks
+/// [`Info`](crate::Info)'s `info()`. The slug names stored networks
 /// and must stay stable across restarts; neither is derived from the other,
 /// because EVM chains are an open set.
 #[derive(Clone, Debug, PartialEq, Eq)]

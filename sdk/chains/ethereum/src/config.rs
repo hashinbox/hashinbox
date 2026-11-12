@@ -5,13 +5,13 @@ use std::{sync::Arc, time::Duration};
 use alloy_primitives::hex;
 use anyhow::{Context as _, ensure};
 use base::{
-    Asset, AssetInfo, AssetKind, Assets, Future, Indexer, Service, Storage,
-    WalletFactoryBroadcaster,
+    Asset, AssetInfo, AssetKind, Assets, Cluster, Future, Indexer, InfoClient, Policy, Service,
+    Storage, WalletFactoryBroadcaster,
 };
 use serde::Deserialize;
 
 use crate::{
-    Chain, Client, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Factory, FeeLimits, Network, Tokens,
+    Chain, Client, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Factory, FeeLimits, Info, Network, Tokens,
     fee::Estimator, fee_cache::Cached,
 };
 
@@ -243,20 +243,24 @@ impl TryFrom<&base::NetworkConfig> for Config {
             confirmations: config.confirmations,
         };
         ensure!(
-            base::Config::network(&built) == config.network,
+            base::ServiceFactory::network(&built) == config.network,
             "not an Ethereum network"
         );
         Ok(built)
     }
 }
 
-impl base::Config for Config {
+impl base::ServiceFactory for Config {
     fn network(&self) -> base::Network {
         (&self.native()).into()
     }
 
-    fn node(&self, client: Arc<dyn ::rpc::Client>) -> Arc<dyn base::Tip> {
-        Arc::new(Client::new(client, self.native()))
+    fn info(&self, nodes: Vec<Arc<dyn ::rpc::Client>>) -> anyhow::Result<Arc<dyn InfoClient>> {
+        let nodes = nodes
+            .into_iter()
+            .map(|node| Arc::new(Info::new(node, self.native())) as Arc<dyn InfoClient>)
+            .collect();
+        Ok(Arc::new(Cluster::new(nodes, Policy::default())?))
     }
 
     fn build<'a>(

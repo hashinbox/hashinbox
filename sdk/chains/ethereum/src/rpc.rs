@@ -15,14 +15,15 @@ use alloy_primitives::{B256, Bytes, U64, U256, hex, keccak256};
 use alloy_rpc_types_eth::Block as RpcBlock;
 use anyhow::{Context as _, anyhow, bail, ensure};
 use base::{
-    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, NodeInfo, NotServed,
-    Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
+    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, InfoClient, NodeInfo,
+    NotServed, Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
 };
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Address, Network, Tokens, erc20,
+    Address, Info, Network, Tokens, erc20,
+    rpc_info::decode,
     transaction::{Log, Transaction},
 };
 
@@ -37,26 +38,24 @@ const WEI_PER_GWEI: u64 = 1_000_000_000;
 /// header shape, transaction objects stay JSON for [`Transaction::from_rpc`].
 type WireBlock = RpcBlock<Value>;
 
-/// An Ethereum JSON-RPC client of one network; cheap to clone, clones share
-/// it.
+/// An Ethereum JSON-RPC client of one network: its [`Info`] client and
+/// every call this crate makes; cheap to clone, clones share it.
 #[derive(Clone)]
 pub struct Client(Arc<Inner>);
 
 struct Inner {
-    transport: Arc<dyn ::rpc::Client>,
-    network: Network,
+    node: Info,
     /// Set once the node refuses `eth_getBlockReceipts`: receipts then come
     /// one per transaction.
     receipts_by_transaction: AtomicBool,
 }
 
 impl Client {
-    /// A client of `network` over `transport`; [`Self::verify`] checks the node.
+    /// A client of `network` over `transport`; [`InfoClient::info`] checks the node.
     #[must_use]
     pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
         Self(Arc::new(Inner {
-            transport,
-            network,
+            node: Info::new(transport, network),
             receipts_by_transaction: AtomicBool::new(false),
         }))
     }
@@ -64,26 +63,7 @@ impl Client {
     /// The network it serves.
     #[must_use]
     pub fn network(&self) -> &Network {
-        &self.0.network
-    }
-
-    /// The chain ID the node serves and its newest block.
-    ///
-    /// # Errors
-    ///
-    /// A node failure, or a node of another chain.
-    pub async fn info(&self) -> anyhow::Result<NodeInfo> {
-        let actual: U64 = self.call("eth_chainId", json!([])).await?;
-        let expected = self.network().chain_id;
-        ensure!(
-            actual == U64::from(expected),
-            "Ethereum node serves chain ID {actual}, not the configured {expected}"
-        );
-        let tip: U64 = self.call("eth_blockNumber", json!([])).await?;
-        Ok(NodeInfo {
-            chain_id: expected.to_string(),
-            tip: tip.to(),
-        })
+        self.0.node.network()
     }
 
     /// The newest block (`eth_blockNumber`) and the newest block consensus
@@ -186,7 +166,7 @@ impl Client {
         let method = "eth_getBlockByNumber";
         let reply = self
             .0
-            .transport
+            .node
             .request(Request::new(method, json!([format!("{height:#x}"), false])))
             .await;
         expired(height, &reply)?;
@@ -207,6 +187,8 @@ impl Client {
     /// A node failure.
     pub async fn nonce(&self, address: &Address) -> anyhow::Result<u64> {
         let nonce: U64 = self
+            .0
+            .node
             .call(
                 "eth_getTransactionCount",
                 json!([address.to_string(), "pending"]),
@@ -263,7 +245,7 @@ impl Client {
         ]);
         let reply = self
             .0
-            .transport
+            .node
             .request(Request::new("eth_estimateGas", params))
             .await;
         let failure = match reply {
@@ -306,7 +288,11 @@ impl Client {
             "to": hex::encode_prefixed(token),
             "data": hex::encode_prefixed(erc20::decimals()),
         });
-        let word: Bytes = self.call("eth_call", json!([call, "latest"])).await?;
+        let word: Bytes = self
+            .0
+            .node
+            .call("eth_call", json!([call, "latest"]))
+            .await?;
         erc20::decode_decimals(&word).with_context(|| format!("ERC-20 {token}"))
     }
 
@@ -324,7 +310,7 @@ impl Client {
             json!([hex::encode_prefixed(bytes)]),
         )
         .with_timeout(::rpc::SEND_TIMEOUT);
-        let failure = match self.0.transport.broadcast(request).await {
+        let failure = match self.0.node.broadcast(request).await {
             Ok(()) => return Ok(()),
             Err(::rpc::Error::Remote(failure)) => failure,
             Err(error) => {
@@ -363,6 +349,8 @@ impl Client {
     /// Whether the node holds the transaction `id`, mined or pending.
     async fn known(&self, id: B256) -> anyhow::Result<bool> {
         let found: Option<Value> = self
+            .0
+            .node
             .call(
                 "eth_getTransactionByHash",
                 json!([hex::encode_prefixed(id)]),
@@ -428,7 +416,7 @@ impl Client {
             }]);
             let reply = self
                 .0
-                .transport
+                .node
                 .request(Request::new("eth_getLogs", filter))
                 .await;
             let refused = match &reply {
@@ -464,19 +452,13 @@ impl Client {
         Ok((transfers, None))
     }
 
-    /// One repeatable call, decoded.
-    async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> anyhow::Result<T> {
-        let reply = self.0.transport.request(Request::new(method, params)).await;
-        decode(method, reply)
-    }
-
     /// Repeatable calls as one batch; one answer per call, in call order,
     /// an error object as the [`::rpc::Error`] a single call returns.
     async fn batch(&self, calls: Vec<Call>) -> anyhow::Result<Vec<Result<RawJson, ::rpc::Error>>> {
         let count = calls.len();
         let replies = self
             .0
-            .transport
+            .node
             .batch(Batch::new(calls)?)
             .await
             .context("Ethereum JSON-RPC batch")?;
@@ -506,32 +488,29 @@ impl ::rpc::Client for Client {
         &'a self,
         request: Request,
     ) -> ::rpc::BoxFuture<'a, Result<RawJson, ::rpc::Error>> {
-        self.0.transport.request(request)
+        self.0.node.request(request)
     }
 
     fn batch<'a>(
         &'a self,
         batch: Batch,
     ) -> ::rpc::BoxFuture<'a, Result<Vec<Answer>, ::rpc::Error>> {
-        self.0.transport.batch(batch)
+        self.0.node.batch(batch)
     }
 
     fn broadcast<'a>(&'a self, request: Request) -> ::rpc::BoxFuture<'a, Result<(), ::rpc::Error>> {
-        self.0.transport.broadcast(request)
+        self.0.node.broadcast(request)
     }
 }
 
-/// The tip is `eth_blockNumber`.
-impl base::Tip for Client {
+/// Its [`Info`]'s.
+impl InfoClient for Client {
     fn tip(&self) -> base::Future<'_, anyhow::Result<u64>> {
-        Box::pin(async move {
-            let tip: U64 = self.call("eth_blockNumber", json!([])).await?;
-            Ok(tip.to())
-        })
+        self.0.node.tip()
     }
 
     fn info(&self) -> base::Future<'_, anyhow::Result<NodeInfo>> {
-        Box::pin(Self::info(self))
+        self.0.node.info()
     }
 }
 
@@ -671,16 +650,6 @@ fn expired(height: u64, reply: &Result<RawJson, ::rpc::Error>) -> Result<(), Not
         }
         _ => Ok(()),
     }
-}
-
-/// A call's result decoded as `T`; an error keeps its [`::rpc::Error`].
-fn decode<T: DeserializeOwned>(
-    method: &str,
-    reply: Result<RawJson, ::rpc::Error>,
-) -> anyhow::Result<T> {
-    let raw = reply.with_context(|| format!("Ethereum {method}"))?;
-    raw.deserialize()
-        .with_context(|| format!("Ethereum {method} result"))
 }
 
 /// Why the node definitively refused a transaction, when its message says.

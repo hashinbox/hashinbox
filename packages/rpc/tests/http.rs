@@ -559,8 +559,6 @@ fn rpc_settings_are_read_and_checked() {
         rpc::HttpParams::try_from(&plain),
         Ok(rpc::HttpParams::default())
     );
-    let parts = endpoint.parts().unwrap();
-    assert!(parts.parameters.iter().all(|parameter| parameter.setting));
 }
 
 #[test]

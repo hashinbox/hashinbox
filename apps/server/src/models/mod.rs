@@ -68,7 +68,7 @@ pub(crate) mod wallet_index;
 
 pub(crate) use asset::Asset;
 pub(crate) use block::Block;
-pub(crate) use endpoint::{RpcEndpoints, RpcNode};
+pub(crate) use endpoint::RpcEndpoints;
 pub(crate) use json::Json;
 pub(crate) use leg::Leg;
 pub(crate) use network::{Network, NetworkName};

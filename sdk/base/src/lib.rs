@@ -9,6 +9,7 @@ mod cluster;
 mod config;
 mod fee;
 mod indexer;
+mod info;
 mod inout;
 mod network;
 #[cfg(feature = "testing")]
@@ -26,11 +27,12 @@ pub use block::{
 };
 pub use cache::Cache;
 pub use chain::Chain;
-pub use cluster::{Cluster, Policy, Tip};
-pub use config::{AssetConfig, AssetKind, Config, NetworkConfig, NodeInfo, Service, Storage};
+pub use cluster::{Cluster, Policy};
+pub use config::{AssetConfig, AssetKind, NetworkConfig, Service, ServiceFactory, Storage};
 pub use decimal::{Decimal, Error as DecimalError};
 pub use fee::{Estimator as FeeEstimator, Holdings, NoHoldings, Spend, Spends};
 pub use indexer::{Birthday, DEFAULT_BATCH, Indexer, Next, Stats};
+pub use info::{InfoClient, NodeInfo};
 
 pub use inout::{Coin, Input, Inputs, Output, Outputs, Store as InputStore};
 pub use network::{Network, Networked};

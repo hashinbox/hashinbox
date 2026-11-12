@@ -3,83 +3,13 @@
 
 use std::collections::BTreeMap;
 
+use super::schema::network_endpoint;
 use anyhow::Context as _;
 use base::{Chain, Network};
 use diesel::{prelude::*, sqlite::Sqlite, upsert::excluded};
-use serde::Serialize;
-
-use super::schema::network_endpoint;
 
 /// The most endpoints one network may list.
 const MOST: usize = 16;
-
-/// One query parameter of a node's URL.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-pub(crate) struct RpcParameter {
-    /// The parameter's name, or for a `header.<Name>` one, the header's.
-    name: String,
-    value: String,
-    /// Whether every call sends it as a header instead of in the URL.
-    header: bool,
-}
-
-/// One RPC node: its URL, parsed.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-pub(crate) struct RpcNode {
-    /// Its position in failover order; what removing it takes.
-    index: usize,
-    /// The URL as stored.
-    url: String,
-    /// Scheme, host and port.
-    origin: String,
-    scheme: String,
-    host: String,
-    /// The port, the scheme's default when unwritten; always present.
-    #[schema(required)]
-    port: Option<u16>,
-    path: String,
-    /// The user of `user:password`, sent as HTTP Basic; empty when none.
-    username: String,
-    /// Always present.
-    #[schema(required)]
-    password: Option<String>,
-    /// Its query parameters, in order.
-    parameters: Vec<RpcParameter>,
-    /// Longest one call may take, in milliseconds.
-    timeout_ms: u64,
-    /// Largest request body, in bytes.
-    max_request_bytes: u32,
-    /// Largest response body, in bytes.
-    max_response_bytes: u32,
-}
-
-impl RpcNode {
-    fn new(index: usize, (url, parts, params): (String, rpc::Parts, rpc::HttpParams)) -> Self {
-        Self {
-            index,
-            url,
-            origin: parts.origin,
-            scheme: parts.scheme,
-            host: parts.host,
-            port: parts.port,
-            path: parts.path,
-            username: parts.username,
-            password: parts.password,
-            parameters: parts
-                .parameters
-                .into_iter()
-                .map(|parameter| RpcParameter {
-                    name: parameter.name,
-                    value: parameter.value,
-                    header: parameter.header,
-                })
-                .collect(),
-            timeout_ms: params.timeout_ms,
-            max_request_bytes: params.max_request_bytes,
-            max_response_bytes: params.max_response_bytes,
-        }
-    }
-}
 
 /// One row of `network_endpoint`: a network's endpoints in failover order, one
 /// to [`MOST`] of them. The store's operations are this row's.
@@ -105,22 +35,6 @@ impl RpcEndpoints {
         Ok(Self(endpoints))
     }
 
-    /// Each one's shown form, in failover order; one whose URL does not
-    /// parse or check is left out.
-    pub(crate) fn shown(&self) -> Vec<RpcNode> {
-        let views = self.0.iter().filter_map(|endpoint| {
-            Some((
-                endpoint.url.clone(),
-                endpoint.parts()?,
-                rpc::HttpParams::try_from(&endpoint.parse().ok()?).ok()?,
-            ))
-        });
-        views
-            .enumerate()
-            .map(|(index, view)| RpcNode::new(index, view))
-            .collect()
-    }
-
     /// The endpoints, in failover order.
     pub(crate) fn nodes(&self) -> &[rpc::Endpoint] {
         &self.0
@@ -131,11 +45,6 @@ impl RpcEndpoints {
 pub(crate) struct NetworkEndpoints(BTreeMap<Network, RpcEndpoints>);
 
 impl NetworkEndpoints {
-    /// Every network's list.
-    pub(crate) fn rows(&self) -> &BTreeMap<Network, RpcEndpoints> {
-        &self.0
-    }
-
     /// `network`'s endpoints, in failover order; none when it has no row.
     pub(crate) fn nodes(&self, network: &Network) -> Vec<rpc::Endpoint> {
         self.0

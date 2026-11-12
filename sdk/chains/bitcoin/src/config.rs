@@ -4,15 +4,15 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Asset, AssetInfo, AssetKind, Future, Indexer, InputStore, Service, Storage,
-    WalletFactoryBroadcaster,
+    Asset, AssetInfo, AssetKind, Cluster, Future, Indexer, InfoClient, InputStore, Policy, Service,
+    Storage, WalletFactoryBroadcaster,
 };
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::{AddressType, Chain, Factory};
 use crate::{BTC_DECIMALS, BTC_NAME, BTC_TICKER, Network};
-use crate::{FeeRate, fee::Estimator, fee_cache::Cached, rpc::Client};
+use crate::{FeeRate, Info, fee::Estimator, fee_cache::Cached, rpc::Client};
 
 /// Everything one Bitcoin network needs; built in code with [`Config::new`]
 /// or from a [`base::NetworkConfig`].
@@ -190,20 +190,24 @@ impl TryFrom<&base::NetworkConfig> for Config {
             built.display_decimals = asset.display_decimals;
         }
         ensure!(
-            base::Config::network(&built) == config.network,
+            base::ServiceFactory::network(&built) == config.network,
             "not a Bitcoin network"
         );
         Ok(built)
     }
 }
 
-impl base::Config for Config {
+impl base::ServiceFactory for Config {
     fn network(&self) -> base::Network {
         self.network.into()
     }
 
-    fn node(&self, client: Arc<dyn ::rpc::Client>) -> Arc<dyn base::Tip> {
-        Arc::new(Client::new(client, self.network))
+    fn info(&self, nodes: Vec<Arc<dyn ::rpc::Client>>) -> anyhow::Result<Arc<dyn InfoClient>> {
+        let nodes = nodes
+            .into_iter()
+            .map(|node| Arc::new(Info::new(node, self.network)) as Arc<dyn InfoClient>)
+            .collect();
+        Ok(Arc::new(Cluster::new(nodes, Policy::default())?))
     }
 
     fn build<'a>(

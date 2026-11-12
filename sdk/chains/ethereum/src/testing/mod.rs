@@ -201,8 +201,8 @@ impl TestChain for Ethereum {
             .collect()
     }
 
-    fn client(node: Arc<dyn ::rpc::Client>) -> Arc<dyn base::Tip> {
-        Arc::new(crate::Client::new(
+    fn client(node: Arc<dyn ::rpc::Client>) -> Arc<dyn base::InfoClient> {
+        Arc::new(crate::Info::new(
             node,
             crate::Network::new(model::CHAIN_ID, "sepolia"),
         ))

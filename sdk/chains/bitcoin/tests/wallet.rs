@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use ::rpc::testing::{Reply, Script};
 use base::{
-    Address, Asset, Broadcaster as _, BuilderExt as _, Cluster, Coin, Future, Input, InputStore,
-    Inputs, Leg, Policy, Reason, Signer, Tip, TransactionErrorKind, TransactionId,
+    Address, Asset, Broadcaster as _, BuilderExt as _, Coin, Future, Input, InputStore, Inputs,
+    Leg, Reason, ServiceFactory as _, Signer, TransactionErrorKind, TransactionId,
     TransactionState, Transfer, WalletError, WalletErrorKind, WalletFactory as _,
 };
 use bitcoin::{Transaction, consensus};
@@ -248,12 +248,14 @@ async fn broadcasts_exact_bytes_to_every_node() {
             .once_only("sendrawtransaction")
         })
         .collect();
-    let tips = nodes
+    let transports = nodes
         .iter()
-        .map(|node| Arc::new(Client::new(Arc::new(node.clone()), Network::Regtest)) as Arc<dyn Tip>)
+        .map(|node| Arc::new(node.clone()) as Arc<dyn ::rpc::Client>)
         .collect();
-    let cluster = Cluster::new(tips, Policy::default()).expect("cluster");
-    let rpc = Client::new(Arc::new(cluster), Network::Regtest);
+    let cluster = Config::new(Network::Regtest)
+        .info(transports)
+        .expect("cluster");
+    let rpc = Client::new(cluster, Network::Regtest);
     let broadcaster = rpc;
     broadcaster
         .broadcast(&signed(&bytes))

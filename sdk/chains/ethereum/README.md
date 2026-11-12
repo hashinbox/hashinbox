@@ -7,7 +7,7 @@ and token transfers as EIP-1559 transactions.
 ## Usage
 
 ```rust,no_run
-use base::{Asset, Broadcaster as _, BuilderExt as _, Chained as _, Config as _, Storage, WalletFactory as _};
+use base::{Asset, Broadcaster as _, BuilderExt as _, Chained as _, ServiceFactory as _, Storage, WalletFactory as _};
 use std::sync::Arc;
 
 use chain_ethereum::{Client, Config, Network};
@@ -51,15 +51,16 @@ rate-limits) (each absent one its default).
 
 ## Notes
 
-- `Config` implements `base::Config`: `build(&storage, client)` validates
+- `Config` implements `base::ServiceFactory`: `build(&storage, client)` validates
   and returns the `base::Service`, asking no node. The indexer wakes every
   `interval_ms` milliseconds (default 12,000).
 - The config holds no endpoints: `build(&storage, client)` builds every
-  part over the given transport, asking no node. `node(client)` is the
-  `Client` over one node, a `base::Tip`: `tip()` is `eth_blockNumber`, `info()` its
-  chain and tip, asked once when a node is added; `payments` clusters a
-  network's nodes by `tip()` (`base::Cluster`). Pass a `rpc::Swap` and keep
-  it to change nodes live.
+  part over the given transport, asking no node. `info(nodes)` is the
+  network's nodes as one client: each wrapped in `Info`, the chain's
+  `base::InfoClient` (`tip()` is `eth_blockNumber`, `info()` its chain and tip, asked
+  once when a node is added), clustered by `tip()` (`base::Cluster`).
+  `Client` extends `Info` with every other call and is an `InfoClient` too.
+  Pass a `rpc::Swap` and keep it to change nodes live.
 - Position and height are the block number. A block is confirmed once it is at
   or below the node's `finalized` block; a node that serves none yet (syncing,
   a development chain) fails `tips`.

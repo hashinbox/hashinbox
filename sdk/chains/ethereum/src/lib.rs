@@ -10,6 +10,7 @@ mod fee_cache;
 mod key;
 mod network;
 mod rpc;
+mod rpc_info;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod transaction;
@@ -23,5 +24,6 @@ pub use fee::{FeeLimits, Fees};
 pub use key::KeyPair;
 pub use network::{CHAIN_NAME, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Network};
 pub use rpc::Client;
+pub use rpc_info::Info;
 pub use transaction::Transaction;
 pub use wallet::Factory;
