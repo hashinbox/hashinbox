@@ -36,7 +36,8 @@ struct ListResponse {
     path = "/v1/networks",
     operation_id = "list_networks",
     summary = "List every network, its assets, its RPC nodes, its indexing and its live tip",
-    description = "Every stored network: its row, its assets, its nodes (each URL parsed) and \
+    description = "Every stored network: its row, its assets, its nodes (each URL with what \
+        the running server knows of it: last tip, failure streak, calls) and \
         its `index` row (null: not indexed), and why its index job last failed \
         (`index_job_reason`). `tip_live` asks every running network's node at \
         once, each for at most 2 s; one that fails keeps the stored `tip` and says why in \
@@ -72,7 +73,10 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, 
     let networks = rows.into_iter().map(|mut row| {
         let state = &state;
         async move {
-            let service = match state.payments.service(&row.key()) {
+            if let Ok(transport) = state.container.transport(&row.key()) {
+                transport.clients().states(&mut row.endpoints).await;
+            }
+            let service = match state.container.service(&row.key()) {
                 Ok(service) => service,
                 Err(error) => {
                     row.tip_error = Some(format!("{error:#}"));
@@ -109,9 +113,12 @@ pub(super) struct NetworkPath {
 
 impl NetworkPath {
     /// The network, when configured; a 404 when not.
-    pub(super) fn network(&self, payments: &payments::Payments) -> Result<base::Network, Error> {
+    pub(super) fn network(
+        &self,
+        container: &base::Container<crate::usecase::Transport>,
+    ) -> Result<base::Network, Error> {
         let network = base::Network::new(base::Chain::new(&self.chain), self.network.clone());
-        payments.service(&network)?;
+        container.service(&network)?;
         Ok(network)
     }
 }

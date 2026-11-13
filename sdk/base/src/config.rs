@@ -1,19 +1,19 @@
-//! [`Config`]: a chain's configuration of one network, built into a
-//! [`Service`] over the application's [`Storage`]; and [`NetworkConfig`],
-//! the chain-neutral description each chain builds its `Config` from.
+//! [`NetworkConfig`]: one network, whatever its chain; [`ServiceFactory`]:
+//! a chain building it into a [`Service`] over the application's
+//! [`Storage`].
 
 use std::{fmt, sync::Arc, time::Duration};
 
 use serde_json::Value;
 
 use crate::{
-    Assets, BlockStore, Dated, Future, Holdings, Indexer, InfoClient, InputStore, Network,
+    Assets, BlockStore, Chain, Dated, Holdings, Indexer, InputStore, Network,
     WalletFactoryBroadcaster, WalletIndexStore, WalletStore,
 };
 
 /// One network as an application stores it, whatever its chain: the facts
-/// every chain has, its assets and endpoints, and `settings`, the chain's
-/// own knobs. Each chain crate builds its `Config` from it
+/// every chain has, its assets, and `settings`, the chain's own knobs. Its
+/// nodes are not here: they belong to its [`crate::Transport`]. Each chain crate builds its `Config` from it
 /// (`TryFrom<&NetworkConfig>`), reading every absent knob as its default.
 #[derive(Clone, Debug)]
 pub struct NetworkConfig {
@@ -38,8 +38,6 @@ pub struct NetworkConfig {
     pub settings: Value,
     /// The native currency and every token.
     pub assets: Vec<AssetConfig>,
-    /// The nodes, in failover order.
-    pub endpoints: Vec<rpc::Endpoint>,
 }
 
 /// One asset of a [`NetworkConfig`].
@@ -101,7 +99,7 @@ pub struct Service {
     /// The stores it was built over.
     pub storage: Storage,
     /// The node transport every part of the service reads and broadcasts
-    /// through: the one passed to [`Config::build`].
+    /// through: the one passed to [`ServiceFactory::service`].
     pub client: Arc<dyn rpc::Client>,
     /// Finds the network's blocks by time; `None` where the chain cannot.
     pub dated: Option<Arc<dyn Dated>>,
@@ -122,29 +120,24 @@ impl fmt::Debug for Service {
     }
 }
 
-/// What a chain builds for one network: its info clients and its service.
-pub trait ServiceFactory: Send + Sync {
-    /// The network it configures.
-    fn network(&self) -> Network;
+/// One chain: a network's config, read once, then built into its
+/// [`Service`] over the application's stores and the one client every part
+/// reaches its nodes through.
+pub trait ServiceFactory: Sized {
+    /// The chain it builds.
+    const CHAIN: Chain;
 
-    /// The network's nodes as one info client: each wrapped in this chain's
-    /// info client, clustered by tip ([`crate::Cluster`]); asks no node.
+    /// The chain's settings from a stored `config`, checked once.
     ///
     /// # Errors
     ///
-    /// When `nodes` is empty.
-    fn info(&self, nodes: Vec<Arc<dyn rpc::Client>>) -> anyhow::Result<Arc<dyn InfoClient>>;
+    /// Settings that do not decode, or a network of another chain.
+    fn new(config: &NetworkConfig) -> anyhow::Result<Self>;
 
-    /// Validates and builds the service over `storage`, every part of it reaching the
-    /// nodes through `client` (typically a [`rpc::Swap`] the caller
-    /// keeps to change nodes live).
+    /// Its service over `storage` and `client`; asks no node.
     ///
     /// # Errors
     ///
     /// An invalid configuration.
-    fn build<'a>(
-        &'a self,
-        storage: &'a Storage,
-        client: Arc<dyn rpc::Client>,
-    ) -> Future<'a, anyhow::Result<Service>>;
+    fn service(&self, storage: &Storage, client: Arc<dyn rpc::Client>) -> anyhow::Result<Service>;
 }

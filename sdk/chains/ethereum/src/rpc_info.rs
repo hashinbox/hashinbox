@@ -5,32 +5,17 @@ use std::sync::Arc;
 
 use ::rpc::{Answer, Batch, RawJson, Request};
 use alloy_primitives::U64;
-use anyhow::{Context as _, ensure};
+use anyhow::Context as _;
 use base::{InfoClient, NodeInfo};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::Network;
-
-/// An Ethereum node of one network, as a cluster ranks it.
+/// An Ethereum node, read for its tip and chain ID.
 pub struct Info {
     transport: Arc<dyn ::rpc::Client>,
-    network: Network,
 }
 
 impl Info {
-    /// The node at `transport`, of `network`.
-    #[must_use]
-    pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
-        Self { transport, network }
-    }
-
-    /// The network it serves.
-    #[must_use]
-    pub const fn network(&self) -> &Network {
-        &self.network
-    }
-
     /// One repeatable call, decoded.
     pub(crate) async fn call<T: DeserializeOwned>(
         &self,
@@ -65,6 +50,10 @@ impl ::rpc::Client for Info {
 
 /// The tip is `eth_blockNumber`; the chain is `eth_chainId`.
 impl InfoClient for Info {
+    fn new(transport: Arc<dyn ::rpc::Client>) -> Self {
+        Self { transport }
+    }
+
     fn tip(&self) -> base::Future<'_, anyhow::Result<u64>> {
         Box::pin(async move {
             let tip: U64 = self.call("eth_blockNumber", json!([])).await?;
@@ -74,14 +63,9 @@ impl InfoClient for Info {
 
     fn info(&self) -> base::Future<'_, anyhow::Result<NodeInfo>> {
         Box::pin(async move {
-            let actual: U64 = self.call("eth_chainId", json!([])).await?;
-            let expected = self.network.chain_id;
-            ensure!(
-                actual == U64::from(expected),
-                "Ethereum node serves chain ID {actual}, not the configured {expected}"
-            );
+            let chain_id: U64 = self.call("eth_chainId", json!([])).await?;
             Ok(NodeInfo {
-                chain_id: expected.to_string(),
+                chain_id: chain_id.to_string(),
                 tip: self.tip().await?,
             })
         })

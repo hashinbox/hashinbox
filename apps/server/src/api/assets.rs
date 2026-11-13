@@ -52,7 +52,7 @@ struct ListResponse {
 )]
 async fn list(State(state): State<Arc<AppState>>) -> Json<ListResponse> {
     let assets = state
-        .payments
+        .container
         .assets()
         .into_iter()
         .map(|info| Listing {

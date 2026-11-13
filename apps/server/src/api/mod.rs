@@ -225,6 +225,13 @@ impl Error {
     }
 }
 
+/// A malformed id: always a 400.
+impl From<crate::models::IdError> for Error {
+    fn from(error: crate::models::IdError) -> Self {
+        Self::invalid_request(error.to_string())
+    }
+}
+
 /// The handled failures inside an `anyhow::Error` by their status: an
 /// unconfigured network is a 404, a bad address or key a 400; any other
 /// failure (a store, a node, generation) is a 503.
@@ -285,16 +292,11 @@ impl IndexParams {
 /// # Errors
 ///
 /// A 400 for a malformed ID or address; a 404 for an unconfigured network.
-fn wallet_address(payments: &payments::Payments, id: &str) -> Result<base::Address, Error> {
-    let mut parts = id.splitn(3, '.');
-    let (Some(chain), Some(network), Some(text)) = (parts.next(), parts.next(), parts.next())
-    else {
-        return Err(Error::invalid_request(
-            "wallet ID must be {chain}.{network}.{address}",
-        ));
-    };
-    let network = base::Network::new(base::Chain::new(chain), network);
-    Ok(payments.parse(&network, text)?)
+fn wallet_address(
+    container: &base::Container<crate::usecase::Transport>,
+    id: &str,
+) -> Result<base::Address, Error> {
+    Ok(container.parse(&crate::models::wallet::WalletId::parse(id)?)?)
 }
 
 /// The asset `id` of `network` and its description.
@@ -303,7 +305,7 @@ fn wallet_address(payments: &payments::Payments, id: &str) -> Result<base::Addre
 ///
 /// A 404 when the network does not configure it.
 fn asset_info(
-    payments: &payments::Payments,
+    container: &base::Container<crate::usecase::Transport>,
     network: &base::Network,
     id: &str,
 ) -> Result<base::AssetInfo, Error> {
@@ -311,7 +313,7 @@ fn asset_info(
         network: network.clone(),
         id: id.to_owned(),
     };
-    payments
+    container
         .service(network)?
         .assets
         .get(&asset)

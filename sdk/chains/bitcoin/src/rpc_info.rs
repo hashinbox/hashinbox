@@ -4,34 +4,20 @@
 use std::sync::Arc;
 
 use ::rpc::{Answer, Batch, RawJson, Request};
-use anyhow::{Context as _, ensure};
+use anyhow::Context as _;
 use base::NodeInfo;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::Network;
 
-/// A Bitcoin Core node of one network, as a cluster ranks it; cheap to
-/// clone.
+/// A Bitcoin Core node, read for its tip and chain; cheap to clone.
 #[derive(Clone)]
 pub struct Info {
     transport: Arc<dyn ::rpc::Client>,
-    network: Network,
 }
 
 impl Info {
-    /// The node at `transport`, of `network`.
-    #[must_use]
-    pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
-        Self { transport, network }
-    }
-
-    /// The network it serves.
-    #[must_use]
-    pub const fn network(&self) -> Network {
-        self.network
-    }
-
     /// One repeatable call, decoded.
     pub(crate) async fn call<T: DeserializeOwned>(
         &self,
@@ -64,8 +50,14 @@ impl ::rpc::Client for Info {
     }
 }
 
-/// The tip is `getblockcount`; the chain is Bitcoin Core's name for it.
+/// The tip is `getblockcount`; the chain is the network Bitcoin Core names,
+/// by its name here (`mainnet` for Core's `main`), or Core's name for one
+/// this crate does not know.
 impl base::InfoClient for Info {
+    fn new(transport: Arc<dyn ::rpc::Client>) -> Self {
+        Self { transport }
+    }
+
     fn tip(&self) -> base::Future<'_, anyhow::Result<u64>> {
         Box::pin(self.call("getblockcount", json!([])))
     }
@@ -74,16 +66,12 @@ impl base::InfoClient for Info {
         Box::pin(async move {
             let chain: Value = self.call("getblockchaininfo", json!([])).await?;
             let name = chain["chain"].as_str().unwrap_or_default();
-            let expected = self.network.native().to_core_arg();
-            ensure!(
-                Network::from_core_chain(name) == Some(self.network),
-                "Bitcoin node serves {name}, not the configured {expected}"
-            );
             let tip = chain["blocks"]
                 .as_u64()
                 .context("Bitcoin getblockchaininfo has no blocks")?;
+            let chain_id = Network::from_core_chain(name).map_or(name, |network| network.slug());
             Ok(NodeInfo {
-                chain_id: name.to_owned(),
+                chain_id: chain_id.to_owned(),
                 tip,
             })
         })

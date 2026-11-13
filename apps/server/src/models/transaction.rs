@@ -4,18 +4,60 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Context as _;
-use base::{Decimal, Network, Reason, TransactionId, TransactionState};
+use base::{Chain, Decimal, Network, Networked, Reason, TransactionState};
 use diesel::{
+    deserialize::FromSqlRow,
+    expression::AsExpression,
     prelude::*,
     sql_types::{BigInt, Nullable, Text},
     sqlite::Sqlite,
 };
 
 use super::{
-    Json, Leg, int, key, leg,
+    Id, IdError, Json, Leg,
+    block::BlockId,
+    id::typed_id,
+    int, leg,
     schema::{self, transaction_with_legs, transactions},
     uint,
 };
+
+/// A transaction's id: `{chain}.{network}.{txid}`.
+#[derive(Clone, Debug, PartialEq, Eq, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Text)]
+pub(crate) struct TransactionId {
+    pub(crate) network: Network,
+    pub(crate) txid: String,
+    id: Id,
+}
+
+impl TransactionId {
+    /// The id of `txid` of `network`.
+    ///
+    /// # Errors
+    ///
+    /// When a part holds a dot.
+    pub(crate) fn new(network: &Network, txid: &str) -> Result<Self, IdError> {
+        let id = Id::new(&[network.chain.as_str(), &network.name, txid])?;
+        Ok(Self {
+            network: network.clone(),
+            txid: txid.to_owned(),
+            id,
+        })
+    }
+
+    /// `text` as a transaction id.
+    ///
+    /// # Errors
+    ///
+    /// Unless it has its three parts.
+    pub(crate) fn parse(text: &str) -> Result<Self, IdError> {
+        let [chain, network, txid] = Id::parts::<3>(text, "{chain}.{network}.{txid}")?;
+        Self::new(&Network::new(Chain::new(chain), network), txid)
+    }
+}
+
+typed_id!(TransactionId, network);
 
 /// The `state` and `reason` columns of `state`.
 ///
@@ -75,9 +117,11 @@ pub(crate) fn decode_state(state: i32, reason: Option<&str>) -> anyhow::Result<T
 )]
 pub(crate) struct Transaction {
     /// `{chain}.{network}.{txid}`.
-    pub(crate) id: String,
+    #[schema(value_type = String)]
+    pub(crate) id: TransactionId,
     /// Its block; null while pending.
-    pub(crate) block: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub(crate) block: Option<BlockId>,
     pub(crate) chain: String,
     pub(crate) network: String,
     /// Chain-native transaction id.
@@ -137,19 +181,17 @@ pub(crate) fn parse_key(text: &str) -> Option<Key> {
     ))
 }
 
-impl Transaction {
-    /// The id of `txid` of `network`: `"{chain}.{network}.{txid}"`.
-    ///
-    /// # Errors
-    ///
-    /// When a part holds a dot.
-    pub(crate) fn id(network: &Network, txid: &str) -> anyhow::Result<String> {
-        key(&[network.chain.as_str(), &network.name, txid])
+impl Networked for Transaction {
+    fn network(&self) -> &Network {
+        self.id.network()
     }
+}
 
+impl Transaction {
     /// Drops its legs of wallet indexes not in `ours` (index ids).
     pub(crate) fn keep(&mut self, ours: &BTreeSet<String>) {
-        self.legs.retain(|leg| ours.contains(&leg.wallet_index_id));
+        self.legs
+            .retain(|leg| ours.contains(leg.wallet_index_id.as_ref()));
     }
 
     /// The transaction it was written from, with its kept legs.
@@ -158,15 +200,14 @@ impl Transaction {
     ///
     /// When a stored value does not decode.
     pub(crate) fn transaction(self) -> anyhow::Result<base::Transaction> {
-        let network = Network::new(base::Chain::new(&self.chain), &self.network);
         Ok(base::Transaction {
-            id: TransactionId::new(network.clone(), self.txid),
+            id: base::TransactionId::new(self.id.network, self.txid),
             state: decode_state(self.state, self.reason.as_deref())?,
             order: self.order.map(uint).transpose()?,
             legs: self
                 .legs
                 .into_iter()
-                .map(|leg| leg.leg(&network))
+                .map(Leg::leg)
                 .collect::<anyhow::Result<Vec<_>>>()?,
             bytes: self.bytes,
             expires: self.expires_at.map(uint).transpose()?,
@@ -180,10 +221,10 @@ impl TryFrom<&base::Transaction> for Transaction {
 
     fn try_from(transaction: &base::Transaction) -> anyhow::Result<Self> {
         let network = &transaction.id.network;
-        let id = Self::id(network, &transaction.id.id)?;
+        let id = TransactionId::new(network, &transaction.id.id)?;
         let legs = (0_u32..)
             .zip(&transaction.legs)
-            .map(|(index, leg)| Leg::try_from((id.as_str(), index, leg)))
+            .map(|(index, leg)| Leg::try_from((&id, index, leg)))
             .collect::<anyhow::Result<_>>()?;
         let (state, reason) = encode_state(&transaction.state)?;
         Ok(Self {
@@ -250,7 +291,7 @@ pub(crate) mod db {
         let mut takes = BTreeMap::<String, Decimal>::new();
         for leg in &transaction.legs {
             *takes
-                .entry(leg.wallet_index_id.clone())
+                .entry(leg.wallet_index_id.clone().into())
                 .or_insert_with(Decimal::zero) += leg.signed()?;
         }
         let ours: BTreeMap<String, leg::db::Spending> =
@@ -290,7 +331,7 @@ pub(crate) mod db {
     ) -> anyhow::Result<()> {
         let block = transaction
             .block
-            .as_deref()
+            .as_ref()
             .context("a mined transaction has no block")?;
         diesel::insert_into(transactions::table)
             .values(transaction)
@@ -305,10 +346,10 @@ pub(crate) mod db {
     /// Transaction `id` with its kept legs, if kept.
     pub(crate) fn get(
         connection: &mut SqliteConnection,
-        id: &str,
+        id: impl AsRef<str>,
     ) -> QueryResult<Option<Transaction>> {
         transaction_with_legs::table
-            .find(id)
+            .find(id.as_ref())
             .get_result(connection)
             .optional()
     }
@@ -437,7 +478,7 @@ pub(crate) mod db {
     /// their legs, in block order; after `page.after` when given.
     pub(crate) fn find_by_block_page(
         connection: &mut SqliteConnection,
-        block: &str,
+        block: impl AsRef<str>,
         page: Page<Key>,
     ) -> QueryResult<Vec<Transaction>> {
         let (order, txid) = page
@@ -455,7 +496,7 @@ pub(crate) mod db {
                 t.txid
             LIMIT ?4"#,
         )
-        .bind::<Text, _>(block)
+        .bind::<Text, _>(block.as_ref())
         .bind::<BigInt, _>(order)
         .bind::<Nullable<Text>, _>(txid)
         .bind::<BigInt, _>(page.limit)
@@ -466,8 +507,9 @@ pub(crate) mod db {
     /// refused): their funds and coins are free again. A mined one is kept.
     pub(crate) fn delete_pending(
         connection: &mut SqliteConnection,
-        ids: &[String],
+        ids: &[impl AsRef<str>],
     ) -> QueryResult<usize> {
+        let ids: Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
         let pending = transactions::table
             .filter(transactions::id.eq_any(ids))
             .filter(transactions::block.is_null());

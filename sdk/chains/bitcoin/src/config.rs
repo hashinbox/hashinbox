@@ -1,18 +1,19 @@
-//! [`Config`]: one Bitcoin network's settings, and the pieces built from them.
+//! [`Config`]: one Bitcoin network's settings; [`Factory`]: the pieces
+//! built from them, a stored network's service among them.
 
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Asset, AssetInfo, AssetKind, Cluster, Future, Indexer, InfoClient, InputStore, Policy, Service,
-    Storage, WalletFactoryBroadcaster,
+    Asset, AssetInfo, AssetKind, Indexer, InputStore, NetworkConfig, Service, Storage,
+    WalletFactoryBroadcaster,
 };
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{AddressType, Chain, Factory};
+use crate::{AddressType, CHAIN_NAME, Chain, WalletFactory};
 use crate::{BTC_DECIMALS, BTC_NAME, BTC_TICKER, Network};
-use crate::{FeeRate, Info, fee::Estimator, fee_cache::Cached, rpc::Client};
+use crate::{FeeRate, fee::Estimator, fee_cache::Cached, rpc::Client};
 
 /// Everything one Bitcoin network needs; built in code with [`Config::new`]
 /// or from a [`base::NetworkConfig`].
@@ -122,42 +123,6 @@ impl Config {
         Ok(())
     }
 
-    /// Validates, and a client over `transport`; asks the node nothing.
-    fn open(&self, transport: Arc<dyn ::rpc::Client>) -> anyhow::Result<Client> {
-        self.validate()?;
-        Ok(Client::new(transport, self.network))
-    }
-
-    /// The chain read through `rpc`.
-    ///
-    /// # Errors
-    ///
-    /// For an invalid confirmation depth.
-    pub fn chain(&self, rpc: &Client) -> anyhow::Result<Chain> {
-        Chain::new(rpc.clone(), self.confirmation_depth)
-    }
-
-    /// The wallet factory: coins from `inputs`; fee rates from `rpc`,
-    /// reused by its one cached estimator for `fee_ttl_ms`.
-    #[must_use]
-    pub fn factory(&self, rpc: &Client, inputs: Arc<dyn InputStore>) -> Factory {
-        let precise = Estimator {
-            network: self.network.into(),
-            rpc: rpc.clone(),
-            inputs: Arc::clone(&inputs),
-            target_blocks: self.fee_target_blocks,
-            floor: FeeRate::from_sat_per_kvb(self.fee_floor),
-        };
-        let fees = Cached::new(precise, Duration::from_millis(self.fee_ttl_ms));
-        Factory {
-            rpc: rpc.clone(),
-            pending_ttl: Duration::from_millis(self.pending_ttl_ms),
-            inputs,
-            address_type: self.address_type,
-            fees: Arc::new(fees),
-        }
-    }
-
     /// BTC on this network.
     #[must_use]
     pub fn asset(&self) -> AssetInfo {
@@ -171,13 +136,13 @@ impl Config {
     }
 }
 
-impl TryFrom<&base::NetworkConfig> for Config {
+impl TryFrom<&NetworkConfig> for Config {
     type Error = anyhow::Error;
 
     /// Its network (by name) and native display, its
     /// `confirmation_depth` (`confirmations + 1`), and its knobs from
     /// `settings`.
-    fn try_from(config: &base::NetworkConfig) -> anyhow::Result<Self> {
+    fn try_from(config: &NetworkConfig) -> anyhow::Result<Self> {
         let settings = Settings::deserialize(&config.settings).context("Bitcoin settings")?;
         let network =
             Network::deserialize(json!(config.network.name)).context("Bitcoin network")?;
@@ -190,57 +155,98 @@ impl TryFrom<&base::NetworkConfig> for Config {
             built.display_decimals = asset.display_decimals;
         }
         ensure!(
-            base::ServiceFactory::network(&built) == config.network,
+            base::Network::from(built.network) == config.network,
             "not a Bitcoin network"
         );
         Ok(built)
     }
 }
 
-impl base::ServiceFactory for Config {
-    fn network(&self) -> base::Network {
-        self.network.into()
+/// Builds Bitcoin's pieces from a [`Config`]; as its
+/// [`base::ServiceFactory`], a stored network's whole service.
+pub struct Factory {
+    config: Config,
+}
+
+impl From<Config> for Factory {
+    fn from(config: Config) -> Self {
+        Self { config }
+    }
+}
+
+impl Factory {
+    /// The block reader over `rpc`.
+    ///
+    /// # Errors
+    ///
+    /// For an invalid confirmation depth.
+    pub fn chain(&self, rpc: &Client) -> anyhow::Result<Chain> {
+        Chain::new(rpc.clone(), self.config.confirmation_depth)
     }
 
-    fn info(&self, nodes: Vec<Arc<dyn ::rpc::Client>>) -> anyhow::Result<Arc<dyn InfoClient>> {
-        let nodes = nodes
-            .into_iter()
-            .map(|node| Arc::new(Info::new(node, self.network)) as Arc<dyn InfoClient>)
-            .collect();
-        Ok(Arc::new(Cluster::new(nodes, Policy::default())?))
+    /// The wallet factory over `rpc`: coins from `inputs`; fee rates from
+    /// `rpc`, reused by its one cached estimator for `fee_ttl_ms`.
+    #[must_use]
+    pub fn wallets(&self, rpc: &Client, inputs: Arc<dyn InputStore>) -> WalletFactory {
+        let config = &self.config;
+        let precise = Estimator {
+            network: config.network.into(),
+            rpc: rpc.clone(),
+            inputs: Arc::clone(&inputs),
+            target_blocks: config.fee_target_blocks,
+            floor: FeeRate::from_sat_per_kvb(config.fee_floor),
+        };
+        let fees = Cached::new(precise, Duration::from_millis(config.fee_ttl_ms));
+        WalletFactory {
+            rpc: rpc.clone(),
+            pending_ttl: Duration::from_millis(config.pending_ttl_ms),
+            inputs,
+            address_type: config.address_type,
+            fees: Arc::new(fees),
+        }
+    }
+}
+
+impl base::ServiceFactory for Factory {
+    const CHAIN: base::Chain = CHAIN_NAME;
+
+    fn new(config: &NetworkConfig) -> anyhow::Result<Self> {
+        Ok(Config::try_from(config)?.into())
     }
 
-    fn build<'a>(
-        &'a self,
-        storage: &'a Storage,
+    /// Validates, and the service over `storage`, every part of it reaching
+    /// the nodes through `client`; asks no node.
+    fn service(
+        &self,
+        storage: &Storage,
         client: Arc<dyn ::rpc::Client>,
-    ) -> Future<'a, anyhow::Result<Service>> {
-        Box::pin(async move {
-            let rpc = self.open(Arc::clone(&client))?;
-            let chain = Arc::new(self.chain(&rpc)?);
-            let indexer = Arc::new(
-                Indexer::new(
-                    chain.clone(),
-                    Arc::clone(&storage.blocks),
-                    Arc::clone(&storage.indexes),
-                    Duration::from_millis(self.interval_ms),
-                )
-                .with_batch(self.batch),
-            );
-            Ok(Service {
-                indexer,
-                wallets: WalletFactoryBroadcaster {
-                    network: self.network.into(),
-                    factory: Arc::new(self.factory(&rpc, Arc::clone(&storage.inputs))),
-                    broadcaster: Arc::new(rpc),
-                },
-                assets: std::iter::once(self.asset()).collect(),
-                storage: storage.clone(),
-                client,
-                dated: Some(chain),
-                max_history: self.max_history,
-                confirmations: self.confirmation_depth.saturating_sub(1),
-            })
+    ) -> anyhow::Result<Service> {
+        let config = &self.config;
+        config.validate()?;
+        let rpc = Client::new(Arc::clone(&client), config.network);
+        let chain = Arc::new(self.chain(&rpc)?);
+        let indexer = Arc::new(
+            Indexer::new(
+                chain.clone(),
+                Arc::clone(&storage.blocks),
+                Arc::clone(&storage.indexes),
+                Duration::from_millis(config.interval_ms),
+            )
+            .with_batch(config.batch),
+        );
+        Ok(Service {
+            indexer,
+            wallets: WalletFactoryBroadcaster {
+                network: config.network.into(),
+                factory: Arc::new(self.wallets(&rpc, Arc::clone(&storage.inputs))),
+                broadcaster: Arc::new(rpc),
+            },
+            assets: std::iter::once(config.asset()).collect(),
+            storage: storage.clone(),
+            client,
+            dated: Some(chain),
+            max_history: config.max_history,
+            confirmations: config.confirmation_depth.saturating_sub(1),
         })
     }
 }

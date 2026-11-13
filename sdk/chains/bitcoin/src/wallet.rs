@@ -1,4 +1,4 @@
-//! [`Factory`] (`base::WalletFactory`) and its wallets (`base::Wallet`).
+//! [`WalletFactory`] (`base::WalletFactory`) and its wallets (`base::Wallet`).
 
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use crate::{KeyPair, Network as Native, fee_cache::Cached, rpc::Client};
 /// Makes the wallets of one Bitcoin network and address type. Their builders
 /// spend the store's inputs and price fees with the factory's one estimator.
 #[derive(Clone)]
-pub struct Factory {
+pub struct WalletFactory {
     pub(crate) rpc: Client,
     /// How long a signed transaction counts as pending.
     pub(crate) pending_ttl: std::time::Duration,
@@ -24,7 +24,7 @@ pub struct Factory {
     pub(crate) fees: Arc<Cached>,
 }
 
-impl Factory {
+impl WalletFactory {
     pub(crate) fn native(&self) -> Native {
         self.rpc.network()
     }
@@ -36,7 +36,7 @@ impl Factory {
     }
 }
 
-impl base::WalletFactory for Factory {
+impl base::WalletFactory for WalletFactory {
     fn generate(&self) -> Future<'_, anyhow::Result<SecretBytes>> {
         Box::pin(async move { Ok(KeyPair::generate(self.native(), self.address_type)?.secret()) })
     }
@@ -93,7 +93,7 @@ impl base::WalletFactory for Factory {
 /// One Bitcoin key and its address.
 pub(crate) struct Wallet {
     pub(crate) key: KeyPair,
-    pub(crate) factory: Factory,
+    pub(crate) factory: WalletFactory,
 }
 
 impl Addressed for Wallet {

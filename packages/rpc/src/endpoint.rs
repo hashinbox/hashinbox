@@ -179,6 +179,28 @@ impl Endpoint {
         Url::parse(&self.url)
     }
 
+    /// The node's identity: `host[:port]/path` and the query sent to it,
+    /// without scheme, userinfo, `header.*` or `rpc.*` params. Providers put
+    /// the network or key in the path, so different paths are different
+    /// nodes. A URL that does not parse is its own id.
+    #[must_use]
+    pub fn id(&self) -> String {
+        let Ok(url) = self.parse() else {
+            return self.url.clone();
+        };
+        let node = url.node;
+        let host = node.host_str().unwrap_or_default();
+        let port = node
+            .port()
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        let query = node
+            .query()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default();
+        format!("{host}{port}{}{query}", node.path())
+    }
+
     /// Rejects an unusable node: builds its client ([`crate::node`]), which
     /// does no I/O, so every param is read by the layer that owns it.
     ///
@@ -197,6 +219,28 @@ pub(crate) fn invalid(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::Endpoint;
+
+    #[test]
+    fn the_id_is_host_port_path_and_the_query_sent() {
+        let id = |url: &str| Endpoint::new(url).id();
+        assert_eq!(
+            id(
+                "https://user:pass@node.invalid:8545/v1/KEY?apikey=A&header.x-key=B&rpc.max_batch=1"
+            ),
+            "node.invalid:8545/v1/KEY?apikey=A"
+        );
+        assert_eq!(id("http://node.invalid"), "node.invalid/");
+        assert_eq!(id("https://node.invalid:443/a"), "node.invalid/a");
+        assert_ne!(id("https://node.invalid/a"), id("https://node.invalid/b"));
+        assert_eq!(
+            id("http://node.invalid/?rpc.timeout_ms=1"),
+            id("https://node.invalid/")
+        );
+
+        let endpoint = Endpoint::new("http://node.invalid/");
+        let node = crate::Retry::new(crate::node(&endpoint, Default::default()).unwrap());
+        assert_eq!(crate::Client::endpoint(&node), Some(&endpoint));
+    }
 
     #[test]
     fn header_parameters_become_headers() {

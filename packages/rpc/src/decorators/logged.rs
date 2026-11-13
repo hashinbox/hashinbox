@@ -8,7 +8,8 @@ use std::{
 };
 
 use crate::{
-    Answer, Batch, BoxFuture, Client, Error, RawJson, Request, decorators::counted::Outcome,
+    Answer, Batch, BoxFuture, Client, Endpoint, Error, RawJson, Request,
+    decorators::counted::Outcome,
 };
 
 /// `C`, its failures logged: the first of a streak warns, a repeat warns at
@@ -52,6 +53,10 @@ impl<C: Client> Client for Logged<C> {
 
     fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(self.log(self.inner.broadcast(request)))
+    }
+
+    fn endpoint(&self) -> Option<&Endpoint> {
+        self.inner.endpoint()
     }
 }
 

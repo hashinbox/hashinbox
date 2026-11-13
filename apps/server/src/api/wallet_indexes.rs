@@ -112,11 +112,10 @@ async fn create(
     request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<WalletIndex>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let address = wallet_address(&state.payments, &path.id)?;
-    let asset = asset_info(&state.payments, &address.network, &request.asset)?.asset;
-    let (wallet_id, index_id) = models::Wallet::id(&address)
-        .and_then(|wallet| Ok((wallet.clone(), models::child(&wallet, &[&asset.id])?)))
-        .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
+    let address = wallet_address(&state.container, &path.id)?;
+    let asset = asset_info(&state.container, &address.network, &request.asset)?.asset;
+    let index = models::wallet_index::WalletIndexId::of(&address, &asset)?;
+    let (wallet_id, index_id) = (String::from(index.wallet.clone()), String::from(index));
     let Some(mut wallet) = state
         .db
         .read(move |connection| models::wallet::db::find(connection, &wallet_id))
@@ -127,25 +126,23 @@ async fn create(
     if let Some(index) = wallet.indexes.remove(&asset.id) {
         return Ok((StatusCode::OK, Json(index)));
     }
-    let birthday = request
-        .birthday(state.payments.service(&address.network)?)
-        .await?;
+    let service = state.container.service(&address)?;
+    let birthday = request.birthday(&service).await?;
     // `Indexer::watch` borrows the address as `&dyn Addressed`, which is not
     // `Sync`, so its future is not `Send`: it runs on a blocking thread.
-    let (payments, watched, runtime) = (
-        state.payments.clone(),
+    let (container, watched, runtime) = (
+        state.container.clone(),
         address.clone(),
         tokio::runtime::Handle::current(),
     );
     tokio::task::spawn_blocking(move || {
-        runtime.block_on(payments.watch(&watched, &asset, birthday))
+        runtime.block_on(container.watch(&watched, &asset, birthday))
     })
     .await
     .map_err(anyhow::Error::from)??;
-    let network = address.network;
     let created = state
         .db
-        .read(move |connection| wallet_index::db::find_at_tip(connection, &network, &index_id))
+        .read(move |connection| wallet_index::db::find_at_tip(connection, &index_id))
         .await?
         .ok_or_else(|| Error::not_found("no such index"))?;
     Ok((StatusCode::CREATED, Json(created)))
@@ -165,12 +162,11 @@ impl IndexPath {
     /// The wallet's address and the index's model id.
     pub(super) fn index(
         &self,
-        payments: &payments::Payments,
+        container: &base::Container<crate::usecase::Transport>,
     ) -> Result<(base::Address, String), Error> {
-        let address = wallet_address(payments, &self.id)?;
-        let id = models::Wallet::id(&address)
-            .and_then(|wallet| models::child(&wallet, &[&self.asset]))
-            .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
+        let address = wallet_address(container, &self.id)?;
+        let wallet = models::wallet::WalletId::of(&address)?;
+        let id = String::from(models::Id::child(wallet.id(), &[&self.asset])?);
         Ok((address, id))
     }
 }
@@ -225,7 +221,7 @@ async fn update(
 ) -> Result<Json<WalletIndex>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let index_state = request.index_state()?;
-    let (address, id) = path.index(&state.payments)?;
+    let (address, id) = path.index(&state.container)?;
     state
         .db
         .write(move |connection| {
@@ -236,7 +232,7 @@ async fn update(
                 index_state,
                 None,
             )?;
-            wallet_index::db::find_at_tip(connection, &address.network, &id)
+            wallet_index::db::find_at_tip(connection, &id)
         })
         .await?
         .map(Json)
@@ -265,7 +261,7 @@ async fn remove(
     State(state): State<Arc<AppState>>,
     Path(path): Path<IndexPath>,
 ) -> Result<StatusCode, Error> {
-    let (_, id) = path.index(&state.payments)?;
+    let (_, id) = path.index(&state.container)?;
     let removed = state
         .db
         .write(move |connection| Ok(wallet_index::db::delete(connection, &id)?))

@@ -5,11 +5,64 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::bail;
-use base::{Address, Chain, Network};
+use base::{Address, Addressed, Chain, Network, Networked};
 use crypto::{Curve, SecretBytes};
+use diesel::{deserialize::FromSqlRow, expression::AsExpression};
 use serde::Serialize;
 
-use super::{Json, key, wallet_index::WalletIndex};
+use super::{Id, IdError, Json, id::typed_id, wallet_index::WalletIndex};
+
+/// A wallet's id: `{chain}.{network}.{address}`.
+#[derive(Clone, Debug, PartialEq, Eq, AsExpression, FromSqlRow)]
+#[diesel(sql_type = diesel::sql_types::Text)]
+pub(crate) struct WalletId {
+    /// Its network and address text, as the id spells it.
+    pub(crate) address: Address,
+    id: Id,
+}
+
+typed_id!(WalletId, address.network);
+
+impl Addressed for WalletId {
+    fn address(&self) -> &Address {
+        &self.address
+    }
+}
+
+impl WalletId {
+    /// The id of the wallet of `address`.
+    ///
+    /// # Errors
+    ///
+    /// When a part holds a dot.
+    pub(crate) fn of(address: &Address) -> Result<Self, IdError> {
+        let Address { network, value } = address;
+        let id = Id::new(&[network.chain.as_str(), &network.name, value])?;
+        Ok(Self {
+            address: address.clone(),
+            id,
+        })
+    }
+
+    /// `text` as a wallet id; `Container::parse` makes its address canonical.
+    ///
+    /// # Errors
+    ///
+    /// Unless it has its three parts.
+    pub(crate) fn parse(text: &str) -> Result<Self, IdError> {
+        let [chain, network, address] = Id::parts::<3>(text, "{chain}.{network}.{address}")?;
+        Self::of(&Address::new(
+            Network::new(Chain::new(chain), network),
+            address,
+        ))
+    }
+
+    /// The row id.
+    #[must_use]
+    pub(crate) fn id(&self) -> &Id {
+        &self.id
+    }
+}
 
 /// Key bytes, zeroized on drop; `None` for a watch-only wallet.
 pub(crate) struct Secret(pub(crate) Option<SecretBytes>);
@@ -28,7 +81,8 @@ impl From<Option<Vec<u8>>> for Secret {
 #[derive(Serialize, utoipa::ToSchema)]
 pub(crate) struct Wallet {
     /// `{chain}.{network}.{address}`: what every wallet route takes.
-    pub(crate) id: String,
+    #[schema(value_type = String)]
+    pub(crate) id: WalletId,
     pub(crate) chain: String,
     pub(crate) network: String,
     /// Canonical address text.
@@ -89,7 +143,7 @@ impl Wallet {
     /// When a part of the address holds a dot.
     pub(crate) fn from_address(address: &Address) -> anyhow::Result<Self> {
         Ok(Self {
-            id: Self::id(address)?,
+            id: WalletId::of(address)?,
             chain: address.network.chain.as_str().to_owned(),
             network: address.network.name.clone(),
             address: address.value.clone(),
@@ -100,19 +154,6 @@ impl Wallet {
             curve: None,
             secret: Secret(None),
         })
-    }
-
-    /// The id of the wallet of `address`: `"{chain}.{network}.{address}"`.
-    ///
-    /// # Errors
-    ///
-    /// When a part holds a dot.
-    pub(crate) fn id(address: &Address) -> anyhow::Result<String> {
-        key(&[
-            address.network.chain.as_str(),
-            &address.network.name,
-            &address.value,
-        ])
     }
 
     /// Its key's curve; `None` for a watch-only wallet.
@@ -145,20 +186,22 @@ collection! {
     Wallets(Wallet)
 }
 
-/// A wallet row's address.
-impl From<&Wallet> for Address {
-    fn from(row: &Wallet) -> Self {
-        Self::new(
-            Network::new(Chain::new(&row.chain), &row.network),
-            &row.address,
-        )
+impl Networked for Wallet {
+    fn network(&self) -> &Network {
+        self.id.network()
+    }
+}
+
+impl Addressed for Wallet {
+    fn address(&self) -> &Address {
+        self.id.address()
     }
 }
 
 /// Its id.
 impl crate::db::Keyed for Wallet {
     fn key(&self) -> String {
-        self.id.clone()
+        self.id.clone().into()
     }
 }
 
@@ -178,7 +221,7 @@ pub(crate) mod db {
         sqlite::Sqlite,
     };
 
-    use super::{Json, Secret, Wallet, Wallets, is_tag};
+    use super::{Json, Secret, Wallet, WalletId, Wallets, is_tag};
     use crate::{
         db::Page,
         models::{
@@ -191,7 +234,7 @@ pub(crate) mod db {
     #[derive(Queryable, QueryableByName, Selectable)]
     #[diesel(table_name = wallet, check_for_backend(Sqlite))]
     struct Row {
-        id: String,
+        id: WalletId,
         chain: String,
         network: String,
         address: String,
@@ -223,7 +266,7 @@ pub(crate) mod db {
     #[derive(QueryableByName)]
     struct AtTip {
         #[diesel(sql_type = Text)]
-        id: String,
+        id: WalletId,
         #[diesel(sql_type = Text)]
         chain: String,
         #[diesel(sql_type = Text)]
@@ -245,12 +288,11 @@ pub(crate) mod db {
         type Error = anyhow::Error;
 
         fn try_from(row: AtTip) -> anyhow::Result<Self> {
-            let network = super::Network::new(super::Chain::new(&row.chain), &row.network);
             let indexes = row
                 .indexes
                 .0
                 .into_iter()
-                .map(|(asset, index)| Ok((asset, WalletIndex::try_from((&network, index))?)))
+                .map(|(asset, index)| Ok((asset, WalletIndex::try_from(index)?)))
                 .collect::<anyhow::Result<_>>()?;
             Ok(Self {
                 id: row.id,
@@ -275,8 +317,9 @@ pub(crate) mod db {
     /// When the read fails or a stored value does not decode.
     pub(crate) fn find(
         connection: &mut SqliteConnection,
-        id: &str,
+        id: impl AsRef<str>,
     ) -> anyhow::Result<Option<Wallet>> {
+        let id = id.as_ref();
         // Wallet `?1` with its indexes (as `wallet_index_with_balance` reads
         // them) as one JSON object by asset. No key is read.
         diesel::sql_query(
@@ -301,7 +344,6 @@ pub(crate) mod db {
                             'indexed_at', wi.indexed_at,
                             'state', wi.state,
                             'reason', wi.reason,
-                            'address', wi.address,
                             'indexed_through', wi.indexed_through,
                             'behind_tip', wi.behind_tip,
                             'finality_at', wi.finality_at,
@@ -359,7 +401,6 @@ pub(crate) mod db {
                             'indexed_at', wi.indexed_at,
                             'state', wi.state,
                             'reason', wi.reason,
-                            'address', wi.address,
                             'indexed_through', wi.indexed_through,
                             'behind_tip', wi.behind_tip,
                             'finality_at', wi.finality_at,
@@ -461,9 +502,14 @@ pub(crate) mod db {
     }
 
     /// Whether wallet `id` is kept with its key.
-    pub(crate) fn is_keyed(connection: &mut SqliteConnection, id: &str) -> QueryResult<bool> {
+    pub(crate) fn is_keyed(
+        connection: &mut SqliteConnection,
+        id: impl AsRef<str>,
+    ) -> QueryResult<bool> {
         diesel::select(diesel::dsl::exists(
-            wallet::table.find(id).filter(wallet::secret.is_not_null()),
+            wallet::table
+                .find(id.as_ref())
+                .filter(wallet::secret.is_not_null()),
         ))
         .get_result(connection)
     }
@@ -519,10 +565,11 @@ pub(crate) mod db {
     /// When `tag` is not [`is_tag`], or the read or write fails.
     pub(crate) fn set_tag(
         connection: &mut SqliteConnection,
-        id: &str,
+        id: impl AsRef<str>,
         tag: &str,
         add: bool,
     ) -> anyhow::Result<Option<bool>> {
+        let id = id.as_ref();
         ensure!(is_tag(tag), "a tag is 1 to 64 of [a-z0-9-]: {tag:?}");
         let Some(Json(mut tags)) = wallet::table
             .find(id)

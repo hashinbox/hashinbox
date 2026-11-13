@@ -5,11 +5,11 @@ use std::sync::Arc;
 use ::rpc::testing::{Reply, Script};
 use base::{
     Address, Asset, Broadcaster as _, BuilderExt as _, Coin, Future, Input, InputStore, Inputs,
-    Leg, Reason, ServiceFactory as _, Signer, TransactionErrorKind, TransactionId,
-    TransactionState, Transfer, WalletError, WalletErrorKind, WalletFactory as _,
+    Leg, Reason, Signer, TransactionErrorKind, TransactionId, TransactionState, Transfer,
+    WalletError, WalletErrorKind, WalletFactory as _,
 };
 use bitcoin::{Transaction, consensus};
-use chain_bitcoin::{AddressType, Client, Config, Factory, Network};
+use chain_bitcoin::{AddressType, Client, Config, Factory, Network, WalletFactory};
 use crypto::SecretBytes;
 use serde_json::json;
 
@@ -32,11 +32,11 @@ fn network() -> base::Network {
     Network::Regtest.into()
 }
 
-fn factory(script: &Script, kind: AddressType, inputs: Vec<Input>) -> Factory {
+fn factory(script: &Script, kind: AddressType, inputs: Vec<Input>) -> WalletFactory {
     let rpc = Client::new(Arc::new(script.clone()), Network::Regtest);
     let mut config = Config::new(Network::Regtest);
     config.address_type = kind;
-    config.factory(&rpc, Arc::new(Store(inputs)))
+    Factory::from(config).wallets(&rpc, Arc::new(Store(inputs)))
 }
 
 fn funded(owner: &Address, sats: u64) -> Input {
@@ -236,34 +236,20 @@ async fn refuses_what_it_cannot_send() {
 }
 
 #[tokio::test]
-async fn broadcasts_exact_bytes_to_every_node() {
+async fn broadcasts_the_exact_bytes_once() {
     let bytes = hex_transaction();
-    let nodes: Vec<Script> = (0..2)
-        .map(|_| {
-            Script::new([
-                Reply::ok("sendrawtransaction", json!("txid")).expecting(json!([
-                    bitcoin::hex::DisplayHex::to_lower_hex_string(&bytes[..])
-                ])),
-            ])
-            .once_only("sendrawtransaction")
-        })
-        .collect();
-    let transports = nodes
-        .iter()
-        .map(|node| Arc::new(node.clone()) as Arc<dyn ::rpc::Client>)
-        .collect();
-    let cluster = Config::new(Network::Regtest)
-        .info(transports)
-        .expect("cluster");
-    let rpc = Client::new(cluster, Network::Regtest);
-    let broadcaster = rpc;
+    let node = Script::new([
+        Reply::ok("sendrawtransaction", json!("txid")).expecting(json!([
+            bitcoin::hex::DisplayHex::to_lower_hex_string(&bytes[..])
+        ])),
+    ])
+    .once_only("sendrawtransaction");
+    let broadcaster = Client::new(Arc::new(node.clone()), Network::Regtest);
     broadcaster
         .broadcast(&signed(&bytes))
         .await
         .expect("accepted");
-    for node in &nodes {
-        node.exhausted();
-    }
+    node.exhausted();
 }
 
 #[tokio::test]
@@ -494,8 +480,8 @@ async fn the_fee_rate_refreshes_once_per_time_to_live() {
     let rpc = Client::new(Arc::new(script.clone()), Network::Regtest);
     let mut config = Config::new(Network::Regtest);
     config.fee_ttl_ms = 0;
-    let fees = config
-        .factory(&rpc, Arc::new(Store(vec![funded(&owner, 1_000)])))
+    let fees = Factory::from(config)
+        .wallets(&rpc, Arc::new(Store(vec![funded(&owner, 1_000)])))
         .fees();
     fees.estimate(&spends(&source)).await.expect("priced");
     fees.estimate(&spends(&source)).await.expect("priced");

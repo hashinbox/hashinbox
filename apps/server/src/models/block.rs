@@ -3,16 +3,58 @@
 use std::collections::BTreeSet;
 
 use anyhow::Context as _;
-use base::{BlockHash, BlockHeader, BlockParent, Decimal, Network};
+use base::{BlockHash, BlockHeader, BlockParent, Chain, Decimal, Network, Networked};
 use diesel::{
+    deserialize::FromSqlRow,
+    expression::AsExpression,
     prelude::*,
     sql_types::{BigInt, Text},
     sqlite::Sqlite,
 };
 
 use super::{
-    Leg, int, key, leg, schema::block, transaction, transaction::Transaction, uint, wallet_index,
+    Id, IdError, Leg, id::typed_id, int, leg, schema::block, transaction, transaction::Transaction,
+    uint, wallet_index,
 };
+
+/// A block's id: `{chain}.{network}.{hash in hex}`.
+#[derive(Clone, Debug, PartialEq, Eq, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Text)]
+pub(crate) struct BlockId {
+    pub(crate) network: Network,
+    pub(crate) hash: BlockHash,
+    id: Id,
+}
+
+impl BlockId {
+    /// The id of `network`'s block `hash`.
+    ///
+    /// # Errors
+    ///
+    /// When a part holds a dot.
+    pub(crate) fn new(network: &Network, hash: &BlockHash) -> Result<Self, IdError> {
+        let id = Id::new(&[network.chain.as_str(), &network.name, &hex::encode(&hash.0)])?;
+        Ok(Self {
+            network: network.clone(),
+            hash: hash.clone(),
+            id,
+        })
+    }
+
+    /// `text` as a block id.
+    ///
+    /// # Errors
+    ///
+    /// Unless it has its three parts, the hash in hex.
+    pub(crate) fn parse(text: &str) -> Result<Self, IdError> {
+        let [chain, network, hash] = Id::parts::<3>(text, "{chain}.{network}.{hash}")?;
+        let hash = hex::decode(hash)
+            .map_err(|error| IdError(format!("a block id's hash is not hex: {error}")))?;
+        Self::new(&Network::new(Chain::new(chain), network), &BlockHash(hash))
+    }
+}
+
+typed_id!(BlockId, network);
 
 /// Serializes bytes as lowercase hexadecimal.
 fn hex_text<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
@@ -26,7 +68,8 @@ fn hex_text<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, 
 #[diesel(table_name = block, check_for_backend(Sqlite))]
 pub(crate) struct Block {
     /// `{chain}.{network}.{hash}`.
-    pub(crate) id: String,
+    #[schema(value_type = String)]
+    pub(crate) id: BlockId,
     pub(crate) chain: String,
     pub(crate) network: String,
     /// Native position (height or slot).
@@ -38,7 +81,8 @@ pub(crate) struct Block {
     #[schema(value_type = String)]
     pub(crate) hash: Vec<u8>,
     /// Its parent's id, once that is kept.
-    pub(crate) parent: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub(crate) parent: Option<BlockId>,
     /// Its parent's position; null for genesis.
     pub(crate) parent_position: Option<i64>,
     #[serde(skip)]
@@ -88,7 +132,7 @@ impl TryFrom<&base::Block> for Block {
 
     fn try_from(block: &base::Block) -> anyhow::Result<Self> {
         let header = &block.header;
-        let id = Self::id(&block.network, &header.hash)?;
+        let id = BlockId::new(&block.network, &header.hash)?;
         let position = int(header.position)?;
         let mut transactions = block
             .transactions
@@ -108,7 +152,7 @@ impl TryFrom<&base::Block> for Block {
         let mut rewards = block
             .rewards
             .iter()
-            .map(|reward| Leg::try_from((id.as_str(), reward)))
+            .map(|reward| Leg::try_from((&id, reward)))
             .collect::<anyhow::Result<Vec<_>>>()?;
         rewards.sort_by_key(|reward| reward.leg_index);
         for reward in &mut rewards {
@@ -136,6 +180,12 @@ impl TryFrom<&base::Block> for Block {
     }
 }
 
+impl Networked for Block {
+    fn network(&self) -> &Network {
+        self.id.network()
+    }
+}
+
 impl Block {
     /// Whether this row is `header`'s block.
     pub(crate) fn is(&self, header: &BlockHeader) -> bool {
@@ -150,15 +200,6 @@ impl Block {
         })
     }
 
-    /// The id of `network`'s block `hash`: `"{chain}.{network}.{hex}"`.
-    ///
-    /// # Errors
-    ///
-    /// When a part holds a dot.
-    pub(crate) fn id(network: &Network, hash: &BlockHash) -> anyhow::Result<String> {
-        key(&[network.chain.as_str(), &network.name, &hex::encode(&hash.0)])
-    }
-
     /// Drops its legs of wallet indexes not in `ours` (index ids), then its
     /// transactions left without a leg.
     pub(crate) fn keep(&mut self, ours: &BTreeSet<String>) {
@@ -168,7 +209,7 @@ impl Block {
         self.transactions
             .retain(|transaction| !transaction.legs.is_empty());
         self.rewards
-            .retain(|reward| ours.contains(&reward.wallet_index_id));
+            .retain(|reward| ours.contains(reward.wallet_index_id.as_ref()));
     }
 
     /// Its legs: each transaction's in order, then its rewards (072's
@@ -198,13 +239,13 @@ pub(crate) mod db {
     #[derive(Queryable, QueryableByName, Selectable)]
     #[diesel(table_name = block, check_for_backend(Sqlite))]
     pub(in crate::models) struct Row {
-        id: String,
+        id: BlockId,
         chain: String,
         network: String,
         position: i64,
         height: i64,
         hash: Vec<u8>,
-        parent: Option<String>,
+        parent: Option<BlockId>,
         parent_position: Option<i64>,
         parent_hash: Option<Vec<u8>>,
         timestamp: Option<i64>,
@@ -260,19 +301,18 @@ pub(crate) mod db {
     /// When a value does not decode or a write fails (a live block at its
     /// position already, a seq an index holds).
     pub(crate) fn save(connection: &mut SqliteConnection, block: &mut Block) -> anyhow::Result<()> {
-        let network = Network::new(base::Chain::new(&block.chain), &block.network);
         let parent = block
             .parent_hash
             .clone()
-            .map(|hash| Block::id(&network, &BlockHash(hash)))
+            .map(|hash| BlockId::new(block.network(), &BlockHash(hash)))
             .transpose()?;
-        save_row(connection, block, parent.as_deref())?;
-        let ours = wallet_index::db::advance(connection, block, parent.as_deref())?;
+        save_row(connection, block, parent.as_ref())?;
+        let ours = wallet_index::db::advance(connection, block, parent.as_ref())?;
         block.keep(&ours);
 
         let index_ids: BTreeSet<String> = block
             .legs()
-            .map(|leg| leg.wallet_index_id.clone())
+            .map(|leg| leg.wallet_index_id.clone().into())
             .collect();
         leg::db::delete_in(connection, &block.id, block.position, &index_ids)?;
 
@@ -284,7 +324,7 @@ pub(crate) mod db {
             .chain(&mut block.rewards);
         for leg in legs {
             let (seq, received, sent) = running
-                .get_mut(&leg.wallet_index_id)
+                .get_mut(leg.wallet_index_id.as_ref())
                 .context("a leg's index was not read")?;
             let signed = leg.signed()?;
             if signed >= Decimal::zero() {
@@ -312,7 +352,7 @@ pub(crate) mod db {
     fn save_row(
         connection: &mut SqliteConnection,
         block: &mut Block,
-        parent: Option<&str>,
+        parent: Option<&BlockId>,
     ) -> anyhow::Result<()> {
         let revived = diesel::update(block::table.find(&block.id))
             .set(block::archived_at.eq(None::<i64>))
@@ -324,7 +364,7 @@ pub(crate) mod db {
             Some(parent) => block::table
                 .find(parent)
                 .select(block::id)
-                .first::<String>(connection)
+                .first::<BlockId>(connection)
                 .optional()?,
             None => None,
         };

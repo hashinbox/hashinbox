@@ -1,6 +1,6 @@
 use std::{num::NonZeroU32, time::Duration};
 
-use crate::{Answer, Batch, BoxFuture, Client, Error, RawJson, Repetition, Request};
+use crate::{Answer, Batch, BoxFuture, Client, Endpoint, Error, RawJson, Repetition, Request};
 
 /// Delay between two [`Retry`] attempts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,9 +42,9 @@ impl Default for Backoff {
 /// Repeats the work of an inner [`Client`] while it fails with an
 /// [`Error::is_retryable`] error.
 ///
-/// One attempt is one complete execution of the inner client, so
-/// `Retry::new(router)` retries whole walks of a [`crate::Router`]'s rotation
-/// and waits between walks, not between nodes.
+/// One attempt is one complete execution of the inner client, so over a
+/// client that walks several nodes it retries whole walks and waits between
+/// walks, not between nodes.
 ///
 /// [`Repetition::Forbidden`] work reaches the inner client exactly once,
 /// whatever the policy says. A batch repeats whole, so only on a failure of
@@ -123,5 +123,9 @@ impl<C: Client> Client for Retry<C> {
     fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
         let repetition = request.repetition();
         Box::pin(self.repeat(repetition, move || self.inner.broadcast(request.clone())))
+    }
+
+    fn endpoint(&self) -> Option<&Endpoint> {
+        self.inner.endpoint()
     }
 }

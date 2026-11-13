@@ -202,10 +202,7 @@ impl TestChain for Ethereum {
     }
 
     fn client(node: Arc<dyn ::rpc::Client>) -> Arc<dyn base::InfoClient> {
-        Arc::new(crate::Info::new(
-            node,
-            crate::Network::new(model::CHAIN_ID, "sepolia"),
-        ))
+        Arc::new(<crate::Info as base::InfoClient>::new(node))
     }
 
     fn network(&self) -> NetworkConfig {
@@ -236,7 +233,6 @@ impl TestChain for Ethereum {
             explorer_transaction: None,
             settings: json!({"interval_ms": 5}),
             assets: vec![native, token],
-            endpoints: Vec::new(),
         }
     }
 

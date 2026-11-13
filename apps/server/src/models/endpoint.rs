@@ -20,6 +20,33 @@ pub(crate) struct Endpoint {
     /// Its URL as stored.
     #[schema(value_type = String)]
     pub(crate) url: rpc::Endpoint,
+    /// What the running server knows of it; always present, null where it
+    /// is not running (its network is not, or its URL did not build).
+    #[schema(required)]
+    pub(crate) state: Option<NodeState>,
+}
+
+/// What the running server knows of one node: its last tip, its failure
+/// streak, and its calls since it was loaded. Nothing asks the node.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[schema(as = RpcNodeState)]
+pub(crate) struct NodeState {
+    /// Its newest block (slot) when last asked, kept for the network's block
+    /// time; always present, null before it told one.
+    #[schema(required)]
+    pub(crate) tip: Option<u64>,
+    /// Retryable failures in a row (a rate limit counts as 3); from 3 it is
+    /// tried after every other node until it answers, or 10 block times (at
+    /// least 30 s) pass.
+    pub(crate) failures: u32,
+    /// Calls that reached it and finished.
+    pub(crate) calls: u64,
+    /// Of those, the ones that failed.
+    pub(crate) failed_calls: u64,
+    /// The last failure's kind or code, never a message of the node's;
+    /// always present, null: none.
+    #[schema(required)]
+    pub(crate) last_failure: Option<String>,
 }
 
 /// The URLs of `endpoints`, in their order.
@@ -148,6 +175,7 @@ pub(crate) mod db {
             networks.entry(network).or_default().push(Endpoint {
                 id: row.id,
                 url: rpc::Endpoint::new(row.url),
+                state: None,
             });
         }
         Ok(NetworkEndpoints(networks))

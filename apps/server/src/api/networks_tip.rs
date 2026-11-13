@@ -105,8 +105,8 @@ async fn search(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Error> {
     let Query(query) = query.map_err(Error::invalid_query)?;
     let time = seconds(&query.at)?;
-    let network = path.network(&state.payments)?;
-    let dated = state.payments.service(&network)?.dated.clone();
+    let network = path.network(&state.container)?;
+    let dated = state.container.service(&network)?.dated.clone();
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         // A client gone mid-search only stops hearing it.

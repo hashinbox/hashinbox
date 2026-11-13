@@ -4,13 +4,11 @@
 mod counted;
 mod logged;
 mod retry;
-mod router;
 mod split;
 mod swap;
 
 pub use counted::{Counted, Snapshot, Statistics};
 pub use logged::Logged;
 pub use retry::{Backoff, Retry};
-pub use router::Router;
 pub use split::{Split, SplitParams};
 pub use swap::Swap;

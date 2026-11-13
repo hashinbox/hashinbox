@@ -1,4 +1,4 @@
-//! [`Factory`] (`base::WalletFactory`) and its wallets (`base::Wallet`).
+//! [`WalletFactory`] (`base::WalletFactory`) and its wallets (`base::Wallet`).
 
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use crate::{KeyPair, Tokens, fee_cache::Cached, rpc::Client};
 /// and the allowlisted tokens, on the blockhash and fees of the
 /// factory's one estimator.
 #[derive(Clone)]
-pub struct Factory {
+pub struct WalletFactory {
     pub(crate) rpc: Client,
     /// How long a signed transaction counts as pending.
     pub(crate) pending_ttl: std::time::Duration,
@@ -23,7 +23,7 @@ pub struct Factory {
     pub(crate) fees: Arc<Cached>,
 }
 
-impl base::WalletFactory for Factory {
+impl base::WalletFactory for WalletFactory {
     fn generate(&self) -> Future<'_, anyhow::Result<SecretBytes>> {
         Box::pin(async move { Ok(KeyPair::generate(self.rpc.network())?.secret()) })
     }
@@ -94,7 +94,7 @@ impl base::WalletFactory for Factory {
 /// One Solana key and its address.
 pub(crate) struct Wallet {
     pub(crate) key: KeyPair,
-    pub(crate) factory: Factory,
+    pub(crate) factory: WalletFactory,
 }
 
 impl Addressed for Wallet {

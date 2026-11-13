@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Context as _;
-use base::{Address, Addressed as _, Asset, Coin, Decimal, Input, Network, Reward, TransactionId};
+use base::{Address, Addressed as _, Asset, Coin, Decimal, Input, Network, Networked, Reward};
 use diesel::{
     prelude::*,
     sql_types::{BigInt, Integer, Nullable, Text},
@@ -15,11 +15,37 @@ use diesel::{
 };
 
 use super::{
-    Json, child, int,
+    Id, IdError, Json,
+    block::BlockId,
+    int,
     schema::{leg, wallet_index_with_balance},
+    transaction::TransactionId,
     uint,
-    wallet_index::WalletIndex,
+    wallet_index::WalletIndexId,
 };
+
+/// A leg's id: under its transaction, `{transaction}.{index}`; a block
+/// reward, `{block}.reward.{index}`.
+pub(crate) enum LegId<'a> {
+    /// Leg `index` of transaction id `.0`.
+    Transaction(&'a str, u32),
+    /// Reward `index` of block id `.0`.
+    Reward(&'a str, i64),
+}
+
+impl LegId<'_> {
+    /// The row id.
+    ///
+    /// # Errors
+    ///
+    /// When a part holds a dot.
+    pub(crate) fn id(&self) -> Result<Id, IdError> {
+        match self {
+            Self::Transaction(transaction, index) => Id::child(transaction, &[&index.to_string()]),
+            Self::Reward(block, index) => Id::child(block, &["reward", &index.to_string()]),
+        }
+    }
+}
 
 /// The `kind` of a reward row.
 const REWARD: i32 = 5;
@@ -43,9 +69,11 @@ const REWARD: i32 = 5;
 pub(crate) struct Leg {
     pub(crate) id: String,
     /// Its block; null while pending.
-    pub(crate) block: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub(crate) block: Option<BlockId>,
     /// Its transaction; null for a reward.
-    pub(crate) transaction: Option<String>,
+    #[schema(value_type = Option<String>)]
+    pub(crate) transaction: Option<TransactionId>,
     pub(crate) leg_index: i64,
     /// 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward.
     pub(crate) kind: i32,
@@ -56,7 +84,8 @@ pub(crate) struct Leg {
     pub(crate) coin_txid: Option<String>,
     pub(crate) coin_index: Option<i64>,
     /// The wallet index it is kept for: its address's index in its asset.
-    pub(crate) wallet_index_id: String,
+    #[schema(value_type = String)]
+    pub(crate) wallet_index_id: WalletIndexId,
     /// Its block's position; `None` while pending.
     pub(crate) position: Option<i64>,
     /// Its index's leg sequence: 1 + the highest the index has kept,
@@ -79,16 +108,18 @@ impl From<Json<Vec<Leg>>> for Vec<Leg> {
     }
 }
 
-/// Leg `index` of transaction `transaction` (its id), pending: id
+/// Leg `index` of transaction `transaction`, pending: id
 /// `"{transaction}.{index}"`, no block, position, seq or total ([`Block`]
 /// mines it, [`block::db::save`] numbers it).
 ///
 /// [`Block`]: super::Block
 /// [`block::db::save`]: super::block::db::save
-impl TryFrom<(&str, u32, &base::Leg)> for Leg {
+impl TryFrom<(&TransactionId, u32, &base::Leg)> for Leg {
     type Error = anyhow::Error;
 
-    fn try_from((transaction, index, leg): (&str, u32, &base::Leg)) -> anyhow::Result<Self> {
+    fn try_from(
+        (transaction, index, leg): (&TransactionId, u32, &base::Leg),
+    ) -> anyhow::Result<Self> {
         let (kind, coin) = match leg {
             base::Leg::Received { coin, .. } => (0, coin.as_ref()),
             base::Leg::Spent { coin, .. } => (1, coin.as_ref()),
@@ -97,9 +128,9 @@ impl TryFrom<(&str, u32, &base::Leg)> for Leg {
             base::Leg::Fee { .. } => (4, None),
         };
         Ok(Self {
-            id: child(transaction, &[&index.to_string()])?,
+            id: LegId::Transaction(transaction.as_ref(), index).id()?.into(),
             block: None,
-            transaction: Some(transaction.to_owned()),
+            transaction: Some(transaction.clone()),
             leg_index: i64::from(index),
             kind,
             address: leg.address().value.clone(),
@@ -107,7 +138,7 @@ impl TryFrom<(&str, u32, &base::Leg)> for Leg {
             amount: leg.amount().to_string(),
             coin_txid: coin.map(|coin| coin.transaction.id.clone()),
             coin_index: coin.map(|coin| i64::from(coin.index)),
-            wallet_index_id: WalletIndex::id(leg.address(), leg.asset())?,
+            wallet_index_id: WalletIndexId::of(leg.address(), leg.asset())?,
             position: None,
             seq: None,
             total: None,
@@ -117,16 +148,16 @@ impl TryFrom<(&str, u32, &base::Leg)> for Leg {
     }
 }
 
-/// `reward` of block `block` (its id): id `"{block}.reward.{index}"`, no
-/// position, seq or total yet.
-impl TryFrom<(&str, &Reward)> for Leg {
+/// `reward` of block `block`: id `"{block}.reward.{index}"`, no position,
+/// seq or total yet.
+impl TryFrom<(&BlockId, &Reward)> for Leg {
     type Error = anyhow::Error;
 
-    fn try_from((block, reward): (&str, &Reward)) -> anyhow::Result<Self> {
+    fn try_from((block, reward): (&BlockId, &Reward)) -> anyhow::Result<Self> {
         let index = int(reward.index)?;
         Ok(Self {
-            id: child(block, &["reward", &index.to_string()])?,
-            block: Some(block.to_owned()),
+            id: LegId::Reward(block.as_ref(), index).id()?.into(),
+            block: Some(block.clone()),
             transaction: None,
             leg_index: index,
             kind: REWARD,
@@ -135,13 +166,19 @@ impl TryFrom<(&str, &Reward)> for Leg {
             amount: reward.amount.to_string(),
             coin_txid: None,
             coin_index: None,
-            wallet_index_id: WalletIndex::id(&reward.address, &reward.asset)?,
+            wallet_index_id: WalletIndexId::of(&reward.address, &reward.asset)?,
             position: None,
             seq: None,
             total: None,
             total_received: None,
             total_sent: None,
         })
+    }
+}
+
+impl Networked for Leg {
+    fn network(&self) -> &Network {
+        self.wallet_index_id.network()
     }
 }
 
@@ -166,13 +203,13 @@ impl Leg {
 }
 
 impl Leg {
-    /// The transaction leg this row was written from, of `network` (the row
-    /// holds none).
+    /// The transaction leg this row was written from.
     ///
     /// # Errors
     ///
     /// When a stored value does not decode, or it is a reward.
-    pub(crate) fn leg(self, network: &Network) -> anyhow::Result<base::Leg> {
+    pub(crate) fn leg(self) -> anyhow::Result<base::Leg> {
+        let network = self.wallet_index_id.network();
         let address = Address::new(network.clone(), self.address);
         let asset = Asset {
             network: network.clone(),
@@ -184,7 +221,7 @@ impl Leg {
             .context("a stored amount does not decode")?;
         let coin = match (self.coin_txid, self.coin_index) {
             (Some(txid), Some(index)) => Some(Coin {
-                transaction: TransactionId::new(network.clone(), txid),
+                transaction: base::TransactionId::new(network.clone(), txid),
                 index: u32::try_from(uint(index)?)
                     .context("a stored coin index is out of range")?,
             }),
@@ -316,7 +353,7 @@ pub(crate) mod db {
     /// transaction's txid and state.
     pub(crate) fn find_page(
         connection: &mut SqliteConnection,
-        index: &str,
+        index: impl AsRef<str>,
         page: Page<i64>,
     ) -> QueryResult<Vec<Movement>> {
         // At most `?3` live mined legs of wallet index `?1` with a seq below
@@ -338,7 +375,7 @@ pub(crate) mod db {
             ORDER BY l.seq DESC
             LIMIT ?3"#,
         )
-        .bind::<Text, _>(index)
+        .bind::<Text, _>(index.as_ref())
         .bind::<BigInt, _>(page.after.unwrap_or(i64::MAX))
         .bind::<BigInt, _>(page.limit)
         .load(connection)
@@ -407,7 +444,7 @@ pub(crate) mod db {
     /// reading every leg of each index.
     pub(crate) fn delete_in(
         connection: &mut SqliteConnection,
-        block: &str,
+        block: impl AsRef<str>,
         position: i64,
         indexes: &BTreeSet<String>,
     ) -> QueryResult<usize> {
@@ -415,7 +452,7 @@ pub(crate) mod db {
             leg::table
                 .filter(leg::wallet_index_id.eq_any(indexes))
                 .filter(leg::position.eq(position))
-                .filter(leg::block.eq(block)),
+                .filter(leg::block.eq(block.as_ref())),
         )
         .execute(connection)
     }
@@ -446,13 +483,13 @@ pub(crate) mod db {
     /// `block`, or none (pending): it is mined in `block` now.
     pub(crate) fn delete_moved(
         connection: &mut SqliteConnection,
-        block: &str,
-        transaction: &str,
+        block: impl AsRef<str>,
+        transaction: impl AsRef<str>,
     ) -> QueryResult<usize> {
         diesel::delete(
             leg::table
-                .filter(leg::transaction.eq(transaction))
-                .filter(leg::block.is_null().or(leg::block.ne(block))),
+                .filter(leg::transaction.eq(transaction.as_ref()))
+                .filter(leg::block.is_null().or(leg::block.ne(block.as_ref()))),
         )
         .execute(connection)
     }
@@ -522,7 +559,7 @@ pub(crate) mod db {
         rows.into_iter()
             .map(|row| {
                 let height = uint(row.height)?;
-                match row.leg.leg(network)? {
+                match row.leg.leg()? {
                     base::Leg::Received {
                         address,
                         asset,

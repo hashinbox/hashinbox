@@ -6,8 +6,8 @@ use std::{str::FromStr as _, sync::Arc};
 use ::rpc::{Answer, Batch, Call, Client as _, RawJson, Request};
 use anyhow::{Context as _, anyhow, bail, ensure};
 use base::{
-    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, InfoClient, NodeInfo,
-    NotServed, Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
+    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, InfoClient as _, NotServed,
+    Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
@@ -33,19 +33,27 @@ const BATCH: usize = 10;
 /// A Solana JSON-RPC client of one cluster: its [`Info`] client and every
 /// call this crate makes; cheap to clone, clones share it.
 #[derive(Clone)]
-pub struct Client(Arc<Info>);
+pub struct Client(Arc<Inner>);
+
+struct Inner {
+    node: Info,
+    network: Network,
+}
 
 impl Client {
-    /// A client of `network` over `transport`; [`InfoClient::info`] checks the node.
+    /// A client of `network` over `transport`.
     #[must_use]
     pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
-        Self(Arc::new(Info::new(transport, network)))
+        Self(Arc::new(Inner {
+            node: Info::new(transport),
+            network,
+        }))
     }
 
     /// The network it serves.
     #[must_use]
     pub fn network(&self) -> &Network {
-        self.0.network()
+        &self.0.network
     }
 
     /// The newest confirmed slot as produced, and the newest rooted
@@ -87,6 +95,7 @@ impl Client {
         }
         let slots: Vec<u64> = self
             .0
+            .node
             .call(
                 "getBlocks",
                 json!([start, end, { "commitment": CONFIRMED }]),
@@ -95,7 +104,11 @@ impl Client {
         // A node lists no slot below the first block it keeps: unless `start`
         // is listed, it may be one it no longer serves, not a skipped one.
         if slots.first() != Some(&start) {
-            let first: u64 = self.0.call("getFirstAvailableBlock", json!([])).await?;
+            let first: u64 = self
+                .0
+                .node
+                .call("getFirstAvailableBlock", json!([]))
+                .await?;
             if start < first {
                 return Err(NotServed { position: start }.into());
             }
@@ -148,6 +161,7 @@ impl Client {
     pub async fn time(&self, slot: u64) -> anyhow::Result<Option<u64>> {
         let reply = self
             .0
+            .node
             .request(Request::new("getBlockTime", json!([slot])))
             .await;
         match &reply {
@@ -167,6 +181,7 @@ impl Client {
     pub async fn blockhash(&self) -> anyhow::Result<Hash> {
         let latest: Context<Latest> = self
             .0
+            .node
             .call("getLatestBlockhash", json!([{ "commitment": CONFIRMED }]))
             .await?;
         Hash::from_str(&latest.value.blockhash)
@@ -183,6 +198,7 @@ impl Client {
     pub async fn fee(&self, message: &Message) -> anyhow::Result<u64> {
         let fee: Context<Option<u64>> = self
             .0
+            .node
             .call(
                 "getFeeForMessage",
                 json!([STANDARD.encode(message.serialize()), { "commitment": CONFIRMED }]),
@@ -198,6 +214,7 @@ impl Client {
     /// A node failure.
     pub(crate) async fn rent(&self, bytes: u64) -> anyhow::Result<u64> {
         self.0
+            .node
             .call("getMinimumBalanceForRentExemption", json!([bytes]))
             .await
     }
@@ -242,7 +259,7 @@ impl Client {
             }]),
         )
         .with_timeout(::rpc::SEND_TIMEOUT);
-        let failure = match self.0.broadcast(request).await {
+        let failure = match self.0.node.broadcast(request).await {
             Ok(()) => return Ok(()),
             Err(::rpc::Error::Remote(failure)) => failure,
             Err(error) => {
@@ -278,6 +295,7 @@ impl Client {
     async fn account(&self, address: &solana_address::Address) -> anyhow::Result<Option<Account>> {
         let account: Context<Option<Account>> = self
             .0
+            .node
             .call(
                 "getAccountInfo",
                 json!([address.to_string(), { "commitment": "finalized", "encoding": "base64" }]),
@@ -300,6 +318,7 @@ impl Client {
         let count = calls.len();
         let replies = self
             .0
+            .node
             .batch(Batch::new(calls)?)
             .await
             .context("Solana JSON-RPC batch")?;
@@ -328,29 +347,18 @@ impl ::rpc::Client for Client {
         &'a self,
         request: Request,
     ) -> ::rpc::BoxFuture<'a, Result<RawJson, ::rpc::Error>> {
-        self.0.request(request)
+        self.0.node.request(request)
     }
 
     fn batch<'a>(
         &'a self,
         batch: Batch,
     ) -> ::rpc::BoxFuture<'a, Result<Vec<Answer>, ::rpc::Error>> {
-        self.0.batch(batch)
+        self.0.node.batch(batch)
     }
 
     fn broadcast<'a>(&'a self, request: Request) -> ::rpc::BoxFuture<'a, Result<(), ::rpc::Error>> {
-        self.0.broadcast(request)
-    }
-}
-
-/// Its [`Info`]'s.
-impl InfoClient for Client {
-    fn tip(&self) -> base::Future<'_, anyhow::Result<u64>> {
-        self.0.tip()
-    }
-
-    fn info(&self) -> base::Future<'_, anyhow::Result<NodeInfo>> {
-        self.0.info()
+        self.0.node.broadcast(request)
     }
 }
 

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use ::rpc::{Answer, Batch, Call, Client as _, Failure, RawJson, Request};
 use anyhow::{Context as _, bail, ensure};
 use base::{
-    Block, BlockHash, BlockHeader, BlockParent, Blocks, InfoClient, NodeInfo, NotServed, Reason,
-    Tips, TransactionError, TransactionErrorKind, Transactions,
+    Block, BlockHash, BlockHeader, BlockParent, Blocks, InfoClient as _, NotServed, Reason, Tips,
+    TransactionError, TransactionErrorKind, Transactions,
 };
 use bitcoin::{Amount, Denomination, hashes::Hash as _, hex::DisplayHex as _};
 use serde::Deserialize;
@@ -33,21 +33,23 @@ const ALREADY_IN_CHAIN: i64 = -27;
 #[derive(Clone)]
 pub struct Client {
     node: Info,
+    network: Network,
 }
 
 impl Client {
-    /// A client of `network` over `transport`; [`InfoClient::info`] checks the node.
+    /// A client of `network` over `transport`.
     #[must_use]
     pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
         Self {
-            node: Info::new(transport, network),
+            node: Info::new(transport),
+            network,
         }
     }
 
     /// The network it serves.
     #[must_use]
     pub const fn network(&self) -> Network {
-        self.node.network()
+        self.network
     }
 
     /// The node's best height, and the height `depth` blocks deep (`depth` 1
@@ -305,16 +307,5 @@ impl ::rpc::Client for Client {
 
     fn broadcast<'a>(&'a self, request: Request) -> ::rpc::BoxFuture<'a, Result<(), ::rpc::Error>> {
         self.node.broadcast(request)
-    }
-}
-
-/// Its [`Info`]'s.
-impl InfoClient for Client {
-    fn tip(&self) -> base::Future<'_, anyhow::Result<u64>> {
-        self.node.tip()
-    }
-
-    fn info(&self) -> base::Future<'_, anyhow::Result<NodeInfo>> {
-        self.node.info()
     }
 }

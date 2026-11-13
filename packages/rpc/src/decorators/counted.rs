@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use crate::{Answer, Batch, BoxFuture, Client, Error, RawJson, Request};
+use crate::{Answer, Batch, BoxFuture, Client, Endpoint, Error, RawJson, Request};
 
 /// A shared handle to one node's execution counters.
 /// Clones observe the same counters; separate nodes do not.
@@ -149,6 +149,10 @@ impl<C: Client> Client for Counted<C> {
 
     fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(self.count(self.inner.broadcast(request)))
+    }
+
+    fn endpoint(&self) -> Option<&Endpoint> {
+        self.inner.endpoint()
     }
 }
 

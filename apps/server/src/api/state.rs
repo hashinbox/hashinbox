@@ -4,12 +4,11 @@
 
 use std::sync::Arc;
 
-use payments::Payments;
-
-/// The payments container, the one SQLite file and the job queue on it.
+/// The container, the one SQLite file and the job queue on it.
 pub(crate) struct AppState {
-    /// Every configured network: services, wallets, broadcast, stats.
-    pub(crate) payments: Arc<Payments>,
+    /// Every registered network: services and transports, wallets,
+    /// broadcast, stats.
+    pub(crate) container: Arc<base::Container<crate::usecase::Transport>>,
     /// The one SQLite file every model reads and writes.
     pub(crate) db: crate::db::Db,
     /// The job queue: sends are enqueued, jobs read.

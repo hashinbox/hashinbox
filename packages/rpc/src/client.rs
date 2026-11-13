@@ -2,7 +2,7 @@ use std::{future::Future, num::NonZeroUsize, pin::Pin, sync::Arc, time::Duration
 
 use serde_json::Value;
 
-use crate::{Call, Error, ErrorKind, Failure, RawJson};
+use crate::{Call, Endpoint, Error, ErrorKind, Failure, RawJson};
 
 /// One call's outcome in a [`Batch`]: its result, or the node's error object
 /// for that call alone.
@@ -48,6 +48,12 @@ pub trait Client: Send + Sync {
     fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move { self.request(request).await.map(drop) })
     }
+
+    /// The one node behind this client; `None` over several. A decorator
+    /// forwards its inner's.
+    fn endpoint(&self) -> Option<&Endpoint> {
+        None
+    }
 }
 
 /// A shared client is a client, so one decorated handle serves every holder.
@@ -62,6 +68,10 @@ impl<C: Client + ?Sized> Client for Arc<C> {
 
     fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
         (**self).broadcast(request)
+    }
+
+    fn endpoint(&self) -> Option<&Endpoint> {
+        (**self).endpoint()
     }
 }
 
@@ -133,7 +143,8 @@ impl Request {
     }
 
     /// The method it calls.
-    pub(crate) fn method(&self) -> &str {
+    #[must_use]
+    pub fn method(&self) -> &str {
         &self.call.method
     }
 }
@@ -204,7 +215,8 @@ impl Batch {
     }
 
     /// The method every call names, if they all name one.
-    pub(crate) fn method(&self) -> Option<&str> {
+    #[must_use]
+    pub fn method(&self) -> Option<&str> {
         let (first, rest) = self.calls.split_first()?;
         rest.iter()
             .all(|call| call.method == first.method)

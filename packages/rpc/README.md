@@ -11,8 +11,15 @@ substitute a scripted node.
 | `Logged` | logs a node's failure streaks and recovery to an injected `logging::Logger` |
 | `Counted` | counts a node's outcomes into `Statistics` |
 | `Retry` | repeats retryable work with backoff |
-| `Router` | sends listed methods to their own rotation, the rest to a default |
 | `Swap` | replaces the stack live |
+
+Decorators keep no selection state. Choosing among a network's nodes
+(tips, failure streaks, routed methods) is the application's: the server's
+`usecase::Transport` is one `Client` over its nodes, each built here.
+`Client::endpoint()` is the one node behind a client (`Http` answers it,
+every decorator forwards it; `None` over several), and `Endpoint::id()` is
+a node's identity: `host[:port]/path` and the query sent, without scheme,
+userinfo, `header.*` or `rpc.*` params.
 
 ## Usage
 
@@ -55,7 +62,7 @@ A call ends one of three ways, all in `src/error.rs`:
 `Answer` (`Result<RawJson, Failure>`) per call, since one call can fail
 alone; a rate limit on any call, or a transport error, fails the whole batch.
 
-One policy, used by `Retry`, `Router` and `base::Cluster`:
+One policy, used by `Retry` and the server's transport:
 `Error::is_rate_limited` is HTTP 429, or an error object
 `Failure::is_rate_limited` says is one (`-32005`, or `-32003` naming a rate
 or request limit). `Error::is_retryable` is that, a timeout, an unreachable
@@ -81,24 +88,6 @@ one prefix). Each setting is read from it by its owner:
 `HttpParams` in `http.rs`, `SplitParams` in `decorators/split.rs`, each
 `TryFrom<&Url>`. `Endpoint::validate` builds the node, which does no I/O.
 Retry, routes and the logger never go in a URL.
-
-## Router
-
-`Router` sends listed methods to their own clients, round robin, and
-everything else to a default. A retryable failure moves to the next client
-in the rotation, then to the default. A batch of one routed method is routed
-as one unit; a mixed batch goes to the default. Once-only work reaches the
-picked client only, and a broadcast always goes to the default.
-
-```rust
-use std::sync::Arc;
-
-use rpc::{Client, Router};
-
-fn split_scans(default: impl Client + 'static, a: Arc<dyn Client>, b: Arc<dyn Client>) -> Result<Router, rpc::Error> {
-    Router::new(default).route(["scan"], vec![a, b])
-}
-```
 
 ## Swap
 
@@ -138,8 +127,8 @@ fn repoint() -> Result<(), rpc::Error> {
   before sending (an invalid parameter) does not count; cancellation records
   no invented outcome. Label handles by configured ordinal, never by a
   credential-bearing URL.
-- Submit a transaction with `Request::once` or `Batch::once`. `Retry` and
-  `Router` then execute it exactly once against one node, because a repeated
+- Submit a transaction with `Request::once` or `Batch::once`. `Retry` (and
+  any selection over nodes) then executes it exactly once against one node, because a repeated
   submission can send the same payment twice. Pass it to `Client::broadcast`
   to reach every node of a fan-out client once; every decorator forwards a
   broadcast, so wrapping never narrows it to one node. When no node

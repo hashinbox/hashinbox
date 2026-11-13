@@ -18,7 +18,7 @@ mod wallet;
 
 pub use address::Address;
 pub use chain::Chain;
-pub use config::{Config, Token};
+pub use config::{Config, Factory, Token};
 pub use erc20::Tokens;
 pub use fee::{FeeLimits, Fees};
 pub use key::KeyPair;
@@ -26,4 +26,4 @@ pub use network::{CHAIN_NAME, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Network};
 pub use rpc::Client;
 pub use rpc_info::Info;
 pub use transaction::Transaction;
-pub use wallet::Factory;
+pub use wallet::WalletFactory;

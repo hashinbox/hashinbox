@@ -37,3 +37,11 @@ pub trait Networked {
     /// The network.
     fn network(&self) -> &Network;
 }
+
+/// A network is on itself, so generic code over [`Networked`] takes a plain
+/// [`Network`] too.
+impl Networked for Network {
+    fn network(&self) -> &Network {
+        self
+    }
+}

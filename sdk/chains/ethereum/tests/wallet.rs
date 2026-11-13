@@ -9,10 +9,10 @@ use alloy_eips::Decodable2718 as _;
 use alloy_primitives::{hex, keccak256};
 use alloy_sol_types::{SolCall as _, sol};
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, Reason, ServiceFactory as _, Signer,
-    TransactionErrorKind, TransactionState, Transfer, WalletFactory as _,
+    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, Reason, Signer, TransactionErrorKind,
+    TransactionState, Transfer, WalletFactory as _,
 };
-use chain_ethereum::{Client, Config, Factory, Network, Token};
+use chain_ethereum::{Client, Config, Factory, Network, Token, WalletFactory};
 use crypto::SecretBytes;
 use futures_executor::block_on;
 use num_bigint::BigUint;
@@ -38,8 +38,8 @@ fn connect(transport: Arc<dyn ::rpc::Client>) -> Client {
     Client::new(transport, Network::new(1, "mainnet"))
 }
 
-fn factory(script: &Script) -> Factory {
-    config().factory(
+fn factory(script: &Script) -> WalletFactory {
+    Factory::from(config()).wallets(
         &connect(Arc::new(script.clone())),
         Arc::new(base::NoHoldings),
     )
@@ -293,24 +293,15 @@ fn a_reverting_transfer_fails_before_signing() {
 }
 
 #[test]
-fn a_broadcast_reaches_every_node_once() {
-    let nodes =
-        [Script::new([]), Script::new([])].map(|node| node.once_only("eth_sendRawTransaction"));
-    let transports = nodes
-        .iter()
-        .map(|node| Arc::new(node.clone()) as Arc<dyn ::rpc::Client>)
-        .collect();
-    let broadcaster = connect(config().info(transports).unwrap());
+fn a_broadcast_sends_the_exact_bytes_once() {
+    let node = Script::new([]).once_only("eth_sendRawTransaction");
+    let broadcaster = connect(Arc::new(node.clone()));
     let bytes = b"\x02signed".to_vec();
     let id = hex::encode_prefixed(keccak256(&bytes));
-    for node in &nodes {
-        node.push([Reply::ok("eth_sendRawTransaction", json!(id))
-            .expecting(json!([hex::encode_prefixed(&bytes)]))]);
-    }
+    node.push([Reply::ok("eth_sendRawTransaction", json!(id))
+        .expecting(json!([hex::encode_prefixed(&bytes)]))]);
     block_on(broadcaster.broadcast(&signed(&bytes))).unwrap();
-    for node in &nodes {
-        node.exhausted();
-    }
+    node.exhausted();
 }
 
 #[test]
@@ -476,8 +467,8 @@ fn fees_and_gas_refresh_once_per_time_to_live() {
     script.push([estimate()]);
     script.push(fee_replies());
     script.push([estimate()]);
-    let fees = config
-        .factory(
+    let fees = Factory::from(config)
+        .wallets(
             &connect(Arc::new(script.clone())),
             Arc::new(base::NoHoldings),
         )
@@ -549,7 +540,8 @@ fn a_send_to_a_holder_is_priced_for_one_and_any_other_for_a_new_account() {
     // What an ether transfer to a new account costs on Sepolia today.
     let new = || Reply::ok("eth_estimateGas", json!("0x32a1f"));
     script.push([held(), new()]);
-    let factory = config().factory(&connect(Arc::new(script.clone())), Arc::new(Held));
+    let factory =
+        Factory::from(config()).wallets(&connect(Arc::new(script.clone())), Arc::new(Held));
     let fees = factory.fees();
     let one = base::Address::new(network(), KEY_ONE);
     let holder = base::Address::new(network(), HOLDER);
@@ -607,8 +599,8 @@ fn a_sender_holding_no_token_gets_the_last_answer_of_its_kind() {
     let mut config = config();
     config.fee_ttl_ms = 0;
     let script = Script::new([]);
-    let fees = config
-        .factory(
+    let fees = Factory::from(config)
+        .wallets(
             &connect(Arc::new(script.clone())),
             Arc::new(base::NoHoldings),
         )

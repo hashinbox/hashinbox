@@ -23,7 +23,6 @@ use anyhow::ensure;
 use base::{
     Address, Asset, BuilderExt as _, Chain, Decimal, Network, TransactionErrorKind, WalletError,
 };
-use payments::Payments;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tasks::{Ack, Context, Job, Policy, Topic, Worker};
@@ -31,7 +30,10 @@ use tasks::{Ack, Context, Job, Policy, Topic, Worker};
 use super::TIMEOUT;
 use crate::{
     db::Db,
-    models::{Task as Row, int, task, transaction, transaction::Transaction},
+    models::{
+        Task as Row, int, task, transaction,
+        transaction::{Transaction, TransactionId},
+    },
 };
 
 /// The job kind.
@@ -81,22 +83,25 @@ impl SendIntent {
     }
 }
 
-/// The broadcast worker: the payments container that signs and sends, and
+/// The broadcast worker: the container that signs and sends, and
 /// the database that records.
 pub(crate) struct Broadcast {
-    payments: Arc<Payments>,
+    container: Arc<base::Container<crate::usecase::Transport>>,
     db: Db,
 }
 
 impl Broadcast {
-    pub(crate) const fn new(payments: Arc<Payments>, db: Db) -> Self {
-        Self { payments, db }
+    pub(crate) const fn new(
+        container: Arc<base::Container<crate::usecase::Transport>>,
+        db: Db,
+    ) -> Self {
+        Self { container, db }
     }
 
     /// Every transaction of `intent`, signed by the kept wallet of `sender`.
     /// A missing key fails the job; a store failure retries.
     async fn sign(&self, sender: &Address, intent: &SendIntent) -> Result<base::Transactions, Ack> {
-        let wallet = self.payments.wallet(sender).await.map_err(|error| {
+        let wallet = self.container.wallet(sender).await.map_err(|error| {
             match error.downcast_ref::<WalletError>() {
                 Some(wallet) if !wallet.kind.retryable() => {
                     Ack::Fail(format!("invalid: {}", wallet.message))
@@ -174,7 +179,7 @@ impl Broadcast {
         network: &Network,
         txid: &str,
     ) -> anyhow::Result<Option<base::Transaction>> {
-        let id = Transaction::id(network, txid)?;
+        let id = TransactionId::new(network, txid)?;
         self.db
             .read(move |connection| {
                 transaction::db::get(connection, &id)?
@@ -190,8 +195,8 @@ impl Broadcast {
     async fn forget(&self, network: &Network, txids: &[String]) -> anyhow::Result<()> {
         let ids = txids
             .iter()
-            .map(|txid| Transaction::id(network, txid))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .map(|txid| TransactionId::new(network, txid))
+            .collect::<Result<Vec<_>, _>>()?;
         self.db
             .write(move |connection| Ok(transaction::db::delete_pending(connection, &ids)?))
             .await?;
@@ -253,7 +258,7 @@ impl Worker for Broadcast {
                 Ok(None) => return Ack::Fail("outcome-unknown".into()),
                 Err(error) => return Ack::Retry(format!("{error:#}")),
             };
-            match self.payments.broadcast(&network, &transaction).await {
+            match self.container.broadcast(&network, &transaction).await {
                 Ok(()) => {
                     progress.sent += 1;
                     if let Err(error) = task.save(progress.clone()).await {

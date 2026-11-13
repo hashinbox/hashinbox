@@ -1,6 +1,6 @@
 //! Every network's routed methods, `network_endpoint_route` rows: a method
-//! spread round robin over some of the network's endpoints (`rpc::Router`);
-//! every other method goes to the cluster of all of them.
+//! spread round robin over some of the network's endpoints; every other
+//! method goes to all of them, highest tip first (`usecase::Transport`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,24 +21,6 @@ pub(crate) struct Route {
     pub(crate) method: String,
     /// The network's endpoints taking turns, by id.
     pub(crate) endpoint_ids: Vec<i64>,
-}
-
-/// `endpoints` with `routes`, as `payments` connects them: positions in
-/// `endpoints` in place of ids; an id not among them is left out.
-///
-/// # Errors
-///
-/// A route left with no endpoint.
-pub(crate) fn nodes(endpoints: &[Endpoint], routes: &[Route]) -> anyhow::Result<payments::Nodes> {
-    let mut nodes = payments::Nodes::new(super::endpoint::urls(endpoints));
-    for route in routes {
-        let positions = route
-            .endpoint_ids
-            .iter()
-            .filter_map(|id| endpoints.iter().position(|endpoint| endpoint.id == *id));
-        nodes = nodes.route(route.method.clone(), positions)?;
-    }
-    Ok(nodes)
 }
 
 /// A network's routes, checked against its endpoints.

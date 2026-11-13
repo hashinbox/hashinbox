@@ -1,5 +1,5 @@
-//! The server's background work, all jobs of one `tasks::Executor` built in
-//! `main.rs`: the index job (per network), the triggers job it queues, the
+//! The server's background work, all jobs of one `tasks::Executor`
+//! (which `main.rs` builds): the index job (per network), the triggers job it queues, the
 //! broadcast job those start (design 066), the expire job (per network,
 //! design 068) that frees what expired pending transactions held, and the
 //! prune job that clears old succeeded jobs. Each worker declares its

@@ -110,7 +110,7 @@ export interface paths {
         };
         /**
          * List every network, its assets, its RPC nodes, its indexing and its live tip
-         * @description Every stored network: its row, its assets, its nodes (each URL parsed) and its `index` row (null: not indexed), and why its index job last failed (`index_job_reason`). `tip_live` asks every running network's node at once, each for at most 2 s; one that fails keeps the stored `tip` and says why in `tip_error`.
+         * @description Every stored network: its row, its assets, its nodes (each URL with what the running server knows of it: last tip, failure streak, calls) and its `index` row (null: not indexed), and why its index job last failed (`index_job_reason`). `tip_live` asks every running network's node at once, each for at most 2 s; one that fails keeps the stored `tip` and says why in `tip_error`.
          */
         get: operations["list_networks"];
         put?: never;
@@ -204,12 +204,12 @@ export interface paths {
         };
         /**
          * List a network's RPC nodes
-         * @description Its stored nodes in failover order: each one's id and URL, as `PUT` takes them.
+         * @description Its stored nodes in stored order: each one's id and URL, as `PUT` takes them, and what the running server knows of it (`state`: last tip, failure streak, calls).
          */
         get: operations["list_network_endpoints"];
         /**
          * Replace a network's RPC nodes
-         * @description Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. Each node is asked its chain and tip once, before storing. A URL already stored keeps its id and routes; one left out is removed with its routes.
+         * @description Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them: the healthy node with the highest tip first, then the others in order; calls already sent finish on the node they reached. Each node is asked its chain and tip once, before storing. A URL already stored keeps its id, routes and state; one left out is removed with its routes.
          */
         put: operations["replace_network_endpoints"];
         /**
@@ -252,12 +252,12 @@ export interface paths {
         };
         /**
          * List a network's routed methods
-         * @description Each routed method and the nodes taking turns serving it, round robin. Every other method goes to the network's cluster.
+         * @description Each routed method and the nodes taking turns serving it, round robin. Every other method goes to the network's healthy node with the highest tip.
          */
         get: operations["list_network_routes"];
         /**
          * Replace a network's routed methods
-         * @description Stores the routes, then sends each routed method round robin over its nodes, and every other method to the cluster. A routed call failing retryably moves to the next node, then to the cluster. No node is asked.
+         * @description Stores the routes, then sends each routed method round robin over its nodes, and every other method to the healthy node with the highest tip. A routed call failing retryably moves to the next node, then to the network's other nodes. No node is asked.
          */
         put: operations["replace_network_routes"];
         post?: never;
@@ -1125,8 +1125,43 @@ export interface components {
              * @description Its id: what a route and removal name.
              */
             id: number;
+            state: null | components["schemas"]["RpcNodeState"];
             /** @description Its URL as stored. */
             url: string;
+        };
+        /**
+         * @description What the running server knows of one node: its last tip, its failure
+         *     streak, and its calls since it was loaded. Nothing asks the node.
+         */
+        RpcNodeState: {
+            /**
+             * Format: int64
+             * @description Calls that reached it and finished.
+             */
+            calls: number;
+            /**
+             * Format: int64
+             * @description Of those, the ones that failed.
+             */
+            failed_calls: number;
+            /**
+             * Format: int32
+             * @description Retryable failures in a row (a rate limit counts as 3); from 3 it is
+             *     tried after every other node until it answers, or 10 block times (at
+             *     least 30 s) pass.
+             */
+            failures: number;
+            /**
+             * @description The last failure's kind or code, never a message of the node's;
+             *     always present, null: none.
+             */
+            last_failure: string | null;
+            /**
+             * Format: int64
+             * @description Its newest block (slot) when last asked, kept for the network's block
+             *     time; always present, null before it told one.
+             */
+            tip: number | null;
         };
         /** @description `POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body. */
         RpcNodes: {

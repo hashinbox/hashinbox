@@ -20,7 +20,7 @@ use super::{Error, ErrorBody, networks::NetworkPath};
 use crate::{
     api::AppState,
     models::{Endpoint, NetworkName, RpcEndpoints, endpoint},
-    usecase::endpoints::connect,
+    usecase::Networks,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -40,9 +40,15 @@ struct EndpointsResponse {
 }
 
 impl EndpointsResponse {
-    /// `network`'s stored nodes, after putting them and its routes in use.
+    /// `network`'s stored nodes, each with its node's state, after loading
+    /// them and its routes into its transport.
     async fn connected(state: &AppState, network: base::Network) -> Result<Self, Error> {
-        let (endpoints, _) = connect(&state.db, &state.payments, &network).await?;
+        Networks::read(&state.db)
+            .await?
+            .load(&network, &state.container)?;
+        let mut endpoints = state.db.read(endpoint::db::find_all).await?.nodes(&network);
+        let transport = state.container.transport(&network)?;
+        transport.clients().states(&mut endpoints).await;
         Ok(Self {
             network: network.into(),
             endpoints,
@@ -55,8 +61,9 @@ impl EndpointsResponse {
     path = "/v1/networks/{chain}/{network}/endpoints",
     operation_id = "list_network_endpoints",
     summary = "List a network's RPC nodes",
-    description = "Its stored nodes in failover order: each one's id and URL, as `PUT` takes \
-        them.",
+    description = "Its stored nodes in stored order: each one's id and URL, as `PUT` takes \
+        them, and what the running server knows of it (`state`: last tip, failure streak, \
+        calls).",
     params(NetworkPath),
     security(("bearerAuth" = [])),
     responses(
@@ -71,10 +78,12 @@ async fn list(
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
 ) -> Result<Json<EndpointsResponse>, Error> {
-    let network = path.network(&state.payments)?;
-    let stored = state.db.read(endpoint::db::find_all).await?;
+    let network = path.network(&state.container)?;
+    let mut endpoints = state.db.read(endpoint::db::find_all).await?.nodes(&network);
+    let transport = state.container.transport(&network)?;
+    transport.clients().states(&mut endpoints).await;
     Ok(Json(EndpointsResponse {
-        endpoints: stored.nodes(&network),
+        endpoints,
         network: network.into(),
     }))
 }
@@ -131,7 +140,7 @@ async fn add(
     request: Result<Json<NodesRequest>, JsonRejection>,
 ) -> Result<Json<EndpointsResponse>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let network = path.network(&state.payments)?;
+    let network = path.network(&state.container)?;
     if request.endpoints.is_empty() {
         return Err(Error::invalid_request("add 1 to 16 nodes at once"));
     }
@@ -150,9 +159,10 @@ async fn add(
     operation_id = "replace_network_endpoints",
     summary = "Replace a network's RPC nodes",
     description = "Stores the nodes, then sends every later call of the network (indexing, \
-        wallets, broadcast) to them, failing over in order; calls already sent finish on the \
-        node they reached. Each node is asked its chain and tip once, before storing. A URL \
-        already stored keeps its id and routes; one left out is removed with its routes.",
+        wallets, broadcast) to them: the healthy node with the highest tip first, then the \
+        others in order; calls already sent finish on the node they reached. Each node is asked \
+        its chain and tip once, before storing. A URL already stored keeps its id, \
+        routes and state; one left out is removed with its routes.",
     params(NetworkPath),
     request_body = NodesRequest,
     security(("bearerAuth" = [])),
@@ -172,7 +182,7 @@ async fn replace(
     request: Result<Json<NodesRequest>, JsonRejection>,
 ) -> Result<Json<EndpointsResponse>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let network = path.network(&state.payments)?;
+    let network = path.network(&state.container)?;
     let nodes = RpcEndpoints::new(request.nodes()).map_err(Error::invalid_request)?;
     check(&state, &network, nodes.nodes()).await?;
     store(&state, &network, &nodes).await?;
@@ -240,7 +250,7 @@ async fn add_many(
     let mut added = Vec::new();
     for node in request.nodes {
         let network = base::Network::new(base::Chain::new(node.chain), node.network);
-        state.payments.service(&network)?;
+        state.container.service(&network)?;
         let endpoint = rpc::Endpoint::new(node.endpoint);
         added.push((network.clone(), endpoint.clone()));
         lists
@@ -311,7 +321,7 @@ async fn remove(
     Path(path): Path<NodePath>,
 ) -> Result<Json<EndpointsResponse>, Error> {
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
-    state.payments.service(&network)?;
+    state.container.service(&network)?;
     let mut nodes = state.db.read(endpoint::db::find_all).await?.nodes(&network);
     let Some(position) = nodes.iter().position(|node| node.id == path.id) else {
         return Err(Error::not_found("no such node"));
@@ -324,17 +334,17 @@ async fn remove(
 }
 
 /// Asks each of `endpoints` which chain it serves and its tip, once, before
-/// anything is stored: a node that fails or serves another chain is refused
-/// with why. Nothing asks again while the server runs.
+/// anything is stored (`Transport::verify`): a node that fails or serves
+/// another chain is refused with why.
 async fn check(
     state: &AppState,
     network: &base::Network,
     endpoints: &[rpc::Endpoint],
 ) -> Result<(), Error> {
+    let transport = state.container.transport(network)?;
     for (index, endpoint) in endpoints.iter().enumerate() {
-        state
-            .payments
-            .info(network, endpoint)
+        transport
+            .verify(endpoint)
             .await
             .map_err(|error| Error::invalid_request(format!("node {index}: {error:#}")))?;
     }

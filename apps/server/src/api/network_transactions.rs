@@ -71,7 +71,7 @@ async fn list(
     let pending = query.pending == Some(true);
     let page = index.page("transactions", transaction::parse_key)?;
     let limit = page.limit;
-    let network = path.network(&state.payments)?;
+    let network = path.network(&state.container)?;
     let transactions = state
         .db
         .read(move |connection| {

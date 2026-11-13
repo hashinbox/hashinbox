@@ -30,10 +30,9 @@ Flags and the network tables are in [apps/server](apps/server/README.md).
 | [sdk/chains/ethereum](sdk/chains/ethereum/README.md) | Ethereum: RPC, blocks, ETH and ERC-20 wallets, sending |
 | [sdk/chains/solana](sdk/chains/solana/README.md) | Solana: RPC, blocks, SOL and SPL wallets, SOL sending |
 | [sdk/indexing](sdk/indexing/README.md) | Watches, block synchronization and the store contracts |
-| [sdk/payments](sdk/payments/README.md) | The network container and chain registration |
 | [packages/crypto](packages/crypto/README.md) | Keys and signing |
 | [packages/decimal](packages/decimal/README.md) | Exact decimal amounts |
-| [packages/rpc](packages/rpc/README.md) | JSON-RPC client with retry and failover |
+| [packages/rpc](packages/rpc/README.md) | JSON-RPC over HTTP, one node per client, with retry |
 | [packages/http-server](packages/http-server/README.md) | Authenticated axum serving |
 | [docs/design](docs/design) | Design notes |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Ownership and dependency direction |

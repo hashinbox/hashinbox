@@ -27,12 +27,20 @@ assert_eq!(amount.to_atomic_u64(8)?, 1_500_000);
 
 ## Notes
 
-- `Cluster` makes several nodes of one network one `rpc::Client`. Each node
-  is the chain's info client over it (an `InfoClient`: `tip()`, `info()`);
-  `ServiceFactory::info(nodes)` is the chain's cluster of them. Requests go to the
-  primary, the highest `tip()` as `Policy` selects (refresh, lag, failure
-  streak, rate limit); a broadcast reaches every node once. It is an
-  `InfoClient` too, so clusters nest.
+- `Container<T: Transport>` (`base::container`) keeps every registered
+  network's `Service` (or why it did not build) and its transport.
+  `register::<F>(config, transport)` reads the chain's settings
+  (`ServiceFactory::new(&config)`) and builds its service over the
+  container's `Storage` and `transport.client()`, asking no node. `service`,
+  `transport` and the cross-network calls (`networks`, `assets`, `stats`,
+  `watch`, `generate`, `wallet`, `wallets`, `parse`, `broadcast`) are keyed
+  by network. A `Transport` is how a network gets its one `rpc::Client`:
+  `Simple` is a client made upfront (tests, custom stacks); the server's
+  selects among its stored nodes.
+- `InfoClient` is a chain's reader of one node: `new(node)`, `tip()`, and
+  `info()`, its chain and tip as the node reports them (the caller judges
+  them). `CachedInfo` asks its tip at most once per `ttl`, the network's
+  block time (`base::Cache`), and `last()` answers without asking.
 - `Address::new` stores the text it is given and does not validate or normalize
   it. Addresses are compared as strings, so parse user input with the chain's
   wallet factory; a differently spelled address is a different address and its

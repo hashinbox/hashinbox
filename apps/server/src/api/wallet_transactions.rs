@@ -70,7 +70,7 @@ impl SendRequest {
     /// transfer.
     fn intent(
         self,
-        payments: &payments::Payments,
+        container: &base::Container<crate::usecase::Transport>,
         from: &base::Address,
         info: &base::AssetInfo,
     ) -> Result<SendIntent, Error> {
@@ -88,8 +88,8 @@ impl SendRequest {
                         "amount must be a positive exact decimal within the asset's decimals",
                     ))
                 })?;
-            let to = payments
-                .parse(&from.network, &item.destination)
+            let to = container
+                .parse(&base::Address::new(from.network.clone(), &item.destination))
                 .map_err(|error| at(error.into()))?;
             transfers.push(Payment {
                 to: to.value,
@@ -148,10 +148,9 @@ async fn send(
             "between 1 and {MAX_TRANSFERS} transfers are allowed"
         )));
     }
-    let address = wallet_address(&state.payments, &path.id)?;
-    let info = asset_info(&state.payments, &address.network, &request.asset)?;
-    let id = crate::models::Wallet::id(&address)
-        .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
+    let address = wallet_address(&state.container, &path.id)?;
+    let info = asset_info(&state.container, &address.network, &request.asset)?;
+    let id = crate::models::wallet::WalletId::of(&address)?;
     if !state
         .db
         .read(move |connection| Ok(crate::models::wallet::db::is_keyed(connection, &id)?))
@@ -159,7 +158,7 @@ async fn send(
     {
         return Err(Error::unprocessable("the wallet holds no key here"));
     }
-    let intent = request.intent(&state.payments, &address, &info)?;
+    let intent = request.intent(&state.container, &address, &info)?;
     let queued = Broadcast::enqueue(&state.queue, &intent)
         .await
         .map_err(|error| match error {

@@ -54,6 +54,7 @@ mod asset;
 pub(crate) mod block;
 pub(crate) mod endpoint;
 pub(crate) mod endpoint_route;
+pub(crate) mod id;
 mod json;
 pub(crate) mod leg;
 pub(crate) mod network;
@@ -69,8 +70,9 @@ pub(crate) mod wallet_index;
 
 pub(crate) use asset::Asset;
 pub(crate) use block::Block;
-pub(crate) use endpoint::{Endpoint, RpcEndpoints};
+pub(crate) use endpoint::{Endpoint, NodeState, RpcEndpoints};
 pub(crate) use endpoint_route::{Route, Routes};
+pub(crate) use id::{Id, IdError};
 pub(crate) use json::Json;
 pub(crate) use leg::Leg;
 pub(crate) use network::{Network, NetworkName};
@@ -96,7 +98,7 @@ pub(crate) use trigger::Trigger;
 pub(crate) use trigger_run::TriggerRun;
 pub(crate) use wallet::Wallet;
 
-use anyhow::{Context as _, ensure};
+use anyhow::Context as _;
 
 /// `value` as a SQLite integer.
 ///
@@ -114,29 +116,4 @@ pub(crate) fn int(value: u64) -> anyhow::Result<i64> {
 /// When it is negative, which no writer stores.
 pub(crate) fn uint(value: i64) -> anyhow::Result<u64> {
     u64::try_from(value).context("a stored value is negative")
-}
-
-/// A row id: `parts` joined with dots (see `init.sql`).
-///
-/// # Errors
-///
-/// When a part is empty or holds a dot, so the id would not split back.
-pub(crate) fn key(parts: &[&str]) -> anyhow::Result<String> {
-    for part in parts {
-        ensure!(
-            !part.is_empty() && !part.contains('.'),
-            "an id part is empty or holds a dot: {part:?}"
-        );
-    }
-    Ok(parts.join("."))
-}
-
-/// The id of a row under row `parent` (an id [`key`] built): `parent` and
-/// `parts` joined with dots.
-///
-/// # Errors
-///
-/// When a part is empty or holds a dot.
-pub(crate) fn child(parent: &str, parts: &[&str]) -> anyhow::Result<String> {
-    Ok(format!("{parent}.{}", key(parts)?))
 }

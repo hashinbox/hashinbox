@@ -8,10 +8,10 @@ use std::sync::{Arc, Mutex};
 use base::{TransactionErrorKind, WalletStore as _};
 use tasks::{Ack, Admission, Claim, Context, Id, OnLock, Store, Worker};
 
-use super::{Fake, Script, database, network, payments};
+use super::{Fake, Script, container, database, network};
 use crate::{
     db::Db,
-    models::{transaction, transaction::Transaction},
+    models::{transaction, transaction::TransactionId},
     usecase::workers::broadcast::{Broadcast, Payment, SendIntent},
     usecase::{sdk::Stores, tasks::Queue},
 };
@@ -81,7 +81,7 @@ impl Fixture {
         let claimed = queue.claim(claim).await.expect("claimed");
         assert_eq!(claimed.len(), 1, "the job runs");
         Self {
-            worker: Broadcast::new(payments(&db, script.clone()).await, db.clone()),
+            worker: Broadcast::new(container(&db, script.clone()), db.clone()),
             db,
             queue,
             script,
@@ -105,7 +105,7 @@ impl Fixture {
 
     /// Whether txid `txid` is recorded as pending.
     async fn recorded(&self, txid: &str) -> bool {
-        let id = Transaction::id(&network(), txid).expect("an id");
+        let id = TransactionId::new(&network(), txid).expect("an id");
         self.db
             .read(move |connection| {
                 Ok(transaction::db::get(connection, &id)?.is_some_and(|kept| kept.block.is_none()))
@@ -116,7 +116,7 @@ impl Fixture {
 
     /// Forgets txid `txid`, as an expiry does.
     async fn forget(&self, txid: &str) {
-        let id = Transaction::id(&network(), txid).expect("an id");
+        let id = TransactionId::new(&network(), txid).expect("an id");
         self.db
             .write(move |connection| Ok(transaction::db::delete_pending(connection, &[id])?))
             .await

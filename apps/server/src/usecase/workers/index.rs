@@ -24,7 +24,6 @@ use std::{
 };
 
 use base::{Chain, Network, Next, Stats};
-use payments::Payments;
 use serde::{Deserialize, Serialize};
 use tasks::{Ack, Context, Policy, Store, StoreError, Topic, Worker, millis};
 
@@ -95,7 +94,7 @@ impl Target {
 
 /// Steps every indexed network's indexer.
 pub(crate) struct Index {
-    payments: Arc<Payments>,
+    container: Arc<base::Container<crate::usecase::Transport>>,
     db: Db,
     queue: Queue,
     /// Each indexer's stats as last written: a step writes what grew since.
@@ -103,9 +102,13 @@ pub(crate) struct Index {
 }
 
 impl Index {
-    pub(crate) fn new(payments: Arc<Payments>, db: Db, queue: Queue) -> Self {
+    pub(crate) fn new(
+        container: Arc<base::Container<crate::usecase::Transport>>,
+        db: Db,
+        queue: Queue,
+    ) -> Self {
         Self {
-            payments,
+            container,
             db,
             queue,
             saved: Mutex::default(),
@@ -144,7 +147,7 @@ impl Worker for Index {
         let target = cx.input().clone();
         let network = target.network();
         let now = tasks::now();
-        let service = match self.payments.service(&network) {
+        let service = match self.container.service(&network) {
             Ok(service) => service,
             Err(error) => return Ack::Fail(format!("{error:#}")),
         };

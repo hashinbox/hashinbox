@@ -60,7 +60,7 @@ async fn legs(
     let Query(index) = index.map_err(Error::invalid_query)?;
     let page = index.page("legs", |cursor| cursor.parse().ok())?;
     let limit = page.limit;
-    let (_, id) = path.index(&state.payments)?;
+    let (_, id) = path.index(&state.container)?;
     let legs = state
         .db
         .read(move |connection| Ok(leg::db::find_page(connection, &id, page)?))

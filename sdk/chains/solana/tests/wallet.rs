@@ -4,11 +4,10 @@ use std::sync::Arc;
 
 use ::rpc::testing::{Reply, Script};
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, ServiceFactory as _, Signer,
-    TransactionErrorKind, TransactionState, Transfer, Wallet, WalletError, WalletErrorKind,
-    WalletFactory as _,
+    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, Signer, TransactionErrorKind,
+    TransactionState, Transfer, Wallet, WalletError, WalletErrorKind, WalletFactory as _,
 };
-use chain_solana::{Client, Config};
+use chain_solana::{Client, Config, Factory};
 use crypto::SecretBytes;
 use futures_executor::block_on;
 use serde_json::json;
@@ -44,7 +43,8 @@ fn client(transport: impl ::rpc::Client + 'static) -> Client {
 }
 
 fn wallet(script: &Script) -> Arc<dyn Wallet> {
-    let factory = config().factory(&client(script.clone()), Arc::new(base::NoHoldings));
+    let factory =
+        Factory::from(config()).wallets(&client(script.clone()), Arc::new(base::NoHoldings));
     block_on(factory.from_pk(SecretBytes::new(SEED))).unwrap()
 }
 
@@ -89,7 +89,7 @@ fn a_wallet_keeps_its_ed25519_key_and_parses_canonical_addresses() {
     assert_eq!(wallet.address().value, reference.pubkey().to_string());
     assert_eq!(wallet.private_key().1.as_bytes(), SEED);
 
-    let factory = config().factory(&client(script), Arc::new(base::NoHoldings));
+    let factory = Factory::from(config()).wallets(&client(script), Arc::new(base::NoHoldings));
     let parsed = factory.parse_address(&wallet.address().value).unwrap();
     assert_eq!(&parsed, wallet.address());
     let error = factory.parse_address("0x00").unwrap_err();
@@ -293,28 +293,18 @@ fn signed(script: &Script) -> base::Transaction {
 }
 
 #[test]
-fn broadcast_sends_the_exact_bytes_to_every_node() {
+fn broadcast_sends_the_exact_bytes_once() {
     let transaction = signed(&Script::new(signing_replies()));
-    let nodes: Vec<Script> = (0..2)
-        .map(|_| {
-            Script::new([Reply::ok("sendTransaction", json!(transaction.id.id))])
-                .once_only("sendTransaction")
-        })
-        .collect();
-    let transports = nodes
-        .iter()
-        .map(|node| Arc::new(node.clone()) as Arc<dyn ::rpc::Client>)
-        .collect();
-    let broadcaster = client(config().info(transports).unwrap());
+    let node = Script::new([Reply::ok("sendTransaction", json!(transaction.id.id))])
+        .once_only("sendTransaction");
+    let broadcaster = client(node.clone());
 
     block_on(broadcaster.broadcast(&transaction)).unwrap();
 
-    for node in &nodes {
-        let requests = node.requests();
-        let encoded = requests[0].1[0].as_str().unwrap();
-        assert_eq!(base64_decode(encoded), transaction.bytes);
-        node.exhausted();
-    }
+    let requests = node.requests();
+    let encoded = requests[0].1[0].as_str().unwrap();
+    assert_eq!(base64_decode(encoded), transaction.bytes);
+    node.exhausted();
 }
 
 #[test]
@@ -377,7 +367,8 @@ fn associated(owner: &str) -> solana_address::Address {
 #[test]
 fn two_sources_sign_one_transaction_each() {
     let script = Script::new([]);
-    let factory = config().factory(&client(script.clone()), Arc::new(base::NoHoldings));
+    let factory =
+        Factory::from(config()).wallets(&client(script.clone()), Arc::new(base::NoHoldings));
     let one = block_on(factory.from_pk(SecretBytes::new(SEED))).unwrap();
     let two = block_on(factory.from_pk(SecretBytes::new([9; 32]))).unwrap();
     let mut builder = factory.transaction(&Asset::native(network())).unwrap();
@@ -405,7 +396,8 @@ fn two_sources_sign_one_transaction_each() {
 #[test]
 fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
     let script = Script::new([]);
-    let factory = config().factory(&client(script.clone()), Arc::new(base::NoHoldings));
+    let factory =
+        Factory::from(config()).wallets(&client(script.clone()), Arc::new(base::NoHoldings));
     let mut builder = factory.transaction(&Asset::native(network())).unwrap();
     builder.send((recipient(), Decimal::from(100))).unwrap();
     assert_eq!(
@@ -443,8 +435,8 @@ fn an_estimate_sums_signatures_and_a_token_accounts_rent() {
     script.push([
         Reply::ok("getMinimumBalanceForRentExemption", json!(2_039_280)).expecting(json!([165])),
     ]);
-    let fees = config()
-        .factory(&client(script.clone()), Arc::new(base::NoHoldings))
+    let fees = Factory::from(config())
+        .wallets(&client(script.clone()), Arc::new(base::NoHoldings))
         .fees();
     let one = wallet(&script).address().clone();
     let two = recipient();
@@ -479,8 +471,8 @@ impl base::Holdings for HeldByAll {
 #[test]
 fn a_token_sent_to_a_holder_is_priced_without_the_rent_of_its_account() {
     let script = Script::new(signing_replies());
-    let fees = config()
-        .factory(&client(script.clone()), Arc::new(HeldByAll))
+    let fees = Factory::from(config())
+        .wallets(&client(script.clone()), Arc::new(HeldByAll))
         .fees();
     let one = wallet(&script).address().clone();
     let source = [(one, token())];
@@ -504,8 +496,8 @@ fn a_token_sent_to_a_holder_is_priced_without_the_rent_of_its_account() {
 fn prices_refresh_once_per_time_to_live() {
     let source = [(recipient(), Asset::native(network()))];
     let script = Script::new(signing_replies());
-    let fees = config()
-        .factory(&client(script.clone()), Arc::new(base::NoHoldings))
+    let fees = Factory::from(config())
+        .wallets(&client(script.clone()), Arc::new(base::NoHoldings))
         .fees();
     block_on(fees.estimate(&spends(&source))).unwrap();
     block_on(fees.estimate(&spends(&source))).unwrap();
@@ -515,8 +507,8 @@ fn prices_refresh_once_per_time_to_live() {
     config.fee_ttl_ms = 0;
     let script = Script::new(signing_replies());
     script.push(signing_replies());
-    let fees = config
-        .factory(&client(script.clone()), Arc::new(base::NoHoldings))
+    let fees = Factory::from(config)
+        .wallets(&client(script.clone()), Arc::new(base::NoHoldings))
         .fees();
     block_on(fees.estimate(&spends(&source))).unwrap();
     block_on(fees.estimate(&spends(&source))).unwrap();
@@ -526,7 +518,8 @@ fn prices_refresh_once_per_time_to_live() {
 #[test]
 fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
     let script = Script::new(signing_replies());
-    let factory = config().factory(&client(script.clone()), Arc::new(base::NoHoldings));
+    let factory =
+        Factory::from(config()).wallets(&client(script.clone()), Arc::new(base::NoHoldings));
     let wallet = block_on(factory.from_pk(SecretBytes::new(SEED))).unwrap();
     let source = [(wallet.address().clone(), Asset::native(network()))];
     let fee = block_on(factory.fees().estimate(&spends(&source))).unwrap();
@@ -545,7 +538,8 @@ fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
 
 #[test]
 fn a_base58_secret_or_keypair_imports() {
-    let factory = config().factory(&client(Script::new([])), Arc::new(base::NoHoldings));
+    let factory =
+        Factory::from(config()).wallets(&client(Script::new([])), Arc::new(base::NoHoldings));
     let keypair = Keypair::new_from_array(SEED);
     for text in [keypair.to_base58_string(), bs58::encode(SEED).into_string()] {
         let wallet = block_on(factory.from_pk_text(&text)).unwrap();

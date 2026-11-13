@@ -14,11 +14,7 @@ use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody, IndexParams, wallet_address};
-use crate::{
-    api::AppState,
-    db::Paged as _,
-    models::{Wallet, wallet},
-};
+use crate::{api::AppState, db::Paged as _, models::wallet};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
@@ -83,10 +79,12 @@ struct TagPath {
 
 impl TagPath {
     /// The wallet's model id; the tag checked.
-    fn wallet_id(&self, payments: &payments::Payments) -> Result<String, Error> {
-        let address = wallet_address(payments, &self.id)?;
-        let id =
-            Wallet::id(&address).map_err(|error| Error::invalid_request(format!("{error:#}")))?;
+    fn wallet_id(
+        &self,
+        container: &base::Container<crate::usecase::Transport>,
+    ) -> Result<String, Error> {
+        let address = wallet_address(container, &self.id)?;
+        let id = String::from(crate::models::wallet::WalletId::of(&address)?);
         if !wallet::is_tag(&self.tag) {
             return Err(Error::invalid_request(format!(
                 "a tag is 1 to 64 of [a-z0-9-]: {:?}",
@@ -119,7 +117,7 @@ async fn add(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TagPath>,
 ) -> Result<StatusCode, Error> {
-    let id = path.wallet_id(&state.payments)?;
+    let id = path.wallet_id(&state.container)?;
     state
         .db
         .write(move |connection| wallet::db::set_tag(connection, &id, &path.tag, true))
@@ -150,7 +148,7 @@ async fn remove(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TagPath>,
 ) -> Result<StatusCode, Error> {
-    let id = path.wallet_id(&state.payments)?;
+    let id = path.wallet_id(&state.container)?;
     let removed = state
         .db
         .write(move |connection| wallet::db::set_tag(connection, &id, &path.tag, false))

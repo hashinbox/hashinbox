@@ -17,7 +17,6 @@ use std::{num::NonZeroUsize, sync::Arc};
 use ::trigger::{Decision, actions::Registry};
 use diesel::SqliteConnection;
 use logging::{Level, Logger};
-use payments::Payments;
 use tasks::{Ack, Job, OnLock, Policy, Topic, Worker};
 
 use super::{TIMEOUT, index::Target};
@@ -32,7 +31,7 @@ pub(crate) const KIND: &str = "triggers";
 
 /// Runs a network's triggers: the triggers job.
 pub(crate) struct Round {
-    payments: Arc<Payments>,
+    container: Arc<base::Container<crate::usecase::Transport>>,
     db: Db,
     queue: Queue,
     actions: Arc<Registry<Job>>,
@@ -41,14 +40,14 @@ pub(crate) struct Round {
 
 impl Round {
     pub(crate) fn new(
-        payments: Arc<Payments>,
+        container: Arc<base::Container<crate::usecase::Transport>>,
         db: Db,
         queue: Queue,
         actions: Arc<Registry<Job>>,
         logger: Logger,
     ) -> Self {
         Self {
-            payments,
+            container,
             db,
             queue,
             actions,
@@ -83,7 +82,7 @@ impl Worker for Round {
     async fn run(&self, cx: tasks::Context<'_, Target, ()>) -> Ack {
         let network = cx.input().network();
         let round = async {
-            let service = self.payments.service(&network)?;
+            let service = self.container.service(&network)?;
             let (actions, fees, assets) = (
                 self.actions.clone(),
                 service.wallets.factory.fees(),

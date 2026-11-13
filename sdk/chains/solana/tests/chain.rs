@@ -8,7 +8,7 @@ use base::{
 use std::sync::Arc;
 
 use ::rpc::testing::{Reply, Script};
-use chain_solana::{Chain, Client, Config};
+use chain_solana::{Chain, Client, Config, Factory};
 use futures_executor::block_on;
 use serde_json::{Value, json};
 
@@ -33,7 +33,7 @@ fn config() -> Config {
 
 fn chain(script: &Script) -> Chain {
     let config = config();
-    config.chain(&Client::new(Arc::new(script.clone()), config.native()))
+    Factory::from(config.clone()).chain(&Client::new(Arc::new(script.clone()), config.native()))
 }
 
 fn network() -> Network {
@@ -297,7 +297,7 @@ fn a_chain_over_a_swap_follows_its_replacement() {
     let old = Script::new([]);
     let swap = Arc::new(::rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
     let config = config();
-    let chain = config.chain(&Client::new(swap.clone(), config.native()));
+    let chain = Factory::from(config.clone()).chain(&Client::new(swap.clone(), config.native()));
     let tips = |script: &Script, produced: u64| {
         script.push([
             Reply::ok("getSlot", json!(produced)),

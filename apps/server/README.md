@@ -1,8 +1,9 @@
 # payment-server
 
-The one executable of the workspace: it opens one SQLite file, builds
-`payments::Payments` from its network tables with the Bitcoin, Ethereum and
-Solana chains registered, runs every indexed network's indexer and the send
+The one executable of the workspace: it opens one SQLite file, builds the
+container (`base::Container`) of its network tables with the Bitcoin,
+Ethereum and Solana chains registered, each network over its stored nodes
+(`usecase::Transport`), runs every indexed network's indexer and the send
 queue, and serves the wallet HTTP API. It is a binary with no library.
 
 ## Usage
@@ -23,14 +24,23 @@ token; optional only for a loopback bind), `--tls-terminated-upstream`
 migrations. `serve` only opens it. Networks are rows: `network` (facts and
 `settings`, the chain's own knobs as JSON), `network_asset`, `network_endpoint`
 (one row per node, see `seed.sql`) and `network_endpoint_route` (methods sent
-round robin over some of a network's nodes, `rpc::Router`). The server indexes exactly the networks with a
-`network_index` row and adds one for every `enabled` network at start; each is
-built by its chain (`TryFrom<&base::NetworkConfig>`), and one that fails
-verification stops the start.
+round robin over some of a network's nodes). The server indexes exactly the
+networks with a `network_index` row and adds one for every `enabled` network
+at start; each is built by its chain (`ServiceFactory::new(&config)`), asking
+no node, and one that does not build fails only its own jobs, with why.
 
-`PUT /v1/networks/{chain}/{network}/rpc` stores a list and moves every later call
-of the network to it at once (`base::Cluster` behind the network's
-`rpc::Swap`), unverified; the chain verifies it on the next start.
+A network's transport (`usecase::Transport`) is its stored nodes and the
+selection over them, made on every call: a routed method rotates over its
+route's nodes; anything else goes to the healthy node with the highest tip
+(each tip asked at most once per block time), then the others in stored
+order, a node more than `confirmations` behind after those in sync. Three
+retryable failures in a row, or one rate limit, put a node last until it
+answers or 10 block times (at least 30 s) pass. A retryable failure moves on
+to the next node; a broadcast reaches every node. Adding a node asks it which
+chain it serves first (`Transport::verify`); every endpoint or route edit is
+stored, then loaded into the running transport (`usecase::Networks::load`):
+a node whose URL stays keeps its tip, failures and call counts. `GET
+/v1/networks` shows each node's `state`.
 
 The server also serves a browser page at `/` (`--brand`, `PAYMENT_UI_API_BASE`).
 The committed page (`ui/dist`) was built against the previous API and needs a
@@ -41,7 +51,7 @@ rebuild for the routes below.
 `payment-server --openapi` prints the OpenAPI document; `docs/openapi.json` is the
 committed copy. `GET /health` and `GET /openapi.json` need no token.
 
-- `GET /v1/assets`: every configured asset (`payments.assets()`): its network, its
+- `GET /v1/assets`: every configured asset (`container.assets()`): its network, its
   id (`native` or a token's) and metadata.
 - `POST /v1/wallets` `{chain, network, secret?, address?}`: with `secret` (a raw
   private key: Ethereum hex, Solana Base58, Bitcoin WIF), imports and keeps it
@@ -79,10 +89,11 @@ Layers, bottom up: `models`, `usecase`, `api`, `main`; `db` beside
 them. Nothing imports upward (docs/design/069-server-layers.md;
 `scripts/server-layers.py` checks it).
 
-- `src/main.rs`: composition (network rows into the `payments` builder, `base::Storage` from
-  `usecase::sdk::Stores`, the `payments` builder, the executor with the
-  index, expire, triggers and broadcast jobs, HTTP) and shutdown (the executor
-  stops after HTTP drains; unfinished jobs resume on the next start).
+- `src/main.rs`: one `main` block: the container (`base::Storage` from
+  `usecase::sdk::Stores`, every stored network registered per chain by
+  `usecase::Networks`), `AppState`, the workers (`usecase::workers::executor`:
+  index, expire, prune, triggers and broadcast jobs), HTTP; and shutdown (the
+  executor stops after HTTP drains; unfinished jobs resume on the next start).
   `src/main.rs` is the only file that names a chain crate; `src/config.rs` is
   the command line; `src/ui.rs` serves the page.
 - `src/db.rs`: the SQLite pool, its pragmas, read and write transactions, and
@@ -91,8 +102,11 @@ them. Nothing imports upward (docs/design/069-server-layers.md;
   and holds the shared `Error`; `state.rs` is the handler state.
 - `src/models/`: one file per table (diesel row and its SQL) and the shared wire
   shapes (`asset`, `network`).
-- `src/usecase/`: `sdk/` (every `base` store on the models), `tasks.rs` (the
-  job queue: `tasks::Store` on SQLite, wrapped in `tasks::Notifying`),
+- `src/usecase/`: `sdk/` (every `base` store on the models), `transport.rs`
+  (a network's nodes and the selection over them), `networks.rs` (every
+  stored network into the container, and its edits into its transport),
+  `tasks.rs` (the job queue: `tasks::Store` on SQLite, wrapped in
+  `tasks::Notifying`),
   `trigger.rs` (a trigger's decision), the multi-model reads (`history.rs`,
   `wallets.rs`, `chain.rs`, `stats.rs`), and `workers/`: the jobs, each
   declaring its `tasks::Policy` (`index.rs`, `expire.rs`, `prune.rs`,
@@ -102,12 +116,12 @@ them. Nothing imports upward (docs/design/069-server-layers.md;
 ## Notes
 
 - Balances and history include every live block up to the produced tip: the
-  store records no confirmation, and `payments` exposes no chain's confirmed tip
+  store records no confirmation, and the container exposes no chain's confirmed tip
   (`base::Stats` carries only the produced `tip`), so no confirmed/pending split
   is reported. A reorg archives blocks and both reads follow.
 - The send job signs through `wallet.transaction(asset)` → `transfer` → `sign()`,
   saves every transaction's signed bytes in its payload before broadcasting, and
-  broadcasts them in order through `payments.broadcast`; a retry resends the saved
+  broadcasts them in order through `container.broadcast`; a retry resends the saved
   bytes, never re-signs. Nothing is written to the index: indexing records the
   transactions once mined.
 - Generated keys persist directly in SQLite; no encryption or passphrase. Keys

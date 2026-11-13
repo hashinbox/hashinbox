@@ -114,7 +114,7 @@ async fn create(
     let Json(request) = request.map_err(Error::invalid_json)?;
     let external_id = request.external_id()?;
     let network = base::Network::new(Chain::new(request.chain), request.network);
-    let factory = &state.payments.service(&network)?.wallets.factory;
+    let factory = &state.container.service(&network)?.wallets.factory;
     let given = request
         .address
         .map(|text| factory.parse_address(&text))
@@ -230,9 +230,8 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<WalletPath>,
 ) -> Result<Json<Wallet>, Error> {
-    let address = wallet_address(&state.payments, &path.id)?;
-    let id = models::Wallet::id(&address)
-        .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
+    let address = wallet_address(&state.container, &path.id)?;
+    let id = models::wallet::WalletId::of(&address)?;
     state
         .db
         .read(move |connection| models::wallet::db::find(connection, &id))

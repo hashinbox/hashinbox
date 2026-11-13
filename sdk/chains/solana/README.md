@@ -7,33 +7,37 @@ token transfers.
 ## Usage
 
 ```rust,no_run
-use base::{Asset, Broadcaster as _, BuilderExt as _, Chained as _, ServiceFactory as _, Storage, WalletFactory as _};
+use base::{
+    Asset, Broadcaster as _, BuilderExt as _, Chained as _, ServiceFactory as _, Storage,
+    WalletFactory as _,
+};
 use std::sync::Arc;
 
-use chain_solana::{Client, Config, Network};
+use chain_solana::{Client, Config, Factory, Network};
 use rpc::Endpoint;
 
 async fn solana(storage: Storage) -> anyhow::Result<()> {
     let genesis = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d".parse()?;
     let config = Config::new(Network::new(genesis, "mainnet-beta"));
     let node: Arc<dyn rpc::Client> = Arc::new(rpc::node(&Endpoint::new("http://127.0.0.1:8899"), Default::default())?);
-    // The one entry point a container uses: indexer, factory, broadcaster,
-    // and assets over the application's stores.
-    let _service = config.build(&storage, node.clone()).await?;
+    let rpc = Client::new(node.clone(), config.native());
+    let sol = Asset::native((&config.native()).into());
+    let factory = Factory::from(config);
 
-    let rpc = Client::new(node, config.native());
+    // What `base::ServiceFactory::service` builds a stored network into:
+    // indexer, wallet factory, broadcaster and assets over the application's stores.
+    let _service = factory.service(&storage, node)?;
 
     // Reading: what `base::Indexer` consumes.
-    let chain = config.chain(&rpc);
+    let chain = factory.chain(&rpc);
     let tips = chain.tips().await?;
     let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
 
     // Sending: sign, keep the bytes, then broadcast them to every node.
-    let factory = config.factory(&rpc, std::sync::Arc::new(base::NoHoldings));
-    let wallet = factory.from_pk(factory.generate().await?).await?;
-    let sol = Asset::native((&config.native()).into());
+    let wallets = factory.wallets(&rpc, Arc::new(base::NoHoldings));
+    let wallet = wallets.from_pk(wallets.generate().await?).await?;
     let mut builder = wallet.transaction(&sol)?;
-    builder.send((factory.parse_address("...")?, 10_000_u64.into()))?;
+    builder.send((wallets.parse_address("...")?, 10_000_u64.into()))?;
     for transaction in builder.sign().await? {
         rpc.broadcast(&transaction).await?;
     }
@@ -50,16 +54,18 @@ the indexer fetches per step (default 100) (each absent one its default).
 
 ## Notes
 
-- `Config` implements `base::ServiceFactory`: `build(&storage, client)` validates
-  and returns the `base::Service`, asking no node. The indexer wakes every
-  `interval_ms` milliseconds (default 1,000).
-- The config holds no endpoints: `build(&storage, client)` builds every
-  part over the given transport, asking no node. `info(nodes)` is the
-  network's nodes as one client: each wrapped in `Info`, the chain's
-  `base::InfoClient` (`tip()` is `getSlot` at `confirmed`, `info()` its chain and tip, asked
-  once when a node is added), clustered by `tip()` (`base::Cluster`).
-  `Client` extends `Info` with every other call and is an `InfoClient` too.
-  Pass a `rpc::Swap` and keep it to change nodes live.
+- `Config` is data; `Factory` builds from it. As the chain's
+  `base::ServiceFactory`, `Factory::new(&network_config)` reads a stored
+  network as its `Config`; `Factory::from(config)` takes one made in code.
+  `factory.chain(&rpc)` is the block reader, `factory.wallets(..)` the
+  wallet factory, and `factory.service(&storage, client)` validates and
+  returns the whole `base::Service`, every part over the given client,
+  asking no node. The indexer wakes every `interval_ms` milliseconds
+  (default 1,000).
+- The config holds no endpoints. `Info` is the chain's `base::InfoClient`
+  over one node (`Info::new(node)`): `tip()` is `getSlot` at `confirmed`, `info()`
+  its genesis hash and its tip, as the node reports them; the caller judges them.
+  `Client` extends `Info` with every other call.
 - Position is the slot; a skipped slot holds no block. `Header.height` is the
   block height. Blocks are read at `confirmed` commitment; `Tips.produced` is
   the newest confirmed slot, `Tips.confirmed` the newest rooted (`finalized`)

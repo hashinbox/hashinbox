@@ -113,7 +113,6 @@ impl From<&Network> for base::NetworkConfig {
             explorer_transaction: network.explorer_transaction.clone(),
             settings: network.settings.clone(),
             assets: network.assets.iter().map(Into::into).collect(),
-            endpoints: endpoint::urls(&network.endpoints),
         }
     }
 }

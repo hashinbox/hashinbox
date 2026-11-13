@@ -10,23 +10,33 @@ import TableCell from '@mui/material/TableCell';
 import TableRow from '@mui/material/TableRow';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
-import { call, client, type ConfiguredNetwork } from '@/api/client';
+import { call, client, type ConfiguredNetwork, type Schemas } from '@/api/client';
 import { Confirm } from '@/_components/confirm';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { AddNode } from './add';
 import { Routes } from './routes';
 
-/** A stored node URL, parsed by the browser; `index` is its position. */
+/** A stored node URL, parsed by the browser, and what the server knows of it; `index` is its position. */
 interface Node {
   index: number;
   id: number;
   text: string;
   url: URL;
+  state: Schemas['RpcNodeState'] | null;
 }
 
 const HEADER = 'header.';
 const SETTING = 'rpc.';
+/** Failures in a row from which a node is tried after every other one. */
+const DEMOTED = 3;
+
+/** One line of what the server knows of a node, or that it is not running. */
+function summary(state: Node['state']): string {
+  if (!state) return 'not running';
+  const tip = state.tip === null ? 'tip unknown' : `tip ${state.tip}`;
+  return `${tip} · ${state.calls} calls · ${state.failed_calls} failed`;
+}
 
 /** A network's nodes in failover order, and the one picked, parsed. */
 export function Nodes({
@@ -41,11 +51,12 @@ export function Nodes({
   const [picked, setPicked] = useState(0);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<Node | null>(null);
-  const nodes = network.endpoints.map(({ id, url }, index): Node => ({
+  const nodes = network.endpoints.map(({ id, url, state }, index): Node => ({
     index,
     id,
     text: url,
     url: new URL(url),
+    state,
   }));
   const node = nodes[picked] ?? nodes[0] ?? null;
   const name = `${network.chain}/${network.network}`;
@@ -75,7 +86,8 @@ export function Nodes({
         </Button>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 3, maxWidth: 720 }}>
-        Calls go to the first node and fail over in order. A change is stored and used at once.
+        Calls go to the healthy node with the highest tip, then to the others in order; a node
+        failing 3 times in a row, or rate-limited, goes last. A change is stored and used at once.
         {network.index_job_reason && ` Index job's last run failed: ${network.index_job_reason}`}
       </Typography>
       <Box
@@ -107,9 +119,15 @@ export function Nodes({
                 {[...n.url.searchParams.keys()].some((k) => k.startsWith(HEADER)) && (
                   <Chip size="small" label="header key" />
                 )}
+                {n.state && n.state.failures >= DEMOTED && (
+                  <Chip size="small" color="warning" label="demoted" />
+                )}
               </Stack>
               <Typography noWrap sx={{ fontFamily: mono, fontSize: 11.5, color: 'text.secondary' }}>
                 {n.text}
+              </Typography>
+              <Typography noWrap sx={{ fontFamily: mono, fontSize: 11.5, color: 'text.secondary' }}>
+                {summary(n.state)}
               </Typography>
             </ListItemButton>
           ))}
@@ -161,7 +179,7 @@ function Detail({ node, onRemove, last }: { node: Node; onRemove: () => void; la
       </TableCell>
     </TableRow>
   );
-  const { url } = node;
+  const { url, state } = node;
   const params = [...url.searchParams];
   const query = params.filter(([k]) => !k.startsWith(HEADER) && !k.startsWith(SETTING));
   const headers = params.filter(([k]) => k.startsWith(HEADER));
@@ -195,6 +213,10 @@ function Detail({ node, onRemove, last }: { node: Node; onRemove: () => void; la
           {row('Request limit', setting('max_request_bytes', ' bytes'))}
           {row('Response limit', setting('max_response_bytes', ' bytes'))}
           {row('Max batch', setting('max_batch', ' calls'))}
+          {row('Tip', state?.tip?.toString() ?? 'unknown')}
+          {row('Failures in a row', state ? state.failures.toString() : 'not running')}
+          {row('Calls', state ? `${state.calls} (${state.failed_calls} failed)` : 'not running')}
+          {row('Last failure', state?.last_failure ?? 'none')}
         </TableBody>
       </Table>
       <Button color="error" sx={{ mt: 1.5 }} disabled={last} onClick={onRemove}>

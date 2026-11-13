@@ -5,9 +5,13 @@ use std::collections::BTreeSet;
 
 use ::trigger::selection::{Index, Selector};
 use anyhow::{Context as _, bail, ensure};
-use base::{Address, Addressed, Asset, BlockHeader, Decimal, Network, Networked, WalletIndexState};
+use base::{
+    Address, Addressed, Asset, BlockHeader, Chain, Decimal, Network, Networked, WalletIndexState,
+};
 use diesel::{
+    deserialize::FromSqlRow,
     dsl::sql,
+    expression::AsExpression,
     prelude::*,
     sql_types::{BigInt, Nullable, Text},
     sqlite::Sqlite,
@@ -15,10 +19,64 @@ use diesel::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Block, Wallet, child, int,
+    Block, Id, IdError,
+    block::BlockId,
+    id::typed_id,
+    int,
     schema::{block, wallet, wallet_index, wallet_index_with_balance},
     uint,
+    wallet::WalletId,
 };
+
+/// A wallet index's id: its wallet's id and the asset, `{chain}.{network}.{address}.{asset}`.
+#[derive(Clone, Debug, PartialEq, Eq, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Text)]
+pub(crate) struct WalletIndexId {
+    pub(crate) wallet: WalletId,
+    pub(crate) asset: String,
+    id: Id,
+}
+
+impl WalletIndexId {
+    /// The id of the index of `asset` of `address`.
+    ///
+    /// # Errors
+    ///
+    /// When a part holds a dot.
+    pub(crate) fn of(address: &Address, asset: &Asset) -> Result<Self, IdError> {
+        let wallet = WalletId::of(address)?;
+        let id = Id::child(wallet.id(), &[&asset.id])?;
+        Ok(Self {
+            wallet,
+            asset: asset.id.clone(),
+            id,
+        })
+    }
+
+    /// `text` as a wallet index id.
+    ///
+    /// # Errors
+    ///
+    /// Unless it has its four parts.
+    pub(crate) fn parse(text: &str) -> Result<Self, IdError> {
+        let shape = "{chain}.{network}.{address}.{asset}";
+        let [chain, network, address, asset] = Id::parts::<4>(text, shape)?;
+        let network = Network::new(Chain::new(chain), network);
+        let asset = Asset {
+            network: network.clone(),
+            id: asset.to_owned(),
+        };
+        Self::of(&Address::new(network, address), &asset)
+    }
+}
+
+typed_id!(WalletIndexId, wallet.address.network);
+
+impl Addressed for WalletIndexId {
+    fn address(&self) -> &Address {
+        self.wallet.address()
+    }
+}
 
 /// Whether an index is scanned.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -56,9 +114,11 @@ fn asset_id<S: serde::Serializer>(asset: &Asset, serializer: S) -> Result<S::Ok,
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub(crate) struct WalletIndex {
     /// `{wallet_id}.{asset}`.
-    pub(crate) id: String,
+    #[schema(value_type = String)]
+    pub(crate) id: WalletIndexId,
     /// `{chain}.{network}.{address}`.
-    pub(crate) wallet_id: String,
+    #[schema(value_type = String)]
+    pub(crate) wallet_id: WalletId,
     /// The asset id.
     #[serde(serialize_with = "asset_id")]
     #[schema(value_type = String)]
@@ -101,35 +161,20 @@ pub(crate) struct WalletIndex {
     /// Whether its wallet's key is kept here.
     #[serde(skip)]
     pub(crate) keyed: bool,
-    /// Its wallet's address.
-    #[serde(skip)]
-    pub(crate) address: Address,
     /// The block it is indexed through.
     #[serde(skip)]
     pub(crate) indexed_at: Option<String>,
 }
 
-impl WalletIndex {
-    /// The id of the index of `asset` of `address`:
-    /// `"{wallet_id}.{asset}"`, `"{chain}.{network}.{address}.{asset}"`.
-    ///
-    /// # Errors
-    ///
-    /// When a part holds a dot.
-    pub(crate) fn id(address: &Address, asset: &Asset) -> anyhow::Result<String> {
-        child(&Wallet::id(address)?, &[&asset.id])
-    }
-}
-
 impl Networked for WalletIndex {
     fn network(&self) -> &Network {
-        &self.address.network
+        self.id.network()
     }
 }
 
 impl Addressed for WalletIndex {
     fn address(&self) -> &Address {
-        &self.address
+        self.id.address()
     }
 }
 
@@ -161,8 +206,8 @@ impl WalletIndex {
                 .balance_pending
                 .parse()
                 .context("a stored balance does not decode")?,
-            id: self.id,
-            address: self.address,
+            address: self.id.address().clone(),
+            id: self.id.into(),
             asset: self.asset,
             keyed: self.keyed,
         })
@@ -179,8 +224,8 @@ pub(crate) mod db {
     #[derive(Queryable, Selectable, Insertable)]
     #[diesel(table_name = wallet_index, check_for_backend(Sqlite))]
     pub(crate) struct Row {
-        id: String,
-        wallet_id: String,
+        id: WalletIndexId,
+        wallet_id: WalletId,
         asset: String,
         requested_from: i64,
         birthday: i64,
@@ -190,23 +235,18 @@ pub(crate) mod db {
     }
 
     impl Row {
-        /// The index of `address` (its wallet's), indexed through `block`
-        /// (its `indexed_at`).
+        /// The index, indexed through `block` (its `indexed_at`).
         ///
         /// # Errors
         ///
         /// When a stored value does not decode.
-        pub(crate) fn progress(
-            self,
-            address: Address,
-            block: Option<&Block>,
-        ) -> anyhow::Result<base::WalletIndex> {
+        pub(crate) fn progress(self, block: Option<&Block>) -> anyhow::Result<base::WalletIndex> {
             Ok(base::WalletIndex {
                 asset: Asset {
-                    network: address.network.clone(),
+                    network: self.id.network().clone(),
                     id: self.asset,
                 },
-                address,
+                address: self.id.address().clone(),
                 requested_from: uint(self.requested_from)?,
                 birthday: uint(self.birthday)?,
                 indexed_at: block.map(BlockHeader::try_from).transpose()?,
@@ -216,21 +256,20 @@ pub(crate) mod db {
         }
     }
 
-    /// A [`WalletIndex`] as read, of its wallet's network (not a column):
-    /// a row of [`find_at_tip`] or [`select`], or one object of a wallet read's
-    /// `indexes` (SQLite builds the same fields as JSON).
+    /// A [`WalletIndex`] as read: a row of [`find_at_tip`] or [`select`], or
+    /// one object of a wallet read's `indexes` (SQLite builds the same fields
+    /// as JSON).
     #[derive(QueryableByName, Deserialize)]
     #[diesel(table_name = wallet_index_with_balance)]
     pub(crate) struct IndexRow {
-        id: String,
-        wallet_id: String,
+        id: WalletIndexId,
+        wallet_id: WalletId,
         asset: String,
         requested_from: i64,
         birthday: i64,
         indexed_at: Option<String>,
         state: i32,
         reason: Option<String>,
-        address: String,
         indexed_through: Option<i64>,
         #[diesel(sql_type = Nullable<BigInt>)]
         behind_tip: Option<i64>,
@@ -244,19 +283,18 @@ pub(crate) mod db {
         keyed: bool,
     }
 
-    /// The row of an index of `network`.
-    impl TryFrom<(&Network, IndexRow)> for WalletIndex {
+    /// The row as its index.
+    impl TryFrom<IndexRow> for WalletIndex {
         type Error = anyhow::Error;
 
-        fn try_from((network, row): (&Network, IndexRow)) -> anyhow::Result<Self> {
+        fn try_from(row: IndexRow) -> anyhow::Result<Self> {
             Ok(Self {
-                id: row.id,
-                wallet_id: row.wallet_id,
-                address: Address::new(network.clone(), row.address),
                 asset: Asset {
-                    network: network.clone(),
+                    network: row.id.network().clone(),
                     id: row.asset,
                 },
+                id: row.id,
+                wallet_id: row.wallet_id,
                 state: state(row.state)?.into(),
                 reason: row.reason,
                 requested_from: row.requested_from,
@@ -275,16 +313,15 @@ pub(crate) mod db {
         }
     }
 
-    /// Index `id` (`{wallet_id}.{asset}`) of `network`, if kept, as the
-    /// wallet reads measure it (against its network's `network` row).
+    /// Index `id` (`{wallet_id}.{asset}`), if kept, as the wallet reads
+    /// measure it (against its network's `network` row).
     ///
     /// # Errors
     ///
     /// When the read fails or a stored value does not decode.
     pub(crate) fn find_at_tip(
         connection: &mut SqliteConnection,
-        network: &Network,
-        id: &str,
+        id: impl AsRef<str>,
     ) -> anyhow::Result<Option<WalletIndex>> {
         diesel::sql_query(
             "
@@ -293,10 +330,10 @@ pub(crate) mod db {
             FROM wallet_index_with_balance
             WHERE id = ?1",
         )
-        .bind::<Text, _>(id)
+        .bind::<Text, _>(id.as_ref())
         .get_result::<IndexRow>(connection)
         .optional()?
-        .map(|row| WalletIndex::try_from((network, row)))
+        .map(WalletIndex::try_from)
         .transpose()
     }
 
@@ -347,9 +384,10 @@ pub(crate) mod db {
         connection: &mut SqliteConnection,
         index: &base::WalletIndex,
     ) -> anyhow::Result<()> {
+        let id = WalletIndexId::of(&index.address, &index.asset)?;
         let row = Row {
-            id: WalletIndex::id(&index.address, &index.asset)?,
-            wallet_id: Wallet::id(&index.address)?,
+            wallet_id: id.wallet.clone(),
+            id,
             asset: index.asset.id.clone(),
             requested_from: int(index.requested_from)?,
             birthday: int(index.birthday)?,
@@ -443,23 +481,19 @@ pub(crate) mod db {
         connection: &mut SqliteConnection,
         network: &Network,
     ) -> anyhow::Result<Vec<base::WalletIndex>> {
-        let rows: Vec<(Row, String, Option<crate::models::block::db::Row>)> = wallet_index::table
+        let rows: Vec<(Row, Option<crate::models::block::db::Row>)> = wallet_index::table
             .inner_join(wallet::table)
             .left_join(block::table)
             .filter(wallet::chain.eq(network.chain.as_str()))
             .filter(wallet::network.eq(&network.name))
             .select((
                 Row::as_select(),
-                wallet::address,
                 Option::<crate::models::block::db::Row>::as_select(),
             ))
             .order((wallet::address, wallet_index::asset))
             .load(connection)?;
         rows.into_iter()
-            .map(|(row, address, block)| {
-                let block = block.map(Block::from);
-                row.progress(Address::new(network.clone(), address), block.as_ref())
-            })
+            .map(|(row, block)| row.progress(block.map(Block::from).as_ref()))
             .collect()
     }
 
@@ -504,7 +538,7 @@ pub(crate) mod db {
     pub(crate) fn advance(
         connection: &mut SqliteConnection,
         block: &Block,
-        parent: Option<&str>,
+        parent: Option<&BlockId>,
     ) -> QueryResult<BTreeSet<String>> {
         // Moves every indexing (state 0) index of network `?1`, `?2` that the
         // block at position `?3` (id `?5`) applies to onto it, and answers
@@ -560,7 +594,7 @@ pub(crate) mod db {
     ) -> anyhow::Result<()> {
         diesel::update(
             wallet_index::table
-                .filter(wallet_index::id.eq(WalletIndex::id(&index.address, &index.asset)?))
+                .filter(wallet_index::id.eq(WalletIndexId::of(&index.address, &index.asset)?))
                 .filter(wallet_index::indexed_at.is_null()),
         )
         .set(wallet_index::birthday.eq(int(birthday)?))
@@ -585,22 +619,27 @@ pub(crate) mod db {
             wallet_index::state.eq(code(state)),
             wallet_index::reason.eq(reason),
         );
-        let wallet_id = Wallet::id(address)?;
+        let wallet_id = WalletId::of(address)?;
         Ok(match asset {
-            Some(asset) => diesel::update(wallet_index::table.find(child(&wallet_id, &[asset])?))
-                .set(changes)
-                .execute(connection)?,
-            None => {
-                diesel::update(wallet_index::table.filter(wallet_index::wallet_id.eq(wallet_id)))
-                    .set(changes)
-                    .execute(connection)?
-            }
+            Some(asset) => diesel::update(
+                wallet_index::table.find(Id::child(wallet_id.id(), &[asset])?.to_string()),
+            )
+            .set(changes)
+            .execute(connection)?,
+            None => diesel::update(
+                wallet_index::table.filter(wallet_index::wallet_id.eq(wallet_id.as_ref())),
+            )
+            .set(changes)
+            .execute(connection)?,
         })
     }
 
     /// Forgets index `id`; how many went (0 or 1).
-    pub(crate) fn delete(connection: &mut SqliteConnection, id: &str) -> QueryResult<usize> {
-        diesel::delete(wallet_index::table.find(id)).execute(connection)
+    pub(crate) fn delete(
+        connection: &mut SqliteConnection,
+        id: impl AsRef<str>,
+    ) -> QueryResult<usize> {
+        diesel::delete(wallet_index::table.find(id.as_ref())).execute(connection)
     }
 
     /// Rewinds every index of `network` indexed through a live block at or
@@ -634,7 +673,7 @@ pub(crate) mod db {
         .bind::<Text, _>(&network.name)
         .bind::<BigInt, _>(from)
         .bind::<Nullable<BigInt>, _>(below.map(|block| block.position))
-        .bind::<Nullable<Text>, _>(below.map(|block| block.id.as_str()))
+        .bind::<Nullable<Text>, _>(below.map(|block| &block.id))
         .execute(connection)
     }
 
@@ -674,7 +713,7 @@ pub(crate) mod db {
     ) -> anyhow::Result<Vec<Index>> {
         let ids = wanted
             .iter()
-            .map(|(address, asset)| WalletIndex::id(address, asset))
+            .map(|(address, asset)| Ok(String::from(WalletIndexId::of(address, asset)?)))
             .collect::<anyhow::Result<_>>()?;
         select(connection, network, &Selector::Ids(ids), confirmed)
     }
@@ -689,12 +728,15 @@ pub(crate) mod db {
     pub(crate) fn find_by_ids(
         connection: &mut SqliteConnection,
         network: &Network,
-        ids: &[String],
+        ids: &[impl AsRef<str>],
         confirmed: i64,
     ) -> anyhow::Result<std::collections::BTreeMap<String, WalletIndex>> {
-        let picked = Selector::Ids(ids.to_vec());
+        let picked = Selector::Ids(ids.iter().map(|id| id.as_ref().to_owned()).collect());
         let found = read(connection, network, &picked, confirmed, false)?;
-        Ok(found.into_iter().map(|one| (one.id.clone(), one)).collect())
+        Ok(found
+            .into_iter()
+            .map(|one| (one.id.clone().into(), one))
+            .collect())
     }
 
     /// The indexes of `network` that `selector` picks, only those indexed
@@ -727,7 +769,6 @@ pub(crate) mod db {
                 wi.indexed_at,
                 wi.state,
                 wi.reason,
-                wi.address,
                 wi.keyed,
                 wi.indexed_through,
                 NULL AS behind_tip,
@@ -756,7 +797,7 @@ pub(crate) mod db {
         let rows: Vec<IndexRow> = query.load(connection)?;
         rows.into_iter()
             .map(|row| {
-                let index = WalletIndex::try_from((network, row))?;
+                let index = WalletIndex::try_from(row)?;
                 let negative = index
                     .balance_confirmed
                     .as_deref()

@@ -33,7 +33,6 @@ hex.workspace = true
 jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
 http-server = { path = "../../packages/http-server" }
 rpc = { path = "../../packages/rpc" }
-payments = { path = "../../sdk/payments" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 # The one SQLite file: every table's model (`src/models`) and the SDK storage

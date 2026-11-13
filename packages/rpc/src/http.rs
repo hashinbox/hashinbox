@@ -17,7 +17,9 @@ use jsonrpsee::{
 };
 use serde_json::{Value, value::RawValue};
 
-use crate::{Answer, Batch, BoxFuture, Client, Error, ErrorKind, Failure, RawJson, Request, Url};
+use crate::{
+    Answer, Batch, BoxFuture, Client, Endpoint, Error, ErrorKind, Failure, RawJson, Request, Url,
+};
 
 /// What [`Http`] reads from a node's URL: by default 15 s, 10 MiB
 /// requests, 64 MiB responses and no headers.
@@ -87,22 +89,22 @@ impl TryFrom<&Url> for HttpParams {
 #[derive(Clone)]
 pub struct Http {
     client: HttpClient,
-    url: String,
+    endpoint: Endpoint,
 }
 
 impl fmt::Debug for Http {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Http")
-            .field("url", &self.url)
+            .field("url", &self.endpoint.url)
             .finish()
     }
 }
 
 impl Http {
-    /// The client of `url`, shown as `shown`, under its [`HttpParams`];
+    /// The client of `endpoint`, parsed as `url`, under its [`HttpParams`];
     /// does no I/O. Userinfo becomes HTTP Basic authorization.
-    pub(crate) fn new(url: &Url, shown: String) -> Result<Self, Error> {
+    pub(crate) fn new(url: &Url, endpoint: Endpoint) -> Result<Self, Error> {
         let params = HttpParams::try_from(url)?;
         let client = HttpClientBuilder::default()
             .set_headers(params.headers)
@@ -111,7 +113,7 @@ impl Http {
             .max_response_size(params.max_response_bytes)
             .build(url.node.as_str())
             .map_err(translate)?;
-        Ok(Self { client, url: shown })
+        Ok(Self { client, endpoint })
     }
 
     async fn execute(&self, request: Request) -> Result<RawJson, Error> {
@@ -174,6 +176,10 @@ impl Client for Http {
 
     fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>> {
         Box::pin(self.execute_batch(batch))
+    }
+
+    fn endpoint(&self) -> Option<&Endpoint> {
+        Some(&self.endpoint)
     }
 }
 

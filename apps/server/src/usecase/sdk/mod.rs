@@ -8,6 +8,8 @@ mod indexes;
 mod inputs;
 mod wallets;
 
+use std::sync::Arc;
+
 use crate::db::Db;
 
 /// Every `base` store over the one SQLite file. Clones share the pool.
@@ -20,5 +22,17 @@ impl Stores {
     /// Every store on `db`.
     pub(crate) const fn new(db: Db) -> Self {
         Self { db }
+    }
+
+    /// Every store on `db`, as the services take them.
+    pub(crate) fn storage(db: Db) -> base::Storage {
+        let stores = Arc::new(Self::new(db));
+        base::Storage {
+            blocks: stores.clone(),
+            indexes: stores.clone(),
+            inputs: stores.clone(),
+            wallets: stores.clone(),
+            holdings: stores,
+        }
     }
 }

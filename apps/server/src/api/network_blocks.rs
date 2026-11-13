@@ -60,7 +60,7 @@ async fn list(
     let Query(index) = index.map_err(Error::invalid_query)?;
     let page = index.page("blocks", |cursor| cursor.parse().ok())?;
     let limit = page.limit;
-    let network = path.network(&state.payments)?;
+    let network = path.network(&state.container)?;
     let blocks = state
         .db
         .read(move |connection| Ok(block::db::find_page(connection, &network, page)?))

@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, ensure};
-use base::{Address, Future, Wallet, WalletFactories, WalletStore};
+use base::{Addressed as _, Future, Wallet, WalletFactories, WalletStore};
 
 use super::Stores;
 use crate::models;
@@ -35,7 +35,7 @@ impl WalletStore for Stores {
                 .await?;
             let mut wallets = Vec::with_capacity(rows.len());
             for row in rows {
-                let address = Address::from(&row);
+                let address = row.address().clone();
                 row.curve()?;
                 let secret = row
                     .secret

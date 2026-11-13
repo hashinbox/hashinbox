@@ -5,7 +5,6 @@ members = [
     "sdk/chains/bitcoin",
     "sdk/chains/ethereum",
     "sdk/chains/solana",
-    "sdk/payments",
     "sdk/trigger",
     "packages/decimal",
     "packages/crypto",

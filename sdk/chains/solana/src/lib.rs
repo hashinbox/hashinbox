@@ -16,11 +16,11 @@ mod wallet;
 
 pub use address::Address;
 pub use chain::Chain;
-pub use config::{Config, Token};
+pub use config::{Config, Factory, Token};
 pub use key::KeyPair;
 pub use network::{CHAIN_NAME, GenesisHash, Network, SOL_DECIMALS, SOL_NAME, SOL_TICKER};
 pub use rpc::Client;
 pub use rpc_info::Info;
 pub use spl::Tokens;
 pub use transaction::Transaction;
-pub use wallet::Factory;
+pub use wallet::WalletFactory;

@@ -16,7 +16,7 @@ pub type Node = Counted<Logged<Split<Http>>>;
 /// An invalid URL or param ([`crate::ErrorKind::InvalidConfiguration`]).
 pub fn node(endpoint: &Endpoint, logger: Logger) -> Result<Node, Error> {
     let url = Url::parse(&endpoint.url)?;
-    let http = Http::new(&url, endpoint.url.clone())?;
+    let http = Http::new(&url, endpoint.clone())?;
     let split = Split::new(http, SplitParams::try_from(&url)?.max_batch);
     Ok(Counted::new(Logged::new(split, logger)))
 }

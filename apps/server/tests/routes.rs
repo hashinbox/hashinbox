@@ -20,7 +20,7 @@ use rpc::Client as _;
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
-use super::{Script, database, limited, network, payments};
+use super::{Script, container, database, limited, network};
 use crate::{api, api::AppState};
 
 /// The raw body of `GET uri`.
@@ -100,9 +100,9 @@ fn paid(to: &str, amount: u64) -> Blocks {
 #[tokio::test(flavor = "multi_thread")]
 async fn wallets_balance_legs_and_sends() {
     let (db, _directory) = database().await;
-    let payments = payments(&db, Arc::new(Script::default())).await;
+    let container = container(&db, Arc::new(Script::default()));
     let state = Arc::new(AppState {
-        payments,
+        container,
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
@@ -354,9 +354,9 @@ async fn answering(answer: u64) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
     let (db, _directory) = database().await;
-    let payments = payments(&db, Arc::new(Script::default())).await;
+    let container = container(&db, Arc::new(Script::default()));
     let state = Arc::new(AppState {
-        payments: payments.clone(),
+        container: container.clone(),
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
@@ -369,9 +369,9 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
     );
     let router = api::router(state, &config).expect("a router");
     let ask = |method: &'static str| {
-        let payments = payments.clone();
+        let container = container.clone();
         async move {
-            let client = payments.client(&network()).unwrap();
+            let client = base::Transport::client(&*container.transport(&network()).unwrap());
             let raw = client
                 .request(rpc::Request::new(method, json!([])))
                 .await
@@ -397,7 +397,12 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
         .map(|n| n["id"].as_i64().unwrap())
         .collect();
     assert_eq!(put["endpoints"][1]["url"], json!(nodes[1]));
-    assert_eq!(ask("m").await, 0, "unrouted: the cluster's primary");
+    assert!(put["endpoints"][1]["state"].is_object(), "{put}");
+    assert_eq!(
+        ask("m").await,
+        0,
+        "unrouted: the highest tip, a tie: the first"
+    );
 
     let route = json!({ "routes": [{ "method": "m", "endpoint_ids": [ids[1], ids[2]] }] });
     let (status, put) = call(&router, Method::PUT, routes, Some(route.clone())).await;
@@ -462,15 +467,22 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
         "removing a node removes its routes"
     );
     assert_eq!(ask("m").await, 0);
+    let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
+    let state = &networks["networks"][0]["endpoints"][0]["state"];
+    assert!(
+        state["calls"].as_u64() > Some(1),
+        "kept across edits: {state}"
+    );
+    assert_eq!(state["failures"], 0, "{state}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_and_goes() {
     let (db, _directory) = database().await;
     let days = std::time::Duration::from_secs(30 * 86_400);
-    let payments = limited(&db, Arc::new(Script::default()), Some(days)).await;
+    let container = limited(&db, Arc::new(Script::default()), Some(days));
     let state = Arc::new(AppState {
-        payments,
+        container,
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
@@ -567,9 +579,9 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
     let (db, _directory) = database().await;
-    let payments = payments(&db, Arc::new(Script::default())).await;
+    let container = container(&db, Arc::new(Script::default()));
     let state = Arc::new(AppState {
-        payments,
+        container,
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
@@ -754,9 +766,9 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
     use crate::usecase::workers::index::{Index, Target};
 
     let (db, _directory) = database().await;
-    let payments = payments(&db, Arc::new(Script::default())).await;
+    let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let worker = Arc::new(Index::new(payments.clone(), db.clone(), queue.clone()));
+    let worker = Arc::new(Index::new(container.clone(), db.clone(), queue.clone()));
     let target = Target {
         chain: "bitcoin".into(),
         network: "regtest".into(),
@@ -791,7 +803,7 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
     assert!(job.run_at >= now + 1_000, "{job:?}");
 
     let state = Arc::new(AppState {
-        payments,
+        container,
         db: db.clone(),
         queue,
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
@@ -817,7 +829,7 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
     use diesel::connection::SimpleConnection as _;
 
     let (db, _directory) = database().await;
-    let payments = payments(&db, Arc::new(Script::default())).await;
+    let container = container(&db, Arc::new(Script::default()));
     // One run that queued two sends: one succeeded, one failed.
     db.write(|connection| {
         Ok(connection.batch_execute(
@@ -837,7 +849,7 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
     .await
     .expect("seeded");
     let state = Arc::new(AppState {
-        payments,
+        container,
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
@@ -870,9 +882,9 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_count_compares_with_a_whole_number_or_the_trigger_is_refused() {
     let (db, _directory) = database().await;
-    let payments = payments(&db, Arc::new(Script::default())).await;
+    let container = container(&db, Arc::new(Script::default()));
     let state = Arc::new(AppState {
-        payments,
+        container,
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),

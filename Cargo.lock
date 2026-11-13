@@ -2960,7 +2960,6 @@ dependencies = [
  "jiff",
  "libsqlite3-sys",
  "logging",
- "payments",
  "reqwest",
  "rpc",
  "serde",
@@ -2976,17 +2975,6 @@ dependencies = [
  "utoipa-axum",
  "uuid",
  "zeroize",
-]
-
-[[package]]
-name = "payments"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base",
- "crypto",
- "rpc",
- "tokio",
 ]
 
 [[package]]

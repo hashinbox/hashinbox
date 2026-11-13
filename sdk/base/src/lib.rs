@@ -5,8 +5,8 @@ mod asset;
 mod block;
 mod cache;
 mod chain;
-mod cluster;
 mod config;
+pub mod container;
 mod fee;
 mod indexer;
 mod info;
@@ -27,12 +27,12 @@ pub use block::{
 };
 pub use cache::Cache;
 pub use chain::Chain;
-pub use cluster::{Cluster, Policy};
 pub use config::{AssetConfig, AssetKind, NetworkConfig, Service, ServiceFactory, Storage};
+pub use container::{Container, Simple, Transport};
 pub use decimal::{Decimal, Error as DecimalError};
 pub use fee::{Estimator as FeeEstimator, Holdings, NoHoldings, Spend, Spends};
 pub use indexer::{Birthday, DEFAULT_BATCH, Indexer, Next, Stats};
-pub use info::{InfoClient, NodeInfo};
+pub use info::{CachedInfo, InfoClient, NodeInfo};
 
 pub use inout::{Coin, Input, Inputs, Output, Outputs, Store as InputStore};
 pub use network::{Network, Networked};

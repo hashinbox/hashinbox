@@ -2,7 +2,9 @@
 
 use std::num::NonZeroUsize;
 
-use crate::{Answer, Batch, BoxFuture, Client, Error, RawJson, Request, Url, client::answer};
+use crate::{
+    Answer, Batch, BoxFuture, Client, Endpoint, Error, RawJson, Request, Url, client::answer,
+};
 
 /// What [`Split`] reads from a node's URL.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,6 +71,10 @@ impl<C: Client> Client for Split<C> {
 
     fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
         self.inner.broadcast(request)
+    }
+
+    fn endpoint(&self) -> Option<&Endpoint> {
+        self.inner.endpoint()
     }
 }
 

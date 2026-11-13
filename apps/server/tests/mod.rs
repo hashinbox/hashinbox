@@ -12,19 +12,20 @@ mod storage;
 mod support;
 
 use std::{
+    cell::RefCell,
     collections::VecDeque,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use anyhow::Context as _;
 use base::{
-    Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Cluster,
-    Future, Indexer, InfoClient, Network, Networked, Policy, Service, Signer, Tips, Transaction,
+    Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Future,
+    Indexer, InfoClient, Network, NetworkConfig, Networked, Service, Signer, Tips, Transaction,
     TransactionError, TransactionErrorKind, TransactionId, TransactionState, Transactions,
     Transfer, Wallet, WalletFactory, WalletFactoryBroadcaster,
 };
 use crypto::{Curve, SecretBytes};
-use payments::Payments;
 
 /// The test network.
 fn network() -> Network {
@@ -300,6 +301,10 @@ impl rpc::Client for Node {
 }
 
 impl InfoClient for Node {
+    fn new(node: Arc<dyn rpc::Client>) -> Self {
+        Self(node)
+    }
+
     fn tip(&self) -> Future<'_, anyhow::Result<u64>> {
         Box::pin(async { Ok(0) })
     }
@@ -314,87 +319,105 @@ impl InfoClient for Node {
     }
 }
 
-/// The scripted network's configuration, and its history limit (found by
-/// time over [`Days`]).
-struct Config(Arc<Script>, Option<Duration>);
+thread_local! {
+    /// The script the next scripted network is built with; [`Scripted::new`]
+    /// takes it, on the thread that registers the network.
+    static SCRIPT: RefCell<Option<Arc<Script>>> = const { RefCell::new(None) };
+}
 
-impl base::ServiceFactory for Config {
-    fn network(&self) -> Network {
-        network()
+/// The scripted network's chain: its wallets answer as its [`Script`]
+/// (taken from [`SCRIPT`]) says; with a history limit, it finds blocks by
+/// time over [`Days`].
+struct Scripted {
+    script: Arc<Script>,
+    max_history: Option<Duration>,
+}
+
+impl base::ServiceFactory for Scripted {
+    const CHAIN: Chain = Chain::from_static("bitcoin");
+
+    fn new(config: &NetworkConfig) -> anyhow::Result<Self> {
+        Ok(Self {
+            script: SCRIPT.take().context("no script is set")?,
+            max_history: config.max_history,
+        })
     }
 
-    fn info(&self, nodes: Vec<Arc<dyn rpc::Client>>) -> anyhow::Result<Arc<dyn InfoClient>> {
-        let nodes = nodes
-            .into_iter()
-            .map(|node| Arc::new(Node(node)) as Arc<dyn InfoClient>)
-            .collect();
-        Ok(Arc::new(Cluster::new(nodes, Policy::default())?))
-    }
-
-    fn build<'a>(
-        &'a self,
-        storage: &'a base::Storage,
+    fn service(
+        &self,
+        storage: &base::Storage,
         client: Arc<dyn rpc::Client>,
-    ) -> Future<'a, anyhow::Result<Service>> {
-        Box::pin(async move {
-            let indexer = Indexer::new(
-                Arc::new(Empty),
-                storage.blocks.clone(),
-                storage.indexes.clone(),
-                Duration::from_secs(3_600),
-            );
-            let wallet = Fake {
-                address: Address::new(network(), "unused"),
-                script: self.0.clone(),
-            };
-            Ok(Service {
-                indexer: Arc::new(indexer),
-                wallets: WalletFactoryBroadcaster {
-                    network: network(),
-                    factory: Arc::new(Factory(self.0.clone())),
-                    broadcaster: Arc::new(wallet),
-                },
-                assets: Assets::from_iter([AssetInfo {
-                    asset: Asset::native(network()),
-                    decimals: 8,
-                    name: Some("Bitcoin".to_owned()),
-                    ticker: Some("BTC".to_owned()),
-                    display_decimals: None,
-                }]),
-                storage: storage.clone(),
-                client,
-                dated: self.1.map(|_| -> Arc<dyn base::Dated> { Arc::new(Days) }),
-                max_history: self.1,
-                confirmations: 0,
-            })
+    ) -> anyhow::Result<Service> {
+        let indexer = Indexer::new(
+            Arc::new(Empty),
+            storage.blocks.clone(),
+            storage.indexes.clone(),
+            Duration::from_secs(3_600),
+        );
+        let wallet = Fake {
+            address: Address::new(network(), "unused"),
+            script: self.script.clone(),
+        };
+        Ok(Service {
+            indexer: Arc::new(indexer),
+            wallets: WalletFactoryBroadcaster {
+                network: network(),
+                factory: Arc::new(Factory(self.script.clone())),
+                broadcaster: Arc::new(wallet),
+            },
+            assets: Assets::from_iter([AssetInfo {
+                asset: Asset::native(network()),
+                decimals: 8,
+                name: Some("Bitcoin".to_owned()),
+                ticker: Some("BTC".to_owned()),
+                display_decimals: None,
+            }]),
+            storage: storage.clone(),
+            client,
+            dated: self
+                .max_history
+                .map(|_| -> Arc<dyn base::Dated> { Arc::new(Days) }),
+            max_history: self.max_history,
+            confirmations: 0,
         })
     }
 }
 
-/// The payments container of the scripted network over `db`.
-async fn payments(db: &crate::db::Db, script: Arc<Script>) -> Arc<Payments> {
-    limited(db, script, None).await
+/// The scripted network as stored.
+fn config(max_history: Option<Duration>) -> NetworkConfig {
+    NetworkConfig {
+        network: network(),
+        chain_id: None,
+        testnet: true,
+        block_time: Duration::from_secs(600),
+        confirmations: 0,
+        max_history,
+        explorer_address: None,
+        explorer_transaction: None,
+        settings: serde_json::json!({}),
+        assets: Vec::new(),
+    }
 }
 
-/// [`payments`], with a history limit of `max_history`.
-async fn limited(
+/// The container of the scripted network over `db`.
+fn container(
+    db: &crate::db::Db,
+    script: Arc<Script>,
+) -> Arc<base::Container<crate::usecase::Transport>> {
+    limited(db, script, None)
+}
+
+/// [`container`], with a history limit of `max_history`.
+fn limited(
     db: &crate::db::Db,
     script: Arc<Script>,
     max_history: Option<Duration>,
-) -> Arc<Payments> {
-    let stores = Arc::new(crate::usecase::sdk::Stores::new(db.clone()));
-    let payments = Payments::builder()
-        .with_network(Config(script, max_history), Vec::new())
-        .with_client(network(), Arc::new(rpc::testing::Script::default()))
-        .with_storage(base::Storage {
-            blocks: stores.clone(),
-            indexes: stores.clone(),
-            inputs: stores.clone(),
-            wallets: stores.clone(),
-            holdings: stores,
-        })
-        .build()
-        .await
-        .expect("the scripted network builds");
-    Arc::new(payments)
+) -> Arc<base::Container<crate::usecase::Transport>> {
+    let container = base::Container::new(crate::usecase::sdk::Stores::storage(db.clone()));
+    let config = config(max_history);
+    let node: Arc<dyn rpc::Client> = Arc::new(rpc::testing::Script::default());
+    let transport = crate::usecase::Transport::from_clients::<Node>(&config, vec![node]);
+    SCRIPT.set(Some(script));
+    container.register::<Scripted>(config, transport);
+    Arc::new(container)
 }

@@ -28,7 +28,9 @@ async fn storage() -> (Stores, Db, tempfile::TempDir) {
 /// The signed balance of `address` in `asset` over every live block, as the
 /// balance route reads it.
 async fn balance(db: &Db, address: &Address, asset: &Asset) -> anyhow::Result<Decimal> {
-    let id = crate::models::wallet_index::WalletIndex::id(address, asset)?;
+    let id = String::from(crate::models::wallet_index::WalletIndexId::of(
+        address, asset,
+    )?);
     db.read(move |connection| {
         let last = crate::models::leg::db::find_page(
             connection,
@@ -1634,19 +1636,19 @@ fn a_block_converts_with_its_transactions_legs_and_rewards() {
         amount: Decimal::from(50),
     }];
     let model = crate::models::Block::try_from(&chained).unwrap();
-    assert_eq!(model.id, "bitcoin.regtest.0200");
-    assert_eq!((model.position, model.parent.as_deref()), (2, None));
+    assert_eq!(model.id.as_ref(), "bitcoin.regtest.0200");
+    assert_eq!((model.position, model.parent.as_ref()), (2, None));
     let txids: Vec<_> = model.transactions.iter().map(|t| t.txid.as_str()).collect();
     assert_eq!(txids, ["a", "b"]);
     let b = &model.transactions[1];
     assert_eq!(
-        (b.id.as_str(), b.block.as_deref()),
-        ("bitcoin.regtest.b", Some(model.id.as_str()))
+        (b.id.as_ref(), b.block.as_ref()),
+        ("bitcoin.regtest.b", Some(&model.id))
     );
     let legs: Vec<_> = b
         .legs
         .iter()
-        .map(|leg| (leg.id.as_str(), leg.kind, leg.wallet_index_id.as_str()))
+        .map(|leg| (leg.id.as_str(), leg.kind, leg.wallet_index_id.as_ref()))
         .collect();
     assert_eq!(
         legs,
@@ -1664,8 +1666,8 @@ fn a_block_converts_with_its_transactions_legs_and_rewards() {
     let every = b.legs.iter().chain(&model.rewards);
     for leg in every {
         assert_eq!(
-            (leg.block.as_deref(), leg.position),
-            (Some(model.id.as_str()), Some(2))
+            (leg.block.as_ref(), leg.position),
+            (Some(&model.id), Some(2))
         );
         assert_eq!((leg.seq, leg.total.as_deref()), (None, None));
     }

@@ -1,7 +1,7 @@
 //! `/v1/networks/{chain}/{network}/routes`: which methods of a network take
-//! turns over which of its RPC nodes (`rpc::Router`), and replacing them
-//! while the server runs. Every other method goes to the cluster of all the
-//! network's nodes.
+//! turns over which of its RPC nodes, and replacing them while the server
+//! runs. Every other method goes to all the network's nodes, highest tip
+//! first (`usecase::Transport`).
 
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use super::{Error, ErrorBody, networks::NetworkPath};
 use crate::{
     api::AppState,
     models::{NetworkName, Route, Routes, endpoint, endpoint_route},
-    usecase::endpoints::connect,
+    usecase::Networks,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -38,7 +38,7 @@ struct RoutesResponse {
     operation_id = "list_network_routes",
     summary = "List a network's routed methods",
     description = "Each routed method and the nodes taking turns serving it, round robin. \
-        Every other method goes to the network's cluster.",
+        Every other method goes to the network's healthy node with the highest tip.",
     params(NetworkPath),
     security(("bearerAuth" = [])),
     responses(
@@ -53,7 +53,7 @@ async fn list(
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
 ) -> Result<Json<RoutesResponse>, Error> {
-    let network = path.network(&state.payments)?;
+    let network = path.network(&state.container)?;
     let stored = state.db.read(endpoint_route::db::find_all).await?;
     Ok(Json(RoutesResponse {
         routes: stored.routes(&network),
@@ -77,8 +77,9 @@ struct RoutesRequest {
     operation_id = "replace_network_routes",
     summary = "Replace a network's routed methods",
     description = "Stores the routes, then sends each routed method round robin over its \
-        nodes, and every other method to the cluster. A routed call failing retryably moves \
-        to the next node, then to the cluster. No node is asked.",
+        nodes, and every other method to the healthy node with the highest tip. A routed \
+        call failing retryably moves to the next node, then to the network's other nodes. \
+        No node is asked.",
     params(NetworkPath),
     request_body = RoutesRequest,
     security(("bearerAuth" = [])),
@@ -98,7 +99,7 @@ async fn replace(
     request: Result<Json<RoutesRequest>, JsonRejection>,
 ) -> Result<Json<RoutesResponse>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let network = path.network(&state.payments)?;
+    let network = path.network(&state.container)?;
     let endpoints = state.db.read(endpoint::db::find_all).await?.nodes(&network);
     let routes = Routes::new(request.routes, &endpoints).map_err(Error::invalid_request)?;
     let key = network.clone();
@@ -107,9 +108,12 @@ async fn replace(
         .db
         .write(move |connection| endpoint_route::db::replace(connection, &key, &routes))
         .await?;
-    let (_, routes) = connect(&state.db, &state.payments, &network).await?;
+    Networks::read(&state.db)
+        .await?
+        .load(&network, &state.container)?;
+    let stored = state.db.read(endpoint_route::db::find_all).await?;
     Ok(Json(RoutesResponse {
+        routes: stored.routes(&network),
         network: network.into(),
-        routes,
     }))
 }

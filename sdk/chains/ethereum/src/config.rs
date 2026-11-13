@@ -1,18 +1,19 @@
-//! [`Config`]: one Ethereum network's settings, and the pieces built from them.
+//! [`Config`]: one Ethereum network's settings; [`Factory`]: the pieces
+//! built from them, a stored network's service among them.
 
 use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::hex;
 use anyhow::{Context as _, ensure};
 use base::{
-    Asset, AssetInfo, AssetKind, Assets, Cluster, Future, Indexer, InfoClient, Policy, Service,
-    Storage, WalletFactoryBroadcaster,
+    Asset, AssetInfo, AssetKind, Assets, Indexer, NetworkConfig, Service, Storage,
+    WalletFactoryBroadcaster,
 };
 use serde::Deserialize;
 
 use crate::{
-    Chain, Client, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Factory, FeeLimits, Info, Network, Tokens,
-    fee::Estimator, fee_cache::Cached,
+    CHAIN_NAME, Chain, Client, ETH_DECIMALS, ETH_NAME, ETH_TICKER, FeeLimits, Network, Tokens,
+    WalletFactory, fee::Estimator, fee_cache::Cached,
 };
 
 /// Everything one Ethereum network needs; built in code with
@@ -127,36 +128,6 @@ impl Config {
         self.limits.validate()
     }
 
-    /// Validates, and a client over `transport`; asks the node nothing.
-    fn open(&self, transport: Arc<dyn ::rpc::Client>) -> anyhow::Result<Client> {
-        self.validate()?;
-        Ok(Client::new(transport, self.native()))
-    }
-
-    /// The chain read through `rpc`.
-    #[must_use]
-    pub fn chain(&self, rpc: &Client) -> Chain {
-        Chain::new(rpc.clone(), self.contracts())
-    }
-
-    /// The wallet factory: nonces from `rpc`; fees and gas from `rpc`,
-    /// reused by its one cached estimator for `fee_ttl_ms`, each send priced
-    /// for its recipient as `holdings` say.
-    #[must_use]
-    pub fn factory(&self, rpc: &Client, holdings: Arc<dyn base::Holdings>) -> Factory {
-        let fees = Cached::new(
-            Estimator::new(rpc.clone(), self.limits, self.contracts()),
-            holdings,
-            Duration::from_millis(self.fee_ttl_ms),
-        );
-        Factory {
-            rpc: rpc.clone(),
-            pending_ttl: Duration::from_millis(self.pending_ttl_ms),
-            tokens: self.contracts(),
-            fees: Arc::new(fees),
-        }
-    }
-
     /// Ether and every allowlisted token, in its configured decimals.
     #[must_use]
     pub fn assets(&self) -> Assets {
@@ -199,12 +170,12 @@ fn contract(text: &str) -> anyhow::Result<alloy_primitives::Address> {
     Ok(contract)
 }
 
-impl TryFrom<&base::NetworkConfig> for Config {
+impl TryFrom<&NetworkConfig> for Config {
     type Error = anyhow::Error;
 
     /// Its chain ID, assets and limits, and its knobs from
     /// `settings`.
-    fn try_from(config: &base::NetworkConfig) -> anyhow::Result<Self> {
+    fn try_from(config: &NetworkConfig) -> anyhow::Result<Self> {
         let settings = Settings::deserialize(&config.settings).context("Ethereum settings")?;
         let chain_id = config
             .chain_id
@@ -243,57 +214,92 @@ impl TryFrom<&base::NetworkConfig> for Config {
             confirmations: config.confirmations,
         };
         ensure!(
-            base::ServiceFactory::network(&built) == config.network,
+            base::Network::from(&built.native()) == config.network,
             "not an Ethereum network"
         );
         Ok(built)
     }
 }
 
-impl base::ServiceFactory for Config {
-    fn network(&self) -> base::Network {
-        (&self.native()).into()
+/// Builds Ethereum's pieces from a [`Config`]; as its
+/// [`base::ServiceFactory`], a stored network's whole service.
+pub struct Factory {
+    config: Config,
+}
+
+impl From<Config> for Factory {
+    fn from(config: Config) -> Self {
+        Self { config }
+    }
+}
+
+impl Factory {
+    /// The block reader over `rpc`.
+    #[must_use]
+    pub fn chain(&self, rpc: &Client) -> Chain {
+        Chain::new(rpc.clone(), self.config.contracts())
     }
 
-    fn info(&self, nodes: Vec<Arc<dyn ::rpc::Client>>) -> anyhow::Result<Arc<dyn InfoClient>> {
-        let nodes = nodes
-            .into_iter()
-            .map(|node| Arc::new(Info::new(node, self.native())) as Arc<dyn InfoClient>)
-            .collect();
-        Ok(Arc::new(Cluster::new(nodes, Policy::default())?))
+    /// The wallet factory over `rpc`: nonces from `rpc`; fees and gas from
+    /// `rpc`, reused by its one cached estimator for `fee_ttl_ms`, each send
+    /// priced for its recipient as `holdings` say.
+    #[must_use]
+    pub fn wallets(&self, rpc: &Client, holdings: Arc<dyn base::Holdings>) -> WalletFactory {
+        let config = &self.config;
+        let fees = Cached::new(
+            Estimator::new(rpc.clone(), config.limits, config.contracts()),
+            holdings,
+            Duration::from_millis(config.fee_ttl_ms),
+        );
+        WalletFactory {
+            rpc: rpc.clone(),
+            pending_ttl: Duration::from_millis(config.pending_ttl_ms),
+            tokens: config.contracts(),
+            fees: Arc::new(fees),
+        }
+    }
+}
+
+impl base::ServiceFactory for Factory {
+    const CHAIN: base::Chain = CHAIN_NAME;
+
+    fn new(config: &NetworkConfig) -> anyhow::Result<Self> {
+        Ok(Config::try_from(config)?.into())
     }
 
-    fn build<'a>(
-        &'a self,
-        storage: &'a Storage,
+    /// Validates, and the service over `storage`, every part of it reaching
+    /// the nodes through `client`; asks no node.
+    fn service(
+        &self,
+        storage: &Storage,
         client: Arc<dyn ::rpc::Client>,
-    ) -> Future<'a, anyhow::Result<Service>> {
-        Box::pin(async move {
-            let rpc = self.open(Arc::clone(&client))?;
-            let chain = Arc::new(self.chain(&rpc));
-            let indexer = Arc::new(
-                Indexer::new(
-                    chain.clone(),
-                    Arc::clone(&storage.blocks),
-                    Arc::clone(&storage.indexes),
-                    Duration::from_millis(self.interval_ms),
-                )
-                .with_batch(self.batch),
-            );
-            Ok(Service {
-                indexer,
-                wallets: WalletFactoryBroadcaster {
-                    network: (&self.native()).into(),
-                    factory: Arc::new(self.factory(&rpc, Arc::clone(&storage.holdings))),
-                    broadcaster: Arc::new(rpc),
-                },
-                assets: self.assets(),
-                storage: storage.clone(),
-                client,
-                dated: Some(chain),
-                max_history: self.max_history,
-                confirmations: self.confirmations,
-            })
+    ) -> anyhow::Result<Service> {
+        let config = &self.config;
+        config.validate()?;
+        let rpc = Client::new(Arc::clone(&client), config.native());
+        let chain = Arc::new(self.chain(&rpc));
+        let indexer = Arc::new(
+            Indexer::new(
+                chain.clone(),
+                Arc::clone(&storage.blocks),
+                Arc::clone(&storage.indexes),
+                Duration::from_millis(config.interval_ms),
+            )
+            .with_batch(config.batch),
+        );
+        Ok(Service {
+            indexer,
+            wallets: WalletFactoryBroadcaster {
+                network: (&config.native()).into(),
+                factory: Arc::new(self.wallets(&rpc, Arc::clone(&storage.holdings))),
+                broadcaster: Arc::new(rpc),
+            },
+            assets: config.assets(),
+            storage: storage.clone(),
+            client,
+            dated: Some(chain),
+            max_history: config.max_history,
+            confirmations: config.confirmations,
         })
     }
 }

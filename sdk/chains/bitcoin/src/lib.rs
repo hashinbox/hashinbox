@@ -15,11 +15,11 @@ mod wallet;
 
 pub use address::{Address, AddressType};
 pub use chain::Chain;
-pub use config::Config;
+pub use config::{Config, Factory};
 pub use fee::FeeRate;
 pub use key::KeyPair;
 pub use network::{BTC_DECIMALS, BTC_NAME, BTC_TICKER, CHAIN_NAME, Network};
 pub use rpc::Client;
 pub use rpc_info::Info;
 pub use transaction::Transaction;
-pub use wallet::Factory;
+pub use wallet::WalletFactory;

@@ -1,5 +1,5 @@
-//! The server suite's harness: [`App`] boots the real server (`crate::boot`)
-//! over a mock chain's nodes, [`Api`] calls its routes, [`until`] waits for
+//! The server suite's harness: [`App`] runs the real server (its container,
+//! routes and workers) over a mock chain's nodes, [`Api`] calls its routes, [`until`] waits for
 //! the workers, and `scenarios!` emits one test per case, chain and
 //! topology. Nothing here opens a socket.
 
@@ -8,7 +8,7 @@ mod api;
 use std::{future::Future, sync::Arc, time::Duration};
 
 use base::{
-    Cluster, NetworkConfig, Policy,
+    Container, NetworkConfig,
     testing::{TestChain, Topology},
 };
 use diesel::{
@@ -16,7 +16,9 @@ use diesel::{
     connection::SimpleConnection as _,
     sql_types::{BigInt, Bool, Integer, Nullable, Text},
 };
-use rpc::{Backoff, Retry};
+
+use crate::{api::AppState, usecase, usecase::workers};
+use tasks::Executor;
 
 pub(crate) use api::{Api, Wallet};
 
@@ -25,7 +27,20 @@ const TICK: Duration = Duration::from_millis(5);
 /// The longest [`until`] waits.
 const PATIENCE: Duration = Duration::from_secs(5);
 
-/// The server booted over a mock chain, on its own SQLite file.
+/// A test chain's reader and factory, as `main` registers its chain.
+pub(crate) trait Served: TestChain {
+    /// How a node is read.
+    type Info: base::InfoClient + 'static;
+    /// How a network is built.
+    type Factory: base::ServiceFactory;
+}
+
+impl Served for chain_ethereum::testing::Ethereum {
+    type Info = chain_ethereum::Info;
+    type Factory = chain_ethereum::Factory;
+}
+
+/// The server over a mock chain, on its own SQLite file.
 pub(crate) struct App {
     pub(crate) api: Api,
     db: crate::db::Db,
@@ -36,43 +51,61 @@ pub(crate) struct App {
 
 impl App {
     /// [`Self::boot`] with `chain`'s network alone.
-    pub(crate) async fn start<T: TestChain>(chain: &T) -> Self {
+    pub(crate) async fn start<T: Served>(chain: &T) -> Self {
         Self::boot::<T>(vec![(chain.network(), chain.nodes())]).await
     }
 
     /// Seeds a new file as `migrate` does, with `networks` as the only ones,
-    /// each one's node `i` at `http://{name}-{i}.invalid/`; boots it with
-    /// those URLs mapped to the nodes (`Cluster` for several), and runs
-    /// every worker.
-    pub(crate) async fn boot<T: TestChain>(
+    /// each one's node `i` stored at `http://{name}-{i}.invalid/`; registers
+    /// each over a transport of its nodes, as `main` does over stored ones,
+    /// and runs every worker.
+    pub(crate) async fn boot<T: Served>(
         networks: Vec<(NetworkConfig, Vec<Arc<dyn rpc::Client>>)>,
     ) -> Self {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let db = crate::db::Db::open(&directory.path().join("test.db")).expect("the file opens");
         db.migrate().await.expect("the schema applies");
         clear(&db).await;
-        let mut mapped = Vec::new();
+        let container = Container::new(usecase::sdk::Stores::storage(db.clone()));
         for (network, nodes) in networks {
             let urls: Vec<String> = (0..nodes.len())
                 .map(|node| format!("http://{}-{node}.invalid/", network.network.name))
                 .collect();
-            seed(&db, network, urls.clone()).await;
-            mapped.extend(urls.into_iter().zip(nodes));
+            seed(&db, network.clone(), urls).await;
+            let transport = usecase::Transport::from_clients::<T::Info>(&network, nodes);
+            container.register::<T::Factory>(network, transport);
         }
-        let connect = move |config: NetworkConfig| -> base::BoxFuture<'static, _> {
-            let picked: Vec<_> = config
-                .endpoints
-                .iter()
-                .filter_map(|endpoint| mapped.iter().find(|(url, _)| *url == endpoint.url))
-                .map(|(_, node)| node.clone())
-                .collect();
-            Box::pin(connect::<T>(picked))
-        };
-        let logger = logging::Logger::default();
-        let (state, executor) = crate::boot(db.clone(), &connect, TICK, logger)
+        db.write(crate::models::network_index::db::create_enabled)
             .await
-            .expect("it boots");
-        let jobs = executor.run();
+            .expect("the networks are indexed");
+        let state = Arc::new(AppState {
+            container: Arc::new(container),
+            queue: usecase::tasks::queue(db.clone()),
+            actions: Arc::new(usecase::workers::trigger::actions::registry()),
+            db: db.clone(),
+        });
+        let (container, queue, actions) = (&state.container, &state.queue, &state.actions);
+        let logger = logging::Logger::default();
+        let jobs = Executor::new(queue.clone(), TICK)
+            .add(workers::index::Index::new(
+                container.clone(),
+                db.clone(),
+                queue.clone(),
+            ))
+            .add(workers::expire::Expire::new(db.clone()))
+            .add(workers::prune::Prune::new(db.clone()))
+            .add(workers::broadcast::Broadcast::new(
+                container.clone(),
+                db.clone(),
+            ))
+            .add(workers::trigger::Round::new(
+                container.clone(),
+                db.clone(),
+                queue.clone(),
+                actions.clone(),
+                logger,
+            ))
+            .run();
         let config = http_server::Config::new(
             "127.0.0.1:0".parse().expect("an address"),
             http_server::TransportSecurity::PlaintextLoopback,
@@ -98,20 +131,6 @@ impl App {
             .await
             .expect("the statement runs");
     }
-}
-
-/// One node as itself; several as the chain's cluster, retried as the
-/// chain retries it, but [`TICK`] apart.
-async fn connect<T: TestChain>(
-    nodes: Vec<Arc<dyn rpc::Client>>,
-) -> anyhow::Result<Option<Arc<dyn rpc::Client>>> {
-    if nodes.len() < 2 {
-        return Ok(nodes.into_iter().next());
-    }
-    let nodes = nodes.into_iter().map(T::client).collect();
-    let cluster = Cluster::new(nodes, Policy::default())?;
-    let retry = Retry::new(cluster).with_backoff(Backoff::Fixed(TICK));
-    Ok(Some(Arc::new(retry)))
 }
 
 /// Deletes the seeded networks.

@@ -11,7 +11,7 @@ use bitcoin::{
     Amount, BlockHash, Denomination, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
     Witness, absolute, consensus::encode::serialize_hex, hashes::Hash as _, transaction::Version,
 };
-use chain_bitcoin::{AddressType, Client, Config, KeyPair, Network};
+use chain_bitcoin::{AddressType, Client, Config, Factory, KeyPair, Network};
 use crypto::SecretBytes;
 use serde_json::{Value, json};
 
@@ -108,7 +108,7 @@ fn chain(script: &Script, depth: u64) -> chain_bitcoin::Chain {
     let rpc = Client::new(Arc::new(script.clone()), Network::Regtest);
     let mut config = Config::new(Network::Regtest);
     config.confirmation_depth = depth;
-    config.chain(&rpc).expect("valid depth")
+    Factory::from(config).chain(&rpc).expect("valid depth")
 }
 
 #[tokio::test]
@@ -306,7 +306,9 @@ async fn a_chain_over_a_swap_follows_its_replacement() {
     let old = Script::new([Reply::ok("getblockcount", json!(10))]);
     let swap = Arc::new(::rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
     let rpc = Client::new(swap.clone(), Network::Regtest);
-    let chain = Config::new(Network::Regtest).chain(&rpc).expect("chain");
+    let chain = Factory::from(Config::new(Network::Regtest))
+        .chain(&rpc)
+        .expect("chain");
     assert_eq!(chain.tips().await.expect("old node").produced, 10);
 
     let next = Script::new([Reply::ok("getblockcount", json!(20))]);

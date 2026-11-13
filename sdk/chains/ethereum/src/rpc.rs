@@ -15,8 +15,8 @@ use alloy_primitives::{B256, Bytes, U64, U256, hex, keccak256};
 use alloy_rpc_types_eth::Block as RpcBlock;
 use anyhow::{Context as _, anyhow, bail, ensure};
 use base::{
-    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, InfoClient, NodeInfo,
-    NotServed, Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
+    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, InfoClient as _, NotServed,
+    Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -45,17 +45,19 @@ pub struct Client(Arc<Inner>);
 
 struct Inner {
     node: Info,
+    network: Network,
     /// Set once the node refuses `eth_getBlockReceipts`: receipts then come
     /// one per transaction.
     receipts_by_transaction: AtomicBool,
 }
 
 impl Client {
-    /// A client of `network` over `transport`; [`InfoClient::info`] checks the node.
+    /// A client of `network` over `transport`.
     #[must_use]
     pub fn new(transport: Arc<dyn ::rpc::Client>, network: Network) -> Self {
         Self(Arc::new(Inner {
-            node: Info::new(transport, network),
+            node: Info::new(transport),
+            network,
             receipts_by_transaction: AtomicBool::new(false),
         }))
     }
@@ -63,7 +65,7 @@ impl Client {
     /// The network it serves.
     #[must_use]
     pub fn network(&self) -> &Network {
-        self.0.node.network()
+        &self.0.network
     }
 
     /// The newest block (`eth_blockNumber`) and the newest block consensus
@@ -500,17 +502,6 @@ impl ::rpc::Client for Client {
 
     fn broadcast<'a>(&'a self, request: Request) -> ::rpc::BoxFuture<'a, Result<(), ::rpc::Error>> {
         self.0.node.broadcast(request)
-    }
-}
-
-/// Its [`Info`]'s.
-impl InfoClient for Client {
-    fn tip(&self) -> base::Future<'_, anyhow::Result<u64>> {
-        self.0.node.tip()
-    }
-
-    fn info(&self) -> base::Future<'_, anyhow::Result<NodeInfo>> {
-        self.0.node.info()
     }
 }
 

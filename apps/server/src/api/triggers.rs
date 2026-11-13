@@ -126,7 +126,7 @@ impl Definition {
         updated_at: i64,
     ) -> Result<models::Trigger, Error> {
         let network = base::Network::new(base::Chain::new(&self.chain), self.network.clone());
-        let assets = &state.payments.service(&network)?.assets;
+        let assets = &state.container.service(&network)?.assets;
         let trigger = models::Trigger {
             id,
             chain: self.chain,

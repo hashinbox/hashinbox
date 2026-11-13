@@ -126,13 +126,13 @@ fn tag_with(
     name: &str,
 ) -> anyhow::Result<bool> {
     wallet::db::insert(connection, &Wallet::from_address(address)?)?;
-    wallet::db::set_tag(connection, &Wallet::id(address)?, name, true)?
+    wallet::db::set_tag(connection, &wallet::WalletId::of(address)?, name, true)?
         .ok_or_else(|| anyhow::anyhow!("the wallet is kept"))
 }
 
 /// The tags of the wallet of `address`.
 fn tags_of(connection: &mut SqliteConnection, address: &Address) -> Vec<String> {
-    wallet::db::find(connection, &Wallet::id(address).unwrap())
+    wallet::db::find(connection, wallet::WalletId::of(address).unwrap())
         .unwrap()
         .map(|wallet| wallet.tags.0.into_iter().collect())
         .unwrap_or_default()
@@ -181,7 +181,7 @@ fn tags_are_kept_once_listed_and_removed() {
     assert!(!tag_with(&mut connection, &a, "hot").unwrap());
     tag_with(&mut connection, &a, "deposit-1").unwrap();
     assert_eq!(tags_of(&mut connection, &a), ["deposit-1", "hot"]);
-    let id = Wallet::id(&a).unwrap();
+    let id = wallet::WalletId::of(&a).unwrap();
     assert_eq!(
         wallet::db::set_tag(&mut connection, &id, "hot", false).unwrap(),
         Some(true)
@@ -354,13 +354,13 @@ fn a_pending_send_is_taken_off_what_its_sender_can_spend() {
     let balances = wallet_index::db::find_by_ids(&mut connection, &network(), &ids, 2).unwrap();
     let a = &balances[&id("a", "native")];
     assert_eq!(
-        (confirmed(&balances, &a.id), a.spendable().unwrap()),
+        (confirmed(&balances, a.id.as_ref()), a.spendable().unwrap()),
         (decimal("690"), decimal("585"))
     );
     // What arrives counts once mined.
     let b = &balances[&id("b", "native")];
     assert_eq!(
-        (confirmed(&balances, &b.id), b.spendable().unwrap()),
+        (confirmed(&balances, b.id.as_ref()), b.spendable().unwrap()),
         (decimal("50"), decimal("50"))
     );
 }

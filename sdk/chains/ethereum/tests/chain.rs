@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use ::rpc::testing::{Faults, Reply, Script};
 use base::{
-    Asset, Chained as _, Dated as _, Decimal, InfoClient as _, Leg, NotServed, Reason, Reward,
-    Tips, TransactionState,
+    Asset, Chained as _, Dated as _, Decimal, InfoClient, Leg, NotServed, Reason, Reward,
+    ServiceFactory as _, Tips, TransactionState,
 };
-use chain_ethereum::{Chain, Client, Config, Network, Token};
+use chain_ethereum::{Chain, Client, Config, Factory, Info, Network, Token};
 use futures_executor::block_on;
 use num_bigint::BigUint;
 use serde_json::{Value, json};
@@ -102,7 +102,7 @@ fn no_logs() -> Reply {
 }
 
 fn connect(script: &Script, config: &Config) -> Chain {
-    config.chain(&Client::new(Arc::new(script.clone()), config.native()))
+    Factory::from(config.clone()).chain(&Client::new(Arc::new(script.clone()), config.native()))
 }
 
 fn config() -> Config {
@@ -117,18 +117,19 @@ fn config() -> Config {
 }
 
 #[test]
-fn info_reads_the_chain_id_and_tip() {
+fn info_reports_the_chain_id_and_tip() {
     let script = Script::new([]);
-    let client = Client::new(Arc::new(script.clone()), Network::new(1, "mainnet"));
+    let info = Info::new(Arc::new(script.clone()));
     script.push([
         Reply::ok("eth_chainId", json!("0x1")),
         Reply::ok("eth_blockNumber", json!("0x10")),
+        Reply::ok("eth_chainId", json!("0xaa36a7")),
+        Reply::ok("eth_blockNumber", json!("0x11")),
     ]);
-    let info = block_on(client.info()).unwrap();
-    assert_eq!((info.chain_id.as_str(), info.tip), ("1", 16));
-    script.push([Reply::ok("eth_chainId", json!("0x2"))]);
-    let error = block_on(client.info()).unwrap_err();
-    assert!(format!("{error:#}").contains("chain ID 2"), "{error:#}");
+    let node = block_on(info.info()).unwrap();
+    assert_eq!((node.chain_id.as_str(), node.tip), ("1", 16));
+    let other = block_on(info.info()).unwrap();
+    assert_eq!((other.chain_id.as_str(), other.tip), ("11155111", 17));
     script.exhausted();
 }
 
@@ -486,7 +487,7 @@ fn a_chain_over_a_swap_follows_its_replacement() {
     let old = Script::new([]);
     let swap = Arc::new(::rpc::Swap::new(Arc::new(old.clone()), Vec::new()));
     let config = config();
-    let chain = config.chain(&Client::new(swap.clone(), config.native()));
+    let chain = Factory::from(config.clone()).chain(&Client::new(swap.clone(), config.native()));
     let tips = |script: &Script, produced: &str| {
         script.push([
             Reply::ok("eth_blockNumber", json!(produced)),
@@ -612,8 +613,6 @@ impl base::WalletStore for Fresh {
 
 #[test]
 fn the_settings_batch_is_the_indexers_step() {
-    use base::ServiceFactory as _;
-
     let stored = base::NetworkConfig {
         network: network(),
         chain_id: Some("1".to_owned()),
@@ -625,7 +624,6 @@ fn the_settings_batch_is_the_indexers_step() {
         explorer_transaction: None,
         settings: json!({"batch": 2}),
         assets: Vec::new(),
-        endpoints: Vec::new(),
     };
     let config = Config::try_from(&stored).unwrap();
     assert_eq!(config.batch, 2);
@@ -647,7 +645,9 @@ fn the_settings_batch_is_the_indexers_step() {
         holdings: Arc::new(base::NoHoldings),
     };
     let script = Script::new([]);
-    let service = block_on(config.build(&storage, Arc::new(script.clone()))).unwrap();
+    let service = Factory::from(config)
+        .service(&storage, Arc::new(script.clone()))
+        .unwrap();
     // From block 5 with the tip at 16: two blocks a step, not the default 100.
     script.push([
         Reply::ok("eth_blockNumber", json!("0x10")),
@@ -670,8 +670,6 @@ fn the_settings_batch_is_the_indexers_step() {
 
 #[test]
 fn a_network_builds_with_its_node_down_and_asks_it_nothing() {
-    use base::ServiceFactory as _;
-
     let script = Script::new([]);
     let node = Faults::new(script.clone());
     let switch = node.switch();
@@ -684,7 +682,9 @@ fn a_network_builds_with_its_node_down_and_asks_it_nothing() {
         wallets: fresh,
         holdings: Arc::new(base::NoHoldings),
     };
-    let service = block_on(config().build(&storage, Arc::new(node))).unwrap();
+    let service = Factory::from(config())
+        .service(&storage, Arc::new(node))
+        .unwrap();
     let chain = service.dated.unwrap();
     script.exhausted();
 
