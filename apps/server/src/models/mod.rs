@@ -80,21 +80,7 @@ pub(crate) use network_asset::NetworkAsset;
 pub(crate) use network_index::NetworkIndex;
 pub(crate) use task::Task;
 
-#[cfg_attr(
-    not(test),
-    allow(
-        unused_imports,
-        reason = "playground: wired by the pipe evaluator later"
-    )
-)]
 pub(crate) use trigger::Trigger;
-#[cfg_attr(
-    not(test),
-    allow(
-        unused_imports,
-        reason = "playground: wired by the pipe evaluator later"
-    )
-)]
 pub(crate) use trigger_run::TriggerRun;
 pub(crate) use wallet::Wallet;
 
