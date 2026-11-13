@@ -1,7 +1,9 @@
-//! The HTTP endpoints, one module per resource, assembled into the router and
-//! the OpenAPI document, and the error every endpoint answers with. A shape
-//! several endpoints share is a model (`crate::models`); each endpoint's own
-//! request and response bodies live in its resource file.
+//! The HTTP transport: one module per resource, assembled into the router and
+//! the OpenAPI document, and the error every endpoint answers with. A handler
+//! reads and checks its request, calls one usecase (`crate::usecase`, where
+//! the logic is) and answers its result with a status. A shape several
+//! endpoints share is a model (`crate::models`); each endpoint's own request
+//! and response bodies live in its resource file.
 
 mod assets;
 mod health;
@@ -39,7 +41,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::db::Page;
+use crate::{db::Page, usecase};
 pub(crate) use state::AppState;
 
 /// The document root: title, version, description and servers. Title and
@@ -147,38 +149,16 @@ pub(crate) struct ErrorBody {
     pub(crate) failed_index: Option<usize>,
 }
 
-/// One HTTP status the API answers with; every handler failure picks one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Failure {
-    BadRequest,
-    NotFound,
-    Unprocessable,
-    Internal,
-    Unavailable,
-}
-
-impl Failure {
-    const fn status(self) -> StatusCode {
-        match self {
-            Self::BadRequest => StatusCode::BAD_REQUEST,
-            Self::NotFound => StatusCode::NOT_FOUND,
-            Self::Unprocessable => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-        }
-    }
-}
-
+/// An endpoint's failure: its status and body.
 #[derive(Debug)]
 pub(crate) struct Error {
-    failure: Failure,
-    message: String,
-    failed_index: Option<usize>,
+    status: StatusCode,
+    body: ErrorBody,
 }
 
 impl Error {
     pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
-        Self::new(Failure::BadRequest, message)
+        Self::new(StatusCode::BAD_REQUEST, message)
     }
 
     pub(crate) fn invalid_json(_error: JsonRejection) -> Self {
@@ -192,35 +172,16 @@ impl Error {
     }
 
     pub(crate) fn invalid_response(message: impl Into<String>) -> Self {
-        Self::new(Failure::Internal, message)
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
     }
 
-    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
-        Self::new(Failure::Unavailable, message)
-    }
-
-    pub(crate) fn not_found(message: impl Into<String>) -> Self {
-        Self::new(Failure::NotFound, message)
-    }
-
-    pub(crate) fn unprocessable(message: impl Into<String>) -> Self {
-        Self::new(Failure::Unprocessable, message)
-    }
-
-    /// The same failure, attributed to one authored batch occurrence.
-    #[must_use]
-    pub(crate) fn at(self, failed_index: usize) -> Self {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
-            failed_index: Some(failed_index),
-            ..self
-        }
-    }
-
-    fn new(failure: Failure, message: impl Into<String>) -> Self {
-        Self {
-            failure,
-            message: message.into(),
-            failed_index: None,
+            status,
+            body: ErrorBody {
+                message: message.into(),
+                failed_index: None,
+            },
         }
     }
 }
@@ -232,19 +193,31 @@ impl From<crate::models::IdError> for Error {
     }
 }
 
-/// The handled failures inside an `anyhow::Error` by their status: an
-/// unconfigured network is a 404, a bad address or key a 400; any other
-/// failure (a store, a node, generation) is a 503.
-impl From<anyhow::Error> for Error {
-    fn from(error: anyhow::Error) -> Self {
-        let failure = match error.downcast_ref::<base::WalletError>().map(|e| e.kind) {
-            Some(base::WalletErrorKind::Unsupported) => Failure::NotFound,
-            Some(base::WalletErrorKind::InvalidAddress | base::WalletErrorKind::InvalidSecret) => {
-                Failure::BadRequest
-            }
-            _ => Failure::Unavailable,
+/// A usecase failure by its kind: invalid 400, not found 404, conflict 422,
+/// unavailable 503, internal 500.
+impl From<usecase::Error> for Error {
+    fn from(error: usecase::Error) -> Self {
+        let status = match error.kind {
+            usecase::Kind::Invalid => StatusCode::BAD_REQUEST,
+            usecase::Kind::NotFound => StatusCode::NOT_FOUND,
+            usecase::Kind::Conflict => StatusCode::UNPROCESSABLE_ENTITY,
+            usecase::Kind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            usecase::Kind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        Self::new(failure, format!("{error:#}"))
+        let body = ErrorBody {
+            message: error.message,
+            failed_index: error.failed_index,
+        };
+        Self { status, body }
+    }
+}
+
+/// 201 for what a create made, 200 for what it found already kept.
+const fn create_status(created: bool) -> StatusCode {
+    if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
     }
 }
 
@@ -286,50 +259,8 @@ impl IndexParams {
     }
 }
 
-/// The address a wallet ID (`{chain}.{network}.{address}`, the model id) names, parsed by
-/// its network's chain.
-///
-/// # Errors
-///
-/// A 400 for a malformed ID or address; a 404 for an unconfigured network.
-fn wallet_address(
-    container: &base::Container<crate::usecase::Transport>,
-    id: &str,
-) -> Result<base::Address, Error> {
-    Ok(container.parse(&crate::models::wallet::WalletId::parse(id)?)?)
-}
-
-/// The asset `id` of `network` and its description.
-///
-/// # Errors
-///
-/// A 404 when the network does not configure it.
-fn asset_info(
-    container: &base::Container<crate::usecase::Transport>,
-    network: &base::Network,
-    id: &str,
-) -> Result<base::AssetInfo, Error> {
-    let asset = base::Asset {
-        network: network.clone(),
-        id: id.to_owned(),
-    };
-    container
-        .service(network)?
-        .assets
-        .get(&asset)
-        .cloned()
-        .ok_or_else(|| Error::not_found("asset is not configured"))
-}
-
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        (
-            self.failure.status(),
-            Json(ErrorBody {
-                message: self.message,
-                failed_index: self.failed_index,
-            }),
-        )
-            .into_response()
+        (self.status, Json(self.body)).into_response()
     }
 }

@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, IndexParams, wallet_address};
-use crate::{api::AppState, db::Paged as _, models::wallet};
+use super::{Error, ErrorBody, IndexParams};
+use crate::{api::AppState, db::Paged as _, models::wallet::WalletId, usecase::wallets};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
@@ -57,10 +57,7 @@ async fn list(
     let Query(index) = index.map_err(Error::invalid_query)?;
     let page = index.page("tags", |cursor| Some(cursor.to_owned()))?;
     let limit = page.limit;
-    let tags = state
-        .db
-        .read(move |connection| Ok(wallet::db::find_tags_page(connection, page)?))
-        .await?;
+    let tags = wallets::tags_page(&state.db, page).await?;
     Ok(Json(ListResponse {
         next_cursor: tags.cursor(limit),
         tags,
@@ -75,24 +72,6 @@ struct TagPath {
     id: String,
     /// 1 to 64 of `[a-z0-9-]`.
     tag: String,
-}
-
-impl TagPath {
-    /// The wallet's model id; the tag checked.
-    fn wallet_id(
-        &self,
-        container: &base::Container<crate::usecase::Transport>,
-    ) -> Result<String, Error> {
-        let address = wallet_address(container, &self.id)?;
-        let id = String::from(crate::models::wallet::WalletId::of(&address)?);
-        if !wallet::is_tag(&self.tag) {
-            return Err(Error::invalid_request(format!(
-                "a tag is 1 to 64 of [a-z0-9-]: {:?}",
-                self.tag
-            )));
-        }
-        Ok(id)
-    }
 }
 
 #[utoipa::path(
@@ -117,12 +96,8 @@ async fn add(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TagPath>,
 ) -> Result<StatusCode, Error> {
-    let id = path.wallet_id(&state.container)?;
-    state
-        .db
-        .write(move |connection| wallet::db::set_tag(connection, &id, &path.tag, true))
-        .await?
-        .ok_or_else(|| Error::not_found("wallet is unknown"))?;
+    let id = WalletId::parse(&path.id)?;
+    wallets::set_tag(&state.container, &state.db, &id, path.tag, true).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -148,14 +123,7 @@ async fn remove(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TagPath>,
 ) -> Result<StatusCode, Error> {
-    let id = path.wallet_id(&state.container)?;
-    let removed = state
-        .db
-        .write(move |connection| wallet::db::set_tag(connection, &id, &path.tag, false))
-        .await?
-        .ok_or_else(|| Error::not_found("wallet is unknown"))?;
-    if !removed {
-        return Err(Error::not_found("no such tag"));
-    }
+    let id = WalletId::parse(&path.id)?;
+    wallets::set_tag(&state.container, &state.db, &id, path.tag, false).await?;
     Ok(StatusCode::NO_CONTENT)
 }

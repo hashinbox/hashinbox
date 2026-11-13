@@ -3,28 +3,26 @@
 //! rules: `max_history_days`; a start the node no longer serves moves
 //! forward), at once; pause or resume it; delete it.
 
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
 
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
     http::StatusCode,
 };
-use base::{Birthday, WalletIndexState};
+use base::WalletIndexState;
 use serde::Deserialize;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, asset_info, wallet_address, wallets::WalletPath};
+use super::{Error, ErrorBody, create_status, wallets::WalletPath};
 use crate::{
     api::AppState,
     models::{
-        self, wallet_index,
+        wallet::WalletId,
         wallet_index::{IndexState, WalletIndex},
     },
+    usecase::wallets,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -46,39 +44,6 @@ struct CreateRequest {
     #[serde(default)]
     #[schema(nullable = false)]
     start: Option<u64>,
-}
-
-impl CreateRequest {
-    /// Where to index from: `start`, refused when older than the network's
-    /// history limit (accepted when it has no limit or cannot find blocks by
-    /// time); absent, the chain's tip.
-    async fn birthday(&self, service: &base::Service) -> Result<Birthday, Error> {
-        let Some(position) = self.start else {
-            return Ok(Birthday::Fresh);
-        };
-        // No limit, or no way to find blocks by time: any start goes.
-        let (Some(dated), Some(limit)) = (&service.dated, service.max_history) else {
-            return Ok(Birthday::At(position));
-        };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let Some(earliest) = dated
-            .position_at(now.saturating_sub(limit).as_secs())
-            .await?
-        else {
-            return Ok(Birthday::At(position));
-        };
-        if position < earliest.position {
-            return Err(Error::invalid_request(format!(
-                "start {position} is older than this network's history limit of {} \
-                 days: start at {} or later",
-                limit.as_secs() / 86_400,
-                earliest.position
-            )));
-        }
-        Ok(Birthday::At(position))
-    }
 }
 
 #[utoipa::path(
@@ -112,40 +77,11 @@ async fn create(
     request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<WalletIndex>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let address = wallet_address(&state.container, &path.id)?;
-    let asset = asset_info(&state.container, &address.network, &request.asset)?.asset;
-    let index = models::wallet_index::WalletIndexId::of(&address, &asset)?;
-    let (wallet_id, index_id) = (String::from(index.wallet.clone()), String::from(index));
-    let Some(mut wallet) = state
-        .db
-        .read(move |connection| models::wallet::db::find(connection, &wallet_id))
-        .await?
-    else {
-        return Err(Error::not_found("wallet is unknown"));
-    };
-    if let Some(index) = wallet.indexes.remove(&asset.id) {
-        return Ok((StatusCode::OK, Json(index)));
-    }
-    let service = state.container.service(&address)?;
-    let birthday = request.birthday(&service).await?;
-    // `Indexer::watch` borrows the address as `&dyn Addressed`, which is not
-    // `Sync`, so its future is not `Send`: it runs on a blocking thread.
-    let (container, watched, runtime) = (
-        state.container.clone(),
-        address.clone(),
-        tokio::runtime::Handle::current(),
-    );
-    tokio::task::spawn_blocking(move || {
-        runtime.block_on(container.watch(&watched, &asset, birthday))
-    })
-    .await
-    .map_err(anyhow::Error::from)??;
-    let created = state
-        .db
-        .read(move |connection| wallet_index::db::find_at_tip(connection, &index_id))
-        .await?
-        .ok_or_else(|| Error::not_found("no such index"))?;
-    Ok((StatusCode::CREATED, Json(created)))
+    let id = WalletId::parse(&path.id)?;
+    let (container, db) = (&state.container, &state.db);
+    let index = wallets::create_index(container, db, &id, &request.asset, request.start);
+    let (created, index) = index.await?;
+    Ok((create_status(created), Json(index)))
 }
 
 /// The index a route acts on.
@@ -159,15 +95,9 @@ pub(super) struct IndexPath {
 }
 
 impl IndexPath {
-    /// The wallet's address and the index's model id.
-    pub(super) fn index(
-        &self,
-        container: &base::Container<crate::usecase::Transport>,
-    ) -> Result<(base::Address, String), Error> {
-        let address = wallet_address(container, &self.id)?;
-        let wallet = models::wallet::WalletId::of(&address)?;
-        let id = String::from(models::Id::child(wallet.id(), &[&self.asset])?);
-        Ok((address, id))
+    /// The wallet's id.
+    pub(super) fn wallet(&self) -> Result<WalletId, Error> {
+        Ok(WalletId::parse(&self.id)?)
     }
 }
 
@@ -221,22 +151,9 @@ async fn update(
 ) -> Result<Json<WalletIndex>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let index_state = request.index_state()?;
-    let (address, id) = path.index(&state.container)?;
-    state
-        .db
-        .write(move |connection| {
-            wallet_index::db::set_state(
-                connection,
-                &address,
-                Some(&path.asset),
-                index_state,
-                None,
-            )?;
-            wallet_index::db::find_at_tip(connection, &id)
-        })
-        .await?
-        .map(Json)
-        .ok_or_else(|| Error::not_found("no such index"))
+    let id = path.wallet()?;
+    let index = wallets::set_index_state(&state.container, &state.db, &id, path.asset, index_state);
+    Ok(Json(index.await?))
 }
 
 #[utoipa::path(
@@ -261,13 +178,7 @@ async fn remove(
     State(state): State<Arc<AppState>>,
     Path(path): Path<IndexPath>,
 ) -> Result<StatusCode, Error> {
-    let (_, id) = path.index(&state.container)?;
-    let removed = state
-        .db
-        .write(move |connection| Ok(wallet_index::db::delete(connection, &id)?))
-        .await?;
-    if removed == 0 {
-        return Err(Error::not_found("no such index"));
-    }
+    let id = path.wallet()?;
+    wallets::delete_index(&state.container, &state.db, &id, &path.asset).await?;
     Ok(StatusCode::NO_CONTENT)
 }

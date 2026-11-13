@@ -11,11 +11,7 @@ use serde::Serialize;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody, IndexParams, wallet_indexes::IndexPath};
-use crate::{
-    api::AppState,
-    db::Paged as _,
-    models::leg::{self, Movement},
-};
+use crate::{api::AppState, db::Paged as _, models::leg::Movement, usecase::wallets};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(legs))
@@ -60,11 +56,8 @@ async fn legs(
     let Query(index) = index.map_err(Error::invalid_query)?;
     let page = index.page("legs", |cursor| cursor.parse().ok())?;
     let limit = page.limit;
-    let (_, id) = path.index(&state.container)?;
-    let legs = state
-        .db
-        .read(move |connection| Ok(leg::db::find_page(connection, &id, page)?))
-        .await?;
+    let id = path.wallet()?;
+    let legs = wallets::legs_page(&state.container, &state.db, &id, &path.asset, page).await?;
     Ok(Json(LegsResponse {
         next_cursor: legs.cursor(limit),
         legs,

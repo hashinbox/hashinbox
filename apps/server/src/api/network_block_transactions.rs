@@ -15,10 +15,8 @@ use super::{Error, ErrorBody, IndexParams, network_blocks::BlockPath};
 use crate::{
     api::AppState,
     db::Paged as _,
-    models::{
-        block,
-        transaction::{self, Transaction},
-    },
+    models::transaction::{self, Transaction},
+    usecase::networks,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -63,18 +61,8 @@ async fn list(
     let (network, position) = path.at()?;
     let page = index.page("transactions", transaction::parse_key)?;
     let limit = page.limit;
-    let transactions = state
-        .db
-        .read(move |connection| {
-            let Some(block) = block::db::find_by_position(connection, &network, position)? else {
-                return Ok(None);
-            };
-            Ok(Some(transaction::db::find_by_block_page(
-                connection, &block.id, page,
-            )?))
-        })
-        .await?
-        .ok_or_else(|| Error::not_found("no live block is kept at this position"))?;
+    let transactions = networks::block_transactions_page(&state.db, network, position, page);
+    let transactions = transactions.await?;
     Ok(Json(ListResponse {
         next_cursor: transactions.cursor(limit),
         transactions,

@@ -13,7 +13,7 @@ use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody, IndexParams};
-use crate::{api::AppState, db::Paged as _, models::task, usecase::workers::broadcast};
+use crate::{api::AppState, db::Paged as _, usecase::jobs};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
@@ -80,15 +80,15 @@ impl From<tasks::Status> for JobState {
     }
 }
 
-impl JobState {
-    const fn status(self) -> i32 {
-        match self {
-            Self::Pending => 0,
-            Self::Running => 1,
-            Self::Succeeded => 2,
-            Self::Failed => 3,
-            Self::Skipped => 4,
-            Self::Idle => 5,
+impl From<JobState> for tasks::Status {
+    fn from(state: JobState) -> Self {
+        match state {
+            JobState::Pending => Self::Pending,
+            JobState::Running => Self::Running,
+            JobState::Succeeded => Self::Done,
+            JobState::Failed => Self::Failed,
+            JobState::Skipped => Self::Skipped,
+            JobState::Idle => Self::Idle,
         }
     }
 }
@@ -131,27 +131,25 @@ struct Job {
     accepted: usize,
 }
 
-impl Job {
-    /// Row `id` of the queue, with when it was queued and last written.
-    fn new((id, row, created_at, updated_at): (i64, task::Task, i64, i64)) -> anyhow::Result<Self> {
-        let job = row.into_job(id)?;
-        let (signed, accepted) = broadcast::progress(job.state.as_ref());
-        Ok(Self {
+impl From<jobs::Job> for Job {
+    fn from(kept: jobs::Job) -> Self {
+        let job = kept.job;
+        Self {
             id: job.id.to_string(),
             kind: job.kind,
             topic: job.topic.to_string(),
             state: job.status.into(),
             run_at: job.run_at,
-            created_at,
-            updated_at,
+            created_at: kept.created_at,
+            updated_at: kept.updated_at,
             deadline: job.deadline,
             attempts: job.attempts,
             reason: job.reason,
             input: job.input,
             progress: job.state,
-            signed,
-            accepted,
-        })
+            signed: kept.signed,
+            accepted: kept.accepted,
+        }
     }
 }
 
@@ -194,26 +192,10 @@ async fn list(
         Some((updated_at.parse().ok()?, id.parse().ok()?))
     })?;
     let limit = page.limit;
-    let status = query.state.map(JobState::status);
-    let network = query.network()?;
-    let rows = state
-        .db
-        .read(move |connection| {
-            Ok(task::db::find_page(
-                connection,
-                network.as_ref(),
-                query.kind.as_deref(),
-                status,
-                page,
-            )?)
-        })
-        .await?;
-    let next_cursor = rows.cursor(limit);
-    let jobs = rows
-        .into_iter()
-        .map(Job::new)
-        .collect::<anyhow::Result<Vec<_>>>()
-        .map_err(|error| Error::unavailable(format!("{error:#}")))?;
+    let (network, status) = (query.network()?, query.state.map(Into::into));
+    let jobs = jobs::list_page(&state.db, network, query.kind, status, page).await?;
+    let next_cursor = jobs.cursor(limit);
+    let jobs = jobs.into_iter().map(Job::from).collect();
     Ok(Json(ListResponse { jobs, next_cursor }))
 }
 
@@ -246,14 +228,5 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<JobPath>,
 ) -> Result<Json<Job>, Error> {
-    let Ok(id) = path.id.parse() else {
-        return Err(Error::not_found("job does not exist"));
-    };
-    let row = state
-        .db
-        .read(move |connection| Ok(task::db::find_by_id(connection, id)?))
-        .await?
-        .ok_or_else(|| Error::not_found("job does not exist"))?;
-    let job = Job::new(row).map_err(|error| Error::unavailable(format!("{error:#}")))?;
-    Ok(Json(job))
+    Ok(Json(jobs::read(&state.db, &path.id).await?.into()))
 }

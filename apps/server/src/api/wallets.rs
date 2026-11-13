@@ -14,16 +14,16 @@ use axum::{
     },
     http::StatusCode,
 };
-use base::Chain;
 use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, IndexParams, wallet_address};
+use super::{Error, ErrorBody, IndexParams, create_status};
 use crate::{
     api::AppState,
     db::Paged as _,
-    models::{self, Wallet},
+    models::{Wallet, wallet::WalletId},
+    usecase::wallets::{self, NewWallet},
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -62,22 +62,25 @@ struct CreateRequest {
 }
 
 impl CreateRequest {
-    /// `external_id` trimmed, if given.
+    /// The wallet asked for, its `external_id` trimmed.
     ///
     /// # Errors
     ///
-    /// When it is empty once trimmed or longer than 128 characters.
-    fn external_id(&self) -> Result<Option<String>, Error> {
-        let Some(text) = &self.external_id else {
-            return Ok(None);
-        };
-        let text = text.trim();
-        if !(1..=128).contains(&text.chars().count()) {
+    /// When `external_id` is empty once trimmed or longer than 128
+    /// characters.
+    fn wallet(self) -> Result<NewWallet, Error> {
+        let external_id = self.external_id.as_deref().map(str::trim);
+        if external_id.is_some_and(|text| !(1..=128).contains(&text.chars().count())) {
             return Err(Error::invalid_request(
                 "external_id must be 1 to 128 characters once trimmed",
             ));
         }
-        Ok(Some(text.to_owned()))
+        Ok(NewWallet {
+            external_id: external_id.map(str::to_owned),
+            network: base::Network::new(base::Chain::new(self.chain), self.network),
+            secret: self.secret,
+            address: self.address,
+        })
     }
 }
 
@@ -112,46 +115,9 @@ async fn create(
     request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Wallet>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let external_id = request.external_id()?;
-    let network = base::Network::new(Chain::new(request.chain), request.network);
-    let factory = &state.container.service(&network)?.wallets.factory;
-    let given = request
-        .address
-        .map(|text| factory.parse_address(&text))
-        .transpose()?;
-    let mut row = if let Some(secret) = request.secret {
-        let wallet = factory.from_pk_text(&secret).await?;
-        if let Some(given) = given.filter(|given| given != wallet.address()) {
-            return Err(Error::invalid_request(format!(
-                "the key derives {}, not {}",
-                wallet.address().value,
-                given.value
-            )));
-        }
-        models::Wallet::try_from(&*wallet)
-    } else if let Some(address) = given {
-        models::Wallet::from_address(&address)
-    } else {
-        let wallet = factory.from_pk(factory.generate().await?).await?;
-        models::Wallet::try_from(&*wallet)
-    }
-    .map_err(|error| Error::invalid_request(format!("{error:#}")))?;
-    row.external_id = external_id;
-    let (created, wallet) = state
-        .db
-        .write(move |connection| {
-            let created = models::wallet::db::insert(connection, &row)?;
-            let wallet = models::wallet::db::find(connection, &row.id)?;
-            Ok((created, wallet))
-        })
-        .await?;
-    let wallet = wallet.ok_or_else(|| Error::not_found("wallet is unknown"))?;
-    let status = if created {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
-    Ok((status, Json(wallet)))
+    let new = request.wallet()?;
+    let (created, wallet) = wallets::create(&state.container, &state.db, new).await?;
+    Ok((create_status(created), Json(wallet)))
 }
 
 /// `GET /v1/wallets`: a page of wallets.
@@ -190,10 +156,7 @@ async fn list(
     let Query(index) = index.map_err(Error::invalid_query)?;
     let page = index.page("wallet list", |cursor| Some(cursor.to_owned()))?;
     let limit = page.limit;
-    let wallets = state
-        .db
-        .read(move |connection| models::wallet::db::find_page(connection, page))
-        .await?;
+    let wallets = wallets::list_page(&state.db, page).await?;
     Ok(Json(ListResponse {
         next_cursor: wallets.cursor(limit),
         wallets,
@@ -230,12 +193,6 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<WalletPath>,
 ) -> Result<Json<Wallet>, Error> {
-    let address = wallet_address(&state.container, &path.id)?;
-    let id = models::wallet::WalletId::of(&address)?;
-    state
-        .db
-        .read(move |connection| models::wallet::db::find(connection, &id))
-        .await?
-        .map(Json)
-        .ok_or_else(|| Error::not_found("wallet is unknown"))
+    let id = WalletId::parse(&path.id)?;
+    Ok(Json(wallets::read(&state.container, &state.db, &id).await?))
 }

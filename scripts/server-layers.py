@@ -4,7 +4,9 @@
 Layers, bottom up: models, usecase, api, main (`main.rs`, `config.rs`, `ui.rs`).
 `db` sits beside them and depends on no other module. A module may name,
 through `crate::`, only its own layer, the layers below it, and `db`; `main`
-names everything. Comments are ignored.
+names everything. The api is transport only: it runs no statement
+(`<model>::db::…(`), opens no transaction (`.db.read`, `.db.write`) and
+names no `diesel`; the usecases do. Comments are ignored.
 
 usage: scripts/server-layers.py        (exits 1 and lists every upward import)
 """
@@ -25,6 +27,8 @@ ALLOWED = {
     "api": {"api", "usecase", "models"} | BESIDE,
 }
 MAIN = {"main", "config", "ui"}
+# What only a usecase or a model may do: run a statement, open a transaction.
+STORE = re.compile(r"\bdb::\w+\s*\(|\.db\s*\.\s*(?:read|write)\b|\bdiesel\b")
 
 
 def roots(text):
@@ -76,6 +80,9 @@ def main():
                 text = re.sub(r"//.*", "", source.read())
             for root in sorted(roots(text) - ALLOWED[module] - {"self"}):
                 upward.append(f"{os.path.relpath(path, ROOT)}: {module} names crate::{root}")
+            if module == "api":
+                for found in STORE.finditer(text):
+                    upward.append(f"{os.path.relpath(path, ROOT)}: api uses the store: {' '.join(found[0].split())}")
     for line in upward:
         print(line)
     return 1 if upward else 0

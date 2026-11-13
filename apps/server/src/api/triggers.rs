@@ -2,10 +2,7 @@
 //! action on one network) and their runs. The JSON forms of selector,
 //! filter, check and action are `crate::models::trigger`'s.
 
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -15,22 +12,22 @@ use axum::{
     },
     http::StatusCode,
 };
-use diesel::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use ::trigger::{Class, Stats, actions::Call, conditions::Logic, selection::Selector};
+use ::trigger::{Stats, actions::Call, conditions::Logic, selection::Selector};
 
 use super::{Error, ErrorBody, IndexParams, jobs::JobState};
 use crate::{
     api::AppState,
     db::Paged as _,
     models::{
-        self, Trigger,
-        trigger::{self as triggers, Check, Filter},
-        trigger_run,
+        Trigger,
+        trigger::{Check, Filter},
+        trigger_run::{Run, RunOutcome},
     },
+    usecase::triggers,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -74,10 +71,7 @@ async fn list(
     let Query(index) = index.map_err(Error::invalid_query)?;
     let page = index.page("triggers", |cursor| Some(cursor.to_owned()))?;
     let limit = page.limit;
-    let triggers = state
-        .db
-        .read(move |connection| Ok(triggers::db::find_page(connection, page)?))
-        .await?;
+    let triggers = triggers::list_page(&state.db, page).await?;
     Ok(Json(ListResponse {
         next_cursor: triggers.cursor(limit),
         triggers,
@@ -113,49 +107,18 @@ fn enabled() -> bool {
     true
 }
 
-impl Definition {
-    /// The trigger this definition describes as trigger `id`; a 404 for an
-    /// unconfigured network, else the status of the first rule it breaks
-    /// ([`models::Trigger::validate`], [`refused`]).
-    fn trigger(
-        self,
-        state: &AppState,
-        id: String,
-        group_id: String,
-        created_at: i64,
-        updated_at: i64,
-    ) -> Result<models::Trigger, Error> {
-        let network = base::Network::new(base::Chain::new(&self.chain), self.network.clone());
-        let assets = &state.container.service(&network)?.assets;
-        let trigger = models::Trigger {
-            id,
-            chain: self.chain,
-            network: self.network,
-            group_id,
-            selector: models::Json(self.selector),
-            filter: self.filter.map(models::Json),
-            check: models::Json(self.check),
-            action: models::Json(self.action),
-            enabled: self.enabled,
-            created_at,
-            updated_at,
-            last_round: None,
-        };
-        // The model's own rules, before it is ever kept.
-        trigger
-            .validate(&state.actions, &network, assets)
-            .map_err(refused)?;
-        Ok(trigger)
-    }
-}
-
-/// The answer to a trigger that breaks a rule: 404 when its action's input
-/// names something not configured here, 400 for every other rule (an
-/// unknown action is a malformed body, as before the `trigger` package).
-fn refused(error: ::trigger::Error) -> Error {
-    match error.class {
-        Class::NotConfigured => Error::not_found(error.message()),
-        _ => Error::invalid_request(error.message()),
+impl From<Definition> for triggers::Definition {
+    fn from(definition: Definition) -> Self {
+        Self {
+            id: definition.id,
+            chain: definition.chain,
+            network: definition.network,
+            selector: definition.selector,
+            filter: definition.filter,
+            check: definition.check,
+            action: definition.action,
+            enabled: definition.enabled,
+        }
     }
 }
 
@@ -167,41 +130,6 @@ struct BatchRequest {
     /// One to 16 triggers, each with its `id`.
     #[schema(min_items = 1, max_items = 16)]
     triggers: Vec<Definition>,
-}
-
-impl BatchRequest {
-    /// The batch's triggers in group `group_id`: 1 to 16, each with its own
-    /// `id`, all on one network.
-    fn triggers(
-        self,
-        state: &AppState,
-        group_id: &str,
-        now: i64,
-    ) -> Result<Vec<models::Trigger>, Error> {
-        if self.triggers.is_empty() || self.triggers.len() > 16 {
-            return Err(Error::invalid_request("a batch holds 1 to 16 triggers"));
-        }
-        let mut rows = Vec::with_capacity(self.triggers.len());
-        for definition in self.triggers {
-            let id = definition
-                .id
-                .clone()
-                .ok_or_else(|| Error::invalid_request("every trigger of a batch needs an id"))?;
-            if rows.iter().any(|row: &models::Trigger| row.id == id) {
-                return Err(Error::unprocessable("a batch repeats a trigger id"));
-            }
-            if rows.first().is_some_and(|first: &models::Trigger| {
-                (first.chain.as_str(), first.network.as_str())
-                    != (definition.chain.as_str(), definition.network.as_str())
-            }) {
-                return Err(Error::invalid_request(
-                    "every trigger of a batch is on one network",
-                ));
-            }
-            rows.push(definition.trigger(state, id, group_id.to_owned(), now, now)?);
-        }
-        Ok(rows)
-    }
 }
 
 /// `POST /v1/triggers`: the triggers created.
@@ -239,35 +167,10 @@ async fn create(
     request: Result<Json<BatchRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<CreateResponse>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let now = now()?;
-    // One group for the whole batch, so it can be found (and removed) together.
-    let group = uuid::Uuid::now_v7().to_string();
-    let rows = request.triggers(&state, &group, now)?;
-    let kept = rows.clone();
-    let taken = state
-        .db
-        .write(move |connection| {
-            // Every id is checked before any is written: all or none.
-            for row in &kept {
-                if triggers::db::get_by_id(connection, &row.id)
-                    .optional()?
-                    .is_some()
-                {
-                    return Ok(Some(row.id.clone()));
-                }
-            }
-            for row in &kept {
-                triggers::db::insert(connection, row)?;
-            }
-            Ok(None)
-        })
-        .await?;
-    if let Some(taken) = taken {
-        return Err(Error::unprocessable(format!(
-            "a trigger with id {taken} exists"
-        )));
-    }
-    Ok((StatusCode::CREATED, Json(CreateResponse { triggers: rows })))
+    let definitions = request.triggers.into_iter().map(Into::into).collect();
+    let (container, db, actions) = (&state.container, &state.db, &state.actions);
+    let triggers = triggers::create(container, db, actions, definitions).await?;
+    Ok((StatusCode::CREATED, Json(CreateResponse { triggers })))
 }
 
 /// The trigger a route acts on.
@@ -297,13 +200,7 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
 ) -> Result<Json<Trigger>, Error> {
-    let id = path.id;
-    let row = state
-        .db
-        .read(move |connection| Ok(triggers::db::get_by_id(connection, &id).optional()?))
-        .await?
-        .ok_or_else(|| Error::not_found("no such trigger"))?;
-    Ok(Json(row))
+    Ok(Json(triggers::read(&state.db, path.id).await?))
 }
 
 #[utoipa::path(
@@ -333,26 +230,9 @@ async fn replace(
     request: Result<Json<Definition>, JsonRejection>,
 ) -> Result<Json<Trigger>, Error> {
     let Json(definition) = request.map_err(Error::invalid_json)?;
-    if definition.id.is_some() {
-        return Err(Error::invalid_request("a trigger's id never changes"));
-    }
-    let id = path.id.clone();
-    let kept = state
-        .db
-        .read(move |connection| Ok(triggers::db::get_by_id(connection, &id).optional()?))
-        .await?
-        .ok_or_else(|| Error::not_found("no such trigger"))?;
-    // A replace keeps its id, creation time and group.
-    let row = definition.trigger(&state, path.id, kept.group_id, kept.created_at, now()?)?;
-    let replaced = row.clone();
-    let changed = state
-        .db
-        .write(move |connection| Ok(triggers::db::update(connection, &replaced)?))
-        .await?;
-    if changed == 0 {
-        return Err(Error::not_found("no such trigger"));
-    }
-    Ok(Json(row))
+    let (container, db, actions) = (&state.container, &state.db, &state.actions);
+    let trigger = triggers::replace(container, db, actions, path.id, definition.into());
+    Ok(Json(trigger.await?))
 }
 
 #[utoipa::path(
@@ -374,14 +254,7 @@ async fn delete(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
 ) -> Result<StatusCode, Error> {
-    let id = path.id;
-    let deleted = state
-        .db
-        .write(move |connection| Ok(triggers::db::delete(connection, &id)?))
-        .await?;
-    if deleted == 0 {
-        return Err(Error::not_found("no such trigger"));
-    }
+    triggers::delete(&state.db, path.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -399,37 +272,6 @@ struct TriggerRun {
     outcome: Option<RunOutcome>,
     /// Its send jobs, in the order queued; a job no longer kept is left out.
     jobs: Vec<RunJob>,
-}
-
-/// Where a run's jobs are together.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
-enum RunOutcome {
-    /// One still waits or runs.
-    Pending,
-    /// Every one succeeded.
-    Succeeded,
-    /// None succeeded.
-    Failed,
-    /// Some succeeded, some did not.
-    Mixed,
-}
-
-impl RunOutcome {
-    /// Where `states` are together; `None` for none.
-    fn of(states: &[JobState]) -> Option<Self> {
-        let succeeded = states.iter().filter(|state| **state == JobState::Succeeded);
-        let unfinished = states
-            .iter()
-            .any(|state| matches!(state, JobState::Pending | JobState::Running));
-        Some(match succeeded.count() {
-            _ if states.is_empty() => return None,
-            _ if unfinished => Self::Pending,
-            all if all == states.len() => Self::Succeeded,
-            0 => Self::Failed,
-            _ => Self::Mixed,
-        })
-    }
 }
 
 /// One send job of a run.
@@ -479,42 +321,28 @@ async fn runs(
     let Query(index) = index.map_err(Error::invalid_query)?;
     let page = index.page("runs", |cursor| cursor.parse().ok())?;
     let limit = page.limit;
-    let id = path.id;
-    let runs = state
-        .db
-        .read(move |connection| Ok(trigger_run::db::find_page(connection, &id, page)?))
-        .await?;
+    let runs = triggers::runs_page(&state.db, path.id, page).await?;
     Ok(Json(RunsResponse {
         next_cursor: runs.cursor(limit),
         runs: runs.into_iter().map(TriggerRun::from).collect(),
     }))
 }
 
-impl From<trigger_run::Run> for TriggerRun {
-    fn from(run: trigger_run::Run) -> Self {
-        let jobs: Vec<RunJob> = run
-            .jobs
-            .into_iter()
-            .map(|job| RunJob {
-                id: job.id.to_string(),
-                state: job.status.into(),
-                reason: job.reason,
-            })
-            .collect();
-        let states: Vec<JobState> = jobs.iter().map(|job| job.state).collect();
+impl From<Run> for TriggerRun {
+    fn from(run: Run) -> Self {
         Self {
             started_at: run.started_at,
+            outcome: run.outcome(),
             stats: run.stats,
-            outcome: RunOutcome::of(&states),
-            jobs,
+            jobs: run
+                .jobs
+                .into_iter()
+                .map(|job| RunJob {
+                    id: job.id.to_string(),
+                    state: job.status.into(),
+                    reason: job.reason,
+                })
+                .collect(),
         }
     }
-}
-
-/// Unix ms.
-fn now() -> Result<i64, Error> {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| Error::invalid_response(error.to_string()))?;
-    i64::try_from(elapsed.as_millis()).map_err(|error| Error::invalid_response(error.to_string()))
 }

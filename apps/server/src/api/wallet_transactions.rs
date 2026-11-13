@@ -8,16 +8,15 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
     http::StatusCode,
 };
-use base::Decimal;
 use serde::{Deserialize, Serialize};
-use tasks::Worker as _;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, asset_info, wallet_address};
+use super::{Error, ErrorBody};
 use crate::{
     api::AppState,
-    usecase::workers::broadcast::{Broadcast, Payment, SendIntent},
+    models::wallet::WalletId,
+    usecase::wallets::{self, Transfer},
 };
 
 /// Maximum transfers one send request accepts.
@@ -65,44 +64,18 @@ struct SendRequest {
 }
 
 impl SendRequest {
-    /// The send from `from`: each transfer's amount in `info`'s atomic units
-    /// and its destination parsed by the wallet's chain; a failure names its
-    /// transfer.
-    fn intent(
-        self,
-        container: &base::Container<crate::usecase::Transport>,
-        from: &base::Address,
-        info: &base::AssetInfo,
-    ) -> Result<SendIntent, Error> {
-        let mut transfers = Vec::with_capacity(self.transfers.len());
-        for (index, item) in self.transfers.into_iter().enumerate() {
-            let at = |error: Error| error.at(index);
-            let units = item
-                .amount
-                .parse::<Decimal>()
-                .ok()
-                .filter(|amount| amount > &Decimal::zero())
-                .and_then(|amount| info.atomic(&amount).ok())
-                .ok_or_else(|| {
-                    at(Error::invalid_request(
-                        "amount must be a positive exact decimal within the asset's decimals",
-                    ))
-                })?;
-            let to = container
-                .parse(&base::Address::new(from.network.clone(), &item.destination))
-                .map_err(|error| at(error.into()))?;
-            transfers.push(Payment {
-                to: to.value,
-                amount: units.to_string(),
-            });
+    /// The transfers, in order: 1 to [`MAX_TRANSFERS`].
+    fn transfers(&self) -> Result<Vec<Transfer>, Error> {
+        if self.transfers.is_empty() || self.transfers.len() > MAX_TRANSFERS {
+            return Err(Error::invalid_request(format!(
+                "between 1 and {MAX_TRANSFERS} transfers are allowed"
+            )));
         }
-        Ok(SendIntent {
-            chain: from.network.chain.to_string(),
-            network: from.network.name.clone(),
-            address: from.value.clone(),
-            asset: info.asset.id.clone(),
-            transfers,
-        })
+        let transfers = self.transfers.iter().map(|item| Transfer {
+            destination: item.destination.clone(),
+            amount: item.amount.clone(),
+        });
+        Ok(transfers.collect())
     }
 }
 
@@ -143,30 +116,9 @@ async fn send(
     request: Result<Json<SendRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<SendResponse>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    if request.transfers.is_empty() || request.transfers.len() > MAX_TRANSFERS {
-        return Err(Error::invalid_request(format!(
-            "between 1 and {MAX_TRANSFERS} transfers are allowed"
-        )));
-    }
-    let address = wallet_address(&state.container, &path.id)?;
-    let info = asset_info(&state.container, &address.network, &request.asset)?;
-    let id = crate::models::wallet::WalletId::of(&address)?;
-    if !state
-        .db
-        .read(move |connection| Ok(crate::models::wallet::db::is_keyed(connection, &id)?))
-        .await?
-    {
-        return Err(Error::unprocessable("the wallet holds no key here"));
-    }
-    let intent = request.intent(&state.container, &address, &info)?;
-    let queued = Broadcast::enqueue(&state.queue, &intent)
-        .await
-        .map_err(|error| match error {
-            tasks::StoreError::Invalid(reason) => Error::invalid_request(reason),
-            error => Error::unavailable(error.to_string()),
-        })?;
-    // A send is not unique: it is always queued.
-    let (tasks::Admission::Queued(id) | tasks::Admission::Duplicate(id)) = queued;
-    let job = id.to_string();
+    let (transfers, id) = (request.transfers()?, WalletId::parse(&path.id)?);
+    let (container, db, queue) = (&state.container, &state.db, &state.queue);
+    let job = wallets::send(container, db, queue, &id, &request.asset, transfers).await?;
+    let job = job.to_string();
     Ok((StatusCode::ACCEPTED, Json(SendResponse { job })))
 }

@@ -15,8 +15,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::{Error, ErrorBody, networks::NetworkPath};
 use crate::{
     api::AppState,
-    models::{NetworkName, Route, Routes, endpoint, endpoint_route},
-    usecase::Networks,
+    models::{NetworkName, Route},
+    usecase::networks,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -53,10 +53,10 @@ async fn list(
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
 ) -> Result<Json<RoutesResponse>, Error> {
-    let network = path.network(&state.container)?;
-    let stored = state.db.read(endpoint_route::db::find_all).await?;
+    let network = path.network();
+    let routes = networks::routes(&state.container, &state.db, &network).await?;
     Ok(Json(RoutesResponse {
-        routes: stored.routes(&network),
+        routes,
         network: network.into(),
     }))
 }
@@ -99,21 +99,10 @@ async fn replace(
     request: Result<Json<RoutesRequest>, JsonRejection>,
 ) -> Result<Json<RoutesResponse>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let network = path.network(&state.container)?;
-    let endpoints = state.db.read(endpoint::db::find_all).await?.nodes(&network);
-    let routes = Routes::new(request.routes, &endpoints).map_err(Error::invalid_request)?;
-    let key = network.clone();
-    // Stored before connected: a restart never forgets a change in use.
-    state
-        .db
-        .write(move |connection| endpoint_route::db::replace(connection, &key, &routes))
-        .await?;
-    Networks::read(&state.db)
-        .await?
-        .load(&network, &state.container)?;
-    let stored = state.db.read(endpoint_route::db::find_all).await?;
+    let network = path.network();
+    let routes = networks::replace_routes(&state.container, &state.db, &network, request.routes);
     Ok(Json(RoutesResponse {
-        routes: stored.routes(&network),
+        routes: routes.await?,
         network: network.into(),
     }))
 }

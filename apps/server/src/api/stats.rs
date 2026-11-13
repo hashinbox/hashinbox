@@ -2,10 +2,7 @@
 //! blocks, transactions, triggers, jobs) and the last day hour by hour,
 //! whatever the configuration names.
 
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
 
 use axum::{Json, extract::State};
 use serde::Serialize;
@@ -103,49 +100,49 @@ struct StatsResponse {
     tag = "stats"
 )]
 async fn read(State(state): State<Arc<AppState>>) -> Result<Json<StatsResponse>, Error> {
-    let clock = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| Error::invalid_response(error.to_string()))?
-        .as_secs();
-    let clock = i64::try_from(clock).map_err(|error| Error::invalid_response(error.to_string()))?;
-    let stats = stats::read(&state.db, clock).await?;
-    let jobs = stats.jobs;
-    Ok(Json(StatsResponse {
-        wallets: stats.wallets,
-        addresses: stats.addresses,
-        tags: stats.tags,
-        blocks: stats.blocks,
-        reorged: stats.reorged,
-        transactions: stats.transactions,
-        reverted: stats.reverted,
-        pending: stats.pending,
-        movements: stats.movements,
-        triggers: stats.triggers,
-        enabled: stats.enabled,
-        jobs: JobCounts {
-            pending: jobs.pending,
-            running: jobs.running,
-            succeeded: jobs.succeeded,
-            failed: jobs.failed,
-        },
-        chain: stats
-            .chain
-            .into_iter()
-            .map(|hour| ChainHour {
-                start: hour.start,
-                blocks: hour.blocks,
-                transactions: hour.transactions,
-            })
-            .collect(),
-        server: stats
-            .server
-            .into_iter()
-            .map(|hour| ServerHour {
-                start: hour.start,
-                succeeded: hour.succeeded,
-                failed: hour.failed,
-                runs: hour.runs,
-            })
-            .collect(),
-    }))
+    Ok(Json(stats::read(&state.db).await?.into()))
+}
+
+impl From<stats::Stats> for StatsResponse {
+    fn from(stats: stats::Stats) -> Self {
+        let jobs = stats.jobs;
+        Self {
+            wallets: stats.wallets,
+            addresses: stats.addresses,
+            tags: stats.tags,
+            blocks: stats.blocks,
+            reorged: stats.reorged,
+            transactions: stats.transactions,
+            reverted: stats.reverted,
+            pending: stats.pending,
+            movements: stats.movements,
+            triggers: stats.triggers,
+            enabled: stats.enabled,
+            jobs: JobCounts {
+                pending: jobs.pending,
+                running: jobs.running,
+                succeeded: jobs.succeeded,
+                failed: jobs.failed,
+            },
+            chain: stats
+                .chain
+                .into_iter()
+                .map(|hour| ChainHour {
+                    start: hour.start,
+                    blocks: hour.blocks,
+                    transactions: hour.transactions,
+                })
+                .collect(),
+            server: stats
+                .server
+                .into_iter()
+                .map(|hour| ServerHour {
+                    start: hour.start,
+                    succeeded: hour.succeeded,
+                    failed: hour.failed,
+                    runs: hour.runs,
+                })
+                .collect(),
+        }
+    }
 }

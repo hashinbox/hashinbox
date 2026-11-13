@@ -51,15 +51,18 @@ struct ListResponse {
     tag = "assets"
 )]
 async fn list(State(state): State<Arc<AppState>>) -> Json<ListResponse> {
-    let assets = state
-        .container
-        .assets()
-        .into_iter()
-        .map(|info| Listing {
+    let assets = state.container.assets().into_iter();
+    Json(ListResponse {
+        assets: assets.map(Listing::from).collect(),
+    })
+}
+
+impl From<base::AssetInfo> for Listing {
+    fn from(info: base::AssetInfo) -> Self {
+        Self {
             asset: info.asset.id.clone(),
             network: info.asset.network.clone().into(),
             metadata: Asset::from(&info),
-        })
-        .collect();
-    Json(ListResponse { assets })
+        }
+    }
 }

@@ -8,8 +8,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     api::AppState,
-    models::{NetworkIndex, NetworkName, network_index, task},
-    usecase::workers::index,
+    models::{NetworkIndex, NetworkName},
+    usecase::stats,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -50,27 +50,26 @@ struct ReadResponse {
     tag = "health"
 )]
 async fn read(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadResponse>) {
-    let read = state
-        .db
-        .read(|connection| {
-            let indexes = network_index::db::find_all(connection)?;
-            let failing = task::db::count_failing(connection, index::KIND)?;
-            Ok((indexes, failing))
-        })
-        .await;
-    let (indexes, failing) = read.unwrap_or_default();
-    let networks: Vec<_> = indexes
-        .into_iter()
-        .map(|(network, indexing)| NetworkHealth {
-            network: network.into(),
-            indexing,
-        })
-        .collect();
-    let ready = !networks.is_empty() && failing == 0;
-    let status = if ready {
+    let health = stats::health(&state.db).await;
+    let status = if health.ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    (status, Json(ReadResponse { ready, networks }))
+    (status, Json(health.into()))
+}
+
+impl From<stats::Health> for ReadResponse {
+    fn from(health: stats::Health) -> Self {
+        let networks = health.networks.into_iter();
+        Self {
+            ready: health.ready,
+            networks: networks
+                .map(|(network, indexing)| NetworkHealth {
+                    network: network.into(),
+                    indexing,
+                })
+                .collect(),
+        }
+    }
 }

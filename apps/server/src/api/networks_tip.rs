@@ -13,7 +13,10 @@ use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::{Error, ErrorBody, networks::NetworkPath};
-use crate::api::AppState;
+use crate::{
+    api::AppState,
+    usecase::networks::{self, Search},
+};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(search))
@@ -105,51 +108,29 @@ async fn search(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Error> {
     let Query(query) = query.map_err(Error::invalid_query)?;
     let time = seconds(&query.at)?;
-    let network = path.network(&state.container)?;
-    let dated = state.container.service(&network)?.dated.clone();
-    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        // A client gone mid-search only stops hearing it.
-        let probe = |probe: base::BlockProbe| {
-            let body = Probe {
-                low: probe.low.into(),
-                high: probe.high.into(),
-            };
-            let _ = sender.send(event("probe", &body));
-        };
-        let found = match &dated {
-            None => Err(anyhow::anyhow!("this network cannot find blocks by time")),
-            Some(dated) => dated.search(time, &probe).await,
-        };
-        let last = match found {
-            Ok(Some(stamp)) => event("found", &Stamp::from(stamp)),
-            Ok(None) => event(
-                "error",
-                &Failed {
-                    message: "the time is before the network's first block".to_owned(),
-                },
-            ),
-            Err(error) => event(
-                "error",
-                &Failed {
-                    message: format!("{error:#}"),
-                },
-            ),
-        };
-        let _ = sender.send(last);
-    });
+    let steps = networks::search_tip(&state.container, &path.network(), time)?;
     Ok(Sse::new(futures_util::stream::unfold(
-        receiver,
-        |mut receiver| async move {
-            let event = receiver.recv().await?;
-            Some((Ok(event), receiver))
+        steps,
+        |mut steps| async move {
+            let step = steps.recv().await?;
+            Some((Ok(event(step)), steps))
         },
     )))
 }
 
-/// The event `name` carrying `data` as JSON.
-fn event(name: &str, data: &impl Serialize) -> Event {
-    Event::default()
-        .event(name)
-        .data(serde_json::to_string(data).unwrap_or_default())
+/// A search's step as its event: `probe`, `found` or `error`, carrying its
+/// data as JSON.
+fn event(step: Search) -> Event {
+    let (name, data) = match step {
+        Search::Probe(probe) => (
+            "probe",
+            serde_json::to_string(&Probe {
+                low: probe.low.into(),
+                high: probe.high.into(),
+            }),
+        ),
+        Search::Found(stamp) => ("found", serde_json::to_string(&Stamp::from(stamp))),
+        Search::Failed(message) => ("error", serde_json::to_string(&Failed { message })),
+    };
+    Event::default().event(name).data(data.unwrap_or_default())
 }

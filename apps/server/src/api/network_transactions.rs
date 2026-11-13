@@ -17,6 +17,7 @@ use crate::{
     api::AppState,
     db::Paged as _,
     models::transaction::{self, Transaction},
+    usecase::networks,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -68,21 +69,11 @@ async fn list(
 ) -> Result<Json<ListResponse>, Error> {
     let Query(query) = query.map_err(Error::invalid_query)?;
     let Query(index) = index.map_err(Error::invalid_query)?;
-    let pending = query.pending == Some(true);
     let page = index.page("transactions", transaction::parse_key)?;
     let limit = page.limit;
-    let network = path.network(&state.container)?;
-    let transactions = state
-        .db
-        .read(move |connection| {
-            if pending {
-                return Ok(transaction::db::find_pending_page(
-                    connection, &network, page,
-                )?);
-            }
-            Ok(transaction::db::find_page(connection, &network, page)?)
-        })
-        .await?;
+    let (container, db, pending) = (&state.container, &state.db, query.pending == Some(true));
+    let transactions = networks::transactions_page(container, db, path.network(), pending, page);
+    let transactions = transactions.await?;
     Ok(Json(ListResponse {
         next_cursor: transactions.cursor(limit),
         transactions,

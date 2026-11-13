@@ -51,6 +51,39 @@ pub(crate) struct RunJob {
     pub(crate) reason: Option<String>,
 }
 
+/// Where a run's jobs are together.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RunOutcome {
+    /// One still waits or runs.
+    Pending,
+    /// Every one succeeded.
+    Succeeded,
+    /// None succeeded.
+    Failed,
+    /// Some succeeded, some did not.
+    Mixed,
+}
+
+impl Run {
+    /// Where its jobs are together; `None` for none.
+    pub(crate) fn outcome(&self) -> Option<RunOutcome> {
+        use tasks::Status;
+        let succeeded = self.jobs.iter().filter(|job| job.status == Status::Done);
+        let unfinished = self
+            .jobs
+            .iter()
+            .any(|job| matches!(job.status, Status::Pending | Status::Running));
+        Some(match succeeded.count() {
+            _ if self.jobs.is_empty() => return None,
+            _ if unfinished => RunOutcome::Pending,
+            all if all == self.jobs.len() => RunOutcome::Succeeded,
+            0 => RunOutcome::Failed,
+            _ => RunOutcome::Mixed,
+        })
+    }
+}
+
 /// Its start.
 impl crate::db::Keyed for Run {
     fn key(&self) -> String {

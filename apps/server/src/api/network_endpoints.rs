@@ -6,7 +6,7 @@
 //! later call of the network goes to the new list and its routes. A node
 //! kept by URL keeps its id and routes; a removed one leaves its routes.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -19,8 +19,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::{Error, ErrorBody, networks::NetworkPath};
 use crate::{
     api::AppState,
-    models::{Endpoint, NetworkName, RpcEndpoints, endpoint},
-    usecase::Networks,
+    models::{Endpoint, NetworkName},
+    usecase::networks::{self, Nodes},
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -39,20 +39,12 @@ struct EndpointsResponse {
     endpoints: Vec<Endpoint>,
 }
 
-impl EndpointsResponse {
-    /// `network`'s stored nodes, each with its node's state, after loading
-    /// them and its routes into its transport.
-    async fn connected(state: &AppState, network: base::Network) -> Result<Self, Error> {
-        Networks::read(&state.db)
-            .await?
-            .load(&network, &state.container)?;
-        let mut endpoints = state.db.read(endpoint::db::find_all).await?.nodes(&network);
-        let transport = state.container.transport(&network)?;
-        transport.clients().states(&mut endpoints).await;
-        Ok(Self {
-            network: network.into(),
-            endpoints,
-        })
+impl From<Nodes> for EndpointsResponse {
+    fn from(nodes: Nodes) -> Self {
+        Self {
+            network: nodes.network.into(),
+            endpoints: nodes.endpoints,
+        }
     }
 }
 
@@ -78,20 +70,8 @@ async fn list(
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
 ) -> Result<Json<EndpointsResponse>, Error> {
-    let network = path.network(&state.container)?;
-    let mut endpoints = state.db.read(endpoint::db::find_all).await?.nodes(&network);
-    let transport = state.container.transport(&network)?;
-    transport.clients().states(&mut endpoints).await;
-    Ok(Json(EndpointsResponse {
-        endpoints,
-        network: network.into(),
-    }))
-}
-
-/// `network`'s stored node URLs, in failover order.
-async fn stored(state: &AppState, network: &base::Network) -> Result<Vec<rpc::Endpoint>, Error> {
-    let stored = state.db.read(endpoint::db::find_all).await?;
-    Ok(endpoint::urls(&stored.nodes(network)))
+    let nodes = networks::endpoints(&state.container, &state.db, &path.network()).await?;
+    Ok(Json(nodes.into()))
 }
 
 /// `POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body.
@@ -140,17 +120,9 @@ async fn add(
     request: Result<Json<NodesRequest>, JsonRejection>,
 ) -> Result<Json<EndpointsResponse>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let network = path.network(&state.container)?;
-    if request.endpoints.is_empty() {
-        return Err(Error::invalid_request("add 1 to 16 nodes at once"));
-    }
-    let mut nodes = stored(&state, &network).await?;
-    let added = request.nodes();
-    nodes.extend(added.clone());
-    let nodes = RpcEndpoints::new(nodes).map_err(Error::invalid_request)?;
-    check(&state, &network, &added).await?;
-    store(&state, &network, &nodes).await?;
-    Ok(Json(EndpointsResponse::connected(&state, network).await?))
+    let (container, db, network) = (&state.container, &state.db, path.network());
+    let nodes = networks::add_endpoints(container, db, &network, request.nodes()).await?;
+    Ok(Json(nodes.into()))
 }
 
 #[utoipa::path(
@@ -182,11 +154,9 @@ async fn replace(
     request: Result<Json<NodesRequest>, JsonRejection>,
 ) -> Result<Json<EndpointsResponse>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let network = path.network(&state.container)?;
-    let nodes = RpcEndpoints::new(request.nodes()).map_err(Error::invalid_request)?;
-    check(&state, &network, nodes.nodes()).await?;
-    store(&state, &network, &nodes).await?;
-    Ok(Json(EndpointsResponse::connected(&state, network).await?))
+    let (container, db, network) = (&state.container, &state.db, path.network());
+    let nodes = networks::replace_endpoints(container, db, &network, request.nodes()).await?;
+    Ok(Json(nodes.into()))
 }
 
 /// One node to add, and its network.
@@ -207,6 +177,20 @@ struct AddManyRequest {
     /// Nodes to append, each after its network's current ones, in order.
     #[schema(min_items = 1, max_items = 64)]
     nodes: Vec<NetworkNode>,
+}
+
+impl AddManyRequest {
+    /// The nodes, each with its network, in order: 1 to 64.
+    fn nodes(self) -> Result<Vec<(base::Network, rpc::Endpoint)>, Error> {
+        if self.nodes.is_empty() || self.nodes.len() > 64 {
+            return Err(Error::invalid_request("add 1 to 64 nodes at once"));
+        }
+        let nodes = self.nodes.into_iter().map(|node| {
+            let network = base::Network::new(base::Chain::new(node.chain), node.network);
+            (network, rpc::Endpoint::new(node.endpoint))
+        });
+        Ok(nodes.collect())
+    }
 }
 
 /// The networks a change touched.
@@ -242,48 +226,8 @@ async fn add_many(
     request: Result<Json<AddManyRequest>, JsonRejection>,
 ) -> Result<Json<AddManyResponse>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    if request.nodes.is_empty() || request.nodes.len() > 64 {
-        return Err(Error::invalid_request("add 1 to 64 nodes at once"));
-    }
-    let stored = state.db.read(endpoint::db::find_all).await?;
-    let mut lists: BTreeMap<base::Network, Vec<rpc::Endpoint>> = BTreeMap::new();
-    let mut added = Vec::new();
-    for node in request.nodes {
-        let network = base::Network::new(base::Chain::new(node.chain), node.network);
-        state.container.service(&network)?;
-        let endpoint = rpc::Endpoint::new(node.endpoint);
-        added.push((network.clone(), endpoint.clone()));
-        lists
-            .entry(network.clone())
-            .or_insert_with(|| endpoint::urls(&stored.nodes(&network)))
-            .push(endpoint);
-    }
-    let lists = lists
-        .into_iter()
-        .map(|(network, nodes)| {
-            RpcEndpoints::new(nodes)
-                .map(|nodes| (network, nodes))
-                .map_err(Error::invalid_request)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    for (network, endpoint) in added {
-        check(&state, &network, &[endpoint]).await?;
-    }
-    let kept = lists.clone();
-    // Stored before connected: a restart never forgets a change in use.
-    state
-        .db
-        .write(move |connection| {
-            for (network, nodes) in &kept {
-                endpoint::db::replace(connection, network, nodes)?;
-            }
-            Ok(())
-        })
-        .await?;
-    let mut networks = Vec::new();
-    for (network, _) in lists {
-        networks.push(EndpointsResponse::connected(&state, network).await?);
-    }
+    let changed = networks::add_endpoints_each(&state.container, &state.db, request.nodes()?);
+    let networks = changed.await?.into_iter().map(Into::into).collect();
     Ok(Json(AddManyResponse { networks }))
 }
 
@@ -321,47 +265,6 @@ async fn remove(
     Path(path): Path<NodePath>,
 ) -> Result<Json<EndpointsResponse>, Error> {
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
-    state.container.service(&network)?;
-    let mut nodes = state.db.read(endpoint::db::find_all).await?.nodes(&network);
-    let Some(position) = nodes.iter().position(|node| node.id == path.id) else {
-        return Err(Error::not_found("no such node"));
-    };
-    nodes.remove(position);
-    let nodes = RpcEndpoints::new(endpoint::urls(&nodes))
-        .map_err(|_| Error::invalid_request("a network keeps at least one node"))?;
-    store(&state, &network, &nodes).await?;
-    Ok(Json(EndpointsResponse::connected(&state, network).await?))
-}
-
-/// Asks each of `endpoints` which chain it serves and its tip, once, before
-/// anything is stored (`Transport::verify`): a node that fails or serves
-/// another chain is refused with why.
-async fn check(
-    state: &AppState,
-    network: &base::Network,
-    endpoints: &[rpc::Endpoint],
-) -> Result<(), Error> {
-    let transport = state.container.transport(network)?;
-    for (index, endpoint) in endpoints.iter().enumerate() {
-        transport
-            .verify(endpoint)
-            .await
-            .map_err(|error| Error::invalid_request(format!("node {index}: {error:#}")))?;
-    }
-    Ok(())
-}
-
-/// Stores `nodes` as `network`'s list.
-async fn store(
-    state: &AppState,
-    network: &base::Network,
-    nodes: &RpcEndpoints,
-) -> Result<(), Error> {
-    let (network, nodes) = (network.clone(), nodes.clone());
-    // Stored before connected: a restart never forgets a change in use.
-    state
-        .db
-        .write(move |connection| endpoint::db::replace(connection, &network, &nodes))
-        .await?;
-    Ok(())
+    let nodes = networks::remove_endpoint(&state.container, &state.db, &network, path.id);
+    Ok(Json(nodes.await?.into()))
 }

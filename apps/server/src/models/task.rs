@@ -90,15 +90,10 @@ impl Task {
     }
 }
 
-/// A job with its id, `created_at` and `updated_at`: `"{updated_at}:{id}"`.
-impl crate::db::Keyed for (i64, Task, i64, i64) {
-    fn key(&self) -> String {
-        format!("{}:{}", self.3, self.0)
-    }
-}
-
 /// The `q` table's statements.
 pub(crate) mod db {
+    use std::collections::BTreeMap;
+
     use diesel::{
         prelude::*,
         sql_types::{BigInt, Bool, Text},
@@ -271,19 +266,23 @@ pub(crate) mod db {
             .optional()
     }
 
-    /// The last job of `kind` on `topic`, if any.
-    pub(crate) fn find_last(
+    /// Why the last job of `kind` on each topic failed, by topic: only the
+    /// topics whose last job has a `reason`.
+    pub(crate) fn find_last_reasons(
         connection: &mut SqliteConnection,
         kind: &str,
-        topic: &str,
-    ) -> QueryResult<Option<Task>> {
-        q::table
-            .filter(q::kind.eq(kind))
-            .filter(q::topic.eq(topic))
-            .order(q::id.desc())
-            .select(Task::as_select())
-            .first(connection)
-            .optional()
+    ) -> QueryResult<BTreeMap<String, String>> {
+        use diesel::dsl::sql;
+        let rows = q::table
+            .filter(
+                sql::<Bool>("id IN (SELECT MAX(id) FROM q WHERE kind = ")
+                    .bind::<Text, _>(kind)
+                    .sql(" GROUP BY topic)"),
+            )
+            .filter(q::reason.is_not_null())
+            .select((q::topic, q::reason.assume_not_null()))
+            .load::<(String, String)>(connection)?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Deletes every job of one of `kinds` that succeeded, was idle or was

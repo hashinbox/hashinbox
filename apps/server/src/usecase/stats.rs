@@ -1,11 +1,20 @@
 //! What the store holds across every network (wallets, blocks,
 //! transactions, triggers, jobs) and the last day hour by hour, whatever the
 //! configuration names: counts and hourly series over ten models, in one
-//! snapshot.
+//! snapshot. And readiness: every indexed network's indexing.
 
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use super::{Error, workers::index};
 use crate::{
     db::Db,
-    models::{block, leg, task, transaction, trigger, trigger_run, wallet, wallet_index},
+    models::{
+        NetworkIndex, block, leg, network_index, task, transaction, trigger, trigger_run, wallet,
+        wallet_index,
+    },
 };
 
 /// How many hours a series covers, the current one last.
@@ -96,13 +105,18 @@ fn at<T>(hours: &mut [T], hour: i64) -> Option<&mut T> {
         .and_then(|hour| hours.get_mut(hour))
 }
 
-/// The store's stats, with this server's time `clock` (Unix seconds).
+/// The store's stats, by this server's clock.
 ///
 /// # Errors
 ///
-/// The read.
-pub(crate) async fn read(db: &Db, clock: i64) -> anyhow::Result<Stats> {
-    db.read(move |connection| {
+/// Internal when the clock is before 1970; the read.
+pub(crate) async fn read(db: &Db) -> Result<Stats, Error> {
+    let clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| Error::internal(error.to_string()))?
+        .as_secs();
+    let clock = i64::try_from(clock).map_err(|error| Error::internal(error.to_string()))?;
+    let stats = db.read(move |connection| {
         let count = |value: i64| u64::try_from(value).unwrap_or_default();
         let (blocks, reorged) = block::db::count(connection)?;
         let (transactions, reverted, pending) = transaction::db::count(connection)?;
@@ -172,6 +186,32 @@ pub(crate) async fn read(db: &Db, clock: i64) -> anyhow::Result<Stats> {
             chain,
             server,
         })
-    })
-    .await
+    });
+    Ok(stats.await?)
+}
+
+/// Readiness and every indexed network's indexing.
+pub(crate) struct Health {
+    /// At least one network is indexed, and no index job is failing.
+    pub(crate) ready: bool,
+    /// Every indexed network's `network_index` row.
+    pub(crate) networks: BTreeMap<base::Network, NetworkIndex>,
+}
+
+/// Whether the server is ready: at least one network indexed and no index
+/// job failing (failed, or going again with a `reason`). A failed read is
+/// not ready. No RPC.
+pub(crate) async fn health(db: &Db) -> Health {
+    let read = db
+        .read(|connection| {
+            let networks = network_index::db::find_all(connection)?;
+            let failing = task::db::count_failing(connection, index::KIND)?;
+            Ok((networks, failing))
+        })
+        .await;
+    let (networks, failing) = read.unwrap_or_default();
+    Health {
+        ready: !networks.is_empty() && failing == 0,
+        networks,
+    }
 }
