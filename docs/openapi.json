@@ -745,7 +745,7 @@
           "networks"
         ],
         "summary": "List a network's RPC nodes",
-        "description": "Its stored node URLs in failover order, as `PUT` takes them.",
+        "description": "Its stored nodes in failover order: each one's id and URL, as `PUT` takes them.",
         "operationId": "list_network_endpoints",
         "parameters": [
           {
@@ -820,7 +820,7 @@
           "networks"
         ],
         "summary": "Replace a network's RPC nodes",
-        "description": "Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. Each node is asked its chain and tip once, before storing.",
+        "description": "Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. Each node is asked its chain and tip once, before storing. A URL already stored keeps its id and routes; one left out is removed with its routes.",
         "operationId": "replace_network_endpoints",
         "parameters": [
           {
@@ -1006,13 +1006,13 @@
         ]
       }
     },
-    "/v1/networks/{chain}/{network}/endpoints/{index}": {
+    "/v1/networks/{chain}/{network}/endpoints/{id}": {
       "delete": {
         "tags": [
           "networks"
         ],
         "summary": "Remove one RPC node of a network",
-        "description": "Removes the node at `index`, stores the rest and uses them from now on. A network's last node cannot be removed.",
+        "description": "Removes the node `id` and its routes, stores the rest and uses them from now on. A network's last node cannot be removed.",
         "operationId": "remove_network_endpoint",
         "parameters": [
           {
@@ -1032,13 +1032,13 @@
             }
           },
           {
-            "name": "index",
+            "name": "id",
             "in": "path",
-            "description": "The node's `index` in its network's `endpoints`.",
+            "description": "The node's `id`, as `endpoints` lists it.",
             "required": true,
             "schema": {
               "type": "integer",
-              "minimum": 0
+              "format": "int64"
             }
           }
         ],
@@ -1085,6 +1085,178 @@
           },
           "503": {
             "description": "The nodes could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/networks/{chain}/{network}/routes": {
+      "get": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "List a network's routed methods",
+        "description": "Each routed method and the nodes taking turns serving it, round robin. Every other method goes to the network's cluster.",
+        "operationId": "list_network_routes",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The network's routes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkRoutes"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The routes could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "Replace a network's routed methods",
+        "description": "Stores the routes, then sends each routed method round robin over its nodes, and every other method to the cluster. A routed call failing retryably moves to the next node, then to the cluster. No node is asked.",
+        "operationId": "replace_network_routes",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RpcRoutes"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Routes stored and in use",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkRoutes"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An empty method, a method routed twice, or a node that is missing, repeated or of another network",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The routes could not be stored",
             "content": {
               "application/json": {
                 "schema": {
@@ -2985,7 +3157,7 @@
       },
       "ConfiguredNetwork": {
         "type": "object",
-        "description": "One network as stored: its `network` row, its `network_asset` rows, its\n`network_endpoint` nodes and its `network_index` row (`None`: not\nindexed); and the node's tip asked now (`tip_live`, the stored `tip`\nuntil a caller that asked sets it; `tip_error`, why asking failed).",
+        "description": "One network as stored: its `network` row, its `network_asset` rows, its\n`network_endpoint` nodes and their routes, and its `network_index` row (`None`: not\nindexed); and the node's tip asked now (`tip_live`, the stored `tip`\nuntil a caller that asked sets it; `tip_error`, why asking failed).",
         "required": [
           "chain",
           "network",
@@ -3000,6 +3172,7 @@
           "settings",
           "assets",
           "endpoints",
+          "routes",
           "index",
           "index_job_reason",
           "tip_live",
@@ -3043,9 +3216,9 @@
           "endpoints": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/RpcNode"
             },
-            "description": "Its node URLs as stored, in failover order."
+            "description": "Its nodes as stored, in failover order."
           },
           "explorer_address": {
             "type": [
@@ -3091,6 +3264,13 @@
           "network": {
             "type": "string",
             "description": "Network name."
+          },
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RpcRoute"
+            },
+            "description": "Its routed methods, each over its own nodes; every other method goes\nto all of them."
           },
           "settings": {
             "type": "object",
@@ -3675,9 +3855,9 @@
           "endpoints": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/RpcNode"
             },
-            "description": "Its node URLs as stored, in failover order; a node's index is its\nposition here."
+            "description": "Its nodes as stored, in failover order."
           },
           "network": {
             "$ref": "#/components/schemas/Network"
@@ -3832,6 +4012,26 @@
         },
         "additionalProperties": false
       },
+      "NetworkRoutes": {
+        "type": "object",
+        "description": "A network's routed methods.",
+        "required": [
+          "network",
+          "routes"
+        ],
+        "properties": {
+          "network": {
+            "$ref": "#/components/schemas/Network"
+          },
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RpcRoute"
+            },
+            "description": "By method; each one's nodes in failover order."
+          }
+        }
+      },
       "NetworkTransactions": {
         "type": "object",
         "description": "`GET /v1/networks/{chain}/{network}/transactions`: a page of transactions.",
@@ -3896,6 +4096,25 @@
         },
         "additionalProperties": false
       },
+      "RpcNode": {
+        "type": "object",
+        "description": "One stored node of a network.",
+        "required": [
+          "id",
+          "url"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its id: what a route and removal name."
+          },
+          "url": {
+            "type": "string",
+            "description": "Its URL as stored."
+          }
+        }
+      },
       "RpcNodes": {
         "type": "object",
         "description": "`POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body.",
@@ -3908,9 +4127,49 @@
             "items": {
               "type": "string"
             },
-            "description": "One to 16 node URLs, in failover order. A URL carries everything:\nuserinfo (HTTP Basic), query keys, a key in the path,\n`header.<Name>=value` parameters sent as headers, and `rpc.` settings\n(`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`).",
+            "description": "One to 16 distinct node URLs, in failover order. A URL carries everything:\nuserinfo (HTTP Basic), query keys, a key in the path,\n`header.<Name>=value` parameters sent as headers, and `rpc.` settings\n(`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`).",
             "maxItems": 16,
             "minItems": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "RpcRoute": {
+        "type": "object",
+        "description": "One method and the endpoints taking turns serving it.",
+        "required": [
+          "method",
+          "endpoint_ids"
+        ],
+        "properties": {
+          "endpoint_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "The network's endpoints taking turns, by id."
+          },
+          "method": {
+            "type": "string",
+            "description": "The JSON-RPC method, exactly as sent, e.g. `getBlock`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "RpcRoutes": {
+        "type": "object",
+        "description": "`PUT /v1/networks/{chain}/{network}/routes` body.",
+        "required": [
+          "routes"
+        ],
+        "properties": {
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RpcRoute"
+            },
+            "description": "Every route of the network; empty: none. A method appears once, over\none or more of the network's node ids, each once."
           }
         },
         "additionalProperties": false

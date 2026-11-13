@@ -41,9 +41,9 @@ VALUES
     ('solana', 'mainnet', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', 'contract',
         'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', 'USDT', 6, 2);
 
-INSERT INTO network_endpoint (chain, network, nodes)
+INSERT INTO network_endpoint (chain, network, url, position)
 VALUES
-    ('ethereum', 'sepolia', '["https://ethereum-sepolia-rpc.publicnode.com"]'),
-    ('ethereum', 'mainnet', '["https://ethereum-rpc.publicnode.com"]'),
-    ('solana', 'devnet', '["https://api.devnet.solana.com"]'),
-    ('solana', 'mainnet', '["https://api.mainnet-beta.solana.com"]');
+    ('ethereum', 'sepolia', 'https://ethereum-sepolia-rpc.publicnode.com', 0),
+    ('ethereum', 'mainnet', 'https://ethereum-rpc.publicnode.com', 0),
+    ('solana', 'devnet', 'https://api.devnet.solana.com', 0),
+    ('solana', 'mainnet', 'https://api.mainnet-beta.solana.com', 0);

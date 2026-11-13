@@ -15,10 +15,12 @@ import { Confirm } from '@/_components/confirm';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { AddNode } from './add';
+import { Routes } from './routes';
 
 /** A stored node URL, parsed by the browser; `index` is its position. */
 interface Node {
   index: number;
+  id: number;
   text: string;
   url: URL;
 }
@@ -39,16 +41,21 @@ export function Nodes({
   const [picked, setPicked] = useState(0);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<Node | null>(null);
-  const nodes = network.endpoints.map((text, index): Node => ({ index, text, url: new URL(text) }));
+  const nodes = network.endpoints.map(({ id, url }, index): Node => ({
+    index,
+    id,
+    text: url,
+    url: new URL(url),
+  }));
   const node = nodes[picked] ?? nodes[0] ?? null;
   const name = `${network.chain}/${network.network}`;
 
   const remove = (target: Node) => {
     setRemoving(null);
     const params = {
-      path: { chain: network.chain, network: network.network, index: target.index },
+      path: { chain: network.chain, network: network.network, id: target.id },
     };
-    call(client.DELETE('/v1/networks/{chain}/{network}/endpoints/{index}', { params }))
+    call(client.DELETE('/v1/networks/{chain}/{network}/endpoints/{id}', { params }))
       .then(() => {
         shell.notify(`${target.url.origin} removed from ${name}.`);
         setPicked(0);
@@ -116,6 +123,7 @@ export function Nodes({
           <Detail node={node} onRemove={() => setRemoving(node)} last={nodes.length === 1} />
         )}
       </Box>
+      <Routes shell={shell} network={network} onChanged={onChanged} />
       <AddNode
         shell={shell}
         network={network}
@@ -137,7 +145,7 @@ export function Nodes({
           if (removing) remove(removing);
         }}
       >
-        Calls of this network stop going to this node at once.
+        Calls of this network stop going to this node at once, and its routes go with it.
       </Confirm>
     </Box>
   );

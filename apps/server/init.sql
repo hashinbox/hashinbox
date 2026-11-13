@@ -379,14 +379,27 @@ CREATE TABLE network_index (
     FOREIGN KEY (chain, network) REFERENCES network (chain, network)
 );
 
--- One row per network: its RPC endpoint documents in failover order, as one
--- JSON list. Seeded by `seed.sql`, replaced by verified edits.
+-- One RPC node of a network: its URL (keys, headers and `rpc.` settings
+-- written in it), failing over by `position`, lowest first. Seeded by
+-- `seed.sql`, changed by verified edits. `id` is an integer, unlike the
+-- natural TEXT keys above: a URL holds dots and secrets.
 CREATE TABLE network_endpoint (
-    chain   TEXT NOT NULL,
-    network TEXT NOT NULL,
-    nodes   TEXT NOT NULL,
-    PRIMARY KEY (chain, network),
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain    TEXT    NOT NULL,
+    network  TEXT    NOT NULL,
+    url      TEXT    NOT NULL,
+    position INTEGER NOT NULL,
+    UNIQUE (chain, network, url),
     FOREIGN KEY (chain, network) REFERENCES network (chain, network)
+);
+
+-- `rpc::Router` of a network: each method with rows here is spread round
+-- robin over those endpoints; every other method goes to the cluster of all
+-- the network's endpoints.
+CREATE TABLE network_endpoint_route (
+    endpoint_id INTEGER NOT NULL REFERENCES network_endpoint (id) ON DELETE CASCADE,
+    method      TEXT    NOT NULL,
+    PRIMARY KEY (endpoint_id, method)
 ) WITHOUT ROWID;
 
 -- One trigger (pipes): its selector, filter, check and action as JSON, the

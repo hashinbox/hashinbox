@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{NetworkAsset, NetworkIndex};
+use super::{Endpoint, NetworkAsset, NetworkIndex, Route, endpoint};
 
 /// The chain and network a wallet, address, or transaction belongs to. It
 /// always ships as one nested object, never as two sibling fields.
@@ -30,7 +30,7 @@ impl From<base::Network> for NetworkName {
 }
 
 /// One network as stored: its `network` row, its `network_asset` rows, its
-/// `network_endpoint` nodes and its `network_index` row (`None`: not
+/// `network_endpoint` nodes and their routes, and its `network_index` row (`None`: not
 /// indexed); and the node's tip asked now (`tip_live`, the stored `tip`
 /// until a caller that asked sets it; `tip_error`, why asking failed).
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
@@ -69,9 +69,11 @@ pub(crate) struct Network {
     pub(crate) settings: Value,
     /// Its native currency and tokens.
     pub(crate) assets: Vec<NetworkAsset>,
-    /// Its node URLs as stored, in failover order.
-    #[schema(value_type = Vec<String>)]
-    pub(crate) endpoints: Vec<rpc::Endpoint>,
+    /// Its nodes as stored, in failover order.
+    pub(crate) endpoints: Vec<Endpoint>,
+    /// Its routed methods, each over its own nodes; every other method goes
+    /// to all of them.
+    pub(crate) routes: Vec<Route>,
     /// Its indexing; always present, null: not indexed.
     #[schema(required)]
     pub(crate) index: Option<NetworkIndex>,
@@ -111,7 +113,7 @@ impl From<&Network> for base::NetworkConfig {
             explorer_transaction: network.explorer_transaction.clone(),
             settings: network.settings.clone(),
             assets: network.assets.iter().map(Into::into).collect(),
-            endpoints: network.endpoints.clone(),
+            endpoints: endpoint::urls(&network.endpoints),
         }
     }
 }
@@ -123,7 +125,7 @@ pub(crate) mod db {
     use anyhow::Context as _;
     use diesel::{prelude::*, sqlite::Sqlite};
 
-    use crate::models::{endpoint, network_asset, network_index, schema::network, uint};
+    use crate::models::{endpoint_route, network_asset, network_index, schema::network, uint};
 
     /// One `network` row as the file holds it.
     #[derive(Queryable, Selectable)]
@@ -164,6 +166,7 @@ pub(crate) mod db {
                 settings,
                 assets: Vec::new(),
                 endpoints: Vec::new(),
+                routes: Vec::new(),
                 index: None,
                 index_job_reason: None,
                 tip_live: None,
@@ -186,6 +189,7 @@ pub(crate) mod db {
             .load(connection)?;
         let mut assets = network_asset::db::find_all(connection)?;
         let endpoints = endpoint::db::find_all(connection)?;
+        let routes = endpoint_route::db::find_all(connection)?;
         let mut indexes = network_index::db::find_all(connection)?;
         let mut networks = Vec::new();
         for row in rows {
@@ -193,6 +197,7 @@ pub(crate) mod db {
             let key = network.key();
             network.assets = assets.remove(&key).unwrap_or_default();
             network.endpoints = endpoints.nodes(&key);
+            network.routes = routes.routes(&key);
             network.index = indexes.remove(&key);
             network.tip_live = network.index.as_ref().and_then(|index| index.tip);
             networks.push(network);

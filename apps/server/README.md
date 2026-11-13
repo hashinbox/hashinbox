@@ -22,7 +22,8 @@ token; optional only for a loopback bind), `--tls-terminated-upstream`
 `migrate` executes `init.sql` then `seed.sql` on the (new) file; there are no
 migrations. `serve` only opens it. Networks are rows: `network` (facts and
 `settings`, the chain's own knobs as JSON), `network_asset`, `network_endpoint`
-(see `seed.sql`). The server indexes exactly the networks with a
+(one row per node, see `seed.sql`) and `network_endpoint_route` (methods sent
+round robin over some of a network's nodes, `rpc::Router`). The server indexes exactly the networks with a
 `network_index` row and adds one for every `enabled` network at start; each is
 built by its chain (`TryFrom<&base::NetworkConfig>`), and one that fails
 verification stops the start.

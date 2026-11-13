@@ -161,11 +161,16 @@ async fn seed(db: &crate::db::Db, network: NetworkConfig, urls: Vec<String>) {
             .bind::<Integer, _>(i32::try_from(asset.decimals)?)
             .execute(connection)?;
         }
-        diesel::sql_query("INSERT INTO network_endpoint (chain, network, nodes) VALUES (?, ?, ?)")
+        for (position, url) in urls.iter().enumerate() {
+            diesel::sql_query(
+                "INSERT INTO network_endpoint (chain, network, url, position) VALUES (?, ?, ?, ?)",
+            )
             .bind::<Text, _>(&chain)
             .bind::<Text, _>(&name)
-            .bind::<Text, _>(serde_json::to_string(&urls)?)
+            .bind::<Text, _>(url)
+            .bind::<BigInt, _>(i64::try_from(position)?)
             .execute(connection)?;
+        }
         Ok(())
     })
     .await

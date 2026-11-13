@@ -189,10 +189,19 @@ diesel::table! {
 }
 
 diesel::table! {
-    network_endpoint (chain, network) {
+    network_endpoint (id) {
+        id -> BigInt,
         chain -> Text,
         network -> Text,
-        nodes -> Text,
+        url -> Text,
+        position -> BigInt,
+    }
+}
+
+diesel::table! {
+    network_endpoint_route (endpoint_id, method) {
+        endpoint_id -> BigInt,
+        method -> Text,
     }
 }
 
@@ -231,6 +240,7 @@ diesel::joinable!(leg -> transactions (transaction));
 diesel::joinable!(leg -> block (block));
 diesel::joinable!(wallet_index -> block (indexed_at));
 diesel::joinable!(wallet_index -> wallet (wallet_id));
+diesel::joinable!(network_endpoint_route -> network_endpoint (endpoint_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     block,
@@ -239,5 +249,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     wallet,
     wallet_index,
     triggers,
-    trigger_run
+    trigger_run,
+    network_endpoint,
+    network_endpoint_route
 );

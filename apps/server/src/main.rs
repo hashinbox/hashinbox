@@ -112,7 +112,10 @@ pub(crate) async fn boot(
         if let Some(client) = connect(config.clone()).await? {
             builder = builder.with_client(config.network.clone(), client);
         }
-        builder = builder.with_network_config(config);
+        let nodes = models::endpoint_route::nodes(&network.endpoints, &network.routes)?;
+        builder = builder
+            .with_nodes(config.network.clone(), nodes)
+            .with_network_config(config);
     }
     let payments = builder
         .with_storage(base::Storage {

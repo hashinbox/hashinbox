@@ -16,6 +16,7 @@ use base::{
     TransactionState,
 };
 use http_body_util::BodyExt as _;
+use rpc::Client as _;
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
@@ -316,15 +317,151 @@ async fn wallets_balance_legs_and_sends() {
     let nodes = serde_json::from_value(stored.clone()).unwrap();
     let nodes = crate::models::RpcEndpoints::new(nodes).unwrap();
     let network = base::Network::new(base::Chain::new("bitcoin"), "regtest");
-    db.write(move |connection| crate::models::endpoint::db::upsert(connection, &network, &nodes))
+    db.write(move |connection| crate::models::endpoint::db::replace(connection, &network, &nodes))
         .await
         .unwrap();
+    let urls = |nodes: &Value| -> Value {
+        nodes
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["url"].clone())
+            .collect()
+    };
     let (status, listed) = call(&router, Method::GET, endpoints, None).await;
-    assert_eq!((status, &listed["endpoints"]), (StatusCode::OK, &stored));
+    assert_eq!(
+        (status, urls(&listed["endpoints"])),
+        (StatusCode::OK, stored.clone())
+    );
     let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
-    assert_eq!(networks["networks"][0]["endpoints"], stored);
-    let (status, _) = call(&router, Method::DELETE, &format!("{endpoints}/2"), None).await;
+    assert_eq!(urls(&networks["networks"][0]["endpoints"]), stored);
+    let (status, _) = call(&router, Method::DELETE, &format!("{endpoints}/99"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A JSON-RPC node on loopback answering every call with `answer`.
+async fn answering(answer: u64) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let reply = move |axum::Json(call): axum::Json<Value>| async move {
+        axum::Json(json!({ "jsonrpc": "2.0", "id": call["id"], "result": answer }))
+    };
+    let node = Router::new().route("/", axum::routing::post(reply));
+    tokio::spawn(async move { axum::serve(listener, node).await });
+    url
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
+    let (db, _directory) = database().await;
+    let payments = payments(&db, Arc::new(Script::default())).await;
+    let state = Arc::new(AppState {
+        payments: payments.clone(),
+        db: db.clone(),
+        queue: crate::usecase::tasks::queue(db.clone()),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+    });
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("an address"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        None,
+        http_server::RequestLimits::default(),
+    );
+    let router = api::router(state, &config).expect("a router");
+    let ask = |method: &'static str| {
+        let payments = payments.clone();
+        async move {
+            let client = payments.client(&network()).unwrap();
+            let raw = client
+                .request(rpc::Request::new(method, json!([])))
+                .await
+                .unwrap();
+            raw.deserialize::<u64>().unwrap()
+        }
+    };
+    let endpoints = "/v1/networks/bitcoin/regtest/endpoints";
+    let routes = "/v1/networks/bitcoin/regtest/routes";
+    let nodes = [answering(0).await, answering(1).await, answering(2).await];
+    let (status, put) = call(
+        &router,
+        Method::PUT,
+        endpoints,
+        Some(json!({ "endpoints": nodes })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    let ids: Vec<i64> = put["endpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(put["endpoints"][1]["url"], json!(nodes[1]));
+    assert_eq!(ask("m").await, 0, "unrouted: the cluster's primary");
+
+    let route = json!({ "routes": [{ "method": "m", "endpoint_ids": [ids[1], ids[2]] }] });
+    let (status, put) = call(&router, Method::PUT, routes, Some(route.clone())).await;
+    assert_eq!((status, &put["routes"]), (StatusCode::OK, &route["routes"]));
+    let mut answers = Vec::new();
+    for _ in 0..4 {
+        answers.push(ask("m").await);
+    }
+    assert_eq!(answers, [1, 2, 1, 2]);
+    assert_eq!((ask("n").await, ask("n").await), (0, 0));
+
+    for bad in [
+        json!([{ "method": "", "endpoint_ids": [ids[0]] }]),
+        json!([{ "method": "m", "endpoint_ids": [] }]),
+        json!([{ "method": "m", "endpoint_ids": [ids[0], ids[0]] }]),
+        json!([{ "method": "m", "endpoint_ids": [999] }]),
+        json!([{ "method": "m", "endpoint_ids": [ids[0]] }, { "method": "m", "endpoint_ids": [ids[1]] }]),
+    ] {
+        let (status, _) = call(&router, Method::PUT, routes, Some(json!({ "routes": bad }))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let (_, listed) = call(&router, Method::GET, routes, None).await;
+    assert_eq!(
+        listed["routes"], route["routes"],
+        "a refusal changes nothing"
+    );
+
+    let reordered = json!({ "endpoints": [nodes[2], nodes[0], nodes[1]] });
+    let (status, put) = call(&router, Method::PUT, endpoints, Some(reordered)).await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    assert_eq!(
+        put["endpoints"][0]["id"],
+        json!(ids[2]),
+        "a kept URL keeps its id"
+    );
+    let (_, listed) = call(&router, Method::GET, routes, None).await;
+    assert_eq!(listed["routes"][0]["endpoint_ids"], json!([ids[2], ids[1]]));
+
+    let (status, _) = call(
+        &router,
+        Method::DELETE,
+        &format!("{endpoints}/{}", ids[1]),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, listed) = call(&router, Method::GET, routes, None).await;
+    assert_eq!(listed["routes"][0]["endpoint_ids"], json!([ids[2]]));
+    assert_eq!((ask("m").await, ask("m").await), (2, 2));
+    let (status, _) = call(
+        &router,
+        Method::DELETE,
+        &format!("{endpoints}/{}", ids[2]),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
+    assert_eq!(
+        networks["networks"][0]["routes"],
+        json!([]),
+        "removing a node removes its routes"
+    );
+    assert_eq!(ask("m").await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

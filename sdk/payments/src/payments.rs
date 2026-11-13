@@ -12,6 +12,84 @@ use base::{
 use crypto::SecretBytes;
 use rpc::{Retry, Swap};
 
+/// A network's nodes: its endpoints in failover order, clustered by tip, and
+/// the methods spread round robin over some of them instead
+/// ([`rpc::Router`]). Without routes there is no router.
+///
+/// ```
+/// # fn nodes() -> anyhow::Result<payments::Nodes> {
+/// let endpoints = vec![rpc::Endpoint::new("https://a.invalid/"), rpc::Endpoint::new("https://b.invalid/")];
+/// payments::Nodes::new(endpoints).route("getBlock", [0, 1])
+/// # }
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Nodes {
+    endpoints: Vec<rpc::Endpoint>,
+    routes: Vec<(String, Vec<usize>)>,
+}
+
+impl Nodes {
+    /// `endpoints` in failover order, every method to their cluster.
+    #[must_use]
+    pub fn new(endpoints: Vec<rpc::Endpoint>) -> Self {
+        Self {
+            endpoints,
+            routes: Vec::new(),
+        }
+    }
+
+    /// The same, `method` round robin over the endpoints at `positions`.
+    ///
+    /// # Errors
+    ///
+    /// No positions, or one past the endpoints.
+    pub fn route(
+        mut self,
+        method: impl Into<String>,
+        positions: impl IntoIterator<Item = usize>,
+    ) -> anyhow::Result<Self> {
+        let method = method.into();
+        let positions: Vec<usize> = positions.into_iter().collect();
+        ensure!(!positions.is_empty(), "route {method} names no endpoint");
+        ensure!(
+            positions
+                .iter()
+                .all(|&position| position < self.endpoints.len()),
+            "route {method} names no such endpoint"
+        );
+        self.routes.push((method, positions));
+        Ok(self)
+    }
+
+    /// One transport over every node, primary chosen by `config`'s tip, each
+    /// routed method round robin over its nodes instead, transport failures
+    /// retried; and each node's counters, which a node shares between the
+    /// cluster and its routes. Asks no node.
+    fn client(
+        &self,
+        config: &Arc<dyn ServiceFactory>,
+    ) -> anyhow::Result<(Arc<dyn rpc::Client>, Vec<rpc::Statistics>)> {
+        let mut nodes: Vec<Arc<dyn rpc::Client>> = Vec::new();
+        let mut statistics = Vec::new();
+        for endpoint in &self.endpoints {
+            // No sink yet: nothing reads RPC failure events.
+            let node = rpc::node(endpoint, Default::default())?;
+            statistics.push(node.statistics());
+            nodes.push(Arc::new(node));
+        }
+        let cluster = config.info(nodes.clone())?;
+        if self.routes.is_empty() {
+            return Ok((Arc::new(Retry::new(cluster)), statistics));
+        }
+        let mut router = rpc::Router::new(cluster);
+        for (method, positions) in &self.routes {
+            let clients = positions.iter().map(|&position| nodes[position].clone());
+            router = router.route([method.as_str()], clients.collect())?;
+        }
+        Ok((Arc::new(Retry::new(router)), statistics))
+    }
+}
+
 /// Builds a registered chain's configuration from a [`NetworkConfig`].
 type Parser = Box<dyn Fn(&NetworkConfig) -> anyhow::Result<Box<dyn ServiceFactory>> + Send + Sync>;
 
@@ -80,7 +158,7 @@ impl Payments {
     }
 
     /// The transport every part of `network` reaches its nodes through;
-    /// [`Self::set_endpoints`] moves it to other nodes.
+    /// [`Self::connect`] moves it to other nodes.
     ///
     /// # Errors
     ///
@@ -109,19 +187,15 @@ impl Payments {
     }
 
     /// Sends every later call of `network` (indexer, factory, wallets,
-    /// broadcaster) to a cluster of `endpoints`; asks no node.
+    /// broadcaster) to `nodes`; asks no node.
     ///
     /// # Errors
     ///
     /// `Unsupported` for a network that is not configured; no or an invalid
     /// endpoint.
-    pub fn set_endpoints(
-        &self,
-        network: &Network,
-        endpoints: &[rpc::Endpoint],
-    ) -> anyhow::Result<()> {
+    pub fn connect(&self, network: &Network, nodes: &Nodes) -> anyhow::Result<()> {
         let config = self.configs.get(network).ok_or_else(unsupported)?;
-        let (transport, statistics) = cluster(config, endpoints)?;
+        let (transport, statistics) = nodes.client(config)?;
         self.client(network)?.replace(transport, statistics);
         Ok(())
     }
@@ -257,6 +331,7 @@ pub struct Builder {
     configs: Vec<NetworkConfig>,
     networks: Vec<(Box<dyn ServiceFactory>, Vec<rpc::Endpoint>)>,
     clients: BTreeMap<Network, Arc<dyn rpc::Client>>,
+    nodes: BTreeMap<Network, Nodes>,
     storage: Option<Storage>,
 }
 
@@ -301,6 +376,14 @@ impl Builder {
         client: Arc<dyn rpc::Client>,
     ) -> Self {
         self.clients.insert(network.into(), client);
+        self
+    }
+
+    /// Reaches `network` through `nodes` instead of its configured
+    /// endpoints; ignored where a client is given.
+    #[must_use]
+    pub fn with_nodes(mut self, network: impl Into<Network>, nodes: Nodes) -> Self {
+        self.nodes.insert(network.into(), nodes);
         self
     }
 
@@ -355,6 +438,7 @@ impl Builder {
         }
         configs.extend(self.networks);
         let mut given = self.clients;
+        let mut nodes = self.nodes;
         for network in given.keys() {
             ensure!(
                 payments.failures.contains_key(network)
@@ -377,10 +461,10 @@ impl Builder {
                 "network {label} is configured twice"
             );
             let given = given.remove(&network);
-            match open(&config, &endpoints, given, &storage)
-                .await
-                .context(label)
-            {
+            let nodes = nodes
+                .remove(&network)
+                .unwrap_or_else(|| Nodes::new(endpoints));
+            match open(&config, &nodes, given, &storage).await.context(label) {
                 Ok((service, client)) => {
                     payments.services.insert(network.clone(), service);
                     payments.clients.insert(network.clone(), client);
@@ -395,39 +479,20 @@ impl Builder {
     }
 }
 
-/// `config` built over a [`Swap`] of `given`, or of a cluster of `endpoints`.
+/// `config` built over a [`Swap`] of `given`, or of `nodes`.
 async fn open(
     config: &Arc<dyn ServiceFactory>,
-    endpoints: &[rpc::Endpoint],
+    nodes: &Nodes,
     given: Option<Arc<dyn rpc::Client>>,
     storage: &Storage,
 ) -> anyhow::Result<(Service, Arc<Swap>)> {
     let (transport, statistics) = match given {
         Some(client) => (client, Vec::new()),
-        None => cluster(config, endpoints)?,
+        None => nodes.client(config)?,
     };
     let client = Arc::new(Swap::new(transport, statistics));
     let service = config.build(storage, client.clone()).await?;
     Ok((service, client))
-}
-
-/// One transport over every node of `endpoints`, primary chosen by the
-/// chain's tip and transport failures retried, and each node's counters;
-/// asks no node.
-fn cluster(
-    config: &Arc<dyn ServiceFactory>,
-    endpoints: &[rpc::Endpoint],
-) -> anyhow::Result<(Arc<dyn rpc::Client>, Vec<rpc::Statistics>)> {
-    let mut nodes: Vec<Arc<dyn rpc::Client>> = Vec::new();
-    let mut statistics = Vec::new();
-    for endpoint in endpoints {
-        // No sink yet: nothing reads RPC failure events.
-        let node = rpc::node(endpoint, Default::default())?;
-        statistics.push(node.statistics());
-        nodes.push(Arc::new(node));
-    }
-    let cluster = config.info(nodes)?;
-    Ok((Arc::new(Retry::new(cluster)), statistics))
 }
 
 impl fmt::Debug for Builder {

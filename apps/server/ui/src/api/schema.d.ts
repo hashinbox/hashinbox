@@ -204,12 +204,12 @@ export interface paths {
         };
         /**
          * List a network's RPC nodes
-         * @description Its stored node URLs in failover order, as `PUT` takes them.
+         * @description Its stored nodes in failover order: each one's id and URL, as `PUT` takes them.
          */
         get: operations["list_network_endpoints"];
         /**
          * Replace a network's RPC nodes
-         * @description Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. Each node is asked its chain and tip once, before storing.
+         * @description Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them, failing over in order; calls already sent finish on the node they reached. Each node is asked its chain and tip once, before storing. A URL already stored keeps its id and routes; one left out is removed with its routes.
          */
         put: operations["replace_network_endpoints"];
         /**
@@ -223,7 +223,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/networks/{chain}/{network}/endpoints/{index}": {
+    "/v1/networks/{chain}/{network}/endpoints/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -235,9 +235,33 @@ export interface paths {
         post?: never;
         /**
          * Remove one RPC node of a network
-         * @description Removes the node at `index`, stores the rest and uses them from now on. A network's last node cannot be removed.
+         * @description Removes the node `id` and its routes, stores the rest and uses them from now on. A network's last node cannot be removed.
          */
         delete: operations["remove_network_endpoint"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/networks/{chain}/{network}/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a network's routed methods
+         * @description Each routed method and the nodes taking turns serving it, round robin. Every other method goes to the network's cluster.
+         */
+        get: operations["list_network_routes"];
+        /**
+         * Replace a network's routed methods
+         * @description Stores the routes, then sends each routed method round robin over its nodes, and every other method to the cluster. A routed call failing retryably moves to the next node, then to the cluster. No node is asked.
+         */
+        put: operations["replace_network_routes"];
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -642,7 +666,7 @@ export interface components {
         };
         /**
          * @description One network as stored: its `network` row, its `network_asset` rows, its
-         *     `network_endpoint` nodes and its `network_index` row (`None`: not
+         *     `network_endpoint` nodes and their routes, and its `network_index` row (`None`: not
          *     indexed); and the node's tip asked now (`tip_live`, the stored `tip`
          *     until a caller that asked sets it; `tip_error`, why asking failed).
          */
@@ -668,8 +692,8 @@ export interface components {
             confirmations: number;
             /** @description Whether the server starts indexing it. */
             enabled: boolean;
-            /** @description Its node URLs as stored, in failover order. */
-            endpoints: string[];
+            /** @description Its nodes as stored, in failover order. */
+            endpoints: components["schemas"]["RpcNode"][];
             /**
              * @description An address's explorer page, `{address}` filled in; always present,
              *     null: none.
@@ -694,6 +718,11 @@ export interface components {
             max_history_days: number | null;
             /** @description Network name. */
             network: string;
+            /**
+             * @description Its routed methods, each over its own nodes; every other method goes
+             *     to all of them.
+             */
+            routes: components["schemas"]["RpcRoute"][];
             /** @description The chain's own knobs; an absent key is the chain's default. */
             settings: Record<string, never>;
             /** @description Whether its coins are test coins. */
@@ -986,11 +1015,8 @@ export interface components {
         NetworkAssetKind: "native" | "contract";
         /** @description A network's nodes. */
         NetworkEndpoints: {
-            /**
-             * @description Its node URLs as stored, in failover order; a node's index is its
-             *     position here.
-             */
-            endpoints: string[];
+            /** @description Its nodes as stored, in failover order. */
+            endpoints: components["schemas"]["RpcNode"][];
             network: components["schemas"]["Network"];
         };
         /** @description The networks a change touched. */
@@ -1064,6 +1090,12 @@ export interface components {
             endpoint: string;
             network: string;
         };
+        /** @description A network's routed methods. */
+        NetworkRoutes: {
+            network: components["schemas"]["Network"];
+            /** @description By method; each one's nodes in failover order. */
+            routes: components["schemas"]["RpcRoute"][];
+        };
         /** @description `GET /v1/networks/{chain}/{network}/transactions`: a page of transactions. */
         NetworkTransactions: {
             /**
@@ -1086,15 +1118,40 @@ export interface components {
             /** @description Nodes to append, each after its network's current ones, in order. */
             nodes: components["schemas"]["NetworkNode"][];
         };
+        /** @description One stored node of a network. */
+        RpcNode: {
+            /**
+             * Format: int64
+             * @description Its id: what a route and removal name.
+             */
+            id: number;
+            /** @description Its URL as stored. */
+            url: string;
+        };
         /** @description `POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body. */
         RpcNodes: {
             /**
-             * @description One to 16 node URLs, in failover order. A URL carries everything:
+             * @description One to 16 distinct node URLs, in failover order. A URL carries everything:
              *     userinfo (HTTP Basic), query keys, a key in the path,
              *     `header.<Name>=value` parameters sent as headers, and `rpc.` settings
              *     (`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`).
              */
             endpoints: string[];
+        };
+        /** @description One method and the endpoints taking turns serving it. */
+        RpcRoute: {
+            /** @description The network's endpoints taking turns, by id. */
+            endpoint_ids: number[];
+            /** @description The JSON-RPC method, exactly as sent, e.g. `getBlock`. */
+            method: string;
+        };
+        /** @description `PUT /v1/networks/{chain}/{network}/routes` body. */
+        RpcRoutes: {
+            /**
+             * @description Every route of the network; empty: none. A method appears once, over
+             *     one or more of the network's node ids, each once.
+             */
+            routes: components["schemas"]["RpcRoute"][];
         };
         /** @description One send job of a run. */
         RunJob: {
@@ -2203,8 +2260,8 @@ export interface operations {
             path: {
                 chain: string;
                 network: string;
-                /** @description The node's `index` in its network's `endpoints`. */
-                index: number;
+                /** @description The node's `id`, as `endpoints` lists it. */
+                id: number;
             };
             cookie?: never;
         };
@@ -2247,6 +2304,123 @@ export interface operations {
                 };
             };
             /** @description The nodes could not be stored */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_network_routes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The network's routes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkRoutes"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Network is not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The routes could not be read */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    replace_network_routes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RpcRoutes"];
+            };
+        };
+        responses: {
+            /** @description Routes stored and in use */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkRoutes"];
+                };
+            };
+            /** @description An empty method, a method routed twice, or a node that is missing, repeated or of another network */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Network is not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The routes could not be stored */
             503: {
                 headers: {
                     [name: string]: unknown;

@@ -8,6 +8,7 @@ mod health;
 mod jobs;
 mod network_block_transactions;
 mod network_blocks;
+mod network_endpoint_routes;
 mod network_endpoints;
 mod network_transactions;
 mod networks;
@@ -118,6 +119,7 @@ fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
         .merge(networks::routes())
         .merge(network_blocks::routes())
         .merge(network_endpoints::routes())
+        .merge(network_endpoint_routes::routes())
         .merge(network_block_transactions::routes())
         .merge(network_transactions::routes())
         .merge(networks_tip::routes())

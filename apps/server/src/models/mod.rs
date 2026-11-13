@@ -53,6 +53,7 @@ macro_rules! collection {
 mod asset;
 pub(crate) mod block;
 pub(crate) mod endpoint;
+pub(crate) mod endpoint_route;
 mod json;
 pub(crate) mod leg;
 pub(crate) mod network;
@@ -68,7 +69,8 @@ pub(crate) mod wallet_index;
 
 pub(crate) use asset::Asset;
 pub(crate) use block::Block;
-pub(crate) use endpoint::RpcEndpoints;
+pub(crate) use endpoint::{Endpoint, RpcEndpoints};
+pub(crate) use endpoint_route::{Route, Routes};
 pub(crate) use json::Json;
 pub(crate) use leg::Leg;
 pub(crate) use network::{Network, NetworkName};

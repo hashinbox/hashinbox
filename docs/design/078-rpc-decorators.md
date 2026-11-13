@@ -1,8 +1,8 @@
 # 078: `packages/rpc` as small decorators
 
-Status: steps 1–3 and 5–9 of section 8 are built; step 4 is dropped (see
-"Built, and where it deviates"); steps 10–11 (payments composition API,
-server routes) are open. Paths are under `packages/rpc/` unless noted. Line
+Status: steps 1–3, 5–9 and 11 of section 8 are built (11 as in "apps/server:
+routes as data"); step 4 is dropped (see "Built, and where it deviates");
+step 10 (the split payments composition API) is open. Paths are under `packages/rpc/` unless noted. Line
 numbers are as of `7e1e9a9`, plus the uncommitted `rpc.max_batch` diff,
 which this design treats as current.
 
@@ -443,65 +443,91 @@ impl Payments {
 `base::Height` stays `fn(&rpc::Http)`: the cluster's probe reaches the
 transport through the node type, `node.inner().inner()` (built that way).
 
-### `apps/server`: routes as data
+### `apps/server`: routes as data (built)
 
-Storage goes on the same row as the nodes, because the routes name positions
-in that list and must change atomically with it:
+Built differently from the first plan (a JSON `routes` column naming list
+positions): nodes are rows with ids, and
+routes name ids, so reordering never remaps a route and removing a node
+removes it from its routes (no removal guard).
 
 ```sql
 CREATE TABLE network_endpoint (
-    chain   TEXT NOT NULL,
-    network TEXT NOT NULL,
-    nodes   TEXT NOT NULL,                -- JSON: ["https://…?rpc.max_batch=10", …]
-    routes  TEXT NOT NULL DEFAULT '[]',   -- JSON: [{"methods":["getProgramAccounts"],"nodes":[0,1]}]
-    …
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain    TEXT    NOT NULL,
+    network  TEXT    NOT NULL,
+    url      TEXT    NOT NULL,
+    position INTEGER NOT NULL,           -- failover order
+    UNIQUE (chain, network, url),
+    FOREIGN KEY (chain, network) REFERENCES network (chain, network)
+);
+CREATE TABLE network_endpoint_route (    -- room for more params later
+    endpoint_id INTEGER NOT NULL REFERENCES network_endpoint (id) ON DELETE CASCADE,
+    method      TEXT    NOT NULL,
+    PRIMARY KEY (endpoint_id, method)
+) WITHOUT ROWID;
 ```
 
-An empty `routes` list is the default preset, with no `Router` layer. `seed.sql`
-seeds `[]`.
+A method with route rows goes round robin over those endpoints; every other
+method goes to the tip-ranked cluster of all the network's endpoints.
 
-Model (`src/models/endpoint.rs`), which owns its queries and its composition:
+- `payments::Route { method, endpoints: Vec<usize> }` (positions, no DB ids).
+  `set_endpoints(network, endpoints, routes)` and `Builder::with_routes`.
+  `cluster()` builds one `Arc`'d node per endpoint, shared by
+  `factory.info(nodes)` and every route, then
+  `Router::new(cluster).route([method], nodes)?` per route, then `Retry`,
+  then `Swap`. No routes: no `Router` layer.
+- Models: `models/endpoint.rs` (`Endpoint {id, url}`, `RpcEndpoints`,
+  `db::replace` keeps a stored URL's id), `models/endpoint_route.rs`
+  (`Route {method, endpoint_ids}`, `Routes::new` validation, `db::replace`).
+  `usecase/endpoints.rs::install` reads both and calls `set_endpoints`;
+  `boot` passes them to `with_routes`.
+- API: `GET …/endpoints` gives `{network, endpoints: [{id, url}]}`;
+  `DELETE …/endpoints/{id}`; `GET`/`PUT …/routes` with
+  `{routes: [{method, endpoint_ids}]}`. `/v1/networks` items carry both.
+- UI: `pages/networks/_components/routes.tsx`, under the node panel.
 
-```rust
-pub(crate) struct RpcRoute { methods: Vec<String>, nodes: Vec<usize> }
-pub(crate) struct RpcEndpoints { nodes: Vec<rpc::Endpoint>, routes: Vec<RpcRoute> }
+Migration of an existing file (applied to `.data/payment.db`):
 
-impl RpcEndpoints {
-    /// Checks nodes as today, and each route: methods and nodes non-empty,
-    /// every index < nodes.len(), no method in two routes.
-    pub(crate) fn new(nodes: Vec<rpc::Endpoint>, routes: Vec<RpcRoute>) -> Result<Self, String>;
+```sql
+-- network_endpoint: one JSON list per network -> one row per node, plus
+-- network_endpoint_route. Every other table and row is left as it is.
+-- Run: sqlite3 -bail payment.db < 079-endpoint-rows.sql
+BEGIN IMMEDIATE;
 
-    /// Builds and installs the network's stack; asks no node.
-    pub(crate) fn install(&self, payments: &Payments, network: &Network) -> anyhow::Result<()> {
-        let nodes = payments.nodes(network, &self.nodes)?;
-        let cluster = payments.cluster(network, nodes.clone())?;
-        if self.routes.is_empty() {
-            return payments.install(network, cluster, &nodes);
-        }
-        let mut router = rpc::Router::new(cluster);
-        for route in &self.routes {
-            let clients = route.nodes.iter().map(|&i| Arc::new(nodes[i].clone()) as Arc<dyn rpc::Client>).collect();
-            router = router.route(route.methods.clone(), clients)?;
-        }
-        payments.install(network, router, &nodes)
-    }
-}
+CREATE TABLE network_endpoint_new (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    chain    TEXT    NOT NULL,
+    network  TEXT    NOT NULL,
+    url      TEXT    NOT NULL,
+    position INTEGER NOT NULL,
+    UNIQUE (chain, network, url),
+    FOREIGN KEY (chain, network) REFERENCES network (chain, network)
+);
+
+-- Each list in order: element i becomes position i.
+INSERT INTO network_endpoint_new (chain, network, url, position)
+SELECT e.chain, e.network, node.value, node.key
+FROM network_endpoint AS e, json_each(e.nodes) AS node
+ORDER BY e.chain, e.network, node.key;
+
+-- Every listed node landed, or the CHECK aborts (and -bail rolls back).
+CREATE TEMP TABLE copied (ok INTEGER NOT NULL CHECK (ok));
+INSERT INTO copied
+SELECT (SELECT count(*) FROM network_endpoint_new)
+     = (SELECT coalesce(sum(json_array_length(nodes)), 0) FROM network_endpoint);
+DROP TABLE copied;
+
+DROP TABLE network_endpoint;
+ALTER TABLE network_endpoint_new RENAME TO network_endpoint;
+
+CREATE TABLE network_endpoint_route (
+    endpoint_id INTEGER NOT NULL REFERENCES network_endpoint (id) ON DELETE CASCADE,
+    method      TEXT    NOT NULL,
+    PRIMARY KEY (endpoint_id, method)
+) WITHOUT ROWID;
+
+COMMIT;
 ```
-
-Callers: `api/network_endpoints.rs:373` `install()` and the new routes
-handler call `RpcEndpoints::install`. After `Payments::build`, `boot`
-(`src/main.rs:95`) calls it for every network that has routes. The `Connect`
-seam that tests use (`src/main.rs:37-44`) is unchanged.
-
-API and UI surface:
-
-| Route | Change |
-|---|---|
-| `GET …/{chain}/{network}/endpoints` | Response gains `routes: [{methods, nodes}]`. `RpcNode` keeps `timeout_ms`, … (read from the URL) and gains `max_batch`. |
-| `PUT …/{chain}/{network}/routes` | New. Body is `[{methods, nodes}]`. Validate, store, install. No node is asked. |
-| `POST`/`PUT …/endpoints` | Body items become URL strings only (`DetailedEndpoint` goes away). A list that leaves a route pointing past its end is refused. |
-| `DELETE …/endpoints/{index}` | Refused while a route names `index`: "node 1 is routed (getProgramAccounts); change routes first". |
-| UI `pages/networks/_components/nodes.tsx` | A "Routes" list: methods, then node chips; one edit dialog. |
 
 ## 6. File layout after
 

@@ -2,4 +2,4 @@
 
 mod payments;
 
-pub use payments::{Builder, Payments};
+pub use payments::{Builder, Nodes, Payments};

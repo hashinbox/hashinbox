@@ -1,9 +1,10 @@
 //! `/v1/networks/{chain}/{network}/endpoints`: a network's RPC nodes, and
-//! changing them while the server runs: add, replace the list, or remove
-//! one; `POST /v1/networks/endpoints` adds nodes to several networks at
-//! once. A node is one URL; what a provider needs (keys, headers) is written
-//! into it. A change is stored, then every later call of the network goes to
-//! the new list.
+//! changing them while the server runs: add, replace the list (which also
+//! reorders it), or remove one by id; `POST /v1/networks/endpoints` adds
+//! nodes to several networks at once. A node is one URL; what a provider
+//! needs (keys, headers) is written into it. A change is stored, then every
+//! later call of the network goes to the new list and its routes. A node
+//! kept by URL keeps its id and routes; a removed one leaves its routes.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -18,7 +19,8 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 use super::{Error, ErrorBody, networks::NetworkPath};
 use crate::{
     api::AppState,
-    models::{NetworkName, RpcEndpoints, endpoint},
+    models::{Endpoint, NetworkName, RpcEndpoints, endpoint},
+    usecase::endpoints::connect,
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -33,10 +35,19 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 #[schema(as = NetworkEndpoints)]
 struct EndpointsResponse {
     network: NetworkName,
-    /// Its node URLs as stored, in failover order; a node's index is its
-    /// position here.
-    #[schema(value_type = Vec<String>)]
-    endpoints: Vec<rpc::Endpoint>,
+    /// Its nodes as stored, in failover order.
+    endpoints: Vec<Endpoint>,
+}
+
+impl EndpointsResponse {
+    /// `network`'s stored nodes, after putting them and its routes in use.
+    async fn connected(state: &AppState, network: base::Network) -> Result<Self, Error> {
+        let (endpoints, _) = connect(&state.db, &state.payments, &network).await?;
+        Ok(Self {
+            network: network.into(),
+            endpoints,
+        })
+    }
 }
 
 #[utoipa::path(
@@ -44,7 +55,8 @@ struct EndpointsResponse {
     path = "/v1/networks/{chain}/{network}/endpoints",
     operation_id = "list_network_endpoints",
     summary = "List a network's RPC nodes",
-    description = "Its stored node URLs in failover order, as `PUT` takes them.",
+    description = "Its stored nodes in failover order: each one's id and URL, as `PUT` takes \
+        them.",
     params(NetworkPath),
     security(("bearerAuth" = [])),
     responses(
@@ -67,12 +79,18 @@ async fn list(
     }))
 }
 
+/// `network`'s stored node URLs, in failover order.
+async fn stored(state: &AppState, network: &base::Network) -> Result<Vec<rpc::Endpoint>, Error> {
+    let stored = state.db.read(endpoint::db::find_all).await?;
+    Ok(endpoint::urls(&stored.nodes(network)))
+}
+
 /// `POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body.
 #[derive(Clone, Deserialize, utoipa::ToSchema)]
 #[schema(as = RpcNodes)]
 #[serde(deny_unknown_fields)]
 struct NodesRequest {
-    /// One to 16 node URLs, in failover order. A URL carries everything:
+    /// One to 16 distinct node URLs, in failover order. A URL carries everything:
     /// userinfo (HTTP Basic), query keys, a key in the path,
     /// `header.<Name>=value` parameters sent as headers, and `rpc.` settings
     /// (`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`).
@@ -117,13 +135,13 @@ async fn add(
     if request.endpoints.is_empty() {
         return Err(Error::invalid_request("add 1 to 16 nodes at once"));
     }
-    let mut nodes = state.db.read(endpoint::db::find_all).await?.nodes(&network);
+    let mut nodes = stored(&state, &network).await?;
     let added = request.nodes();
     nodes.extend(added.clone());
     let nodes = RpcEndpoints::new(nodes).map_err(Error::invalid_request)?;
     check(&state, &network, &added).await?;
     store(&state, &network, &nodes).await?;
-    Ok(Json(install(&state, network, &nodes)?))
+    Ok(Json(EndpointsResponse::connected(&state, network).await?))
 }
 
 #[utoipa::path(
@@ -133,7 +151,8 @@ async fn add(
     summary = "Replace a network's RPC nodes",
     description = "Stores the nodes, then sends every later call of the network (indexing, \
         wallets, broadcast) to them, failing over in order; calls already sent finish on the \
-        node they reached. Each node is asked its chain and tip once, before storing.",
+        node they reached. Each node is asked its chain and tip once, before storing. A URL \
+        already stored keeps its id and routes; one left out is removed with its routes.",
     params(NetworkPath),
     request_body = NodesRequest,
     security(("bearerAuth" = [])),
@@ -157,7 +176,7 @@ async fn replace(
     let nodes = RpcEndpoints::new(request.nodes()).map_err(Error::invalid_request)?;
     check(&state, &network, nodes.nodes()).await?;
     store(&state, &network, &nodes).await?;
-    Ok(Json(install(&state, network, &nodes)?))
+    Ok(Json(EndpointsResponse::connected(&state, network).await?))
 }
 
 /// One node to add, and its network.
@@ -226,7 +245,7 @@ async fn add_many(
         added.push((network.clone(), endpoint.clone()));
         lists
             .entry(network.clone())
-            .or_insert_with(|| stored.nodes(&network))
+            .or_insert_with(|| endpoint::urls(&stored.nodes(&network)))
             .push(endpoint);
     }
     let lists = lists
@@ -241,20 +260,20 @@ async fn add_many(
         check(&state, &network, &[endpoint]).await?;
     }
     let kept = lists.clone();
-    // Stored before installed: a restart never forgets a change in use.
+    // Stored before connected: a restart never forgets a change in use.
     state
         .db
         .write(move |connection| {
             for (network, nodes) in &kept {
-                endpoint::db::upsert(connection, network, nodes)?;
+                endpoint::db::replace(connection, network, nodes)?;
             }
             Ok(())
         })
         .await?;
-    let networks = lists
-        .into_iter()
-        .map(|(network, nodes)| install(&state, network, &nodes))
-        .collect::<Result<_, _>>()?;
+    let mut networks = Vec::new();
+    for (network, _) in lists {
+        networks.push(EndpointsResponse::connected(&state, network).await?);
+    }
     Ok(Json(AddManyResponse { networks }))
 }
 
@@ -264,17 +283,17 @@ async fn add_many(
 struct NodePath {
     chain: String,
     network: String,
-    /// The node's `index` in its network's `endpoints`.
-    index: usize,
+    /// The node's `id`, as `endpoints` lists it.
+    id: i64,
 }
 
 #[utoipa::path(
     delete,
-    path = "/v1/networks/{chain}/{network}/endpoints/{index}",
+    path = "/v1/networks/{chain}/{network}/endpoints/{id}",
     operation_id = "remove_network_endpoint",
     summary = "Remove one RPC node of a network",
-    description = "Removes the node at `index`, stores the rest and uses them from now on. A \
-        network's last node cannot be removed.",
+    description = "Removes the node `id` and its routes, stores the rest and uses them from \
+        now on. A network's last node cannot be removed.",
     params(NodePath),
     security(("bearerAuth" = [])),
     responses(
@@ -294,14 +313,14 @@ async fn remove(
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
     state.payments.service(&network)?;
     let mut nodes = state.db.read(endpoint::db::find_all).await?.nodes(&network);
-    if path.index >= nodes.len() {
+    let Some(position) = nodes.iter().position(|node| node.id == path.id) else {
         return Err(Error::not_found("no such node"));
-    }
-    nodes.remove(path.index);
-    let nodes = RpcEndpoints::new(nodes)
+    };
+    nodes.remove(position);
+    let nodes = RpcEndpoints::new(endpoint::urls(&nodes))
         .map_err(|_| Error::invalid_request("a network keeps at least one node"))?;
     store(&state, &network, &nodes).await?;
-    Ok(Json(install(&state, network, &nodes)?))
+    Ok(Json(EndpointsResponse::connected(&state, network).await?))
 }
 
 /// Asks each of `endpoints` which chain it serves and its tip, once, before
@@ -329,23 +348,10 @@ async fn store(
     nodes: &RpcEndpoints,
 ) -> Result<(), Error> {
     let (network, nodes) = (network.clone(), nodes.clone());
-    // Stored before installed: a restart never forgets a change in use.
+    // Stored before connected: a restart never forgets a change in use.
     state
         .db
-        .write(move |connection| endpoint::db::upsert(connection, &network, &nodes))
+        .write(move |connection| endpoint::db::replace(connection, &network, &nodes))
         .await?;
     Ok(())
-}
-
-/// Sends every later call of `network` to a cluster of `nodes`.
-fn install(
-    state: &AppState,
-    network: base::Network,
-    nodes: &RpcEndpoints,
-) -> Result<EndpointsResponse, Error> {
-    state.payments.set_endpoints(&network, nodes.nodes())?;
-    Ok(EndpointsResponse {
-        endpoints: nodes.nodes().to_vec(),
-        network: network.into(),
-    })
 }
