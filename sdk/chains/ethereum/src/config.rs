@@ -40,9 +40,6 @@ pub struct Config {
     /// Blocks the indexer fetches per step; default 100
     /// ([`base::DEFAULT_BATCH`]). Lower it for a node that limits requests.
     pub batch: u64,
-    /// How old a watch's start may be: about what history the nodes keep;
-    /// none: no limit.
-    pub max_history: Option<Duration>,
     /// Blocks a block needs below the tip to count as confirmed: the
     /// confirmed position is `tip - confirmations`; default 12.
     pub confirmations: u64,
@@ -101,7 +98,6 @@ impl Config {
             pending_ttl_ms: settings.pending_ttl_ms,
             interval_ms: settings.interval_ms,
             batch: settings.batch,
-            max_history: None,
             confirmations: 12,
         }
     }
@@ -116,8 +112,8 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// For an invalid network, a zero token
-    /// contract, or contradicting fee limits.
+    /// For an invalid network, a zero token contract, or contradicting fee
+    /// limits.
     pub fn validate(&self) -> anyhow::Result<()> {
         self.native().validate()?;
         ensure!(
@@ -210,7 +206,6 @@ impl TryFrom<&NetworkConfig> for Config {
             pending_ttl_ms: settings.pending_ttl_ms,
             interval_ms: settings.interval_ms,
             batch: settings.batch,
-            max_history: config.max_history,
             confirmations: config.confirmations,
         };
         ensure!(
@@ -285,7 +280,8 @@ impl base::ServiceFactory for Factory {
                 Arc::clone(&storage.indexes),
                 Duration::from_millis(config.interval_ms),
             )
-            .with_batch(config.batch),
+            .with_batch(config.batch)
+            .with_balances(chain.clone()),
         );
         Ok(Service {
             indexer,
@@ -297,8 +293,9 @@ impl base::ServiceFactory for Factory {
             assets: config.assets(),
             storage: storage.clone(),
             client,
-            dated: Some(chain),
-            max_history: config.max_history,
+            dated: Some(chain.clone()),
+            balances: Some(chain),
+            max_depth: None,
             confirmations: config.confirmations,
         })
     }

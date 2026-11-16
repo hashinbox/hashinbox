@@ -152,6 +152,22 @@ async fn linked<T: TestChain>(app: &App, chain: &T) -> Vec<Value> {
     blocks
 }
 
+/// Indexes `wallet` in `asset` from the tip and waits until it is open: on
+/// a chain that reads balances it starts at the chain's final block, its
+/// balance null until the chain's balance read there settles it; a deposit
+/// after that is a leg of its own.
+async fn open(app: &App, wallet: &Wallet, asset: &str) {
+    app.api.index(wallet, asset, None).await;
+    until(&format!("{asset} open"), || async {
+        let index = app.api.index_of(wallet, asset).await;
+        if index["balance_pending"].is_string() {
+            return Ok(());
+        }
+        Err(index.to_string())
+    })
+    .await;
+}
+
 /// A new wallet indexed in the native currency from the tip, holding one
 /// unit, final.
 async fn funded<T: TestChain>(app: &App, chain: &T) -> Wallet {
@@ -166,7 +182,7 @@ async fn funded<T: TestChain>(app: &App, chain: &T) -> Wallet {
 /// A new wallet indexed in the native currency through the tip, empty.
 async fn indexed<T: TestChain>(app: &App, chain: &T) -> Wallet {
     let wallet = app.api.wallet(&chain.network()).await;
-    app.api.index(&wallet, "native", None).await;
+    open(app, &wallet, "native").await;
     let tip = chain.tip();
     until("the payee indexed through the tip", || async {
         let index = app.api.index_of(&wallet, "native").await;

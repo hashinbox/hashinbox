@@ -2318,7 +2318,7 @@
           "wallets"
         ],
         "summary": "Index a wallet in an asset",
-        "description": "Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next indexing step picks it). An asset already indexed keeps its first start (200). A `start` older than the network's `max_history_days` is refused; one the node no longer serves moves forward to the first block it serves before indexing begins.",
+        "description": "Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next indexing step picks it). An asset already indexed keeps its first start (200). A `start` below the chain's tip less the network's `max_depth` is refused (400). On a chain that reads balances (Solana, Ethereum) the index starts at the chain's final block whatever `start` says (kept as `requested_from`): its balances are null until the chain's balance read there opens it with an `adjustment` leg. A start the node no longer serves moves forward to the first block it serves before indexing begins.",
         "operationId": "create_wallet_index",
         "parameters": [
           {
@@ -2363,7 +2363,7 @@
             }
           },
           "400": {
-            "description": "Malformed body or wallet ID, or a start older than the network's history limit",
+            "description": "Malformed body or wallet ID, or a start below the chain's tip less the network's `max_depth`",
             "content": {
               "application/json": {
                 "schema": {
@@ -2494,7 +2494,7 @@
           "wallets"
         ],
         "summary": "Pause or resume a wallet's index",
-        "description": "`paused`: skipped, no facts kept for blocks while paused; what is kept stays. `indexing`: from `paused` or `no_data` (clearing its reason), it continues from its last indexed block, backfilling what it missed.",
+        "description": "`paused`: skipped, no facts kept for blocks while paused; what is kept stays. `indexing`: from `paused` or `no_data` (clearing its reason), it continues from its last indexed block, backfilling what it missed. On a chain that reads balances (Solana, Ethereum) one left behind the chain's final block is not read back: its balance is read there and one `adjustment` leg closes the gap.",
         "operationId": "update_wallet_index",
         "parameters": [
           {
@@ -2668,6 +2668,103 @@
           },
           "503": {
             "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/{id}/indexes/{asset}/reconcile": {
+      "post": {
+        "tags": [
+          "wallets"
+        ],
+        "summary": "Reconcile a wallet's index with the chain's balance",
+        "description": "Deletes the index's mined legs above the chain's final block and unsets its progress: its balances read null until the next indexing step reads the chain's balance at a final block, appends one `adjustment` leg of the difference and reads on from there. Pending legs stay. Corrects what indexing cannot see, such as ether a contract sent. Only on chains that read balances (Solana, Ethereum).",
+        "operationId": "reconcile_wallet_index",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "`{chain}.{network}.{address}`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "asset",
+            "in": "path",
+            "description": "The asset id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The index, its progress unset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletIndex"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed wallet ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such index",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The chain reads no balance (Bitcoin), or the index is paused or `no_data`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The indexer has not read the chain's final block yet, or the store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3022,14 +3119,6 @@
           "hash"
         ],
         "properties": {
-          "archived_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Unix ms a reorg archived it; null while live."
-          },
           "chain": {
             "type": "string"
           },
@@ -3068,6 +3157,14 @@
             "type": "integer",
             "format": "int64",
             "description": "Native position (height or slot)."
+          },
+          "reorged_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms a reorg took it back; null while live."
           },
           "timestamp": {
             "type": [
@@ -3166,7 +3263,7 @@
           "enabled",
           "block_time_ms",
           "confirmations",
-          "max_history_days",
+          "max_depth",
           "explorer_address",
           "explorer_transaction",
           "settings",
@@ -3252,13 +3349,13 @@
             ],
             "description": "Why its index job's last run failed (the job's `reason`), cleared by\nthe next run that does not; always present, null: none."
           },
-          "max_history_days": {
+          "max_depth": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "How old, in days, a wallet's start may be; always present, null: no\nlimit.",
+            "description": "How many positions below the tip a wallet's start may be; at least\n`confirmations`. Always present, null: no limit. Null on a chain that\nreads balances (Solana, Ethereum): its line is the chain's final block.",
             "minimum": 0
           },
           "network": {
@@ -3345,7 +3442,7 @@
           "start": {
             "type": "integer",
             "format": "int64",
-            "description": "The native position to index from, no older than the network's\n`max_history_days`. Absent: from the chain's tip, as a generated\nwallet (it has no past) must be.",
+            "description": "The native position to index from, at or above the chain's tip less\nthe network's `max_depth` (a chain that reads balances starts at its\nfinal block instead). Absent: from the chain's tip, as a generated\nwallet (it has no past) must be.",
             "minimum": 0
           }
         },
@@ -3583,7 +3680,7 @@
       },
       "Leg": {
         "type": "object",
-        "description": "One `leg` row: a transaction's leg, or a block's reward; the API shows\nit as is.",
+        "description": "One `leg` row: a transaction's leg, a block's reward, or an index's\nadjustment; the API shows it as is.",
         "required": [
           "id",
           "leg_index",
@@ -3599,7 +3696,15 @@
           },
           "amount": {
             "type": "string",
-            "description": "Exact atomic decimal text."
+            "description": "Exact atomic decimal text; signed for a reward or an adjustment."
+          },
+          "archived_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "A received coin a jump wrote off: that jump's position; never\nspendable again. Null otherwise."
           },
           "asset": {
             "type": "string"
@@ -3630,7 +3735,7 @@
           "kind": {
             "type": "integer",
             "format": "int32",
-            "description": "0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward."
+            "description": "0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward, 6\nadjustment (signed; leg 0: what the chain's balance read corrects the\nindex's total by, at the block it was read at; leg 1: the coins a\njump archived)."
           },
           "leg_index": {
             "type": "integer",
@@ -3664,21 +3769,21 @@
               "string",
               "null"
             ],
-            "description": "What its index has received (received, minted, reward) through it;\n`None` while pending."
+            "description": "What its index has received (received, minted, reward) through it;\n`None` while pending. No adjustment counts."
           },
           "total_sent": {
             "type": [
               "string",
               "null"
             ],
-            "description": "What its index has sent (spent, burned, fee) through it; `None`\nwhile pending. `total = total_received - total_sent`."
+            "description": "What its index has sent (spent, burned, fee) through it; `None` while\npending. `total` is `total_received - total_sent` plus its index's\nadjustments so far."
           },
           "transaction": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Its transaction; null for a reward."
+            "description": "Its transaction; null for a reward or an adjustment."
           },
           "wallet_index_id": {
             "type": "string",
@@ -3769,7 +3874,7 @@
             }
           }
         ],
-        "description": "A mined leg with its transaction's txid and state (null for a reward)\nand its block's time: a row of [`db::find_page`]."
+        "description": "A mined leg with its transaction's txid and state (null for a reward or\nan adjustment) and its block's time: a row of [`db::find_page`]."
       },
       "Network": {
         "type": "object",
@@ -3954,7 +4059,7 @@
           "reorgs": {
             "type": "integer",
             "format": "int64",
-            "description": "Kept blocks archived because the chain took them back.",
+            "description": "Kept blocks reorged because the chain took them back.",
             "minimum": 0
           },
           "tip": {
@@ -4186,7 +4291,7 @@
             "items": {
               "type": "string"
             },
-            "description": "One to 16 distinct node URLs, in failover order. A URL carries everything:\nuserinfo (HTTP Basic), query keys, a key in the path,\n`header.<Name>=value` parameters sent as headers, and `rpc.` settings\n(`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`).",
+            "description": "One to 16 distinct node URLs, in failover order. A URL carries everything:\nuserinfo (HTTP Basic), query keys, a key in the path,\n`header.<Name>=value` parameters sent as headers, and `rpc.` settings\n(`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`,\n`rps`: most calls a second, e.g. `3.5`; a request waits for its turn).",
             "maxItems": 16,
             "minItems": 1
           }
@@ -4403,7 +4508,7 @@
           "reorged": {
             "type": "integer",
             "format": "int64",
-            "description": "Blocks a reorg archived.",
+            "description": "Blocks a reorg took back.",
             "minimum": 0
           },
           "reverted": {
@@ -4930,8 +5035,7 @@
           "asset",
           "state",
           "requested_from",
-          "birthday",
-          "balance_pending"
+          "birthday"
         ],
         "properties": {
           "asset": {
@@ -4943,14 +5047,14 @@
               "string",
               "null"
             ],
-            "description": "Its confirmed balance: its last live mined leg's total at or below\n`finality_at`, `0` without one; negative when indexed debits exceed\nindexed credits (history before the start is unknown); null while\n`finality_at` is unknown."
+            "description": "Its confirmed balance: its last live mined leg's total at or below\n`finality_at`, `0` without one; negative when indexed debits exceed\nindexed credits (history before the start or a jump is unknown);\nnull while `finality_at` is unknown."
           },
           "balance_confirmed_received": {
             "type": [
               "string",
               "null"
             ],
-            "description": "What it had received by then (that leg's `total_received`):\n`balance_confirmed = balance_confirmed_received -\nbalance_confirmed_sent`."
+            "description": "What it had received by then (that leg's `total_received`):\n`balance_confirmed` is `balance_confirmed_received -\nbalance_confirmed_sent` plus its adjustments."
           },
           "balance_confirmed_sent": {
             "type": [
@@ -4967,8 +5071,11 @@
             "description": "What it can spend: `balance_confirmed` less its outgoing legs not yet\nin it (pending, or mined above `finality_at`); null while\n`balance_confirmed` is."
           },
           "balance_pending": {
-            "type": "string",
-            "description": "What it will hold once every pending transaction lands: its newest\nlive mined leg's total, any block (`0` without one), with what this\nserver sent and is not mined yet, in and out."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What it will hold once every pending transaction lands: its newest\nlive mined leg's total, any block (`0` without one), with what this\nserver sent and is not mined yet, in and out; null before its first\nblock (`indexed_through`), as every balance is."
           },
           "behind_tip": {
             "type": [

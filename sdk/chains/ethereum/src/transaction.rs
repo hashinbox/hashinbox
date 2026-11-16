@@ -204,7 +204,7 @@ pub(crate) fn request(
 }
 
 /// `amount` atomic units as a decimal count of them.
-fn decimal(amount: U256) -> Decimal {
+pub(crate) fn decimal(amount: U256) -> Decimal {
     Decimal::from_atomic(BigUint::from_bytes_be(&amount.to_be_bytes::<32>()), 0)
 }
 

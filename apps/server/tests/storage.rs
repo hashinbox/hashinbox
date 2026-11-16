@@ -2,14 +2,18 @@
 //! store contracts, and the balance read. Offline and
 //! deterministic.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+};
 
+use anyhow::Context as _;
 use base::{
-    Address, Asset, Block, BlockHash, BlockHeader, BlockNotify, BlockParent, BlockStore, Blocks,
-    Broadcaster, Builder, Chain, Coin, Decimal, Future, InputStore, Leg, Network, Networked,
-    Reward, Transaction, TransactionError, TransactionId, TransactionState, Wallet,
-    WalletFactories, WalletFactory, WalletFactoryBroadcaster, WalletIndex, WalletIndexStore,
-    WalletStore,
+    Address, Asset, Birthday, Block, BlockHash, BlockHeader, BlockNotify, BlockParent, BlockStore,
+    Blocks, Broadcaster, Builder, Chain, Chained, Coin, Decimal, Future, Holding, Indexer,
+    InputStore, Leg, Network, Networked, Next, Reward, Tips, Transaction, TransactionError,
+    TransactionId, TransactionState, Wallet, WalletFactories, WalletFactory,
+    WalletFactoryBroadcaster, WalletIndex, WalletIndexState, WalletIndexStore, WalletStore,
 };
 use crypto::{Curve, SecretBytes};
 
@@ -65,9 +69,14 @@ fn native(network: &Network) -> Asset {
 }
 
 /// Header `position` of branch `fork`; the parent is `position - 1` of the
-/// same branch.
+/// same branch. Its hash: the position's bytes from the first nonzero one,
+/// then the fork.
 fn header(position: u64, fork: u8) -> BlockHeader {
-    let hash = |position: u64| BlockHash(vec![u8::try_from(position).unwrap(), fork]);
+    let hash = |position: u64| {
+        let bytes = position.to_be_bytes();
+        let from = bytes.iter().position(|byte| *byte != 0).unwrap_or(7);
+        BlockHash([&bytes[from..], &[fork]].concat())
+    };
     BlockHeader {
         position,
         height: position,
@@ -89,7 +98,7 @@ fn coin(network: &Network, txid: &str, index: u32) -> Coin {
 
 /// A transaction `txid` paying `amount` to `to` (coin `txid:0`) and, when
 /// given, spending `spends` from `from`.
-fn payment(
+pub(super) fn payment(
     network: &Network,
     txid: &str,
     to: &str,
@@ -120,7 +129,12 @@ fn payment(
     }
 }
 
-fn block(network: &Network, position: u64, fork: u8, transactions: Vec<Transaction>) -> Block {
+pub(super) fn block(
+    network: &Network,
+    position: u64,
+    fork: u8,
+    transactions: Vec<Transaction>,
+) -> Block {
     Block {
         network: network.clone(),
         header: header(position, fork),
@@ -184,7 +198,7 @@ fn history(directory: &tempfile::TempDir, address: &Address) -> Vec<String> {
     let mut connection = diesel::SqliteConnection::establish(path.to_str().unwrap()).unwrap();
     diesel::sql_query(
         r#"SELECT t.txid FROM "transaction" t LEFT JOIN block b ON b.id = t.block
-        WHERE (t.block IS NULL OR b.archived_at IS NULL)
+        WHERE (t.block IS NULL OR b.reorged_at IS NULL)
           AND EXISTS (SELECT 1 FROM leg l WHERE l."transaction" = t.id AND l.address = ?)
         ORDER BY t.block IS NULL, b.position, t."order", t.id"#,
     )
@@ -197,8 +211,8 @@ fn history(directory: &tempfile::TempDir, address: &Address) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn insert_links_and_refuses_non_linking_blocks() {
-    let (storage, _db, _directory) = storage().await;
+async fn insert_links_refuses_non_linking_neighbours_and_accepts_gaps() {
+    let (storage, _db, directory) = storage().await;
     let network = network();
     BlockStore::insert(&storage, &empty(&network, 0, 3, 0))
         .await
@@ -228,6 +242,52 @@ async fn insert_links_and_refuses_non_linking_blocks() {
         storage.find_last(&network).await.unwrap(),
         Some(header(5, 0))
     );
+
+    // A gap (pruned blocks) below a run is no conflict: 8 is kept unlinked.
+    BlockStore::insert(&storage, &empty(&network, 8, 9, 0))
+        .await
+        .unwrap();
+    assert!(blocks(&directory).contains(&(8, false, None)));
+    // A block the kept block above names at its position must link to it.
+    let error = BlockStore::insert(&storage, &empty(&network, 7, 7, 1))
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("does not link"), "{error:#}");
+    // The gap's blocks link both sides.
+    BlockStore::insert(&storage, &empty(&network, 6, 7, 0))
+        .await
+        .unwrap();
+    let kept = blocks(&directory);
+    assert!(kept.contains(&(6, false, Some(5))) && kept.contains(&(8, false, Some(7))));
+}
+
+/// Every block row of the test network by position, live first: its
+/// position, whether it is reorged, and its stored parent's position.
+fn blocks(directory: &tempfile::TempDir) -> Vec<(i64, bool, Option<i64>)> {
+    use diesel::{
+        RunQueryDsl as _,
+        sql_types::{BigInt, Bool, Nullable},
+    };
+    #[derive(diesel::QueryableByName)]
+    struct Kept {
+        #[diesel(sql_type = BigInt)]
+        position: i64,
+        #[diesel(sql_type = Bool)]
+        reorged: bool,
+        #[diesel(sql_type = Nullable<BigInt>)]
+        parent: Option<i64>,
+    }
+    diesel::sql_query(
+        "SELECT b.position, b.reorged_at IS NOT NULL AS reorged, p.position AS parent
+        FROM block b LEFT JOIN block p ON p.id = b.parent
+        WHERE b.chain = 'bitcoin' AND b.network = 'regtest'
+        ORDER BY b.position, reorged",
+    )
+    .load::<Kept>(&mut raw(directory))
+    .unwrap()
+    .into_iter()
+    .map(|kept| (kept.position, kept.reorged, kept.parent))
+    .collect()
 }
 
 #[tokio::test]
@@ -308,7 +368,10 @@ async fn a_new_index_backfills_without_duplicating_other_facts() {
     assert_eq!(rows(&directory, "x").1.len(), 1);
 
     watch(&storage, &bob, 1).await;
-    assert_eq!(storage.find_next(&network, Some(2)).await.unwrap(), Some(1));
+    assert_eq!(
+        storage.find_next(&network, 0, Some(2)).await.unwrap(),
+        Some(1)
+    );
     // The indexer refetches from bob's birthday.
     let rerun = run(&network, blocks.iter().skip(1).cloned().collect());
     BlockStore::insert(&storage, &rerun).await.unwrap();
@@ -317,7 +380,7 @@ async fn a_new_index_backfills_without_duplicating_other_facts() {
     assert_eq!(found.1.len(), 2, "bob's leg added once");
     assert_eq!(history(&directory, &bob), ["x"]);
     assert_eq!(indexed_at(&storage, &bob).await, Some(2));
-    assert_eq!(storage.find_next(&network, Some(2)).await.unwrap(), None);
+    assert_eq!(storage.find_next(&network, 0, Some(2)).await.unwrap(), None);
 
     // A repeat is a no-op.
     BlockStore::insert(&storage, &rerun).await.unwrap();
@@ -468,16 +531,46 @@ async fn networks_are_isolated() {
 async fn find_next_is_the_lowest_lagging_index() {
     let (storage, _db, _directory) = storage().await;
     let network = network();
-    assert_eq!(storage.find_next(&network, None).await.unwrap(), None);
+    assert_eq!(storage.find_next(&network, 0, None).await.unwrap(), None);
     watch(&storage, &address(&network, "a"), 5).await;
     watch(&storage, &address(&network, "b"), 2).await;
-    assert_eq!(storage.find_next(&network, None).await.unwrap(), Some(2));
-    assert_eq!(storage.find_next(&network, Some(1)).await.unwrap(), None);
+    assert_eq!(storage.find_next(&network, 0, None).await.unwrap(), Some(2));
+    assert_eq!(storage.find_next(&network, 3, None).await.unwrap(), Some(5));
+    assert_eq!(storage.find_next(&network, 0, Some(1)).await.unwrap(), None);
     BlockStore::insert(&storage, &empty(&network, 2, 6, 0))
         .await
         .unwrap();
-    assert_eq!(storage.find_next(&network, None).await.unwrap(), Some(7));
-    assert_eq!(storage.find_next(&network, Some(6)).await.unwrap(), None);
+    assert_eq!(storage.find_next(&network, 0, None).await.unwrap(), Some(7));
+    assert_eq!(storage.find_next(&network, 0, Some(6)).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn find_behind_is_the_indexing_ones_below_furthest_behind_first() {
+    let (storage, _db, _directory) = storage().await;
+    let network = network();
+    let behind = |below: u64, limit: usize| {
+        let storage = &storage;
+        let network = &network;
+        async move {
+            let found = storage.find_behind(network, below, limit).await.unwrap();
+            found
+                .into_iter()
+                .map(|index| index.address.value)
+                .collect::<Vec<_>>()
+        }
+    };
+    watch(&storage, &address(&network, "a"), 5).await;
+    watch(&storage, &address(&network, "b"), 2).await;
+    watch(&storage, &address(&network, "c"), 3).await;
+    set_state(&storage, "c", WalletIndexState::Paused).await;
+    assert_eq!(behind(6, usize::MAX).await, ["b", "a"]);
+    assert_eq!(behind(6, 1).await, ["b"]);
+    assert_eq!(behind(2, usize::MAX).await, Vec::<String>::new());
+    BlockStore::insert(&storage, &empty(&network, 2, 6, 0))
+        .await
+        .unwrap();
+    assert_eq!(behind(7, usize::MAX).await, Vec::<String>::new());
+    assert_eq!(behind(8, usize::MAX).await, ["a", "b"]);
 }
 
 #[tokio::test]
@@ -1080,14 +1173,14 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
         r#"SELECT l.address, l.wallet_index_id, l.position, l.kind, l.amount, l.total,
         l.total_received, l.total_sent FROM leg l
         JOIN block b ON b.id = l.block LEFT JOIN "transaction" t ON t.id = l."transaction"
-        WHERE b.archived_at IS NULL AND l.asset = 'native'
+        WHERE b.reorged_at IS NULL AND l.asset = 'native'
         ORDER BY l.wallet_index_id, b.position, l."transaction" IS NULL, t."order", l.leg_index"#,
     )
     .load(&mut raw(directory))
     .unwrap();
     assert!(!rows.is_empty());
-    // What each address has received and sent so far.
-    let mut running = std::collections::BTreeMap::<String, (Decimal, Decimal)>::new();
+    // Each address's [balance, received, sent] so far.
+    let mut running = std::collections::BTreeMap::<String, [Decimal; 3]>::new();
     // (address, position, balance right after the leg), in order.
     let mut steps = Vec::new();
     // (address, position, amount) of every mined outgoing leg.
@@ -1098,20 +1191,24 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
             format!("bitcoin.regtest.{}.native", row.address)
         );
         let amount: Decimal = row.amount.parse().unwrap();
-        let (received, sent) = running
+        let [total, received, sent] = running
             .entry(row.address.clone())
-            .or_insert_with(|| (Decimal::zero(), Decimal::zero()));
-        if matches!(row.kind, 1 | 2 | 4) {
-            sends.push((row.address.clone(), row.position, amount.clone()));
-        }
+            .or_insert_with(|| [0; 3].map(Decimal::from));
         match row.kind {
-            0 | 3 | 5 => *received += amount,
-            _ => *sent += amount,
+            0 | 3 | 5 => *received += &amount,
+            // An adjustment moves the balance only.
+            6 => {}
+            _ => *sent += &amount,
         }
-        let sum = &*received - &*sent;
+        if matches!(row.kind, 1 | 2 | 4) {
+            *total -= &amount;
+            sends.push((row.address.clone(), row.position, amount));
+        } else {
+            *total += amount;
+        }
         let stored = [row.total, row.total_received, row.total_sent]
             .map(|text| text.parse::<Decimal>().unwrap());
-        let expected = [sum, received.clone(), sent.clone()];
+        let expected = [total.clone(), received.clone(), sent.clone()];
         assert_eq!(stored, expected, "{}", row.address);
         steps.push((row.address, row.position, expected));
     }
@@ -1228,7 +1325,7 @@ async fn totals_hold(db: &Db, directory: &tempfile::TempDir, names: &[&str], tip
                 "{} at {through}",
                 one.address
             );
-            let tip = parse(&index.balance_pending);
+            let tip = parse(index.balance_pending.as_deref().unwrap());
             assert_eq!(
                 tip,
                 at(&one.address, i64::MAX) + in_flight(&one.address),
@@ -1944,4 +2041,1393 @@ async fn the_network_index_moves_back_only_on_a_reorg() {
         ],
         "a node behind keeps them, and does not look fresh; a reorg moves them"
     );
+}
+
+/// A chain serving `.0`, one block per position from 0; its tip the last,
+/// final from `.1` positions below it.
+pub(super) struct Served(pub(super) Vec<Block>, pub(super) u64);
+
+/// How far below its tip [`index`]'s chain is final: below every reorg the
+/// tests make.
+const FINALITY: u64 = 10;
+
+impl Networked for Served {
+    fn network(&self) -> &Network {
+        &self.0[0].network
+    }
+}
+
+impl Chained for Served {
+    fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
+        let tip = u64::try_from(self.0.len() - 1).unwrap();
+        let confirmed = tip.saturating_sub(self.1);
+        Box::pin(async move {
+            Ok(Tips {
+                produced: tip,
+                confirmed,
+            })
+        })
+    }
+
+    fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
+        let block = usize::try_from(position)
+            .ok()
+            .and_then(|at| self.0.get(at))
+            .cloned();
+        Box::pin(async move { Ok(block) })
+    }
+}
+
+/// The positions a [`Noted`] chain was read at.
+type Reads = Arc<Mutex<BTreeSet<u64>>>;
+
+/// [`Served`], noting each position read in `.1`.
+struct Noted(Served, Reads);
+
+impl Networked for Noted {
+    fn network(&self) -> &Network {
+        self.0.network()
+    }
+}
+
+impl Chained for Noted {
+    fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
+        self.0.tips()
+    }
+
+    fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
+        self.1.lock().unwrap().insert(position);
+        self.0.block(position)
+    }
+}
+
+/// [`Noted`], no longer serving (nor noting) the blocks below `.1`: pruned
+/// history.
+struct Pruned(Noted, u64);
+
+impl Networked for Pruned {
+    fn network(&self) -> &Network {
+        self.0.network()
+    }
+}
+
+impl Chained for Pruned {
+    fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
+        self.0.tips()
+    }
+
+    fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
+        if position < self.1 {
+            return Box::pin(async move { Err(base::NotServed { position }.into()) });
+        }
+        self.0.block(position)
+    }
+}
+
+/// An indexer over `chain` into `storage`.
+pub(super) fn indexer(storage: &Stores, chain: impl Chained + 'static) -> Indexer {
+    let stores = Arc::new(storage.clone());
+    Indexer::new(
+        Arc::new(chain),
+        stores.clone(),
+        stores,
+        std::time::Duration::ZERO,
+    )
+}
+
+/// Steps `indexer` until it is idle.
+pub(super) async fn idle(indexer: &Indexer) {
+    while indexer.next().await.unwrap() != Next::Idle {}
+}
+
+/// Steps an indexer over `blocks` into `storage` until it is idle.
+async fn index(storage: &Stores, blocks: &[Block]) {
+    idle(&indexer(storage, Served(blocks.to_vec(), FINALITY))).await;
+}
+
+/// What the chain says each address holds, by its text: a holding,
+/// answered whatever final block was asked for, or `None` (not answerable
+/// yet); a read of an address not set fails.
+#[derive(Default)]
+pub(super) struct Held(Mutex<BTreeMap<String, Option<Holding>>>);
+
+impl Held {
+    /// `address` holds `amount` at `position`; `None`: not answerable.
+    pub(super) fn set(&self, address: &str, held: Option<(u64, u64)>) {
+        let held = held.map(|(position, amount)| Holding {
+            position,
+            amount: Decimal::from(amount),
+        });
+        self.0.lock().unwrap().insert(address.to_owned(), held);
+    }
+}
+
+impl Networked for Held {
+    fn network(&self) -> &Network {
+        super::Empty.network()
+    }
+}
+
+impl base::Balances for Held {
+    fn balance<'a>(
+        &'a self,
+        address: &'a Address,
+        _asset: &'a Asset,
+        _at: u64,
+    ) -> Future<'a, anyhow::Result<Option<Holding>>> {
+        let held = self.0.lock().unwrap().get(&address.value).cloned();
+        Box::pin(async move { held.context("the node cannot read this balance") })
+    }
+}
+
+/// The pruning tests' chain, 0..=16: alice is paid at 2 (coin a) and 9 and
+/// pays bob coin a at 6; erin is paid at 4 and 7, carol at 5. From 7 on it
+/// is branch 1; 7 links onto 6.
+fn pruned_chain(network: &Network) -> Vec<Block> {
+    let paid = |position: u64, txid: &str, to: &str, amount: u64| {
+        block(
+            network,
+            position,
+            u8::from(position >= 7),
+            vec![payment(network, txid, to, amount, None)],
+        )
+    };
+    let mut chain: Vec<Block> = (0..=16)
+        .map(|position| block(network, position, u8::from(position >= 7), vec![]))
+        .collect();
+    chain[2] = paid(2, "a", "alice", 5);
+    chain[4] = paid(4, "f", "erin", 3);
+    chain[5] = paid(5, "e", "carol", 1);
+    chain[6] = block(
+        network,
+        6,
+        0,
+        vec![payment(
+            network,
+            "c",
+            "bob",
+            5,
+            Some(("alice", coin(network, "a", 0))),
+        )],
+    );
+    chain[7] = paid(7, "g", "erin", 1);
+    chain[7].header.parent = Some(BlockParent {
+        position: 6,
+        hash: header(6, 0).hash,
+    });
+    chain[9] = paid(9, "d", "alice", 2);
+    chain
+}
+
+/// Indexes the pruning tests' history into `storage`: alice, bob, carol and
+/// dave from 0; dave paused at 1; branch 0 through 8 (7 pays alice "r"),
+/// carol's index forgotten (her transaction stays), then [`pruned_chain`],
+/// reorging 7 and 8. The network prunes below 16 - 4 = 12.
+async fn prunable(storage: &Stores, db: &Db) {
+    let network = network();
+    let chain = pruned_chain(&network);
+    for name in ["alice", "bob", "carol", "dave"] {
+        watch(storage, &address(&network, name), 0).await;
+    }
+    index(storage, &chain[..=1]).await;
+    let dave = WalletIndexStore::find_all(storage, &network)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|index| index.address.value == "dave")
+        .unwrap();
+    WalletIndexStore::set_state(storage, &dave, base::WalletIndexState::Paused, None)
+        .await
+        .unwrap();
+    let mut forked = chain[..=6].to_vec();
+    forked.push(block(
+        &network,
+        7,
+        0,
+        vec![payment(&network, "r", "alice", 4, None)],
+    ));
+    forked.push(block(&network, 8, 0, vec![]));
+    index(storage, &forked).await;
+    db.write(|connection| {
+        use diesel::connection::SimpleConnection as _;
+        crate::models::wallet_index::db::delete(connection, "bitcoin.regtest.carol.native")?;
+        Ok(connection.batch_execute("UPDATE network SET max_depth = 4")?)
+    })
+    .await
+    .unwrap();
+    index(storage, &chain).await;
+    confirm(db, 16).await;
+}
+
+/// What reads show of `names`: each index (balances included) with its
+/// movements, and their unspent coins.
+async fn reads(
+    db: &Db,
+    names: &'static [&str],
+) -> (
+    Vec<(
+        Option<crate::models::wallet_index::WalletIndex>,
+        serde_json::Value,
+    )>,
+    Vec<base::Input>,
+) {
+    use crate::models::{leg, wallet_index};
+    db.read(move |connection| {
+        let mut indexes = Vec::new();
+        for name in names {
+            let id = format!("bitcoin.regtest.{name}.native");
+            let page = Page {
+                after: None,
+                limit: 100,
+            };
+            indexes.push((
+                wallet_index::db::find_at_tip(connection, &id)?,
+                serde_json::to_value(leg::db::find_page(connection, &id, page)?)?,
+            ));
+        }
+        let unspent = leg::db::find_unspent(connection, &network(), names)?;
+        Ok((indexes, unspent))
+    })
+    .await
+    .unwrap()
+}
+
+/// Prunes the test network as the prune job does.
+async fn prune(db: &Db) {
+    let container = Arc::new(base::Container::new(Stores::storage(db.clone())));
+    crate::usecase::workers::prune::Prune::new(db.clone(), container)
+        .blocks()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pruning_deletes_unnamed_and_reorged_blocks_and_reads_the_same() {
+    let (storage, db, directory) = storage().await;
+    prunable(&storage, &db).await;
+    let names = &["alice", "bob", "carol", "dave"];
+    let before = reads(&db, names).await;
+    assert_eq!(before.1.len(), 2, "bob's coin c and alice's coin d");
+    assert_eq!(rows(&directory, "r").1.len(), 1, "alice's reorged leg");
+
+    prune(&db).await;
+    let after = blocks(&directory);
+    // Below 12: 1 (dave's indexed_at), 2, 6 and 9 (legs), 5 (carol's
+    // transaction); 0, 3, 4, 7, 8, 10, 11 and reorged 7 and 8 are gone. A
+    // child of a deleted block has no parent.
+    let mut kept = vec![
+        (1, false, None),
+        (2, false, Some(1)),
+        (5, false, None),
+        (6, false, Some(5)),
+        (9, false, None),
+        (12, false, None),
+    ];
+    kept.extend((13..=16).map(|position| (position, false, Some(position - 1))));
+    assert_eq!(after, kept);
+    assert_eq!(rows(&directory, "r"), (vec![], vec![]), "reorged facts go");
+    assert_eq!(rows(&directory, "e").0.len(), 1, "a transaction stays");
+    assert_eq!(reads(&db, names).await, before);
+
+    prune(&db).await;
+    assert_eq!(blocks(&directory), after, "pruning twice changes nothing");
+    assert_eq!(reads(&db, names).await, before);
+
+    // The last live block stays, named by nothing.
+    BlockStore::insert(&storage, &empty(&other(), 0, 3, 0))
+        .await
+        .unwrap();
+    let deleted = db
+        .write(|connection| Ok(crate::models::block::db::prune(connection, &other(), 10)?))
+        .await
+        .unwrap();
+    assert_eq!(deleted, 3);
+    assert_eq!(
+        storage.find_last(&other()).await.unwrap(),
+        Some(header(3, 0))
+    );
+}
+
+#[tokio::test]
+async fn a_new_index_over_a_pruned_range_gets_the_same_legs() {
+    let network = network();
+    let mut seen = Vec::new();
+    for pruned in [false, true] {
+        let (storage, db, directory) = storage().await;
+        prunable(&storage, &db).await;
+        if pruned {
+            prune(&db).await;
+        }
+        // Erin from 4: pruned with 3 below it, so the run writes 4 again
+        // with no parent.
+        watch(&storage, &address(&network, "erin"), 4).await;
+        index(&storage, &pruned_chain(&network)).await;
+        if pruned {
+            let kept = blocks(&directory);
+            assert!(kept.contains(&(4, false, None)), "{kept:?}");
+            assert!(kept.contains(&(5, false, Some(4))), "{kept:?}");
+        }
+        seen.push(reads(&db, &["alice", "bob", "dave", "erin"]).await);
+    }
+    assert_eq!(seen[0], seen[1]);
+    let erin = &seen[1].0[3];
+    assert_eq!(erin.1.as_array().map(Vec::len), Some(2), "{erin:?}");
+    assert_eq!(
+        erin.0.as_ref().unwrap().balance_pending.as_deref(),
+        Some("4")
+    );
+}
+
+/// Empty blocks `0..=tip` of branch 0, as [`Served`] serves them.
+fn quiet(network: &Network, tip: u64) -> Vec<Block> {
+    (0..=tip).map(|p| block(network, p, 0, vec![])).collect()
+}
+
+/// Each of `names`' index state and mined legs, latest first, as
+/// (position, kind, amount, total).
+async fn opened(
+    db: &Db,
+    names: &'static [&str],
+) -> Vec<(
+    crate::models::wallet_index::IndexState,
+    Vec<(i64, i64, String, String)>,
+)> {
+    let (read, _) = reads(db, names).await;
+    read.into_iter()
+        .map(|(index, legs)| {
+            let legs = legs.as_array().unwrap().iter().map(|leg| {
+                let text = |field: &str| leg[field].as_str().unwrap().to_owned();
+                let number = |field: &str| leg[field].as_i64().unwrap();
+                (
+                    number("position"),
+                    number("kind"),
+                    text("amount"),
+                    text("total"),
+                )
+            });
+            (index.unwrap().state, legs.collect())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_watched_address_opens_at_its_balance_and_a_new_one_at_zero() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    let held = Arc::new(Held::default());
+    held.set("watched", Some((3, 5)));
+    held.set("generated", Some((3, 0)));
+    let indexer = indexer(&storage, Served(quiet(&network, 6), FINALITY)).with_balances(held);
+    for name in ["watched", "generated"] {
+        let address = address(&network, name);
+        indexer
+            .watch(&address, &native(&network), Birthday::At(2))
+            .await
+            .unwrap();
+    }
+    idle(&indexer).await;
+    let adjustment = |amount: &str| vec![(3, 6, amount.to_owned(), amount.to_owned())];
+    assert_eq!(
+        opened(&db, &["watched", "generated"]).await,
+        [(Indexing, adjustment("5")), (Indexing, adjustment("0"))]
+    );
+    let (read, _) = reads(&db, &["watched"]).await;
+    assert_eq!(
+        read[0].1[0]["id"],
+        "bitcoin.regtest.0300.adjustment.bitcoin.regtest.watched.native.0"
+    );
+    assert_eq!(read[0].1[0]["transaction"], serde_json::Value::Null);
+}
+
+/// `name`'s native index watched from `from` by `indexer`.
+async fn watch_at(indexer: &Indexer, name: &str, from: u64) {
+    let network = network();
+    indexer
+        .watch(
+            &address(&network, name),
+            &native(&network),
+            Birthday::At(from),
+        )
+        .await
+        .unwrap();
+}
+
+/// alice, watched from 2 on a chain with balances at 20, final through 15:
+/// she starts at 15, her balance unknown. The first step reads her balance
+/// at a final block (9 at 16, finality one further on) and, in the same
+/// step, reads on from 17: 5 paid at 4 is in the adjustment, never a leg;
+/// 3 paid at 18 is one.
+#[tokio::test]
+async fn a_new_watch_starts_at_the_final_block_settles_and_reads_on() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    let mut chain = quiet(&network, 20);
+    for (position, txid, amount) in [(4, "a", 5), (18, "b", 3)] {
+        let paid = payment(&network, txid, "alice", amount, None);
+        chain[position] = block(&network, u64::try_from(position).unwrap(), 0, vec![paid]);
+    }
+    let held = Arc::new(Held::default());
+    held.set("alice", Some((16, 9)));
+    let indexer = indexer(&storage, Served(chain, 5)).with_balances(held);
+    watch_at(&indexer, "alice", 2).await;
+    assert_eq!(
+        progress(&storage).await,
+        [("alice".to_owned(), 2, 15, None)]
+    );
+    let (read, _) = reads(&db, &["alice"]).await;
+    assert_eq!(read[0].0.as_ref().unwrap().balance_pending, None);
+
+    assert_eq!(indexer.next().await.unwrap(), Next::Indexed(header(20, 0)));
+    assert_eq!(
+        progress(&storage).await,
+        [("alice".to_owned(), 2, 16, Some(20))]
+    );
+    let legs = vec![leg(18, 0, "3", "12"), leg(16, 6, "9", "9")];
+    assert_eq!(opened(&db, &["alice"]).await, [(Indexing, legs)]);
+}
+
+/// alice (paid 5 at 50) and bob are indexed through 100 when the server
+/// stops; alice has a send pending. Back at 4,100, final through 4,090,
+/// both are behind the final block: the step checks the last kept block,
+/// settles each at 4,090 (alice's chain balance 7, 2 paid inside the gap:
+/// one adjustment of 2), forgets her send and reads on from 4,091. The gap
+/// is never read; her legs before it stay.
+#[tokio::test]
+async fn indexes_behind_the_final_block_settle_at_the_chains_balance_and_read_on() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, directory) = storage().await;
+    let network = network();
+    // An account chain's legs carry no coin.
+    let mut chain = quiet(&network, 4_100);
+    for (position, txid, amount) in [(50, "f", 5_u64), (2_000, "g", 2)] {
+        let paid = mined(
+            &network,
+            txid,
+            0,
+            vec![Leg::Received {
+                address: address(&network, "alice"),
+                asset: native(&network),
+                amount: Decimal::from(amount),
+                coin: None,
+            }],
+        );
+        chain[position] = block(&network, u64::try_from(position).unwrap(), 0, vec![paid]);
+    }
+    for name in ["alice", "bob"] {
+        watch(&storage, &address(&network, name), 0).await;
+    }
+    index(&storage, &chain[..=100]).await;
+    confirm(&db, 100).await;
+    let mut spend = pending(&network, "s", "carol", 5);
+    spend.legs.push(Leg::Spent {
+        address: address(&network, "alice"),
+        asset: native(&network),
+        amount: Decimal::from(5_u64),
+        coin: None,
+    });
+    record(&db, &spend).await;
+    assert_eq!(rows(&directory, "s"), (vec![None], vec![None]));
+
+    let held = Arc::new(Held::default());
+    held.set("alice", Some((4_090, 7)));
+    held.set("bob", Some((4_090, 0)));
+    let read = Reads::default();
+    let indexer = indexer(&storage, Noted(Served(chain, FINALITY), read.clone()));
+    let indexer = indexer.with_balances(held);
+    assert_eq!(
+        indexer.next().await.unwrap(),
+        Next::Indexed(header(4_100, 0))
+    );
+    let expected: BTreeSet<u64> = std::iter::once(100).chain(4_090..=4_100).collect();
+    assert_eq!(*read.lock().unwrap(), expected, "the last kept block, S on");
+    assert_eq!(
+        progress(&storage).await,
+        [
+            ("alice".to_owned(), 0, 4_090, Some(4_100)),
+            ("bob".to_owned(), 0, 4_090, Some(4_100)),
+        ]
+    );
+    let alice = vec![leg(4_090, 6, "2", "7"), leg(50, 0, "5", "5")];
+    let bob = vec![leg(4_090, 6, "0", "0")];
+    assert_eq!(
+        opened(&db, &["alice", "bob"]).await,
+        [(Indexing, alice), (Indexing, bob)]
+    );
+    assert_eq!(
+        rows(&directory, "s"),
+        (vec![], vec![]),
+        "the send is forgotten"
+    );
+}
+
+/// An adjustment moves the total only (design 083 §7). alice, on an
+/// account chain, received 30 at 50 and sent 10 at 60, indexed through
+/// 100; back at 4,100, final through 4,090, the chain reads 25: the settle
+/// is +5, total 25, received 30 and sent 10 as before. 1 paid at 4,095
+/// makes the total 26, received 31.
+#[tokio::test]
+async fn an_adjustment_moves_the_total_but_not_what_was_received_or_sent() {
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    let (alice, asset) = (address(&network, "alice"), native(&network));
+    let received = |amount: u64| Leg::Received {
+        address: alice.clone(),
+        asset: asset.clone(),
+        amount: Decimal::from(amount),
+        coin: None,
+    };
+    let spent = Leg::Spent {
+        address: alice.clone(),
+        asset: asset.clone(),
+        amount: Decimal::from(10_u64),
+        coin: None,
+    };
+    let mut chain = quiet(&network, 4_100);
+    for (position, txid, leg) in [
+        (50, "f", received(30)),
+        (60, "g", spent),
+        (4_095, "h", received(1)),
+    ] {
+        let moved = mined(&network, txid, 0, vec![leg]);
+        chain[position] = block(&network, u64::try_from(position).unwrap(), 0, vec![moved]);
+    }
+    watch(&storage, &alice, 0).await;
+    index(&storage, &chain[..=100]).await;
+    let held = Arc::new(Held::default());
+    held.set("alice", Some((4_090, 25)));
+    idle(&indexer(&storage, Served(chain, FINALITY)).with_balances(held)).await;
+
+    let (read, _) = reads(&db, &["alice"]).await;
+    let field = |leg: &serde_json::Value, name: &str| leg[name].as_str().unwrap().to_owned();
+    let legs: Vec<[String; 4]> = read[0]
+        .1
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|leg| ["amount", "total", "total_received", "total_sent"].map(|name| field(leg, name)))
+        .collect();
+    let row = |values: [&str; 4]| values.map(str::to_owned);
+    assert_eq!(
+        legs,
+        [
+            row(["1", "26", "31", "10"]),
+            row(["5", "25", "30", "10"]),
+            row(["10", "20", "30", "10"]),
+            row(["30", "30", "30", "0"]),
+        ]
+    );
+    assert_eq!(read[0].1[1]["kind"], 6, "the settle");
+}
+
+/// Watched at 20, final through 15: alice's balance read answers nothing
+/// yet, bob's fails, carol's answers. The step settles carol and reads on;
+/// alice and bob stay as they were, unread by that run, one failure
+/// counted. Once the chain answers, the next step settles them.
+#[tokio::test]
+async fn a_balance_read_not_answered_or_failed_leaves_the_index_for_the_next_step() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    let held = Arc::new(Held::default());
+    held.set("alice", None);
+    held.set("carol", Some((15, 1)));
+    let indexer = indexer(&storage, Served(quiet(&network, 20), 5)).with_balances(held.clone());
+    for name in ["alice", "bob", "carol"] {
+        watch_at(&indexer, name, 0).await;
+    }
+    assert_eq!(indexer.next().await.unwrap(), Next::Indexed(header(20, 0)));
+    assert_eq!(
+        progress(&storage).await,
+        [
+            ("alice".to_owned(), 0, 15, None),
+            ("bob".to_owned(), 0, 15, None),
+            ("carol".to_owned(), 0, 15, Some(20)),
+        ]
+    );
+    assert_eq!(
+        opened(&db, &["alice", "bob"]).await,
+        [(Indexing, vec![]), (Indexing, vec![])]
+    );
+    let stats = indexer.stats();
+    assert_eq!(stats.failures, 1, "{stats:?}");
+
+    held.set("alice", Some((15, 5)));
+    held.set("bob", Some((15, 0)));
+    assert_eq!(indexer.next().await.unwrap(), Next::Indexed(header(20, 0)));
+    assert_eq!(
+        progress(&storage).await,
+        [
+            ("alice".to_owned(), 0, 15, Some(20)),
+            ("bob".to_owned(), 0, 15, Some(20)),
+            ("carol".to_owned(), 0, 15, Some(20)),
+        ]
+    );
+    assert_eq!(
+        opened(&db, &["alice", "bob"]).await,
+        [
+            (Indexing, vec![leg(15, 6, "5", "5")]),
+            (Indexing, vec![leg(15, 6, "0", "0")])
+        ]
+    );
+}
+
+/// alice settles at 15 (final through 15 of 20) and the same step reads on
+/// through 20, past the final block. At 22, final through 17, the next
+/// steps read on from 21 and do not settle her again.
+#[tokio::test]
+async fn a_settled_index_reads_on_in_the_same_step_and_is_not_settled_again() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    let chain = quiet(&network, 22);
+    let held = Arc::new(Held::default());
+    held.set("alice", Some((15, 5)));
+    let first = indexer(&storage, Served(chain[..=20].to_vec(), 5)).with_balances(held.clone());
+    watch_at(&first, "alice", 0).await;
+    assert_eq!(first.next().await.unwrap(), Next::Indexed(header(20, 0)));
+    assert_eq!(
+        progress(&storage).await,
+        [("alice".to_owned(), 0, 15, Some(20))]
+    );
+
+    // A settle now would read 9.
+    held.set("alice", Some((17, 9)));
+    idle(&indexer(&storage, Served(chain, 5)).with_balances(held)).await;
+    assert_eq!(
+        progress(&storage).await,
+        [("alice".to_owned(), 0, 15, Some(22))]
+    );
+    assert_eq!(
+        opened(&db, &["alice"]).await,
+        [(Indexing, vec![leg(15, 6, "5", "5")])]
+    );
+}
+
+/// bob is read through 20, settled at 15. At 22, final through 17, alice is
+/// watched: she starts at 17 and settles there, and the step's run starts
+/// from her next, 18, not from the last kept block, 20.
+#[tokio::test]
+async fn the_run_starts_from_an_index_just_settled() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    let chain = quiet(&network, 22);
+    let held = Arc::new(Held::default());
+    held.set("bob", Some((15, 0)));
+    held.set("alice", Some((17, 3)));
+    let first = indexer(&storage, Served(chain[..=20].to_vec(), 5)).with_balances(held.clone());
+    watch_at(&first, "bob", 0).await;
+    idle(&first).await;
+
+    let read = Reads::default();
+    let second = indexer(&storage, Noted(Served(chain, 5), read.clone())).with_balances(held);
+    watch_at(&second, "alice", 0).await;
+    assert_eq!(second.next().await.unwrap(), Next::Indexed(header(22, 0)));
+    assert_eq!(
+        *read.lock().unwrap(),
+        (17..=22).collect(),
+        "S, then S + 1 on"
+    );
+    assert_eq!(
+        progress(&storage).await,
+        [
+            ("alice".to_owned(), 0, 17, Some(22)),
+            ("bob".to_owned(), 0, 15, Some(22)),
+        ]
+    );
+    assert_eq!(
+        opened(&db, &["alice"]).await,
+        [(Indexing, vec![leg(17, 6, "3", "3")])]
+    );
+}
+
+/// alice settles at 15 (final through 15 of 20, the chain reading 5) and is
+/// read through 20. Another branch from 15 then takes the adjustment's
+/// block back, past finality (final through 19): the steps walk back to
+/// 14, her index rewinds behind its birthday, and she settles again on the
+/// new branch, at 19 (6 there). One live adjustment.
+#[tokio::test]
+async fn a_reorg_taking_back_an_adjustment_settles_its_index_again() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    let held = Arc::new(Held::default());
+    held.set("alice", Some((15, 5)));
+    let first = indexer(&storage, Served(quiet(&network, 20), 5)).with_balances(held.clone());
+    watch_at(&first, "alice", 0).await;
+    idle(&first).await;
+    assert_eq!(
+        opened(&db, &["alice"]).await,
+        [(Indexing, vec![leg(15, 6, "5", "5")])]
+    );
+
+    let mut forked: Vec<Block> = (0..=24)
+        .map(|p| block(&network, p, u8::from(p >= 15), vec![]))
+        .collect();
+    forked[15].header.parent = header(15, 0).parent;
+    held.set("alice", Some((19, 6)));
+    let second = indexer(&storage, Served(forked, 5)).with_balances(held);
+    idle(&second).await;
+    assert_eq!(second.stats().reorgs, 6, "20 down to 15");
+    assert_eq!(
+        progress(&storage).await,
+        [("alice".to_owned(), 0, 19, Some(24))]
+    );
+    assert_eq!(
+        opened(&db, &["alice"]).await,
+        [(Indexing, vec![leg(19, 6, "6", "6")])]
+    );
+}
+
+/// The store's settle keeps the block it settles on when that is not kept:
+/// with no facts, linked as the indexer's blocks are (a gap below it). Another
+/// live block there answers `false`; one that does not link onto its kept
+/// neighbour fails; a second settle on the same block answers `false`.
+#[tokio::test]
+async fn a_settle_keeps_its_block_when_it_is_not_kept() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, directory) = storage().await;
+    let network = network();
+    BlockStore::insert(&storage, &empty(&network, 0, 3, 0))
+        .await
+        .unwrap();
+    for name in ["alice", "bob", "carol"] {
+        watch(&storage, &address(&network, name), 0).await;
+    }
+    let all = WalletIndexStore::find_all(&storage, &network)
+        .await
+        .unwrap();
+    let (alice, bob, carol) = (&all[0], &all[1], &all[2]);
+    let holding = |position, amount: u64| Holding {
+        position,
+        amount: Decimal::from(amount),
+    };
+    let settle = async |index: &WalletIndex, position, amount, fork| {
+        let held = holding(position, amount);
+        WalletIndexStore::settle(&storage, index, &held, &header(position, fork)).await
+    };
+
+    assert!(settle(alice, 10, 7, 0).await.unwrap());
+    assert!(blocks(&directory).contains(&(10, false, None)));
+    assert!(!settle(bob, 10, 1, 1).await.unwrap());
+    let error = settle(carol, 4, 1, 1).await.unwrap_err();
+    assert!(error.to_string().contains("does not link"), "{error:#}");
+    let alice = &WalletIndexStore::find_all(&storage, &network)
+        .await
+        .unwrap()[0];
+    assert!(!settle(alice, 10, 8, 0).await.unwrap());
+
+    assert_eq!(
+        progress(&storage).await,
+        [
+            ("alice".to_owned(), 0, 10, Some(10)),
+            ("bob".to_owned(), 0, 0, None),
+            ("carol".to_owned(), 0, 0, None),
+        ]
+    );
+    assert_eq!(
+        opened(&db, &["alice", "bob", "carol"]).await,
+        [
+            (Indexing, vec![leg(10, 6, "7", "7")]),
+            (Indexing, vec![]),
+            (Indexing, vec![])
+        ]
+    );
+}
+
+/// Each index of the test network: its address, requested start, birthday
+/// and the block it is indexed through.
+async fn progress(storage: &Stores) -> Vec<(String, u64, u64, Option<u64>)> {
+    WalletIndexStore::find_all(storage, &network())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|index| {
+            let at = index.indexed_at.map(|header| header.position);
+            (
+                index.address.value,
+                index.requested_from,
+                index.birthday,
+                at,
+            )
+        })
+        .collect()
+}
+
+/// Sets the state of `name`'s index, as pausing or resuming it does.
+async fn set_state(storage: &Stores, name: &str, state: WalletIndexState) {
+    let index = WalletIndexStore::find_all(storage, &network())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|index| index.address.value == name)
+        .unwrap();
+    WalletIndexStore::set_state(storage, &index, state, None)
+        .await
+        .unwrap();
+}
+
+/// alice is indexed through 100; meanwhile the chain took back 99 and 100
+/// and reached 4,100, final through 4,090. On a chain with balances the
+/// step first checks the last kept block below the final one: gone, it is
+/// marked reorged, then 99; on 98, kept, she settles at 4,090 and reads on.
+#[tokio::test]
+async fn a_last_kept_block_the_chain_took_back_is_marked_reorged_before_a_settle() {
+    let (storage, _db, directory) = storage().await;
+    let network = network();
+    watch(&storage, &address(&network, "alice"), 0).await;
+    index(&storage, &quiet(&network, 100)).await;
+    let mut chain: Vec<Block> = (0..=4_100)
+        .map(|p| block(&network, p, u8::from(p >= 99), vec![]))
+        .collect();
+    chain[99].header.parent = header(99, 0).parent;
+    let held = Arc::new(Held::default());
+    held.set("alice", Some((4_090, 0)));
+    let indexer = indexer(&storage, Served(chain, FINALITY)).with_balances(held);
+    assert_eq!(indexer.next().await.unwrap(), Next::Reorged(100));
+    assert_eq!(indexer.next().await.unwrap(), Next::Reorged(99));
+    assert_eq!(
+        progress(&storage).await,
+        [("alice".to_owned(), 0, 0, Some(98))]
+    );
+    assert_eq!(
+        indexer.next().await.unwrap(),
+        Next::Indexed(header(4_100, 1))
+    );
+    assert_eq!(
+        progress(&storage).await,
+        [("alice".to_owned(), 0, 4_090, Some(4_100))]
+    );
+    let kept = blocks(&directory);
+    for row in [
+        (99, true, Some(98)),
+        (100, true, Some(99)),
+        (4_090, false, None),
+    ] {
+        assert!(kept.contains(&row), "{row:?}");
+    }
+}
+
+/// alice, paid 5 at 50, is indexed through 100; back at 4,100 (P = 4,000,
+/// final through 4,090) the node serves 3,000 on only, not the last kept
+/// block: it is final, and the step never reads the gap. With balances she
+/// settles at 4,090 and reads on; without, she jumps to P and her coin is
+/// written off at 100.
+#[tokio::test]
+async fn a_last_kept_block_the_node_no_longer_serves_counts_as_final() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let network = network();
+    let held = Arc::new(Held::default());
+    held.set("alice", Some((4_090, 7)));
+    let a = coin(&network, "a", 0);
+    for (balances, coin, from, mut legs) in [
+        (Some(held), None, 4_090, vec![leg(4_090, 6, "2", "7")]),
+        (None, Some(a), 4_000, vec![leg(100, 6, "-5", "0")]),
+    ] {
+        let (storage, db, _directory) = storage().await;
+        let mut chain = quiet(&network, 4_100);
+        let paid = Leg::Received {
+            address: address(&network, "alice"),
+            asset: native(&network),
+            amount: Decimal::from(5_u64),
+            coin,
+        };
+        chain[50] = block(&network, 50, 0, vec![mined(&network, "a", 0, vec![paid])]);
+        watch(&storage, &address(&network, "alice"), 0).await;
+        index(&storage, &chain[..=100]).await;
+        let read = Reads::default();
+        let pruned = Pruned(Noted(Served(chain, FINALITY), read.clone()), 3_000);
+        let mut indexer = indexer(&storage, pruned).with_max_depth(Some(100));
+        if let Some(held) = balances {
+            indexer = indexer.with_balances(held);
+        }
+        idle(&indexer).await;
+        assert_eq!(
+            *read.lock().unwrap(),
+            (from..=4_100).collect(),
+            "the line on"
+        );
+        assert_eq!(
+            progress(&storage).await,
+            [("alice".to_owned(), 0, from, Some(4_100))]
+        );
+        legs.push(leg(50, 0, "5", "5"));
+        assert_eq!(opened(&db, &["alice"]).await, [(Indexing, legs)]);
+    }
+}
+
+/// alice is paused at 100 and bob at 245 of 250; both resumed at 250,
+/// final through 240: alice, behind the final block, settles there and
+/// reads on; bob, past it, reads on from 246.
+#[tokio::test]
+async fn a_resumed_index_settles_when_behind_the_final_block_and_reads_on_when_not() {
+    let (storage, _db, _directory) = storage().await;
+    let network = network();
+    let chain = quiet(&network, 250);
+    for name in ["alice", "bob"] {
+        watch(&storage, &address(&network, name), 0).await;
+    }
+    index(&storage, &chain[..=100]).await;
+    set_state(&storage, "alice", WalletIndexState::Paused).await;
+    index(&storage, &chain[..=245]).await;
+    set_state(&storage, "bob", WalletIndexState::Paused).await;
+
+    for name in ["alice", "bob"] {
+        set_state(&storage, name, WalletIndexState::Indexing).await;
+    }
+    let held = Arc::new(Held::default());
+    held.set("alice", Some((240, 0)));
+    let read = Reads::default();
+    let served = Noted(Served(chain, FINALITY), read.clone());
+    idle(&indexer(&storage, served).with_balances(held)).await;
+    assert_eq!(*read.lock().unwrap(), (240..=250).collect());
+    assert_eq!(
+        progress(&storage).await,
+        [
+            ("alice".to_owned(), 0, 240, Some(250)),
+            ("bob".to_owned(), 0, 0, Some(250)),
+        ]
+    );
+}
+
+/// Design 083 §10's example, in satoshis, on a chain without balances
+/// (Bitcoin), tip 1,200: alice is paid 0.3 at 800 (coin a) and 0.2 at 840
+/// (coin b); at 950 she pays bob 0.25 from coin a, 0.0499 back (coin s:1),
+/// 0.0001 fee; at 1,050 she pays bob 0.1999 from coin b, 0.0001 fee.
+fn archived_chain(network: &Network) -> Vec<Block> {
+    let mut chain = quiet(network, 1_200);
+    for (position, txid, amount) in [(800, "a", 30_000_000), (840, "b", 20_000_000)] {
+        let paid = payment(network, txid, "alice", amount, None);
+        chain[position] = block(network, u64::try_from(position).unwrap(), 0, vec![paid]);
+    }
+    let mut spend = send(
+        network,
+        "alice",
+        "bob",
+        29_990_000,
+        10_000,
+        coin(network, "a", 0),
+    );
+    spend.push(Leg::Received {
+        address: address(network, "alice"),
+        asset: native(network),
+        amount: Decimal::from(4_990_000_u64),
+        coin: Some(coin(network, "s", 1)),
+    });
+    chain[950] = block(network, 950, 0, vec![mined(network, "s", 0, spend)]);
+    let spend = send(
+        network,
+        "alice",
+        "bob",
+        19_990_000,
+        10_000,
+        coin(network, "b", 0),
+    );
+    chain[1_050] = block(network, 1_050, 0, vec![mined(network, "t", 0, spend)]);
+    chain
+}
+
+/// Indexes alice from 800 through 850 of [`archived_chain`]; then, carol
+/// watched from 860 (not started), steps an indexer with `max_depth` 100
+/// over it through 1,000 until idle: both jump to 900. The positions that
+/// read.
+pub(super) async fn jumped(storage: &Stores) -> BTreeSet<u64> {
+    let network = network();
+    let chain = archived_chain(&network);
+    watch(storage, &address(&network, "alice"), 800).await;
+    index(storage, &chain[..=850]).await;
+    watch(storage, &address(&network, "carol"), 860).await;
+    let read = Reads::default();
+    let served = Noted(Served(chain[..=1_000].to_vec(), FINALITY), read.clone());
+    idle(&indexer(storage, served).with_max_depth(Some(100))).await;
+    read.lock().unwrap().clone()
+}
+
+/// alice's received legs, latest first, as (position, `archived_at`), and
+/// her spendable coins.
+async fn archived(db: &Db) -> (Vec<(i64, Option<i64>)>, Vec<Coin>) {
+    let (read, unspent) = reads(db, &["alice"]).await;
+    let legs = read[0].1.as_array().unwrap();
+    let received = legs.iter().filter(|leg| leg["kind"] == 0);
+    let received = received.map(|leg| {
+        (
+            leg["position"].as_i64().unwrap(),
+            leg["archived_at"].as_i64(),
+        )
+    });
+    (
+        received.collect(),
+        unspent.into_iter().map(|input| input.coin).collect(),
+    )
+}
+
+/// (position, kind, amount, total) of a leg, as [`opened`] reads it.
+fn leg(position: i64, kind: i64, amount: &str, total: &str) -> (i64, i64, String, String) {
+    (position, kind, amount.to_owned(), total.to_owned())
+}
+
+/// alice's legs through 1,000 of [`archived_chain`] after [`jumped`],
+/// latest first: at 950 the spend of archived coin a, spent −0.2999, fee
+/// −0.0001, change +0.0499, with no leg finding the coin: the total goes
+/// negative, history is missing; at 850 the write-off of both coins.
+fn jumped_legs() -> Vec<(i64, i64, String, String)> {
+    vec![
+        leg(950, 0, "4990000", "-25010000"),
+        leg(950, 4, "10000", "-30000000"),
+        leg(950, 1, "29990000", "-29990000"),
+        leg(850, 6, "-50000000", "0"),
+        leg(840, 0, "20000000", "50000000"),
+        leg(800, 0, "30000000", "30000000"),
+    ]
+}
+
+#[tokio::test]
+async fn a_jump_without_balances_archives_coins_and_a_spend_of_one_goes_negative() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    let read = jumped(&storage).await;
+    let expected: BTreeSet<u64> = std::iter::once(850).chain(900..=1_000).collect();
+    assert_eq!(read, expected, "the last kept block, then P on");
+    assert_eq!(
+        progress(&storage).await,
+        [
+            ("alice".to_owned(), 800, 900, Some(1_000)),
+            ("carol".to_owned(), 860, 900, Some(1_000)),
+        ]
+    );
+    // carol never started: nothing written off.
+    assert_eq!(
+        opened(&db, &["alice", "carol"]).await,
+        [(Indexing, jumped_legs()), (Indexing, vec![])]
+    );
+    let (received, unspent) = archived(&db).await;
+    assert_eq!(received, [(950, None), (840, Some(900)), (800, Some(900))]);
+    assert_eq!(unspent, [coin(&network, "s", 1)]);
+}
+
+#[tokio::test]
+async fn a_reorg_takes_a_spend_of_an_archived_coin_back_and_the_coin_stays_archived() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    jumped(&storage).await;
+    // Another branch from 950 takes the spend back.
+    let chain = archived_chain(&network);
+    let mut forked = chain[..=1_000].to_vec();
+    for (position, kept) in forked.iter_mut().enumerate().skip(950) {
+        *kept = block(&network, u64::try_from(position).unwrap(), 1, vec![]);
+    }
+    forked[950].header.parent = header(950, 0).parent;
+    idle(&indexer(&storage, Served(forked, FINALITY)).with_max_depth(Some(100))).await;
+    let legs = jumped_legs()[3..].to_vec();
+    assert_eq!(opened(&db, &["alice"]).await, [(Indexing, legs)]);
+    let (received, unspent) = archived(&db).await;
+    assert_eq!(received, [(840, Some(900)), (800, Some(900))]);
+    assert!(unspent.is_empty());
+
+    // Kept again, 950's spend subtracts again.
+    let served = Served(chain[..=1_000].to_vec(), FINALITY);
+    idle(&indexer(&storage, served).with_max_depth(Some(100))).await;
+    assert_eq!(opened(&db, &["alice"]).await, [(Indexing, jumped_legs())]);
+    assert_eq!(archived(&db).await.1, [coin(&network, "s", 1)]);
+}
+
+#[tokio::test]
+async fn a_second_jump_writes_off_only_the_coins_not_archived_yet() {
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    jumped(&storage).await;
+    // Through 1,050, where alice spends archived coin b: −0.2 more. Then at
+    // 1,200, P = 1,100: only coin s:1 is written off, on 1,050.
+    let chain = archived_chain(&network);
+    let served = Served(chain[..=1_050].to_vec(), FINALITY);
+    idle(&indexer(&storage, served).with_max_depth(Some(100))).await;
+    idle(&indexer(&storage, Served(chain, FINALITY)).with_max_depth(Some(100))).await;
+    let mut legs = vec![
+        leg(1_050, 6, "-4990000", "-50000000"),
+        leg(1_050, 4, "10000", "-45010000"),
+        leg(1_050, 1, "19990000", "-45000000"),
+    ];
+    legs.extend(jumped_legs());
+    let kept = opened(&db, &["alice", "carol"]).await;
+    assert_eq!((&kept[0].1, &kept[1].1), (&legs, &vec![]));
+    let (received, unspent) = archived(&db).await;
+    assert_eq!(
+        received,
+        [(950, Some(1_100)), (840, Some(900)), (800, Some(900))]
+    );
+    assert!(unspent.is_empty());
+    let (read, _) = reads(&db, &["alice"]).await;
+    assert_eq!(
+        read[0].1[0]["id"],
+        "bitcoin.regtest.041a00.adjustment.bitcoin.regtest.alice.native.1"
+    );
+}
+
+/// [`Served`] reads its blocks' times as any chain does: what the start
+/// check reads its tip with.
+impl base::Dated for Served {}
+
+/// alice re-indexed after [`jumped`] (tip 1,000, P = 900): her index
+/// forgotten, its legs with it, a start below P is refused and one at P
+/// reads from there. Her coins from before the jump are gone: only the
+/// change of 950's spend is spendable, and that spend of coin a, never
+/// seen, takes her total negative.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_re_index_after_a_jump_starts_at_the_depth_line_without_the_old_coins() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    /// The scripted network, its tip read from [`archived_chain`] through
+    /// 1,000.
+    struct Jumped(super::Scripted);
+
+    impl base::ServiceFactory for Jumped {
+        const CHAIN: Chain = Chain::from_static("bitcoin");
+
+        fn new(config: &base::NetworkConfig) -> anyhow::Result<Self> {
+            <super::Scripted as base::ServiceFactory>::new(config).map(Self)
+        }
+
+        fn service(
+            &self,
+            storage: &base::Storage,
+            client: Arc<dyn rpc::Client>,
+        ) -> anyhow::Result<base::Service> {
+            let mut service = self.0.service(storage, client)?;
+            let chain = archived_chain(&network())[..=1_000].to_vec();
+            service.dated = Some(Arc::new(Served(chain, FINALITY)));
+            Ok(service)
+        }
+    }
+
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    jumped(&storage).await;
+    db.write(|connection| {
+        Ok(crate::models::wallet_index::db::delete(
+            connection,
+            "bitcoin.regtest.alice.native",
+        )?)
+    })
+    .await
+    .unwrap();
+    let container = base::Container::new(Stores::storage(db.clone()));
+    let config = super::config(Some(100));
+    let node: Arc<dyn rpc::Client> = Arc::new(rpc::testing::Script::default());
+    let transport = crate::usecase::Transport::from_clients::<super::Node>(&config, vec![node]);
+    super::SCRIPT.set(Some(Arc::new(super::Script::default())));
+    container.register::<Jumped>(config, transport);
+    let wallet = crate::models::wallet::WalletId::of(&address(&network, "alice")).unwrap();
+    let create = |start| {
+        crate::usecase::wallets::create_index(&container, &db, &wallet, "native", Some(start))
+    };
+    let error = create(899).await.unwrap_err();
+    assert!(error.message.contains("start at 900"), "{error:?}");
+    assert!(create(900).await.unwrap().0);
+
+    let served = Served(archived_chain(&network)[..=1_000].to_vec(), FINALITY);
+    idle(&indexer(&storage, served).with_max_depth(Some(100))).await;
+    assert_eq!(
+        progress(&storage).await,
+        [
+            ("alice".to_owned(), 900, 900, Some(1_000)),
+            ("carol".to_owned(), 860, 900, Some(1_000)),
+        ]
+    );
+    assert_eq!(
+        opened(&db, &["alice"]).await,
+        [(Indexing, jumped_legs()[..3].to_vec())],
+        "only what she read since"
+    );
+    assert_eq!(
+        archived(&db).await,
+        (vec![(950, None)], vec![coin(&network, "s", 1)])
+    );
+}
+
+/// alice, indexed through 850 of [`archived_chain`], sent 950's transaction
+/// s (spending coin a, change s:1) and it is still pending when the network
+/// jumps to 900: the jump forgets it, its row and legs, and archives both
+/// coins. Mined at 950, read after the jump, it comes back as any mined
+/// transaction: its spend of archived coin a subtracts, the total goes
+/// negative, coin a stays archived and the change is spendable.
+#[tokio::test]
+async fn a_pending_send_a_jump_forgot_comes_back_mined_and_spends_its_archived_coin() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, directory) = storage().await;
+    let network = network();
+    let chain = archived_chain(&network);
+    watch(&storage, &address(&network, "alice"), 800).await;
+    index(&storage, &chain[..=850]).await;
+    confirm(&db, 850).await;
+    let mut sent = chain[950].transactions[0].clone();
+    sent.state = TransactionState::Pending;
+    sent.order = None;
+    record(&db, &sent).await;
+    assert_eq!(rows(&directory, "s"), (vec![None], vec![None; 3]));
+
+    // The jump's step reads 900..=909 only: not 950 yet.
+    let reading = indexer(&storage, Served(chain[..=1_000].to_vec(), FINALITY))
+        .with_max_depth(Some(100))
+        .with_batch(10);
+    reading.next().await.unwrap();
+    assert_eq!(
+        rows(&directory, "s"),
+        (vec![], vec![]),
+        "the jump forgets it"
+    );
+    let (received, unspent) = archived(&db).await;
+    assert_eq!(received, [(840, Some(900)), (800, Some(900))]);
+    assert!(unspent.is_empty());
+
+    idle(&reading).await;
+    let at = Some("bitcoin.regtest.03b600".to_owned());
+    assert_eq!(rows(&directory, "s"), (vec![at.clone()], vec![at; 3]));
+    assert_eq!(opened(&db, &["alice"]).await, [(Indexing, jumped_legs())]);
+    let (received, unspent) = archived(&db).await;
+    assert_eq!(received, [(950, None), (840, Some(900)), (800, Some(900))]);
+    assert_eq!(unspent, [coin(&network, "s", 1)]);
+}
+
+/// alice and dave are indexed through 850 of [`archived_chain`], dave paid
+/// 0.01 at 820 (coin d), when dave is paused and the network jumps alice to
+/// 900. Resumed at 1,049 (P = 949) he is behind it: he jumps then, on his
+/// own, coin d archived at 949 and written off on 850; alice's legs stay.
+#[tokio::test]
+async fn a_paused_index_resumed_behind_the_depth_line_jumps_on_its_own() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, _directory) = storage().await;
+    let network = network();
+    let mut chain = archived_chain(&network);
+    let paid = payment(&network, "d", "dave", 1_000_000, None);
+    chain[820] = block(&network, 820, 0, vec![paid]);
+    for name in ["alice", "dave"] {
+        watch(&storage, &address(&network, name), 800).await;
+    }
+    index(&storage, &chain[..=850]).await;
+    set_state(&storage, "dave", WalletIndexState::Paused).await;
+    let reading = |tip: usize| {
+        let served = Served(chain[..=tip].to_vec(), FINALITY);
+        indexer(&storage, served).with_max_depth(Some(100))
+    };
+    idle(&reading(1_000)).await;
+    assert_eq!(
+        progress(&storage).await,
+        [
+            ("alice".to_owned(), 800, 900, Some(1_000)),
+            ("dave".to_owned(), 800, 800, Some(850)),
+        ]
+    );
+
+    set_state(&storage, "dave", WalletIndexState::Indexing).await;
+    idle(&reading(1_049)).await;
+    assert_eq!(
+        progress(&storage).await,
+        [
+            ("alice".to_owned(), 800, 900, Some(1_049)),
+            ("dave".to_owned(), 800, 949, Some(1_049)),
+        ]
+    );
+    let dave = vec![
+        leg(850, 6, "-1000000", "0"),
+        leg(820, 0, "1000000", "1000000"),
+    ];
+    assert_eq!(
+        opened(&db, &["alice", "dave"]).await,
+        [(Indexing, jumped_legs()), (Indexing, dave)]
+    );
+    let (read, unspent) = reads(&db, &["dave"]).await;
+    assert_eq!(read[0].1[1]["archived_at"], 949);
+    assert!(unspent.is_empty());
+    let (received, unspent) = archived(&db).await;
+    assert_eq!(received, [(950, None), (840, Some(900)), (800, Some(900))]);
+    assert_eq!(unspent, [coin(&network, "s", 1)]);
+}
+
+/// alice, paid 5 at 50 (coin a) and 2 at 100 (coin b), is indexed through
+/// 100; meanwhile the chain took back 99 and 100 and reached 4,100 (P =
+/// 4,000). Without balances the jump's step first marks 100 and 99 reorged,
+/// coin b's leg with them, then writes coin a off on 98, the last live
+/// block she is indexed through.
+#[tokio::test]
+async fn a_jump_without_balances_writes_off_below_a_last_kept_block_the_chain_took_back() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, directory) = storage().await;
+    let network = network();
+    let mut kept = quiet(&network, 100);
+    kept[50] = block(
+        &network,
+        50,
+        0,
+        vec![payment(&network, "a", "alice", 5, None)],
+    );
+    kept[100] = block(
+        &network,
+        100,
+        0,
+        vec![payment(&network, "b", "alice", 2, None)],
+    );
+    watch(&storage, &address(&network, "alice"), 0).await;
+    index(&storage, &kept).await;
+    let mut chain: Vec<Block> = (0..=4_100)
+        .map(|p| block(&network, p, u8::from(p >= 99), vec![]))
+        .collect();
+    chain[99].header.parent = header(99, 0).parent;
+    chain[50] = kept[50].clone();
+    idle(&indexer(&storage, Served(chain, FINALITY)).with_max_depth(Some(100))).await;
+    assert_eq!(
+        progress(&storage).await,
+        [("alice".to_owned(), 0, 4_000, Some(4_100))]
+    );
+    let kept = blocks(&directory);
+    for row in [(99, true, Some(98)), (100, true, Some(99))] {
+        assert!(kept.contains(&row), "{row:?}");
+    }
+    let legs = vec![leg(98, 6, "-5", "0"), leg(50, 0, "5", "5")];
+    assert_eq!(opened(&db, &["alice"]).await, [(Indexing, legs)]);
+    let (received, unspent) = archived(&db).await;
+    assert_eq!(received, [(50, Some(4_000))]);
+    assert!(unspent.is_empty());
+}
+
+/// After [`jumped`] the chain's tip is 1,100 (P = 1,000) when the prune job
+/// runs, before the indexer reads on: below 1,000 only the blocks alice's
+/// legs are on stay (800 and 840, the archived coins; 850, the write-off;
+/// 950, the spend), and 1,000, the indexes' block; every leg stays. Read
+/// on, 1,050 spends archived coin b: it subtracts, coin b stays archived,
+/// only the change s:1 is spendable.
+#[tokio::test]
+async fn a_prune_after_a_jump_keeps_the_archived_coins_and_a_later_spend_of_one_subtracts() {
+    use crate::models::wallet_index::IndexState::Indexing;
+    let (storage, db, directory) = storage().await;
+    let network = network();
+    jumped(&storage).await;
+    db.write(|connection| {
+        use diesel::connection::SimpleConnection as _;
+        Ok(connection.batch_execute("UPDATE network SET max_depth = 100")?)
+    })
+    .await
+    .unwrap();
+    confirm(&db, 1_100).await;
+    prune(&db).await;
+    let kept: Vec<_> = [800, 840, 850, 950, 1_000]
+        .into_iter()
+        .map(|position| (position, false, None))
+        .collect();
+    assert_eq!(blocks(&directory), kept);
+    assert_eq!(opened(&db, &["alice"]).await, [(Indexing, jumped_legs())]);
+
+    let served = Served(archived_chain(&network)[..=1_100].to_vec(), FINALITY);
+    idle(&indexer(&storage, served).with_max_depth(Some(100))).await;
+    let mut legs = vec![
+        leg(1_050, 4, "10000", "-45010000"),
+        leg(1_050, 1, "19990000", "-45000000"),
+    ];
+    legs.extend(jumped_legs());
+    assert_eq!(opened(&db, &["alice"]).await, [(Indexing, legs)]);
+    let (received, unspent) = archived(&db).await;
+    assert_eq!(received, [(950, None), (840, Some(900)), (800, Some(900))]);
+    assert_eq!(unspent, [coin(&network, "s", 1)]);
 }

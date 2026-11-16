@@ -46,9 +46,9 @@ pub struct Config {
     pub batch: u64,
     /// Fractional digits a view shows of the native currency; none: all.
     pub display_decimals: Option<u32>,
-    /// How old a watch's start may be: about what history the nodes keep;
-    /// none: no limit.
-    pub max_history: Option<Duration>,
+    /// Positions below the tip a watch's start may be; none: no limit. At
+    /// least `confirmation_depth - 1`.
+    pub max_depth: Option<u64>,
 }
 
 /// The knobs a [`base::NetworkConfig`]'s `settings` may set:
@@ -98,7 +98,7 @@ impl Config {
             pending_ttl_ms: settings.pending_ttl_ms,
             interval_ms: settings.interval_ms,
             batch: settings.batch,
-            max_history: None,
+            max_depth: None,
             display_decimals: None,
         }
     }
@@ -107,12 +107,17 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// For a depth outside `1..=1000`, a zero fee
-    /// target, fee floor or interval.
+    /// For a depth outside `1..=1000`, a depth limit below
+    /// `confirmation_depth - 1`, a zero fee target, fee floor or interval.
     pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(
             (1..=1_000).contains(&self.confirmation_depth),
             "Bitcoin confirmation depth must be between 1 and 1000"
+        );
+        let confirmations = self.confirmation_depth - 1;
+        ensure!(
+            self.max_depth.is_none_or(|limit| limit >= confirmations),
+            "Bitcoin max_depth must be at least its confirmations ({confirmations})"
         );
         ensure!(
             self.fee_target_blocks > 0,
@@ -148,7 +153,7 @@ impl TryFrom<&NetworkConfig> for Config {
             Network::deserialize(json!(config.network.name)).context("Bitcoin network")?;
         let mut built = Self::with(network, settings);
         built.confirmation_depth = config.confirmations.saturating_add(1);
-        built.max_history = config.max_history;
+        built.max_depth = config.max_depth;
         for asset in &config.assets {
             ensure!(asset.kind == AssetKind::Native, "Bitcoin has no tokens");
             ensure!(asset.decimals == BTC_DECIMALS, "BTC has 8 decimals");
@@ -232,7 +237,8 @@ impl base::ServiceFactory for Factory {
                 Arc::clone(&storage.indexes),
                 Duration::from_millis(config.interval_ms),
             )
-            .with_batch(config.batch),
+            .with_batch(config.batch)
+            .with_max_depth(config.max_depth),
         );
         Ok(Service {
             indexer,
@@ -245,7 +251,8 @@ impl base::ServiceFactory for Factory {
             storage: storage.clone(),
             client,
             dated: Some(chain),
-            max_history: config.max_history,
+            balances: None,
+            max_depth: config.max_depth,
             confirmations: config.confirmation_depth.saturating_sub(1),
         })
     }

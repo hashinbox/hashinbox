@@ -9,7 +9,7 @@ NEW = found while checking this list.
 
 | id | P | one line | status |
 |---|---|---|---|
-| H1 | P2 | A network's history limit (`max_history_days`) is set per network; how far back a node serves is the node's, so its RPC endpoint should set it | open |
+| H1 | P2 | A network's depth limit (`max_depth`) is set per network; how far back a node serves is the node's, so its RPC endpoint should set it | open |
 | D | P2 | A node answering garbage is never failed over (744 failed steps in 5 s) | open |
 | T1 | P2 | One 15 s timeout for everything. No deadline for a step or a send; boot can block | partly fixed (13dda2f, 6839bcd) |
 | R1 | P2 | Short batch returns `Ok` | partly fixed (6839bcd) |

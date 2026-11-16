@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use ::rpc::testing::{Faults, Reply, Script};
 use base::{
-    Asset, Chained as _, Dated as _, Decimal, InfoClient, Leg, NotServed, Reason, Reward,
-    ServiceFactory as _, Tips, TransactionState,
+    Asset, Balances as _, Chained as _, Dated as _, Decimal, Holding, InfoClient, Leg, NotServed,
+    Reason, Reward, ServiceFactory as _, Tips, TransactionState,
 };
 use chain_ethereum::{Chain, Client, Config, Factory, Info, Network, Token};
 use futures_executor::block_on;
@@ -531,7 +531,7 @@ fn a_block_time_is_a_header_read_and_expired_history_says_so() {
 }
 
 /// Storage for an indexer that has never kept a block and indexes from
-/// block 5; every other store call fails the test.
+/// block 13; every other store call fails the test.
 struct Fresh;
 
 impl base::BlockStore for Fresh {
@@ -559,16 +559,18 @@ impl base::WalletIndexStore for Fresh {
     fn find_next<'a>(
         &'a self,
         _: &'a base::Network,
+        _: u64,
         _: Option<u64>,
     ) -> base::Future<'a, anyhow::Result<Option<u64>>> {
-        Box::pin(async { Ok(Some(5)) })
+        Box::pin(async { Ok(Some(13)) })
     }
 
+    /// None: nothing to settle.
     fn find_all<'a>(
         &'a self,
         _: &'a base::Network,
     ) -> base::Future<'a, anyhow::Result<Vec<base::WalletIndex>>> {
-        unreachable!("nothing pruned")
+        Box::pin(async { Ok(Vec::new()) })
     }
 
     fn move_birthday<'a>(
@@ -586,6 +588,23 @@ impl base::WalletIndexStore for Fresh {
         _: Option<&'a str>,
     ) -> base::Future<'a, anyhow::Result<()>> {
         unreachable!("nothing pruned")
+    }
+
+    fn settle<'a>(
+        &'a self,
+        _: &'a base::WalletIndex,
+        _: &'a base::Holding,
+        _: &'a base::BlockHeader,
+    ) -> base::Future<'a, anyhow::Result<bool>> {
+        unreachable!("nothing to settle")
+    }
+
+    fn restart<'a>(
+        &'a self,
+        _: &'a base::WalletIndex,
+        _: u64,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        unreachable!("no jump")
     }
 }
 
@@ -619,7 +638,7 @@ fn the_settings_batch_is_the_indexers_step() {
         testnet: false,
         block_time: std::time::Duration::from_secs(12),
         confirmations: 12,
-        max_history: None,
+        max_depth: None,
         explorer_address: None,
         explorer_transaction: None,
         settings: json!({"batch": 2}),
@@ -648,23 +667,23 @@ fn the_settings_batch_is_the_indexers_step() {
     let service = Factory::from(config)
         .service(&storage, Arc::new(script.clone()))
         .unwrap();
-    // From block 5 with the tip at 16: two blocks a step, not the default 100.
+    // From block 13 with the tip at 16: two blocks a step, not the default 100.
     script.push([
         Reply::ok("eth_blockNumber", json!("0x10")),
         Reply::ok("eth_getBlockByNumber", json!({"number": "0xc"})),
         Reply::ok(
             "eth_getBlockByNumber",
-            block(5, 0x55, 0x44, vec![], json!([])),
+            block(13, 0xdd, 0xcc, vec![], json!([])),
         )
-        .expecting(json!(["0x5", true])),
+        .expecting(json!(["0xd", true])),
         Reply::ok(
             "eth_getBlockByNumber",
-            block(6, 0x66, 0x55, vec![], json!([])),
+            block(14, 0xee, 0xdd, vec![], json!([])),
         )
-        .expecting(json!(["0x6", true])),
+        .expecting(json!(["0xe", true])),
     ]);
     let next = block_on(service.indexer.next()).unwrap();
-    assert!(matches!(next, base::Next::Indexed(header) if header.position == 6));
+    assert!(matches!(next, base::Next::Indexed(header) if header.position == 14));
     script.exhausted();
 }
 
@@ -698,5 +717,67 @@ fn a_network_builds_with_its_node_down_and_asks_it_nothing() {
         confirmed: 12,
     };
     assert_eq!(block_on(chain.tips()).unwrap(), expected);
+    script.exhausted();
+}
+
+/// Tips with the finalized block at 12.
+fn finalized_at_12() -> [Reply; 2] {
+    [
+        Reply::ok("eth_blockNumber", json!("0x10")),
+        Reply::ok("eth_getBlockByNumber", json!({"number": "0xc"})),
+    ]
+}
+
+#[test]
+fn a_balance_is_read_at_the_finalized_block() {
+    let owner = account(0xb1);
+    let usdc = Asset {
+        network: network(),
+        id: TOKEN.to_owned(),
+    };
+    let script = Script::new([]);
+    let chain = connect(&script, &config());
+    script.push(finalized_at_12());
+    script
+        .push([Reply::ok("eth_getBalance", json!("0xde0b6b3a7640000"))
+            .expecting(json!([owner, "0xc"]))]);
+    script.push(finalized_at_12());
+    script.push([Reply::ok(
+        "eth_call",
+        json!("0x00000000000000000000000000000000000000000000000000000000004c4b40"),
+    )
+    .expecting(json!([
+        { "to": TOKEN, "data": format!("0x70a08231{:0>64}", &owner[2..]) },
+        "0xc",
+    ]))]);
+
+    let native = block_on(chain.balance(&address(0xb1), &Asset::native(network()), 5));
+    let token = block_on(chain.balance(&address(0xb1), &usdc, 12));
+
+    assert_eq!(
+        native.unwrap(),
+        Some(Holding {
+            position: 12,
+            amount: Decimal::from(1_000_000_000_000_000_000_u64)
+        })
+    );
+    assert_eq!(
+        token.unwrap(),
+        Some(Holding {
+            position: 12,
+            amount: Decimal::from(5_000_000)
+        })
+    );
+    script.exhausted();
+}
+
+#[test]
+fn a_balance_at_a_block_not_finalized_yet_is_not_answerable() {
+    let script = Script::new(finalized_at_12());
+    let chain = connect(&script, &config());
+
+    let read = block_on(chain.balance(&address(0xb1), &Asset::native(network()), 13));
+
+    assert_eq!(read.unwrap(), None, "finalized 12 is below 13");
     script.exhausted();
 }

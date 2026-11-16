@@ -90,11 +90,13 @@ impl Api {
         read["indexes"][asset].clone()
     }
 
-    /// The mined legs of `wallet` in `asset`, latest first.
+    /// The mined legs of `wallet` in `asset`, latest first, its adjustments
+    /// left out (the one opening an index on a chain that reads balances).
     pub(crate) async fn legs(&self, wallet: &Wallet, asset: &str) -> Vec<Value> {
         let uri = format!("/v1/wallets/{}/indexes/{asset}/legs", wallet.id);
         let page = self.get(&uri).await;
-        page["legs"].as_array().cloned().unwrap_or_default()
+        let legs = page["legs"].as_array().cloned().unwrap_or_default();
+        legs.into_iter().filter(|leg| leg["kind"] != 6).collect()
     }
 
     /// Sends `amount` (display units) of `asset` from `wallet` to `to`:

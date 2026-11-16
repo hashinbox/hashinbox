@@ -64,7 +64,7 @@ pub(crate) struct Stats {
     pub(crate) tags: u64,
     /// Live blocks kept.
     pub(crate) blocks: u64,
-    /// Blocks a reorg archived.
+    /// Blocks a reorg took back.
     pub(crate) reorged: u64,
     /// Transactions kept mined in live blocks.
     pub(crate) transactions: u64,

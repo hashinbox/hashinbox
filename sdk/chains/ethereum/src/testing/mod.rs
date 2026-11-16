@@ -26,8 +26,9 @@ const TRANSFER: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 const FAUCET: Address = Address::repeat_byte(0xfa);
 /// Where each block's filler transfer goes (Sepolia blocks are never empty).
 const SINK: Address = alloy_primitives::address!("000000000000000000000000000000000000dead");
-/// Blocks a node's `finalized` trails its head by.
-const FINALITY: u64 = 3;
+/// Blocks a node's `finalized` trails its head by: more than a case mines
+/// at once (`1 + confirmations`), so an indexer at the tip stays above it.
+const FINALITY: u64 = 6;
 
 /// The recipient the recordings send to: an address that holds nothing.
 const PLACEHOLDER: alloy_primitives::Address = alloy_primitives::Address::repeat_byte(0xfe);
@@ -147,7 +148,7 @@ pub fn recording(name: &str) -> Recording {
 
 /// The mock Sepolia and its nodes. Every mined block carries a filler
 /// transfer, as Sepolia's do; a node's `finalized` trails its head by
-/// three blocks.
+/// six blocks.
 pub struct Ethereum {
     chain: Chain<Model>,
     nodes: Vec<Arc<Node<Model>>>,
@@ -228,7 +229,7 @@ impl TestChain for Ethereum {
             testnet: true,
             block_time: Duration::from_secs(12),
             confirmations: 2,
-            max_history: None,
+            max_depth: None,
             explorer_address: None,
             explorer_transaction: None,
             settings: json!({"interval_ms": 5}),

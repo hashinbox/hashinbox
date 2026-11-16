@@ -8,8 +8,8 @@ use anyhow::Result;
 use crypto::{Curve, SecretBytes};
 
 use crate::{
-    Address, Addressed, Asset, BlockHeader, Broadcaster, Builder, FeeEstimator, Future, Network,
-    Networked, TransactionError,
+    Address, Addressed, Asset, BlockHeader, Broadcaster, Builder, FeeEstimator, Future, Holding,
+    Network, Networked, TransactionError,
 };
 
 /// One address with its key, its chain's builders and its broadcaster, all
@@ -294,8 +294,10 @@ pub struct Index {
     pub asset: Asset,
     /// The start asked for.
     pub requested_from: u64,
-    /// The first position to scan: `requested_from`, or the first block the
-    /// node served when it no longer served that one.
+    /// The first position to scan: `requested_from`, the first block the
+    /// node served when it no longer served that one, or where a jump or a
+    /// settle moved it (with [`crate::Balances`], a watch starts at the
+    /// chain's final block).
     pub birthday: u64,
     /// Scanned through this block; `None` before the first.
     pub indexed_at: Option<BlockHeader>,
@@ -357,9 +359,17 @@ pub trait IndexStore: Send + Sync {
     /// When the store cannot write.
     fn insert<'a>(&'a self, index: &'a Index) -> Future<'a, Result<()>>;
 
+    /// Every index of `network`, whatever its state.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot read.
+    fn find_all<'a>(&'a self, network: &'a Network) -> Future<'a, Result<Vec<Index>>>;
+
     /// The lowest [`Index::next`] of `network`'s [`IndexState::Indexing`]
-    /// indexes at or below `through`; with `None`, the lowest of all. `None`
-    /// when no index qualifies.
+    /// indexes at or above `from` and at or below `through`; with `None`,
+    /// at or above `from`. `None` when no index qualifies. By default
+    /// from [`Self::find_all`].
     ///
     /// # Errors
     ///
@@ -367,15 +377,46 @@ pub trait IndexStore: Send + Sync {
     fn find_next<'a>(
         &'a self,
         network: &'a Network,
+        from: u64,
         through: Option<u64>,
-    ) -> Future<'a, Result<Option<u64>>>;
+    ) -> Future<'a, Result<Option<u64>>> {
+        Box::pin(async move {
+            let indexes = self.find_all(network).await?;
+            Ok(indexes
+                .iter()
+                .filter(|index| index.state == IndexState::Indexing)
+                .filter_map(Index::next)
+                .filter(|next| *next >= from && through.is_none_or(|through| *next <= through))
+                .min())
+        })
+    }
 
-    /// Every index of `network`, whatever its state.
+    /// `network`'s [`IndexState::Indexing`] indexes whose [`Index::next`] is
+    /// below `below`, furthest behind first, at most `limit`. By default
+    /// from [`Self::find_all`].
     ///
     /// # Errors
     ///
     /// When the store cannot read.
-    fn find_all<'a>(&'a self, network: &'a Network) -> Future<'a, Result<Vec<Index>>>;
+    fn find_behind<'a>(
+        &'a self,
+        network: &'a Network,
+        below: u64,
+        limit: usize,
+    ) -> Future<'a, Result<Vec<Index>>> {
+        Box::pin(async move {
+            let mut behind: Vec<Index> = self
+                .find_all(network)
+                .await?
+                .into_iter()
+                .filter(|index| index.state == IndexState::Indexing)
+                .filter(|index| index.next().is_some_and(|next| next < below))
+                .collect();
+            behind.sort_by_key(Index::next);
+            behind.truncate(limit);
+            Ok(behind)
+        })
+    }
 
     /// Moves the birthday of `index` to `birthday`, only while it has not
     /// started (`indexed_at` unset); its `requested_from` stays.
@@ -396,4 +437,36 @@ pub trait IndexStore: Send + Sync {
         state: IndexState,
         reason: Option<&'a str>,
     ) -> Future<'a, Result<()>>;
+
+    /// Settles `index` at `holding`, what the chain says it holds at a
+    /// final block `S` (`holding.position`, its header `header`), in one
+    /// write: `S` kept unless it is; on it, an `adjustment` of
+    /// `holding.amount` less the index's total (its live legs, none above
+    /// `S`), even a zero one (it marks the opening); the index continuing
+    /// from `S + 1`. One that had started forgets its pending sends, as
+    /// [`Self::restart`] does. `false`: another live block at `S`, or `S`
+    /// already holds its adjustment; nothing written; try again later.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot read or write, or `S` does not link onto the
+    /// kept blocks around it.
+    fn settle<'a>(
+        &'a self,
+        index: &'a Index,
+        holding: &'a Holding,
+        header: &'a BlockHeader,
+    ) -> Future<'a, Result<bool>>;
+
+    /// Restarts `index` at `birthday`, the jump line it fell below, in one
+    /// write: its birthday there, `indexed_at` unset, indexing; its
+    /// `requested_from` and legs stay. Its pending sends are forgotten, as
+    /// when they expire: one mined below `birthday` is never read. A store
+    /// keeping coins archives those `index` still shows unspent and writes
+    /// them off on its `indexed_at`.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot write.
+    fn restart<'a>(&'a self, index: &'a Index, birthday: u64) -> Future<'a, Result<()>>;
 }

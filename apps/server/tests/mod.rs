@@ -61,14 +61,17 @@ async fn migrate(db: &crate::db::Db) -> anyhow::Result<()> {
 }
 
 /// What each broadcast answers, in order; the fee each built transaction
-/// pays (none when zero); how many transactions were built; and every
-/// broadcast envelope.
+/// pays (none when zero); how many transactions were built; every
+/// broadcast envelope; the chain's balance reads, when it has them; and
+/// the chain its indexer reads (none: an empty one).
 #[derive(Default)]
 struct Script {
     answers: Mutex<VecDeque<Result<(), TransactionErrorKind>>>,
     fee: u64,
     built: Mutex<u8>,
     sent: Mutex<Vec<Vec<u8>>>,
+    balances: Option<Arc<dyn base::Balances>>,
+    chain: Option<Arc<dyn Chained>>,
 }
 
 /// The one wallet of the scripted network; its key is its address text.
@@ -239,8 +242,8 @@ impl Chained for Empty {
 }
 
 /// A chain whose tip is block 100, block `p` made `100 - p` days ago: what
-/// the scripted network finds its blocks by time with, when it has a
-/// history limit.
+/// the scripted network reads its tip and finds its blocks by time with,
+/// when it has a depth limit.
 struct Days;
 
 impl Networked for Days {
@@ -326,11 +329,11 @@ thread_local! {
 }
 
 /// The scripted network's chain: its wallets answer as its [`Script`]
-/// (taken from [`SCRIPT`]) says; with a history limit, it finds blocks by
-/// time over [`Days`].
+/// (taken from [`SCRIPT`]) says; with a depth limit, it reads its tip and
+/// finds blocks by time over [`Days`].
 struct Scripted {
     script: Arc<Script>,
-    max_history: Option<Duration>,
+    max_depth: Option<u64>,
 }
 
 impl base::ServiceFactory for Scripted {
@@ -339,7 +342,7 @@ impl base::ServiceFactory for Scripted {
     fn new(config: &NetworkConfig) -> anyhow::Result<Self> {
         Ok(Self {
             script: SCRIPT.take().context("no script is set")?,
-            max_history: config.max_history,
+            max_depth: config.max_depth,
         })
     }
 
@@ -348,12 +351,17 @@ impl base::ServiceFactory for Scripted {
         storage: &base::Storage,
         client: Arc<dyn rpc::Client>,
     ) -> anyhow::Result<Service> {
-        let indexer = Indexer::new(
-            Arc::new(Empty),
+        let chain = self.script.chain.clone();
+        let mut indexer = Indexer::new(
+            chain.unwrap_or_else(|| Arc::new(Empty)),
             storage.blocks.clone(),
             storage.indexes.clone(),
             Duration::from_secs(3_600),
-        );
+        )
+        .with_max_depth(self.max_depth);
+        if let Some(balances) = &self.script.balances {
+            indexer = indexer.with_balances(balances.clone());
+        }
         let wallet = Fake {
             address: Address::new(network(), "unused"),
             script: self.script.clone(),
@@ -375,23 +383,24 @@ impl base::ServiceFactory for Scripted {
             storage: storage.clone(),
             client,
             dated: self
-                .max_history
+                .max_depth
                 .map(|_| -> Arc<dyn base::Dated> { Arc::new(Days) }),
-            max_history: self.max_history,
+            balances: self.script.balances.clone(),
+            max_depth: self.max_depth,
             confirmations: 0,
         })
     }
 }
 
 /// The scripted network as stored.
-fn config(max_history: Option<Duration>) -> NetworkConfig {
+fn config(max_depth: Option<u64>) -> NetworkConfig {
     NetworkConfig {
         network: network(),
         chain_id: None,
         testnet: true,
         block_time: Duration::from_secs(600),
         confirmations: 0,
-        max_history,
+        max_depth,
         explorer_address: None,
         explorer_transaction: None,
         settings: serde_json::json!({}),
@@ -407,14 +416,14 @@ fn container(
     limited(db, script, None)
 }
 
-/// [`container`], with a history limit of `max_history`.
+/// [`container`], with a depth limit of `max_depth` positions.
 fn limited(
     db: &crate::db::Db,
     script: Arc<Script>,
-    max_history: Option<Duration>,
+    max_depth: Option<u64>,
 ) -> Arc<base::Container<crate::usecase::Transport>> {
     let container = base::Container::new(crate::usecase::sdk::Stores::storage(db.clone()));
-    let config = config(max_history);
+    let config = config(max_depth);
     let node: Arc<dyn rpc::Client> = Arc::new(rpc::testing::Script::default());
     let transport = crate::usecase::Transport::from_clients::<Node>(&config, vec![node]);
     SCRIPT.set(Some(script));

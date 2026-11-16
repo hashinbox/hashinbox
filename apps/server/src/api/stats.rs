@@ -60,7 +60,7 @@ struct StatsResponse {
     tags: u64,
     /// Live blocks kept.
     blocks: u64,
-    /// Blocks a reorg archived.
+    /// Blocks a reorg took back.
     reorged: u64,
     /// Transactions kept mined in live blocks.
     transactions: u64,

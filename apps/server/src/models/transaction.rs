@@ -364,7 +364,7 @@ pub(crate) mod db {
                 block::table.on(block::id
                     .nullable()
                     .eq(transactions::block)
-                    .and(block::archived_at.is_null())),
+                    .and(block::reorged_at.is_null())),
             )
             .select(diesel::dsl::sql::<(BigInt, BigInt, BigInt)>(
                 r#"
@@ -385,7 +385,7 @@ pub(crate) mod db {
         use crate::models::schema::block;
         transactions::table
             .inner_join(block::table.on(block::id.nullable().eq(transactions::block)))
-            .filter(block::archived_at.is_null())
+            .filter(block::reorged_at.is_null())
             .filter(block::timestamp.ge(since))
             .group_by(diesel::dsl::sql::<BigInt>("hour"))
             .select((
@@ -418,7 +418,7 @@ pub(crate) mod db {
             LEFT JOIN block b ON b.id = t.block
             WHERE t.chain = ?1
               AND t.network = ?2
-              AND (t.block IS NULL OR b.archived_at IS NULL)
+              AND (t.block IS NULL OR b.reorged_at IS NULL)
               AND (?6 IS NULL OR (
                   COALESCE(t.position, 9223372036854775807),
                   COALESCE(t."order", 0),
@@ -518,6 +518,23 @@ pub(crate) mod db {
         ))
         .execute(connection)?;
         diesel::delete(pending).execute(connection)
+    }
+
+    /// Forgets the pending transactions wallet index `index` sends (a leg
+    /// of it spent, burned or a fee) and their legs, as [`delete_pending`]
+    /// does: a jump's, as one mined in its gap is never read. How many.
+    pub(crate) fn forget_sent(
+        connection: &mut SqliteConnection,
+        index: impl AsRef<str>,
+    ) -> QueryResult<usize> {
+        let sent: Vec<String> = schema::leg::table
+            .filter(schema::leg::wallet_index_id.eq(index.as_ref()))
+            .filter(schema::leg::block.is_null())
+            .filter(schema::leg::kind.eq_any([1, 2, 4]))
+            .select(schema::leg::transaction.assume_not_null())
+            .distinct()
+            .load(connection)?;
+        delete_pending(connection, &sent)
     }
 
     /// Forgets every pending transaction of `network` past its expiry at

@@ -2,8 +2,8 @@
 //! slots and a reorg-shaped refetch.
 
 use base::{
-    Address, Asset, BlockHash, Chained as _, Dated as _, Decimal, Leg, Network, NotServed, Reason,
-    TransactionState,
+    Address, Asset, Balances as _, BlockHash, Chained as _, Dated as _, Decimal, Holding, Leg,
+    Network, NotServed, Reason, TransactionState,
 };
 use std::sync::Arc;
 
@@ -329,5 +329,116 @@ fn a_search_by_time_reads_block_times_and_steps_over_skipped_slots() {
     ]);
     let stamp = block_on(chain(&script).position_at(250)).unwrap().unwrap();
     assert_eq!((stamp.position, stamp.timestamp), (2, 200));
+    script.exhausted();
+}
+
+/// A reply read at `slot`, as a node answers it.
+fn at_slot(slot: u64, value: Value) -> Value {
+    json!({ "context": { "apiVersion": "2.2.7", "slot": slot }, "value": value })
+}
+
+/// A `jsonParsed` SPL Token account of `owner` holding `amount` of [`MINT`].
+fn token_account(account: u8, owner: &str, amount: u64) -> Value {
+    let ui = amount as f64 / 1e6;
+    json!({
+        "pubkey": base58(account, 32),
+        "account": {
+            "data": {
+                "parsed": {
+                    "info": {
+                        "isNative": false, "mint": MINT, "owner": owner, "state": "initialized",
+                        "tokenAmount": {
+                            "amount": amount.to_string(), "decimals": 6,
+                            "uiAmount": ui, "uiAmountString": ui.to_string(),
+                        },
+                    },
+                    "type": "account",
+                },
+                "program": "spl-token",
+                "space": 165,
+            },
+            "executable": false,
+            "lamports": 2_039_280,
+            "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "rentEpoch": u64::MAX,
+            "space": 165,
+        },
+    })
+}
+
+#[test]
+fn a_balance_is_read_finalized_at_the_slot_the_node_answers_at() {
+    let owner = base58(1, 32);
+    let usdc = Asset {
+        network: network(),
+        id: MINT.to_owned(),
+    };
+    let script = Script::new([
+        Reply::ok("getBalance", at_slot(105, json!(5_000_000_000_u64))).expecting(json!([
+            owner,
+            { "commitment": "finalized", "minContextSlot": 100 },
+        ])),
+        Reply::ok(
+            "getTokenAccountsByOwner",
+            at_slot(
+                106,
+                json!([
+                    token_account(20, &owner, 1_500_000),
+                    token_account(21, &owner, 250_000)
+                ]),
+            ),
+        )
+        .expecting(json!([
+            owner,
+            { "mint": MINT },
+            { "commitment": "finalized", "minContextSlot": 100, "encoding": "jsonParsed" },
+        ])),
+        Reply::ok("getTokenAccountsByOwner", at_slot(107, json!([]))),
+    ]);
+    let chain = chain(&script);
+    let sol = Asset::native(network());
+
+    let native = block_on(chain.balance(&address(1), &sol, 100)).unwrap();
+    let token = block_on(chain.balance(&address(1), &usdc, 100)).unwrap();
+    let none = block_on(chain.balance(&address(1), &usdc, 100)).unwrap();
+
+    assert_eq!(
+        native,
+        Some(Holding {
+            position: 105,
+            amount: Decimal::from(5_000_000_000_u64)
+        })
+    );
+    assert_eq!(
+        token,
+        Some(Holding {
+            position: 106,
+            amount: Decimal::from(1_750_000)
+        })
+    );
+    assert_eq!(
+        none,
+        Some(Holding {
+            position: 107,
+            amount: Decimal::zero()
+        }),
+        "an owner without an account of the mint holds 0"
+    );
+    script.exhausted();
+}
+
+#[test]
+fn a_balance_at_a_slot_not_finalized_yet_is_not_answerable() {
+    let script = Script::new([Reply::failure(
+        "getBalance",
+        -32_016,
+        "Minimum context slot has not been reached",
+    )]);
+    let chain = chain(&script);
+    let sol = Asset::native(network());
+
+    let behind = block_on(chain.balance(&address(1), &sol, 100)).unwrap();
+
+    assert_eq!(behind, None, "the node is not at 100 yet");
     script.exhausted();
 }

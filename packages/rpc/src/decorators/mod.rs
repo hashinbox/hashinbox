@@ -6,9 +6,11 @@ mod logged;
 mod retry;
 mod split;
 mod swap;
+mod throttle;
 
 pub use counted::{Counted, Snapshot, Statistics};
 pub use logged::Logged;
 pub use retry::{Backoff, Retry};
 pub use split::{Split, SplitParams};
 pub use swap::Swap;
+pub use throttle::{Throttle, ThrottleParams};

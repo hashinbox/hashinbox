@@ -306,6 +306,7 @@ impl<C: Client> Cluster<C> {
 | `rpc.max_request_bytes=N` | request body limit | 10 MiB |
 | `rpc.max_response_bytes=N` | response body limit | 64 MiB |
 | `rpc.max_batch=N` | most calls per request; 1 sends no batches | none |
+| `rpc.rps=X` | most calls a second (`3.5`), paced by `Throttle` under `Split`; waits, never fails | none |
 
 These never go in a URL: retry policy, cluster policy, routes and the logger.
 They belong to the composer, not to the node.

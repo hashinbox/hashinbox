@@ -8,6 +8,7 @@ substitute a scripted node.
 |---|---|
 | `Http` | JSON-RPC over HTTP to one node; answers mapped to results, error objects and `Error` kinds |
 | `Split` | sends a batch in requests of at most `rpc.max_batch` calls |
+| `Throttle` | paces requests to at most `rpc.rps` calls a second; waits, never fails |
 | `Logged` | logs a node's failure streaks and recovery to an injected `logging::Logger` |
 | `Counted` | counts a node's outcomes into `Statistics` |
 | `Retry` | repeats retryable work with backoff |
@@ -24,7 +25,7 @@ userinfo, `header.*` or `rpc.*` params.
 ## Usage
 
 `rpc::node` turns one URL into that node's preset,
-`Node = Counted<Logged<Split<Http>>>`. It does no I/O.
+`Node = Counted<Logged<Split<Throttle<Http>>>>`. It does no I/O.
 
 ```rust
 use rpc::{Client, Endpoint, Request, Retry};
@@ -80,14 +81,16 @@ is not repeated.
 | `rpc.max_request_bytes=N` | request body limit | 10 MiB |
 | `rpc.max_response_bytes=N` | response body limit | 64 MiB |
 | `rpc.max_batch=N` | most calls per request; 1 sends no batches | none |
+| `rpc.rps=X` | most calls a second (`3`, `3.5`); a batch counts per call; a request waits for its turn | none |
 
 An `Endpoint` is the URL and serializes as it. `Endpoint::parse` checks it
 and gives an `rpc::Url`: `node`, the URL as sent, and `params`, every query
 parameter by name (`get`, `get_int`, and `namespace("rpc")` for those under
 one prefix). Each setting is read from it by its owner:
-`HttpParams` in `http.rs`, `SplitParams` in `decorators/split.rs`, each
-`TryFrom<&Url>`. `Endpoint::validate` builds the node, which does no I/O.
-Retry, routes and the logger never go in a URL.
+`HttpParams` in `http.rs`, `SplitParams` in `decorators/split.rs`,
+`ThrottleParams` in `decorators/throttle.rs`, each `TryFrom<&Url>`.
+`Endpoint::validate` builds the node, which does no I/O. Retry, routes and
+the logger never go in a URL.
 
 ## Swap
 

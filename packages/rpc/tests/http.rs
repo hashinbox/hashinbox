@@ -522,6 +522,77 @@ async fn a_failing_request_fails_the_split_batch() {
     assert_eq!(kind(outcome), (ErrorKind::HttpStatus(429), true));
 }
 
+#[tokio::test]
+async fn rpc_rps_paces_each_request_split_sends_by_its_calls() {
+    let (url, seen) = node(echo).await;
+    let start = Instant::now();
+    batch_of(&(url + "/?rpc.max_batch=2&rpc.rps=20"), 6)
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(200),
+        "two waits of 2 calls at 20 a second, not of 1 request: {elapsed:?}"
+    );
+    let seen = seen.lock().unwrap();
+    let sizes: Vec<usize> = seen.iter().map(|one| items(one).len()).collect();
+    assert_eq!(sizes, [2, 2, 2]);
+    assert!(seen.iter().all(|one| !one.head.contains("rpc.rps")));
+}
+
+#[tokio::test]
+async fn rpc_rps_spaces_concurrent_calls_and_clones_share_it() {
+    let (url, _) = node(echo).await;
+    let node = connect(&format!("{url}/?rpc.rps=10"));
+    let clone = node.clone();
+    let ping = || rpc::Request::new("ping", json!([]));
+    let start = Instant::now();
+    let (a, b, c) = tokio::join!(
+        node.request(ping()),
+        clone.request(ping()),
+        node.request(ping())
+    );
+    let elapsed = start.elapsed();
+    assert!(a.is_ok() && b.is_ok() && c.is_ok());
+    assert!(
+        elapsed >= Duration::from_millis(200),
+        "3 calls at 10 a second: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_wait_for_rpc_rps_is_not_part_of_a_timeout() {
+    let (url, _) = node(echo).await;
+    let node = connect(&format!("{url}/?rpc.rps=4"));
+    let start = Instant::now();
+    let two = vec![Call::new("a", json!([])), Call::new("b", json!([]))];
+    node.batch(Batch::new(two).unwrap()).await.unwrap();
+    let short = Batch::new(vec![Call::new("c", json!([]))])
+        .unwrap()
+        .with_timeout(Duration::from_millis(100));
+    node.batch(short).await.unwrap();
+    let short = rpc::Request::new("d", json!([])).with_timeout(Duration::from_millis(100));
+    node.request(short).await.unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(750),
+        "3 calls waited for, each past a 100 ms timeout: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn without_rpc_rps_requests_go_at_once() {
+    let (url, seen) = node(echo).await;
+    let start = Instant::now();
+    batch_of(&(url + "/?rpc.max_batch=1"), 10).await.unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(450),
+        "10 calls at 10 a second would take 900 ms: {elapsed:?}"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 10);
+}
+
 #[test]
 fn rpc_settings_are_read_and_checked() {
     for bad in [
@@ -531,12 +602,17 @@ fn rpc_settings_are_read_and_checked() {
         "http://node.invalid/?rpc.timeout_ms=0",
         "http://node.invalid/?rpc.max_request_bytes=-1",
         "http://node.invalid/?rpc.max_response_bytes=4294967296",
+        "http://node.invalid/?rpc.rps=0",
+        "http://node.invalid/?rpc.rps=-1",
+        "http://node.invalid/?rpc.rps=x",
+        "http://node.invalid/?rpc.rps=NaN",
+        "http://node.invalid/?rpc.rps=inf",
     ] {
         let error = Endpoint::new(bad).validate().unwrap_err();
         assert_eq!(error.kind(), Some(ErrorKind::InvalidConfiguration), "{bad}");
     }
     let endpoint = Endpoint::new(
-        "http://node.invalid/?rpc.timeout_ms=20000&rpc.max_request_bytes=1&rpc.max_response_bytes=2&rpc.max_batch=3",
+        "http://node.invalid/?rpc.timeout_ms=20000&rpc.max_request_bytes=1&rpc.max_response_bytes=2&rpc.max_batch=3&rpc.rps=3.5",
     );
     let url = endpoint.parse().unwrap();
     let params = rpc::HttpParams::try_from(&url).unwrap();
@@ -550,6 +626,15 @@ fn rpc_settings_are_read_and_checked() {
     );
     let split = rpc::SplitParams::try_from(&url).unwrap();
     assert_eq!(split.max_batch.map(|max| max.get()), Some(3));
+    let throttle = rpc::ThrottleParams::try_from(&url).unwrap();
+    assert_eq!(throttle.rps, Some(3.5));
+    let whole = Endpoint::new("http://node.invalid/?rpc.rps=3")
+        .parse()
+        .unwrap();
+    assert_eq!(
+        rpc::ThrottleParams::try_from(&whole).unwrap().rps,
+        Some(3.0)
+    );
     let rpc = url.params.namespace("rpc");
     assert_eq!(rpc.get_int::<usize>("max_batch"), Ok(Some(3)));
     assert_eq!(url.params.get_int::<usize>("rpc.max_batch"), Ok(Some(3)));
@@ -559,6 +644,7 @@ fn rpc_settings_are_read_and_checked() {
         rpc::HttpParams::try_from(&plain),
         Ok(rpc::HttpParams::default())
     );
+    assert_eq!(rpc::ThrottleParams::try_from(&plain).unwrap().rps, None);
 }
 
 #[test]

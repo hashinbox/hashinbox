@@ -2,6 +2,7 @@
 
 mod address;
 mod asset;
+mod balance;
 mod block;
 mod cache;
 mod chain;
@@ -20,6 +21,7 @@ mod wallet;
 
 pub use address::{Address, Addressed};
 pub use asset::{Asset, AssetInfo, Assets};
+pub use balance::{Balances, Holding};
 pub use block::{
     Block, Blocks, Chained, Dated, Hash as BlockHash, Header as BlockHeader,
     Listener as BlockListener, NotServed, Notify as BlockNotify, Notifying, Parent as BlockParent,

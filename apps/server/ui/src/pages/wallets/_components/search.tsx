@@ -49,7 +49,8 @@ export function SearchDialog({
   const [found, setFound] = useState<Stamp | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // The earliest time the network's history limit allows (null: no limit).
+  // About the earliest time the network's depth limit allows: `max_depth`
+  // blocks back (null: no limit).
   const [earliest, setEarliest] = useState<number | null>(null);
   const searching = useRef<AbortController | null>(null);
   const target = at === '' ? NaN : Math.floor(new Date(at).getTime() / 1000);
@@ -59,11 +60,12 @@ export function SearchDialog({
     let live = true;
     call(client.GET('/v1/networks'))
       .then((list) => {
-        const days = list.networks.find(
+        const stored = list.networks.find(
           (n) => n.chain === network.chain && n.network === network.name,
-        )?.max_history_days;
+        );
+        const limit = stored?.max_depth ?? null;
         if (live)
-          setEarliest(days === undefined || days === null ? null : Date.now() - days * 86_400_000);
+          setEarliest(stored && limit !== null ? Date.now() - limit * stored.block_time_ms : null);
       })
       .catch(() => live && setEarliest(null));
     return () => {
@@ -142,7 +144,7 @@ export function SearchDialog({
           </Stack>
           {tooOld && (
             <Typography variant="caption" color="error">
-              Older than this network&apos;s history limit.
+              Older than this network&apos;s depth limit.
             </Typography>
           )}
           {probes.length > 0 && (

@@ -1,6 +1,6 @@
 //! Nodes that pruned old receipts (Sepolia answers `null` for them): an
-//! index asked to start below the floor starts at the first block served,
-//! keeps the start it was asked for, and indexes on.
+//! index asked to start below the floor keeps the start it was asked for,
+//! starts at the chain's final block, above the floor, and indexes on.
 
 use base::testing::{Caps, TestChain};
 
@@ -22,6 +22,6 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     settle(chain);
     let index = reaches(app, &wallet, "native", "balance_confirmed", &unit(chain)).await;
     assert_eq!(index["requested_from"], asked);
-    assert_eq!(index["birthday"], floor);
+    assert!(index["birthday"].as_u64() >= Some(floor), "{index}");
     assert_eq!(index["state"], "indexing");
 }

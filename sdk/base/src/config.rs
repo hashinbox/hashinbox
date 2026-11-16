@@ -7,7 +7,7 @@ use std::{fmt, sync::Arc, time::Duration};
 use serde_json::Value;
 
 use crate::{
-    Assets, BlockStore, Chain, Dated, Holdings, Indexer, InputStore, Network,
+    Assets, Balances, BlockStore, Chain, Dated, Holdings, Indexer, InputStore, Network,
     WalletFactoryBroadcaster, WalletIndexStore, WalletStore,
 };
 
@@ -28,8 +28,10 @@ pub struct NetworkConfig {
     pub block_time: Duration,
     /// Positions a block needs below the tip to count as confirmed.
     pub confirmations: u64,
-    /// How old a watch's start may be; `None`: no limit.
-    pub max_history: Option<Duration>,
+    /// Positions below the tip a watch's start may be; `None`: no limit.
+    /// At least `confirmations`. A chain that reads balances has none: its
+    /// line is its final block.
+    pub max_depth: Option<u64>,
     /// An address's explorer page, `{address}` filled in; `None`: none.
     pub explorer_address: Option<String>,
     /// A transaction's explorer page, `{tx}` filled in; `None`: none.
@@ -103,9 +105,11 @@ pub struct Service {
     pub client: Arc<dyn rpc::Client>,
     /// Finds the network's blocks by time; `None` where the chain cannot.
     pub dated: Option<Arc<dyn Dated>>,
-    /// How old a watch's start may be: about what history the nodes keep;
-    /// `None`: no limit.
-    pub max_history: Option<Duration>,
+    /// Reads a balance at a final block; `None` where the chain cannot.
+    pub balances: Option<Arc<dyn Balances>>,
+    /// Positions below the tip a watch's start may be; `None`: no limit (a
+    /// chain with `balances` starts every watch at its final block).
+    pub max_depth: Option<u64>,
     /// Positions a block needs below the tip to count as confirmed: the
     /// confirmed position is `tip - confirmations`.
     pub confirmations: u64,

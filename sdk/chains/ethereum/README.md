@@ -48,10 +48,13 @@ async fn ethereum(storage: Storage) -> anyhow::Result<()> {
 
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network:
 `chain_id`, assets (ether's display decimals, the `contract`
-tokens), `confirmations`, `max_history`, and from `settings` the knobs
+tokens), `confirmations`, and from `settings` the knobs
 `limits`, `fee_ttl_ms`, `pending_ttl_ms`, `interval_ms`, and `batch`, the
 blocks the indexer fetches per step (default 100; lower it for a node that
-rate-limits) (each absent one its default).
+rate-limits) (each absent one its default). It has no `max_depth`: it reads
+balances (`base::Balances`, at the node's `finalized` block), so its
+indexer reads nothing at or below that block and settles an index behind it
+with one balance read (design 083 §9).
 
 ## Notes
 

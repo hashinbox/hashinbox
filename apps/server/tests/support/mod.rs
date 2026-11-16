@@ -93,7 +93,7 @@ impl App {
                 queue.clone(),
             ))
             .add(workers::expire::Expire::new(db.clone()))
-            .add(workers::prune::Prune::new(db.clone()))
+            .add(workers::prune::Prune::new(db.clone(), container.clone()))
             .add(workers::broadcast::Broadcast::new(
                 container.clone(),
                 db.clone(),

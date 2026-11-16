@@ -1,10 +1,8 @@
 //! Wallets: create one (import a key, watch an address, or generate), list
 //! and read them; their tags; their indexes, one per asset (create from a
-//! start, pause or resume, delete) and each one's mined legs; and an ordered
-//! send from one, a queued job. A wallet is named by its id; its address is
-//! taken in its chain's canonical form.
-
-use std::time::{SystemTime, UNIX_EPOCH};
+//! start, pause or resume, reconcile, delete) and each one's mined legs; and
+//! an ordered send from one, a queued job. A wallet is named by its id; its
+//! address is taken in its chain's canonical form.
 
 use base::{Address, Birthday, Container, Decimal, WalletIndexState};
 use tasks::Worker as _;
@@ -17,7 +15,7 @@ use super::{
 use crate::{
     db::{Db, Page},
     models::{
-        Id, Wallet,
+        Id, Wallet, int,
         leg::{self, Movement},
         wallet::{self, WalletId},
         wallet_index::{self, WalletIndex, WalletIndexId},
@@ -165,13 +163,16 @@ pub(crate) async fn set_tag(
 
 /// Indexes wallet `id` in `asset` from `start` (`None`: the chain's tip),
 /// at once; and whether it was created: an asset already indexed answers its
-/// index as is. A start the node no longer serves moves forward.
+/// index as is. A start the node no longer serves moves forward; on a chain
+/// that reads balances the index starts at the chain's final block instead
+/// (the indexer's), its balance read there.
 ///
 /// # Errors
 ///
-/// Invalid for a malformed address or a start older than the network's
-/// history limit; not found for an unknown wallet or an unconfigured network
-/// or asset; unavailable when the node or the store is.
+/// Invalid for a malformed address or a start below the chain's tip less
+/// the network's `max_depth`; not found
+/// for an unknown wallet or an unconfigured network or asset; unavailable
+/// when the node or the store is.
 pub(crate) async fn create_index(
     container: &Container<Transport>,
     db: &Db,
@@ -209,38 +210,30 @@ pub(crate) async fn create_index(
     Ok((true, created))
 }
 
-/// Where to index from: `start`, refused when older than the network's
-/// history limit (accepted when it has no limit or cannot find blocks by
-/// time); `None`, the chain's tip.
+/// Where to index from: `start`, refused when below the chain's tip less
+/// the network's `max_depth` (accepted when it has no limit or cannot read
+/// its tip); `None`, the chain's tip.
 async fn birthday(service: &base::Service, start: Option<u64>) -> Result<Birthday, Error> {
     let Some(position) = start else {
         return Ok(Birthday::Fresh);
     };
-    // No limit, or no way to find blocks by time: any start goes.
-    let (Some(dated), Some(limit)) = (&service.dated, service.max_history) else {
+    // No limit, or no way to read the tip: any start goes.
+    let (Some(dated), Some(limit)) = (&service.dated, service.max_depth) else {
         return Ok(Birthday::At(position));
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let Some(earliest) = dated
-        .position_at(now.saturating_sub(limit).as_secs())
-        .await?
-    else {
-        return Ok(Birthday::At(position));
-    };
-    if position < earliest.position {
+    let earliest = dated.tips().await?.produced.saturating_sub(limit);
+    if position < earliest {
         return Err(Error::invalid(format!(
-            "start {position} is older than this network's history limit of {} \
-             days: start at {} or later",
-            limit.as_secs() / 86_400,
-            earliest.position
+            "start {position} is more than this network's max_depth of {limit} \
+             positions below the tip: start at {earliest} or later"
         )));
     }
     Ok(Birthday::At(position))
 }
 
-/// Pauses or resumes wallet `id`'s index of `asset`; the index.
+/// Pauses or resumes wallet `id`'s index of `asset`; the index. On a chain
+/// that reads balances a resumed index left behind the final block settles
+/// there (the indexer's).
 ///
 /// # Errors
 ///
@@ -255,11 +248,64 @@ pub(crate) async fn set_index_state(
 ) -> Result<WalletIndex, Error> {
     let (address, index) = index_id(container, id, &asset)?;
     db.write(move |connection| {
-        wallet_index::db::set_state(connection, &address, Some(&asset), state, None)?;
+        if state == WalletIndexState::Indexing {
+            wallet_index::db::resume(connection, &index)?;
+        } else {
+            wallet_index::db::set_state(connection, &address, Some(&asset), state, None)?;
+        }
         wallet_index::db::find_at_tip(connection, &index)
     })
     .await?
     .ok_or_else(|| Error::not_found("no such index"))
+}
+
+/// Reads wallet `id`'s index of `asset` again from the chain's balance
+/// (design 083 §9.1): in one write, its mined legs above the chain's final
+/// block `F` (the indexer's last read) are deleted and its progress unset,
+/// so the indexer settles it at a final block `S` and reads on from `S + 1`;
+/// its pending legs stay. The index.
+///
+/// # Errors
+///
+/// Invalid for a malformed address or asset; not found for an unconfigured
+/// network or no such index; conflict on a chain that reads no balance, or
+/// for a paused or `no_data` index; unavailable before the indexer read the
+/// final block, or when the store is.
+pub(crate) async fn reconcile(
+    container: &Container<Transport>,
+    db: &Db,
+    id: &WalletId,
+    asset: &str,
+) -> Result<WalletIndex, Error> {
+    let (address, index) = index_id(container, id, asset)?;
+    let service = container.service(&address)?;
+    if service.balances.is_none() {
+        return Err(Error::conflict(
+            "this chain reads no balance to reconcile with",
+        ));
+    }
+    let Some(confirmed) = service.indexer.stats().confirmed else {
+        return Err(Error::unavailable(
+            "the indexer has not read the chain's final block yet",
+        ));
+    };
+    let confirmed = int(confirmed)?;
+    let (changed, found) = db
+        .write(move |connection| {
+            let changed = wallet_index::db::reconcile(connection, &index, confirmed)?;
+            if changed > 0 {
+                leg::db::delete_above(connection, &index, confirmed)?;
+            }
+            Ok((changed, wallet_index::db::find_at_tip(connection, &index)?))
+        })
+        .await?;
+    let found = found.ok_or_else(|| Error::not_found("no such index"))?;
+    if changed == 0 {
+        return Err(Error::conflict(
+            "a paused or no_data index is not reconciled",
+        ));
+    }
+    Ok(found)
 }
 
 /// Forgets wallet `id`'s index of `asset` and its progress.
@@ -295,7 +341,7 @@ pub(crate) async fn legs_page(
     db: &Db,
     id: &WalletId,
     asset: &str,
-    page: Page<i64>,
+    page: Page<leg::Key>,
 ) -> Result<Vec<Movement>, Error> {
     let (_, index) = index_id(container, id, asset)?;
     Ok(db
@@ -324,10 +370,10 @@ pub(crate) async fn send(
     let from = container.parse(id)?;
     let info = asset_info(container, &from.network, asset)?;
     let id = WalletId::of(&from)?;
-    if !db
+    let keyed = db
         .read(move |connection| Ok(wallet::db::is_keyed(connection, &id)?))
-        .await?
-    {
+        .await?;
+    if !keyed {
         return Err(Error::conflict("the wallet holds no key here"));
     }
     let mut payments = Vec::with_capacity(transfers.len());

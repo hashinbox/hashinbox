@@ -148,7 +148,7 @@ impl Params {
 /// in the URL: every call carries it as the static header `<Name>` instead
 /// (`?header.x-api-key=KEY`). One named `rpc.<setting>` is not sent either:
 /// it sets how this client talks to the node ([`crate::HttpParams`],
-/// [`crate::SplitParams`]). The rest reaches
+/// [`crate::SplitParams`], [`crate::ThrottleParams`]). The rest reaches
 /// the node unaltered. [`crate::node`] builds the client.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]

@@ -20,7 +20,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     assert_eq!(network["tip_live"], chain.tip(), "{network}");
     let wallet = app.api.wallet(&chain.network()).await;
     let index = app.api.index(&wallet, "native", None).await;
-    assert_eq!(index["birthday"], chain.tip());
+    assert_eq!(index["requested_from"], chain.tip());
     chain.fund(&wallet.address, &unit(chain), "native");
     settle(chain);
     reaches(app, &wallet, "native", "balance_confirmed", &unit(chain)).await;

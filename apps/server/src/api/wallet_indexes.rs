@@ -1,7 +1,8 @@
 //! `/v1/wallets/{id}/indexes` and `/v1/wallets/{id}/indexes/{asset}`: the
 //! indexes of a kept wallet, one per asset. Create one from a start (070's
-//! rules: `max_history_days`; a start the node no longer serves moves
-//! forward), at once; pause or resume it; delete it.
+//! rules: `max_depth`; a start the node no longer serves moves forward; a
+//! chain that reads balances starts at its final block), at once; pause or
+//! resume it; reconcile it with the chain's balance; delete it.
 
 use std::sync::Arc;
 
@@ -29,6 +30,7 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
         .routes(routes!(create))
         .routes(routes!(update, remove))
+        .routes(routes!(reconcile))
 }
 
 /// `POST /v1/wallets/{id}/indexes` body.
@@ -38,8 +40,9 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 struct CreateRequest {
     /// The asset id to index the wallet in.
     asset: String,
-    /// The native position to index from, no older than the network's
-    /// `max_history_days`. Absent: from the chain's tip, as a generated
+    /// The native position to index from, at or above the chain's tip less
+    /// the network's `max_depth` (a chain that reads balances starts at its
+    /// final block instead). Absent: from the chain's tip, as a generated
     /// wallet (it has no past) must be.
     #[serde(default)]
     #[schema(nullable = false)]
@@ -53,8 +56,12 @@ struct CreateRequest {
     summary = "Index a wallet in an asset",
     description = "Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next \
         indexing step picks it). An asset already indexed keeps its first start (200). A \
-        `start` older than the network's `max_history_days` is refused; one the node no \
-        longer serves moves forward to the first block it serves before indexing begins.",
+        `start` below the chain's tip less the network's `max_depth` is refused (400). On \
+        a chain that reads balances (Solana, Ethereum) the index starts at the chain's \
+        final block whatever `start` says (kept as `requested_from`): its balances are \
+        null until the chain's balance read there opens it with an `adjustment` leg. A \
+        start the node no longer serves moves forward to the first block it serves before \
+        indexing begins.",
     params(WalletPath),
     request_body = CreateRequest,
     security(("bearerAuth" = [])),
@@ -62,8 +69,8 @@ struct CreateRequest {
         (status = 201, description = "The index", body = WalletIndex),
         (status = 200, description = "The asset was already indexed: its index",
             body = WalletIndex),
-        (status = 400, description = "Malformed body or wallet ID, or a start older than the \
-            network's history limit", body = ErrorBody),
+        (status = 400, description = "Malformed body or wallet ID, or a start below the \
+            chain's tip less the network's `max_depth`", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "Wallet is unknown, or the asset is not configured",
             body = ErrorBody),
@@ -113,7 +120,7 @@ struct UpdateRequest {
 }
 
 impl UpdateRequest {
-    /// The state asked for; `no_data` is the indexer's to set.
+    /// The state asked for; `no_data` is the indexer's.
     fn index_state(&self) -> Result<WalletIndexState, Error> {
         match self.index_state {
             IndexState::Indexing => Ok(WalletIndexState::Indexing),
@@ -130,7 +137,9 @@ impl UpdateRequest {
     summary = "Pause or resume a wallet's index",
     description = "`paused`: skipped, no facts kept for blocks while paused; what is kept \
         stays. `indexing`: from `paused` or `no_data` (clearing its reason), it continues \
-        from its last indexed block, backfilling what it missed.",
+        from its last indexed block, backfilling what it missed. On a chain that reads \
+        balances (Solana, Ethereum) one left behind the chain's final block is not read \
+        back: its balance is read there and one `adjustment` leg closes the gap.",
     params(IndexPath),
     request_body = UpdateRequest,
     security(("bearerAuth" = [])),
@@ -181,4 +190,38 @@ async fn remove(
     let id = path.wallet()?;
     wallets::delete_index(&state.container, &state.db, &id, &path.asset).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/wallets/{id}/indexes/{asset}/reconcile",
+    operation_id = "reconcile_wallet_index",
+    summary = "Reconcile a wallet's index with the chain's balance",
+    description = "Deletes the index's mined legs above the chain's final block and \
+        unsets its progress: its balances read null until the next indexing step reads \
+        the chain's balance at a final block, appends one `adjustment` leg of the \
+        difference and reads on from there. Pending legs stay. Corrects what indexing \
+        cannot see, such as ether a contract sent. Only on chains that read balances \
+        (Solana, Ethereum).",
+    params(IndexPath),
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 202, description = "The index, its progress unset", body = WalletIndex),
+        (status = 400, description = "Malformed wallet ID", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 404, description = "No such index", body = ErrorBody),
+        (status = 422, description = "The chain reads no balance (Bitcoin), or the index is \
+            paused or `no_data`", body = ErrorBody),
+        (status = 503, description = "The indexer has not read the chain's final block \
+            yet, or the store is unavailable", body = ErrorBody)
+    ),
+    tag = "wallets"
+)]
+async fn reconcile(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<IndexPath>,
+) -> Result<(StatusCode, Json<WalletIndex>), Error> {
+    let id = path.wallet()?;
+    let index = wallets::reconcile(&state.container, &state.db, &id, &path.asset).await?;
+    Ok((StatusCode::ACCEPTED, Json(index)))
 }

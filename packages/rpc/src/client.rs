@@ -214,6 +214,11 @@ impl Batch {
         self.calls
     }
 
+    /// How many calls it carries.
+    pub(crate) fn len(&self) -> usize {
+        self.calls.len()
+    }
+
     /// The method every call names, if they all name one.
     #[must_use]
     pub fn method(&self) -> Option<&str> {

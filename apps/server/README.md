@@ -40,7 +40,10 @@ to the next node; a broadcast reaches every node. Adding a node asks it which
 chain it serves first (`Transport::verify`); every endpoint or route edit is
 stored, then loaded into the running transport (`usecase::Networks::load`):
 a node whose URL stays keeps its tip, failures and call counts. `GET
-/v1/networks` shows each node's `state`.
+/v1/networks` shows each node's `state`. A node's URL carries its own
+`rpc.` settings (`packages/rpc/README.md`): `rpc.max_batch=4&rpc.rps=3.5`
+sends a batch as requests of 4 calls, paced to 3.5 calls a second; a
+request waits for its turn rather than fail.
 
 The server also serves a browser page at `/` (`--brand`, `PAYMENT_UI_API_BASE`).
 The committed page (`ui/dist`) was built against the previous API and needs a
@@ -60,9 +63,14 @@ committed copy. `GET /health` and `GET /openapi.json` need no token.
   address already kept answers its wallet (`200`), a watched one gaining its key.
   A wallet's ID is `<chain>:<network>:<address>`.
 - `POST /v1/wallets/{id}/indexes` `{asset, start?}`: indexes the wallet in the
-  asset from `start` (a native position within `max_history_days`; absent: the
-  tip); `PATCH /v1/wallets/{id}/indexes/{asset}` `{index_state}` pauses or
-  resumes it; `DELETE` forgets it.
+  asset from `start` (a native position at or above the tip less
+  `max_depth`; absent: the tip; a chain that reads balances starts at its
+  final block, balances null until its balance read there appends an
+  `adjustment` leg); `PATCH /v1/wallets/{id}/indexes/{asset}`
+  `{index_state}` pauses or resumes it; `DELETE` forgets it.
+  `POST .../{asset}/reconcile` (Solana, Ethereum) deletes its legs above the
+  final block and unsets it: balances null until the chain's balance read
+  appends an `adjustment` leg and it reads on.
 - `GET /v1/wallets`, `GET /v1/wallets/{id}`: every wallet (keyed or watch-only),
   its tags and indexed asset ids.
 - `GET /v1/networks/{chain}/{network}/tip/search?at=`: `text/event-stream` of the
@@ -76,7 +84,8 @@ committed copy. `GET /health` and `GET /openapi.json` need no token.
   blocks with a leg of the address in the asset, in chain order, with only those
   legs; keyset-paged on (block position, order, txid).
 - `POST /v1/wallets/{id}/transactions` `{asset?, transfers}`: enqueues one send
-  job (one lane per sender) and answers `202 {job}`; a watch-only wallet is `422`.
+  job (one lane per sender) and answers `202 {job}`; a watch-only wallet is
+  `422`.
 - `GET /v1/jobs/{id}`: the job's state, reason, and signed/accepted counts.
 - `GET /v1/networks`: every `network` row with its `assets`, `endpoints`,
   `index` (its `network_index` row) and the node's tip asked now.
@@ -118,7 +127,7 @@ them. Nothing imports upward (docs/design/069-server-layers.md;
 - Balances and history include every live block up to the produced tip: the
   store records no confirmation, and the container exposes no chain's confirmed tip
   (`base::Stats` carries only the produced `tip`), so no confirmed/pending split
-  is reported. A reorg archives blocks and both reads follow.
+  is reported. A reorg marks blocks reorged and both reads follow.
 - The send job signs through `wallet.transaction(asset)` → `transfer` → `sign()`,
   saves every transaction's signed bytes in its payload before broadcasting, and
   broadcasts them in order through `container.broadcast`; a retry resends the saved

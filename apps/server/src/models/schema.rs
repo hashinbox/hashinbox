@@ -13,7 +13,7 @@ diesel::table! {
         parent_position -> Nullable<BigInt>,
         parent_hash -> Nullable<Binary>,
         timestamp -> Nullable<BigInt>,
-        archived_at -> Nullable<BigInt>,
+        reorged_at -> Nullable<BigInt>,
     }
 }
 
@@ -52,6 +52,7 @@ diesel::table! {
         total -> Nullable<Text>,
         total_received -> Nullable<Text>,
         total_sent -> Nullable<Text>,
+        archived_at -> Nullable<BigInt>,
     }
 }
 
@@ -91,7 +92,7 @@ diesel::table! {
         enabled -> Bool,
         block_time_ms -> BigInt,
         confirmations -> BigInt,
-        max_history_days -> Nullable<BigInt>,
+        max_depth -> Nullable<BigInt>,
         explorer_address -> Nullable<Text>,
         explorer_transaction -> Nullable<Text>,
         settings -> Text,
@@ -167,7 +168,7 @@ diesel::table! {
         balance_confirmed_received -> Nullable<Text>,
         balance_confirmed_sent -> Nullable<Text>,
         balance_confirmed_spendable -> Nullable<Text>,
-        balance_pending -> Text,
+        balance_pending -> Nullable<Text>,
     }
 }
 

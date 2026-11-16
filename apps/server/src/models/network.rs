@@ -52,10 +52,11 @@ pub(crate) struct Network {
     pub(crate) block_time_ms: u64,
     /// Positions below the tip before a block counts as confirmed.
     pub(crate) confirmations: u64,
-    /// How old, in days, a wallet's start may be; always present, null: no
-    /// limit.
+    /// How many positions below the tip a wallet's start may be; at least
+    /// `confirmations`. Always present, null: no limit. Null on a chain that
+    /// reads balances (Solana, Ethereum): its line is the chain's final block.
     #[schema(required)]
-    pub(crate) max_history_days: Option<u64>,
+    pub(crate) max_depth: Option<u64>,
     /// An address's explorer page, `{address}` filled in; always present,
     /// null: none.
     #[schema(required)]
@@ -106,9 +107,7 @@ impl From<&Network> for base::NetworkConfig {
             testnet: network.testnet,
             block_time: Duration::from_millis(network.block_time_ms),
             confirmations: network.confirmations,
-            max_history: network
-                .max_history_days
-                .map(|days| Duration::from_secs(days.saturating_mul(86_400))),
+            max_depth: network.max_depth,
             explorer_address: network.explorer_address.clone(),
             explorer_transaction: network.explorer_transaction.clone(),
             settings: network.settings.clone(),
@@ -138,7 +137,7 @@ pub(crate) mod db {
         enabled: bool,
         block_time_ms: i64,
         confirmations: i64,
-        max_history_days: Option<i64>,
+        max_depth: Option<i64>,
         explorer_address: Option<String>,
         explorer_transaction: Option<String>,
         settings: String,
@@ -159,7 +158,7 @@ pub(crate) mod db {
                 enabled: row.enabled,
                 block_time_ms: uint(row.block_time_ms)?,
                 confirmations: uint(row.confirmations)?,
-                max_history_days: row.max_history_days.map(uint).transpose()?,
+                max_depth: row.max_depth.map(uint).transpose()?,
                 explorer_address: row.explorer_address,
                 explorer_transaction: row.explorer_transaction,
                 settings,

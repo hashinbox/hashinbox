@@ -82,7 +82,8 @@ struct NodesRequest {
     /// One to 16 distinct node URLs, in failover order. A URL carries everything:
     /// userinfo (HTTP Basic), query keys, a key in the path,
     /// `header.<Name>=value` parameters sent as headers, and `rpc.` settings
-    /// (`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`).
+    /// (`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`,
+    /// `rps`: most calls a second, e.g. `3.5`; a request waits for its turn).
     #[schema(min_items = 1, max_items = 16)]
     endpoints: Vec<String>,
 }

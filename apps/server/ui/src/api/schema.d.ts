@@ -456,7 +456,7 @@ export interface paths {
         put?: never;
         /**
          * Index a wallet in an asset
-         * @description Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next indexing step picks it). An asset already indexed keeps its first start (200). A `start` older than the network's `max_history_days` is refused; one the node no longer serves moves forward to the first block it serves before indexing begins.
+         * @description Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next indexing step picks it). An asset already indexed keeps its first start (200). A `start` below the chain's tip less the network's `max_depth` is refused (400). On a chain that reads balances (Solana, Ethereum) the index starts at the chain's final block whatever `start` says (kept as `requested_from`): its balances are null until the chain's balance read there opens it with an `adjustment` leg. A start the node no longer serves moves forward to the first block it serves before indexing begins.
          */
         post: operations["create_wallet_index"];
         delete?: never;
@@ -484,7 +484,7 @@ export interface paths {
         head?: never;
         /**
          * Pause or resume a wallet's index
-         * @description `paused`: skipped, no facts kept for blocks while paused; what is kept stays. `indexing`: from `paused` or `no_data` (clearing its reason), it continues from its last indexed block, backfilling what it missed.
+         * @description `paused`: skipped, no facts kept for blocks while paused; what is kept stays. `indexing`: from `paused` or `no_data` (clearing its reason), it continues from its last indexed block, backfilling what it missed. On a chain that reads balances (Solana, Ethereum) one left behind the chain's final block is not read back: its balance is read there and one `adjustment` leg closes the gap.
          */
         patch: operations["update_wallet_index"];
         trace?: never;
@@ -503,6 +503,26 @@ export interface paths {
         get: operations["list_wallet_index_legs"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/wallets/{id}/indexes/{asset}/reconcile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reconcile a wallet's index with the chain's balance
+         * @description Deletes the index's mined legs above the chain's final block and unsets its progress: its balances read null until the next indexing step reads the chain's balance at a final block, appends one `adjustment` leg of the difference and reads on from there. Pending legs stay. Corrects what indexing cannot see, such as ether a contract sent. Only on chains that read balances (Solana, Ethereum).
+         */
+        post: operations["reconcile_wallet_index"];
         delete?: never;
         options?: never;
         head?: never;
@@ -589,11 +609,6 @@ export interface components {
          *     read back into it.
          */
         Block: {
-            /**
-             * Format: int64
-             * @description Unix ms a reorg archived it; null while live.
-             */
-            archived_at?: number | null;
             chain: string;
             /** @description Block hash, hexadecimal. */
             hash: string;
@@ -617,6 +632,11 @@ export interface components {
              * @description Native position (height or slot).
              */
             position: number;
+            /**
+             * Format: int64
+             * @description Unix ms a reorg took it back; null while live.
+             */
+            reorged_at?: number | null;
             /**
              * Format: int64
              * @description Unix seconds, when reported.
@@ -712,10 +732,11 @@ export interface components {
             index_job_reason: string | null;
             /**
              * Format: int64
-             * @description How old, in days, a wallet's start may be; always present, null: no
-             *     limit.
+             * @description How many positions below the tip a wallet's start may be; at least
+             *     `confirmations`. Always present, null: no limit. Null on a chain that
+             *     reads balances (Solana, Ethereum): its line is the chain's final block.
              */
-            max_history_days: number | null;
+            max_depth: number | null;
             /** @description Network name. */
             network: string;
             /**
@@ -769,8 +790,9 @@ export interface components {
             asset: string;
             /**
              * Format: int64
-             * @description The native position to index from, no older than the network's
-             *     `max_history_days`. Absent: from the chain's tip, as a generated
+             * @description The native position to index from, at or above the chain's tip less
+             *     the network's `max_depth` (a chain that reads balances starts at its
+             *     final block instead). Absent: from the chain's tip, as a generated
              *     wallet (it has no past) must be.
              */
             start?: number;
@@ -884,13 +906,19 @@ export interface components {
             refused: string | null;
         };
         /**
-         * @description One `leg` row: a transaction's leg, or a block's reward; the API shows
-         *     it as is.
+         * @description One `leg` row: a transaction's leg, a block's reward, or an index's
+         *     adjustment; the API shows it as is.
          */
         Leg: {
             address: string;
-            /** @description Exact atomic decimal text. */
+            /** @description Exact atomic decimal text; signed for a reward or an adjustment. */
             amount: string;
+            /**
+             * Format: int64
+             * @description A received coin a jump wrote off: that jump's position; never
+             *     spendable again. Null otherwise.
+             */
+            archived_at?: number | null;
             asset: string;
             /** @description Its block; null while pending. */
             block?: string | null;
@@ -900,7 +928,10 @@ export interface components {
             id: string;
             /**
              * Format: int32
-             * @description 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward.
+             * @description 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward, 6
+             *     adjustment (signed; leg 0: what the chain's balance read corrects the
+             *     index's total by, at the block it was read at; leg 1: the coins a
+             *     jump archived).
              */
             kind: number;
             /** Format: int64 */
@@ -920,15 +951,16 @@ export interface components {
             total?: string | null;
             /**
              * @description What its index has received (received, minted, reward) through it;
-             *     `None` while pending.
+             *     `None` while pending. No adjustment counts.
              */
             total_received?: string | null;
             /**
-             * @description What its index has sent (spent, burned, fee) through it; `None`
-             *     while pending. `total = total_received - total_sent`.
+             * @description What its index has sent (spent, burned, fee) through it; `None` while
+             *     pending. `total` is `total_received - total_sent` plus its index's
+             *     adjustments so far.
              */
             total_sent?: string | null;
-            /** @description Its transaction; null for a reward. */
+            /** @description Its transaction; null for a reward or an adjustment. */
             transaction?: string | null;
             /** @description The wallet index it is kept for: its address's index in its asset. */
             wallet_index_id: string;
@@ -959,8 +991,8 @@ export interface components {
             network: components["schemas"]["Network"];
         };
         /**
-         * @description A mined leg with its transaction's txid and state (null for a reward)
-         *     and its block's time: a row of [`db::find_page`].
+         * @description A mined leg with its transaction's txid and state (null for a reward or
+         *     an adjustment) and its block's time: a row of [`db::find_page`].
          */
         Movement: components["schemas"]["Leg"] & {
             /**
@@ -1063,7 +1095,7 @@ export interface components {
             indexed: number | null;
             /**
              * Format: int64
-             * @description Kept blocks archived because the chain took them back.
+             * @description Kept blocks reorged because the chain took them back.
              */
             reorgs: number;
             /**
@@ -1169,7 +1201,8 @@ export interface components {
              * @description One to 16 distinct node URLs, in failover order. A URL carries everything:
              *     userinfo (HTTP Basic), query keys, a key in the path,
              *     `header.<Name>=value` parameters sent as headers, and `rpc.` settings
-             *     (`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`).
+             *     (`timeout_ms`, `max_request_bytes`, `max_response_bytes`, `max_batch`,
+             *     `rps`: most calls a second, e.g. `3.5`; a request waits for its turn).
              */
             endpoints: string[];
         };
@@ -1278,7 +1311,7 @@ export interface components {
             pending: number;
             /**
              * Format: int64
-             * @description Blocks a reorg archived.
+             * @description Blocks a reorg took back.
              */
             reorged: number;
             /**
@@ -1544,14 +1577,14 @@ export interface components {
             /**
              * @description Its confirmed balance: its last live mined leg's total at or below
              *     `finality_at`, `0` without one; negative when indexed debits exceed
-             *     indexed credits (history before the start is unknown); null while
-             *     `finality_at` is unknown.
+             *     indexed credits (history before the start or a jump is unknown);
+             *     null while `finality_at` is unknown.
              */
             balance_confirmed?: string | null;
             /**
              * @description What it had received by then (that leg's `total_received`):
-             *     `balance_confirmed = balance_confirmed_received -
-             *     balance_confirmed_sent`.
+             *     `balance_confirmed` is `balance_confirmed_received -
+             *     balance_confirmed_sent` plus its adjustments.
              */
             balance_confirmed_received?: string | null;
             /** @description What it had sent by then (fees included), the same way. */
@@ -1565,9 +1598,10 @@ export interface components {
             /**
              * @description What it will hold once every pending transaction lands: its newest
              *     live mined leg's total, any block (`0` without one), with what this
-             *     server sent and is not mined yet, in and out.
+             *     server sent and is not mined yet, in and out; null before its first
+             *     block (`indexed_through`), as every balance is.
              */
-            balance_pending: string;
+            balance_pending?: string | null;
             /**
              * Format: int64
              * @description Blocks between `indexed_through` and the network's produced tip;
@@ -3236,7 +3270,7 @@ export interface operations {
                     "application/json": components["schemas"]["WalletIndex"];
                 };
             };
-            /** @description Malformed body or wallet ID, or a start older than the network's history limit */
+            /** @description Malformed body or wallet ID, or a start below the chain's tip less the network's `max_depth` */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -3445,6 +3479,76 @@ export interface operations {
                 };
             };
             /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    reconcile_wallet_index: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `{chain}.{network}.{address}`. */
+                id: string;
+                /** @description The asset id. */
+                asset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The index, its progress unset */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WalletIndex"];
+                };
+            };
+            /** @description Malformed wallet ID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such index */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The chain reads no balance (Bitcoin), or the index is paused or `no_data` */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The indexer has not read the chain's final block yet, or the store is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

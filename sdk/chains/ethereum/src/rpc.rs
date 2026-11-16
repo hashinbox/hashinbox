@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use crate::{
     Address, Info, Network, Tokens, erc20,
     rpc_info::decode,
-    transaction::{Log, Transaction},
+    transaction::{Log, Transaction, decimal},
 };
 
 /// JSON-RPC "method not found": a node without `eth_getBlockReceipts`.
@@ -296,6 +296,36 @@ impl Client {
             .call("eth_call", json!([call, "latest"]))
             .await?;
         erc20::decode_decimals(&word).with_context(|| format!("ERC-20 {token}"))
+    }
+
+    /// What `owner` holds at block `height`: wei (`eth_getBalance`), or with
+    /// `token` its `balanceOf` (`eth_call`).
+    ///
+    /// # Errors
+    ///
+    /// A node failure, or a contract that does not answer one `uint256`.
+    pub async fn balance(
+        &self,
+        owner: &alloy_primitives::Address,
+        token: Option<&alloy_primitives::Address>,
+        height: u64,
+    ) -> anyhow::Result<Decimal> {
+        let at = format!("{height:#x}");
+        let Some(token) = token else {
+            let wei: U256 = self
+                .0
+                .node
+                .call("eth_getBalance", json!([hex::encode_prefixed(owner), at]))
+                .await?;
+            return Ok(decimal(wei));
+        };
+        let call = json!({
+            "to": hex::encode_prefixed(token),
+            "data": hex::encode_prefixed(erc20::balance_of(*owner)),
+        });
+        let word: Bytes = self.0.node.call("eth_call", json!([call, at])).await?;
+        let amount = erc20::decode_balance(&word).with_context(|| format!("ERC-20 {token}"))?;
+        Ok(decimal(amount))
     }
 
     /// Submits `bytes` with `eth_sendRawTransaction` to every node the

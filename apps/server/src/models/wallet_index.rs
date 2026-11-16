@@ -141,12 +141,12 @@ pub(crate) struct WalletIndex {
     pub(crate) finality_at: Option<i64>,
     /// Its confirmed balance: its last live mined leg's total at or below
     /// `finality_at`, `0` without one; negative when indexed debits exceed
-    /// indexed credits (history before the start is unknown); null while
-    /// `finality_at` is unknown.
+    /// indexed credits (history before the start or a jump is unknown);
+    /// null while `finality_at` is unknown.
     pub(crate) balance_confirmed: Option<String>,
     /// What it had received by then (that leg's `total_received`):
-    /// `balance_confirmed = balance_confirmed_received -
-    /// balance_confirmed_sent`.
+    /// `balance_confirmed` is `balance_confirmed_received -
+    /// balance_confirmed_sent` plus its adjustments.
     pub(crate) balance_confirmed_received: Option<String>,
     /// What it had sent by then (fees included), the same way.
     pub(crate) balance_confirmed_sent: Option<String>,
@@ -156,8 +156,9 @@ pub(crate) struct WalletIndex {
     pub(crate) balance_confirmed_spendable: Option<String>,
     /// What it will hold once every pending transaction lands: its newest
     /// live mined leg's total, any block (`0` without one), with what this
-    /// server sent and is not mined yet, in and out.
-    pub(crate) balance_pending: String,
+    /// server sent and is not mined yet, in and out; null before its first
+    /// block (`indexed_through`), as every balance is.
+    pub(crate) balance_pending: Option<String>,
     /// Whether its wallet's key is kept here.
     #[serde(skip)]
     pub(crate) keyed: bool,
@@ -204,6 +205,8 @@ impl WalletIndex {
             confirmed: self.spendable()?,
             pending: self
                 .balance_pending
+                .as_deref()
+                .unwrap_or("0")
                 .parse()
                 .context("a stored balance does not decode")?,
             address: self.id.address().clone(),
@@ -279,7 +282,7 @@ pub(crate) mod db {
         balance_confirmed_received: Option<String>,
         balance_confirmed_sent: Option<String>,
         balance_confirmed_spendable: Option<String>,
-        balance_pending: String,
+        balance_pending: Option<String>,
         keyed: bool,
     }
 
@@ -497,15 +500,52 @@ pub(crate) mod db {
             .collect()
     }
 
-    /// The lowest next position of `network`'s indexes at or below
-    /// `through` (`None`: of all), in one query.
+    /// An index's next position: the one after the block it is indexed
+    /// through, or its birthday while it has not started.
+    const NEXT: &str = "COALESCE(block.position + 1, wallet_index.birthday)";
+
+    /// `network`'s indexing indexes whose next position is below `below`,
+    /// furthest behind first, at most `limit`, with the block each is
+    /// indexed through.
+    ///
+    /// # Errors
+    ///
+    /// When the read fails or a stored value does not decode.
+    pub(crate) fn find_behind(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        below: i64,
+        limit: i64,
+    ) -> anyhow::Result<Vec<base::WalletIndex>> {
+        let rows: Vec<(Row, Option<crate::models::block::db::Row>)> = wallet_index::table
+            .inner_join(wallet::table)
+            .left_join(block::table)
+            .filter(wallet::chain.eq(network.chain.as_str()))
+            .filter(wallet::network.eq(&network.name))
+            .filter(wallet_index::state.eq(code(WalletIndexState::Indexing)))
+            .filter(sql::<BigInt>(NEXT).lt(below))
+            .select((
+                Row::as_select(),
+                Option::<crate::models::block::db::Row>::as_select(),
+            ))
+            .order((sql::<BigInt>(NEXT), wallet::address, wallet_index::asset))
+            .limit(limit)
+            .load(connection)?;
+        rows.into_iter()
+            .map(|(row, block)| row.progress(block.map(Block::from).as_ref()))
+            .collect()
+    }
+
+    /// The lowest next position of `network`'s indexes at or above `from`
+    /// and at or below `through` (`None`: no upper bound), in one query.
     pub(crate) fn find_next(
         connection: &mut SqliteConnection,
         network: &Network,
+        from: i64,
         through: Option<i64>,
     ) -> QueryResult<Option<i64>> {
-        // The lowest next position of a network's indexing (state 0) indexes,
-        // at or below a bound (NULL: none).
+        // The lowest next position of a network's indexing (state 0)
+        // indexes, at or above a bound and at or below another (NULL: none).
         let row: Next = diesel::sql_query(
             "
             SELECT
@@ -523,11 +563,12 @@ pub(crate) mod db {
                   AND w.network = ?2
                   AND wi.state = 0
             )
-            WHERE ?3 IS NULL
-               OR n <= ?3",
+            WHERE n >= ?3
+              AND (?4 IS NULL OR n <= ?4)",
         )
         .bind::<Text, _>(network.chain.as_str())
         .bind::<Text, _>(&network.name)
+        .bind::<BigInt, _>(from)
         .bind::<Nullable<BigInt>, _>(through)
         .get_result(connection)?;
         Ok(row.next)
@@ -540,10 +581,12 @@ pub(crate) mod db {
         block: &Block,
         parent: Option<&BlockId>,
     ) -> QueryResult<BTreeSet<String>> {
-        // Moves every indexing (state 0) index of network `?1`, `?2` that the
-        // block at position `?3` (id `?5`) applies to onto it, and answers
-        // their ids: birthday at or below it, and indexed through its parent
-        // `?4`, or unset with no live block from the birthday up to it.
+        // Moves every indexing (state 0) index of network `?1`, `?2` that
+        // the block at position `?3` (id `?5`, its parent at position `?6`)
+        // applies to onto it, and answers their ids: birthday at or below
+        // it, and indexed through its parent `?4`, or unset with its parent
+        // below the birthday (none: the chain's first). By the chain's links,
+        // not the kept blocks: an index never skips a block nobody kept.
         let rows: Vec<IndexId> = diesel::sql_query(
             "
             UPDATE wallet_index
@@ -558,18 +601,7 @@ pub(crate) mod db {
               )
               AND (
                   indexed_at = ?4
-                  OR (
-                      indexed_at IS NULL
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM block b
-                          WHERE b.chain = ?1
-                            AND b.network = ?2
-                            AND b.archived_at IS NULL
-                            AND b.position >= wallet_index.birthday
-                            AND b.position < ?3
-                      )
-                  )
+                  OR (indexed_at IS NULL AND (?6 IS NULL OR ?6 < birthday))
               )
             RETURNING id",
         )
@@ -578,6 +610,7 @@ pub(crate) mod db {
         .bind::<BigInt, _>(block.position)
         .bind::<Nullable<Text>, _>(parent)
         .bind::<Text, _>(&block.id)
+        .bind::<Nullable<BigInt>, _>(block.parent_position)
         .load(connection)?;
         Ok(rows.into_iter().map(|row| row.id).collect())
     }
@@ -634,6 +667,77 @@ pub(crate) mod db {
         })
     }
 
+    /// Resumes index `id`, indexing, clearing its reason; how many (0 or 1).
+    pub(crate) fn resume(
+        connection: &mut SqliteConnection,
+        id: impl AsRef<str>,
+    ) -> QueryResult<usize> {
+        diesel::update(wallet_index::table.find(id.as_ref()))
+            .set((
+                wallet_index::state.eq(code(WalletIndexState::Indexing)),
+                wallet_index::reason.eq(None::<String>),
+            ))
+            .execute(connection)
+    }
+
+    /// Unsets the progress of index `id` when it is indexing, its birthday
+    /// at most `confirmed`, the chain's final block: its next block is at or
+    /// below it, so the indexer settles it again. How many (0 or 1).
+    pub(crate) fn reconcile(
+        connection: &mut SqliteConnection,
+        id: impl AsRef<str>,
+        confirmed: i64,
+    ) -> QueryResult<usize> {
+        diesel::update(
+            wallet_index::table
+                .find(id.as_ref())
+                .filter(wallet_index::state.eq(code(WalletIndexState::Indexing))),
+        )
+        .set((
+            wallet_index::indexed_at.eq(None::<String>),
+            wallet_index::birthday.eq(diesel::dsl::sql::<BigInt>("MIN(birthday, ")
+                .bind::<BigInt, _>(confirmed)
+                .sql(")")),
+        ))
+        .execute(connection)
+    }
+
+    /// Settles index `id` on `block`: it continues from the block after,
+    /// its birthday there.
+    pub(crate) fn settle(
+        connection: &mut SqliteConnection,
+        id: impl AsRef<str>,
+        block: &Block,
+    ) -> QueryResult<usize> {
+        diesel::update(wallet_index::table.find(id.as_ref()))
+            .set((
+                wallet_index::birthday.eq(block.position),
+                wallet_index::indexed_at.eq(&block.id),
+            ))
+            .execute(connection)
+    }
+
+    /// Restarts index `id` at `birthday` (a jump): unstarted, indexing; its
+    /// `requested_from` and legs stay.
+    ///
+    /// # Errors
+    ///
+    /// When `birthday` is out of range or the write fails.
+    pub(crate) fn restart(
+        connection: &mut SqliteConnection,
+        id: impl AsRef<str>,
+        birthday: u64,
+    ) -> anyhow::Result<()> {
+        diesel::update(wallet_index::table.find(id.as_ref()))
+            .set((
+                wallet_index::birthday.eq(int(birthday)?),
+                wallet_index::indexed_at.eq(None::<String>),
+                wallet_index::state.eq(code(WalletIndexState::Indexing)),
+            ))
+            .execute(connection)?;
+        Ok(())
+    }
+
     /// Forgets index `id`; how many went (0 or 1).
     pub(crate) fn delete(
         connection: &mut SqliteConnection,
@@ -665,7 +769,7 @@ pub(crate) mod db {
                 FROM block
                 WHERE chain = ?1
                   AND network = ?2
-                  AND archived_at IS NULL
+                  AND reorged_at IS NULL
                   AND position >= ?3
             )",
         )
@@ -678,7 +782,8 @@ pub(crate) mod db {
     }
 
     /// The fully indexed indexes of `network` that `selector` picks:
-    /// indexed through a live block at or above `confirmed`, the network's
+    /// indexing (not paused or without data) and indexed
+    /// through a live block at or above `confirmed`, the network's
     /// confirmed position (the universe, so `Not` is relative to it), with
     /// the view's balances there (what [`WalletIndex::index`] reads), in
     /// one query.
@@ -739,8 +844,9 @@ pub(crate) mod db {
             .collect())
     }
 
-    /// The indexes of `network` that `selector` picks, only those indexed
-    /// through a live block at or above `confirmed` when `fully_indexed`,
+    /// The indexes of `network` that `selector` picks, only those indexing
+    /// and indexed through a live block at or above `confirmed` when
+    /// `fully_indexed`,
     /// with the view's balances at the confirmed position, in one query.
     fn read(
         connection: &mut SqliteConnection,
@@ -752,7 +858,7 @@ pub(crate) mod db {
         let mut binds = Vec::new();
         let picked = picked(selector, &mut binds);
         let indexed = if fully_indexed {
-            "wi.indexed_through >= ?"
+            "wi.indexed_through >= ? AND wi.state = 0"
         } else {
             "1"
         };

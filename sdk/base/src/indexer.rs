@@ -8,19 +8,22 @@ use std::{
 use anyhow::ensure;
 
 use crate::{
-    Addressed, Asset, BlockHeader, BlockStore, Chained, Network, Networked, NotServed, WalletIndex,
-    WalletIndexState, WalletIndexStore,
+    Addressed, Asset, Balances, BlockHeader, BlockStore, Chained, Network, Networked, NotServed,
+    Tips, WalletIndex, WalletIndexState, WalletIndexStore,
 };
 
 /// Blocks fetched per step unless [`Indexer::with_batch`] says otherwise.
 pub const DEFAULT_BATCH: u64 = 100;
+
+/// Indexes settled per step at most.
+const SETTLES: usize = 8;
 
 /// What one [`Indexer::next`] did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Next {
     /// Kept blocks through this one.
     Indexed(BlockHeader),
-    /// Archived kept blocks from this position: the chain took them back.
+    /// Reorged kept blocks from this position: the chain took them back.
     Reorged(u64),
     /// Nothing to fetch.
     Idle,
@@ -46,14 +49,22 @@ pub struct Stats {
     pub tip: Option<u64>,
     /// The chain's confirmed (final) tip at the last step.
     pub confirmed: Option<u64>,
-    /// Kept blocks archived because the chain took them back.
+    /// Kept blocks reorged because the chain took them back.
     pub reorgs: u64,
     /// Addresses watched.
     pub watched: u64,
-    /// Failed steps.
+    /// Failed steps, and failed settles (balance reads or their writes).
     pub failures: u64,
     /// The last failure, cleared by the next kept block.
     pub error: Option<String>,
+}
+
+impl Stats {
+    /// Counts `error` in `failures`; it is the last `error`.
+    fn fail(&mut self, error: &anyhow::Error) {
+        self.failures += 1;
+        self.error = Some(format!("{error:#}"));
+    }
 }
 
 /// [`Stats`] as they change, behind their own lock.
@@ -67,7 +78,7 @@ impl StatsWithMutex {
 }
 
 /// Indexes one network: fetches blocks up to the produced tip and keeps them,
-/// archiving kept blocks the chain took back. The caller steps it
+/// marking kept blocks the chain took back reorged. The caller steps it
 /// ([`Indexer::next`]), about every [`Indexer::interval`].
 pub struct Indexer {
     chain: Arc<dyn Chained>,
@@ -75,6 +86,8 @@ pub struct Indexer {
     indexes: Arc<dyn WalletIndexStore>,
     interval: Duration,
     batch: u64,
+    balances: Option<Arc<dyn Balances>>,
+    max_depth: Option<u64>,
     stats: StatsWithMutex,
 }
 
@@ -94,6 +107,8 @@ impl Indexer {
             indexes,
             interval,
             batch: DEFAULT_BATCH,
+            balances: None,
+            max_depth: None,
             stats: StatsWithMutex::default(),
         }
     }
@@ -111,8 +126,30 @@ impl Indexer {
         self
     }
 
-    /// Indexes `asset` of `address` from `birthday`; [`Indexer::next`]
-    /// backfills it.
+    /// Reads balances with `balances`: nothing at or below the chain's final
+    /// block is read. A new watch starts there, and each step first settles
+    /// ([`Self::settle`]) every index whose next block is at or below it,
+    /// then reads on above it. It replaces `max_depth`
+    /// ([`Self::with_max_depth`]).
+    #[must_use]
+    pub fn with_balances(mut self, balances: Arc<dyn Balances>) -> Self {
+        self.balances = Some(balances);
+        self
+    }
+
+    /// Never reads more than `max_depth` positions below the tip: an index
+    /// further behind jumps ([`Self::jump`]). `None`: no limit. Without
+    /// balances only ([`Self::with_balances`]).
+    #[must_use]
+    pub const fn with_max_depth(mut self, max_depth: Option<u64>) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
+    /// Indexes `asset` of `address` from `birthday`, its `requested_from`;
+    /// [`Indexer::next`] backfills it. With balances
+    /// ([`Indexer::with_balances`]) it starts at the chain's final block
+    /// instead, and the next step settles it.
     ///
     /// # Errors
     ///
@@ -131,14 +168,18 @@ impl Indexer {
             address.network,
             self.network()
         );
-        let birthday = match birthday {
+        let requested_from = match birthday {
             Birthday::Fresh => self.chain.tips().await?.produced,
             Birthday::At(position) => position,
+        };
+        let birthday = match self.balances {
+            Some(_) => self.chain.tips().await?.confirmed,
+            None => requested_from,
         };
         let index = WalletIndex {
             address: address.clone(),
             asset: asset.clone(),
-            requested_from: birthday,
+            requested_from,
             birthday,
             indexed_at: None,
             state: WalletIndexState::Indexing,
@@ -157,11 +198,14 @@ impl Indexer {
 
     /// One step of at most a batch: from the furthest-behind
     /// [`WalletIndexState::Indexing`] index, or else from the last kept
-    /// block. When the chain no longer has the last kept block, archives it;
-    /// the next step checks the one below. When the node no longer serves a
-    /// block (pruned history), an index that has not started starts at the
-    /// first block it serves; one that has started becomes
-    /// [`WalletIndexState::NoData`] and the step fails.
+    /// block. When the chain no longer has the last kept block, marks it
+    /// reorged; the next step checks the one below. Never below the line
+    /// ([`Self::line`]): with balances, it first settles a few indexes not
+    /// past the chain's final block ([`Self::settle`]); without, an index
+    /// behind the tip less `max_depth` jumps there ([`Self::jump`]). When
+    /// the node no longer serves a block (pruned history), an index that has
+    /// not started starts at the first block it serves; one that has started
+    /// becomes [`WalletIndexState::NoData`] and the step fails.
     ///
     /// # Errors
     ///
@@ -171,11 +215,47 @@ impl Indexer {
     pub async fn next(&self) -> anyhow::Result<Next> {
         let next = self.step().await;
         if let Err(error) = &next {
-            let mut stats = self.stats.get();
-            stats.failures += 1;
-            stats.error = Some(format!("{error:#}"));
+            self.stats.get().fail(error);
         }
         next
+    }
+
+    /// Settles at most [`SETTLES`] indexing indexes whose next block is at
+    /// or below `confirmed`, the chain's final block: each reads its balance
+    /// at a final block `S` at or above it and, once the chain answers and
+    /// serves `S`, writes it ([`WalletIndexStore::settle`]); it reads on from
+    /// `S + 1`. One not answerable yet stays as it is for the next step; a
+    /// failure is counted in [`Stats::failures`], never failing the step.
+    async fn settle(&self, balances: &dyn Balances, confirmed: u64) {
+        let below = confirmed.saturating_add(1);
+        let behind = self.indexes.find_behind(self.network(), below, SETTLES);
+        let behind = match behind.await {
+            Ok(behind) => behind,
+            Err(error) => return self.stats.get().fail(&error),
+        };
+        for index in &behind {
+            if let Err(error) = self.settle_one(balances, index, confirmed).await {
+                self.stats.get().fail(&error);
+            }
+        }
+    }
+
+    /// [`Self::settle`] of one `index`, at a final block at or above `at`.
+    async fn settle_one(
+        &self,
+        balances: &dyn Balances,
+        index: &WalletIndex,
+        at: u64,
+    ) -> anyhow::Result<()> {
+        let read = balances.balance(&index.address, &index.asset, at);
+        let Some(holding) = read.await? else {
+            return Ok(());
+        };
+        let Some(block) = self.chain.block(holding.position).await? else {
+            return Ok(());
+        };
+        self.indexes.settle(index, &holding, &block.header).await?;
+        Ok(())
     }
 
     /// [`Self::fetch`]; when the node no longer serves a block an index
@@ -202,24 +282,17 @@ impl Indexer {
     ///
     /// When the chain or the store fails.
     async fn skip(&self, gap: NotServed) -> anyhow::Result<bool> {
-        let indexing: Vec<_> = self
+        let network = self.network();
+        let needs = self
             .indexes
-            .find_all(self.network())
-            .await?
-            .into_iter()
-            .filter(|index| index.state == WalletIndexState::Indexing)
-            .collect();
-        let below = |index: &WalletIndex, end: u64| index.next().is_some_and(|next| next < end);
-        if !indexing
-            .iter()
-            .any(|index| below(index, gap.position.saturating_add(2)))
-        {
+            .find_behind(network, gap.position.saturating_add(2), 1);
+        if needs.await?.is_empty() {
             return Ok(false);
         }
         let tip = self.chain.tips().await?.produced;
         let start = first_served(&*self.chain, gap.position, tip).await?;
         let (mut moved, mut stopped) = (false, false);
-        for index in indexing.iter().filter(|index| below(index, start)) {
+        for index in &self.indexes.find_behind(network, start, usize::MAX).await? {
             match index.next() {
                 Some(_) if index.indexed_at.is_none() => {
                     self.indexes.move_birthday(index, start).await?;
@@ -241,10 +314,6 @@ impl Indexer {
     async fn fetch(&self) -> anyhow::Result<Next> {
         let network = self.network();
         let last = self.blocks.find_last(network).await?;
-        let lagging = self
-            .indexes
-            .find_next(network, last.as_ref().map(|last| last.position))
-            .await?;
         // The tip first: a network with nothing to index still shows it.
         let tips = self.chain.tips().await?;
         let tip = tips.produced;
@@ -253,10 +322,26 @@ impl Indexer {
             stats.tip = Some(tip);
             stats.confirmed = Some(tips.confirmed);
         }
+        let line = self.line(tips);
+        if let Some(line) = line
+            && let Some(reorged) = self.check(line, last.as_ref()).await?
+        {
+            return Ok(reorged);
+        }
+        if let Some(balances) = &self.balances {
+            self.settle(&**balances, tips.confirmed).await;
+        } else if let Some(line) = line {
+            self.jump(line).await?;
+        }
+        // After the settles and jumps: no index left to read is below the line.
+        let floor = line.unwrap_or(0);
+        let through = last.as_ref().map(|last| last.position);
+        let lagging = self.indexes.find_next(network, floor, through).await?;
         // Forward starts at the last kept block, to see it is still on the chain.
-        let Some(start) = lagging.or(last.as_ref().map(|last| last.position)) else {
+        let Some(start) = lagging.or(through) else {
             return Ok(Next::Idle);
         };
+        let start = start.max(floor);
         let end = tip.min(start.saturating_add(self.batch - 1));
         let run = self.chain.blocks(start, end).await?;
         // The run may end early (the node has no more yet): only the
@@ -265,13 +350,12 @@ impl Indexer {
             return Ok(Next::Idle);
         };
 
+        // One below the start is the line's to check (`Self::check`).
         if let Some(last) = &last
-            && last.position <= reached
+            && (start..=reached).contains(&last.position)
             && !run.contains(last)
         {
-            self.blocks.delete(network, last.position).await?;
-            self.stats.get().reorgs += 1;
-            return Ok(Next::Reorged(last.position));
+            return self.reorg(last).await;
         }
         let Some(header) = run.last().cloned() else {
             return Ok(Next::Idle);
@@ -286,6 +370,56 @@ impl Indexer {
         stats.error = None;
         drop(stats);
         Ok(Next::Indexed(header))
+    }
+
+    /// The line nothing below is read: with balances, the one above the
+    /// chain's final block (an index at or below it settles instead);
+    /// without, the tip less `max_depth` (an index below it jumps); `None`:
+    /// no line.
+    fn line(&self, tips: Tips) -> Option<u64> {
+        if self.balances.is_some() {
+            return Some(tips.confirmed.saturating_add(1));
+        }
+        self.max_depth
+            .map(|depth| tips.produced.saturating_sub(depth))
+    }
+
+    /// When `last`, the last kept block, is below `line`, checks the chain
+    /// still has it: when not, marks it reorged instead (the next step
+    /// checks the one below). With it, every leg kept below is final
+    /// history. A node that no longer serves it ([`NotServed`], pruned
+    /// history) counts as having it: it is far below the final tip.
+    async fn check(&self, line: u64, last: Option<&BlockHeader>) -> anyhow::Result<Option<Next>> {
+        let Some(last) = last.filter(|last| last.position < line) else {
+            return Ok(None);
+        };
+        let gone = match self.chain.block(last.position).await {
+            Ok(block) => block.is_none_or(|block| block.header != *last),
+            Err(error) if NotServed::find(&error).is_some() => false,
+            Err(error) => return Err(error),
+        };
+        if !gone {
+            return Ok(None);
+        }
+        self.reorg(last).await.map(Some)
+    }
+
+    /// Moves every indexing index whose next is below `floor`, the jump line
+    /// (the tip less `max_depth`), up to it ([`WalletIndexStore::restart`]):
+    /// the gap below is never read.
+    async fn jump(&self, floor: u64) -> anyhow::Result<()> {
+        let behind = self.indexes.find_behind(self.network(), floor, usize::MAX);
+        for index in &behind.await? {
+            self.indexes.restart(index, floor).await?;
+        }
+        Ok(())
+    }
+
+    /// Marks `last`, the last kept block, reorged: the chain took it back.
+    async fn reorg(&self, last: &BlockHeader) -> anyhow::Result<Next> {
+        self.blocks.delete(self.network(), last.position).await?;
+        self.stats.get().reorgs += 1;
+        Ok(Next::Reorged(last.position))
     }
 }
 
@@ -407,9 +541,10 @@ mod tests {
                         && index.birthday <= at.position
                         && match &index.indexed_at {
                             Some(through) => Some(through.position) == at.position.checked_sub(1),
-                            None => !blocks
-                                .iter()
-                                .any(|kept| (index.birthday..at.position).contains(&kept.position)),
+                            None => at
+                                .parent
+                                .as_ref()
+                                .is_none_or(|parent| parent.position < index.birthday),
                         };
                     if applies {
                         index.indexed_at = Some(at.clone());
@@ -451,23 +586,6 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
-        fn find_next<'a>(
-            &'a self,
-            _network: &'a Network,
-            through: Option<u64>,
-        ) -> Future<'a, anyhow::Result<Option<u64>>> {
-            let next = self
-                .indexes
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|index| index.state == WalletIndexState::Indexing)
-                .filter_map(WalletIndex::next)
-                .filter(|next| through.is_none_or(|through| *next <= through))
-                .min();
-            Box::pin(async move { Ok(next) })
-        }
-
         fn find_all<'a>(
             &'a self,
             _network: &'a Network,
@@ -500,6 +618,23 @@ mod tests {
                 kept.reason = reason.map(str::to_owned);
             });
             Box::pin(async { Ok(()) })
+        }
+
+        fn settle<'a>(
+            &'a self,
+            _index: &'a WalletIndex,
+            _holding: &'a crate::Holding,
+            _header: &'a BlockHeader,
+        ) -> Future<'a, anyhow::Result<bool>> {
+            unimplemented!("no balances here")
+        }
+
+        fn restart<'a>(
+            &'a self,
+            _index: &'a WalletIndex,
+            _birthday: u64,
+        ) -> Future<'a, anyhow::Result<()>> {
+            unimplemented!("no jump here")
         }
     }
 

@@ -499,9 +499,9 @@ async fn produced<C: Dated + ?Sized>(
 ///
 /// # Model
 ///
-/// - A block is *live* until [`Store::delete`] archives it. Archived blocks
-///   stay (an `archived_at` mark), but their facts leave every read: balances,
-///   history, unspent outputs.
+/// - A block is *live* until [`Store::delete`] marks it reorged. Reorged
+///   blocks stay (a `reorged_at` mark), but their facts leave every read:
+///   balances, history, unspent outputs.
 /// - The live blocks of a network are one linked run: each names the one
 ///   below it as its parent. At most one live block per position.
 /// - Each index, one asset of one address, carries `indexed_at`
@@ -527,8 +527,9 @@ pub trait Store: Send + Sync {
     /// 3. For each block, reads its indexes inside this write and keeps the
     ///    legs, outputs and rewards whose (address, asset) is an index the
     ///    block applies to: birthday at or below it, and `indexed_at` at its
-    ///    parent (or unset, when the block is the birthday or the first one at
-    ///    or above it); a transaction is kept once, when any of its legs is.
+    ///    parent (or unset, when the block is the chain's first at or above
+    ///    the birthday: its parent below it); a transaction is kept once,
+    ///    when any of its legs is.
     ///    Other facts are dropped.
     /// 4. Marks outputs spent by those legs as spent in that block.
     /// 5. Moves `indexed_at` of those indexes to the block, empty blocks
@@ -546,24 +547,24 @@ pub trait Store: Send + Sync {
     fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>>;
 
     /// The last live block of `network`; `None` before the first, or when
-    /// every block is archived.
+    /// every block is reorged.
     ///
     /// # Errors
     ///
     /// When the store cannot read.
     fn find_last<'a>(&'a self, network: &'a Network) -> Future<'a, anyhow::Result<Option<Header>>>;
 
-    /// Archives every live block of `network` at or above `from`, in one
+    /// Marks every live block of `network` at or above `from` reorged, in one
     /// atomic write that:
     ///
-    /// 1. Sets `archived_at` on those blocks; nothing is hard-deleted. Their
+    /// 1. Sets `reorged_at` on those blocks; nothing is hard-deleted. Their
     ///    transactions, legs, outputs and rewards leave every read.
     /// 2. Unmarks outputs spent in them: those outputs are unspent again.
     /// 3. Rewinds `indexed_at` of every index at or above `from` to the live
     ///    block below `from` (unset when none is), so those indexes re-index
     ///    the new branch.
     ///
-    /// Other networks, wallets and indexes stay. Archiving nothing is a no-op.
+    /// Other networks, wallets and indexes stay. Marking nothing is a no-op.
     ///
     /// # Errors
     ///

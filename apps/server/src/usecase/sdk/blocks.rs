@@ -6,7 +6,10 @@ use std::{
 };
 
 use anyhow::{bail, ensure};
-use base::{Block as BaseBlock, BlockHeader, BlockStore, Blocks, Future, Network, Networked as _};
+use base::{
+    Block as BaseBlock, BlockHeader, BlockStore, Blocks, Future, Network, Networked as _,
+    Transactions,
+};
 use diesel::SqliteConnection;
 
 use super::Stores;
@@ -47,7 +50,7 @@ impl BlockStore for Stores {
                 .write(move |connection| {
                     let below = block::db::find_below(connection, &network, from)?;
                     wallet_index::db::rewind(connection, &network, from, below.as_ref())?;
-                    block::db::archive(connection, &network, from, now)?;
+                    block::db::reorg(connection, &network, from, now)?;
                     Ok(())
                 })
                 .await
@@ -58,8 +61,11 @@ impl BlockStore for Stores {
 /// Keeps `run` ([`BlockStore::insert`]): each block with its facts, checked
 /// against the live blocks around the run, read once and kept current as
 /// the run is written. A block conflicting with a kept one, or added
-/// without linking to its live neighbours, fails the write: blocks are
-/// never skipped, a gap fails loudly.
+/// without linking to an adjacent live neighbour (one at or above its
+/// parent's position below it, one whose parent is at or below its position
+/// above it), fails the write. A neighbour further away is a gap (pruned
+/// blocks) and is allowed: an index stays contiguous because it only moves
+/// onto a block whose parent is its `indexed_at` (`wallet_index::db::advance`).
 fn keep(
     connection: &mut SqliteConnection,
     network: &Network,
@@ -72,11 +78,7 @@ fn keep(
     let (Some(&lowest), Some(&highest)) = (positions.iter().min(), positions.iter().max()) else {
         return Ok(());
     };
-    let mut live: BTreeMap<i64, Block> =
-        block::db::find_around(connection, network, lowest, highest)?
-            .into_iter()
-            .map(|block| (block.position, block))
-            .collect();
+    let mut live = around(connection, network, lowest, highest)?;
     let mut added = Vec::new();
     for (base, position) in run.iter().zip(positions) {
         ensure!(base.network == *network, "a block is not of {network:?}");
@@ -89,18 +91,76 @@ fn keep(
         block::db::save(connection, &mut block)?;
         live.insert(position, block);
     }
-    // Every added block must link to its live neighbours.
+    link(network, &live, added)
+}
+
+/// Keeps `header`, a block of `network`, live with no facts, moving no index
+/// (a settle's block): the kept one at its position when that is it, linked
+/// as [`keep`] links a block. `None`: another live block is there.
+pub(super) fn keep_bare(
+    connection: &mut SqliteConnection,
+    network: &Network,
+    header: &BlockHeader,
+) -> anyhow::Result<Option<Block>> {
+    let position = int(header.position)?;
+    let mut live = around(connection, network, position, position)?;
+    if let Some(held) = live.get(&position) {
+        return Ok(held.is(header).then(|| held.clone()));
+    }
+    let mut block = Block::try_from(&BaseBlock {
+        network: network.clone(),
+        header: header.clone(),
+        transactions: Transactions::default(),
+        rewards: Vec::new(),
+    })?;
+    block::db::save_row(connection, &mut block)?;
+    live.insert(position, block.clone());
+    link(network, &live, [position])?;
+    Ok(Some(block))
+}
+
+/// The live blocks of `network` from the one right below `lowest` to the one
+/// right above `highest`, by position.
+fn around(
+    connection: &mut SqliteConnection,
+    network: &Network,
+    lowest: i64,
+    highest: i64,
+) -> anyhow::Result<BTreeMap<i64, Block>> {
+    Ok(
+        block::db::find_around(connection, network, lowest, highest)?
+            .into_iter()
+            .map(|block| (block.position, block))
+            .collect(),
+    )
+}
+
+/// Fails unless every block `added` (positions of `live`, the live blocks
+/// around them) links to its adjacent live neighbours: one at or above its
+/// parent's position below it, one whose parent is at or below its position
+/// above it. A neighbour further away is a gap.
+fn link(
+    network: &Network,
+    live: &BTreeMap<i64, Block>,
+    added: impl IntoIterator<Item = i64>,
+) -> anyhow::Result<()> {
     for position in added {
         let Some(block) = live.get(&position) else {
             continue;
         };
         let header = BlockHeader::try_from(block)?;
         if let Some((_, below)) = live.range(..position).next_back()
+            && block
+                .parent_position
+                .is_none_or(|parent| below.position >= parent)
             && !below.is_parent_of(&header)
         {
             bail!("{network:?}: block {position} does not link onto the kept block below it");
         }
         if let Some((_, above)) = live.range(position + 1..).next()
+            && above
+                .parent_position
+                .is_none_or(|parent| parent <= position)
             && !block.is_parent_of(&BlockHeader::try_from(above)?)
         {
             bail!("{network:?}: the kept block above {position} does not link onto it");

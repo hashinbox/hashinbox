@@ -6,7 +6,7 @@
 
 use base::testing::{Caps, TestChain};
 
-use super::{App, at_tip, linked, reaches, settle, unit, until};
+use super::{App, at_tip, linked, open, reaches, settle, unit, until};
 
 pub(super) const NEEDS: Caps = Caps::CLUSTER.with(Caps::REORG);
 
@@ -14,7 +14,7 @@ pub(super) fn prepare<T: TestChain>(_chain: &T) {}
 
 pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     let wallet = app.api.wallet(&chain.network()).await;
-    app.api.index(&wallet, "native", None).await;
+    open(app, &wallet, "native").await;
     chain.fund(&wallet.address, &unit(chain), "native");
     chain.mine(1);
     reaches(app, &wallet, "native", "balance_pending", &unit(chain)).await;

@@ -1,5 +1,6 @@
 //! The routes over the scripted network and a real SQLite file: create
-//! (generate, import, watch), index (create, pause, resume, delete), tag,
+//! (generate, import, watch), index (create, pause, resume, reconcile,
+//! delete), tag,
 //! list and read wallets; balance and legs of indexed blocks; a send
 //! enqueued and read back as a job; assets, networks and health; the network
 //! asset icons.
@@ -207,7 +208,7 @@ async fn wallets_balance_legs_and_sends() {
     assert_eq!(legs["legs"][0]["txid"], "t0");
     assert_eq!(legs["legs"][0]["state"], 1);
     assert_eq!(legs["legs"][0]["amount"], "150000000");
-    assert_eq!(legs["next_cursor"], "1");
+    assert_eq!(legs["next_cursor"], "0:1");
     let blocks = "/v1/networks/bitcoin/regtest/blocks";
     let (status, page) = call(
         &router,
@@ -477,10 +478,9 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_and_goes() {
+async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and_goes() {
     let (db, _directory) = database().await;
-    let days = std::time::Duration::from_secs(30 * 86_400);
-    let container = limited(&db, Arc::new(Script::default()), Some(days));
+    let container = limited(&db, Arc::new(Script::default()), Some(30));
     let state = Arc::new(AppState {
         container,
         db: db.clone(),
@@ -505,10 +505,10 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
     let watch = |start: u64| json!({ "asset": "native", "start": start });
     let indexes = "/v1/wallets/bitcoin.regtest.alice/indexes";
 
-    // Block 70 is about 30 days old.
-    let (status, error) = call(&router, Method::POST, indexes, Some(watch(60))).await;
+    // The tip is 100: block 70 is the oldest start within 30 positions.
+    let (status, error) = call(&router, Method::POST, indexes, Some(watch(69))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
-    assert!(error.to_string().contains("30 days"), "{error}");
+    assert!(error.to_string().contains("start at 70"), "{error}");
     let (status, index) = call(&router, Method::POST, indexes, Some(watch(80))).await;
     assert_eq!(status, StatusCode::CREATED, "{index}");
     assert_eq!(index["asset"], "native");
@@ -521,12 +521,12 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
     assert_eq!(index["indexed_through"], Value::Null);
     db.write(|connection| {
         use diesel::connection::SimpleConnection as _;
-        Ok(connection.batch_execute("UPDATE network SET max_history_days = 30")?)
+        Ok(connection.batch_execute("UPDATE network SET max_depth = 30")?)
     })
     .await
     .unwrap();
     let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
-    assert_eq!(networks["networks"][0]["max_history_days"], 30);
+    assert_eq!(networks["networks"][0]["max_depth"], 30);
     assert_eq!(networks["networks"][0]["tip_live"], 100);
     // Block p is 100 - p days old: 50.5 days ago is after block 49.
     let at = std::time::SystemTime::now()
@@ -565,6 +565,10 @@ async fn a_start_past_the_history_limit_is_refused_and_an_index_pauses_resumes_a
     assert_eq!(read["indexes"]["native"]["state"], "indexing", "{read}");
     let (status, _) = call(&router, Method::PATCH, &native, state("no_data")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    // This chain reads no balance: nothing to reconcile with.
+    let reconcile = format!("{native}/reconcile");
+    let (status, error) = call(&router, Method::POST, &reconcile, None).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
     let nobody = "/v1/wallets/bitcoin.regtest.nobody/indexes/native";
     let (status, _) = call(&router, Method::PATCH, nobody, state("paused")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -928,4 +932,199 @@ async fn a_count_compares_with_a_whole_number_or_the_trigger_is_refused() {
     let fine = create("fine", compare(select(), "count", "2"));
     let (status, body) = call(&router, Method::POST, "/v1/triggers", Some(fine)).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+/// On a chain that reads balances: an index opens at the chain's final
+/// block, its balances null until a step settles it there; a manual
+/// reconcile (once the indexer read the final block) deletes its legs above
+/// that block and unsets its progress (no balance, no trigger), and the
+/// next steps settle it again and read on; a paused index is not
+/// reconciled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
+    use super::storage::{Held, Served, block, idle, payment};
+
+    let (db, _directory) = database().await;
+    let held = Arc::new(Held::default());
+    // Blocks 0..=5, final through 3; alice is paid 0.5 at 5.
+    let network = network();
+    let mut chain: Vec<_> = (0..=5).map(|p| block(&network, p, 0, vec![])).collect();
+    let paid = payment(&network, "a", "alice", 500_000_000, None);
+    chain[5] = block(&network, 5, 0, vec![paid]);
+    let script = Script {
+        balances: Some(held.clone()),
+        chain: Some(Arc::new(Served(chain, 2))),
+        ..Script::default()
+    };
+    let container = container(&db, Arc::new(script));
+    let indexer = container
+        .service(&network)
+        .expect("a service")
+        .indexer
+        .clone();
+    let state = Arc::new(AppState {
+        container,
+        db: db.clone(),
+        queue: crate::usecase::tasks::queue(db.clone()),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+    });
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("an address"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        None,
+        http_server::RequestLimits::default(),
+    );
+    let router = api::router(state, &config).expect("a router");
+    let alice = json!({ "chain": "bitcoin", "network": "regtest", "secret": "alice" });
+    let (status, _) = call(&router, Method::POST, "/v1/wallets", Some(alice)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let wallet = "/v1/wallets/bitcoin.regtest.alice";
+    let indexes = format!("{wallet}/indexes");
+    let (status, index) = call(
+        &router,
+        Method::POST,
+        &indexes,
+        Some(json!({"asset": "native", "start": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{index}");
+    assert_eq!(index["state"], "indexing", "{index}");
+    assert_eq!(
+        (&index["requested_from"], &index["birthday"]),
+        (&json!(1), &json!(3)),
+        "{index}"
+    );
+    assert_eq!(index["balance_pending"], Value::Null, "{index}");
+    let reconcile = format!("{indexes}/native/reconcile");
+    let (status, error) = call(&router, Method::POST, &reconcile, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
+
+    // The chain reads 5 at 3: it opens at 5, and reads on.
+    held.set("alice", Some((3, 5_000_000_000)));
+    idle(&indexer).await;
+    let read = || async {
+        let (_, wallet) = call(&router, Method::GET, wallet, None).await;
+        wallet["indexes"]["native"].clone()
+    };
+    let index = read().await;
+    assert_eq!(index["indexed_through"], 5, "{index}");
+    assert_eq!(index["balance_pending"], "5500000000", "{index}");
+    // What a trigger round reads: the fully indexed indexes.
+    let fully = || {
+        db.read(|connection| {
+            let network = super::network();
+            let alice = base::Address::new(network.clone(), "alice");
+            let wanted = [(alice, base::Asset::native(network.clone()))];
+            crate::models::wallet_index::db::find(connection, &network, &wanted, 0)
+        })
+    };
+    assert_eq!(fully().await.expect("a read").len(), 1);
+
+    // At 4 the chain says 5.2, 0.2 more than its legs (a contract paid it):
+    // reconciled, its leg above 3 deleted.
+    held.set("alice", Some((4, 5_200_000_000)));
+    for _ in 0..2 {
+        let (status, index) = call(&router, Method::POST, &reconcile, None).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{index}");
+        assert_eq!(index["state"], "indexing", "{index}");
+        assert_eq!(index["indexed_through"], Value::Null, "{index}");
+        assert_eq!(index["balance_pending"], Value::Null, "{index}");
+    }
+    assert!(
+        fully().await.expect("a read").is_empty(),
+        "triggers skip it"
+    );
+    idle(&indexer).await;
+    let index = read().await;
+    assert_eq!(index["indexed_through"], 5, "{index}");
+    assert_eq!(index["balance_pending"], "5700000000", "{index}");
+    // Latest first, two a page: the cursor is the (position, seq) pair.
+    let legs = format!("{indexes}/native/legs?limit=2");
+    let (_, first) = call(&router, Method::GET, &legs, None).await;
+    assert_eq!(first["next_cursor"], "4:2", "{first}");
+    let next = format!("{legs}&cursor=4:2");
+    let (_, second) = call(&router, Method::GET, &next, None).await;
+    assert_eq!(second["next_cursor"], Value::Null, "{second}");
+    let shown: Vec<(Value, Value, Value)> = [&first, &second]
+        .iter()
+        .flat_map(|page| page["legs"].as_array().cloned().unwrap_or_default())
+        .map(|leg| {
+            (
+                leg["position"].clone(),
+                leg["kind"].clone(),
+                leg["amount"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (json!(5), json!(0), json!("500000000")),
+            (json!(4), json!(6), json!("200000000")),
+            (json!(3), json!(6), json!("5000000000")),
+        ]
+    );
+
+    let native = format!("{indexes}/native");
+    let paused = Some(json!({ "index_state": "paused" }));
+    let (status, _) = call(&router, Method::PATCH, &native, paused).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, error) = call(&router, Method::POST, &reconcile, None).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    let resume = Some(json!({ "index_state": "indexing" }));
+    let (_, index) = call(&router, Method::PATCH, &native, resume).await;
+    assert_eq!(index["state"], "indexing", "{index}");
+}
+
+/// After a jump without balances (design 083 §10, [`jumped`]), the legs
+/// route shows `archived_at` on each coin the jump archived, null on every
+/// other leg.
+///
+/// [`jumped`]: super::storage::jumped
+#[tokio::test(flavor = "multi_thread")]
+async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
+    let (db, _directory) = database().await;
+    let state = Arc::new(AppState {
+        container: container(&db, Arc::new(Script::default())),
+        db: db.clone(),
+        queue: crate::usecase::tasks::queue(db.clone()),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+    });
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("an address"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        None,
+        http_server::RequestLimits::default(),
+    );
+    let router = api::router(state, &config).expect("a router");
+    super::storage::jumped(&crate::usecase::sdk::Stores::new(db.clone())).await;
+    let legs = "/v1/wallets/bitcoin.regtest.alice/indexes/native/legs";
+    let (status, page) = call(&router, Method::GET, legs, None).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let shown: Vec<(Value, Value, Value)> = page["legs"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|leg| {
+            (
+                leg["position"].clone(),
+                leg["kind"].clone(),
+                leg["archived_at"].clone(),
+            )
+        })
+        .collect();
+    let leg =
+        |position: u64, kind: u64, archived_at: Value| (json!(position), json!(kind), archived_at);
+    assert_eq!(
+        shown,
+        [
+            leg(950, 0, Value::Null),
+            leg(950, 4, Value::Null),
+            leg(950, 1, Value::Null),
+            leg(850, 6, Value::Null),
+            leg(840, 0, json!(900)),
+            leg(800, 0, json!(900)),
+        ]
+    );
 }

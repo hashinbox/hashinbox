@@ -336,17 +336,53 @@ impl Model {
         json!(format!("{:#x}", state.nonce(&address)))
     }
 
-    fn call(&self, params: &Value) -> Value {
+    /// The state at the block `tag` names on this node; none above its head.
+    fn state_at<'v>(view: &'v View<'_, Self>, tag: &Value) -> Option<&'v State> {
+        let height = Self::height(view, tag).filter(|height| *height <= view.head())?;
+        view.block(height).map(|block| &block.state)
+    }
+
+    /// `eth_getBalance` of an account at a block: its ether there.
+    fn balance(view: &View<'_, Self>, params: &Value) -> Value {
+        let owner: Address = params[0]
+            .as_str()
+            .unwrap_or_default()
+            .parse()
+            .unwrap_or_default();
+        let wei =
+            Self::state_at(view, &params[1]).map_or(U256::ZERO, |state| state.balance(&owner));
+        json!(format!("{wei:#x}"))
+    }
+
+    /// The token's `decimals()`, as recorded, and `balanceOf(owner)` at a
+    /// block.
+    fn call(&self, view: &View<'_, Self>, params: &Value) -> Value {
         let decimals = hex::encode_prefixed(crate::erc20::decimals());
         let to: Address = params[0]["to"]
             .as_str()
             .unwrap_or_default()
             .parse()
             .unwrap_or_default();
-        if to == self.token && params[0]["data"] == decimals {
+        if to != self.token {
+            return json!("0x");
+        }
+        if params[0]["data"] == decimals {
             return recording("eth_call.decimals").result().clone();
         }
-        json!("0x")
+        let data: Bytes = params[0]["data"]
+            .as_str()
+            .unwrap_or_default()
+            .parse()
+            .unwrap_or_default();
+        let Some(owner) = data.get(16..36).map(Address::from_slice) else {
+            return json!("0x");
+        };
+        if *data != crate::erc20::balance_of(owner) {
+            return json!("0x");
+        }
+        let units =
+            Self::state_at(view, &params[1]).map_or(U256::ZERO, |state| state.token(&owner));
+        json!(hex::encode_prefixed(units.to_be_bytes::<32>()))
     }
 }
 
@@ -423,7 +459,8 @@ impl base::testing::Model for Model {
             "eth_getTransactionByHash" => self.transaction(view, params, false),
             "eth_getTransactionCount" => Self::nonce(view, params),
             "eth_maxPriorityFeePerGas" => json!(format!("{:#x}", self.priority)),
-            "eth_call" => self.call(params),
+            "eth_call" => self.call(view, params),
+            "eth_getBalance" => Self::balance(view, params),
             "eth_estimateGas" => return self.estimate(view, params),
             "eth_sendRawTransaction" => return self.send(view, params),
             _ => return Err(recording("method_not_found").failure()),

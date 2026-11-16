@@ -10,6 +10,7 @@ sol! {
     interface Erc20 {
         event Transfer(address indexed from, address indexed to, uint256 value);
         function decimals() external view returns (uint8);
+        function balanceOf(address account) external view returns (uint256);
         function transfer(address recipient, uint256 amount) external returns (bool);
     }
 }
@@ -35,6 +36,17 @@ pub(crate) fn decimals() -> Vec<u8> {
 pub(crate) fn decode_decimals(word: &[u8]) -> anyhow::Result<u8> {
     Erc20::decimalsCall::abi_decode_returns(word)
         .map_err(|_| anyhow!("invalid ERC-20 decimals() result"))
+}
+
+/// `balanceOf(account)` calldata.
+pub(crate) fn balance_of(account: Address) -> Vec<u8> {
+    Erc20::balanceOfCall { account }.abi_encode()
+}
+
+/// The `uint256` a `balanceOf()` call returned.
+pub(crate) fn decode_balance(word: &[u8]) -> anyhow::Result<U256> {
+    Erc20::balanceOfCall::abi_decode_returns(word)
+        .map_err(|_| anyhow!("invalid ERC-20 balanceOf() result"))
 }
 
 /// `(from, to, amount)` of a log, when it is a `Transfer`; the zero address

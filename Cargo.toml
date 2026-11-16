@@ -44,7 +44,7 @@ utoipa = "=5.5.0"
 sha2 = "=0.10.9"
 # The server's SQL store: diesel on SQLite (sync; run on `spawn_blocking`),
 # pooled with r2d2. 2.3 needs Rust 1.86, within the MSRV.
-diesel = { version = "=2.3.14", default-features = false, features = ["sqlite", "r2d2", "returning_clauses_for_sqlite_3_35"] }
+diesel = { version = "=2.3.14", default-features = false, features = ["sqlite", "r2d2", "returning_clauses_for_sqlite_3_35", "32-column-tables"] }
 # Diesel links SQLite through this; bundled, so no system library is needed.
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread"] }

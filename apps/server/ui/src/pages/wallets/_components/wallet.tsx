@@ -38,8 +38,8 @@ import { Send } from './send';
 import { WatchDialog } from './watch';
 import { haltOf, progressOf } from './watching';
 
-/** A leg's `kind`: 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward. */
-const KIND = ['received', 'spent', 'burned', 'minted', 'fee', 'reward'];
+/** A leg's `kind`: 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward, 6 adjustment. */
+const KIND = ['received', 'spent', 'burned', 'minted', 'fee', 'reward', 'adjustment'];
 
 /** The wallet's confirmed balance in `asset`, in atomic units, as `GET /v1/wallets/{id}` reports it. */
 function amountOf(wallet: Account, asset: string): string {

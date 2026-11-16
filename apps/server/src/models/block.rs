@@ -1,9 +1,9 @@
-//! `block`: every block kept, live or archived, of every network.
+//! `block`: every block kept, live or reorged, of every network.
 
 use std::collections::BTreeSet;
 
 use anyhow::Context as _;
-use base::{BlockHash, BlockHeader, BlockParent, Chain, Decimal, Network, Networked};
+use base::{BlockHash, BlockHeader, BlockParent, Chain, Network, Networked};
 use diesel::{
     deserialize::FromSqlRow,
     expression::AsExpression,
@@ -89,8 +89,8 @@ pub(crate) struct Block {
     pub(crate) parent_hash: Option<Vec<u8>>,
     /// Unix seconds, when reported.
     pub(crate) timestamp: Option<i64>,
-    /// Unix ms a reorg archived it; null while live.
-    pub(crate) archived_at: Option<i64>,
+    /// Unix ms a reorg took it back; null while live.
+    pub(crate) reorged_at: Option<i64>,
     /// Its kept transactions, in block order; written, not read.
     #[serde(skip)]
     #[diesel(skip_insertion)]
@@ -172,7 +172,7 @@ impl TryFrom<&base::Block> for Block {
                 .transpose()?,
             parent_hash: header.parent.as_ref().map(|parent| parent.hash.0.clone()),
             timestamp: header.timestamp.map(int).transpose()?,
-            archived_at: None,
+            reorged_at: None,
             transactions,
             rewards,
             id,
@@ -249,7 +249,7 @@ pub(crate) mod db {
         parent_position: Option<i64>,
         parent_hash: Option<Vec<u8>>,
         timestamp: Option<i64>,
-        archived_at: Option<i64>,
+        reorged_at: Option<i64>,
     }
 
     /// The row, transactions and rewards not read.
@@ -266,7 +266,7 @@ pub(crate) mod db {
                 parent_position: row.parent_position,
                 parent_hash: row.parent_hash,
                 timestamp: row.timestamp,
-                archived_at: row.archived_at,
+                reorged_at: row.reorged_at,
                 transactions: Vec::new(),
                 rewards: Vec::new(),
             }
@@ -279,21 +279,22 @@ pub(crate) mod db {
             block::table
                 .filter(block::chain.eq($network.chain.as_str()))
                 .filter(block::network.eq($network.name.as_str()))
-                .filter(block::archived_at.is_null())
+                .filter(block::reorged_at.is_null())
         };
     }
 
     /// Keeps `block` (see [`Block::try_from`]) live with its facts, in
     /// 072's order:
     ///
-    /// 1. its row: a block archived before is revived, a new one linked to
+    /// 1. its row: a block reorged before is revived, a new one linked to
     ///    its kept parent and its kept child to it;
     /// 2. the wallet indexes it applies to move onto it, and it keeps only
     ///    their legs ([`Block::keep`]);
     /// 3. its legs of the wallet indexes its legs are of are deleted (a
     ///    block kept again writes them again);
-    /// 4. each such index's seq and received and sent totals are read (one
-    ///    query), and each leg, in order, takes the next of its index;
+    /// 4. each such index's seq and totals are read (one query), and each
+    ///    leg, in order, takes the next of its index; a spend of a coin the
+    ///    index archived (or never saw) subtracts as any other;
     /// 5. each transaction's row is upserted, then every leg inserted.
     ///
     /// # Errors
@@ -301,12 +302,7 @@ pub(crate) mod db {
     /// When a value does not decode or a write fails (a live block at its
     /// position already, a seq an index holds).
     pub(crate) fn save(connection: &mut SqliteConnection, block: &mut Block) -> anyhow::Result<()> {
-        let parent = block
-            .parent_hash
-            .clone()
-            .map(|hash| BlockId::new(block.network(), &BlockHash(hash)))
-            .transpose()?;
-        save_row(connection, block, parent.as_ref())?;
+        let parent = save_row(connection, block)?;
         let ours = wallet_index::db::advance(connection, block, parent.as_ref())?;
         block.keep(&ours);
 
@@ -323,20 +319,10 @@ pub(crate) mod db {
             .flat_map(|transaction| &mut transaction.legs)
             .chain(&mut block.rewards);
         for leg in legs {
-            let (seq, received, sent) = running
+            let totals = running
                 .get_mut(leg.wallet_index_id.as_ref())
                 .context("a leg's index was not read")?;
-            let signed = leg.signed()?;
-            if signed >= Decimal::zero() {
-                *received += signed;
-            } else {
-                *sent -= signed;
-            }
-            *seq += 1;
-            leg.seq = Some(*seq);
-            leg.total = Some((&*received - &*sent).to_string());
-            leg.total_received = Some(received.to_string());
-            leg.total_sent = Some(sent.to_string());
+            leg.follow(totals)?;
         }
 
         for transaction in &block.transactions {
@@ -346,21 +332,29 @@ pub(crate) mod db {
         Ok(())
     }
 
-    /// Keeps `block`'s row live: revives it when kept archived, else
-    /// inserts it linked to its kept parent (id `parent`) and links a kept
-    /// child to it.
-    fn save_row(
+    /// Keeps `block`'s row live, no index moved and none of its facts
+    /// written: revives it when kept reorged, else inserts it linked to its
+    /// kept parent and links a kept child to it. Its parent's id.
+    ///
+    /// # Errors
+    ///
+    /// When a value does not decode or a write fails.
+    pub(crate) fn save_row(
         connection: &mut SqliteConnection,
         block: &mut Block,
-        parent: Option<&BlockId>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<BlockId>> {
+        let parent = block
+            .parent_hash
+            .clone()
+            .map(|hash| BlockId::new(block.network(), &BlockHash(hash)))
+            .transpose()?;
         let revived = diesel::update(block::table.find(&block.id))
-            .set(block::archived_at.eq(None::<i64>))
+            .set(block::reorged_at.eq(None::<i64>))
             .execute(connection)?;
         if revived > 0 {
-            return Ok(());
+            return Ok(parent);
         }
-        block.parent = match parent {
+        block.parent = match &parent {
             Some(parent) => block::table
                 .find(parent)
                 .select(block::id)
@@ -380,7 +374,7 @@ pub(crate) mod db {
         )
         .set(block::parent.eq(&block.id))
         .execute(connection)?;
-        Ok(())
+        Ok(parent)
     }
 
     /// At most `page.limit` live blocks of `network` below position
@@ -433,13 +427,13 @@ pub(crate) mod db {
             FROM block b
             WHERE b.chain = ?1
               AND b.network = ?2
-              AND b.archived_at IS NULL
+              AND b.reorged_at IS NULL
               AND b.position >= COALESCE((
                   SELECT MAX(position)
                   FROM block
                   WHERE chain = ?1
                     AND network = ?2
-                    AND archived_at IS NULL
+                    AND reorged_at IS NULL
                     AND position < ?3
               ), ?3)
               AND b.position <= COALESCE((
@@ -447,7 +441,7 @@ pub(crate) mod db {
                   FROM block
                   WHERE chain = ?1
                     AND network = ?2
-                    AND archived_at IS NULL
+                    AND reorged_at IS NULL
                     AND position > ?4
               ), ?4)
             ORDER BY b.position",
@@ -461,11 +455,11 @@ pub(crate) mod db {
     }
 
     /// How many blocks of every network are kept live, and how many a reorg
-    /// archived.
+    /// took back.
     pub(crate) fn count(connection: &mut SqliteConnection) -> QueryResult<(i64, i64)> {
         block::table
             .select(diesel::dsl::sql::<(BigInt, BigInt)>(
-                "COUNT(*) - COUNT(archived_at), COUNT(archived_at)",
+                "COUNT(*) - COUNT(reorged_at), COUNT(reorged_at)",
             ))
             .get_result(connection)
     }
@@ -473,7 +467,7 @@ pub(crate) mod db {
     /// The stamp (Unix seconds) of the newest live block of any network.
     pub(crate) fn find_newest_stamp(connection: &mut SqliteConnection) -> QueryResult<Option<i64>> {
         block::table
-            .filter(block::archived_at.is_null())
+            .filter(block::reorged_at.is_null())
             .select(diesel::dsl::max(block::timestamp))
             .first(connection)
     }
@@ -486,7 +480,7 @@ pub(crate) mod db {
         since: i64,
     ) -> QueryResult<Vec<(i64, i64)>> {
         block::table
-            .filter(block::archived_at.is_null())
+            .filter(block::reorged_at.is_null())
             .filter(block::timestamp.ge(since))
             .group_by(diesel::dsl::sql::<BigInt>("hour"))
             .select((
@@ -513,16 +507,71 @@ pub(crate) mod db {
             .map(|row| row.map(Block::from))
     }
 
-    /// Archives, at `now` (Unix ms), every live block of `network` at or
-    /// above `from`.
-    pub(crate) fn archive(
+    /// Marks every live block of `network` at or above `from` reorged at
+    /// `now` (Unix ms).
+    pub(crate) fn reorg(
         connection: &mut SqliteConnection,
         network: &Network,
         from: i64,
         now: i64,
     ) -> QueryResult<usize> {
         diesel::update(live!(network).filter(block::position.ge(from)))
-            .set(block::archived_at.eq(now))
+            .set(block::reorged_at.eq(now))
             .execute(connection)
+    }
+
+    /// The blocks of network `?1`, `?2` below position `?3` nothing needs:
+    /// reorged, or live and named by no leg and no transaction, the
+    /// network's last live block aside; never one an index is indexed
+    /// through.
+    const PRUNED: &str = r#"
+        SELECT b.id
+        FROM block b
+        WHERE b.chain = ?1
+          AND b.network = ?2
+          AND b.position < ?3
+          AND b.id NOT IN (
+              SELECT indexed_at
+              FROM wallet_index
+              WHERE indexed_at IS NOT NULL
+          )
+          AND (
+              b.reorged_at IS NOT NULL
+              OR (
+                  NOT EXISTS (SELECT 1 FROM leg l WHERE l.block = b.id)
+                  AND NOT EXISTS (SELECT 1 FROM "transaction" t WHERE t.block = b.id)
+                  AND b.position < (
+                      SELECT MAX(position)
+                      FROM block
+                      WHERE chain = ?1
+                        AND network = ?2
+                        AND reorged_at IS NULL
+                  )
+              )
+          )"#;
+
+    /// Deletes the blocks of `network` below position `below` nothing needs
+    /// ([`PRUNED`]): the legs and transactions of the reorged ones, each
+    /// kept child's link to one (`parent` NULL), then the blocks. How many
+    /// blocks went.
+    pub(crate) fn prune(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        below: i64,
+    ) -> QueryResult<usize> {
+        let mut deleted = 0;
+        for statement in [
+            format!("DELETE FROM leg WHERE block IN ({PRUNED})"),
+            format!(r#"DELETE FROM "transaction" WHERE block IN ({PRUNED})"#),
+            format!("UPDATE block SET parent = NULL WHERE parent IN ({PRUNED})"),
+            format!("DELETE FROM block WHERE id IN ({PRUNED})"),
+        ] {
+            deleted = diesel::sql_query(statement)
+                .bind::<Text, _>(network.chain.as_str())
+                .bind::<Text, _>(&network.name)
+                .bind::<BigInt, _>(below)
+                .execute(connection)?;
+        }
+        Ok(deleted)
     }
 }

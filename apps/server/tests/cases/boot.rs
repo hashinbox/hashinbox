@@ -1,6 +1,7 @@
 //! A network whose node is down at boot, or whose settings do not decode: the
 //! server boots, the other network indexes, the failing one says why in its
-//! index job and live tip, and indexes once its node answers.
+//! index job and live tip, and indexes once its node answers. A new index
+//! starts at the chain's final block, so it waits for the node too.
 
 use axum::http::{Method, StatusCode};
 use base::{NetworkConfig, testing::TestChain};
@@ -16,15 +17,13 @@ fn two() -> (Ethereum, Ethereum, NetworkConfig) {
     (good, bad, other)
 }
 
-/// Boots `good`'s network and `other` over `bad`'s node, each with a
-/// wallet indexed from block 1, so both indexers read their chain.
+/// Boots `good`'s network, a wallet indexed from block 1, and `other` over
+/// `bad`'s node.
 async fn boot(good: &Ethereum, bad: &Ethereum, other: NetworkConfig) -> App {
-    let networks = vec![(good.network(), good.nodes()), (other.clone(), bad.nodes())];
+    let networks = vec![(good.network(), good.nodes()), (other, bad.nodes())];
     let app = App::boot::<Ethereum>(networks).await;
-    for network in [good.network(), other] {
-        let wallet = app.api.wallet(&network).await;
-        app.api.index(&wallet, "native", Some(1)).await;
-    }
+    let wallet = app.api.wallet(&good.network()).await;
+    app.api.index(&wallet, "native", Some(1)).await;
     app
 }
 
@@ -58,7 +57,12 @@ async fn failing(app: &App, name: &str, why: &str) {
 async fn a_node_down_at_boot_fails_its_network_alone_until_it_answers() {
     let (good, bad, other) = two();
     bad.node(0).faults().down(true);
-    let app = boot(&good, &bad, other).await;
+    let app = boot(&good, &bad, other.clone()).await;
+    let wallet = app.api.wallet(&other).await;
+    let uri = format!("/v1/wallets/{}/indexes", wallet.id);
+    let body = serde_json::json!({"asset": "native", "start": 1});
+    let (status, error) = app.api.call(Method::POST, &uri, Some(body)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
     let (status, health) = app.api.call(Method::GET, "/health", None).await;
     assert_eq!(health["networks"].as_array().map(Vec::len), Some(2));
     assert!(status == StatusCode::OK || status == StatusCode::SERVICE_UNAVAILABLE);
@@ -66,6 +70,7 @@ async fn a_node_down_at_boot_fails_its_network_alone_until_it_answers() {
     failing(&app, "other", "(fault)").await;
 
     bad.node(0).faults().down(false);
+    app.api.index(&wallet, "native", Some(1)).await;
     indexed(&app, "other", bad.tip()).await;
     // The index row moves within the step; the job clears its reason when
     // the step ends, so health turns ready a moment later.

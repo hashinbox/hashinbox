@@ -51,7 +51,7 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
 
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network: the
 network by name, BTC's display decimals, `confirmation_depth`
-(`confirmations + 1`), `max_history`, and from `settings` the knobs
+(`confirmations + 1`), `max_depth`, and from `settings` the knobs
 `address_type`, `fee_target_blocks`, `fee_floor`, `fee_ttl_ms`,
 `pending_ttl_ms`, `interval_ms`, and `batch`, the blocks the indexer fetches
 per step (default 100) (each absent one its default).

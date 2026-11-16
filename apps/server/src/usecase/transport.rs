@@ -343,7 +343,7 @@ impl Rotation {
 
 /// One node: its client, its cached reader, its state.
 pub(crate) struct Node {
-    /// `rpc::node(url)`: Http, Split, Logged, Counted.
+    /// `rpc::node(url)`: Http, Throttle, Split, Logged, Counted.
     client: Arc<dyn rpc::Client>,
     /// The chain's reader over `client`, its tip kept for a block time.
     info: CachedInfo,
@@ -580,7 +580,7 @@ mod tests {
             testnet: true,
             block_time: Duration::from_secs(60),
             confirmations: 2,
-            max_history: None,
+            max_depth: None,
             explorer_address: None,
             explorer_transaction: None,
             settings: json!({}),

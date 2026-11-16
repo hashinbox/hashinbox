@@ -50,7 +50,7 @@ fn network() -> Network {
 /// Mined legs carry their index, position, seq and running total, as the
 /// store writes.
 const SEED: &str = "
-INSERT INTO block (id, chain, network, position, height, hash, archived_at) VALUES
+INSERT INTO block (id, chain, network, position, height, hash, reorged_at) VALUES
  ('bitcoin.regtest.00','bitcoin','regtest',0,0,x'00',NULL),
  ('bitcoin.regtest.01','bitcoin','regtest',1,1,x'01',NULL),
  ('bitcoin.regtest.02','bitcoin','regtest',2,2,x'02',NULL),

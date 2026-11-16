@@ -6,11 +6,11 @@ use std::{str::FromStr as _, sync::Arc};
 use ::rpc::{Answer, Batch, Call, Client as _, RawJson, Request};
 use anyhow::{Context as _, anyhow, bail, ensure};
 use base::{
-    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, InfoClient as _, NotServed,
-    Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
+    Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, Holding, InfoClient as _,
+    NotServed, Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use solana_hash::Hash;
 use solana_message::Message;
@@ -27,6 +27,8 @@ use crate::{
 const SKIPPED: [i64; 2] = [-32_007, -32_009];
 /// `getBlock` and `getBlockTime` code: the node cleaned the block up.
 const CLEANED_UP: i64 = -32_001;
+/// Code of a read whose `minContextSlot` the node has not reached yet.
+const MIN_CONTEXT_SLOT_NOT_REACHED: i64 = -32_016;
 /// Blocks requested per JSON-RPC batch: a full block is large.
 const BATCH: usize = 10;
 
@@ -171,6 +173,72 @@ impl Client {
             }
             _ => decode("getBlockTime", reply),
         }
+    }
+
+    /// What `owner` holds, finalized, at the slot the node answers at (`at`
+    /// or above): lamports (`getBalance`), or with `mint` the sum of its
+    /// accounts of that mint (`getTokenAccountsByOwner`, 0 without one);
+    /// `None` while the node's finalized slot is below `at`.
+    ///
+    /// # Errors
+    ///
+    /// A node failure, or an account without an amount.
+    pub async fn balance(
+        &self,
+        owner: &solana_address::Address,
+        mint: Option<&solana_address::Address>,
+        at: u64,
+    ) -> anyhow::Result<Option<Holding>> {
+        let mut config = json!({ "commitment": "finalized", "minContextSlot": at });
+        let Some(mint) = mint else {
+            let read: Option<Context<u64>> = self
+                .at_least("getBalance", json!([owner.to_string(), config]))
+                .await?;
+            return Ok(read.map(|read| Holding {
+                position: read.context.slot,
+                amount: Decimal::from(read.value),
+            }));
+        };
+        config["encoding"] = json!("jsonParsed");
+        let params = json!([owner.to_string(), { "mint": mint.to_string() }, config]);
+        let Some(read) = self
+            .at_least::<Vec<Value>>("getTokenAccountsByOwner", params)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let amount = read
+            .value
+            .iter()
+            .map(|account| {
+                account
+                    .pointer("/account/data/parsed/info/tokenAmount/amount")
+                    .and_then(Value::as_str)
+                    .context("Solana token account without an amount")?
+                    .parse::<Decimal>()
+                    .context("Solana token amount")
+            })
+            .sum::<anyhow::Result<Decimal>>()?;
+        Ok(Some(Holding {
+            position: read.context.slot,
+            amount,
+        }))
+    }
+
+    /// `method` answered at a slot at or above its `minContextSlot`; `None`
+    /// while the node is not there yet.
+    async fn at_least<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> anyhow::Result<Option<Context<T>>> {
+        let reply = self.0.node.request(Request::new(method, params)).await;
+        if let Err(::rpc::Error::Remote(failure)) = &reply
+            && failure.code == MIN_CONTEXT_SLOT_NOT_REACHED
+        {
+            return Ok(None);
+        }
+        decode(method, reply).map(Some)
     }
 
     /// A recent confirmed blockhash.
@@ -417,10 +485,17 @@ fn hash(text: &str) -> anyhow::Result<BlockHash> {
     Ok(BlockHash(hash.to_bytes().to_vec()))
 }
 
-/// A reply read at a slot: `{ context, value }`; only the value is kept.
+/// A reply read at a slot: `{ context, value }`.
 #[derive(Deserialize)]
 struct Context<T> {
+    context: Slot,
     value: T,
+}
+
+/// A reply's `context`, for its slot.
+#[derive(Deserialize)]
+struct Slot {
+    slot: u64,
 }
 
 /// `getLatestBlockhash`, for its blockhash.

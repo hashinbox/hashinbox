@@ -48,9 +48,13 @@ async fn solana(storage: Storage) -> anyhow::Result<()> {
 
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network:
 the genesis hash (`chain_id`), assets (SOL's display decimals, the
-`contract` mints), `confirmations`, `max_history`, and from `settings` the
-knobs `fee_ttl_ms`, `pending_ttl_ms`, `interval_ms`, and `batch`, the slots
-the indexer fetches per step (default 100) (each absent one its default).
+`contract` mints), `confirmations`, and from `settings` the knobs
+`fee_ttl_ms`, `pending_ttl_ms`, `interval_ms`, and `batch`, the slots the
+indexer fetches per step (default 100) (each absent one its default). It
+has no `max_depth`: it reads balances (`base::Balances`, finalized, at a
+slot at or above the one asked: `minContextSlot`), so its indexer reads
+nothing at or below the finalized slot and settles an index behind it with
+one balance read (design 083 §9).
 
 ## Notes
 

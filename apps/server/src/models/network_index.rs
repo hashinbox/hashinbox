@@ -24,7 +24,7 @@ pub(crate) struct NetworkIndex {
     pub(crate) checked_at: Option<u64>,
     /// Blocks kept.
     pub(crate) blocks: u64,
-    /// Kept blocks archived because the chain took them back.
+    /// Kept blocks reorged because the chain took them back.
     pub(crate) reorgs: u64,
     /// Watches added.
     pub(crate) watched: u64,
@@ -121,7 +121,7 @@ pub(crate) mod db {
     }
 
     /// Writes one step ([`NetworkIndex::step`]) to `network`'s row. `tip` and
-    /// `confirmed` only move forward, unless the step archived blocks (a
+    /// `confirmed` only move forward, unless the step reorged blocks (a
     /// reorg, which may shorten the chain): a step read from a node behind
     /// the last one (a failover) keeps them. `indexed` takes a known
     /// position. `checked_at` moves only when the tip does (a node that
