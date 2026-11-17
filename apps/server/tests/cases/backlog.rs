@@ -1,12 +1,12 @@
-//! A send stuck in retry holds the network while blocks keep coming (F1):
-//! the round behind it waits alone, not one per interval, so a fixed
-//! payout decides once when the send clears; one payment, never two.
+//! A send stuck in retry before it is signed holds the network while blocks
+//! keep coming (F1): the round behind it waits alone, not one per interval,
+//! so a fixed payout decides once when the send clears; one payment, never
+//! two.
 
 use base::testing::{Caps, TestChain};
-use rpc::{ErrorKind, testing::Fault};
 
 use super::{
-    App, at_tip, decided_after, funded, indexed, payout, quarter, runs, settle, succeeded,
+    App, accepted, at_tip, decided_after, funded, indexed, payout, quarter, runs, settle, stall,
     unfinished_rounds, until,
 };
 
@@ -18,13 +18,8 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     let treasury = funded(app, chain).await;
     let payer = funded(app, chain).await;
     let payee = indexed(app, chain).await;
-    // The payer's send is refused twice by the node, then goes.
-    for _ in 0..2 {
-        chain
-            .node(0)
-            .faults()
-            .fail_next(Some(T::SUBMIT), Fault::Transport(ErrorKind::Unavailable));
-    }
+    // The payer's send fails twice before it is signed, then goes.
+    stall(chain);
     let stuck = app.api.send(&payer, "native", &payee.address, "0.25").await;
     until("the send to retry", || async {
         let job = app.api.job(&stuck).await;
@@ -41,7 +36,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         assert!(unfinished_rounds(app, chain).await <= 1);
     }
 
-    succeeded(app, &stuck).await;
+    accepted(app, &stuck).await;
     let sends = decided_after(app, chain, &treasury).await;
     assert_eq!(sends.len(), 1, "{sends:?}");
     let ran = runs(app, "payout").await;

@@ -26,6 +26,9 @@ pub(crate) use api::{Api, Wallet};
 const TICK: Duration = Duration::from_millis(5);
 /// The longest [`until`] waits.
 const PATIENCE: Duration = Duration::from_secs(5);
+/// How long a sent payment waits for its next check: well inside
+/// [`PATIENCE`].
+const CHECK: Duration = Duration::from_secs(1);
 
 /// A test chain's reader and factory, as `main` registers its chain.
 pub(crate) trait Served: TestChain {
@@ -92,11 +95,11 @@ impl App {
                 db.clone(),
                 queue.clone(),
             ))
-            .add(workers::expire::Expire::new(db.clone()))
             .add(workers::prune::Prune::new(db.clone(), container.clone()))
             .add(workers::broadcast::Broadcast::new(
                 container.clone(),
                 db.clone(),
+                CHECK,
             ))
             .add(workers::trigger::Round::new(
                 container.clone(),

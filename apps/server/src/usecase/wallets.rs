@@ -4,13 +4,13 @@
 //! an ordered send from one, a queued job. A wallet is named by its id; its
 //! address is taken in its chain's canonical form.
 
-use base::{Address, Birthday, Container, Decimal, WalletIndexState};
+use base::{Address, Birthday, Container, Decimal, IndexState, WalletIndexTarget};
 use tasks::Worker as _;
 
 use super::{
     Error, Transport,
     tasks::Queue,
-    workers::broadcast::{Broadcast, Payment, SendIntent},
+    workers::broadcast::{Broadcast, SendIntent},
 };
 use crate::{
     db::{Db, Page},
@@ -36,7 +36,7 @@ pub(crate) struct NewWallet {
     pub(crate) external_id: Option<String>,
 }
 
-/// One transfer of a send, as written.
+/// The one payment of a send, as written.
 pub(crate) struct Transfer {
     /// Recipient address text, as the wallet's chain writes it.
     pub(crate) destination: String,
@@ -162,10 +162,11 @@ pub(crate) async fn set_tag(
 }
 
 /// Indexes wallet `id` in `asset` from `start` (`None`: the chain's tip),
-/// at once; and whether it was created: an asset already indexed answers its
-/// index as is. A start the node no longer serves moves forward; on a chain
-/// that reads balances the index starts at the chain's final block instead
-/// (the indexer's), its balance read there.
+/// at once (its target, [`WalletIndexTarget`], kept by the store); and
+/// whether it was created: an asset already indexed answers its index as
+/// is. A start the node no longer serves moves forward; on a chain that
+/// reads balances the index starts at the chain's final block instead, its
+/// balance read there.
 ///
 /// # Errors
 ///
@@ -194,41 +195,18 @@ pub(crate) async fn create_index(
         return Ok((false, index));
     }
     let service = container.service(&address)?;
-    let birthday = birthday(&service, start).await?;
-    // `Indexer::watch` borrows the address as `&dyn Addressed`, which is not
-    // `Sync`, so its future is not `Send`: it runs on a blocking thread.
-    let (indexer, runtime) = (service.indexer.clone(), tokio::runtime::Handle::current());
-    tokio::task::spawn_blocking(move || {
-        runtime.block_on(indexer.watch(&address, &asset, birthday))
-    })
-    .await
-    .map_err(anyhow::Error::from)??;
+    let start = start.map_or(Birthday::Fresh, Birthday::At);
+    let target = WalletIndexTarget::new(service.indexer.chain(), address, asset);
+    service
+        .storage
+        .indexes
+        .insert(&target.with_birthday(start))
+        .await?;
     let created = db
         .read(move |connection| wallet_index::db::find_at_tip(connection, &index))
         .await?
         .ok_or_else(|| Error::not_found("no such index"))?;
     Ok((true, created))
-}
-
-/// Where to index from: `start`, refused when below the chain's tip less
-/// the network's `max_depth` (accepted when it has no limit or cannot read
-/// its tip); `None`, the chain's tip.
-async fn birthday(service: &base::Service, start: Option<u64>) -> Result<Birthday, Error> {
-    let Some(position) = start else {
-        return Ok(Birthday::Fresh);
-    };
-    // No limit, or no way to read the tip: any start goes.
-    let (Some(dated), Some(limit)) = (&service.dated, service.max_depth) else {
-        return Ok(Birthday::At(position));
-    };
-    let earliest = dated.tips().await?.produced.saturating_sub(limit);
-    if position < earliest {
-        return Err(Error::invalid(format!(
-            "start {position} is more than this network's max_depth of {limit} \
-             positions below the tip: start at {earliest} or later"
-        )));
-    }
-    Ok(Birthday::At(position))
 }
 
 /// Pauses or resumes wallet `id`'s index of `asset`; the index. On a chain
@@ -244,11 +222,11 @@ pub(crate) async fn set_index_state(
     db: &Db,
     id: &WalletId,
     asset: String,
-    state: WalletIndexState,
+    state: IndexState,
 ) -> Result<WalletIndex, Error> {
     let (address, index) = index_id(container, id, &asset)?;
     db.write(move |connection| {
-        if state == WalletIndexState::Indexing {
+        if state == IndexState::Indexing {
             wallet_index::db::resume(connection, &index)?;
         } else {
             wallet_index::db::set_state(connection, &address, Some(&asset), state, None)?;
@@ -349,23 +327,23 @@ pub(crate) async fn legs_page(
         .await?)
 }
 
-/// Enqueues one send job of `asset` from keyed wallet `id`: `transfers` in
-/// order, each amount in the asset's atomic units and each destination
-/// parsed by the wallet's chain; the job's id.
+/// Enqueues one send job of `asset` from keyed wallet `id`: `transfer`, its
+/// amount in the asset's atomic units and its destination parsed by the
+/// wallet's chain; the job's id.
 ///
 /// # Errors
 ///
-/// Invalid for a malformed address, amount or destination (naming its
-/// transfer), or a send the queue refuses; not found for an unconfigured
-/// network or asset; conflict for a wallet that holds no key; unavailable
-/// when the store or the queue is.
+/// Invalid for a malformed address, amount or destination, or a send the
+/// queue refuses; not found for an unconfigured network or asset; conflict
+/// for a wallet that holds no key; unavailable when the store or the queue
+/// is.
 pub(crate) async fn send(
     container: &Container<Transport>,
     db: &Db,
     queue: &Queue,
     id: &WalletId,
     asset: &str,
-    transfers: Vec<Transfer>,
+    transfer: Transfer,
 ) -> Result<tasks::Id, Error> {
     let from = container.parse(id)?;
     let info = asset_info(container, &from.network, asset)?;
@@ -376,34 +354,23 @@ pub(crate) async fn send(
     if !keyed {
         return Err(Error::conflict("the wallet holds no key here"));
     }
-    let mut payments = Vec::with_capacity(transfers.len());
-    for (index, transfer) in transfers.into_iter().enumerate() {
-        let units = transfer
-            .amount
-            .parse::<Decimal>()
-            .ok()
-            .filter(|amount| amount > &Decimal::zero())
-            .and_then(|amount| info.atomic(&amount).ok())
-            .ok_or_else(|| {
-                Error::invalid(
-                    "amount must be a positive exact decimal within the asset's decimals",
-                )
-                .at(index)
-            })?;
-        let to = container
-            .parse(&Address::new(from.network.clone(), &transfer.destination))
-            .map_err(|error| Error::from(error).at(index))?;
-        payments.push(Payment {
-            to: to.value,
-            amount: units.to_string(),
-        });
-    }
+    let units = transfer
+        .amount
+        .parse::<Decimal>()
+        .ok()
+        .filter(|amount| amount > &Decimal::zero())
+        .and_then(|amount| info.atomic(&amount).ok())
+        .ok_or_else(|| {
+            Error::invalid("amount must be a positive exact decimal within the asset's decimals")
+        })?;
+    let to = container.parse(&Address::new(from.network.clone(), &transfer.destination))?;
     let intent = SendIntent {
         chain: from.network.chain.to_string(),
         network: from.network.name.clone(),
         address: from.value.clone(),
         asset: info.asset.id.clone(),
-        transfers: payments,
+        to: to.value,
+        amount: units.to_string(),
     };
     let queued = Broadcast::enqueue(queue, &intent)
         .await

@@ -30,7 +30,6 @@ diesel::table! {
         reason -> Nullable<Text>,
         bytes -> Binary,
         sent_at -> Nullable<BigInt>,
-        expires_at -> Nullable<BigInt>,
     }
 }
 
@@ -122,7 +121,6 @@ diesel::table! {
         checked_at -> Nullable<BigInt>,
         blocks -> BigInt,
         reorgs -> BigInt,
-        watched -> BigInt,
         failures -> BigInt,
     }
 }
@@ -141,7 +139,6 @@ diesel::table! {
         reason -> Nullable<Text>,
         bytes -> Binary,
         sent_at -> Nullable<BigInt>,
-        expires_at -> Nullable<BigInt>,
         position -> Nullable<BigInt>,
         legs -> Text,
     }
@@ -226,6 +223,34 @@ diesel::table! {
 }
 
 diesel::table! {
+    transaction_forgotten (id) {
+        id -> Text,
+        chain -> Text,
+        network -> Text,
+        txid -> Text,
+        reason -> Text,
+        forgotten_at -> BigInt,
+        bytes -> Binary,
+        legs -> Text,
+    }
+}
+
+diesel::table! {
+    transaction_index (id) {
+        id -> Text,
+        chain -> Text,
+        network -> Text,
+        txid -> Text,
+        broadcasted_at -> BigInt,
+        expires_height -> Nullable<BigInt>,
+        indexed_at -> Nullable<Text>,
+        found -> Nullable<Text>,
+        state -> Integer,
+        reason -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     trigger_run (id) {
         id -> Text,
         trigger -> Text,
@@ -246,6 +271,7 @@ diesel::joinable!(network_endpoint_route -> network_endpoint (endpoint_id));
 diesel::allow_tables_to_appear_in_same_query!(
     block,
     transactions,
+    transaction_index,
     leg,
     wallet,
     wallet_index,

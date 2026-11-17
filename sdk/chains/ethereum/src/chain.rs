@@ -1,9 +1,10 @@
 //! [`Chain`]: Ethereum blocks as `base` blocks, final once finalized.
 
+use alloy_primitives::B256;
 use anyhow::{Context as _, ensure};
 use base::{
-    Addressed as _, Asset, Balances, Block, Blocks, Chained, Dated, Future, Holding, Network,
-    Networked, Tips,
+    Addressed as _, Asset, Balances, Block, Blocks, Chained, Confirmed, Confirmer, Dated, Future,
+    Holding, Line, Network, Networked, Tips, TransactionId,
 };
 
 use crate::{Address, Client, Tokens};
@@ -58,6 +59,12 @@ impl Chained for Chain {
     fn blocks(&self, start: u64, end: u64) -> Future<'_, anyhow::Result<Blocks>> {
         Box::pin(self.rpc.blocks(start, end, &self.tokens))
     }
+
+    /// The block after the final one: an index behind it settles at the
+    /// chain's balance.
+    fn line(&self) -> Line {
+        Line::Final
+    }
 }
 
 /// Finds blocks by time through header-only reads.
@@ -97,6 +104,34 @@ impl Balances for Chain {
                 .balance(owner.as_native(), token.as_ref(), position)
                 .await?;
             Ok(Some(Holding { position, amount }))
+        })
+    }
+}
+
+/// Mined by its receipt, judged at the node's finalized block.
+impl Confirmer for Chain {
+    /// `None` while the finalized block is below `at`; found only at or
+    /// below it, final.
+    fn confirm<'a>(
+        &'a self,
+        id: &'a TransactionId,
+        at: u64,
+    ) -> Future<'a, anyhow::Result<Option<Confirmed>>> {
+        Box::pin(async move {
+            ensure!(
+                id.network == self.network,
+                "not a transaction of this Ethereum network"
+            );
+            let hash: B256 = id.id.parse().context("not an Ethereum transaction id")?;
+            let position = self.rpc.tips().await?.confirmed;
+            if position < at {
+                return Ok(None);
+            }
+            let found = self.rpc.mined_in(hash).await?;
+            Ok(Some(Confirmed {
+                position,
+                found: found.filter(|block| *block <= position),
+            }))
         })
     }
 }

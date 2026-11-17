@@ -75,13 +75,13 @@ impl<A: Addressed + Clone> Inputs<A> {
 
     /// The inputs `keep` accepts, in order. `keep` sees what is kept so far
     /// and the next candidate, so it can select, for example: keep adding
-    /// while the kept total does not yet cover the outputs and the fee of
+    /// while the kept total does not yet cover the payment and the fee of
     /// that many inputs.
     ///
     /// ```ignore
     /// let chosen = inputs
     ///     .largest_first()
-    ///     .filter(|kept, _| kept.total() < outputs.total() + fee(kept.len() + 1));
+    ///     .filter(|kept, _| kept.total() < &amount + fee(kept.len() + 1));
     /// ```
     #[must_use]
     pub fn filter(&self, mut keep: impl FnMut(&Self, &Input<A>) -> bool) -> Self {
@@ -112,46 +112,6 @@ impl<A: Addressed> std::ops::Deref for Inputs<A> {
 impl<A: Addressed> IntoIterator for Inputs<A> {
     type Item = Input<A>;
     type IntoIter = std::vec::IntoIter<Input<A>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-/// The outputs a transaction creates, in order.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Outputs<A: Addressed = Address>(Vec<Output<A>>);
-
-impl<A: Addressed> Default for Outputs<A> {
-    fn default() -> Self {
-        Self(Vec::new())
-    }
-}
-
-impl<A: Addressed> Outputs<A> {
-    /// Adds `output`.
-    pub fn push(&mut self, output: Output<A>) {
-        self.0.push(output);
-    }
-
-    /// Their summed amount.
-    #[must_use]
-    pub fn total(&self) -> Decimal {
-        Decimal::total(self.0.iter().map(|output| &output.amount))
-    }
-}
-
-impl<A: Addressed> std::ops::Deref for Outputs<A> {
-    type Target = [Output<A>];
-
-    fn deref(&self) -> &[Output<A>] {
-        &self.0
-    }
-}
-
-impl<A: Addressed> IntoIterator for Outputs<A> {
-    type Item = Output<A>;
-    type IntoIter = std::vec::IntoIter<Output<A>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()

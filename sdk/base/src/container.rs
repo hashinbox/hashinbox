@@ -9,9 +9,9 @@ use std::{
 use crypto::SecretBytes;
 
 use crate::{
-    Address, Addressed, Asset, Assets, Birthday, Network, NetworkConfig, Networked, Service,
-    ServiceFactory, Stats, Storage, Transaction, TransactionError, TransactionErrorKind, Wallet,
-    WalletError, WalletErrorKind, WalletFactories,
+    Address, Addressed, Assets, Network, NetworkConfig, Networked, Service, ServiceFactory, Stats,
+    Storage, Transaction, TransactionError, TransactionErrorKind, Wallet, WalletError,
+    WalletErrorKind, WalletFactories,
 };
 
 /// How a network gets its one client.
@@ -122,22 +122,6 @@ impl<T: Transport> Container<T> {
             .into_iter()
             .map(|(network, service)| (network, service.indexer.stats()))
             .collect()
-    }
-
-    /// Indexes `asset` of `address` from `birthday`, on the address's network.
-    ///
-    /// # Errors
-    ///
-    /// An unregistered network, an asset of another network, or a chain or
-    /// store failure.
-    pub async fn watch(
-        &self,
-        address: &Address,
-        asset: &Asset,
-        birthday: Birthday,
-    ) -> anyhow::Result<()> {
-        let service = self.service(address)?;
-        service.indexer.watch(address, asset, birthday).await
     }
 
     /// A new wallet of `network` and its key, kept in the wallet store.

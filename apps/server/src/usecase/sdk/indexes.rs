@@ -1,30 +1,39 @@
 //! `WalletIndexStore` on the `wallet_index` model; an index's wallet is kept
 //! with it (watch-only when its key is not kept). A settle and a restart
-//! write on the `block`, `leg` and `transaction` models too.
+//! write on the `block`, `leg`, `transaction` and `transaction_forgotten` models too.
 
 use std::collections::BTreeSet;
 
 use anyhow::Context as _;
 use base::{
-    BlockHeader, Decimal, Future, Holding, Network, Networked as _, WalletIndex, WalletIndexState,
-    WalletIndexStore,
+    BlockHeader, Decimal, Future, Holding, IndexState, IntoIndex, Network, Networked as _,
+    WalletIndex, WalletIndexStore,
 };
 
 use diesel::SqliteConnection;
 
-use super::{Stores, blocks};
+use super::{Stores, blocks, transaction_indexes};
 use crate::models::{
-    Leg, Wallet, block, int, leg, transaction, uint, wallet, wallet_index,
-    wallet_index::WalletIndexId,
+    Leg, Wallet, block, int, leg, transaction, transaction_forgotten::Why, uint, wallet,
+    wallet_index, wallet_index::WalletIndexId,
 };
 
 impl WalletIndexStore for Stores {
-    fn insert<'a>(&'a self, index: &'a WalletIndex) -> Future<'a, anyhow::Result<()>> {
-        let index = index.clone();
-        Box::pin(self.db.write(move |connection| {
-            wallet::db::insert(connection, &Wallet::from_address(&index.address)?)?;
-            wallet_index::db::insert(connection, &index)
-        }))
+    /// The index first (the chain's reads), then one write: its wallet and
+    /// the index.
+    fn insert<'a>(
+        &'a self,
+        index: &'a dyn IntoIndex<WalletIndex>,
+    ) -> Future<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            let index = index.index().await?;
+            self.db
+                .write(move |connection| {
+                    wallet::db::insert(connection, &Wallet::from_address(&index.address)?)?;
+                    wallet_index::db::insert(connection, &index)
+                })
+                .await
+        })
     }
 
     fn find_next<'a>(
@@ -74,23 +83,22 @@ impl WalletIndexStore for Stores {
         }))
     }
 
-    fn move_birthday<'a>(
+    fn move_start<'a>(
         &'a self,
         index: &'a WalletIndex,
-        birthday: u64,
+        start: u64,
     ) -> Future<'a, anyhow::Result<()>> {
         let index = index.clone();
         Box::pin(
-            self.db.write(move |connection| {
-                wallet_index::db::move_birthday(connection, &index, birthday)
-            }),
+            self.db
+                .write(move |connection| wallet_index::db::move_start(connection, &index, start)),
         )
     }
 
     fn set_state<'a>(
         &'a self,
         index: &'a WalletIndex,
-        state: WalletIndexState,
+        state: IndexState,
         reason: Option<&'a str>,
     ) -> Future<'a, anyhow::Result<()>> {
         let (index, reason) = (index.clone(), reason.map(str::to_owned));
@@ -107,8 +115,8 @@ impl WalletIndexStore for Stores {
     }
     /// One write: block `S` kept unless it is (another live block there:
     /// `false`), the adjustment on it (already kept: `false`), the index
-    /// continuing from `S + 1`; one that had started forgets its pending
-    /// sends.
+    /// continuing from `S + 1`. Its pending sends stay: each one's
+    /// transaction index settles itself.
     fn settle<'a>(
         &'a self,
         index: &'a WalletIndex,
@@ -130,16 +138,13 @@ impl WalletIndexStore for Stores {
             }
             leg::db::insert(connection, vec![&adjustment])?;
             wallet_index::db::settle(connection, &id, &block)?;
-            if index.indexed_at.is_some() {
-                transaction::db::forget_sent(connection, &id)?;
-            }
             Ok(true)
         }))
     }
 
     /// One write: the coins the index still shows unspent archived and
     /// written off ([`write_off`]), the index restarted, its pending sends
-    /// forgotten.
+    /// forgotten (`jump`).
     fn restart<'a>(
         &'a self,
         index: &'a WalletIndex,
@@ -148,11 +153,12 @@ impl WalletIndexStore for Stores {
         let index = index.clone();
         Box::pin(self.db.write(move |connection| {
             let id = WalletIndexId::of(&index.address, &index.asset)?;
-            if let Some(at) = &index.indexed_at {
+            if let Some(at) = &index.progress.indexed_at {
                 write_off(connection, &id, at, birthday)?;
             }
             wallet_index::db::restart(connection, &id, birthday)?;
-            transaction::db::forget_sent(connection, &id)?;
+            let sent = transaction::db::find_sent(connection, &id)?;
+            transaction_indexes::forget(connection, &sent, Why::Jump)?;
             Ok(())
         }))
     }

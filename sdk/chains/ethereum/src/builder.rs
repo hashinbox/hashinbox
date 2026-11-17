@@ -1,34 +1,27 @@
-//! [`Builder`]: one EIP-1559 transaction per Ethereum transfer.
+//! [`Builder`]: one EIP-1559 transaction for one Ethereum transfer.
 
 use std::sync::Arc;
 
-use base::{
-    Addressed as _, Asset, Future, Output, Outputs, Signer, TransactionError, Transactions,
-    Transfer,
-};
+use base::{Addressed as _, Asset, Future, Output, Signer, TransactionError, Transfer};
 
 use crate::{
     Address, Client, KeyPair,
     fee_cache::Cached,
-    transaction::{Transaction, request},
+    transaction::{Transaction, request, sender_and_nonce},
 };
 
-/// Pays every transfer of one asset (ether, or the `contract` token), one
-/// transaction each, from its own source or the default one: a sender's
-/// first takes the node's pending nonce and each later one the next, so a
-/// sender's batch lands in order or not past its first gap.
+/// Pays one transfer of one asset (ether, or the `contract` token) in one
+/// transaction, from its own source or the default one, at the sender's
+/// next nonce ([`Builder::nonce`]).
 pub(crate) struct Builder {
-    /// How long what it signs counts as pending.
-    pub(crate) pending_ttl: std::time::Duration,
     pub(crate) rpc: Client,
-    /// The factory's estimator: its cached fees and gas price every transfer.
+    /// The sends in flight: the nonces they hold.
+    pub(crate) transactions: Arc<dyn base::TransactionIndexStore>,
+    /// The factory's estimator: its cached fees and gas price the transfer.
     pub(crate) fees: Arc<Cached>,
     pub(crate) asset: Asset,
     pub(crate) contract: Option<alloy_primitives::Address>,
     pub(crate) default: Option<Signer>,
-    pub(crate) outputs: Outputs<Address>,
-    /// Each output's own source, in output order.
-    pub(crate) sources: Vec<Option<Signer>>,
 }
 
 impl base::Builder for Builder {
@@ -36,109 +29,91 @@ impl base::Builder for Builder {
         self.default = Some(source);
     }
 
-    fn transfer(&mut self, transfer: Transfer) -> Result<(), TransactionError> {
-        let Transfer { to, amount, from } = transfer;
-        let address =
-            Address::parse(&to.value, self.rpc.network()).map_err(TransactionError::failed)?;
-        if *address.address() != to {
-            return Err(TransactionError::failed(
-                "not a canonical address of this Ethereum network",
-            ));
-        }
-        if amount
-            .to_atomic_be_bytes::<32>(0)
-            .ok()
-            .is_none_or(|word| word == [0; 32])
-        {
-            return Err(TransactionError::failed(
-                "Ethereum amount must be a positive 256-bit number of atomic units",
-            ));
-        }
-        self.outputs.push(Output {
-            address,
-            asset: self.asset.clone(),
-            amount,
-        });
-        self.sources.push(from);
-        Ok(())
-    }
-
-    fn sign<'b>(self: Box<Self>) -> Future<'b, Result<Transactions, TransactionError>>
+    fn sign<'b>(
+        self: Box<Self>,
+        transfer: Transfer,
+    ) -> Future<'b, Result<base::Transaction, TransactionError>>
     where
         Self: 'b,
     {
         Box::pin(async move {
-            if self.outputs.is_empty() {
-                return Err(TransactionError::failed("no transfers to sign"));
-            }
+            let Transfer { to, amount, from } = transfer;
             let network = self.rpc.network();
-            // Each sender's key and next nonce, in order of first transfer.
-            let mut senders: Vec<(KeyPair, u64)> = Vec::new();
-            let mut order = Vec::with_capacity(self.sources.len());
-            for source in &self.sources {
-                let signer = source
-                    .as_ref()
-                    .or(self.default.as_ref())
-                    .ok_or_else(|| TransactionError::failed("a transfer has no source"))?;
-                let known = senders
-                    .iter()
-                    .position(|(key, _)| key.address() == &signer.address);
-                let index = match known {
-                    Some(index) => index,
-                    None => {
-                        let key = KeyPair::from_signer(signer, network)?;
-                        let nonce = self
-                            .rpc
-                            .nonce(key.native_address())
-                            .await
-                            .map_err(TransactionError::unavailable)?;
-                        senders.push((key, nonce));
-                        senders.len() - 1
-                    }
-                };
-                order.push(index);
+            let address = Address::parse(&to.value, network).map_err(TransactionError::failed)?;
+            if *address.address() != to {
+                return Err(TransactionError::failed(
+                    "not a canonical address of this Ethereum network",
+                ));
             }
-            let fees = self.fees.fees().await?;
-            // Which recipients hold the asset already, all in one read.
-            let spends: base::Spends = self
-                .outputs
-                .iter()
-                .zip(&order)
-                .filter_map(|(output, &index)| {
-                    let (key, _) = senders.get(index)?;
-                    let from = key.native_address().address().clone();
-                    Some((from, self.asset.clone(), output.address.address().clone()))
-                })
-                .collect();
-            let held = self.fees.holds(&spends).await?;
-            let mut signed = Vec::with_capacity(self.outputs.len());
-            for (((output, index), spend), held) in
-                self.outputs.iter().zip(order).zip(spends.iter()).zip(held)
+            if amount
+                .to_atomic_be_bytes::<32>(0)
+                .ok()
+                .is_none_or(|word| word == [0; 32])
             {
-                let (key, nonce) = senders
-                    .get_mut(index)
-                    .ok_or_else(|| TransactionError::failed("unknown Ethereum sender"))?;
-                let from = key.native_address();
-                let mut native =
-                    request(output, self.contract).map_err(TransactionError::failed)?;
-                native.chain_id = network.chain_id;
-                native.nonce = *nonce;
-                native.gas_limit = self.fees.gas(spend, held).await?;
-                native.max_fee_per_gas = fees.max_fee_per_gas;
-                native.max_priority_fee_per_gas = fees.max_priority_fee_per_gas;
-                self.fees
-                    .inner
-                    .limits
-                    .total(native.gas_limit, fees)
-                    .map_err(TransactionError::failed)?;
-                let mut transaction = Transaction::pending(native, from, output);
-                transaction.sign(key).map_err(TransactionError::failed)?;
-                signed.push(transaction.into());
-                *nonce = nonce
-                    .checked_add(1)
-                    .ok_or_else(|| TransactionError::failed("Ethereum nonce is exhausted"))?;
+                return Err(TransactionError::failed(
+                    "Ethereum amount must be a positive 256-bit number of atomic units",
+                ));
             }
-            Ok(Transactions(signed).expiring(self.pending_ttl))
+            let Some(signer) = from.as_ref().or(self.default.as_ref()) else {
+                return Err(TransactionError::failed("the transfer has no source"));
+            };
+            let key = KeyPair::from_signer(signer, network)?;
+            let output = Output {
+                address,
+                asset: self.asset.clone(),
+                amount,
+            };
+            let nonce = self.nonce(&key).await?;
+            let fees = self.fees.fees().await?;
+            let sender = key.native_address();
+            let spend = base::Spend::from((
+                sender.address().clone(),
+                self.asset.clone(),
+                output.address.address().clone(),
+            ));
+            // Whether the recipient holds the asset already: which kind of
+            // send it is.
+            let held = self
+                .fees
+                .holds(&[spend.clone()].into_iter().collect())
+                .await?;
+            let mut native = request(&output, self.contract).map_err(TransactionError::failed)?;
+            native.chain_id = network.chain_id;
+            native.nonce = nonce;
+            native.gas_limit = self.fees.gas(&spend, held.first() == Some(&true)).await?;
+            native.max_fee_per_gas = fees.max_fee_per_gas;
+            native.max_priority_fee_per_gas = fees.max_priority_fee_per_gas;
+            self.fees
+                .inner
+                .limits
+                .total(native.gas_limit, fees)
+                .map_err(TransactionError::failed)?;
+            let mut transaction = Transaction::pending(native, sender, &output);
+            transaction.sign(&key).map_err(TransactionError::failed)?;
+            Ok(transaction.into())
+        })
+    }
+}
+
+impl Builder {
+    /// `key`'s next nonce: the node's pending count, or one above the
+    /// highest nonce of its own sends in flight when that is higher,
+    /// so a node whose mempool misses one never hands its nonce out again.
+    async fn nonce(&self, key: &KeyPair) -> Result<u64, TransactionError> {
+        let counted = self
+            .rpc
+            .nonce(key.native_address())
+            .await
+            .map_err(TransactionError::unavailable)?;
+        let sent = self
+            .transactions
+            .find_sent(key.address())
+            .await
+            .map_err(TransactionError::unavailable)?;
+        sent.iter().try_fold(counted, |next, transaction| {
+            let (_, nonce) =
+                sender_and_nonce(&transaction.bytes).map_err(TransactionError::failed)?;
+            Ok(next.max(nonce.saturating_add(1)))
         })
     }
 }

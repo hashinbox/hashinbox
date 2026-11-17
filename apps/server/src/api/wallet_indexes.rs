@@ -11,7 +11,6 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
     http::StatusCode,
 };
-use base::WalletIndexState;
 use serde::Deserialize;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -121,10 +120,10 @@ struct UpdateRequest {
 
 impl UpdateRequest {
     /// The state asked for; `no_data` is the indexer's.
-    fn index_state(&self) -> Result<WalletIndexState, Error> {
+    fn index_state(&self) -> Result<base::IndexState, Error> {
         match self.index_state {
-            IndexState::Indexing => Ok(WalletIndexState::Indexing),
-            IndexState::Paused => Ok(WalletIndexState::Paused),
+            IndexState::Indexing => Ok(base::IndexState::Indexing),
+            IndexState::Paused => Ok(base::IndexState::Paused),
             IndexState::NoData => Err(Error::invalid_request("no_data is the indexer's")),
         }
     }

@@ -331,7 +331,7 @@ impl Model {
         let state = if params[1] == "pending" {
             view.pending()
         } else {
-            view.head_state()
+            Self::state_at(view, &params[1]).map_or_else(|| view.head_state(), Clone::clone)
         };
         json!(format!("{:#x}", state.nonce(&address)))
     }

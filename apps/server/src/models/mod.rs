@@ -63,6 +63,8 @@ pub(crate) mod network_index;
 pub(crate) mod schema;
 pub(crate) mod task;
 pub(crate) mod transaction;
+pub(crate) mod transaction_forgotten;
+pub(crate) mod transaction_index;
 pub(crate) mod trigger;
 pub(crate) mod trigger_run;
 pub(crate) mod wallet;

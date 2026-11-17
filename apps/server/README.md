@@ -83,10 +83,11 @@ committed copy. `GET /health` and `GET /openapi.json` need no token.
 - `GET /v1/wallets/{id}/transactions?asset=&limit=&cursor=`: transactions in live
   blocks with a leg of the address in the asset, in chain order, with only those
   legs; keyset-paged on (block position, order, txid).
-- `POST /v1/wallets/{id}/transactions` `{asset?, transfers}`: enqueues one send
-  job (one lane per sender) and answers `202 {job}`; a watch-only wallet is
-  `422`.
-- `GET /v1/jobs/{id}`: the job's state, reason, and signed/accepted counts.
+- `POST /v1/wallets/{id}/transactions` `{asset?, destination, amount}`: enqueues
+  one send job, one payment as one transaction (one lane per sender), and
+  answers `202 {job}`; a watch-only wallet is `422`.
+- `GET /v1/jobs/{id}`: the job's state, reason, and for a send its `txid` and
+  whether a node `accepted` it.
 - `GET /v1/networks`: every `network` row with its `assets`, `endpoints`,
   `index` (its `network_index` row) and the node's tip asked now.
 - `GET /health`: every `network_index` row; ready (`200`) when at least one
@@ -101,7 +102,7 @@ them. Nothing imports upward (docs/design/069-server-layers.md;
 - `src/main.rs`: one `main` block: the container (`base::Storage` from
   `usecase::sdk::Stores`, every stored network registered per chain by
   `usecase::Networks`), `AppState`, the workers (`usecase::workers::executor`:
-  index, expire, prune, triggers and broadcast jobs), HTTP; and shutdown (the
+  index, prune, triggers and broadcast jobs), HTTP; and shutdown (the
   executor stops after HTTP drains; unfinished jobs resume on the next start).
   `src/main.rs` is the only file that names a chain crate; `src/config.rs` is
   the command line; `src/ui.rs` serves the page.
@@ -118,8 +119,8 @@ them. Nothing imports upward (docs/design/069-server-layers.md;
   `tasks::Notifying`),
   `trigger.rs` (a trigger's decision), the multi-model reads (`history.rs`,
   `wallets.rs`, `chain.rs`, `stats.rs`), and `workers/`: the jobs, each
-  declaring its `tasks::Policy` (`index.rs`, `expire.rs`, `prune.rs`,
-  `broadcast.rs`, `trigger/` with `actions.rs`), run by `tasks::Executor`;
+  declaring its `tasks::Policy` (`index.rs`, `prune.rs`, `broadcast.rs`,
+  `trigger/` with `actions.rs`), run by `tasks::Executor`;
   docs/design/068-index-job.md, 076-jobs.md.
 
 ## Notes
@@ -131,8 +132,9 @@ them. Nothing imports upward (docs/design/069-server-layers.md;
 - The send job signs through `wallet.transaction(asset)` → `transfer` → `sign()`,
   saves every transaction's signed bytes in its payload before broadcasting, and
   broadcasts them in order through `container.broadcast`; a retry resends the saved
-  bytes, never re-signs. Nothing is written to the index: indexing records the
-  transactions once mined.
+  bytes, never re-signs. With each transaction it records its transaction index
+  (design 085), which the indexer moves with every block: the job reads its
+  payment's status there alone, and indexing records the transaction once mined.
 - Generated keys persist directly in SQLite; no encryption or passphrase. Keys
   never appear in API responses, logs or Debug.
 - The server speaks plain HTTP. A `bind` that is not loopback is refused unless

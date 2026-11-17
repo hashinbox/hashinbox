@@ -1,4 +1,5 @@
-//! `base::BlockStore` on the `block` and `wallet_index` models.
+//! `base::BlockStore` on the `block`, `wallet_index` and `transaction_index`
+//! models.
 
 use std::{
     collections::BTreeMap,
@@ -13,7 +14,7 @@ use base::{
 use diesel::SqliteConnection;
 
 use super::Stores;
-use crate::models::{Block, block, int, wallet_index};
+use crate::models::{Block, block, int, transaction_index, wallet_index};
 
 impl BlockStore for Stores {
     fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>> {
@@ -50,6 +51,7 @@ impl BlockStore for Stores {
                 .write(move |connection| {
                     let below = block::db::find_below(connection, &network, from)?;
                     wallet_index::db::rewind(connection, &network, from, below.as_ref())?;
+                    transaction_index::db::rewind(connection, &network, from, below.as_ref())?;
                     block::db::reorg(connection, &network, from, now)?;
                     Ok(())
                 })

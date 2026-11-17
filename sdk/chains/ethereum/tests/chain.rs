@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use ::rpc::testing::{Faults, Reply, Script};
 use base::{
-    Asset, Balances as _, Chained as _, Dated as _, Decimal, Holding, InfoClient, Leg, NotServed,
-    Reason, Reward, ServiceFactory as _, Tips, TransactionState,
+    Asset, Balances as _, Chained as _, Confirmed, Confirmer as _, Dated as _, Decimal, Holding,
+    InfoClient, Leg, NotServed, Reason, Reward, ServiceFactory as _, Tips, TransactionId,
+    TransactionState,
 };
 use chain_ethereum::{Chain, Client, Config, Factory, Info, Network, Token};
 use futures_executor::block_on;
@@ -552,7 +553,10 @@ impl base::BlockStore for Fresh {
 }
 
 impl base::WalletIndexStore for Fresh {
-    fn insert<'a>(&'a self, _: &'a base::WalletIndex) -> base::Future<'a, anyhow::Result<()>> {
+    fn insert<'a>(
+        &'a self,
+        _: &'a dyn base::IntoIndex<base::WalletIndex>,
+    ) -> base::Future<'a, anyhow::Result<()>> {
         unreachable!("no watch")
     }
 
@@ -573,7 +577,7 @@ impl base::WalletIndexStore for Fresh {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    fn move_birthday<'a>(
+    fn move_start<'a>(
         &'a self,
         _: &'a base::WalletIndex,
         _: u64,
@@ -584,7 +588,7 @@ impl base::WalletIndexStore for Fresh {
     fn set_state<'a>(
         &'a self,
         _: &'a base::WalletIndex,
-        _: base::WalletIndexState,
+        _: base::IndexState,
         _: Option<&'a str>,
     ) -> base::Future<'a, anyhow::Result<()>> {
         unreachable!("nothing pruned")
@@ -605,6 +609,67 @@ impl base::WalletIndexStore for Fresh {
         _: u64,
     ) -> base::Future<'a, anyhow::Result<()>> {
         unreachable!("no jump")
+    }
+}
+
+/// No payment is watched.
+impl base::TransactionIndexStore for Fresh {
+    fn insert<'a>(
+        &'a self,
+        _: &'a dyn base::IntoIndex<base::TransactionIndex>,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        unreachable!("no send")
+    }
+
+    fn find_all<'a>(
+        &'a self,
+        _: &'a base::Network,
+    ) -> base::Future<'a, anyhow::Result<Vec<base::TransactionIndex>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn move_start<'a>(
+        &'a self,
+        _: &'a base::TransactionIndex,
+        _: u64,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        unreachable!("no send")
+    }
+
+    fn set_state<'a>(
+        &'a self,
+        _: &'a base::TransactionIndex,
+        _: base::IndexState,
+        _: Option<&'a str>,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        unreachable!("no send")
+    }
+
+    fn settle<'a>(
+        &'a self,
+        _: &'a base::TransactionIndex,
+        _: Option<&'a base::BlockHeader>,
+        _: &'a base::BlockHeader,
+    ) -> base::Future<'a, anyhow::Result<bool>> {
+        unreachable!("no send")
+    }
+
+    fn give_up<'a>(
+        &'a self,
+        _: &'a base::TransactionIndex,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        unreachable!("no send")
+    }
+
+    fn delete<'a>(&'a self, _: &'a base::TransactionIndex) -> base::Future<'a, anyhow::Result<()>> {
+        unreachable!("no send")
+    }
+
+    fn find_sent<'a>(
+        &'a self,
+        _: &'a base::Address,
+    ) -> base::Future<'a, anyhow::Result<Vec<base::Transaction>>> {
+        unreachable!("no send")
     }
 }
 
@@ -659,6 +724,7 @@ fn the_settings_batch_is_the_indexers_step() {
     let storage = base::Storage {
         blocks: fresh.clone(),
         indexes: fresh.clone(),
+        transaction_indexes: fresh.clone(),
         inputs: fresh.clone(),
         wallets: fresh,
         holdings: Arc::new(base::NoHoldings),
@@ -697,6 +763,7 @@ fn a_network_builds_with_its_node_down_and_asks_it_nothing() {
     let storage = base::Storage {
         blocks: fresh.clone(),
         indexes: fresh.clone(),
+        transaction_indexes: fresh.clone(),
         inputs: fresh.clone(),
         wallets: fresh,
         holdings: Arc::new(base::NoHoldings),
@@ -779,5 +846,35 @@ fn a_balance_at_a_block_not_finalized_yet_is_not_answerable() {
     let read = block_on(chain.balance(&address(0xb1), &Asset::native(network()), 13));
 
     assert_eq!(read.unwrap(), None, "finalized 12 is below 13");
+    script.exhausted();
+}
+
+#[test]
+fn a_transaction_is_confirmed_by_its_receipt_at_the_finalized_block() {
+    let script = Script::new([]);
+    let chain = connect(&script, &config());
+    let id = TransactionId::new(network(), hash(0xab));
+    let receipt =
+        |block: Value| Reply::ok("eth_getTransactionReceipt", block).expecting(json!([hash(0xab)]));
+    // Mined at 10, final through 12; at 14, not final yet; not mined.
+    for (mined, found) in [
+        (json!({ "blockNumber": "0xa" }), Some(10)),
+        (json!({ "blockNumber": "0xe" }), None),
+        (Value::Null, None),
+    ] {
+        script.push(finalized_at_12());
+        script.push([receipt(mined)]);
+        let confirmed = block_on(chain.confirm(&id, 12)).unwrap();
+        assert_eq!(
+            confirmed,
+            Some(Confirmed {
+                position: 12,
+                found
+            })
+        );
+    }
+    // Not finalized through 13 yet: no receipt asked.
+    script.push(finalized_at_12());
+    assert_eq!(block_on(chain.confirm(&id, 13)).unwrap(), None);
     script.exhausted();
 }

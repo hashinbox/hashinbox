@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{Context as _, ensure};
 use base::{
     Asset, AssetInfo, AssetKind, Indexer, InputStore, NetworkConfig, Service, Storage,
-    WalletFactoryBroadcaster,
+    TransactionIndexer, WalletFactoryBroadcaster, WalletIndexer,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -36,9 +36,6 @@ pub struct Config {
     /// How long a fetched fee rate prices sends, in milliseconds; default
     /// 60,000.
     pub fee_ttl_ms: u64,
-    /// How long a broadcast transaction counts as pending before it is
-    /// given up on, in milliseconds; default 259_200_000 (3 days).
-    pub pending_ttl_ms: u64,
     /// How often the indexer wakes, in milliseconds; default 30,000.
     pub interval_ms: u64,
     /// Blocks the indexer fetches per step; default 100
@@ -53,7 +50,7 @@ pub struct Config {
 
 /// The knobs a [`base::NetworkConfig`]'s `settings` may set:
 /// `address_type`, `fee_target_blocks`, `fee_floor`, `fee_ttl_ms`,
-/// `pending_ttl_ms`, `interval_ms`, `batch`; an absent one keeps its default.
+/// `interval_ms`, `batch`; an absent one keeps its default.
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Settings {
@@ -61,7 +58,6 @@ struct Settings {
     fee_target_blocks: u16,
     fee_floor: u64,
     fee_ttl_ms: u64,
-    pending_ttl_ms: u64,
     interval_ms: u64,
     batch: u64,
 }
@@ -73,7 +69,6 @@ impl Default for Settings {
             fee_target_blocks: 6,
             fee_floor: 1_000,
             fee_ttl_ms: 60_000,
-            pending_ttl_ms: 259_200_000,
             interval_ms: 30_000,
             batch: base::DEFAULT_BATCH,
         }
@@ -95,7 +90,6 @@ impl Config {
             fee_target_blocks: settings.fee_target_blocks,
             fee_floor: settings.fee_floor,
             fee_ttl_ms: settings.fee_ttl_ms,
-            pending_ttl_ms: settings.pending_ttl_ms,
             interval_ms: settings.interval_ms,
             batch: settings.batch,
             max_depth: None,
@@ -186,7 +180,8 @@ impl Factory {
     ///
     /// For an invalid confirmation depth.
     pub fn chain(&self, rpc: &Client) -> anyhow::Result<Chain> {
-        Chain::new(rpc.clone(), self.config.confirmation_depth)
+        Ok(Chain::new(rpc.clone(), self.config.confirmation_depth)?
+            .with_max_depth(self.config.max_depth))
     }
 
     /// The wallet factory over `rpc`: coins from `inputs`; fee rates from
@@ -204,7 +199,6 @@ impl Factory {
         let fees = Cached::new(precise, Duration::from_millis(config.fee_ttl_ms));
         WalletFactory {
             rpc: rpc.clone(),
-            pending_ttl: Duration::from_millis(config.pending_ttl_ms),
             inputs,
             address_type: config.address_type,
             fees: Arc::new(fees),
@@ -230,15 +224,20 @@ impl base::ServiceFactory for Factory {
         config.validate()?;
         let rpc = Client::new(Arc::clone(&client), config.network);
         let chain = Arc::new(self.chain(&rpc)?);
+        let wallets = WalletIndexer::new(Arc::clone(&storage.indexes), chain.clone(), None);
+        let transactions = TransactionIndexer::new(
+            Arc::clone(&storage.transaction_indexes),
+            chain.clone(),
+            None,
+        );
         let indexer = Arc::new(
             Indexer::new(
                 chain.clone(),
                 Arc::clone(&storage.blocks),
-                Arc::clone(&storage.indexes),
+                vec![Arc::new(wallets), Arc::new(transactions)],
                 Duration::from_millis(config.interval_ms),
             )
-            .with_batch(config.batch)
-            .with_max_depth(config.max_depth),
+            .with_batch(config.batch),
         );
         Ok(Service {
             indexer,
@@ -252,7 +251,7 @@ impl base::ServiceFactory for Factory {
             client,
             dated: Some(chain),
             balances: None,
-            max_depth: config.max_depth,
+            confirmer: None,
             confirmations: config.confirmation_depth.saturating_sub(1),
         })
     }

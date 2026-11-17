@@ -378,6 +378,24 @@ impl Client {
         }
     }
 
+    /// The block transaction `id` is mined in, by its receipt; `None` while
+    /// it has none.
+    ///
+    /// # Errors
+    ///
+    /// A node failure.
+    pub async fn mined_in(&self, id: B256) -> anyhow::Result<Option<u64>> {
+        let receipt: Option<Receipt> = self
+            .0
+            .node
+            .call(
+                "eth_getTransactionReceipt",
+                json!([hex::encode_prefixed(id)]),
+            )
+            .await?;
+        Ok(receipt.map(|receipt| receipt.block_number.to::<u64>()))
+    }
+
     /// Whether the node holds the transaction `id`, mined or pending.
     async fn known(&self, id: B256) -> anyhow::Result<bool> {
         let found: Option<Value> = self
@@ -698,6 +716,13 @@ fn reason(message: &str) -> Option<Reason> {
 #[derive(Deserialize)]
 struct Numbered {
     number: U64,
+}
+
+/// `eth_getTransactionReceipt`, for its block.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Receipt {
+    block_number: U64,
 }
 
 /// `eth_getBlockByNumber(n, false)`, for its time.

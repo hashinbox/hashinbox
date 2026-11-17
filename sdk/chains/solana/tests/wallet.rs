@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use ::rpc::testing::{Reply, Script};
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, Signer, TransactionErrorKind,
-    TransactionState, Transfer, Wallet, WalletError, WalletErrorKind, WalletFactory as _,
+    Asset, Broadcaster as _, Decimal, Leg, Signer, TransactionErrorKind, TransactionState,
+    Transfer, Wallet, WalletError, WalletErrorKind, WalletFactory as _,
 };
 use chain_solana::{Client, Config, Factory};
 use crypto::SecretBytes;
@@ -107,25 +107,21 @@ fn a_wallet_keeps_its_ed25519_key_and_parses_canonical_addresses() {
 }
 
 #[test]
-fn sol_transfers_sign_into_one_verifying_transaction_with_its_legs() {
+fn a_sol_transfer_signs_one_verifying_transaction_with_its_legs() {
     let script = Script::new(signing_replies());
     let wallet = wallet(&script);
     let sol = Asset::native(network());
-    let mut builder = wallet.transaction(&sol).unwrap();
-    builder.send((recipient(), Decimal::from(100))).unwrap();
-    builder.send((recipient(), Decimal::from(200))).unwrap();
+    let builder = wallet.transaction(&sol).unwrap();
 
-    let signed = block_on(builder.sign()).unwrap();
+    let transaction =
+        block_on(builder.sign(Transfer::new(recipient(), Decimal::from(100)))).unwrap();
 
-    let [transaction] = &signed[..] else {
-        panic!("both transfers fit one transaction");
-    };
     let decoded: Transaction = bincode::deserialize(&transaction.bytes).unwrap();
     decoded.verify().unwrap();
     assert_eq!(
         decoded.message.instructions.len(),
-        3,
-        "two transfers and a memo"
+        2,
+        "the transfer and a memo"
     );
     assert_eq!(decoded.message.recent_blockhash.to_bytes(), [3; 32]);
     let reference = Keypair::new_from_array(SEED).sign_message(&decoded.message.serialize());
@@ -145,27 +141,15 @@ fn sol_transfers_sign_into_one_verifying_transaction_with_its_legs() {
                 amount: Decimal::from(5000)
             },
             Leg::Spent {
-                address: from.clone(),
-                asset: sol.clone(),
-                amount: Decimal::from(100),
-                coin: None
-            },
-            Leg::Received {
-                address: recipient(),
-                asset: sol.clone(),
-                amount: Decimal::from(100),
-                coin: None
-            },
-            Leg::Spent {
                 address: from,
                 asset: sol.clone(),
-                amount: Decimal::from(200),
+                amount: Decimal::from(100),
                 coin: None
             },
             Leg::Received {
                 address: recipient(),
                 asset: sol,
-                amount: Decimal::from(200),
+                amount: Decimal::from(100),
                 coin: None
             },
         ]
@@ -181,12 +165,11 @@ fn a_token_transfer_creates_the_recipient_account_and_transfers_checked() {
         network: network(),
         id: MINT.to_owned(),
     };
-    let mut builder = wallet.transaction(&usdc).unwrap();
-    builder.send((recipient(), Decimal::from(20))).unwrap();
+    let builder = wallet.transaction(&usdc).unwrap();
 
-    let signed = block_on(builder.sign()).unwrap();
+    let signed = block_on(builder.sign(Transfer::new(recipient(), Decimal::from(20)))).unwrap();
 
-    let decoded: Transaction = bincode::deserialize(&signed[0].bytes).unwrap();
+    let decoded: Transaction = bincode::deserialize(&signed.bytes).unwrap();
     let programs: Vec<String> = decoded
         .message
         .instructions
@@ -230,7 +213,7 @@ fn a_token_transfer_creates_the_recipient_account_and_transfers_checked() {
     );
     assert_eq!(accounts(1), [sender, MINT.to_owned(), receiver, from]);
     assert_eq!(
-        signed[0].legs[1..],
+        signed.legs[1..],
         [
             Leg::Spent {
                 address: wallet.address().clone(),
@@ -260,36 +243,43 @@ fn builders_refuse_what_they_cannot_send() {
         wallet.transaction(&other).err().map(|error| error.kind),
         Some(TransactionErrorKind::Unsupported)
     );
-    let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
-    let refused = |result: Result<(), base::TransactionError>| result.unwrap_err().kind;
+    // Each refused before any I/O.
+    let refused = |to: base::Address, amount: Decimal| {
+        let builder = wallet.transaction(&Asset::native(network())).unwrap();
+        block_on(builder.sign(Transfer::new(to, amount)))
+            .unwrap_err()
+            .kind
+    };
     assert_eq!(
-        refused(builder.send((recipient(), Decimal::zero()))),
+        refused(recipient(), Decimal::zero()),
         TransactionErrorKind::Failed
     );
     assert_eq!(
-        refused(builder.send((recipient(), "0.5".parse().unwrap()))),
+        refused(recipient(), "0.5".parse().unwrap()),
         TransactionErrorKind::Failed
     );
     assert_eq!(
-        refused(builder.send((wallet.address().clone(), Decimal::from(1)))),
+        refused(wallet.address().clone(), Decimal::from(1)),
         TransactionErrorKind::Failed
     );
     let off_curve = base::Address::new(network(), associated(&wallet.address().value).to_string());
     assert_eq!(
-        refused(builder.send((off_curve, Decimal::from(1)))),
+        refused(off_curve, Decimal::from(1)),
         TransactionErrorKind::Failed
     );
-    assert_eq!(
-        block_on(builder.sign()).unwrap_err().kind,
-        TransactionErrorKind::Failed
-    );
+    script.exhausted();
 }
 
 fn signed(script: &Script) -> base::Transaction {
     let wallet = wallet(script);
-    let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
-    builder.send((recipient(), Decimal::from(100))).unwrap();
-    block_on(builder.sign()).unwrap().0.remove(0)
+    let builder = wallet.transaction(&Asset::native(network())).unwrap();
+    block_on(builder.sign(Transfer::new(recipient(), Decimal::from(100)))).unwrap()
+}
+
+#[test]
+fn a_send_expires_at_its_blockhashs_last_valid_height() {
+    let transaction = signed(&Script::new(signing_replies()));
+    assert_eq!(transaction.expires_height, Some(50));
 }
 
 #[test]
@@ -365,32 +355,25 @@ fn associated(owner: &str) -> solana_address::Address {
 }
 
 #[test]
-fn two_sources_sign_one_transaction_each() {
+fn a_transfer_from_its_own_source_is_paid_and_signed_by_it() {
     let script = Script::new([]);
     let factory =
         Factory::from(config()).wallets(&client(script.clone()), Arc::new(base::NoHoldings));
     let one = block_on(factory.from_pk(SecretBytes::new(SEED))).unwrap();
     let two = block_on(factory.from_pk(SecretBytes::new([9; 32]))).unwrap();
-    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
-    builder
-        .send(Transfer::new(recipient(), Decimal::from(100)).from(&one))
-        .unwrap();
-    builder
-        .send(Transfer::new(recipient(), Decimal::from(200)).from(&two))
-        .unwrap();
+    // One's builder, paid by two.
+    let builder = one.transaction(&Asset::native(network())).unwrap();
     script.push(signing_replies());
-    let signed = block_on(builder.sign()).unwrap();
+    let transfer = Transfer::new(recipient(), Decimal::from(100)).from(&two);
+    let transaction = block_on(builder.sign(transfer)).unwrap();
     script.exhausted();
-    assert_eq!(signed.len(), 2, "one per sender");
-    for (transaction, sender) in signed.iter().zip([&one, &two]) {
-        let decoded: Transaction = bincode::deserialize(&transaction.bytes).unwrap();
-        decoded.verify().unwrap();
-        assert_eq!(
-            decoded.message.account_keys[0].to_string(),
-            sender.address().value,
-            "paid and signed by its sender"
-        );
-    }
+    let decoded: Transaction = bincode::deserialize(&transaction.bytes).unwrap();
+    decoded.verify().unwrap();
+    assert_eq!(
+        decoded.message.account_keys[0].to_string(),
+        two.address().value,
+        "paid and signed by its source"
+    );
 }
 
 #[test]
@@ -398,10 +381,10 @@ fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
     let script = Script::new([]);
     let factory =
         Factory::from(config()).wallets(&client(script.clone()), Arc::new(base::NoHoldings));
-    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
-    builder.send((recipient(), Decimal::from(100))).unwrap();
+    let builder = factory.transaction(&Asset::native(network())).unwrap();
+    let transfer = Transfer::new(recipient(), Decimal::from(100));
     assert_eq!(
-        block_on(builder.sign()).unwrap_err().kind,
+        block_on(builder.sign(transfer)).unwrap_err().kind,
         TransactionErrorKind::Failed
     );
 
@@ -411,12 +394,10 @@ fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
         crypto::Curve::Ed25519,
         SecretBytes::new([9; 32]),
     );
-    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
-    builder
-        .send(Transfer::new(recipient(), Decimal::from(100)).from(wrong))
-        .unwrap();
+    let builder = factory.transaction(&Asset::native(network())).unwrap();
+    let transfer = Transfer::new(recipient(), Decimal::from(100)).from(wrong);
     assert_eq!(
-        block_on(builder.sign()).unwrap_err().kind,
+        block_on(builder.sign(transfer)).unwrap_err().kind,
         TransactionErrorKind::Failed
     );
     script.exhausted();
@@ -523,13 +504,11 @@ fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
     let wallet = block_on(factory.from_pk(SecretBytes::new(SEED))).unwrap();
     let source = [(wallet.address().clone(), Asset::native(network()))];
     let fee = block_on(factory.fees().estimate(&spends(&source))).unwrap();
-    let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
-    builder
-        .send((recipient(), Decimal::from(1_000_000) - fee.clone()))
-        .unwrap();
-    let signed = block_on(builder.sign()).unwrap();
+    let builder = wallet.transaction(&Asset::native(network())).unwrap();
+    let transfer = Transfer::new(recipient(), Decimal::from(1_000_000) - fee.clone());
+    let signed = block_on(builder.sign(transfer)).unwrap();
     script.exhausted();
-    let paid = signed.legs().find_map(|(_, _, leg)| match leg {
+    let paid = signed.legs.iter().find_map(|leg| match leg {
         Leg::Fee { amount, .. } => Some(amount.clone()),
         _ => None,
     });

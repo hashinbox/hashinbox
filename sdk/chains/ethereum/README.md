@@ -8,7 +8,7 @@ and token transfers as EIP-1559 transactions.
 
 ```rust,no_run
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Chained as _, ServiceFactory as _, Storage,
+    Asset, Broadcaster as _, Chained as _, ServiceFactory as _, Storage, Transfer,
     WalletFactory as _,
 };
 use std::sync::Arc;
@@ -32,15 +32,16 @@ async fn ethereum(storage: Storage) -> anyhow::Result<()> {
     let tips = chain.tips().await?;
     let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
 
-    // Sending: sign, keep the bytes, then broadcast them to every node. Fees
-    // are priced for a new recipient unless `Holdings` say it holds the asset.
-    let wallets = factory.wallets(&rpc, Arc::new(base::NoHoldings));
+    // Sending: one transfer signed into one transaction; keep the bytes,
+    // then broadcast them to every node. Fees are priced for a new recipient
+    // unless `Holdings` say it holds the asset; nonces follow the sends in
+    // flight a `TransactionIndexStore` holds.
+    let wallets = factory.wallets(&rpc, Arc::new(base::NoHoldings), Arc::new(base::NoTransactionIndexes));
     let wallet = wallets.from_pk(wallets.generate().await?).await?;
-    let mut builder = wallet.transaction(&ether)?;
-    builder.send((wallets.parse_address("0x...")?, 10_000_u64.into()))?;
-    for transaction in builder.sign().await? {
-        rpc.broadcast(&transaction).await?;
-    }
+    let builder = wallet.transaction(&ether)?;
+    let to = wallets.parse_address("0x...")?;
+    let transaction = builder.sign(Transfer::new(to, 10_000_u64.into())).await?;
+    rpc.broadcast(&transaction).await?;
 
     Ok(())
 }
@@ -49,7 +50,7 @@ async fn ethereum(storage: Storage) -> anyhow::Result<()> {
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network:
 `chain_id`, assets (ether's display decimals, the `contract`
 tokens), `confirmations`, and from `settings` the knobs
-`limits`, `fee_ttl_ms`, `pending_ttl_ms`, `interval_ms`, and `batch`, the
+`limits`, `fee_ttl_ms`, `interval_ms`, and `batch`, the
 blocks the indexer fetches per step (default 100; lower it for a node that
 rate-limits) (each absent one its default). It has no `max_depth`: it reads
 balances (`base::Balances`, at the node's `finalized` block), so its
@@ -88,8 +89,12 @@ with one balance read (design 083 §9).
   use it. ERC-20 tokens are unaffected: every transfer emits a log.
 - A builder sends one asset: ether, or one configured token (`transfer(to,
   amount)` calldata to the contract, no ether); any other asset is
-  `Unsupported`. A batch is one transaction per transfer, with the node's
-  pending nonce and the next ones, all signed before anything is broadcast.
+  `Unsupported`. It signs one transfer into one transaction, at the
+  sender's next nonce: the node's pending count, or one above the highest
+  nonce of the sender's sends in flight
+  (`TransactionIndexStore::find_sent`) when
+  that is higher, so a node behind a load balancer that has not seen the
+  last send yet does not hand its nonce out again.
   Gas and fees come from the factory's one fee estimator
   (`WalletFactory::fees`), which every builder signs with too, so an
   estimate and the transaction signed after it agree. It is two: a precise
@@ -108,3 +113,7 @@ with one balance read (design 083 §9).
   estimate sums.
 - A broadcast refused as "already known" or "nonce too low" is acceptance when
   the node holds that exact hash.
+- Its line is the block after the finalized one (`Line::Final`). A sent
+  transaction's index left behind it is settled by the `Confirmer`: its
+  receipt (`eth_getTransactionReceipt`) at or below the `finalized` block
+  is where it is found; none, it is not mined through that block.

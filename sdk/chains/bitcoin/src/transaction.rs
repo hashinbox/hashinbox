@@ -138,7 +138,7 @@ impl Transaction {
             order,
             legs: legs(&native, &spent, network),
             bytes: consensus::serialize(&native),
-            expires: None,
+            expires_height: None,
         };
         Self {
             native,

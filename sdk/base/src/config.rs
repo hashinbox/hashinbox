@@ -7,8 +7,8 @@ use std::{fmt, sync::Arc, time::Duration};
 use serde_json::Value;
 
 use crate::{
-    Assets, Balances, BlockStore, Chain, Dated, Holdings, Indexer, InputStore, Network,
-    WalletFactoryBroadcaster, WalletIndexStore, WalletStore,
+    Assets, Balances, BlockStore, Chain, Confirmer, Dated, Holdings, Indexer, InputStore, Network,
+    TransactionIndexStore, WalletFactoryBroadcaster, WalletIndexStore, WalletStore,
 };
 
 /// One network as an application stores it, whatever its chain: the facts
@@ -75,6 +75,8 @@ pub struct Storage {
     pub blocks: Arc<dyn BlockStore>,
     /// How far each watched asset of each address is indexed.
     pub indexes: Arc<dyn WalletIndexStore>,
+    /// How far the blocks after each sent transaction are read for it.
+    pub transaction_indexes: Arc<dyn TransactionIndexStore>,
     /// Unspent inputs, which UTXO wallets spend.
     pub inputs: Arc<dyn InputStore>,
     /// Keyed wallets.
@@ -92,7 +94,7 @@ impl fmt::Debug for Storage {
 /// One network, ready to run.
 pub struct Service {
     /// Indexes the network into [`Storage::blocks`]; shared, so it can
-    /// step ([`Indexer::next`]) while still answering watches and stats.
+    /// step ([`Indexer::next`]) while still answering stats.
     pub indexer: Arc<Indexer>,
     /// Makes the network's wallets and broadcasts their transactions.
     pub wallets: WalletFactoryBroadcaster,
@@ -107,9 +109,9 @@ pub struct Service {
     pub dated: Option<Arc<dyn Dated>>,
     /// Reads a balance at a final block; `None` where the chain cannot.
     pub balances: Option<Arc<dyn Balances>>,
-    /// Positions below the tip a watch's start may be; `None`: no limit (a
-    /// chain with `balances` starts every watch at its final block).
-    pub max_depth: Option<u64>,
+    /// Tells whether a transaction was mined through a final block; `None`
+    /// where the chain cannot.
+    pub confirmer: Option<Arc<dyn Confirmer>>,
     /// Positions a block needs below the tip to count as confirmed: the
     /// confirmed position is `tip - confirmations`.
     pub confirmations: u64,

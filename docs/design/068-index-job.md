@@ -5,8 +5,7 @@ Status: implemented.
 Every piece of the server's background work is a job of one executor:
 
 ```
-index (per network, forever) -> triggers (per round) -> broadcast (per sender)
-expire (per network, forever)
+index (per network, forever) -> triggers (per round) -> broadcast (per payment)
 ```
 
 There are no loops, handles or channels outside the executor any more.
@@ -16,17 +15,17 @@ There are no loops, handles or channels outside the executor any more.
 | Job | Topic | Lives | Does |
 | --- | --- | --- | --- |
 | `index` | `index:chain:network` | forever, id `index.chain.network` | steps the indexer; at the tip queues `triggers` |
-| `expire` | `expire:chain:network` | forever, id `expire.chain.network` | forgets pending transactions past their expiry |
 | `triggers` | `chain:network` | one round | every enabled trigger decides; actions start jobs |
-| `broadcast` | `chain:network.sender` | one send | sign, check and record, broadcast (066) |
+| `broadcast` | `chain:network.sender` | one payment, until final or dead | sign, check and record, broadcast one transaction; check it every minute: done once final, forgotten if dead, else sent again (066, 084) |
 
-`index` and `expire` conflict with nothing: each of their steps is one
-transaction, so they run beside triggers and broadcasts. A forever job may not
-share a topic with others: it is always unfinished, and an earlier unfinished
-job blocks every later one it conflicts with (067).
+`index` conflicts with nothing: each of its steps is one transaction, so it
+runs beside triggers and broadcasts. A forever job may not share a topic
+with others: it is always unfinished, and an earlier unfinished job blocks
+every later one it conflicts with (067). A broadcast job waiting for its
+next check blocks nobody until it is due.
 
-At startup `main` makes sure each network has its `index` and `expire` job
-(a missing one is enqueued, a finished one starts over).
+At startup `main` makes sure each network has its `index` job (a missing
+one is enqueued, a finished one starts over).
 
 ## `tasks`: `Ack::Again(at)`
 
@@ -59,8 +58,8 @@ Triggers are queued only at the tip, never while catching up.
   (`insufficient-funds`), visibly.
 - Balances are **spendable**: confirmed, less what pending transactions take
   (spent, burned, fee). What they bring counts once mined. A trigger that sent
-  sees the funds gone at once, so it does not send them again; an expired send
-  gives them back.
+  sees the funds gone at once, so it does not send them again; a send
+  proven dead gives them back (084).
 - Runs are only a record (`started_at`, the jobs). `settled_at`, run settling
   and the `idle` gate are gone; `since` still reads the last run's start.
 

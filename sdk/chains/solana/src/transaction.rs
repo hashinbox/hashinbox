@@ -1,12 +1,12 @@
 //! [`Transaction`]: a Solana transaction and its base form, kept together.
 //! Built for sending and signed, or read from a block.
 
-use std::{collections::BTreeMap, ops::Range};
+use std::collections::BTreeMap;
 
 use anyhow::{Context as _, anyhow, ensure};
 use base::{
-    Addressed as _, Asset, Decimal, Leg, Networked as _, Output, Outputs, Reason, Transacted,
-    TransactionId, TransactionState,
+    Addressed as _, Asset, Decimal, Leg, Networked as _, Output, Reason, Transacted, TransactionId,
+    TransactionState,
 };
 use crypto::PrivateKey as _;
 use serde::Deserialize;
@@ -17,11 +17,6 @@ use solana_message::Message;
 use solana_signature::Signature;
 
 use crate::{Address, KeyPair, Network, Token, Tokens, spl};
-
-/// The largest signed transaction a node accepts, in bytes.
-const PACKET_DATA_SIZE: usize = 1_232;
-/// What one signature adds to the message: its count and its bytes.
-const SIGNATURE_BYTES: usize = 1 + 64;
 
 /// A Solana transaction: the legacy message it signs (none for one read from
 /// a block, which is read as JSON) and its base form (id, state, order, legs,
@@ -35,36 +30,30 @@ pub struct Transaction {
 
 impl Transaction {
     /// Pending and unsigned: `message`, paid by `from` with `fee` lamports,
-    /// paying `outputs`. Its legs are the fee, then a `Spent` and a
-    /// `Received` per output. The rent of a token account it creates is not
-    /// a leg.
+    /// paying `output`. Its legs are the fee, the `Spent` and the
+    /// `Received`. The rent of a token account it creates is not a leg.
     #[must_use]
-    pub fn pending(
-        message: Message,
-        from: &Address,
-        outputs: &[Output<Address>],
-        fee: u64,
-    ) -> Self {
+    pub fn pending(message: Message, from: &Address, output: &Output<Address>, fee: u64) -> Self {
         let network = from.network().clone();
-        let mut legs = vec![Leg::Fee {
-            address: from.address().clone(),
-            asset: Asset::native(network.clone()),
-            amount: Decimal::from(fee),
-        }];
-        for output in outputs {
-            legs.push(Leg::Spent {
+        let legs = vec![
+            Leg::Fee {
+                address: from.address().clone(),
+                asset: Asset::native(network.clone()),
+                amount: Decimal::from(fee),
+            },
+            Leg::Spent {
                 address: from.address().clone(),
                 asset: output.asset.clone(),
                 amount: output.amount.clone(),
                 coin: None,
-            });
-            legs.push(Leg::Received {
+            },
+            Leg::Received {
                 address: output.address.address().clone(),
                 asset: output.asset.clone(),
                 amount: output.amount.clone(),
                 coin: None,
-            });
-        }
+            },
+        ];
         Self::new(
             Some(message),
             TransactionId::new(network, String::new()),
@@ -131,7 +120,7 @@ impl Transaction {
             order,
             legs,
             bytes: Vec::new(),
-            expires: None,
+            expires_height: None,
         };
         Self { native, base }
     }
@@ -191,64 +180,45 @@ impl From<Transaction> for base::Transaction {
     }
 }
 
-/// `outputs` from `from`, in order, as many per message as fit a packet, on
-/// `blockhash`: lamports, or `token` with each recipient's token account
-/// created when missing. Each message ends with a random Memo-v3, so two
-/// equal transfers are distinct transactions. Each message comes with the
-/// range of `outputs` it pays.
+/// `output` from `from` in one message on `blockhash`: lamports, or `token`
+/// with the recipient's token account created when missing. It ends with a
+/// random Memo-v3, so two equal transfers are distinct transactions.
 ///
 /// # Errors
 ///
-/// For an amount that is not a whole `u64` of atomic units, no randomness, or
-/// one transfer that does not fit a transaction.
-pub(crate) fn messages(
+/// For an amount that is not a whole `u64` of atomic units, or no
+/// randomness.
+pub(crate) fn message(
     from: &Address,
     token: Option<&Token>,
-    outputs: &Outputs<Address>,
+    output: &Output<Address>,
     blockhash: &Hash,
-) -> anyhow::Result<Vec<(Message, Range<usize>)>> {
+) -> anyhow::Result<Message> {
     let from = from.as_native();
-    let mut groups = Vec::with_capacity(outputs.len());
-    for output in outputs.iter() {
-        let units = output
-            .amount
-            .to_atomic_u64(0)
-            .map_err(|error| anyhow!("Solana amount: {}", error.message))?;
-        let to = output.address.as_native();
-        groups.push(match token {
-            None => vec![solana_system_interface::instruction::transfer(
-                from, to, units,
-            )],
-            Some(token) => vec![
-                spl::create_account(from, to, token)?,
-                spl::transfer(from, to, token, units)?,
-            ],
-        });
-    }
-    let mut messages = Vec::new();
-    let mut start = 0;
-    while start < groups.len() {
-        let memo = Instruction {
-            program_id: spl_memo_interface::v3::ID,
-            accounts: Vec::new(),
-            data: memo()?,
-        };
-        let mut fitting = None;
-        for end in start + 1..=groups.len() {
-            let mut instructions: Vec<Instruction> =
-                groups[start..end].iter().flatten().cloned().collect();
-            instructions.push(memo.clone());
-            let message = Message::new_with_blockhash(&instructions, Some(from), blockhash);
-            if message.serialize().len() + SIGNATURE_BYTES > PACKET_DATA_SIZE {
-                break;
-            }
-            fitting = Some((message, start..end));
-        }
-        let (message, range) = fitting.context("a Solana transfer does not fit a transaction")?;
-        start = range.end;
-        messages.push((message, range));
-    }
-    Ok(messages)
+    let units = output
+        .amount
+        .to_atomic_u64(0)
+        .map_err(|error| anyhow!("Solana amount: {}", error.message))?;
+    let to = output.address.as_native();
+    let mut instructions = match token {
+        None => vec![solana_system_interface::instruction::transfer(
+            from, to, units,
+        )],
+        Some(token) => vec![
+            spl::create_account(from, to, token)?,
+            spl::transfer(from, to, token, units)?,
+        ],
+    };
+    instructions.push(Instruction {
+        program_id: spl_memo_interface::v3::ID,
+        accounts: Vec::new(),
+        data: memo()?,
+    });
+    Ok(Message::new_with_blockhash(
+        &instructions,
+        Some(from),
+        blockhash,
+    ))
 }
 
 /// A random 32-byte token in Base58, the memo's exact data.

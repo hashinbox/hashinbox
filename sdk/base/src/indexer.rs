@@ -1,22 +1,17 @@
-//! [`Indexer`]: one network's chain into its [`BlockStore`], a step at a time.
+//! [`Indexer`]: one network's chain into its [`BlockStore`], a step at a
+//! time, moving every kind of index ([`Indexes`]) over it.
 
 use std::{
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 
-use anyhow::ensure;
-
 use crate::{
-    Addressed, Asset, Balances, BlockHeader, BlockStore, Chained, Network, Networked, NotServed,
-    Tips, WalletIndex, WalletIndexState, WalletIndexStore,
+    BlockHeader, BlockStore, Chained, Future, Network, Networked, NotServed, Skipped, Tips,
 };
 
 /// Blocks fetched per step unless [`Indexer::with_batch`] says otherwise.
 pub const DEFAULT_BATCH: u64 = 100;
-
-/// Indexes settled per step at most.
-const SETTLES: usize = 8;
 
 /// What one [`Indexer::next`] did.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,15 +22,6 @@ pub enum Next {
     Reorged(u64),
     /// Nothing to fetch.
     Idle,
-}
-
-/// Where a new watch starts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Birthday {
-    /// At the chain's produced tip: no history.
-    Fresh,
-    /// At this position: history from there on.
-    At(u64),
 }
 
 /// What an [`Indexer`] did since it was made: how healthy it is.
@@ -51,9 +37,7 @@ pub struct Stats {
     pub confirmed: Option<u64>,
     /// Kept blocks reorged because the chain took them back.
     pub reorgs: u64,
-    /// Addresses watched.
-    pub watched: u64,
-    /// Failed steps, and failed settles (balance reads or their writes).
+    /// Failed steps, and failed closes ([`Indexes::close`]).
     pub failures: u64,
     /// The last failure, cleared by the next kept block.
     pub error: Option<String>,
@@ -77,38 +61,72 @@ impl StatsWithMutex {
     }
 }
 
+/// One kind of index over a network's blocks: a part of its [`Indexer`].
+/// Keeping blocks moves its items ([`BlockStore::insert`]); the part says
+/// where they need reading and closes their gaps.
+pub trait Indexes: Send + Sync {
+    /// The lowest next block of its indexing items, at or above `from` and
+    /// at or below `through` (`None`: no bound): where the next run may
+    /// start.
+    ///
+    /// # Errors
+    ///
+    /// When its store cannot read.
+    fn next<'a>(
+        &'a self,
+        from: u64,
+        through: Option<u64>,
+    ) -> Future<'a, anyhow::Result<Option<u64>>>;
+
+    /// Closes the gaps of its items whose next block is below `line`, the
+    /// chain's at `tips`.
+    ///
+    /// # Errors
+    ///
+    /// When the chain or its store fails; the step goes on.
+    fn close<'a>(&'a self, line: u64, tips: Tips) -> Future<'a, anyhow::Result<()>>;
+
+    /// Moves its items stuck below `below`, behind a block the node no
+    /// longer serves: an unstarted one starts at `start`, a started one is
+    /// [`crate::IndexState::NoData`].
+    ///
+    /// # Errors
+    ///
+    /// When its store fails.
+    fn skip<'a>(&'a self, below: u64, start: u64) -> Future<'a, anyhow::Result<Skipped>>;
+}
+
 /// Indexes one network: fetches blocks up to the produced tip and keeps them,
-/// marking kept blocks the chain took back reorged. The caller steps it
-/// ([`Indexer::next`]), about every [`Indexer::interval`].
+/// marking kept blocks the chain took back reorged, and has each of its
+/// parts close the gaps of its items below the chain's line. The caller
+/// steps it ([`Indexer::next`]), about every [`Indexer::interval`].
 pub struct Indexer {
     chain: Arc<dyn Chained>,
+    /// Keeping blocks advances the items of every part, in the same write
+    /// as the blocks; deleting them rewinds every part.
     blocks: Arc<dyn BlockStore>,
-    indexes: Arc<dyn WalletIndexStore>,
+    parts: Vec<Arc<dyn Indexes>>,
     interval: Duration,
     batch: u64,
-    balances: Option<Arc<dyn Balances>>,
-    max_depth: Option<u64>,
     stats: StatsWithMutex,
 }
 
 impl Indexer {
-    /// Indexes `chain` into `blocks`, for the addresses of `indexes`, stepped
+    /// Indexes `chain` into `blocks`, for the items of `parts`, stepped
     /// about every `interval` once at the tip.
     #[must_use]
     pub fn new(
         chain: Arc<dyn Chained>,
         blocks: Arc<dyn BlockStore>,
-        indexes: Arc<dyn WalletIndexStore>,
+        parts: Vec<Arc<dyn Indexes>>,
         interval: Duration,
     ) -> Self {
         Self {
             chain,
             blocks,
-            indexes,
+            parts,
             interval,
             batch: DEFAULT_BATCH,
-            balances: None,
-            max_depth: None,
             stats: StatsWithMutex::default(),
         }
     }
@@ -119,75 +137,17 @@ impl Indexer {
         self.interval
     }
 
+    /// The chain it reads: what a target becomes an index with.
+    #[must_use]
+    pub fn chain(&self) -> Arc<dyn Chained> {
+        self.chain.clone()
+    }
+
     /// Fetches at most `batch` positions per step (at least one).
     #[must_use]
     pub fn with_batch(mut self, batch: u64) -> Self {
         self.batch = batch.max(1);
         self
-    }
-
-    /// Reads balances with `balances`: nothing at or below the chain's final
-    /// block is read. A new watch starts there, and each step first settles
-    /// ([`Self::settle`]) every index whose next block is at or below it,
-    /// then reads on above it. It replaces `max_depth`
-    /// ([`Self::with_max_depth`]).
-    #[must_use]
-    pub fn with_balances(mut self, balances: Arc<dyn Balances>) -> Self {
-        self.balances = Some(balances);
-        self
-    }
-
-    /// Never reads more than `max_depth` positions below the tip: an index
-    /// further behind jumps ([`Self::jump`]). `None`: no limit. Without
-    /// balances only ([`Self::with_balances`]).
-    #[must_use]
-    pub const fn with_max_depth(mut self, max_depth: Option<u64>) -> Self {
-        self.max_depth = max_depth;
-        self
-    }
-
-    /// Indexes `asset` of `address` from `birthday`, its `requested_from`;
-    /// [`Indexer::next`] backfills it. With balances
-    /// ([`Indexer::with_balances`]) it starts at the chain's final block
-    /// instead, and the next step settles it.
-    ///
-    /// # Errors
-    ///
-    /// When `address` or `asset` is of another network, or the chain or
-    /// store fails.
-    pub async fn watch(
-        &self,
-        address: &dyn Addressed,
-        asset: &Asset,
-        birthday: Birthday,
-    ) -> anyhow::Result<()> {
-        let address = address.address();
-        ensure!(
-            address.network == *self.network() && asset.network() == self.network(),
-            "{:?} or {asset:?} is not of {:?}",
-            address.network,
-            self.network()
-        );
-        let requested_from = match birthday {
-            Birthday::Fresh => self.chain.tips().await?.produced,
-            Birthday::At(position) => position,
-        };
-        let birthday = match self.balances {
-            Some(_) => self.chain.tips().await?.confirmed,
-            None => requested_from,
-        };
-        let index = WalletIndex {
-            address: address.clone(),
-            asset: asset.clone(),
-            requested_from,
-            birthday,
-            indexed_at: None,
-            state: WalletIndexState::Indexing,
-            reason: None,
-        };
-        self.indexes.insert(&index).await?;
-        self.stats.get().watched += 1;
-        Ok(())
     }
 
     /// What it did so far.
@@ -196,21 +156,21 @@ impl Indexer {
         self.stats.get().clone()
     }
 
-    /// One step of at most a batch: from the furthest-behind
-    /// [`WalletIndexState::Indexing`] index, or else from the last kept
-    /// block. When the chain no longer has the last kept block, marks it
-    /// reorged; the next step checks the one below. Never below the line
-    /// ([`Self::line`]): with balances, it first settles a few indexes not
-    /// past the chain's final block ([`Self::settle`]); without, an index
-    /// behind the tip less `max_depth` jumps there ([`Self::jump`]). When
-    /// the node no longer serves a block (pruned history), an index that has
-    /// not started starts at the first block it serves; one that has started
-    /// becomes [`WalletIndexState::NoData`] and the step fails.
+    /// One step of at most a batch: from the furthest-behind indexing item
+    /// of any part, or else from the last kept block. When the chain no
+    /// longer has the last kept block, marks it reorged; the next step
+    /// checks the one below. Never below the chain's line
+    /// ([`Chained::line`]): each part first closes the gaps of its items
+    /// below it ([`Indexes::close`]; a failure is counted, never failing the
+    /// step). When the node no longer serves a block (pruned history), an
+    /// item that has not started starts at the first block it serves; one
+    /// that has started becomes [`crate::IndexState::NoData`] and the step
+    /// fails.
     ///
     /// # Errors
     ///
     /// When the chain or a store fails, the chain changes mid-fetch
-    /// (retry), or the node no longer serves a block a started index or the
+    /// (retry), or the node no longer serves a block a started item or the
     /// network needs ([`NotServed`]); counted in [`Stats::failures`].
     pub async fn next(&self) -> anyhow::Result<Next> {
         let next = self.step().await;
@@ -220,46 +180,8 @@ impl Indexer {
         next
     }
 
-    /// Settles at most [`SETTLES`] indexing indexes whose next block is at
-    /// or below `confirmed`, the chain's final block: each reads its balance
-    /// at a final block `S` at or above it and, once the chain answers and
-    /// serves `S`, writes it ([`WalletIndexStore::settle`]); it reads on from
-    /// `S + 1`. One not answerable yet stays as it is for the next step; a
-    /// failure is counted in [`Stats::failures`], never failing the step.
-    async fn settle(&self, balances: &dyn Balances, confirmed: u64) {
-        let below = confirmed.saturating_add(1);
-        let behind = self.indexes.find_behind(self.network(), below, SETTLES);
-        let behind = match behind.await {
-            Ok(behind) => behind,
-            Err(error) => return self.stats.get().fail(&error),
-        };
-        for index in &behind {
-            if let Err(error) = self.settle_one(balances, index, confirmed).await {
-                self.stats.get().fail(&error);
-            }
-        }
-    }
-
-    /// [`Self::settle`] of one `index`, at a final block at or above `at`.
-    async fn settle_one(
-        &self,
-        balances: &dyn Balances,
-        index: &WalletIndex,
-        at: u64,
-    ) -> anyhow::Result<()> {
-        let read = balances.balance(&index.address, &index.asset, at);
-        let Some(holding) = read.await? else {
-            return Ok(());
-        };
-        let Some(block) = self.chain.block(holding.position).await? else {
-            return Ok(());
-        };
-        self.indexes.settle(index, &holding, &block.header).await?;
-        Ok(())
-    }
-
-    /// [`Self::fetch`]; when the node no longer serves a block an index
-    /// needs, [`Self::skip`] and, when every such index moved, fetch again.
+    /// [`Self::fetch`]; when the node no longer serves a block an item
+    /// needs, [`Self::skip`] and, when every such item moved, fetch again.
     async fn step(&self) -> anyhow::Result<Next> {
         match self.fetch().await {
             Err(error) => match NotServed::find(&error) {
@@ -270,45 +192,35 @@ impl Indexer {
         }
     }
 
-    /// Moves the indexes stuck behind `gap`, a block the node no longer
+    /// Moves the items stuck behind `gap`, a block the node no longer
     /// serves, out of the way. When one needs it (or the block after it),
     /// finds the first block the node serves; below it nothing is served.
-    /// Every index whose next block is below that and has not started
-    /// starts there; every one that has started becomes
-    /// [`WalletIndexState::NoData`]. Whether the step can go on: one moved,
-    /// and none had started.
+    /// Every item whose next block is below that and has not started starts
+    /// there; every one that has started becomes
+    /// [`crate::IndexState::NoData`] ([`Indexes::skip`]). Whether the step
+    /// can go on: one moved, and none had started.
     ///
     /// # Errors
     ///
-    /// When the chain or the store fails.
+    /// When the chain or a store fails.
     async fn skip(&self, gap: NotServed) -> anyhow::Result<bool> {
-        let network = self.network();
-        let needs = self
-            .indexes
-            .find_behind(network, gap.position.saturating_add(2), 1);
-        if needs.await?.is_empty() {
+        let mut needs = false;
+        for part in &self.parts {
+            needs |= part
+                .next(0, Some(gap.position.saturating_add(1)))
+                .await?
+                .is_some();
+        }
+        if !needs {
             return Ok(false);
         }
         let tip = self.chain.tips().await?.produced;
         let start = first_served(&*self.chain, gap.position, tip).await?;
-        let (mut moved, mut stopped) = (false, false);
-        for index in &self.indexes.find_behind(network, start, usize::MAX).await? {
-            match index.next() {
-                Some(_) if index.indexed_at.is_none() => {
-                    self.indexes.move_birthday(index, start).await?;
-                    moved = true;
-                }
-                Some(position) => {
-                    let reason = NotServed { position }.to_string();
-                    self.indexes
-                        .set_state(index, WalletIndexState::NoData, Some(&reason))
-                        .await?;
-                    stopped = true;
-                }
-                None => {}
-            }
+        let mut skipped = Skipped::default();
+        for part in &self.parts {
+            skipped = skipped.and(part.skip(start, start).await?);
         }
-        Ok(moved && !stopped)
+        Ok(skipped.moved && !skipped.stopped)
     }
 
     async fn fetch(&self) -> anyhow::Result<Next> {
@@ -322,26 +234,29 @@ impl Indexer {
             stats.tip = Some(tip);
             stats.confirmed = Some(tips.confirmed);
         }
-        let line = self.line(tips);
-        if let Some(line) = line
-            && let Some(reorged) = self.check(line, last.as_ref()).await?
-        {
+        let line = self.chain.line().at(tips);
+        if let Some(reorged) = self.check(line, last.as_ref()).await? {
             return Ok(reorged);
         }
-        if let Some(balances) = &self.balances {
-            self.settle(&**balances, tips.confirmed).await;
-        } else if let Some(line) = line {
-            self.jump(line).await?;
+        for part in &self.parts {
+            if let Err(error) = part.close(line, tips).await {
+                self.stats.get().fail(&error);
+            }
         }
-        // After the settles and jumps: no index left to read is below the line.
-        let floor = line.unwrap_or(0);
+        // After the closes: no item left to read is below the line.
         let through = last.as_ref().map(|last| last.position);
-        let lagging = self.indexes.find_next(network, floor, through).await?;
+        let mut lagging = None;
+        for part in &self.parts {
+            lagging = lagging
+                .into_iter()
+                .chain(part.next(line, through).await?)
+                .min();
+        }
         // Forward starts at the last kept block, to see it is still on the chain.
         let Some(start) = lagging.or(through) else {
             return Ok(Next::Idle);
         };
-        let start = start.max(floor);
+        let start = start.max(line);
         let end = tip.min(start.saturating_add(self.batch - 1));
         let run = self.chain.blocks(start, end).await?;
         // The run may end early (the node has no more yet): only the
@@ -372,18 +287,6 @@ impl Indexer {
         Ok(Next::Indexed(header))
     }
 
-    /// The line nothing below is read: with balances, the one above the
-    /// chain's final block (an index at or below it settles instead);
-    /// without, the tip less `max_depth` (an index below it jumps); `None`:
-    /// no line.
-    fn line(&self, tips: Tips) -> Option<u64> {
-        if self.balances.is_some() {
-            return Some(tips.confirmed.saturating_add(1));
-        }
-        self.max_depth
-            .map(|depth| tips.produced.saturating_sub(depth))
-    }
-
     /// When `last`, the last kept block, is below `line`, checks the chain
     /// still has it: when not, marks it reorged instead (the next step
     /// checks the one below). With it, every leg kept below is final
@@ -402,17 +305,6 @@ impl Indexer {
             return Ok(None);
         }
         self.reorg(last).await.map(Some)
-    }
-
-    /// Moves every indexing index whose next is below `floor`, the jump line
-    /// (the tip less `max_depth`), up to it ([`WalletIndexStore::restart`]):
-    /// the gap below is never read.
-    async fn jump(&self, floor: u64) -> anyhow::Result<()> {
-        let behind = self.indexes.find_behind(self.network(), floor, usize::MAX);
-        for index in &behind.await? {
-            self.indexes.restart(index, floor).await?;
-        }
-        Ok(())
     }
 
     /// Marks `last`, the last kept block, reorged: the chain took it back.
@@ -469,7 +361,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        Address, Block, BlockHash, BlockParent, Blocks, Chain, Future, Tips,
+        Address, Asset, Birthday, Block, BlockHash, BlockParent, Blocks, Chain, IndexState,
+        IntoIndex, WalletIndex, WalletIndexStore, WalletIndexTarget, WalletIndexer,
         transaction::Transactions,
     };
 
@@ -537,9 +430,10 @@ mod tests {
             for block in run.iter() {
                 let at = &block.header;
                 for index in indexes.iter_mut() {
-                    let applies = index.state == WalletIndexState::Indexing
+                    let progress = &mut index.progress;
+                    let applies = progress.state == IndexState::Indexing
                         && index.birthday <= at.position
-                        && match &index.indexed_at {
+                        && match &progress.indexed_at {
                             Some(through) => Some(through.position) == at.position.checked_sub(1),
                             None => at
                                 .parent
@@ -547,7 +441,7 @@ mod tests {
                                 .is_none_or(|parent| parent.position < index.birthday),
                         };
                     if applies {
-                        index.indexed_at = Some(at.clone());
+                        progress.indexed_at = Some(at.clone());
                     }
                 }
                 if !blocks.contains(at) {
@@ -581,9 +475,15 @@ mod tests {
     }
 
     impl WalletIndexStore for Fake {
-        fn insert<'a>(&'a self, index: &'a WalletIndex) -> Future<'a, anyhow::Result<()>> {
-            self.indexes.lock().unwrap().push(index.clone());
-            Box::pin(async { Ok(()) })
+        fn insert<'a>(
+            &'a self,
+            index: &'a dyn IntoIndex<WalletIndex>,
+        ) -> Future<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                let index = index.index().await?;
+                self.indexes.lock().unwrap().push(index);
+                Ok(())
+            })
         }
 
         fn find_all<'a>(
@@ -594,14 +494,14 @@ mod tests {
             Box::pin(async { Ok(all) })
         }
 
-        fn move_birthday<'a>(
+        fn move_start<'a>(
             &'a self,
             index: &'a WalletIndex,
-            birthday: u64,
+            start: u64,
         ) -> Future<'a, anyhow::Result<()>> {
             self.change(index, |kept| {
-                if kept.indexed_at.is_none() {
-                    kept.birthday = birthday;
+                if kept.progress.indexed_at.is_none() {
+                    kept.birthday = start;
                 }
             });
             Box::pin(async { Ok(()) })
@@ -610,12 +510,12 @@ mod tests {
         fn set_state<'a>(
             &'a self,
             index: &'a WalletIndex,
-            state: WalletIndexState,
+            state: IndexState,
             reason: Option<&'a str>,
         ) -> Future<'a, anyhow::Result<()>> {
             self.change(index, |kept| {
-                kept.state = state;
-                kept.reason = reason.map(str::to_owned);
+                kept.progress.state = state;
+                kept.progress.reason = reason.map(str::to_owned);
             });
             Box::pin(async { Ok(()) })
         }
@@ -666,23 +566,33 @@ mod tests {
             blocks: Mutex::default(),
             indexes: Mutex::default(),
         });
-        let indexer = Indexer::new(fake.clone(), fake.clone(), fake.clone(), Duration::ZERO)
-            .with_batch(batch);
+        let wallets = WalletIndexer::new(fake.clone(), fake.clone(), None);
+        let indexer = Indexer::new(
+            fake.clone(),
+            fake.clone(),
+            vec![Arc::new(wallets)],
+            Duration::ZERO,
+        )
+        .with_batch(batch);
         (fake, indexer)
     }
 
-    async fn watch(indexer: &Indexer, address: &str, from: u64) {
-        let network = indexer.network().clone();
+    /// Watches the native asset of `address` from `from`.
+    async fn watch(fake: &Arc<Fake>, address: &str, from: u64) {
+        let network = fake.network.clone();
         let asset = Asset::native(network.clone());
         let address = Address::new(network, address);
-        indexer
-            .watch(&address, &asset, Birthday::At(from))
-            .await
-            .unwrap();
+        let target =
+            WalletIndexTarget::new(fake.clone(), address, asset).with_birthday(Birthday::At(from));
+        WalletIndexStore::insert(&**fake, &target).await.unwrap();
     }
 
     fn at(index: &WalletIndex) -> Option<u64> {
-        index.indexed_at.as_ref().map(|header| header.position)
+        index
+            .progress
+            .indexed_at
+            .as_ref()
+            .map(|header| header.position)
     }
 
     #[tokio::test]
@@ -696,34 +606,37 @@ mod tests {
     #[tokio::test]
     async fn an_unstarted_index_starts_at_the_first_served_block() {
         let (fake, indexer) = indexer(20, 100);
-        watch(&indexer, "a", 5).await;
+        watch(&fake, "a", 5).await;
         assert_eq!(indexer.next().await.unwrap(), Next::Indexed(header(TIP)));
         let index = fake.index("a");
         assert_eq!((index.requested_from, index.birthday), (5, 20));
         assert_eq!(
-            (index.state, at(&index)),
-            (WalletIndexState::Indexing, Some(TIP))
+            (index.progress.state, at(&index)),
+            (IndexState::Indexing, Some(TIP))
         );
     }
 
     #[tokio::test]
     async fn a_started_index_with_a_gap_has_no_data_and_fails_the_step() {
         let (fake, indexer) = indexer(0, 10);
-        watch(&indexer, "a", 0).await;
+        watch(&fake, "a", 0).await;
         indexer.next().await.unwrap();
         assert_eq!(at(&fake.index("a")), Some(9));
         // A fresh index behind it, and the node prunes past both.
-        watch(&indexer, "b", 3).await;
+        watch(&fake, "b", 3).await;
         fake.first.store(30, Ordering::SeqCst);
         let error = indexer.next().await.unwrap_err();
         assert_eq!(NotServed::find(&error), Some(NotServed { position: 3 }));
         let (a, b) = (fake.index("a"), fake.index("b"));
-        assert_eq!(a.state, WalletIndexState::NoData);
-        assert_eq!(a.reason.as_deref(), Some("node no longer serves block 10"));
+        assert_eq!(a.progress.state, IndexState::NoData);
+        assert_eq!(
+            a.progress.reason.as_deref(),
+            Some("node no longer serves block 10")
+        );
         assert_eq!(at(&a), Some(9));
         assert_eq!(
-            (b.state, b.birthday, b.requested_from),
-            (WalletIndexState::Indexing, 30, 3)
+            (b.progress.state, b.birthday, b.requested_from),
+            (IndexState::Indexing, 30, 3)
         );
         assert!(indexer.stats().error.is_some());
     }
@@ -731,18 +644,16 @@ mod tests {
     #[tokio::test]
     async fn a_paused_index_is_skipped_and_resumes_without_a_gap() {
         let (fake, indexer) = indexer(0, 10);
-        watch(&indexer, "a", 0).await;
-        watch(&indexer, "b", 0).await;
+        watch(&fake, "a", 0).await;
+        watch(&fake, "b", 0).await;
         indexer.next().await.unwrap();
         let b = fake.index("b");
         assert_eq!(at(&b), Some(9));
-        fake.set_state(&b, WalletIndexState::Paused, None)
-            .await
-            .unwrap();
+        fake.set_state(&b, IndexState::Paused, None).await.unwrap();
         while indexer.next().await.unwrap() != Next::Idle {}
         assert_eq!(at(&fake.index("a")), Some(TIP));
         assert_eq!(at(&fake.index("b")), Some(9));
-        fake.set_state(&b, WalletIndexState::Indexing, None)
+        fake.set_state(&b, IndexState::Indexing, None)
             .await
             .unwrap();
         while indexer.next().await.unwrap() != Next::Idle {}

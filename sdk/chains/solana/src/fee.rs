@@ -19,6 +19,8 @@ const PLACEHOLDER: solana_address::Address = solana_address::Address::new_from_a
 pub(crate) struct Prices {
     /// A recent confirmed blockhash.
     pub(crate) blockhash: Hash,
+    /// The last block height a transaction on `blockhash` can land at.
+    pub(crate) expires_height: u64,
     /// Lamports per signature.
     pub(crate) per_signature: u64,
 }
@@ -57,7 +59,7 @@ impl Estimator {
     ///
     /// The node's failure.
     pub(crate) async fn prices(&self) -> Result<Prices, TransactionError> {
-        let blockhash = self
+        let (blockhash, expires_height) = self
             .rpc
             .blockhash()
             .await
@@ -70,6 +72,7 @@ impl Estimator {
             .map_err(TransactionError::unavailable)?;
         Ok(Prices {
             blockhash,
+            expires_height,
             per_signature,
         })
     }

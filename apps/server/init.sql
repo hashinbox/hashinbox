@@ -43,7 +43,7 @@ CREATE TABLE block (
     -- The parent block's id once it is stored: NULL for the first stored
     -- block of a run, set in the write that later stores the parent; NULL
     -- again once the parent is pruned.
-    parent          TEXT    REFERENCES block (id),
+    parent          TEXT    REFERENCES block (id) ON DELETE SET NULL,
     -- The parent as reported; the position is kept because the header is
     -- read back whole while `parent` is still NULL.
     parent_position INTEGER,          -- NULL exactly for genesis.
@@ -60,7 +60,7 @@ CREATE UNIQUE INDEX block_live ON block (chain, network, position)
     WHERE reorged_at IS NULL;
 CREATE INDEX block_parent_hash ON block (chain, network, parent_hash)
     WHERE parent IS NULL;
--- A block's kept children: what deleting it checks and unlinks.
+-- A block's kept children: what deleting it unlinks.
 CREATE INDEX block_parent ON block (parent);
 
 -- A transaction, once per txid of a network: pending (block NULL, kept by
@@ -68,11 +68,11 @@ CREATE INDEX block_parent ON block (parent);
 -- (BlockStore::insert) upserts it: block, order, state, reason and bytes
 -- become the mined ones and its legs are replaced by the mined legs. One
 -- whose block is reorged and not re-mined is no longer shown: a reorg
--- cannot make funds appear.
+-- cannot make funds appear. Deleting its block deletes it.
 -- id: "{chain}.{network}.{txid}".
 CREATE TABLE "transaction" (
     id      TEXT    NOT NULL PRIMARY KEY,
-    block   TEXT    REFERENCES block (id), -- NULL: pending, not mined.
+    block   TEXT    REFERENCES block (id) ON DELETE CASCADE, -- NULL: pending, not mined.
     chain   TEXT    NOT NULL,
     network TEXT    NOT NULL,
     txid    TEXT    NOT NULL,          -- Chain-native id.
@@ -80,12 +80,11 @@ CREATE TABLE "transaction" (
     state   INTEGER NOT NULL,          -- 0 pending, 1 succeeded, 2 reverted.
     reason  TEXT,                      -- JSON Reason; reverted only.
     bytes   BLOB    NOT NULL,
-    sent_at    INTEGER,                -- Unix ms recorded as pending; NULL once mined.
-    expires_at INTEGER,                -- Unix ms it stops holding funds; NULL once mined.
+    sent_at INTEGER,                   -- Unix ms a node accepted it; NULL until then and once mined.
     CHECK (id = chain || '.' || network || '.' || txid),
     CHECK (state IN (0, 1, 2)),
     CHECK (state = 2 OR reason IS NULL),
-    CHECK (block IS NULL OR (sent_at IS NULL AND expires_at IS NULL))
+    CHECK (block IS NULL OR sent_at IS NULL)
 );
 CREATE INDEX transaction_block ON "transaction" (block);
 
@@ -115,13 +114,13 @@ CREATE INDEX transaction_block ON "transaction" (block);
 -- order as blocks are kept, in one write transaction; a block kept again
 -- (revived, or re-applied to an index) has its legs written again from the
 -- live chain below it. A pending leg has none of these: it is read by
--- address until mined.
+-- address until mined. Deleting its block or its transaction deletes it.
 -- id: "{transaction}.{leg_index}", "{block}.reward.{leg_index}", or
 -- "{block}.adjustment.{wallet_index_id}.{leg_index}".
 CREATE TABLE leg (
     id            TEXT    NOT NULL PRIMARY KEY,
-    block         TEXT    REFERENCES block (id), -- NULL: of a pending transaction.
-    "transaction" TEXT    REFERENCES "transaction" (id), -- NULL: a reward or an adjustment.
+    block         TEXT    REFERENCES block (id) ON DELETE CASCADE, -- NULL: of a pending transaction.
+    "transaction" TEXT    REFERENCES "transaction" (id) ON DELETE CASCADE, -- NULL: a reward or an adjustment.
     leg_index     INTEGER NOT NULL, -- In its transaction, or the block's rewards; an adjustment's 0 or 1.
     kind          INTEGER NOT NULL, -- 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward, 6 adjustment.
     address       TEXT    NOT NULL,
@@ -158,7 +157,7 @@ CREATE INDEX leg_address ON leg (address, asset);
 CREATE INDEX leg_wallet_index ON leg (wallet_index_id, position, seq);
 CREATE UNIQUE INDEX leg_seq ON leg (wallet_index_id, seq);
 CREATE INDEX leg_transaction ON leg ("transaction");
--- A block's legs: what deleting it checks.
+-- A block's legs: what deleting it deletes.
 CREATE INDEX leg_block ON leg (block);
 CREATE INDEX leg_coin ON leg (coin_txid, coin_index) WHERE coin_txid IS NOT NULL;
 
@@ -242,6 +241,33 @@ CREATE TABLE wallet_index (
 );
 CREATE INDEX wallet_index_wallet ON wallet_index (wallet_id);
 CREATE INDEX wallet_index_progress ON wallet_index (indexed_at);
+
+-- One sent transaction being looked for (design 085): the blocks from
+-- `broadcasted_at` (the tip it was broadcast at) through `indexed_at` are
+-- read for it, moved by every block kept as a wallet index is, with no
+-- gaps; NULL indexed_at: nothing read yet. `found`: the block it is mined
+-- in, NULL until then and again once a reorg takes that block back.
+-- `expires_height`: the last block height it can land at (Solana's
+-- blockhash); NULL: never. state as `wallet_index`'s: 0 indexing, 1 paused,
+-- 2 no_data (the node no longer serves a block it needs, or it was given
+-- up: `reason`). Its broadcast job deletes it once done.
+-- id: the transaction's, "{chain}.{network}.{txid}".
+CREATE TABLE transaction_index (
+    id             TEXT    NOT NULL PRIMARY KEY,
+    chain          TEXT    NOT NULL,
+    network        TEXT    NOT NULL,
+    txid           TEXT    NOT NULL,
+    broadcasted_at INTEGER NOT NULL,
+    expires_height INTEGER,
+    indexed_at     TEXT    REFERENCES block (id),
+    found          TEXT    REFERENCES block (id),
+    state          INTEGER NOT NULL,
+    reason         TEXT,
+    CHECK (id = chain || '.' || network || '.' || txid),
+    CHECK (state IN (0, 1, 2))
+);
+CREATE INDEX transaction_index_network ON transaction_index (chain, network);
+CREATE INDEX transaction_index_progress ON transaction_index (indexed_at);
 
 
 
@@ -389,8 +415,8 @@ CREATE TABLE network_asset (
 -- server indexes exactly these, and adds one per `enabled` network at start):
 -- `tip`, the node's newest block; `confirmed`, `tip - confirmations`;
 -- `indexed`, the last kept block (NULL: none yet); `checked_at`, Unix ms of
--- the last step whose tip moved. `blocks` (kept), `reorgs`, `watched` and
--- `failures` count since the row was made. Why a step failed is the index
+-- the last step whose tip moved. `blocks` (kept), `reorgs` and `failures`
+-- count since the row was made. Why a step failed is the index
 -- job's `q.reason`.
 CREATE TABLE network_index (
     chain      TEXT    NOT NULL,
@@ -401,7 +427,6 @@ CREATE TABLE network_index (
     checked_at INTEGER,
     blocks     INTEGER NOT NULL DEFAULT 0,
     reorgs     INTEGER NOT NULL DEFAULT 0,
-    watched    INTEGER NOT NULL DEFAULT 0,
     failures   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chain, network),
     FOREIGN KEY (chain, network) REFERENCES network (chain, network)
@@ -466,6 +491,28 @@ CREATE TABLE trigger_run (
     CHECK (id = "trigger" || '.' || started_at)
 );
 CREATE INDEX trigger_run_latest ON trigger_run ("trigger", started_at);
+
+-- A pending transaction the server forgot (design 084), as it was then:
+-- why (`reason`: `refused`, refused by every node or never sent; `dead`,
+-- the chain proved it can never mine; `jump`, its index, a wallet's or its
+-- own, jumped past a gap, or its own was given up or found it inside one),
+-- when, its bytes, and its legs (JSON, as `transaction_with_legs` has them:
+-- who was to be paid what). Forgetting
+-- deleted its `transaction` row and legs, freeing what it held; this only
+-- records it. A txid forgotten again (recorded again in between) keeps the
+-- latest.
+-- id: the transaction's, "{chain}.{network}.{txid}".
+CREATE TABLE transaction_forgotten (
+    id           TEXT    NOT NULL PRIMARY KEY,
+    chain        TEXT    NOT NULL,
+    network      TEXT    NOT NULL,
+    txid         TEXT    NOT NULL,
+    reason       TEXT    NOT NULL,
+    forgotten_at INTEGER NOT NULL, -- Unix ms.
+    bytes        BLOB    NOT NULL,
+    legs         TEXT    NOT NULL CHECK (json_valid(legs)),
+    CHECK (id = chain || '.' || network || '.' || txid)
+);
 
 
 -- Durable job queue (packages/tasks `Store`, the server's usecase/tasks.rs).

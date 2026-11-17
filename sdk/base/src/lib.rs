@@ -9,6 +9,7 @@ mod chain;
 mod config;
 pub mod container;
 mod fee;
+mod index;
 mod indexer;
 mod info;
 mod inout;
@@ -23,7 +24,7 @@ pub use address::{Address, Addressed};
 pub use asset::{Asset, AssetInfo, Assets};
 pub use balance::{Balances, Holding};
 pub use block::{
-    Block, Blocks, Chained, Dated, Hash as BlockHash, Header as BlockHeader,
+    Block, Blocks, Chained, Dated, Hash as BlockHash, Header as BlockHeader, Line,
     Listener as BlockListener, NotServed, Notify as BlockNotify, Notifying, Parent as BlockParent,
     Probe as BlockProbe, Reward, Stamp as BlockStamp, Store as BlockStore, Tips,
 };
@@ -33,20 +34,25 @@ pub use config::{AssetConfig, AssetKind, NetworkConfig, Service, ServiceFactory,
 pub use container::{Container, Simple, Transport};
 pub use decimal::{Decimal, Error as DecimalError};
 pub use fee::{Estimator as FeeEstimator, Holdings, NoHoldings, Spend, Spends};
-pub use indexer::{Birthday, DEFAULT_BATCH, Indexer, Next, Stats};
+pub use index::{
+    Birthday, Confirmed, Confirmer, IndexState, Indexed, IntoIndex, NoTransactionIndexes, Progress,
+    Skipped, TransactionIndex, TransactionIndexStore, TransactionIndexTarget, TransactionIndexer,
+    TransactionStatus, WalletIndex, WalletIndexStore, WalletIndexTarget, WalletIndexer,
+};
+pub use indexer::{DEFAULT_BATCH, Indexer, Indexes, Next, Stats};
 pub use info::{CachedInfo, InfoClient, NodeInfo};
 
-pub use inout::{Coin, Input, Inputs, Output, Outputs, Store as InputStore};
+pub use inout::{Coin, Input, Inputs, Output, Store as InputStore};
 pub use network::{Network, Networked};
 pub use transaction::{
-    Broadcaster, Builder, BuilderExt, Error as TransactionError, ErrorKind as TransactionErrorKind,
-    Future, Id as TransactionId, Leg, Reason, Signer, State as TransactionState, Transacted,
-    Transaction, Transactions, Transfer,
+    Broadcaster, Builder, Error as TransactionError, ErrorKind as TransactionErrorKind, Future,
+    Id as TransactionId, Leg, Reason, Signer, State as TransactionState, Transacted, Transaction,
+    Transactions, Transfer,
 };
 pub use wallet::{
     Error as WalletError, ErrorKind as WalletErrorKind, Factories as WalletFactories,
-    Factory as WalletFactory, FactoryBroadcaster as WalletFactoryBroadcaster, Index as WalletIndex,
-    IndexState as WalletIndexState, IndexStore as WalletIndexStore, Store as WalletStore, Wallet,
+    Factory as WalletFactory, FactoryBroadcaster as WalletFactoryBroadcaster, Store as WalletStore,
+    Wallet,
 };
 
 use std::pin::Pin;

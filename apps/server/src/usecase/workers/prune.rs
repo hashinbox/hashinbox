@@ -26,7 +26,7 @@ use crate::{
 pub(crate) const KIND: &str = "prune";
 
 /// The kinds pruned: recurring jobs that finish, a new one each time. The
-/// other recurring jobs (index, expire, prune) are one row each, never
+/// other recurring jobs (index, pending, prune) are one row each, never
 /// finished.
 const RECURRING: [&str; 1] = [trigger::KIND];
 

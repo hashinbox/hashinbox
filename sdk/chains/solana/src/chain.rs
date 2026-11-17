@@ -2,8 +2,8 @@
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Addressed as _, Asset, Balances, Block, Blocks, Chained, Dated, Future, Holding, Network,
-    Networked, Tips,
+    Addressed as _, Asset, Balances, Block, Blocks, Chained, Confirmed, Confirmer, Dated, Future,
+    Holding, Line, Network, Networked, Tips, TransactionId,
 };
 
 use crate::{Address, Client, Tokens};
@@ -50,6 +50,12 @@ impl Chained for Chain {
     fn blocks(&self, start: u64, end: u64) -> Future<'_, anyhow::Result<Blocks>> {
         Box::pin(self.rpc.blocks(start, end, &self.tokens))
     }
+
+    /// The block after the final one: an index behind it settles at the
+    /// chain's balance.
+    fn line(&self) -> Line {
+        Line::Final
+    }
 }
 
 /// Finds blocks by time through header-only reads.
@@ -82,6 +88,34 @@ impl Balances for Chain {
                 Some(token.mint)
             };
             self.rpc.balance(owner.as_native(), mint.as_ref(), at).await
+        })
+    }
+}
+
+/// Mined by its signature's status (history searched), judged at the
+/// node's finalized slot.
+impl Confirmer for Chain {
+    /// `None` while the finalized slot is below `at`; found only once
+    /// finalized, at or below it.
+    fn confirm<'a>(
+        &'a self,
+        id: &'a TransactionId,
+        at: u64,
+    ) -> Future<'a, anyhow::Result<Option<Confirmed>>> {
+        Box::pin(async move {
+            ensure!(
+                id.network == self.network,
+                "not a transaction of this Solana network"
+            );
+            let position = self.rpc.tips().await?.confirmed;
+            if position < at {
+                return Ok(None);
+            }
+            let found = self.rpc.finalized_in(&id.id).await?;
+            Ok(Some(Confirmed {
+                position,
+                found: found.filter(|slot| *slot <= position),
+            }))
         })
     }
 }

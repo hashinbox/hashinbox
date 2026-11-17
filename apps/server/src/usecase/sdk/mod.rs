@@ -1,11 +1,13 @@
-//! `base`'s store traits (`BlockStore`, `WalletIndexStore`, `InputStore`,
-//! `WalletStore`, `Holdings`) on the models, one file per trait, all on
-//! [`Stores`]. A store only orchestrates; every statement is a model's.
+//! `base`'s store traits (`BlockStore`, `WalletIndexStore`,
+//! `TransactionIndexStore`, `InputStore`, `WalletStore`, `Holdings`) on the
+//! models, one file per trait, all on [`Stores`]. A store only orchestrates;
+//! every statement is a model's.
 
 mod blocks;
 mod holdings;
 mod indexes;
 mod inputs;
+pub(crate) mod transaction_indexes;
 mod wallets;
 
 use std::sync::Arc;
@@ -30,6 +32,7 @@ impl Stores {
         base::Storage {
             blocks: stores.clone(),
             indexes: stores.clone(),
+            transaction_indexes: stores.clone(),
             inputs: stores.clone(),
             wallets: stores.clone(),
             holdings: stores,

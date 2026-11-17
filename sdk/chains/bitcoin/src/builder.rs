@@ -1,10 +1,10 @@
-//! [`Builder`]: every transfer of a Bitcoin builder in one transaction.
+//! [`Builder`]: one Bitcoin transfer in one transaction.
 
 use std::sync::Arc;
 
 use base::{
-    Addressed as _, Asset, Decimal, Future, Input, InputStore, Inputs, Output, Outputs, Reason,
-    Signer, TransactionError, Transactions, Transfer,
+    Addressed as _, Asset, Decimal, Future, Input, InputStore, Inputs, Output, Reason, Signer,
+    TransactionError, Transfer,
 };
 
 use crate::Address;
@@ -13,70 +13,35 @@ use crate::{
     transaction::Transaction as NativeTransaction,
 };
 
-/// Pays every transfer in one transaction: the estimator's cached fee rate,
-/// the pooled coins of every sender largest first, each input
-/// signed by its own key, change back to the default source, else the first
-/// sender, only when it is worth its own output (above dust after paying for
-/// itself); a smaller leftover is fee.
+/// Pays one transfer in one transaction: the estimator's cached fee rate,
+/// the sender's coins largest first, change back to the default source,
+/// else the sender, only when it is worth its own output (above dust after
+/// paying for itself); a smaller leftover is fee.
 pub(crate) struct Builder {
-    /// How long what it signs counts as pending.
-    pub(crate) pending_ttl: std::time::Duration,
     pub(crate) rpc: Client,
     pub(crate) inputs: Arc<dyn InputStore>,
     /// The factory's estimator, whose cached rate prices the fee.
     pub(crate) fees: Arc<Cached>,
     pub(crate) default: Option<Signer>,
-    pub(crate) outputs: Outputs<Address>,
-    /// Each output's own source, in output order.
-    pub(crate) sources: Vec<Option<Signer>>,
 }
 
 impl Builder {
-    /// The distinct sender keys, in transfer order, and the change owner.
-    fn keys(&self) -> Result<(Vec<KeyPair>, Address), TransactionError> {
-        let network = self.rpc.network();
-        let mut keys: Vec<KeyPair> = Vec::new();
-        for source in &self.sources {
-            let signer = source
-                .as_ref()
-                .or(self.default.as_ref())
-                .ok_or_else(|| TransactionError::failed("a transfer has no source"))?;
-            if keys.iter().all(|key| key.address() != &signer.address) {
-                keys.push(KeyPair::from_signer(signer, network)?);
-            }
-        }
-        let change = match &self.default {
-            Some(signer) => KeyPair::from_signer(signer, network)?
-                .native_address()
-                .clone(),
-            None => keys
-                .first()
-                .ok_or_else(|| TransactionError::failed("no transfers to sign"))?
-                .native_address()
-                .clone(),
-        };
-        Ok((keys, change))
-    }
-
-    /// Every unspent coin of every sender, owned by its native address.
-    async fn coins(&self, keys: &[KeyPair]) -> Result<Inputs<Address>, TransactionError> {
-        let addresses: Vec<base::Address> = keys.iter().map(|key| key.address().clone()).collect();
+    /// Every unspent coin of `key`, owned by its native address.
+    async fn coins(&self, key: &KeyPair) -> Result<Inputs<Address>, TransactionError> {
         let found = self
             .inputs
-            .find_unspent(&addresses)
+            .find_unspent(std::slice::from_ref(key.address()))
             .await
             .map_err(TransactionError::unavailable)?;
         let coins: Vec<_> = found
             .into_iter()
-            .filter_map(|input| {
-                let key = keys.iter().find(|key| *key.address() == input.address)?;
-                Some(Input {
-                    coin: input.coin,
-                    address: key.native_address().clone(),
-                    asset: input.asset,
-                    amount: input.amount,
-                    height: input.height,
-                })
+            .filter(|input| input.address == *key.address())
+            .map(|input| Input {
+                coin: input.coin,
+                address: key.native_address().clone(),
+                asset: input.asset,
+                amount: input.amount,
+                height: input.height,
             })
             .collect();
         Ok(coins.into())
@@ -88,64 +53,63 @@ impl base::Builder for Builder {
         self.default = Some(source);
     }
 
-    fn transfer(&mut self, transfer: Transfer) -> Result<(), TransactionError> {
-        let Transfer { to, amount, from } = transfer;
-        let address =
-            Address::parse(&to.value, self.rpc.network()).map_err(TransactionError::failed)?;
-        if *address.address() != to {
-            return Err(TransactionError::failed(
-                "not a canonical address of this Bitcoin network",
-            ));
-        }
-        if amount.to_atomic_u64(0).ok().is_none_or(|value| value == 0) {
-            return Err(TransactionError::failed(
-                "Bitcoin amount must be a positive number of satoshis",
-            ));
-        }
-        self.outputs.push(Output {
-            address,
-            asset: Asset::native(self.rpc.network().into()),
-            amount,
-        });
-        self.sources.push(from);
-        Ok(())
-    }
-
-    fn sign<'b>(self: Box<Self>) -> Future<'b, Result<Transactions, TransactionError>>
+    fn sign<'b>(
+        self: Box<Self>,
+        transfer: Transfer,
+    ) -> Future<'b, Result<base::Transaction, TransactionError>>
     where
         Self: 'b,
     {
         Box::pin(async move {
-            if self.outputs.is_empty() {
-                return Err(TransactionError::failed("no transfers to sign"));
+            let Transfer { to, amount, from } = transfer;
+            let network = self.rpc.network();
+            let address = Address::parse(&to.value, network).map_err(TransactionError::failed)?;
+            if *address.address() != to {
+                return Err(TransactionError::failed(
+                    "not a canonical address of this Bitcoin network",
+                ));
             }
-            let (keys, owner) = self.keys()?;
+            if amount.to_atomic_u64(0).ok().is_none_or(|value| value == 0) {
+                return Err(TransactionError::failed(
+                    "Bitcoin amount must be a positive number of satoshis",
+                ));
+            }
+            let Some(signer) = from.as_ref().or(self.default.as_ref()) else {
+                return Err(TransactionError::failed("the transfer has no source"));
+            };
+            let key = KeyPair::from_signer(signer, network)?;
+            let owner = match &self.default {
+                Some(signer) => KeyPair::from_signer(signer, network)?
+                    .native_address()
+                    .clone(),
+                None => key.native_address().clone(),
+            };
+            let output = Output {
+                address,
+                asset: Asset::native(network.into()),
+                amount,
+            };
             let rate = self.fees.rate().await?;
-            let inputs = self.coins(&keys).await?;
-            let own = owner.script_pubkey();
-            let paid: Vec<_> = self
-                .outputs
-                .iter()
-                .map(|output| output.address.script_pubkey())
-                .collect();
+            let inputs = self.coins(&key).await?;
+            let (own, paid) = (owner.script_pubkey(), output.address.script_pubkey());
             let fee = |kept: &Inputs<Address>, change: bool| {
                 let spent: Vec<_> = kept
                     .iter()
                     .map(|input| input.address.script_pubkey())
                     .collect();
-                let outputs = paid.iter().chain(change.then_some(&own));
+                let outputs = std::iter::once(&paid).chain(change.then_some(&own));
                 Decimal::from(rate.fee(vsize(
                     spent.iter().map(AsRef::as_ref),
                     outputs.map(AsRef::as_ref),
                 )))
             };
-            let requested = self.outputs.total();
+            let requested = output.amount.clone();
             let chosen = inputs
                 .largest_first()
                 .filter(|kept, _| kept.total() < &requested + &fee(kept, false));
             if chosen.total() < &requested + &fee(&chosen, false) {
                 return Err(TransactionError::failed(
-                    "insufficient funds for the transfers and fee",
+                    "insufficient funds for the transfer and fee",
                 )
                 .with_reason(Reason::InsufficientFunds));
             }
@@ -153,17 +117,19 @@ impl base::Builder for Builder {
             let with_change = &requested + &fee(&chosen, true);
             let change = (chosen.total() >= &with_change + &dust).then(|| Output {
                 address: owner.clone(),
-                asset: Asset::native(self.rpc.network().into()),
+                asset: Asset::native(network.into()),
                 amount: chosen.total() - &with_change,
             });
             let mut transaction = NativeTransaction::from_inputs(
                 &chosen,
-                self.outputs.iter().chain(&change),
-                self.rpc.network(),
+                std::iter::once(&output).chain(&change),
+                network,
             )
             .map_err(TransactionError::failed)?;
-            transaction.sign(&keys).map_err(TransactionError::failed)?;
-            Ok(Transactions(vec![transaction.into()]).expiring(self.pending_ttl))
+            transaction
+                .sign(std::slice::from_ref(&key))
+                .map_err(TransactionError::failed)?;
+            Ok(transaction.into())
         })
     }
 }

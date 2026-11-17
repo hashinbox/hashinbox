@@ -57,7 +57,8 @@ decide time), `add/sub/min/max`. Unknown term → whole amount unknown.
 at create. Many sources → one destination (amount per source) or one source → many destinations
 (amount per destination, `This` = that destination); many↔many refused at decide. Amount ≤ 0 or
 unknown → that transfer skipped. Source not keyed or not in `asset` → refusal. One broadcast job per
-sender, transfers in order. Broadcast: sign, then in one write check `spendable@confirmed + takes ≥ 0`
+sender, transfers in order (since 084: one broadcast job per payment, in walk order, all written in the
+round's one write; each payment is checked on its own). Broadcast: sign, then in one write check `spendable@confirmed + takes ≥ 0`
 per index and record pending (`src/models/transaction.rs:237-278`); short → job **failed
 `insufficient-funds`**, nothing recorded (`src/usecase/workers/broadcast.rs:226`).
 

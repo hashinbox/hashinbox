@@ -17,8 +17,6 @@ use crate::{KeyPair, Network as Native, fee_cache::Cached, rpc::Client};
 #[derive(Clone)]
 pub struct WalletFactory {
     pub(crate) rpc: Client,
-    /// How long a signed transaction counts as pending.
-    pub(crate) pending_ttl: std::time::Duration,
     pub(crate) inputs: Arc<dyn InputStore>,
     pub(crate) address_type: AddressType,
     pub(crate) fees: Arc<Cached>,
@@ -75,13 +73,10 @@ impl base::WalletFactory for WalletFactory {
             ));
         }
         Ok(Box::new(Builder {
-            pending_ttl: self.pending_ttl,
             rpc: self.rpc.clone(),
             inputs: Arc::clone(&self.inputs),
             fees: Arc::clone(&self.fees),
             default: None,
-            outputs: base::Outputs::default(),
-            sources: Vec::new(),
         }))
     }
 

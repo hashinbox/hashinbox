@@ -1,10 +1,11 @@
-//! A broadcast whose answer is lost: the job sends the same bytes again,
-//! the node refuses them as already known, and the send still counts once.
+//! A broadcast whose answer is lost: the job counts it sent and sends the
+//! same bytes again at its next check, the node refuses them as already
+//! known, and the send still counts once.
 
 use base::testing::{Caps, TestChain};
 use rpc::testing::Fault;
 
-use super::{App, funded, quarter, settle, succeeded, text, unit, until};
+use super::{App, accepted, funded, quarter, settle, succeeded, text, unit, until};
 
 pub(super) const NEEDS: Caps = Caps::NONE;
 
@@ -19,10 +20,17 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         .api
         .send(&wallet, "native", &other.address, "0.25")
         .await;
-    let done = succeeded(app, &job).await;
-    assert_eq!(done["attempts"], 2, "{done}");
-    assert_eq!(node.faults().calls(T::SUBMIT), 2);
+    accepted(app, &job).await;
+    until("the same bytes again at the next check", || async {
+        let calls = node.faults().calls(T::SUBMIT);
+        if calls >= 2 {
+            return Ok(());
+        }
+        Err(calls.to_string())
+    })
+    .await;
     settle(chain);
+    succeeded(app, &job).await;
     let legs = until("the send to be mined", || async {
         let legs = app.api.legs(&wallet, "native").await;
         let spent: Vec<_> = legs

@@ -108,7 +108,7 @@ impl Api {
         to: &str,
         amount: &str,
     ) -> String {
-        let body = json!({"asset": asset, "transfers": [{"destination": to, "amount": amount}]});
+        let body = json!({"asset": asset, "destination": to, "amount": amount});
         let uri = format!("/v1/wallets/{}/transactions", wallet.id);
         let accepted = self.post(&uri, body, StatusCode::ACCEPTED).await;
         accepted["job"].as_str().unwrap_or_default().to_owned()

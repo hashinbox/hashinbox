@@ -107,7 +107,8 @@ A chain can read a balance when its service has `Balances` (§11).
 `T`). A start below `P` is refused (400): a new wallet's old coins cannot be
 found.
 
-**With `Balances`** (`Indexer::watch`):
+**With `Balances`** (a `WalletIndexTarget` on a chain whose line is
+`Line::Final`, kept by `WalletIndexStore::insert`; design 085):
 
 - `requested_from` = the asked start (absent: `T`). It is information.
 - `birthday` = `F`; state `indexing`; `indexed_at` unset.
@@ -193,11 +194,12 @@ Each step, once `fetch` has the tips and before it reads blocks
    is below `P` (`IndexStore::restart(index, P)`, one write each):
    `birthday = P`, `indexed_at = NULL`, `indexing`; the same write archives
    and writes off its coins (§10); `requested_from` and its legs stay. Its
-   pending sends (a leg of it spent, burned or a fee) are forgotten at once,
-   as the expire job forgets expired ones (`transaction::db::forget_sent`
-   through `delete_pending`, `apps/server/src/models/transaction.rs`). One
-   mined later, in a block we read, comes back like any other mined
-   transaction; one mined inside the gap is never seen.
+   pending sends (a leg of it spent, burned or a fee) are forgotten at once
+   (`transaction::db::find_sent(index)`, then
+   `usecase::sdk::transaction_indexes::forget(ids, Why::Jump)`, which deletes them and
+   keeps them in `transaction_forgotten`, 084). One mined later, in a block we read,
+   comes back like any other mined transaction; one mined inside the gap is
+   never seen.
 
 Then `fetch`, after the settles and jumps:
 
@@ -263,8 +265,9 @@ For each `indexing` index whose next is at or below `F`, at most 8 a step
    - insert the `adjustment` on `S`, its totals carried on; already kept:
      `false`;
    - `birthday = S`, `indexed_at = S`: the index continues from `S + 1`;
-   - an index that had started (a jump, not a new index) forgets its
-     pending sends, as §8 does.
+   - its pending sends stay: since 085 each one's own transaction index
+     settles it (the chain's `Confirmer`), where before an index that had
+     started forgot them, as §8 does.
 
 `None`, a failed read, no block at `S`, or `false`: the index stays as it
 is and is tried next step. A failure is counted in `Stats::failures`, never
@@ -407,8 +410,12 @@ The hourly prune job (`apps/server/src/usecase/workers/prune.rs`,
    transactions. Final now.
 2. **Live blocks below the line that nothing names:** no leg, no
    transaction, no `wallet_index.indexed_at`, and not the network's last
-   live block. First set `parent = NULL` on their kept children
-   (`block.parent` is a foreign key), then delete them.
+   live block. Delete them.
+
+Both are one `DELETE FROM block` (design 085): the schema's foreign keys
+take a deleted block's legs and transactions with it (`ON DELETE
+CASCADE`) and set its kept children's `parent` NULL (`ON DELETE SET
+NULL`).
 
 Kept forever: every live leg (the history, archived or not), its block and
 its transaction.
@@ -499,7 +506,8 @@ Each shipped alone and needed only the ones before it.
 Iteration 6 proves: a new watch settles at `S ≥ F` and reads `S + 1` in
 the same step, with no legs before `S`; an index behind `F` after an outage
 keeps its old legs and gets one adjustment of the chain's balance less its
-total, its pending send forgotten; a read not answered or failed leaves the
+total, its pending send forgotten (since 085: left to its transaction
+index); a read not answered or failed leaves the
 index unread until the next step; a settled index is not settled again as
 `F` moves; the run starts from an index just settled; a reorg taking back
 an adjustment's block settles again, one live adjustment; a manual
@@ -518,7 +526,7 @@ balance; a settle keeps its block when it is not kept.
 | Delete the tail legs at a jump? | No: the last-block check proves them (§8 step 2). |
 | `archived_at` on Solana and Ethereum? | No: the balance read makes them exact. |
 | Ether sent by contracts (internal transfers)? | Not supported. No traces, no scheduled re-reads; a manual reconcile (§9.1) corrects one index. |
-| Look up what happened inside a gap (our sends by txid, coins by `gettxout`)? | No lookups. The gap is the user's risk; a jump or a settle forgets the index's pending sends (§8, §9). On Bitcoin a send mined inside the gap leaves its change coin unseen, like any gap receive. |
+| Look up what happened inside a gap (our sends by txid, coins by `gettxout`)? | No lookups for wallets. The gap is the user's risk; a jump forgets the index's pending sends (§8). A settle no longer does (085): each pending send's transaction index asks the chain by txid (`Confirmer`). On Bitcoin a send mined inside the gap leaves its change coin unseen, like any gap receive. |
 | Alts: a `max_depth` and a `reconciling` state, the totals above the anchor carried? | No: the line is `F`, an index behind it settles at `S` and reads on from `S + 1`, so nothing above `S` exists to carry and its balance is never unknown once settled. |
 | Alts: an indexer more than `T − F` behind (Solana about 13 s, Ethereum about 64–96 blocks). | Accepted: its wallets settle, one adjustment each instead of the gap's entries; balances stay right. |
 | Bitcoin `max_depth` 4,320: an outage over 30 days writes off every coin. | Accepted; raise per deployment if needed. |

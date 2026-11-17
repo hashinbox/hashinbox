@@ -90,7 +90,7 @@ export interface paths {
         };
         /**
          * Read a queued job
-         * @description The job's outcome, what it was given and what its worker has done; for a broadcast, how many transactions it signed and the nodes accepted.
+         * @description The job's outcome, what it was given and what its worker has done; for a broadcast, the transaction it recorded and whether it was sent.
          */
         get: operations["read_job"];
         put?: never;
@@ -563,10 +563,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Enqueue an ordered send from a wallet
-         * @description Enqueues one send job of `asset` from the keyed wallet: its transfers are signed up front and broadcast in order. A 202 response means queued, not submitted: `GET /v1/jobs/{id}` reports the outcome. Indexing records the transactions once they are mined, for the assets the wallet is watched in. A watch-only wallet answers 422.
+         * Enqueue a payment from a wallet
+         * @description Enqueues one send job of `asset` from the keyed wallet: one payment, signed as one transaction and broadcast. Several payments are several requests; a wallet's sends run one at a time, in order, and each fails on its own. A 202 response means queued, not submitted: `GET /v1/jobs/{id}` reports the outcome. Indexing records the transaction once it is mined, for the assets the wallet is watched in. A watch-only wallet answers 422.
          */
-        post: operations["send_transfers"];
+        post: operations["send_payment"];
         delete?: never;
         options?: never;
         head?: never;
@@ -797,16 +797,8 @@ export interface components {
              */
             start?: number;
         };
-        /**
-         * @description The body of every error response: `message` is always present, the
-         *     failing transfer's index only when one transfer of a send failed.
-         */
+        /** @description The body of every error response. */
         ErrorBody: {
-            /**
-             * @description Zero-based index of the transfer that failed. Present only when one
-             *     transfer of a send failed.
-             */
-            failed_index?: number;
             /** @description What went wrong. */
             message: string;
         };
@@ -817,8 +809,8 @@ export interface components {
         IndexState: "indexing" | "paused" | "no_data";
         /** @description One job of the queue. */
         Job: {
-            /** @description How many of them, in broadcast order, the nodes accepted. */
-            accepted: number;
+            /** @description Whether it was sent: a node accepted it, or may hold it (false for other kinds). */
+            accepted: boolean;
             /**
              * Format: int32
              * @description Executions started since it was last fresh.
@@ -838,7 +830,7 @@ export interface components {
             id: string;
             /** @description What it was given. */
             input: Record<string, never>;
-            /** @description The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`, `prune`). */
+            /** @description The job kind: its worker (`index`, `triggers`, `broadcast`, `prune`). */
             kind: string;
             /** @description What its worker has done so far; always present. */
             progress: Record<string, never> | null;
@@ -852,12 +844,15 @@ export interface components {
              * @description Not started before this, Unix ms: the next run of a pending job.
              */
             run_at: number;
-            /** @description A broadcast's transactions signed (0 for other kinds). */
-            signed: number;
             /** @description Where it is. */
             state: components["schemas"]["JobState"];
             /** @description What it locks: jobs whose topics conflict run one at a time, in line order. */
             topic: string;
+            /**
+             * @description A broadcast's transaction (txid), once recorded; always present,
+             *     null before and for other kinds.
+             */
+            txid: string | null;
             /**
              * Format: int64
              * @description When it was last written, Unix ms: started, retried or finished.
@@ -1104,11 +1099,6 @@ export interface components {
              *     null before the first.
              */
             tip: number | null;
-            /**
-             * Format: int64
-             * @description Watches added.
-             */
-            watched: number;
         };
         /** @description Every stored network. */
         NetworkList: {
@@ -1238,14 +1228,16 @@ export interface components {
          */
         RunOutcome: "pending" | "succeeded" | "failed" | "mixed";
         /**
-         * @description `POST /v1/wallets/{id}/transactions` body: an ordered send from the
-         *     path's wallet in one asset.
+         * @description `POST /v1/wallets/{id}/transactions` body: one payment from the path's
+         *     wallet in one asset.
          */
         Send: {
+            /** @description Exact positive decimal in display units. */
+            amount: string;
             /** @description An asset id of the wallet's network; default `native`. */
             asset?: string;
-            /** @description The transfers, in execution order. */
-            transfers: components["schemas"]["TransferItem"][];
+            /** @description Recipient address text, as the wallet's chain writes it. */
+            destination: string;
         };
         /** @description An enqueued send. */
         SendAccepted: {
@@ -1364,11 +1356,6 @@ export interface components {
             /** @description Its block; null while pending. */
             block?: string | null;
             chain: string;
-            /**
-             * Format: int64
-             * @description Unix ms it stops holding funds; null once mined.
-             */
-            expires_at?: number | null;
             /** @description `{chain}.{network}.{txid}`. */
             id: string;
             /** @description Its kept legs, in order. */
@@ -1388,7 +1375,8 @@ export interface components {
             reason?: string | null;
             /**
              * Format: int64
-             * @description Unix ms it was recorded as pending; null once mined.
+             * @description Unix ms it was sent: a node accepted it, or may hold it; null while
+             *     recorded but not yet sent, and once mined.
              */
             sent_at?: number | null;
             /**
@@ -1398,13 +1386,6 @@ export interface components {
             state: number;
             /** @description Chain-native transaction id. */
             txid: string;
-        };
-        /** @description One ordered transfer of a send. */
-        TransferItem: {
-            /** @description Exact positive decimal in display units. */
-            amount: string;
-            /** @description Recipient address text, as the wallet's chain writes it. */
-            destination: string;
         };
         /** @description One `trigger` row; the API shows it as is. */
         Trigger: {
@@ -1751,7 +1732,7 @@ export interface operations {
                 chain?: string;
                 /** @description Only jobs of this network of `chain`. */
                 network?: string;
-                /** @description Only this kind (`index`, `expire`, `triggers`, `broadcast`, `prune`). */
+                /** @description Only this kind (`index`, `triggers`, `broadcast`, `prune`). */
                 kind?: string;
                 /** @description Only jobs in this state; absent, every state but `idle`. */
                 state?: components["schemas"]["JobState"];
@@ -3677,7 +3658,7 @@ export interface operations {
             };
         };
     };
-    send_transfers: {
+    send_payment: {
         parameters: {
             query?: never;
             header?: never;

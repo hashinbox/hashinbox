@@ -1,365 +1,244 @@
 # 084: Pending transactions
 
-Status: proposed. Replaces the expiry of 066.
+Status: built: no clock, the Ethereum nonce, one payment per job, the
+broadcast job owning its payment. Next: the job watches its payment's
+transaction index (085), and stuck payments are bumped. Replaces the
+expiry of 066.
 
-066 holds a sent transaction's funds until it is mined **or its time is
+066 held a sent transaction's funds until it was mined **or its time was
 up**. A clock cannot tell that a transaction is dead: one past its expiry
-may still be in a mempool and mine later, after its funds and its nonce
-were given to another send. This design keeps a pending transaction until
-the chain proves it can never mine, sends it again while it waits, and
-raises its fee when it is stuck.
+may still sit in a mempool and mine later, after its funds and its nonce
+went to another send. Here a payment is held until it is in a final block,
+or provably can never land. Before it is broadcast it is watched like a
+wallet (a transaction index, 085); its broadcast job only reads that
+index, and when the payment is still not in any of the blocks read since
+it was sent, the job raises its fee, within limits.
 
-## Use cases
+## Decided
 
-1. **No silent loss.** X pays Bob, waits through a gas spike, and is still
-   unmined after an hour. The next send does not take X's nonce and
-   replace it: X holds its nonce until it is mined or dead.
-2. **No double pay.** A send that looks gone is not gone. Nothing frees its
-   funds while it can still mine, so a retry by the user is refused as
-   short instead of paying twice.
-3. **Stuck sends get mined.** A send whose fee fell behind is sent again in
-   its own slot at today's fee, up to a cap.
-4. **Lost sends come back.** A send a node accepted and later dropped
-   (full pool, restart) is sent again with the same bytes.
-5. **Dead sends free their funds.** A send another transaction has
-   displaced stops holding its funds as soon as the chain shows it.
-6. **Back-to-back Ethereum sends do not clash.** Behind a load-balanced
-   node, a second send no longer takes the nonce of the first.
-
-## What stays from 066
-
-- **Recorded is spent.** A transaction is recorded as pending before it is
-  broadcast, and its outgoing legs count as spent from then on. Its funds
-  are held before its bytes leave, and a crash mid-broadcast loses
-  nothing.
-- **Derived, never marked.** Spent coins and balances are read from legs.
-  Deleting a pending row frees everything it held at once.
-- **Built once.** A rerun sends the recorded bytes again and never signs
-  again: a second signing can be a second payment.
-- **One sender at a time.** A broadcast job locks `chain:network.sender`;
-  a triggers job locks its whole network (067). Coin selection and nonces
-  see only what is recorded.
-- **Refused means every node refused.** One node accepting is success; a
-  node that timed out may have accepted, so that is retried with the same
-  bytes (`fan_out`, `apps/server/src/usecase/transport.rs`).
-
-## What changes
-
-- **A pending transaction lives until it is mined or proven dead.** No
-  clock frees it. `Transaction::expires`, `Transactions::expiring`,
-  `pending_ttl_ms` and `transaction.expires_at` go, and so does the
-  `expire` job.
-- **Dead is proven by the chain** (below), never guessed from age.
-- **While pending, it is sent again** with the same bytes, every walk.
-- **When it is stuck, its fee is raised** in its own slot (the same nonce,
-  the same inputs), automatically, up to a cap. Chains that cannot replace
-  only send again.
-- **One row per slot.** A raise swaps the row; `origin` keeps the first
-  version's id, so funds stay held once and a payment stays traceable.
-- **An Ethereum nonce counts our own pending sends**, not only the node's
-  mempool.
-
-## Why a clock is wrong
-
-10:00, X pays Bob 1 ETH at nonce 15; a node accepts it; gas spikes and X
-waits. 11:00, the expire job deletes X: the books show 1 ETH free and
-nothing pending. Then, each wrong:
-
-1. Y pays Carol at nonce 15 with today's higher fee and replaces X. Bob is
-   never paid; X's job says done.
-2. Y's fee is not 10% higher: the node refuses it ("replacement
-   underpriced"). Carol is not paid either.
-3. The user sees X gone and pays Bob again. Gas drops, X mines first, the
-   retry takes nonce 16: Bob gets 2 ETH.
-
-Bitcoin makes it worse: a transaction stays valid for as long as its
-inputs are unspent. A node drops it after 14 days (`mempoolexpiry`) or
-sooner when its pool is full, but anyone holding its bytes can send it
-again, and it mines.
-
-## Dead, per chain
-
-A pending transaction is **dead** when the chain proves it can never mine.
-Only then is it forgotten.
-
-| Chain | Dead when | Read |
+| Question | Decision | Why |
 | --- | --- | --- |
-| Ethereum | its sender's nonce count at block `at` is above its nonce | `eth_getTransactionCount(from, at)` |
-| Bitcoin | a coin it spends is spent by another transaction in a live block | the server's legs, no node |
-| Solana | its signature has no status and its blockhash is no longer valid at `finalized` | `getSignatureStatuses` (with history), `isBlockhashValid` |
+| When does a pending transaction stop holding its funds? | When it is in a final block, or provably can never land. Never by age. | A clock frees funds and nonces of transactions that can still mine: silent loss, refused sends, double pay. A Bitcoin transaction stays valid for as long as its coins are unspent. |
+| How many payments per broadcast job? | One job = one payment = one transaction, on every chain. Several payments are several jobs; the sender's topic runs them in order. | A job of several transactions failed as a whole while some were already sent; a retry paid those twice. Bitcoin multi-recipient batching is dropped for now and may come back as its own feature. |
+| Who knows whether a payment is mined? | Its transaction index (085): made before the broadcast, read forward by the indexer with every block, `found` set on the block that holds it, its gaps closed by the chain (`Confirmer`) or given up (Bitcoin). | The same rules as a wallet. The index says exactly how far we have looked, so nothing is judged on blocks not read yet. |
+| Who watches a sent payment? | Its own broadcast job, which only reads the transaction index. No separate walker. | One job is one payment's whole story; nothing races it; it never gives up on timeouts. |
+| How is "dead" known? | Only by the transaction's own deadline: Solana's blockhash expiry, read against the index's indexed height. Ethereum and Bitcoin transactions never die on their own; they are bumped instead. | With keys used only by this server, nothing else can spend a payment's coins or nonce; our own earlier versions are watched by their own indexes. |
+| When is a payment bumped? | When its index has read `bump_after` blocks past `broadcasted_at` and it is in none of them; at most `max_bumps` times. | Counted in blocks the index actually read, a stuck or lagging indexer never triggers a bump: it has not read those blocks. |
+| How is a bump signed? | The same stateful builder as a first send: `from_existing(current)`, `set_fee(level)`, `bump_fee()`, `sign()`. Its saved state is the signed transaction the server keeps. | One fluent API for sending and bumping; each chain keeps its replacement rule and fee cap. |
+| Keys used outside this server | Not supported (like history gaps, 083). Such a payment may end stuck at its bump limit, its funds held. | Detecting it needs per-chain conflict bookkeeping for a case we do not support. |
+| The Ethereum nonce | The higher of the node's pending count and one above our highest pending nonce. | A load-balanced node's mempool may miss our last send; our own records do not. |
+| What a forgotten send leaves | A row in `transaction_forgotten` (reason, bytes, legs); the `transaction` row and its legs go. | A soft delete would need a filter in every read; one missed filter brings a dead send back. |
 
-- **`at` is the indexed tip of the index it spends from** (its spent leg's
-  wallet index). A transaction of ours mined at or below `at` was read
-  there, so its row is mined, not pending; a row still pending whose nonce
-  is used at `at` was displaced, or mined inside a gap (083), and in both
-  cases is no longer pending. Above `at` nothing is judged, so our own
-  transaction mined in a block not yet read is never taken for dead.
-- **An index that is not `indexing`** (paused, no data) has no
-  `at`: its pending sends are not judged and keep holding.
-- **Bitcoin needs no node read.** A wallet spends only coins of live mined
-  blocks (`find_unspent`), never pending change, so a pending transaction
-  dies only when one of its own coins is spent elsewhere, and the legs
-  show that.
-- **Solana:** once the blockhash is invalid at the finalized bank, no later
-  block can take the transaction. Any block that has it must lie at or
-  below the finalized one, so a signature with no status is final.
-- A failed send again never decides anything: only the dead check forgets.
+## The broadcast job
 
-## Replace, per chain
+```
+record + watch ─► send ─► check ─┬─ found, final        → done
+                           ▲     ├─ Solana, expired     → forgotten (dead), failed
+                           │     ├─ given up / gone     → failed (forgotten)
+                           │     ├─ bump due            → bump, watch the new version
+                           └─────┴─ otherwise           → send the same bytes again
+```
 
-A **replacement** is the same payment, signed again in the same **slot**
-with a higher fee. Exactly one version of a slot can mine; the rest are
-then dead.
+Input: `{chain, network, address, asset, to, amount, fee}` (`fee` a
+`FeeLevel`, `Normal` when absent). State: the txids of every version it
+sent (the last is current), and how many bumps.
 
-| Chain | Slot | Rule for a replacement | Cap |
-| --- | --- | --- | --- |
-| Ethereum | sender's nonce | `maxFeePerGas` and `maxPriorityFeePerGas` each at least 10% higher | `FeeLimits` (existing) |
-| Bitcoin | its inputs | a higher fee rate and a higher total fee (by 1 sat/vB × size), taken from the change | `max_fee_rate` (new) |
-| Solana | none | none: a transaction dies with its blockhash in about 1–2 minutes | — |
+1. **Sign** the payment, once:
 
-- **Ethereum:** the gas limit stays; each fee is the higher of today's
-  estimate and the old one plus 10%. No gain when today's estimate is not
-  above the old fees. Some L2s have a private sequencer and no public
-  mempool: a send is taken quickly or refused, and there is nothing to
-  replace.
-- **Bitcoin:** the inputs and payment outputs stay; the change shrinks by
-  the extra fee. Our sends already signal RBF
-  (`Sequence::ENABLE_RBF_NO_LOCKTIME`). No change output, or a change that
-  would fall below dust: no replacement.
-- **Solana** has no replacement. A stuck send dies on its own; the next
-  triggers round decides again from the balance and sends anew.
+   ```rust
+   let mut builder = wallet.transaction(&asset)?;
+   builder.from_transfer(transfer)?;
+   builder.set_fee(intent.fee);
+   let signed = builder.sign().await?;
+   let index = TransactionIndexTarget::new(chain, signed.id.clone()) // + with_expires_height on Solana
+       .index()
+       .await?;                                                       // broadcasted_at: the tip now
+   ```
 
-## Design
+2. **Record and watch**, one write: the funds check (what the sender holds
+   beyond what is in flight), the pending row and its legs (its coins and
+   funds are held from now on), its `transaction_index` row, the job's
+   state. Short: rolled back, the job fails `insufficient-funds`.
+3. **Send** the bytes to every node, then one write:
+   - accepted, or a transient failure (a node may hold it): `sent_at` set;
+     the job checks from now on;
+   - refused by every node: forgotten (`refused`), its index deleted, the
+     job fails.
+4. **Check**, every `Tracking::check`, reading only the job's transaction
+   indexes (one per version):
+   - **a version `found`** at or below the final block: done. If it is not
+     the current one, the current pending row is forgotten (`replaced`).
+     Found above the final block: check again;
+   - **Solana**, the current index read past its `expires_height`, not
+     found: forgotten (`dead`), failed;
+   - **the current index given up** (`no_data`, a Bitcoin jump) or gone:
+     failed `forgotten`;
+   - **a bump due** (below): bump;
+   - **otherwise**: send the same bytes again; check again.
 
-### `base` (needs approval)
+   When the job ends, its transaction indexes are deleted.
 
-**`Broadcaster::alive`**, required on every chain:
+The send is between two writes, not inside one: a rollback cannot take
+bytes back from a node, and a crash with the write still open would lose
+the record of a payment that may already be out. Recording first keeps
+it; a rerun sends the same bytes again.
+
+Between checks the job blocks nobody (`blocks`, 067), so the sender's next
+payment runs. A check holds the sender's topic while it runs.
+
+## Bump
+
+Due when the current version is in none of the blocks its index read, the
+index has read at least `bump_after` blocks past its `broadcasted_at`, and
+fewer than `max_bumps` were made. A lagging or stuck indexer has not read
+those blocks, so it never makes a bump due.
 
 ```rust
-pub trait Broadcaster: Send + Sync {
-    fn broadcast<'a>(&'a self, transaction: &'a Transaction) -> Future<'a, Result<(), Error>>;
-
-    /// `false` only when the chain proves pending `transaction` never
-    /// mines, judged at block `at`, the indexed tip of the index it spends
-    /// from. `true` when it cannot tell.
-    fn alive<'a>(&'a self, transaction: &'a Transaction, at: u64) -> Future<'a, anyhow::Result<bool>>;
+let mut builder = wallet.transaction(&asset)?;
+builder.from_existing(&current)?;
+builder.set_fee(intent.fee);
+builder.bump_fee();
+match builder.sign().await {
+    Ok(next) => replace(current, next), // below
+    Err(error) if error.kind == FeeCap => resend(current), // reason: stuck
+    Err(error) => …,
 }
 ```
 
-Bitcoin answers `true`: its rule is the server's (legs).
+- **Replace**, one write: the current pending row and its legs out, the
+  new version's in (the funds are held once); the new version's
+  `transaction_index` (born at the tip now); its txid appended to the
+  job's state. Then the new version is sent. Refused by every node: the
+  write is undone (the old version stays current, the new index goes).
+- **The old version's index stays**: whichever version lands is found,
+  and the payment is done.
+- **At the cap** (`FeeCap`), or `max_bumps` reached: the same bytes are
+  sent again, and the job's reason says `stuck`.
+- **A chain that cannot replace** (`from_existing` unsupported, Solana):
+  the same bytes are sent again; a Solana payment ends by its expiry.
+- Signed under the job's sender topic, so no other payment of the sender
+  signs meanwhile.
 
-**`Replace`**, an optional capability, as `Balances` is (083):
+### The builder keeps its state
+
+A builder holds what it signs: the payment, the slot (the coins, or the
+nonce) and the fee. Its saved form is the signed transaction itself,
+which the server already keeps (`bytes` and legs); `from_existing` loads a
+builder back from it.
 
 ```rust
-pub trait Replace: Networked + Send + Sync {
-    /// `transaction` signed again in its slot by `wallet` at today's fee;
-    /// `None` when nothing is gained or the fee is above the cap.
-    fn replace<'a>(
-        &'a self,
-        wallet: &'a dyn Wallet,
-        transaction: &'a Transaction,
-    ) -> Future<'a, Result<Option<Transaction>, Error>>;
+/// How fast a payment should land; each chain maps it to its own fee.
+pub enum FeeLevel { Low, Normal, High }
+
+pub trait Builder: Send {
+    fn with_default_source(&mut self, source: Signer);
+    /// A new payment; its slot (coins or nonce) is picked when signing.
+    fn from_transfer(&mut self, transfer: Transfer) -> Result<(), Error>;
+    /// Continues `signed`, one this wallet signed: its slot, payment and
+    /// fee. Default: unsupported (Solana).
+    fn from_existing(&mut self, signed: &Transaction) -> Result<(), Error>;
+    /// Today's estimate at `level`. Default: `Normal`.
+    fn set_fee(&mut self, level: FeeLevel);
+    /// After `from_existing`: enough to replace it: today's estimate at the
+    /// level set, and at least the chain's minimum step above its fee.
+    fn bump_fee(&mut self);
+    /// Signs. Above the chain's fee cap: an error of kind `FeeCap`.
+    fn sign(&self) -> Future<'_, Result<Transaction, Error>>;
 }
 
-pub struct Service {
-    // ...
-    /// Raises a stuck transaction's fee in its slot; `None` where the chain
-    /// cannot.
-    pub replace: Option<Arc<dyn Replace>>,
+/// From the chain's config.
+pub struct Tracking {
+    /// How often a broadcast job checks.
+    pub check: Duration,
+    /// Blocks read past `broadcasted_at`, not found, before a bump.
+    pub bump_after: u64,
+    pub max_bumps: u32,
 }
 ```
 
-It reads what it needs from the transaction's bytes (the Ethereum fields;
-the Bitcoin inputs and outputs) and legs (the spent coins' amounts).
+`set_fee` takes a level, not a number, and `bump_fee` takes nothing: each
+chain maps the level to its own fee and keeps its replacement rule and
+cap. A signed transaction does not carry its level, so the job sets it
+again from its input before `bump_fee`.
 
-**`Storage::pending`**, for the Ethereum nonce:
+## Per chain
 
-```rust
-pub trait PendingStore: Send + Sync {
-    /// `sender`'s pending transactions, as recorded.
-    fn sent<'a>(&'a self, sender: &'a Address) -> Future<'a, anyhow::Result<Vec<Transaction>>>;
-}
+| | `expires_height` | `from_existing` | `bump_fee` step | Fee cap | `Tracking` (`check` / `bump_after` / `max_bumps`) |
+| --- | --- | --- | --- | --- | --- |
+| Bitcoin | `None` | the coins from its spent legs, the payment from its outputs | a higher fee rate and a higher total fee (1 sat/vB × size); the change pays it | `max_fee_rate` (new setting) | 60 s / 6 blocks / 5 |
+| Ethereum | `None` | the nonce, recipient and amount from its bytes | `maxFeePerGas` and `maxPriorityFeePerGas` each at least 10% higher | `FeeLimits` | 30 s / 50 blocks / 5 |
+| Solana | `lastValidBlockHeight` from `getLatestBlockhash` | unsupported (the default) | — | — | 10 s / — / 0 |
 
-pub struct Storage {
-    // ...
-    pub pending: Arc<dyn PendingStore>,
-}
-```
+A chain sets `expires_height` when it signs, maps `FeeLevel`, and
+implements `from_existing` and its `bump_fee` step if it can replace.
+Everything else is `sdk/base` and the server, the same for all.
 
-The server builds every chain's service through `Storage`, so an
-Ethereum-only port could not reach the builder; this one is generic, and
-only Ethereum reads it.
+## Schema
 
-**`Transaction::expires` and `Transactions::expiring` go.** The caller's
-duties on `Broadcaster` become:
+Built:
 
-1. record a transaction (its legs) before broadcasting it, and count its
-   outgoing legs as spent from then on;
-2. build, record and broadcast a sender's transactions one at a time;
-3. on `Rejected` or `Expired` from a broadcast, forget it; on a transient
-   error, keep it and send the same bytes again, never building anew;
-4. forget a pending transaction only when `alive` says `false`.
+- `"transaction"`: `expires_at` dropped; `sent_at` is when a node may hold
+  it (accepted, or a transient failure), NULL while recorded and not sent,
+  and once mined.
+- `transaction_forgotten (id, chain, network, txid, reason, forgotten_at,
+  bytes, legs)`: every forgotten pending transaction; reasons `refused`,
+  `dead`, `jump`, and next `replaced`.
+- `docs/design/084-migrate-1.sql`; not applied to any real database.
 
-### Chains
+From 085: `transaction_index (transaction, broadcasted_at, indexed_at,
+found, expires_height, state, reason)`.
 
-- **Ethereum:**
-  - The builder's first nonce for a sender is the higher of
-    `eth_getTransactionCount(pending)` and one above the highest nonce of
-    `Storage::pending.sent(sender)` (decoded from their bytes).
-  - `alive` per the table.
-  - `Replace` per the table.
-  - Settings: `bump_after_ms` (600,000) replaces `pending_ttl_ms`.
-- **Bitcoin:**
-  - `alive` is `true`.
-  - `Replace` per the table.
-  - Settings: `bump_after_ms` (3,600,000) and `max_fee_rate` replace
-    `pending_ttl_ms`.
-- **Solana:**
-  - `alive` per the table.
-  - No `Replace`.
-  - `pending_ttl_ms` goes; a send past its blockhash still fails to
-    broadcast as `Expired` and is forgotten then.
+## API
 
-No stored network settings set `pending_ttl_ms` today, so removing it
-breaks no row (`deny_unknown_fields`).
-
-### Server
-
-#### Schema
-
-- `"transaction"`:
-  - gains `origin TEXT`, the id of the first version of its slot: its own
-    id when recorded, kept by a replacement, and kept when it is mined;
-  - drops `expires_at`;
-  - its CHECK becomes `block IS NULL OR sent_at IS NULL`;
-  - `CREATE INDEX transaction_origin ON "transaction" (origin)`.
-- `sent_at` is when the current version was sent: the bump clock.
-- Migration `084-migrate.sql`: rebuild `"transaction"` (SQLite cannot drop
-  a column under a CHECK), with `origin = id` for pending rows.
-
-#### Models (`transaction::db`)
-
-- `find_pending(network)`: every pending row with the indexed tip of the
-  index it spends from.
-- `find_dead_by_coin(network)`: pending rows with a spent coin that a
-  `Spent` leg of another transaction consumes in a live block.
-- `get_by_origin(origin)`: the current version of a slot.
-- `swap(old, new)`: in one write, if `old` is still pending, deletes it
-  and its legs and keeps `new` with `old`'s origin; else nothing.
-- `upsert` (mined) keeps a stored `origin`.
-- `expire` goes. `delete_pending` (refused, forgotten) stays.
-
-#### The broadcast job
-
-- It records, then broadcasts, as now.
-- It looks up each recorded transaction by `origin`, not `id`, so a
-  version swapped in by a raise is still found.
-- "Forgotten meanwhile" now means dead: it fails `dead`, not
-  `outcome-unknown`.
-
-#### The `pending` job (replaces `expire`)
-
-One per indexed network, every 60 s; topic `pending:chain:network`, which
-conflicts with nothing. For each pending row whose index is `indexing`:
-
-1. **Dead?** By `find_dead_by_coin`, or `alive(tx, at) == false`: forget it
-   (`delete_pending`).
-2. **Stuck?** Sent at least `bump_after_ms` ago, and the network has
-   `Replace`: enqueue a `bump` job for its origin (unique per origin).
-3. **Otherwise:** send the same bytes again; the answer is ignored.
-
-It needs no sender lock: forgetting is one DB write, and the same bytes
-again conflict with nothing. A send that builds meanwhile only misses
-funds freed a moment later. An Ethereum nonce stays right: a dead
-transaction's nonce is already used on the chain, so the node's count is
-above it anyway.
-
-#### The `bump` job
-
-Input: the slot's origin. Topic: `chain:network.sender`, as broadcast, so
-it never runs beside a send of its sender or a triggers round. State: the
-replacement, once signed.
-
-1. **Sign** (first run only): load the current version by origin; mined or
-   gone: done. `Replace::replace` gives `None`: done. Check that its
-   extra fee fits what its sender holds beyond what is in flight; short:
-   done. Save the replacement as the job's state.
-2. **Broadcast** it.
-   - Refused by every node: nothing changes; the old version stays.
-   - Transient: retry with the same bytes.
-3. **Accepted:** `swap(old, new)`. If the old version was mined
-   meanwhile, nothing is swapped and the new one dies with its slot.
-
-The replacement is recorded only after a node accepted it. Until then the
-old row holds the slot's funds, and the job's lock keeps every other send
-of its sender out, so the higher fee cannot be spent twice. A crash after
-the broadcast reruns from the saved state: the same bytes again, then the
-swap.
-
-#### Topics
-
-| Job | Topic | Does |
-| --- | --- | --- |
-| `triggers` | `chain:network` | decide; start broadcast jobs (068) |
-| `broadcast` | `chain:network.sender` | sign, check and record, broadcast |
-| `bump` | `chain:network.sender` | replace a stuck send in its slot |
-| `pending` | `pending:chain:network` | forget the dead; enqueue bumps; send again |
-
-## Open
-
-1. **Approval for `base`:** `Broadcaster::alive`, `Replace` with
-   `Service::replace`, `Storage::pending` with `PendingStore`, and
-   `Transaction::expires` removed.
-2. **`bump_after_ms`:** 10 min for Ethereum, 60 min for Bitcoin?
-3. **Bitcoin `max_fee_rate`:** what default?
-4. **The 083 jump forgets an index's pending sends at once**
-   (`forget_sent`), which is the blind forgetting this design removes.
-   - Proposal: Ethereum and Solana stop forgetting and leave it to the
-     dead check, since a send mined inside the gap is proven dead and its
-     effect is already in the settle's balance read.
-   - Bitcoin keeps forgetting: its coins are archived and written off, so
-     the legs can no longer prove anything.
-5. **A send at its cap** stays pending and is sent again for ever. How is
-   it shown? A stats count of stuck sends, a job reason, or nothing until
-   a cancel endpoint exists?
-6. **Cancel**, a replacement that pays the sender itself, is a manual
-   endpoint, later.
-7. **What a dead send leaves.** Today a forgotten row is deleted, and only
-   its job's reason remains. Should the row stay, with a `dropped` state
-   and no legs, so the API can show that a payment never happened?
-
-## Tests
-
-- A pending send past an hour still holds its funds and its nonce; a
-  second send takes the next nonce.
-- Ethereum: a node whose pending count misses our first send still gets
-  the second the next nonce.
-- Ethereum dead: the nonce is used at `at` by another transaction → it is
-  forgotten. Our own transaction mined above `at` → it is not.
-- Bitcoin dead: a coin it spends is spent in a live block by another
-  transaction → it is forgotten. Spent by its own replacement, mined →
-  the replacement is the mined row.
-- Solana dead: no status and an invalid blockhash → forgotten. A status →
-  kept.
-- An index not `indexing` → its sends are not judged.
-- The walker sends again every pending row and never forgets on a refusal.
-- Bump:
-  - stuck past `bump_after_ms` → replaced in its slot, the row swapped,
-    `origin` kept, the funds held once;
-  - refused by every node → the old row stays;
-  - a crash after the broadcast → the rerun swaps;
-  - the old version mined meanwhile → no swap;
-  - at the cap or no gain → no replacement;
-  - short of the extra fee → no replacement.
-- A broadcast job whose transaction was swapped finds it by origin; one
-  forgotten as dead fails `dead`.
+- `POST /v1/wallets/{id}/transactions` (`send_payment`) takes one payment,
+  `{asset?, destination, amount, fee?}`, and enqueues one job.
+- `GET /v1/jobs`: a broadcast shows its `txid` and `accepted`. It succeeds
+  once its payment is in a final block; failed says why: `refused`,
+  `dead`, `forgotten`, `insufficient-funds`, `invalid`; its reason says
+  `stuck` while at its bump limit.
+- Triggers enqueue one job per payment, all of a round's jobs in its one
+  write.
 
 ## Iterations
 
-| # | What | Where | Done when |
-| --- | --- | --- | --- |
-| 1 | No clock: `alive`, the `pending` job (forget the dead, send again), `origin`, `expires_at` and `pending_ttl_ms` removed, the `Broadcaster` duties | `sdk/base`, chains, server, migration | a send unmined for an hour still holds its funds; a displaced one is forgotten on each chain |
-| 2 | Ethereum nonce counts our pending sends (`Storage::pending`) | `sdk/base`, Ethereum, server | two back-to-back sends behind a node that misses the first both land |
-| 3 | `Replace` and the `bump` job, Ethereum | `sdk/base`, Ethereum, server | a send stuck under a low fee is replaced and mined |
-| 4 | Bitcoin `Replace` | Bitcoin | the same on Bitcoin |
-| 5 | The 083 jump (open 4) | server | as decided |
+| # | What | Status |
+| --- | --- | --- |
+| 1 | No clock: `expires`, `pending_ttl_ms`, `expires_at` and the `expire` job removed; `transaction_forgotten` | built |
+| 2 | Ethereum nonce counts our sends in flight (`TransactionIndexStore::find_sent`, was `Storage::pending`) | built |
+| 3 | One job = one payment = one transaction; builders sign one transfer; API and triggers | built |
+| 4 | The broadcast job owns its payment until final or dead; no `pending` job | built |
+| 5 | The job watches its payment's transaction index (085): made in the record write, read by every check; `alive` and `is_displaced` removed | in progress (085) |
+| 6 | The stateful builder (`from_transfer`, `from_existing`, `set_fee`, `bump_fee`, `sign`), `FeeLevel`, `Tracking`, the bump; Ethereum | next |
+| 7 | Bitcoin `from_existing` and `bump_fee`, `max_fee_rate` | next |
+
+## Tests (iterations 5–7)
+
+- A payment found at a final block is done; found above it, checked
+  again; its block reorged, sent again.
+- A payment whose index has not read `bump_after` blocks yet (a lagging
+  indexer) is never bumped.
+- Solana: read past its `expires_height`, not found → forgotten (`dead`),
+  failed; found before it → done.
+- Ethereum and Bitcoin: never dead by age; sent again at every check.
+- A given-up index (a Bitcoin jump) → failed `forgotten`.
+- Bump: `bump_after` blocks read, not found → replaced: the row swapped,
+  the funds held once, a new index; refused → undone; at the cap or
+  `max_bumps` → sent again, reason `stuck`; the old version found instead
+  → done, the current row forgotten (`replaced`).
+
+## Open
+
+1. Bitcoin `max_fee_rate`: what default?
+2. Cancel (a replacement paying the sender itself): a manual endpoint,
+   later.
+3. `FeeLevel` per chain. Proposed: Bitcoin confirmation targets of 12, 3
+   and 1 blocks; Ethereum the priority fee at 0.5×, 1× and 2× the
+   estimate; Solana a priority fee of none, the recent median and the
+   recent 75th percentile.
+
+## Notes
+
+- A trigger round that falls due while a check holds the sender's topic is
+  skipped (076); rare at these intervals.
+- A sign-time failure retries three times, then fails; nothing was
+  recorded, so nothing is held.

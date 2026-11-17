@@ -145,7 +145,7 @@
           {
             "name": "kind",
             "in": "query",
-            "description": "Only this kind (`index`, `expire`, `triggers`, `broadcast`, `prune`).",
+            "description": "Only this kind (`index`, `triggers`, `broadcast`, `prune`).",
             "required": false,
             "schema": {
               "type": "string"
@@ -238,7 +238,7 @@
           "jobs"
         ],
         "summary": "Read a queued job",
-        "description": "The job's outcome, what it was given and what its worker has done; for a broadcast, how many transactions it signed and the nodes accepted.",
+        "description": "The job's outcome, what it was given and what its worker has done; for a broadcast, the transaction it recorded and whether it was sent.",
         "operationId": "read_job",
         "parameters": [
           {
@@ -2944,9 +2944,9 @@
         "tags": [
           "transactions"
         ],
-        "summary": "Enqueue an ordered send from a wallet",
-        "description": "Enqueues one send job of `asset` from the keyed wallet: its transfers are signed up front and broadcast in order. A 202 response means queued, not submitted: `GET /v1/jobs/{id}` reports the outcome. Indexing records the transactions once they are mined, for the assets the wallet is watched in. A watch-only wallet answers 422.",
-        "operationId": "send_transfers",
+        "summary": "Enqueue a payment from a wallet",
+        "description": "Enqueues one send job of `asset` from the keyed wallet: one payment, signed as one transaction and broadcast. Several payments are several requests; a wallet's sends run one at a time, in order, and each fails on its own. A 202 response means queued, not submitted: `GET /v1/jobs/{id}` reports the outcome. Indexing records the transaction once it is mined, for the assets the wallet is watched in. A watch-only wallet answers 422.",
+        "operationId": "send_payment",
         "parameters": [
           {
             "name": "id",
@@ -3450,16 +3450,11 @@
       },
       "ErrorBody": {
         "type": "object",
-        "description": "The body of every error response: `message` is always present, the\nfailing transfer's index only when one transfer of a send failed.",
+        "description": "The body of every error response.",
         "required": [
           "message"
         ],
         "properties": {
-          "failed_index": {
-            "type": "integer",
-            "description": "Zero-based index of the transfer that failed. Present only when one\ntransfer of a send failed.",
-            "minimum": 0
-          },
           "message": {
             "type": "string",
             "description": "What went wrong."
@@ -3491,14 +3486,13 @@
           "reason",
           "input",
           "progress",
-          "signed",
+          "txid",
           "accepted"
         ],
         "properties": {
           "accepted": {
-            "type": "integer",
-            "description": "How many of them, in broadcast order, the nodes accepted.",
-            "minimum": 0
+            "type": "boolean",
+            "description": "Whether it was sent: a node accepted it, or may hold it (false for other kinds)."
           },
           "attempts": {
             "type": "integer",
@@ -3530,7 +3524,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`, `prune`)."
+            "description": "The job kind: its worker (`index`, `triggers`, `broadcast`, `prune`)."
           },
           "progress": {
             "type": [
@@ -3552,11 +3546,6 @@
             "description": "Not started before this, Unix ms: the next run of a pending job.",
             "minimum": 0
           },
-          "signed": {
-            "type": "integer",
-            "description": "A broadcast's transactions signed (0 for other kinds).",
-            "minimum": 0
-          },
           "state": {
             "$ref": "#/components/schemas/JobState",
             "description": "Where it is."
@@ -3564,6 +3553,13 @@
           "topic": {
             "type": "string",
             "description": "What it locks: jobs whose topics conflict run one at a time, in line order."
+          },
+          "txid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A broadcast's transaction (txid), once recorded; always present,\nnull before and for other kinds."
           },
           "updated_at": {
             "type": "integer",
@@ -4013,7 +4009,6 @@
           "checked_at",
           "blocks",
           "reorgs",
-          "watched",
           "failures"
         ],
         "properties": {
@@ -4069,12 +4064,6 @@
             ],
             "format": "int64",
             "description": "The node's newest block at the indexer's last read; always present,\nnull before the first.",
-            "minimum": 0
-          },
-          "watched": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Watches added.",
             "minimum": 0
           }
         }
@@ -4375,23 +4364,23 @@
       },
       "Send": {
         "type": "object",
-        "description": "`POST /v1/wallets/{id}/transactions` body: an ordered send from the\npath's wallet in one asset.",
+        "description": "`POST /v1/wallets/{id}/transactions` body: one payment from the path's\nwallet in one asset.",
         "required": [
-          "transfers"
+          "destination",
+          "amount"
         ],
         "properties": {
+          "amount": {
+            "type": "string",
+            "description": "Exact positive decimal in display units."
+          },
           "asset": {
             "type": "string",
             "description": "An asset id of the wallet's network; default `native`."
           },
-          "transfers": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/TransferItem"
-            },
-            "description": "The transfers, in execution order.",
-            "maxItems": 50,
-            "minItems": 1
+          "destination": {
+            "type": "string",
+            "description": "Recipient address text, as the wallet's chain writes it."
           }
         },
         "additionalProperties": false
@@ -4596,14 +4585,6 @@
           "chain": {
             "type": "string"
           },
-          "expires_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Unix ms it stops holding funds; null once mined."
-          },
           "id": {
             "type": "string",
             "description": "`{chain}.{network}.{txid}`."
@@ -4647,7 +4628,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Unix ms it was recorded as pending; null once mined."
+            "description": "Unix ms it was sent: a node accepted it, or may hold it; null while\nrecorded but not yet sent, and once mined."
           },
           "state": {
             "type": "integer",
@@ -4659,25 +4640,6 @@
             "description": "Chain-native transaction id."
           }
         }
-      },
-      "TransferItem": {
-        "type": "object",
-        "description": "One ordered transfer of a send.",
-        "required": [
-          "destination",
-          "amount"
-        ],
-        "properties": {
-          "amount": {
-            "type": "string",
-            "description": "Exact positive decimal in display units."
-          },
-          "destination": {
-            "type": "string",
-            "description": "Recipient address text, as the wallet's chain writes it."
-          }
-        },
-        "additionalProperties": false
       },
       "Trigger": {
         "type": "object",
@@ -5168,7 +5130,7 @@
     },
     {
       "name": "transactions",
-      "description": "History, single transfers, and batches"
+      "description": "History and sends, one payment each"
     },
     {
       "name": "networks",
@@ -5180,7 +5142,7 @@
     },
     {
       "name": "jobs",
-      "description": "The job queue: indexing, expiry, trigger rounds, broadcasts, pruning"
+      "description": "The job queue: indexing, trigger rounds, broadcasts, pruning"
     },
     {
       "name": "stats",

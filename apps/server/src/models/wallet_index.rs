@@ -5,9 +5,7 @@ use std::collections::BTreeSet;
 
 use ::trigger::selection::{Index, Selector};
 use anyhow::{Context as _, bail, ensure};
-use base::{
-    Address, Addressed, Asset, BlockHeader, Chain, Decimal, Network, Networked, WalletIndexState,
-};
+use base::{Address, Addressed, Asset, BlockHeader, Chain, Decimal, Network, Networked, Progress};
 use diesel::{
     deserialize::FromSqlRow,
     dsl::sql,
@@ -91,12 +89,12 @@ pub(crate) enum IndexState {
     NoData,
 }
 
-impl From<WalletIndexState> for IndexState {
-    fn from(state: WalletIndexState) -> Self {
+impl From<base::IndexState> for IndexState {
+    fn from(state: base::IndexState) -> Self {
         match state {
-            WalletIndexState::Indexing => Self::Indexing,
-            WalletIndexState::Paused => Self::Paused,
-            WalletIndexState::NoData => Self::NoData,
+            base::IndexState::Indexing => Self::Indexing,
+            base::IndexState::Paused => Self::Paused,
+            base::IndexState::NoData => Self::NoData,
         }
     }
 }
@@ -252,9 +250,11 @@ pub(crate) mod db {
                 address: self.id.address().clone(),
                 requested_from: uint(self.requested_from)?,
                 birthday: uint(self.birthday)?,
-                indexed_at: block.map(BlockHeader::try_from).transpose()?,
-                state: state(self.state)?,
-                reason: self.reason,
+                progress: Progress {
+                    indexed_at: block.map(BlockHeader::try_from).transpose()?,
+                    state: state(self.state)?,
+                    reason: self.reason,
+                },
             })
         }
     }
@@ -340,25 +340,25 @@ pub(crate) mod db {
         .transpose()
     }
 
-    /// `state` as stored.
-    const fn code(state: WalletIndexState) -> i32 {
+    /// `state` as stored, a transaction index's too.
+    pub(crate) const fn code(state: base::IndexState) -> i32 {
         match state {
-            WalletIndexState::Indexing => 0,
-            WalletIndexState::Paused => 1,
-            WalletIndexState::NoData => 2,
+            base::IndexState::Indexing => 0,
+            base::IndexState::Paused => 1,
+            base::IndexState::NoData => 2,
         }
     }
 
-    /// A stored `state`.
+    /// A stored `state`, a transaction index's too.
     ///
     /// # Errors
     ///
     /// For a code no writer stores.
-    pub(crate) fn state(code: i32) -> anyhow::Result<WalletIndexState> {
+    pub(crate) fn state(code: i32) -> anyhow::Result<base::IndexState> {
         Ok(match code {
-            0 => WalletIndexState::Indexing,
-            1 => WalletIndexState::Paused,
-            2 => WalletIndexState::NoData,
+            0 => base::IndexState::Indexing,
+            1 => base::IndexState::Paused,
+            2 => base::IndexState::NoData,
             _ => bail!("a stored index state {code} is unknown"),
         })
     }
@@ -395,8 +395,8 @@ pub(crate) mod db {
             requested_from: int(index.requested_from)?,
             birthday: int(index.birthday)?,
             indexed_at: None,
-            state: code(index.state),
-            reason: index.reason.clone(),
+            state: code(index.progress.state),
+            reason: index.progress.reason.clone(),
         };
         diesel::insert_into(wallet_index::table)
             .values(&row)
@@ -522,7 +522,7 @@ pub(crate) mod db {
             .left_join(block::table)
             .filter(wallet::chain.eq(network.chain.as_str()))
             .filter(wallet::network.eq(&network.name))
-            .filter(wallet_index::state.eq(code(WalletIndexState::Indexing)))
+            .filter(wallet_index::state.eq(code(base::IndexState::Indexing)))
             .filter(sql::<BigInt>(NEXT).lt(below))
             .select((
                 Row::as_select(),
@@ -615,22 +615,22 @@ pub(crate) mod db {
         Ok(rows.into_iter().map(|row| row.id).collect())
     }
 
-    /// Moves the birthday of `index` to `birthday` while it has not started.
+    /// Moves the birthday of `index` to `start` while it has not started.
     ///
     /// # Errors
     ///
     /// When a value is out of range or the write fails.
-    pub(crate) fn move_birthday(
+    pub(crate) fn move_start(
         connection: &mut SqliteConnection,
         index: &base::WalletIndex,
-        birthday: u64,
+        start: u64,
     ) -> anyhow::Result<()> {
         diesel::update(
             wallet_index::table
                 .filter(wallet_index::id.eq(WalletIndexId::of(&index.address, &index.asset)?))
                 .filter(wallet_index::indexed_at.is_null()),
         )
-        .set(wallet_index::birthday.eq(int(birthday)?))
+        .set(wallet_index::birthday.eq(int(start)?))
         .execute(connection)?;
         Ok(())
     }
@@ -645,7 +645,7 @@ pub(crate) mod db {
         connection: &mut SqliteConnection,
         address: &Address,
         asset: Option<&str>,
-        state: WalletIndexState,
+        state: base::IndexState,
         reason: Option<&str>,
     ) -> anyhow::Result<usize> {
         let changes = (
@@ -674,7 +674,7 @@ pub(crate) mod db {
     ) -> QueryResult<usize> {
         diesel::update(wallet_index::table.find(id.as_ref()))
             .set((
-                wallet_index::state.eq(code(WalletIndexState::Indexing)),
+                wallet_index::state.eq(code(base::IndexState::Indexing)),
                 wallet_index::reason.eq(None::<String>),
             ))
             .execute(connection)
@@ -691,7 +691,7 @@ pub(crate) mod db {
         diesel::update(
             wallet_index::table
                 .find(id.as_ref())
-                .filter(wallet_index::state.eq(code(WalletIndexState::Indexing))),
+                .filter(wallet_index::state.eq(code(base::IndexState::Indexing))),
         )
         .set((
             wallet_index::indexed_at.eq(None::<String>),
@@ -732,7 +732,7 @@ pub(crate) mod db {
             .set((
                 wallet_index::birthday.eq(int(birthday)?),
                 wallet_index::indexed_at.eq(None::<String>),
-                wallet_index::state.eq(code(WalletIndexState::Indexing)),
+                wallet_index::state.eq(code(base::IndexState::Indexing)),
             ))
             .execute(connection)?;
         Ok(())

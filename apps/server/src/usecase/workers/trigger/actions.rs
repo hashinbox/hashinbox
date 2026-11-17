@@ -2,8 +2,6 @@
 //! `trigger` package [`Action`] returning the jobs to start, never starting
 //! one itself. `send` ([`Transfer`]) is the one there is.
 
-use std::collections::BTreeMap;
-
 use ::trigger::{
     Class, Context, Error,
     actions::{Action, Registry},
@@ -11,13 +9,13 @@ use ::trigger::{
     selection::Target,
 };
 use anyhow::{bail, ensure};
-use base::{Address, Asset, Assets, Decimal, Future, Network};
+use base::{Asset, Assets, Decimal, Future, Network};
 use serde::{Deserialize, Serialize};
 use tasks::{Job, Worker as _};
 
 use crate::{
     models::trigger::Amount,
-    usecase::workers::broadcast::{Broadcast, Payment, SendIntent},
+    usecase::workers::broadcast::{Broadcast, SendIntent},
 };
 
 /// Every action a trigger of this server may call.
@@ -25,7 +23,7 @@ pub(crate) fn registry() -> Registry<Job> {
     Registry::new().add(Transfer)
 }
 
-/// `send`: moves funds, one broadcast job per sender.
+/// `send`: moves funds, one broadcast job per payment.
 pub(crate) struct Transfer;
 
 /// What `send` moves: `amount` of `asset` from the `source` wallet indexes
@@ -73,9 +71,9 @@ impl Action<Job> for Transfer {
 
     /// Many sources pay one destination, `amount` evaluated per source; one
     /// source pays many destinations, `amount` per destination; one to one
-    /// is per destination when the destination is `This`. A transfer whose
-    /// amount is zero, negative or unknown is skipped. Transfers go in
-    /// source then destination order, one broadcast job per sender.
+    /// is per destination when the destination is `This`. A payment whose
+    /// amount is zero, negative or unknown is skipped. Payments go in source
+    /// then destination order, one broadcast job each.
     ///
     /// Refuses many sources and many destinations, a source in another
     /// asset than the send's, a target not fully indexed, and a source not
@@ -119,7 +117,7 @@ impl Action<Job> for Transfer {
                 network: network.clone(),
                 id: send.asset.clone(),
             };
-            let mut by_sender: BTreeMap<Address, Vec<Payment>> = BTreeMap::new();
+            let mut jobs = Vec::new();
             for one in each.values() {
                 let mut alone = on.with(each.only(one)?);
                 let amount = send.amount.atomic(&mut alone, &asset).await?;
@@ -136,27 +134,16 @@ impl Action<Job> for Transfer {
                     "source {} is not keyed here",
                     from.address.value
                 );
-                by_sender
-                    .entry(from.address.clone())
-                    .or_default()
-                    .push(Payment {
-                        to: to.address.value.clone(),
-                        amount: amount.to_string(),
-                    });
+                jobs.push(Broadcast::job(&SendIntent {
+                    chain: network.chain.as_str().to_owned(),
+                    network: network.name.clone(),
+                    address: from.address.value.clone(),
+                    asset: send.asset.clone(),
+                    to: to.address.value.clone(),
+                    amount: amount.to_string(),
+                })?);
             }
-            by_sender
-                .into_iter()
-                .map(|(from, transfers)| {
-                    let intent = SendIntent {
-                        chain: network.chain.as_str().to_owned(),
-                        network: network.name.clone(),
-                        address: from.value,
-                        asset: send.asset.clone(),
-                        transfers,
-                    };
-                    Ok(Broadcast::job(&intent)?)
-                })
-                .collect()
+            Ok(jobs)
         })
     }
 }

@@ -26,8 +26,6 @@ pub(crate) struct NetworkIndex {
     pub(crate) blocks: u64,
     /// Kept blocks reorged because the chain took them back.
     pub(crate) reorgs: u64,
-    /// Watches added.
-    pub(crate) watched: u64,
     /// Failed steps; why the last failed is the index job's `reason`.
     pub(crate) failures: u64,
 }
@@ -49,7 +47,6 @@ impl NetworkIndex {
             checked_at: Some(now),
             blocks: after.blocks.saturating_sub(before.blocks),
             reorgs: after.reorgs.saturating_sub(before.reorgs),
-            watched: after.watched.saturating_sub(before.watched),
             failures: after.failures.saturating_sub(before.failures),
         }
     }
@@ -79,7 +76,6 @@ pub(crate) mod db {
         checked_at: Option<i64>,
         blocks: i64,
         reorgs: i64,
-        watched: i64,
         failures: i64,
     }
 
@@ -95,7 +91,6 @@ pub(crate) mod db {
                 checked_at: row.checked_at.map(uint).transpose()?,
                 blocks: uint(row.blocks)?,
                 reorgs: uint(row.reorgs)?,
-                watched: uint(row.watched)?,
                 failures: uint(row.failures)?,
             };
             Ok((key, index))
@@ -157,10 +152,9 @@ pub(crate) mod db {
                 indexed = COALESCE(?3, indexed),
                 blocks = blocks + ?5,
                 reorgs = reorgs + ?6,
-                watched = watched + ?7,
-                failures = failures + ?8
-            WHERE chain = ?9
-              AND network = ?10",
+                failures = failures + ?7
+            WHERE chain = ?8
+              AND network = ?9",
         )
         .bind::<Nullable<BigInt>, _>(position(step.tip)?)
         .bind::<Nullable<BigInt>, _>(position(step.confirmed)?)
@@ -168,7 +162,6 @@ pub(crate) mod db {
         .bind::<Nullable<BigInt>, _>(position(step.checked_at)?)
         .bind::<BigInt, _>(int(step.blocks)?)
         .bind::<BigInt, _>(int(step.reorgs)?)
-        .bind::<BigInt, _>(int(step.watched)?)
         .bind::<BigInt, _>(int(step.failures)?)
         .bind::<Text, _>(network.chain.as_str())
         .bind::<Text, _>(&network.name)

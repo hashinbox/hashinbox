@@ -1,5 +1,5 @@
 //! The server suite: each case drives the API, lets the real workers
-//! (index, broadcast, expire, triggers) run over a mock chain's nodes, and
+//! (index, broadcast, triggers) run over a mock chain's nodes, and
 //! reads the outcome back through the API. One scenario set for every
 //! chain; `scenarios!` names which chain and topology runs each.
 
@@ -27,9 +27,11 @@ mod send;
 mod shorter;
 mod skipped;
 mod slow;
+mod split;
 mod stale;
 
 use base::testing::TestChain;
+use rpc::testing::Fault;
 use serde_json::{Value, json};
 
 use super::support::{App, Wallet, scenarios, until};
@@ -67,6 +69,7 @@ scenarios! {
     queued: ethereum => chain_ethereum::testing::Ethereum [single];
     partial: ethereum => chain_ethereum::testing::Ethereum [single];
     skipped: ethereum => chain_ethereum::testing::Ethereum [single];
+    split: ethereum => chain_ethereum::testing::Ethereum [single];
 }
 
 /// One whole unit of the native currency, in atomic units.
@@ -89,7 +92,7 @@ fn number(text: &str) -> u128 {
     text.parse().expect("atomic units")
 }
 
-/// Waits until job `id` succeeded.
+/// Waits until job `id` succeeded: a send's block is final.
 async fn succeeded(app: &App, id: &str) -> Value {
     until("the send job to succeed", || async {
         let job = app.api.job(id).await;
@@ -99,6 +102,32 @@ async fn succeeded(app: &App, id: &str) -> Value {
         Err(job.to_string())
     })
     .await
+}
+
+/// Waits until send job `id` sent its transaction: a node accepted it, or
+/// may hold it.
+async fn accepted(app: &App, id: &str) -> Value {
+    until("the send to go out", || async {
+        let job = app.api.job(id).await;
+        if job["accepted"] == true {
+            return Ok(job);
+        }
+        Err(job.to_string())
+    })
+    .await
+}
+
+/// Makes the next send retry twice before it is signed, holding its
+/// network meanwhile: node 0 answers the sender's next two nonce reads
+/// (Ethereum's, as the cases that stall run on Ethereum) with an error
+/// object, which the transport does not retry but the job does.
+fn stall<T: TestChain>(chain: &T) {
+    for _ in 0..2 {
+        chain.node(0).faults().fail_next(
+            Some("eth_getTransactionCount"),
+            Fault::Remote(-32000, "busy".to_owned()),
+        );
+    }
 }
 
 /// Mines the next block and enough after it to make it final.
@@ -251,18 +280,29 @@ async fn runs(app: &App, id: &str) -> Vec<Value> {
     page["runs"].as_array().cloned().unwrap_or_default()
 }
 
-/// Waits until every send from `wallet` succeeded and a round started
-/// after the last of them finished: it decided with them pending. Their
-/// jobs.
+/// Waits until every send from `wallet` went out, mines them final, waits
+/// until every send of the network succeeded (none is checked any more, so
+/// none holds a round back), and then until a round started after the last
+/// of them: it decided with them spent. Their jobs.
 async fn decided_after<T: TestChain>(app: &App, chain: &T, wallet: &Wallet) -> Vec<Value> {
-    let sends = until("the sends to succeed", || async {
+    until("the sends to go out", || async {
         let sends = sends_from(app, wallet).await;
-        if !sends.is_empty() && sends.iter().all(|job| job["state"] == "succeeded") {
-            return Ok(sends);
+        if !sends.is_empty() && sends.iter().all(|job| job["accepted"] == true) {
+            return Ok(());
         }
         Err(format!("{sends:?}"))
     })
     .await;
+    settle(chain);
+    until("every send to succeed", || async {
+        let all = jobs(app, "kind=broadcast").await;
+        if all.iter().all(|job| job["state"] == "succeeded") {
+            return Ok(());
+        }
+        Err(format!("{all:?}"))
+    })
+    .await;
+    let sends = sends_from(app, wallet).await;
     let last = sends[0]["id"].as_str().unwrap_or_default().to_owned();
     chain.mine(1);
     until("a round after the sends", || async {

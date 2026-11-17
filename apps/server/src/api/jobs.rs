@@ -29,7 +29,7 @@ struct ListQuery {
     chain: Option<String>,
     /// Only jobs of this network of `chain`.
     network: Option<String>,
-    /// Only this kind (`index`, `expire`, `triggers`, `broadcast`, `prune`).
+    /// Only this kind (`index`, `triggers`, `broadcast`, `prune`).
     kind: Option<String>,
     /// Only jobs in this state; absent, every state but `idle`.
     state: Option<JobState>,
@@ -57,7 +57,7 @@ pub(super) enum JobState {
     Pending,
     /// Executing.
     Running,
-    /// Every transaction was accepted by the network.
+    /// Done; for a broadcast, its transaction is mined in a final block.
     Succeeded,
     /// Failed for good; `reason` says why.
     Failed,
@@ -98,7 +98,7 @@ impl From<JobState> for tasks::Status {
 struct Job {
     /// The job id.
     id: String,
-    /// The job kind: its worker (`index`, `expire`, `triggers`, `broadcast`, `prune`).
+    /// The job kind: its worker (`index`, `triggers`, `broadcast`, `prune`).
     kind: String,
     /// What it locks: jobs whose topics conflict run one at a time, in line order.
     topic: String,
@@ -125,10 +125,12 @@ struct Job {
     /// What its worker has done so far; always present.
     #[schema(value_type = Option<Object>, required)]
     progress: Option<Value>,
-    /// A broadcast's transactions signed (0 for other kinds).
-    signed: usize,
-    /// How many of them, in broadcast order, the nodes accepted.
-    accepted: usize,
+    /// A broadcast's transaction (txid), once recorded; always present,
+    /// null before and for other kinds.
+    #[schema(required)]
+    txid: Option<String>,
+    /// Whether it was sent: a node accepted it, or may hold it (false for other kinds).
+    accepted: bool,
 }
 
 impl From<jobs::Job> for Job {
@@ -147,7 +149,7 @@ impl From<jobs::Job> for Job {
             reason: job.reason,
             input: job.input,
             progress: job.state,
-            signed: kept.signed,
+            txid: kept.txid,
             accepted: kept.accepted,
         }
     }
@@ -213,7 +215,7 @@ struct JobPath {
     operation_id = "read_job",
     summary = "Read a queued job",
     description = "The job's outcome, what it was given and what its worker has done; for a \
-        broadcast, how many transactions it signed and the nodes accepted.",
+        broadcast, the transaction it recorded and whether it was sent.",
     params(JobPath),
     security(("bearerAuth" = [])),
     responses(

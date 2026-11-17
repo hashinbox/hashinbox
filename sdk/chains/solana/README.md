@@ -8,7 +8,7 @@ token transfers.
 
 ```rust,no_run
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Chained as _, ServiceFactory as _, Storage,
+    Asset, Broadcaster as _, Chained as _, ServiceFactory as _, Storage, Transfer,
     WalletFactory as _,
 };
 use std::sync::Arc;
@@ -33,14 +33,14 @@ async fn solana(storage: Storage) -> anyhow::Result<()> {
     let tips = chain.tips().await?;
     let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
 
-    // Sending: sign, keep the bytes, then broadcast them to every node.
+    // Sending: one transfer signed into one transaction; keep the bytes,
+    // then broadcast them to every node.
     let wallets = factory.wallets(&rpc, Arc::new(base::NoHoldings));
     let wallet = wallets.from_pk(wallets.generate().await?).await?;
-    let mut builder = wallet.transaction(&sol)?;
-    builder.send((wallets.parse_address("...")?, 10_000_u64.into()))?;
-    for transaction in builder.sign().await? {
-        rpc.broadcast(&transaction).await?;
-    }
+    let builder = wallet.transaction(&sol)?;
+    let to = wallets.parse_address("...")?;
+    let transaction = builder.sign(Transfer::new(to, 10_000_u64.into())).await?;
+    rpc.broadcast(&transaction).await?;
 
     Ok(())
 }
@@ -49,7 +49,7 @@ async fn solana(storage: Storage) -> anyhow::Result<()> {
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network:
 the genesis hash (`chain_id`), assets (SOL's display decimals, the
 `contract` mints), `confirmations`, and from `settings` the knobs
-`fee_ttl_ms`, `pending_ttl_ms`, `interval_ms`, and `batch`, the slots the
+`fee_ttl_ms`, `interval_ms`, and `batch`, the slots the
 indexer fetches per step (default 100) (each absent one its default). It
 has no `max_depth`: it reads balances (`base::Balances`, finalized, at a
 slot at or above the one asked: `minContextSlot`), so its indexer reads
@@ -86,9 +86,9 @@ one balance read (design 083 §9).
 - A builder sends one asset: SOL, or one configured token (`TransferChecked`,
   creating the recipient's associated token account when missing; the sender
   pays its rent, which the pending legs do not show); any other asset is
-  `Unsupported`. It packs as many transfers as fit a packet into each
-  transaction, all on one recent blockhash, each with a random Memo-v3 so two
-  equal transfers stay distinct. Recipients must be on-curve addresses.
+  `Unsupported`. It signs one transfer into one transaction on a recent
+  blockhash, with a random Memo-v3 so two equal transfers stay distinct.
+  Recipients must be on-curve addresses.
 - The factory's one fee estimator (`WalletFactory::fees`), which builders
   sign on too (its blockhash and price), is two: a precise one (`fee.rs`)
   that asks the node every time (a blockhash, the price of a signature on it,
@@ -103,4 +103,11 @@ one balance read (design 083 §9).
   signed transaction lands only until its blockhash expires (about a minute);
   after that `broadcast` fails as `Expired`. Resending until then is the
   caller's job. A refusal as "already been processed" is acceptance.
+- A signed transaction carries `expires_height`, its blockhash's
+  `lastValidBlockHeight`: once a caller has read past that height without
+  finding it, no later block can take it.
+- Its line is the slot after the finalized one (`Line::Final`). A sent
+  transaction's index left behind it is settled by the `Confirmer`: its
+  signature's status (`getSignatureStatuses` with history), finalized at
+  or below the finalized slot, is where it is found.
 - Token-2022 mints are refused at `connect`.

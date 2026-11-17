@@ -27,7 +27,7 @@ const POLL_MS = 3000;
 type Stage =
   | { at: 'form' }
   | { at: 'queued'; job: string }
-  | { at: 'accepted'; job: string; txids: string[] }
+  | { at: 'accepted'; txid: string }
   | { at: 'mined'; txid: string; block: number }
   | { at: 'final'; txid: string; block: number }
   | { at: 'failed'; reason: string };
@@ -59,7 +59,7 @@ export function Send({
     event.preventDefault();
     setBusy(true);
     const params = { path: { id: wallet.id } };
-    const body = { asset, transfers: [{ destination: destination.trim(), amount: amount.trim() }] };
+    const body = { asset, destination: destination.trim(), amount: amount.trim() };
     call(client.POST('/v1/wallets/{id}/transactions', { params, body }))
       .then((queued) => setStage({ at: 'queued', job: queued.job }))
       .catch(shell.fail)
@@ -75,15 +75,13 @@ export function Send({
           client.GET('/v1/jobs/{id}', { params: { path: { id: stage.job } } }),
         );
         if (job.state === 'failed') return { at: 'failed', reason: job.reason ?? 'failed' };
-        if (job.state !== 'succeeded') return null;
-        // A broadcast's progress names its transactions in `ids`.
-        const ids: unknown = job.progress && 'ids' in job.progress ? job.progress.ids : [];
-        return { at: 'accepted', job: stage.job, txids: Array.isArray(ids) ? ids.map(String) : [] };
+        if (!job.accepted || job.txid == null) return null;
+        return { at: 'accepted', txid: job.txid };
       }
       if (stage.at === 'accepted') {
         const params = { path: { id: wallet.id, asset } };
         const page = await call(client.GET('/v1/wallets/{id}/indexes/{asset}/legs', { params }));
-        const leg = page.legs.find((l) => l.txid != null && stage.txids.includes(l.txid));
+        const leg = page.legs.find((l) => l.txid === stage.txid);
         if (!leg?.txid || leg.position == null) return null;
         onSent();
         return { at: 'mined', txid: leg.txid, block: leg.position };

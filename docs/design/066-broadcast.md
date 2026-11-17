@@ -1,6 +1,11 @@
 # 066: Broadcast
 
-Status: implemented.
+Status: implemented. Its expiry (`expires`, `pending_ttl_ms`,
+`expires_at`, the `expire` job) is replaced by 084: a pending transaction
+is kept until the chain proves it dead. Its intent of many transfers is
+replaced by 084's one payment per job: a job sends exactly one payment as
+exactly one transaction, and checks it until it is mined at a final block
+or proven dead.
 
 A broadcast transaction is spent money. From the moment a node may have
 accepted it, the funds it moves count as gone, whether it is mined in the next
@@ -34,8 +39,11 @@ other sender sharing the wallet.
   it tracks nothing in flight. The server's queue topics (067) make every
   check race-free: only the broadcast job checks funds, and nothing of its
   network or sender runs beside it.
-- **Built once.** A broadcast job signs once; its transactions are recorded
+- **Built once.** A broadcast job signs once; its transaction is recorded
   with its state in one write, so a rerun only rebroadcasts.
+- **One payment, one job, one transaction** (084). Several payments are
+  several jobs; the sender's topic runs them one at a time, in order, and
+  each fails or retries on its own.
 
 ## Design
 
@@ -127,41 +135,45 @@ mined. A fresh database is needed.
 | `broadcast` | `chain:network.sender` | sign, check and record, broadcast |
 
 A triggers job locks the whole network, so it runs only once every earlier
-broadcast of that network has ended, and the broadcasts it starts run after
-it. When triggers decide, every transaction sent before is pending or gone,
-never in flight.
+broadcast run of that network has ended, and the broadcasts it starts run
+after it. When triggers decide, every transaction sent before is pending or
+gone, never in flight. A broadcast job waiting for its next check (084)
+holds nothing; while a check runs, a round falling due is skipped (076).
 
 #### The broadcast job (`workers/broadcast/`)
 
-Input: an intent (sender, asset, transfers). State: the recorded txids and
-how many the nodes accepted.
+Input: one payment (sender, asset, `to`, `amount`). State: the recorded
+txid and whether it was sent.
 
-1. **Build and sign** (first run only): the chain's builder excludes coins
-   spent by pending transactions.
-2. **Check and record, in one write:** for every (address, asset) each
+1. **Build and sign** (first run only): one transaction; the chain's
+   builder excludes coins spent by pending transactions.
+2. **Check and record, in one write:** for every (address, asset) the
    transaction takes from, live mined legs plus pending outgoing legs plus
    its own must not go below zero; then it is recorded as pending, and the
-   job's state saved with the txids. Short: nothing recorded, the job fails
+   job's state saved with its txid. Short: nothing recorded, the job fails
    `insufficient-funds`.
-3. **Broadcast** each recorded transaction not yet accepted, in order,
-   through the network's own broadcaster (`Payments::broadcast`):
-   - accepted: the count is saved; it holds its funds until mined or expired;
-   - transient: retry, the same recorded bytes;
-   - anything else: it and the rest are forgotten; the job fails.
+3. **Broadcast** it through the network's own broadcaster:
+   - accepted, or transient (a node may hold it): `sent_at` and the state
+     are saved; it holds its funds until mined or proven dead;
+   - refused: it is forgotten (`refused`); the job fails.
+4. **Check** it every minute until it is mined at a final block (done) or
+   proven dead (forgotten, failed `dead`), sending the same bytes again
+   meanwhile (084).
 
 A rerun never builds again; a recorded transaction forgotten meanwhile
-(expired) fails it as `outcome-unknown`.
+(a jump) fails it `forgotten` (084).
 
 #### Expiry
 
-Each network's `expire` job runs `expire(network, now)` every minute (068).
+Gone (084): no clock frees a pending transaction.
 
 ## Tests
 
-- The broadcast job records, then broadcasts each; a retry resends the
-  recorded bytes and never builds again; a refusal forgets what is not
-  sent; a forgotten transaction on rerun is `outcome-unknown`; a sender
-  short of funds sends nothing.
+- The broadcast job records, then broadcasts its one transaction; a
+  transient failure counts as sent and its check sends the recorded bytes
+  again, never building anew; a refusal forgets it; a sender short of
+  funds sends nothing. Two payments of one sender are two jobs, run in
+  order. Its checks: 084.
 - A pending spend hides its coin from `find_unspent` until it expires.
 - Topics: a triggers job waits for every earlier job of its network; `*.w1` locks
   `w1` on every network.

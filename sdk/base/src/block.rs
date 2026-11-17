@@ -230,6 +230,27 @@ pub struct Tips {
     pub confirmed: u64,
 }
 
+/// Where a chain's reading starts and an index's gaps close: its own rule,
+/// from its config ([`Chained::line`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Line {
+    /// Chains that settle (Ethereum, Solana): the block after the final one.
+    Final,
+    /// Bitcoin: the tip less `max_depth` positions; `u64::MAX`: no limit.
+    Depth(u64),
+}
+
+impl Line {
+    /// The position nothing below is read, at `tips`.
+    #[must_use]
+    pub const fn at(self, tips: Tips) -> u64 {
+        match self {
+            Self::Final => tips.confirmed.saturating_add(1),
+            Self::Depth(depth) => tips.produced.saturating_sub(depth),
+        }
+    }
+}
+
 /// The node no longer serves the block at `position`: its history there is
 /// pruned. A chain fails a read with it, inside an [`anyhow::Error`];
 /// [`NotServed::find`] finds it there.
@@ -274,6 +295,12 @@ pub trait Chained: Networked + Send + Sync {
     ///
     /// When the node cannot answer or the block cannot be read.
     fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>>;
+
+    /// Where reading starts and gaps close. Default: no line,
+    /// `Depth(u64::MAX)`: every block may be read.
+    fn line(&self) -> Line {
+        Line::Depth(u64::MAX)
+    }
 
     /// Blocks `start..=end`, linked, skipped positions omitted. It may end
     /// early, before the first block the node cannot fully serve yet (a
@@ -533,7 +560,10 @@ pub trait Store: Send + Sync {
     ///    Other facts are dropped.
     /// 4. Marks outputs spent by those legs as spent in that block.
     /// 5. Moves `indexed_at` of those indexes to the block, empty blocks
-    ///    included, so progress stays contiguous.
+    ///    included, so progress stays contiguous; and of the transaction
+    ///    indexes ([`crate::TransactionIndex`]) it applies to by the same
+    ///    rule (`broadcasted_at` as the birthday), each noting the block as
+    ///    `found` when it holds its transaction, which is kept then.
     ///
     /// Indexes added while a step runs are either read by this write or left
     /// for the next step; none is skipped. A repeat of the same blocks applies
@@ -560,9 +590,10 @@ pub trait Store: Send + Sync {
     /// 1. Sets `reorged_at` on those blocks; nothing is hard-deleted. Their
     ///    transactions, legs, outputs and rewards leave every read.
     /// 2. Unmarks outputs spent in them: those outputs are unspent again.
-    /// 3. Rewinds `indexed_at` of every index at or above `from` to the live
-    ///    block below `from` (unset when none is), so those indexes re-index
-    ///    the new branch.
+    /// 3. Rewinds `indexed_at` of every index of either kind at or above
+    ///    `from` to the live block below `from` (unset when none is, or it
+    ///    is below the index's start), so those indexes re-index the new
+    ///    branch; a transaction index `found` there is found no more.
     ///
     /// Other networks, wallets and indexes stay. Marking nothing is a no-op.
     ///

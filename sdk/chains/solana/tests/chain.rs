@@ -2,8 +2,8 @@
 //! slots and a reorg-shaped refetch.
 
 use base::{
-    Address, Asset, Balances as _, BlockHash, Chained as _, Dated as _, Decimal, Holding, Leg,
-    Network, NotServed, Reason, TransactionState,
+    Address, Asset, Balances as _, BlockHash, Chained as _, Confirmed, Confirmer as _, Dated as _,
+    Decimal, Holding, Leg, Network, NotServed, Reason, TransactionId, TransactionState,
 };
 use std::sync::Arc;
 
@@ -440,5 +440,52 @@ fn a_balance_at_a_slot_not_finalized_yet_is_not_answerable() {
     let behind = block_on(chain.balance(&address(1), &sol, 100)).unwrap();
 
     assert_eq!(behind, None, "the node is not at 100 yet");
+    script.exhausted();
+}
+
+#[test]
+fn a_transaction_is_confirmed_by_its_finalized_status_at_the_finalized_slot() {
+    let script = Script::new([]);
+    let chain = chain(&script);
+    let signature = base58(7, 64);
+    let id = TransactionId::new(network(), signature.clone());
+    let tips = || {
+        [
+            Reply::ok("getSlot", json!(100)),
+            Reply::ok("getSlot", json!(90)),
+        ]
+    };
+    let status = |status: Value| {
+        Reply::ok(
+            "getSignatureStatuses",
+            json!({ "context": { "slot": 100 }, "value": [status] }),
+        )
+        .expecting(json!([[signature], { "searchTransactionHistory": true }]))
+    };
+    let finalized = |slot: u64| json!({ "slot": slot, "confirmationStatus": "finalized" });
+    // Finalized at 80; finalized past the slot read; only confirmed; unknown.
+    for (answer, found) in [
+        (finalized(80), Some(80)),
+        (finalized(95), None),
+        (
+            json!({ "slot": 85, "confirmationStatus": "confirmed" }),
+            None,
+        ),
+        (Value::Null, None),
+    ] {
+        script.push(tips());
+        script.push([status(answer)]);
+        let confirmed = block_on(chain.confirm(&id, 90)).unwrap();
+        assert_eq!(
+            confirmed,
+            Some(Confirmed {
+                position: 90,
+                found
+            })
+        );
+    }
+    // Not finalized through 91 yet: no status asked.
+    script.push(tips());
+    assert_eq!(block_on(chain.confirm(&id, 91)).unwrap(), None);
     script.exhausted();
 }

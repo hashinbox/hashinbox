@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use ::rpc::testing::{Reply, Script};
 use base::{
-    Address, Asset, Broadcaster as _, BuilderExt as _, Coin, Future, Input, InputStore, Inputs,
-    Leg, Reason, Signer, TransactionErrorKind, TransactionId, TransactionState, Transfer,
-    WalletError, WalletErrorKind, WalletFactory as _,
+    Address, Asset, Broadcaster as _, Coin, Future, Input, InputStore, Inputs, Leg, Reason, Signer,
+    TransactionErrorKind, TransactionId, TransactionState, Transfer, WalletError, WalletErrorKind,
+    WalletFactory as _,
 };
 use bitcoin::{Transaction, consensus};
 use chain_bitcoin::{AddressType, Client, Config, Factory, Network, WalletFactory};
@@ -112,14 +112,10 @@ async fn signs_one_pending_transaction_with_its_legs() {
             .from_pk(SecretBytes::new([1; 32]))
             .await
             .expect("key");
-        let mut builder = wallet.transaction(&Asset::native(network())).expect("BTC");
-        builder
-            .send((recipient.clone(), 40_000_u64.into()))
-            .expect("valid transfer");
-        let mut signed = builder.sign().await.expect("signed");
+        let builder = wallet.transaction(&Asset::native(network())).expect("BTC");
+        let transfer = Transfer::new(recipient.clone(), 40_000_u64.into());
+        let signed = builder.sign(transfer).await.expect("signed");
         script.exhausted();
-        assert_eq!(signed.len(), 1);
-        let signed = signed.0.remove(0);
         assert_eq!(signed.state, TransactionState::Pending);
         assert_eq!(signed.order, None);
         let native: Transaction = consensus::deserialize(&signed.bytes).expect("decodes");
@@ -186,12 +182,10 @@ async fn without_an_estimate_the_floor_prices_the_fee() {
         .from_pk(SecretBytes::new([1; 32]))
         .await
         .expect("key");
-    let mut builder = wallet.transaction(&Asset::native(network())).expect("BTC");
-    builder
-        .send((address_of(2).await, 40_000_u64.into()))
-        .expect("valid");
-    let signed = builder.sign().await.expect("signed");
-    let native: Transaction = consensus::deserialize(&signed[0].bytes).expect("decodes");
+    let builder = wallet.transaction(&Asset::native(network())).expect("BTC");
+    let transfer = Transfer::new(address_of(2).await, 40_000_u64.into());
+    let signed = builder.sign(transfer).await.expect("signed");
+    let native: Transaction = consensus::deserialize(&signed.bytes).expect("decodes");
     let fee = 100_000 - 40_000 - native.output[1].value.to_sat();
     let vsize = u64::try_from(native.vsize()).expect("small");
     assert!(
@@ -216,23 +210,24 @@ async fn refuses_what_it_cannot_send() {
     let unsupported = wallet.transaction(&token).err().map(|error| error.kind);
     assert_eq!(unsupported, Some(TransactionErrorKind::Unsupported));
 
-    let mut builder = wallet.transaction(&Asset::native(network())).expect("BTC");
-    let zero = builder.send((address_of(2).await, 0_u64.into()));
+    // Each refused before any I/O, then a valid one too large.
+    let sign = |to: Address, sats: u64| {
+        let builder = wallet.transaction(&Asset::native(network())).expect("BTC");
+        builder.sign(Transfer::new(to, sats.into()))
+    };
+    let zero = sign(address_of(2).await, 0).await;
     assert_eq!(
         zero.err().map(|error| error.kind),
         Some(TransactionErrorKind::Failed)
     );
     let foreign = Address::new(network(), "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
-    assert!(builder.send((foreign, 1_000_u64.into())).is_err());
-    builder
-        .send((address_of(2).await, 40_000_u64.into()))
-        .expect("valid");
-    let error = builder.sign().await.expect_err("too poor");
+    assert!(sign(foreign, 1_000).await.is_err());
+    let error = sign(address_of(2).await, 40_000)
+        .await
+        .expect_err("too poor");
     assert_eq!(error.kind, TransactionErrorKind::Failed);
     assert_eq!(error.reason, Some(Reason::InsufficientFunds));
-
-    let empty = wallet.transaction(&Asset::native(network())).expect("BTC");
-    assert!(empty.sign().await.is_err(), "no transfers");
+    script.exhausted();
 }
 
 #[tokio::test]
@@ -331,12 +326,10 @@ async fn signed_bytes_are_golden() {
             .from_pk(SecretBytes::new([1; 32]))
             .await
             .expect("key");
-        let mut builder = wallet.transaction(&Asset::native(network())).expect("BTC");
-        builder
-            .send((recipient.clone(), 40_000_u64.into()))
-            .expect("valid transfer");
-        let signed = builder.sign().await.expect("signed");
-        let bytes = bitcoin::hex::DisplayHex::to_lower_hex_string(&signed[0].bytes[..]);
+        let builder = wallet.transaction(&Asset::native(network())).expect("BTC");
+        let transfer = Transfer::new(recipient.clone(), 40_000_u64.into());
+        let signed = builder.sign(transfer).await.expect("signed");
+        let bytes = bitcoin::hex::DisplayHex::to_lower_hex_string(&signed.bytes[..]);
         assert_eq!(bytes, expected, "{kind:?}");
     }
 }
@@ -352,7 +345,7 @@ fn funded_at(owner: &Address, sats: u64, index: u32) -> Input {
 }
 
 #[tokio::test]
-async fn two_sources_spend_in_one_transaction_each_input_signed() {
+async fn a_transfer_from_its_own_source_spends_its_coins_with_change_to_the_default() {
     let segwit = factory(&Script::default(), AddressType::SegwitV0, Vec::new())
         .from_pk(SecretBytes::new([1; 32]))
         .await
@@ -367,41 +360,31 @@ async fn two_sources_spend_in_one_transaction_each_input_signed() {
         AddressType::SegwitV0,
         vec![
             funded_at(segwit.address(), 30_000, 1),
-            funded_at(taproot.address(), 30_000, 2),
+            funded_at(taproot.address(), 60_000, 2),
         ],
     );
+    // Segwit is the default source; the transfer is paid by taproot.
     let mut builder = factory.transaction(&Asset::native(network())).expect("BTC");
-    let recipient = address_of(2).await;
-    builder
-        .send(Transfer::new(recipient.clone(), 40_000_u64.into()).from(&segwit))
-        .expect("valid");
-    builder
-        .send(Transfer::new(recipient, 5_000_u64.into()).from(&taproot))
-        .expect("valid");
-    let signed = builder.sign().await.expect("signed");
+    builder.with_default_source(Signer::from(&segwit));
+    let transfer = Transfer::new(address_of(2).await, 40_000_u64.into()).from(&taproot);
+    let signed = builder.sign(transfer).await.expect("signed");
     script.exhausted();
-    assert_eq!(signed.len(), 1, "one transaction");
-    let native: Transaction = consensus::deserialize(&signed[0].bytes).expect("decodes");
-    assert_eq!(native.input.len(), 2, "a coin of each sender");
-    let witnesses: Vec<_> = native
-        .input
-        .iter()
-        .map(|input| (input.previous_output.vout, input.witness.len()))
-        .collect();
-    assert!(witnesses.contains(&(1, 2)), "P2WPKH: signature and key");
-    assert!(witnesses.contains(&(2, 1)), "P2TR key path: one signature");
-    for input in &native.input {
-        let first = input.witness.nth(0).expect("a signature");
-        if input.previous_output.vout == 2 {
-            assert_eq!(first.len(), 64, "Schnorr, default sighash");
-        } else {
-            assert!((70..=73).contains(&first.len()), "DER ECDSA plus sighash");
-        }
-    }
+    let native: Transaction = consensus::deserialize(&signed.bytes).expect("decodes");
+    let [input] = &native.input[..] else {
+        panic!("the source's one coin: {:?}", native.input);
+    };
+    assert_eq!(input.previous_output.vout, 2, "taproot's coin");
+    assert_eq!(input.witness.len(), 1, "P2TR key path: one signature");
+    let first = input.witness.nth(0).expect("a signature");
+    assert_eq!(first.len(), 64, "Schnorr, default sighash");
     let change = native.output.last().expect("change");
     let owner =
         chain_bitcoin::Address::parse(&segwit.address().value, Network::Regtest).expect("address");
-    assert_eq!(change.script_pubkey, owner.script_pubkey(), "first sender");
+    assert_eq!(
+        change.script_pubkey,
+        owner.script_pubkey(),
+        "the default source"
+    );
 }
 
 #[tokio::test]
@@ -416,19 +399,15 @@ async fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
         AddressType::SegwitV0,
         vec![funded(&owner, 100_000)],
     );
-    let mut builder = factory.transaction(&Asset::native(network())).expect("BTC");
-    builder
-        .send((address_of(2).await, 1_000_u64.into()))
-        .expect("valid");
-    let error = builder.sign().await.expect_err("no source");
+    let builder = factory.transaction(&Asset::native(network())).expect("BTC");
+    let transfer = Transfer::new(address_of(2).await, 1_000_u64.into());
+    let error = builder.sign(transfer).await.expect_err("no source");
     assert_eq!(error.kind, TransactionErrorKind::Failed);
 
-    let mut builder = factory.transaction(&Asset::native(network())).expect("BTC");
+    let builder = factory.transaction(&Asset::native(network())).expect("BTC");
     let wrong = Signer::new(owner, crypto::Curve::Secp256k1, SecretBytes::new([3; 32]));
-    builder
-        .send(Transfer::new(address_of(2).await, 1_000_u64.into()).from(wrong))
-        .expect("valid");
-    let error = builder.sign().await.expect_err("mismatch");
+    let transfer = Transfer::new(address_of(2).await, 1_000_u64.into()).from(wrong);
+    let error = builder.sign(transfer).await.expect_err("mismatch");
     assert_eq!(error.kind, TransactionErrorKind::Failed);
 }
 
@@ -506,18 +485,16 @@ async fn a_sweep_of_balance_less_estimate_pays_the_estimate_without_change() {
         .estimate(&spends(&[(owner, Asset::native(network()))]))
         .await
         .expect("priced");
-    let mut builder = wallet.transaction(&Asset::native(network())).expect("BTC");
-    builder
-        .send((
-            address_of(2).await,
-            base::Decimal::from(100_000_u64) - fee.clone(),
-        ))
-        .expect("valid");
-    let signed = builder.sign().await.expect("signed");
+    let builder = wallet.transaction(&Asset::native(network())).expect("BTC");
+    let amount = base::Decimal::from(100_000_u64) - fee.clone();
+    let signed = builder
+        .sign(Transfer::new(address_of(2).await, amount))
+        .await
+        .expect("signed");
     script.exhausted();
-    let native: Transaction = consensus::deserialize(&signed[0].bytes).expect("decodes");
+    let native: Transaction = consensus::deserialize(&signed.bytes).expect("decodes");
     assert_eq!(native.output.len(), 1, "no change");
-    let paid = signed.legs().find_map(|(_, _, leg)| match leg {
+    let paid = signed.legs.iter().find_map(|leg| match leg {
         Leg::Fee { amount, .. } => Some(amount.clone()),
         _ => None,
     });
@@ -533,7 +510,7 @@ fn signed(bytes: &[u8]) -> base::Transaction {
         order: None,
         legs: Vec::new(),
         bytes: bytes.to_vec(),
-        expires: None,
+        expires_height: None,
     }
 }
 

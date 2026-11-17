@@ -241,20 +241,22 @@ impl Client {
         decode(method, reply).map(Some)
     }
 
-    /// A recent confirmed blockhash.
+    /// A recent confirmed blockhash, and the last block height a
+    /// transaction on it can land at.
     ///
     /// # Errors
     ///
     /// A node failure.
-    pub async fn blockhash(&self) -> anyhow::Result<Hash> {
+    pub async fn blockhash(&self) -> anyhow::Result<(Hash, u64)> {
         let latest: Context<Latest> = self
             .0
             .node
             .call("getLatestBlockhash", json!([{ "commitment": CONFIRMED }]))
             .await?;
-        Hash::from_str(&latest.value.blockhash)
+        let blockhash = Hash::from_str(&latest.value.blockhash)
             .ok()
-            .context("Solana getLatestBlockhash result")
+            .context("Solana getLatestBlockhash result")?;
+        Ok((blockhash, latest.value.last_valid_block_height))
     }
 
     /// The fee of `message`, in lamports.
@@ -357,6 +359,31 @@ impl Client {
             ),
         )
         .with_reason(reason))
+    }
+
+    /// The slot transaction `signature` is mined in, once finalized (its
+    /// history searched); `None` while it is not.
+    ///
+    /// # Errors
+    ///
+    /// A node failure.
+    pub async fn finalized_in(&self, signature: &str) -> anyhow::Result<Option<u64>> {
+        let statuses: Context<Vec<Option<Status>>> = self
+            .0
+            .node
+            .call(
+                "getSignatureStatuses",
+                json!([[signature], { "searchTransactionHistory": true }]),
+            )
+            .await?;
+        let status = statuses
+            .value
+            .into_iter()
+            .next()
+            .context("Solana getSignatureStatuses answered no status")?;
+        let finalized =
+            status.filter(|status| status.confirmation_status.as_deref() == Some("finalized"));
+        Ok(finalized.map(|status| status.slot))
     }
 
     /// The finalized account at `address`; `None` when it does not exist.
@@ -498,10 +525,20 @@ struct Slot {
     slot: u64,
 }
 
-/// `getLatestBlockhash`, for its blockhash.
+/// One signature's status, for its slot and how final it is.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Status {
+    slot: u64,
+    confirmation_status: Option<String>,
+}
+
+/// `getLatestBlockhash`, for its blockhash and how long it lasts.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Latest {
     blockhash: String,
+    last_valid_block_height: u64,
 }
 
 /// `getAccountInfo` in base64.

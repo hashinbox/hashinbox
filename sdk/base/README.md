@@ -33,8 +33,10 @@ assert_eq!(amount.to_atomic_u64(8)?, 1_500_000);
   (`ServiceFactory::new(&config)`) and builds its service over the
   container's `Storage` and `transport.client()`, asking no node. `service`,
   `transport` and the cross-network calls (`networks`, `assets`, `stats`,
-  `watch`, `generate`, `wallet`, `wallets`, `parse`, `broadcast`) are keyed
-  by network. A `Transport` is how a network gets its one `rpc::Client`:
+  `generate`, `wallet`, `wallets`, `parse`, `broadcast`) are keyed by
+  network. An index is kept by inserting its target into its store
+  (`WalletIndexStore::insert(&WalletIndexTarget::new(chain, address,
+  asset))`); the indexer reads it from the next step on. A `Transport` is how a network gets its one `rpc::Client`:
   `Simple` is a client made upfront (tests, custom stacks); the server's
   selects among its stored nodes.
 - `InfoClient` is a chain's reader of one node: `new(node)`, `tip()`, and

@@ -332,8 +332,8 @@ fn pending_send(connection: &mut SqliteConnection) {
     connection
         .batch_execute(
             "INSERT INTO \"transaction\" (id, block, chain, network, txid, state, bytes, \
-               sent_at, expires_at) \
-             VALUES ('bitcoin.regtest.p',NULL,'bitcoin','regtest','p',0,x'',1,9); \
+               sent_at) \
+             VALUES ('bitcoin.regtest.p',NULL,'bitcoin','regtest','p',0,x'',1); \
              INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, amount, \
                wallet_index_id) \
              VALUES ('bitcoin.regtest.p.0',NULL,'bitcoin.regtest.p',0,1,'a','native','100', \
@@ -561,8 +561,8 @@ fn ids_of(names: &[&str]) -> Target {
     ))
 }
 
-/// Each started job's sender and its (recipient, amount) transfers.
-type Plan = Vec<(String, Vec<(String, String)>)>;
+/// Each started job's sender, recipient and amount: one payment each.
+type Plan = Vec<(String, String, String)>;
 
 /// The jobs `send` starts over the store with `this` (native indexes by
 /// name) kept, each spend priced 100 sats.
@@ -595,12 +595,7 @@ fn plan(
     let jobs = futures_executor::block_on(Transfer.run(send, &mut on.with(kept)))?;
     let sends = jobs.into_iter().map(|job| {
         let intent: SendIntent = serde_json::from_value(job.input).unwrap();
-        let paid = intent
-            .transfers
-            .into_iter()
-            .map(|p| (p.to, p.amount))
-            .collect();
-        (intent.address, paid)
+        (intent.address, intent.to, intent.amount)
     });
     Ok(sends.collect())
 }
@@ -616,10 +611,7 @@ fn a_send_pays_per_source_or_per_destination() {
     }
     let c = &mut connection;
     let sent = |from: &str, to: &str, amount: &str| {
-        vec![(
-            address(from).value,
-            vec![(address(to).value, amount.to_owned())],
-        )]
+        vec![(address(from).value, address(to).value, amount.to_owned())]
     };
 
     // Many sources to one: everything less the fee, each source alone;
@@ -642,6 +634,30 @@ fn a_send_pays_per_source_or_per_destination() {
     // Many to many is refused.
     let tangled = send(this(None), ids_of(&["a", "b"]), *balance());
     assert!(plan(c, &tangled, &["a", "b"]).is_err());
+}
+
+#[test]
+fn a_send_to_many_is_one_job_per_payment_in_order() {
+    let (_directory, _runtime, mut connection) = seeded();
+    let key = crypto::SecretBytes::new(vec![1]);
+    let keyed = Wallet::new(&address("a"), crypto::Curve::Secp256k1, key).unwrap();
+    wallet::db::insert(&mut connection, &keyed).unwrap();
+    // f: a second destination fully indexed in native.
+    connection
+        .batch_execute(
+            "INSERT INTO wallet (id, chain, network, address) VALUES
+              ('bitcoin.regtest.f','bitcoin','regtest','f');
+             INSERT INTO wallet_index
+              (id, wallet_id, asset, requested_from, birthday, indexed_at, state) VALUES
+              ('bitcoin.regtest.f.native','bitcoin.regtest.f','native',0,0,'bitcoin.regtest.03',0);",
+        )
+        .unwrap();
+    let pay = send(ids_of(&["a"]), this(None), value("0.0000001"));
+    let paid = |to: &str| (address("a").value, address(to).value, "10".to_owned());
+    assert_eq!(
+        plan(&mut connection, &pay, &["b", "f"]).unwrap(),
+        [paid("b"), paid("f")]
+    );
 }
 
 #[test]

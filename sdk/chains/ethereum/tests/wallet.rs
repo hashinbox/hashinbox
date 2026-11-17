@@ -9,8 +9,8 @@ use alloy_eips::Decodable2718 as _;
 use alloy_primitives::{hex, keccak256};
 use alloy_sol_types::{SolCall as _, sol};
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Decimal, Leg, Reason, Signer, TransactionErrorKind,
-    TransactionState, Transfer, WalletFactory as _,
+    Asset, Broadcaster as _, Decimal, Leg, Reason, Signer, TransactionErrorKind, TransactionState,
+    Transfer, WalletFactory as _,
 };
 use chain_ethereum::{Client, Config, Factory, Network, Token, WalletFactory};
 use crypto::SecretBytes;
@@ -42,6 +42,7 @@ fn factory(script: &Script) -> WalletFactory {
     Factory::from(config()).wallets(
         &connect(Arc::new(script.clone())),
         Arc::new(base::NoHoldings),
+        Arc::new(base::NoTransactionIndexes),
     )
 }
 
@@ -128,22 +129,28 @@ fn a_factory_restores_keys_and_parses_addresses() {
 }
 
 #[test]
-fn a_batch_signs_consecutive_nonces_in_order() {
+fn a_transfer_signs_one_transaction_at_the_next_nonce() {
     let script = Script::new([]);
     let factory = factory(&script);
     let wallet = block_on(factory.from_pk(key_one())).unwrap();
     let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
-    let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
-    builder.send((to.clone(), atomic(1000))).unwrap();
-    builder.send((to.clone(), atomic(2000))).unwrap();
-    assert!(builder.send((to.clone(), atomic(0))).is_err());
+    let native = Asset::native(network());
+    // A zero amount is refused before any I/O.
+    let zero = block_on(
+        wallet
+            .transaction(&native)
+            .unwrap()
+            .sign(Transfer::new(to.clone(), atomic(0))),
+    );
+    assert_eq!(zero.unwrap_err().kind, TransactionErrorKind::Failed);
     script.push([
         Reply::ok("eth_getTransactionCount", json!("0x7")).expecting(json!([KEY_ONE, "pending"])),
         Reply::ok("eth_maxPriorityFeePerGas", json!("0x3b9aca00")),
         Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x2"})),
         Reply::ok("eth_estimateGas", json!(ETHER_ESTIMATE)),
     ]);
-    let signed = block_on(builder.sign()).unwrap();
+    let builder = wallet.transaction(&native).unwrap();
+    let transaction = block_on(builder.sign(Transfer::new(to.clone(), atomic(1000)))).unwrap();
     script.exhausted();
     let (_, request) = script.requests().pop().unwrap();
     // Signing tests the very transfer: to its recipient.
@@ -152,47 +159,44 @@ fn a_batch_signs_consecutive_nonces_in_order() {
         to.value.parse::<alloy_primitives::Address>().unwrap()
     );
 
-    assert_eq!(signed.len(), 2);
-    for (transaction, (nonce, value)) in signed.iter().zip([(7, 1000_u64), (8, 2000)]) {
-        assert_eq!(
-            transaction.id.id,
-            hex::encode_prefixed(keccak256(&transaction.bytes))
-        );
-        assert_eq!(transaction.state, TransactionState::Pending);
-        let envelope = TxEnvelope::decode_2718_exact(&transaction.bytes).unwrap();
-        assert_eq!(envelope.nonce(), nonce);
-        assert_eq!(envelope.gas_limit(), ETHER_GAS, "the node's estimate");
-        assert_eq!(envelope.value(), alloy_primitives::U256::from(value));
-        assert_eq!(envelope.chain_id(), Some(1));
-        let from = base::Address::new(network(), KEY_ONE);
-        let worst = (2 * 2 + 1_000_000_000_u64) * ETHER_GAS;
-        assert_eq!(
-            transaction.legs,
-            vec![
-                Leg::Spent {
-                    address: from.clone(),
-                    asset: Asset::native(network()),
-                    amount: atomic(value),
-                    coin: None
-                },
-                Leg::Received {
-                    address: to.clone(),
-                    asset: Asset::native(network()),
-                    amount: atomic(value),
-                    coin: None
-                },
-                Leg::Fee {
-                    address: from,
-                    asset: Asset::native(network()),
-                    amount: atomic(worst)
-                },
-            ]
-        );
-    }
+    assert_eq!(
+        transaction.id.id,
+        hex::encode_prefixed(keccak256(&transaction.bytes))
+    );
+    assert_eq!(transaction.state, TransactionState::Pending);
+    let envelope = TxEnvelope::decode_2718_exact(&transaction.bytes).unwrap();
+    assert_eq!(envelope.nonce(), 7);
+    assert_eq!(envelope.gas_limit(), ETHER_GAS, "the node's estimate");
+    assert_eq!(envelope.value(), alloy_primitives::U256::from(1000));
+    assert_eq!(envelope.chain_id(), Some(1));
+    let from = base::Address::new(network(), KEY_ONE);
+    let worst = (2 * 2 + 1_000_000_000_u64) * ETHER_GAS;
+    assert_eq!(
+        transaction.legs,
+        vec![
+            Leg::Spent {
+                address: from.clone(),
+                asset: Asset::native(network()),
+                amount: atomic(1000),
+                coin: None
+            },
+            Leg::Received {
+                address: to,
+                asset: Asset::native(network()),
+                amount: atomic(1000),
+                coin: None
+            },
+            Leg::Fee {
+                address: from,
+                asset: Asset::native(network()),
+                amount: atomic(worst)
+            },
+        ]
+    );
 }
 
 #[test]
-fn a_token_batch_calls_the_contract_with_consecutive_nonces() {
+fn a_token_transfer_calls_the_contract() {
     let script = Script::new([]);
     let factory = factory(&script);
     let wallet = block_on(factory.from_pk(key_one())).unwrap();
@@ -201,16 +205,14 @@ fn a_token_batch_calls_the_contract_with_consecutive_nonces() {
         id: TOKEN.to_owned(),
     };
     let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
-    let mut builder = wallet.transaction(&token).unwrap();
-    builder.send((to.clone(), atomic(5))).unwrap();
-    builder.send((to.clone(), atomic(6))).unwrap();
+    let builder = wallet.transaction(&token).unwrap();
     script.push([
         Reply::ok("eth_getTransactionCount", json!("0x3")),
         Reply::ok("eth_maxPriorityFeePerGas", json!("0x1")),
         Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x1"})),
         Reply::ok("eth_estimateGas", json!("0xc350")),
     ]);
-    let signed = block_on(builder.sign()).unwrap();
+    let transaction = block_on(builder.sign(Transfer::new(to.clone(), atomic(5)))).unwrap();
     script.exhausted();
     let (_, request) = script.requests().pop().unwrap();
     assert_eq!(request[0]["to"], json!(TOKEN));
@@ -221,51 +223,48 @@ fn a_token_batch_calls_the_contract_with_consecutive_nonces() {
         to.value.parse::<alloy_primitives::Address>().unwrap()
     );
 
-    assert_eq!(signed.len(), 2);
     let from = base::Address::new(network(), KEY_ONE);
-    for (transaction, (nonce, amount)) in signed.iter().zip([(3, 5_u64), (4, 6)]) {
-        let envelope = TxEnvelope::decode_2718_exact(&transaction.bytes).unwrap();
-        assert_eq!(envelope.nonce(), nonce);
-        assert_eq!(
-            envelope.to(),
-            Some(TOKEN.parse().unwrap()),
-            "the token contract"
-        );
-        assert_eq!(envelope.value(), alloy_primitives::U256::ZERO);
-        let call = transferCall::abi_decode(envelope.input()).unwrap();
-        assert_eq!(
-            call.recipient,
-            to.value.parse::<alloy_primitives::Address>().unwrap()
-        );
-        assert_eq!(call.amount, alloy_primitives::U256::from(amount));
-        assert_eq!(
-            transaction.id.id,
-            hex::encode_prefixed(keccak256(&transaction.bytes))
-        );
-        let worst = (2 + 1) * 60_000_u64;
-        assert_eq!(
-            transaction.legs,
-            vec![
-                Leg::Spent {
-                    address: from.clone(),
-                    asset: token.clone(),
-                    amount: atomic(amount),
-                    coin: None
-                },
-                Leg::Received {
-                    address: to.clone(),
-                    asset: token.clone(),
-                    amount: atomic(amount),
-                    coin: None
-                },
-                Leg::Fee {
-                    address: from.clone(),
-                    asset: Asset::native(network()),
-                    amount: atomic(worst)
-                },
-            ]
-        );
-    }
+    let envelope = TxEnvelope::decode_2718_exact(&transaction.bytes).unwrap();
+    assert_eq!(envelope.nonce(), 3);
+    assert_eq!(
+        envelope.to(),
+        Some(TOKEN.parse().unwrap()),
+        "the token contract"
+    );
+    assert_eq!(envelope.value(), alloy_primitives::U256::ZERO);
+    let call = transferCall::abi_decode(envelope.input()).unwrap();
+    assert_eq!(
+        call.recipient,
+        to.value.parse::<alloy_primitives::Address>().unwrap()
+    );
+    assert_eq!(call.amount, alloy_primitives::U256::from(5));
+    assert_eq!(
+        transaction.id.id,
+        hex::encode_prefixed(keccak256(&transaction.bytes))
+    );
+    let worst = (2 + 1) * 60_000_u64;
+    assert_eq!(
+        transaction.legs,
+        vec![
+            Leg::Spent {
+                address: from.clone(),
+                asset: token.clone(),
+                amount: atomic(5),
+                coin: None
+            },
+            Leg::Received {
+                address: to,
+                asset: token,
+                amount: atomic(5),
+                coin: None
+            },
+            Leg::Fee {
+                address: from,
+                asset: Asset::native(network()),
+                amount: atomic(worst)
+            },
+        ]
+    );
 }
 
 #[test]
@@ -277,17 +276,15 @@ fn a_reverting_transfer_fails_before_signing() {
         network: network(),
         id: TOKEN.to_owned(),
     };
-    let mut builder = wallet.transaction(&token).unwrap();
-    builder
-        .send((base::Address::new(network(), TOKEN), atomic(5)))
-        .unwrap();
+    let builder = wallet.transaction(&token).unwrap();
     script.push([
         Reply::ok("eth_getTransactionCount", json!("0x0")),
         Reply::ok("eth_maxPriorityFeePerGas", json!("0x1")),
         Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x1"})),
         Reply::failure("eth_estimateGas", 3, "execution reverted: balance too low"),
     ]);
-    let error = block_on(builder.sign()).unwrap_err();
+    let to = base::Address::new(network(), TOKEN);
+    let error = block_on(builder.sign(Transfer::new(to, atomic(5)))).unwrap_err();
     assert_eq!(error.kind, TransactionErrorKind::Failed);
     assert_eq!(error.reason, Some(Reason::Reverted));
 }
@@ -348,38 +345,30 @@ fn key_two() -> SecretBytes {
 }
 
 #[test]
-fn two_sources_sign_one_transaction_each_with_their_own_nonces() {
+fn a_transfer_from_its_own_source_takes_that_sources_nonce() {
     let script = Script::new([]);
     let factory = factory(&script);
     let one = block_on(factory.from_pk(key_one())).unwrap();
     let two = block_on(factory.from_pk(key_two())).unwrap();
     let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
-    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
-    builder
-        .send(Transfer::new(to.clone(), atomic(1000)).from(&one))
-        .unwrap();
-    builder
-        .send(Transfer::new(to.clone(), atomic(2000)).from(&two))
-        .unwrap();
+    // One's builder, paid by two.
+    let builder = one.transaction(&Asset::native(network())).unwrap();
     script.push([
-        Reply::ok("eth_getTransactionCount", json!("0x7")).expecting(json!([KEY_ONE, "pending"])),
         Reply::ok("eth_getTransactionCount", json!("0x2")).expecting(json!([KEY_TWO, "pending"])),
         Reply::ok("eth_maxPriorityFeePerGas", json!("0x3b9aca00")),
         Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x2"})),
         Reply::ok("eth_estimateGas", json!(ETHER_ESTIMATE)),
     ]);
-    let signed = block_on(builder.sign()).unwrap();
+    let transfer = Transfer::new(to, atomic(1000)).from(&two);
+    let transaction = block_on(builder.sign(transfer)).unwrap();
     script.exhausted();
-    assert_eq!(signed.len(), 2);
-    for (transaction, (nonce, payer)) in signed.iter().zip([(7, KEY_ONE), (2, KEY_TWO)]) {
-        let envelope = TxEnvelope::decode_2718_exact(&transaction.bytes).unwrap();
-        assert_eq!(envelope.nonce(), nonce);
-        let fee = transaction.legs.iter().find_map(|leg| match leg {
-            Leg::Fee { address, .. } => Some(address.value.as_str()),
-            _ => None,
-        });
-        assert_eq!(fee, Some(payer));
-    }
+    let envelope = TxEnvelope::decode_2718_exact(&transaction.bytes).unwrap();
+    assert_eq!(envelope.nonce(), 2);
+    let fee = transaction.legs.iter().find_map(|leg| match leg {
+        Leg::Fee { address, .. } => Some(address.value.as_str()),
+        _ => None,
+    });
+    assert_eq!(fee, Some(KEY_TWO));
 }
 
 #[test]
@@ -387,21 +376,18 @@ fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
     let script = Script::new([]);
     let factory = factory(&script);
     let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
-    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
-    builder.send((to.clone(), atomic(1000))).unwrap();
-    let error = block_on(builder.sign()).unwrap_err();
+    let builder = factory.transaction(&Asset::native(network())).unwrap();
+    let error = block_on(builder.sign(Transfer::new(to.clone(), atomic(1000)))).unwrap_err();
     assert_eq!(error.kind, TransactionErrorKind::Failed);
 
-    let mut builder = factory.transaction(&Asset::native(network())).unwrap();
+    let builder = factory.transaction(&Asset::native(network())).unwrap();
     let wrong = Signer::new(
         base::Address::new(network(), KEY_ONE),
         crypto::Curve::Secp256k1,
         key_two(),
     );
-    builder
-        .send(Transfer::new(to, atomic(1000)).from(wrong))
-        .unwrap();
-    let error = block_on(builder.sign()).unwrap_err();
+    let transfer = Transfer::new(to, atomic(1000)).from(wrong);
+    let error = block_on(builder.sign(transfer)).unwrap_err();
     assert_eq!(error.kind, TransactionErrorKind::Failed);
     script.exhausted();
 }
@@ -471,6 +457,7 @@ fn fees_and_gas_refresh_once_per_time_to_live() {
         .wallets(
             &connect(Arc::new(script.clone())),
             Arc::new(base::NoHoldings),
+            Arc::new(base::NoTransactionIndexes),
         )
         .fees();
     block_on(fees.estimate(&spends(&source))).unwrap();
@@ -497,12 +484,11 @@ fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
     let fee = block_on(factory.fees().estimate(&spends(&source))).unwrap();
     let balance = atomic(10_u64.pow(18));
     let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
-    let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
-    builder.send((to, balance - fee.clone())).unwrap();
+    let builder = wallet.transaction(&Asset::native(network())).unwrap();
     script.push([Reply::ok("eth_getTransactionCount", json!("0x0"))]);
-    let signed = block_on(builder.sign()).unwrap();
+    let signed = block_on(builder.sign(Transfer::new(to, balance - fee.clone()))).unwrap();
     script.exhausted();
-    let paid = signed.legs().find_map(|(_, _, leg)| match leg {
+    let paid = signed.legs.iter().find_map(|leg| match leg {
         Leg::Fee { amount, .. } => Some(amount.clone()),
         _ => None,
     });
@@ -540,8 +526,11 @@ fn a_send_to_a_holder_is_priced_for_one_and_any_other_for_a_new_account() {
     // What an ether transfer to a new account costs on Sepolia today.
     let new = || Reply::ok("eth_estimateGas", json!("0x32a1f"));
     script.push([held(), new()]);
-    let factory =
-        Factory::from(config()).wallets(&connect(Arc::new(script.clone())), Arc::new(Held));
+    let factory = Factory::from(config()).wallets(
+        &connect(Arc::new(script.clone())),
+        Arc::new(Held),
+        Arc::new(base::NoTransactionIndexes),
+    );
     let fees = factory.fees();
     let one = base::Address::new(network(), KEY_ONE);
     let holder = base::Address::new(network(), HOLDER);
@@ -572,25 +561,19 @@ fn a_send_to_a_holder_is_priced_for_one_and_any_other_for_a_new_account() {
 
     // Signing takes each recipient's limit from the same cache.
     let wallet = block_on(factory.from_pk(key_one())).unwrap();
-    let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
-    builder.send((holder, atomic(1000))).unwrap();
-    builder
-        .send((
-            base::Address::new(network(), "0x00000000000000000000000000000000000000c0"),
-            atomic(1000),
-        ))
-        .unwrap();
-    script.push([Reply::ok("eth_getTransactionCount", json!("0x0"))]);
-    let signed = block_on(builder.sign()).unwrap();
-    script.exhausted();
-    let limits: Vec<u64> = signed
-        .iter()
-        .map(|transaction| {
-            TxEnvelope::decode_2718_exact(&transaction.bytes)
+    let other = base::Address::new(network(), "0x00000000000000000000000000000000000000c0");
+    let limits: Vec<u64> = [holder, other]
+        .into_iter()
+        .map(|to| {
+            let builder = wallet.transaction(&Asset::native(network())).unwrap();
+            script.push([Reply::ok("eth_getTransactionCount", json!("0x0"))]);
+            let signed = block_on(builder.sign(Transfer::new(to, atomic(1000)))).unwrap();
+            TxEnvelope::decode_2718_exact(&signed.bytes)
                 .unwrap()
                 .gas_limit()
         })
         .collect();
+    script.exhausted();
     assert_eq!(limits, [ETHER_GAS, 248_870]);
 }
 
@@ -603,6 +586,7 @@ fn a_sender_holding_no_token_gets_the_last_answer_of_its_kind() {
         .wallets(
             &connect(Arc::new(script.clone())),
             Arc::new(base::NoHoldings),
+            Arc::new(base::NoTransactionIndexes),
         )
         .fees();
     let from = |key: &str| [(base::Address::new(network(), key), token())];
@@ -637,7 +621,7 @@ fn signed(bytes: &[u8]) -> base::Transaction {
         order: None,
         legs: Vec::new(),
         bytes: bytes.to_vec(),
-        expires: None,
+        expires_height: None,
     }
 }
 
@@ -658,4 +642,117 @@ fn a_hex_key_imports_with_or_without_its_prefix() {
             "{bad:?}"
         );
     }
+}
+
+/// [`KEY_ONE`]'s sends in flight, as the application keeps them; nothing
+/// else.
+struct Pending(Vec<base::Transaction>);
+
+impl base::TransactionIndexStore for Pending {
+    fn insert<'a>(
+        &'a self,
+        index: &'a dyn base::IntoIndex<base::TransactionIndex>,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        base::TransactionIndexStore::insert(&base::NoTransactionIndexes, index)
+    }
+
+    fn find_all<'a>(
+        &'a self,
+        network: &'a base::Network,
+    ) -> base::Future<'a, anyhow::Result<Vec<base::TransactionIndex>>> {
+        base::TransactionIndexStore::find_all(&base::NoTransactionIndexes, network)
+    }
+
+    fn move_start<'a>(
+        &'a self,
+        index: &'a base::TransactionIndex,
+        start: u64,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        base::TransactionIndexStore::move_start(&base::NoTransactionIndexes, index, start)
+    }
+
+    fn set_state<'a>(
+        &'a self,
+        index: &'a base::TransactionIndex,
+        state: base::IndexState,
+        reason: Option<&'a str>,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        base::TransactionIndexStore::set_state(&base::NoTransactionIndexes, index, state, reason)
+    }
+
+    fn settle<'a>(
+        &'a self,
+        index: &'a base::TransactionIndex,
+        found: Option<&'a base::BlockHeader>,
+        header: &'a base::BlockHeader,
+    ) -> base::Future<'a, anyhow::Result<bool>> {
+        base::TransactionIndexStore::settle(&base::NoTransactionIndexes, index, found, header)
+    }
+
+    fn give_up<'a>(
+        &'a self,
+        index: &'a base::TransactionIndex,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        base::TransactionIndexStore::give_up(&base::NoTransactionIndexes, index)
+    }
+
+    fn delete<'a>(
+        &'a self,
+        index: &'a base::TransactionIndex,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        base::TransactionIndexStore::delete(&base::NoTransactionIndexes, index)
+    }
+
+    fn find_sent<'a>(
+        &'a self,
+        sender: &'a base::Address,
+    ) -> base::Future<'a, anyhow::Result<Vec<base::Transaction>>> {
+        let sent = if sender.value == KEY_ONE {
+            self.0.clone()
+        } else {
+            Vec::new()
+        };
+        Box::pin(async move { Ok(sent) })
+    }
+}
+
+/// 1000 wei from [`KEY_ONE`], signed after `pending`, the node counting
+/// `count` pending.
+fn sent_after(pending: Vec<base::Transaction>, count: &str) -> base::Transaction {
+    let script = Script::new([]);
+    let factory = Factory::from(config()).wallets(
+        &connect(Arc::new(script.clone())),
+        Arc::new(base::NoHoldings),
+        Arc::new(Pending(pending)),
+    );
+    let wallet = block_on(factory.from_pk(key_one())).unwrap();
+    let builder = wallet.transaction(&Asset::native(network())).unwrap();
+    let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
+    script.push([
+        Reply::ok("eth_getTransactionCount", json!(count)).expecting(json!([KEY_ONE, "pending"])),
+        Reply::ok("eth_maxPriorityFeePerGas", json!("0x3b9aca00")),
+        Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x2"})),
+        Reply::ok("eth_estimateGas", json!(ETHER_ESTIMATE)),
+    ]);
+    let signed = block_on(builder.sign(Transfer::new(to, atomic(1000)))).unwrap();
+    script.exhausted();
+    signed
+}
+
+fn nonce(transaction: &base::Transaction) -> u64 {
+    TxEnvelope::decode_2718_exact(&transaction.bytes)
+        .unwrap()
+        .nonce()
+}
+
+#[test]
+fn a_node_whose_pending_count_misses_our_send_still_gives_the_next_send_the_next_nonce() {
+    let first = sent_after(Vec::new(), "0x7");
+    assert_eq!(nonce(&first), 7);
+    // Another node behind the balancer has not seen it: it counts 7 again.
+    let second = sent_after(vec![first.clone()], "0x7");
+    assert_eq!(nonce(&second), 8);
+    // A node ahead of what is recorded is followed.
+    let third = sent_after(vec![first, second], "0xa");
+    assert_eq!(nonce(&third), 10);
 }

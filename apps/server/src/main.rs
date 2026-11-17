@@ -78,19 +78,19 @@ async fn main() -> Result<(), AnyError> {
     let (container, db, queue, actions) =
         (&state.container, &state.db, &state.queue, &state.actions);
     // Each recurring worker seeds its own jobs when the queue starts: the index job per
-    // network (queueing trigger rounds at the tip, whose sends become broadcast jobs),
-    // the expire job per network, and one prune job.
+    // network (queueing trigger rounds at the tip, whose sends become broadcast jobs)
+    // and one prune job.
     let jobs = Executor::new(queue.clone(), TICK)
         .add(workers::index::Index::new(
             container.clone(),
             db.clone(),
             queue.clone(),
         ))
-        .add(workers::expire::Expire::new(db.clone()))
         .add(workers::prune::Prune::new(db.clone(), container.clone()))
         .add(workers::broadcast::Broadcast::new(
             container.clone(),
             db.clone(),
+            workers::broadcast::CHECK,
         ))
         .add(workers::trigger::Round::new(
             container.clone(),

@@ -61,10 +61,10 @@ pub(crate) use state::AppState;
     tags(
         (name = "assets", description = "Configured assets"),
         (name = "wallets", description = "Wallets and balances"),
-        (name = "transactions", description = "History, single transfers, and batches"),
+        (name = "transactions", description = "History and sends, one payment each"),
         (name = "networks", description = "Configured networks, their indexing and RPC nodes"),
         (name = "triggers", description = "Triggers, their runs, and the tags they select by"),
-        (name = "jobs", description = "The job queue: indexing, expiry, trigger rounds, broadcasts, pruning"),
+        (name = "jobs", description = "The job queue: indexing, trigger rounds, broadcasts, pruning"),
         (name = "stats", description = "What the store holds and its last day"),
         (name = "health", description = "Readiness and indexing state"),
         (name = "openapi", description = "This document")
@@ -136,17 +136,11 @@ fn public_routes() -> OpenApiRouter<Arc<AppState>> {
         .merge(openapi::routes())
 }
 
-/// The body of every error response: `message` is always present, the
-/// failing transfer's index only when one transfer of a send failed.
+/// The body of every error response.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
 pub(crate) struct ErrorBody {
     /// What went wrong.
     pub(crate) message: String,
-    /// Zero-based index of the transfer that failed. Present only when one
-    /// transfer of a send failed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub(crate) failed_index: Option<usize>,
 }
 
 /// An endpoint's failure: its status and body.
@@ -180,7 +174,6 @@ impl Error {
             status,
             body: ErrorBody {
                 message: message.into(),
-                failed_index: None,
             },
         }
     }
@@ -206,7 +199,6 @@ impl From<usecase::Error> for Error {
         };
         let body = ErrorBody {
             message: error.message,
-            failed_index: error.failed_index,
         };
         Self { status, body }
     }

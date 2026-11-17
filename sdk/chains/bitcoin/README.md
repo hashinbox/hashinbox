@@ -11,7 +11,7 @@ rest of the SDK.
 use std::sync::Arc;
 
 use base::{
-    Asset, Broadcaster as _, BuilderExt as _, Chained as _, ServiceFactory as _, Storage,
+    Asset, Broadcaster as _, Chained as _, ServiceFactory as _, Storage, Transfer,
     WalletFactory as _,
 };
 use chain_bitcoin::{AddressType, Client, Config, Factory, Network};
@@ -36,14 +36,14 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
     let tips = chain.tips().await?;
     let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
 
-    // Sending: sign, keep the bytes, then broadcast them to every node.
+    // Sending: one transfer signed into one transaction; keep the bytes,
+    // then broadcast them to every node.
     let wallets = factory.wallets(&rpc, Arc::clone(&storage.inputs));
     let wallet = wallets.from_pk(wallets.generate().await?).await?;
-    let mut builder = wallet.transaction(&Asset::native(Network::Regtest.into()))?;
-    builder.send((wallets.parse_address("bcrt1q...")?, 10_000_u64.into()))?;
-    for transaction in builder.sign().await? {
-        rpc.broadcast(&transaction).await?;
-    }
+    let builder = wallet.transaction(&Asset::native(Network::Regtest.into()))?;
+    let to = wallets.parse_address("bcrt1q...")?;
+    let transaction = builder.sign(Transfer::new(to, 10_000_u64.into())).await?;
+    rpc.broadcast(&transaction).await?;
 
     Ok(())
 }
@@ -53,8 +53,8 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
 network by name, BTC's display decimals, `confirmation_depth`
 (`confirmations + 1`), `max_depth`, and from `settings` the knobs
 `address_type`, `fee_target_blocks`, `fee_floor`, `fee_ttl_ms`,
-`pending_ttl_ms`, `interval_ms`, and `batch`, the blocks the indexer fetches
-per step (default 100) (each absent one its default).
+`interval_ms`, and `batch`, the blocks the indexer fetches per step
+(default 100) (each absent one its default).
 
 ## Notes
 
@@ -95,11 +95,15 @@ per step (default 100) (each absent one its default).
   transaction spending every coin of every source to one 34-byte output, no
   change: change is made only when it is above dust after paying for itself;
   a smaller leftover is fee.
-- A send spends the store's unspent outputs of the wallet, largest first,
-  with change back to the wallet. Nothing reserves coins: a second send
+- A send pays one transfer in one transaction: one payment output, spending
+  the store's unspent outputs of the wallet, largest first, with change back
+  to the wallet. Nothing reserves coins: a second send
   before the first is mined can pick the same coins and be refused. A stored
   output does not say whether it is a coinbase, so an immature coinbase coin
   can be picked and the node refuses the send.
 - Broadcasting sends the exact signed bytes to every node; a node that
   already holds the transaction counts as accepting it. Acceptance means
   submitted, not confirmed.
+- The chain has no `Confirmer`: a sent transaction's index (`base`'s
+  `TransactionIndex`) left behind the tip less `max_depth` is given up, as a
+  wallet index jumps. Its line is `Line::Depth(max_depth)` (none: no line).

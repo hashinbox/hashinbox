@@ -1,9 +1,11 @@
-//! Send → pending → mined: what the wallet can spend, what is pending, and
-//! the legs once mined.
+//! Send → pending → mined → final: what the wallet can spend, what is
+//! pending, the legs once mined, and the job done once its block is final.
 
 use base::testing::{Caps, TestChain};
 
-use super::{App, funded, number, quarter, reaches, settle, succeeded, text, unit, until};
+use super::{
+    App, accepted, funded, number, quarter, reaches, settle, succeeded, text, unit, until,
+};
 
 pub(super) const NEEDS: Caps = Caps::NONE;
 
@@ -35,7 +37,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         text(&pending, "balance_pending"),
         text(&pending, "balance_confirmed_spendable")
     );
-    assert_eq!(succeeded(app, &job).await["accepted"], 1);
+    accepted(app, &job).await;
 
     settle(chain);
     let mined = until("the send to be mined", || async {
@@ -77,4 +79,5 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         &text(&mined, "balance_confirmed"),
     )
     .await;
+    succeeded(app, &job).await;
 }

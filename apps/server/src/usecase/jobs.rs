@@ -8,26 +8,26 @@ use crate::{
 };
 
 /// One job of the queue: the job, when it was queued and last written (Unix
-/// ms), and for a broadcast, how many transactions it signed and how many of
-/// them, in broadcast order, the nodes accepted (0 for other kinds).
+/// ms), and for a broadcast, the transaction it recorded (txid) and whether
+/// it was sent (none and false for other kinds).
 pub(crate) struct Job {
     pub(crate) job: tasks::Job,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
-    pub(crate) signed: usize,
-    pub(crate) accepted: usize,
+    pub(crate) txid: Option<String>,
+    pub(crate) accepted: bool,
 }
 
 impl Job {
     /// Row `id` of the queue, with when it was queued and last written.
     fn new((id, row, created_at, updated_at): (i64, task::Task, i64, i64)) -> anyhow::Result<Self> {
         let job = row.into_job(id)?;
-        let (signed, accepted) = broadcast::progress(job.state.as_ref());
+        let (txid, accepted) = broadcast::progress(job.state.as_ref());
         Ok(Self {
             job,
             created_at,
             updated_at,
-            signed,
+            txid,
             accepted,
         })
     }

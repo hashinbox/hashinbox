@@ -14,7 +14,7 @@ use diesel::{
 
 use super::{
     Id, IdError, Leg, id::typed_id, int, leg, schema::block, transaction, transaction::Transaction,
-    uint, wallet_index,
+    transaction_index, uint, wallet_index,
 };
 
 /// A block's id: `{chain}.{network}.{hash in hex}`.
@@ -143,7 +143,6 @@ impl TryFrom<&base::Block> for Block {
         for transaction in &mut transactions {
             transaction.block = Some(id.clone());
             transaction.position = Some(position);
-            transaction.expires_at = None;
             for leg in &mut transaction.legs {
                 leg.block = Some(id.clone());
                 leg.position = Some(position);
@@ -201,13 +200,15 @@ impl Block {
     }
 
     /// Drops its legs of wallet indexes not in `ours` (index ids), then its
-    /// transactions left without a leg.
-    pub(crate) fn keep(&mut self, ours: &BTreeSet<String>) {
+    /// transactions left without a leg, but those `watched` (ids: a
+    /// transaction index found them in it).
+    pub(crate) fn keep(&mut self, ours: &BTreeSet<String>, watched: &BTreeSet<String>) {
         for transaction in &mut self.transactions {
             transaction.keep(ours);
         }
-        self.transactions
-            .retain(|transaction| !transaction.legs.is_empty());
+        self.transactions.retain(|transaction| {
+            !transaction.legs.is_empty() || watched.contains(transaction.id.as_ref())
+        });
         self.rewards
             .retain(|reward| ours.contains(reward.wallet_index_id.as_ref()));
     }
@@ -288,8 +289,9 @@ pub(crate) mod db {
     ///
     /// 1. its row: a block reorged before is revived, a new one linked to
     ///    its kept parent and its kept child to it;
-    /// 2. the wallet indexes it applies to move onto it, and it keeps only
-    ///    their legs ([`Block::keep`]);
+    /// 2. the wallet and transaction indexes it applies to move onto it, and
+    ///    it keeps only the wallet indexes' legs and the transactions found
+    ///    ([`Block::keep`]);
     /// 3. its legs of the wallet indexes its legs are of are deleted (a
     ///    block kept again writes them again);
     /// 4. each such index's seq and totals are read (one query), and each
@@ -304,7 +306,8 @@ pub(crate) mod db {
     pub(crate) fn save(connection: &mut SqliteConnection, block: &mut Block) -> anyhow::Result<()> {
         let parent = save_row(connection, block)?;
         let ours = wallet_index::db::advance(connection, block, parent.as_ref())?;
-        block.keep(&ours);
+        let watched = transaction_index::db::advance(connection, block, parent.as_ref())?;
+        block.keep(&ours, &watched);
 
         let index_ids: BTreeSet<String> = block
             .legs()
@@ -391,6 +394,18 @@ pub(crate) mod db {
         query
             .order(block::position.desc())
             .limit(page.limit)
+            .select(Row::as_select())
+            .load(connection)
+            .map(|rows| rows.into_iter().map(Block::from).collect())
+    }
+
+    /// The blocks `ids`, live or reorged.
+    pub(crate) fn find_by_ids(
+        connection: &mut SqliteConnection,
+        ids: &[&str],
+    ) -> QueryResult<Vec<Block>> {
+        block::table
+            .filter(block::id.eq_any(ids))
             .select(Row::as_select())
             .load(connection)
             .map(|rows| rows.into_iter().map(Block::from).collect())
@@ -520,58 +535,82 @@ pub(crate) mod db {
             .execute(connection)
     }
 
-    /// The blocks of network `?1`, `?2` below position `?3` nothing needs:
-    /// reorged, or live and named by no leg and no transaction, the
-    /// network's last live block aside; never one an index is indexed
-    /// through.
-    const PRUNED: &str = r#"
-        SELECT b.id
-        FROM block b
-        WHERE b.chain = ?1
-          AND b.network = ?2
-          AND b.position < ?3
-          AND b.id NOT IN (
-              SELECT indexed_at
-              FROM wallet_index
-              WHERE indexed_at IS NOT NULL
-          )
-          AND (
-              b.reorged_at IS NOT NULL
-              OR (
-                  NOT EXISTS (SELECT 1 FROM leg l WHERE l.block = b.id)
-                  AND NOT EXISTS (SELECT 1 FROM "transaction" t WHERE t.block = b.id)
-                  AND b.position < (
-                      SELECT MAX(position)
-                      FROM block
-                      WHERE chain = ?1
-                        AND network = ?2
-                        AND reorged_at IS NULL
-                  )
-              )
-          )"#;
+    /// Whether an index names block `block`: a wallet or transaction index
+    /// indexed through it, or a transaction index that found its
+    /// transaction in it. Such a block stays (its foreign keys do not
+    /// cascade).
+    const NAMED: &str = "
+        EXISTS (
+            SELECT 1 FROM wallet_index WHERE indexed_at = block.id
+            UNION ALL
+            SELECT 1 FROM transaction_index WHERE indexed_at = block.id OR found = block.id
+        )";
 
     /// Deletes the blocks of `network` below position `below` nothing needs
-    /// ([`PRUNED`]): the legs and transactions of the reorged ones, each
-    /// kept child's link to one (`parent` NULL), then the blocks. How many
-    /// blocks went.
+    /// ([`delete_reorged`], [`delete_unused`]). How many went.
     pub(crate) fn prune(
         connection: &mut SqliteConnection,
         network: &Network,
         below: i64,
     ) -> QueryResult<usize> {
-        let mut deleted = 0;
-        for statement in [
-            format!("DELETE FROM leg WHERE block IN ({PRUNED})"),
-            format!(r#"DELETE FROM "transaction" WHERE block IN ({PRUNED})"#),
-            format!("UPDATE block SET parent = NULL WHERE parent IN ({PRUNED})"),
-            format!("DELETE FROM block WHERE id IN ({PRUNED})"),
-        ] {
-            deleted = diesel::sql_query(statement)
-                .bind::<Text, _>(network.chain.as_str())
-                .bind::<Text, _>(&network.name)
-                .bind::<BigInt, _>(below)
-                .execute(connection)?;
-        }
-        Ok(deleted)
+        let reorged = delete_reorged(connection, network, below)?;
+        Ok(reorged + delete_unused(connection, network, below)?)
+    }
+
+    /// Deletes the reorged blocks of `network` below position `below` no
+    /// index names: the chain took them back, so what was on them (legs,
+    /// transactions) goes with them by cascade, and a kept child's `parent`
+    /// is set NULL. How many.
+    pub(crate) fn delete_reorged(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        below: i64,
+    ) -> QueryResult<usize> {
+        diesel::sql_query(format!(
+            "
+            DELETE FROM block
+            WHERE chain = ?1
+              AND network = ?2
+              AND position < ?3
+              AND reorged_at IS NOT NULL
+              AND NOT {NAMED}"
+        ))
+        .bind::<Text, _>(network.chain.as_str())
+        .bind::<Text, _>(&network.name)
+        .bind::<BigInt, _>(below)
+        .execute(connection)
+    }
+
+    /// Deletes the live blocks of `network` below position `below` that
+    /// hold nothing: no leg, no transaction, no index names them; the
+    /// newest live block always stays (the indexer checks it is still on
+    /// the chain). Never a block with history: nothing cascades. How many.
+    pub(crate) fn delete_unused(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        below: i64,
+    ) -> QueryResult<usize> {
+        diesel::sql_query(format!(
+            r#"
+            DELETE FROM block
+            WHERE chain = ?1
+              AND network = ?2
+              AND position < ?3
+              AND reorged_at IS NULL
+              AND position < (
+                  SELECT MAX(newest.position)
+                  FROM block AS newest
+                  WHERE newest.chain = ?1
+                    AND newest.network = ?2
+                    AND newest.reorged_at IS NULL
+              )
+              AND NOT EXISTS (SELECT 1 FROM leg WHERE leg.block = block.id)
+              AND NOT EXISTS (SELECT 1 FROM "transaction" AS t WHERE t.block = block.id)
+              AND NOT {NAMED}"#
+        ))
+        .bind::<Text, _>(network.chain.as_str())
+        .bind::<Text, _>(&network.name)
+        .bind::<BigInt, _>(below)
+        .execute(connection)
     }
 }

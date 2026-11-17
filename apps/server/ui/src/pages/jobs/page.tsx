@@ -28,7 +28,6 @@ const KINDS = [
   { kind: 'triggers', label: 'Triggers' },
   { kind: 'broadcast', label: 'Broadcast' },
   { kind: 'index', label: 'Index' },
-  { kind: 'expire', label: 'Expire' },
   { kind: 'prune', label: 'Prune' },
 ] as const;
 
@@ -297,7 +296,7 @@ function Detail({ job }: { job: Job }) {
     ['attempts', String(job.attempts)],
     ...(job.kind === 'broadcast'
       ? ([
-          ['signed', String(job.signed)],
+          ['txid', job.txid ?? '—'],
           ['accepted', String(job.accepted)],
         ] as [string, ReactNode][])
       : []),

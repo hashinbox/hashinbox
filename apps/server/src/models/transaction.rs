@@ -135,10 +135,9 @@ pub(crate) struct Transaction {
     /// The signed transaction in its chain's encoding.
     #[serde(skip)]
     pub(crate) bytes: Vec<u8>,
-    /// Unix ms it was recorded as pending; null once mined.
+    /// Unix ms it was sent: a node accepted it, or may hold it; null while
+    /// recorded but not yet sent, and once mined.
     pub(crate) sent_at: Option<i64>,
-    /// Unix ms it stops holding funds; null once mined.
-    pub(crate) expires_at: Option<i64>,
     /// Its block's position; null while pending.
     #[diesel(skip_insertion, skip_update, sql_type = Nullable<BigInt>)]
     pub(crate) position: Option<i64>,
@@ -194,7 +193,8 @@ impl Transaction {
             .retain(|leg| ours.contains(leg.wallet_index_id.as_ref()));
     }
 
-    /// The transaction it was written from, with its kept legs.
+    /// The transaction it was written from, with its kept legs; its
+    /// `expires_height` is its transaction index's, not kept here.
     ///
     /// # Errors
     ///
@@ -210,7 +210,7 @@ impl Transaction {
                 .map(Leg::leg)
                 .collect::<anyhow::Result<Vec<_>>>()?,
             bytes: self.bytes,
-            expires: self.expires_at.map(uint).transpose()?,
+            expires_height: None,
         })
     }
 }
@@ -238,7 +238,6 @@ impl TryFrom<&base::Transaction> for Transaction {
             reason,
             bytes: transaction.bytes.clone(),
             sent_at: None,
-            expires_at: transaction.expires.map(int).transpose()?,
             position: None,
             legs,
         })
@@ -266,8 +265,8 @@ pub(crate) mod db {
 
     /// Keeps pending `transaction` with its legs of kept wallet indexes
     /// (the others are dropped from it); a no-op when its txid is kept,
-    /// pending or mined. Its outgoing legs count as spent until it is mined,
-    /// deleted or expired.
+    /// pending or mined. Its outgoing legs count as spent until it is mined
+    /// or forgotten.
     ///
     /// # Errors
     ///
@@ -316,6 +315,23 @@ pub(crate) mod db {
         transaction.keep(&ours);
         leg::db::insert(connection, transaction.legs.iter().collect())?;
         Ok(())
+    }
+
+    /// Marks pending transaction `id` sent at `at` (Unix ms): a node
+    /// accepted it, or may hold it. A mined or forgotten one is left as it
+    /// is.
+    pub(crate) fn set_sent(
+        connection: &mut SqliteConnection,
+        id: impl AsRef<str>,
+        at: i64,
+    ) -> QueryResult<usize> {
+        diesel::update(
+            transactions::table
+                .filter(transactions::id.eq(id.as_ref()))
+                .filter(transactions::block.is_null()),
+        )
+        .set(transactions::sent_at.eq(at))
+        .execute(connection)
     }
 
     /// Keeps mined `transaction`'s row: a pending or earlier mined row
@@ -503,58 +519,69 @@ pub(crate) mod db {
         .load(connection)
     }
 
-    /// Forgets the pending transactions `ids` and their legs (never sent,
-    /// refused): their funds and coins are free again. A mined one is kept.
+    /// The pending transactions `sender` pays from (a leg of it spent,
+    /// burned or a fee), with their legs.
+    pub(crate) fn find_sent_by(
+        connection: &mut SqliteConnection,
+        sender: &base::Address,
+    ) -> QueryResult<Vec<Transaction>> {
+        diesel::sql_query(
+            r#"
+            SELECT
+                t.*
+            FROM transaction_with_legs t
+            WHERE t.chain = ?1
+              AND t.network = ?2
+              AND t.block IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM leg l
+                  WHERE l."transaction" = t.id
+                    AND l.address = ?3
+                    AND l.kind IN (1, 2, 4)
+              )"#,
+        )
+        .bind::<Text, _>(sender.network.chain.as_str())
+        .bind::<Text, _>(&sender.network.name)
+        .bind::<Text, _>(&sender.value)
+        .load(connection)
+    }
+
+    /// Deletes the pending transactions `ids`, their legs with them (the
+    /// schema's cascade): their funds and coins are free again. A mined one
+    /// is kept. What it deleted, with its legs, for the caller to record as
+    /// forgotten.
     pub(crate) fn delete_pending(
         connection: &mut SqliteConnection,
         ids: &[impl AsRef<str>],
-    ) -> QueryResult<usize> {
+    ) -> QueryResult<Vec<Transaction>> {
         let ids: Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
-        let pending = transactions::table
-            .filter(transactions::id.eq_any(ids))
-            .filter(transactions::block.is_null());
-        diesel::delete(schema::leg::table.filter(
-            schema::leg::transaction.eq_any(pending.clone().select(transactions::id.nullable())),
-        ))
+        let deleted = transaction_with_legs::table
+            .filter(transaction_with_legs::id.eq_any(&ids))
+            .filter(transaction_with_legs::block.is_null())
+            .load::<Transaction>(connection)?;
+        diesel::delete(
+            transactions::table
+                .filter(transactions::id.eq_any(ids))
+                .filter(transactions::block.is_null()),
+        )
         .execute(connection)?;
-        diesel::delete(pending).execute(connection)
+        Ok(deleted)
     }
 
-    /// Forgets the pending transactions wallet index `index` sends (a leg
-    /// of it spent, burned or a fee) and their legs, as [`delete_pending`]
-    /// does: a jump's, as one mined in its gap is never read. How many.
-    pub(crate) fn forget_sent(
+    /// The ids of the pending transactions wallet index `index` sends (a
+    /// leg of it spent, burned or a fee): what a jump forgets, as one mined
+    /// in its gap is never read.
+    pub(crate) fn find_sent(
         connection: &mut SqliteConnection,
         index: impl AsRef<str>,
-    ) -> QueryResult<usize> {
-        let sent: Vec<String> = schema::leg::table
+    ) -> QueryResult<Vec<String>> {
+        schema::leg::table
             .filter(schema::leg::wallet_index_id.eq(index.as_ref()))
             .filter(schema::leg::block.is_null())
             .filter(schema::leg::kind.eq_any([1, 2, 4]))
             .select(schema::leg::transaction.assume_not_null())
             .distinct()
-            .load(connection)?;
-        delete_pending(connection, &sent)
-    }
-
-    /// Forgets every pending transaction of `network` past its expiry at
-    /// `now`, with its legs; how many.
-    pub(crate) fn expire(
-        connection: &mut SqliteConnection,
-        network: &Network,
-        now: i64,
-    ) -> QueryResult<usize> {
-        let expired = transactions::table
-            .filter(transactions::chain.eq(network.chain.as_str()))
-            .filter(transactions::network.eq(&network.name))
-            .filter(transactions::block.is_null())
-            .filter(transactions::expires_at.le(now));
-        diesel::delete(
-            schema::leg::table.filter(
-                schema::leg::transaction.eq_any(expired.select(transactions::id.nullable())),
-            ),
-        )
-        .execute(connection)?;
-        diesel::delete(expired).execute(connection)
+            .load(connection)
     }
 }

@@ -1,10 +1,11 @@
 //! The server's tests, compiled into the binary's test target (the server has
 //! no library): the suite (`cases`, over mock chains through `support`),
 //! and, until it replaces them, the stores and reads on SQLite (`storage`),
-//! the send job (`send`) and the routes (`routes`) over one scripted
-//! network. Offline.
+//! the send job's first run (`send`) and its checks (`check`) and the
+//! routes (`routes`) over one scripted network. Offline.
 
 mod cases;
+mod check;
 mod pipe;
 mod routes;
 mod send;
@@ -21,9 +22,9 @@ use std::{
 use anyhow::Context as _;
 use base::{
     Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Future,
-    Indexer, InfoClient, Network, NetworkConfig, Networked, Service, Signer, Tips, Transaction,
-    TransactionError, TransactionErrorKind, TransactionId, TransactionState, Transactions,
-    Transfer, Wallet, WalletFactory, WalletFactoryBroadcaster,
+    Indexer, InfoClient, Line, Network, NetworkConfig, Networked, Service, Signer, Tips,
+    Transaction, TransactionError, TransactionErrorKind, TransactionId, TransactionIndexer,
+    TransactionState, Transfer, Wallet, WalletFactory, WalletFactoryBroadcaster, WalletIndexer,
 };
 use crypto::{Curve, SecretBytes};
 
@@ -61,9 +62,9 @@ async fn migrate(db: &crate::db::Db) -> anyhow::Result<()> {
 }
 
 /// What each broadcast answers, in order; the fee each built transaction
-/// pays (none when zero); how many transactions were built; every
-/// broadcast envelope; the chain's balance reads, when it has them; and
-/// the chain its indexer reads (none: an empty one).
+/// pays (none when zero); how many transactions were built; every broadcast
+/// envelope; the chain's balance reads, when it has them; and the chain its
+/// indexer reads (none: an empty one).
 #[derive(Default)]
 struct Script {
     answers: Mutex<VecDeque<Result<(), TransactionErrorKind>>>,
@@ -95,10 +96,7 @@ impl Networked for Fake {
 
 impl Wallet for Fake {
     fn transaction(&self, _asset: &Asset) -> Result<Box<dyn Builder>, TransactionError> {
-        Ok(Box::new(Build {
-            wallet: self.clone(),
-            transfers: 0,
-        }))
+        Ok(Box::new(Build(self.clone())))
     }
 
     fn private_key(&self) -> (Curve, SecretBytes) {
@@ -129,47 +127,40 @@ impl Broadcaster for Fake {
     }
 }
 
-/// A builder of one transaction per transfer, its bytes the build count.
-struct Build {
-    wallet: Fake,
-    transfers: usize,
-}
+/// A builder of the wallet's one transaction, its txid and bytes the build
+/// count.
+struct Build(Fake);
 
 impl Builder for Build {
     fn with_default_source(&mut self, _source: Signer) {}
 
-    fn transfer(&mut self, _transfer: Transfer) -> Result<(), TransactionError> {
-        self.transfers += 1;
-        Ok(())
-    }
-
-    fn sign<'a>(self: Box<Self>) -> Future<'a, Result<Transactions, TransactionError>>
+    fn sign<'a>(
+        self: Box<Self>,
+        _transfer: Transfer,
+    ) -> Future<'a, Result<Transaction, TransactionError>>
     where
         Self: 'a,
     {
         Box::pin(async move {
-            let mut signed = Vec::new();
-            for _ in 0..self.transfers {
-                let mut built = self.wallet.script.built.lock().expect("the counter");
-                *built += 1;
-                signed.push(Transaction {
-                    id: TransactionId::new(network(), built.to_string()),
-                    state: TransactionState::Pending,
-                    order: None,
-                    legs: if self.wallet.script.fee == 0 {
-                        Vec::new()
-                    } else {
-                        vec![base::Leg::Fee {
-                            address: self.wallet.address.clone(),
-                            asset: Asset::native(network()),
-                            amount: self.wallet.script.fee.into(),
-                        }]
-                    },
-                    bytes: vec![*built],
-                    expires: None,
-                });
-            }
-            Ok(signed.into())
+            let Self(wallet) = *self;
+            let mut built = wallet.script.built.lock().expect("the counter");
+            *built += 1;
+            Ok(Transaction {
+                id: TransactionId::new(network(), built.to_string()),
+                state: TransactionState::Pending,
+                order: None,
+                legs: if wallet.script.fee == 0 {
+                    Vec::new()
+                } else {
+                    vec![base::Leg::Fee {
+                        address: wallet.address.clone(),
+                        asset: Asset::native(network()),
+                        amount: wallet.script.fee.into(),
+                    }]
+                },
+                bytes: vec![*built],
+                expires_height: None,
+            })
         })
     }
 }
@@ -277,6 +268,33 @@ impl base::Dated for Days {
     }
 }
 
+/// `.0`, its line `.1`: a test chain with the line a network's config gives.
+struct Lined(Arc<dyn Chained>, Line);
+
+impl Networked for Lined {
+    fn network(&self) -> &Network {
+        self.0.network()
+    }
+}
+
+impl Chained for Lined {
+    fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
+        self.0.tips()
+    }
+
+    fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<base::Block>>> {
+        self.0.block(position)
+    }
+
+    fn blocks(&self, start: u64, end: u64) -> Future<'_, anyhow::Result<Blocks>> {
+        self.0.blocks(start, end)
+    }
+
+    fn line(&self) -> Line {
+        self.1
+    }
+}
+
 /// One node of the scripted network: regtest at tip 0, whatever it is.
 struct Node(Arc<dyn rpc::Client>);
 
@@ -330,7 +348,8 @@ thread_local! {
 
 /// The scripted network's chain: its wallets answer as its [`Script`]
 /// (taken from [`SCRIPT`]) says; with a depth limit, it reads its tip and
-/// finds blocks by time over [`Days`].
+/// finds blocks by time over [`Days`] (its script's chain, when set). Its
+/// line is the final block with balances, else its depth limit.
 struct Scripted {
     script: Arc<Script>,
     max_depth: Option<u64>,
@@ -351,17 +370,26 @@ impl base::ServiceFactory for Scripted {
         storage: &base::Storage,
         client: Arc<dyn rpc::Client>,
     ) -> anyhow::Result<Service> {
-        let chain = self.script.chain.clone();
-        let mut indexer = Indexer::new(
-            chain.unwrap_or_else(|| Arc::new(Empty)),
+        let chain = match (&self.script.chain, self.max_depth) {
+            (Some(chain), _) => chain.clone(),
+            (None, Some(_)) => Arc::new(Days),
+            (None, None) => Arc::new(Empty),
+        };
+        let balances = self.script.balances.clone();
+        let line = match &balances {
+            Some(_) => Line::Final,
+            None => Line::Depth(self.max_depth.unwrap_or(u64::MAX)),
+        };
+        let chain: Arc<dyn Chained> = Arc::new(Lined(chain, line));
+        let wallets = WalletIndexer::new(storage.indexes.clone(), chain.clone(), balances);
+        let transactions =
+            TransactionIndexer::new(storage.transaction_indexes.clone(), chain.clone(), None);
+        let indexer = Indexer::new(
+            chain,
             storage.blocks.clone(),
-            storage.indexes.clone(),
+            vec![Arc::new(wallets), Arc::new(transactions)],
             Duration::from_secs(3_600),
-        )
-        .with_max_depth(self.max_depth);
-        if let Some(balances) = &self.script.balances {
-            indexer = indexer.with_balances(balances.clone());
-        }
+        );
         let wallet = Fake {
             address: Address::new(network(), "unused"),
             script: self.script.clone(),
@@ -386,7 +414,7 @@ impl base::ServiceFactory for Scripted {
                 .max_depth
                 .map(|_| -> Arc<dyn base::Dated> { Arc::new(Days) }),
             balances: self.script.balances.clone(),
-            max_depth: self.max_depth,
+            confirmer: None,
             confirmations: 0,
         })
     }

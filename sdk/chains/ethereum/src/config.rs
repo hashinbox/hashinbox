@@ -7,7 +7,7 @@ use alloy_primitives::hex;
 use anyhow::{Context as _, ensure};
 use base::{
     Asset, AssetInfo, AssetKind, Assets, Indexer, NetworkConfig, Service, Storage,
-    WalletFactoryBroadcaster,
+    TransactionIndexer, WalletFactoryBroadcaster, WalletIndexer,
 };
 use serde::Deserialize;
 
@@ -32,9 +32,6 @@ pub struct Config {
     pub limits: FeeLimits,
     /// How long fetched fees price sends, in milliseconds; default 12,000.
     pub fee_ttl_ms: u64,
-    /// How long a broadcast transaction counts as pending before it is
-    /// given up on, in milliseconds; default 3_600_000 (one hour).
-    pub pending_ttl_ms: u64,
     /// How often the indexer wakes, in milliseconds; default 12,000.
     pub interval_ms: u64,
     /// Blocks the indexer fetches per step; default 100
@@ -46,14 +43,12 @@ pub struct Config {
 }
 
 /// The knobs a [`base::NetworkConfig`]'s `settings` may set: `limits`,
-/// `fee_ttl_ms`, `pending_ttl_ms`, `interval_ms`, `batch`; an absent one
-/// keeps its default.
+/// `fee_ttl_ms`, `interval_ms`, `batch`; an absent one keeps its default.
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Settings {
     limits: FeeLimits,
     fee_ttl_ms: u64,
-    pending_ttl_ms: u64,
     interval_ms: u64,
     batch: u64,
 }
@@ -63,7 +58,6 @@ impl Default for Settings {
         Self {
             limits: FeeLimits::default(),
             fee_ttl_ms: 12_000,
-            pending_ttl_ms: 3_600_000,
             interval_ms: 12_000,
             batch: base::DEFAULT_BATCH,
         }
@@ -95,7 +89,6 @@ impl Config {
             display_decimals: None,
             limits: settings.limits,
             fee_ttl_ms: settings.fee_ttl_ms,
-            pending_ttl_ms: settings.pending_ttl_ms,
             interval_ms: settings.interval_ms,
             batch: settings.batch,
             confirmations: 12,
@@ -203,7 +196,6 @@ impl TryFrom<&NetworkConfig> for Config {
             display_decimals,
             limits: settings.limits,
             fee_ttl_ms: settings.fee_ttl_ms,
-            pending_ttl_ms: settings.pending_ttl_ms,
             interval_ms: settings.interval_ms,
             batch: settings.batch,
             confirmations: config.confirmations,
@@ -235,11 +227,17 @@ impl Factory {
         Chain::new(rpc.clone(), self.config.contracts())
     }
 
-    /// The wallet factory over `rpc`: nonces from `rpc`; fees and gas from
-    /// `rpc`, reused by its one cached estimator for `fee_ttl_ms`, each send
-    /// priced for its recipient as `holdings` say.
+    /// The wallet factory over `rpc`: nonces from `rpc`, after the sends in
+    /// flight `transactions` holds; fees and gas from `rpc`, reused by its one cached
+    /// estimator for `fee_ttl_ms`, each send priced for its recipient as
+    /// `holdings` say.
     #[must_use]
-    pub fn wallets(&self, rpc: &Client, holdings: Arc<dyn base::Holdings>) -> WalletFactory {
+    pub fn wallets(
+        &self,
+        rpc: &Client,
+        holdings: Arc<dyn base::Holdings>,
+        transactions: Arc<dyn base::TransactionIndexStore>,
+    ) -> WalletFactory {
         let config = &self.config;
         let fees = Cached::new(
             Estimator::new(rpc.clone(), config.limits, config.contracts()),
@@ -248,7 +246,7 @@ impl Factory {
         );
         WalletFactory {
             rpc: rpc.clone(),
-            pending_ttl: Duration::from_millis(config.pending_ttl_ms),
+            transactions,
             tokens: config.contracts(),
             fees: Arc::new(fees),
         }
@@ -273,29 +271,42 @@ impl base::ServiceFactory for Factory {
         config.validate()?;
         let rpc = Client::new(Arc::clone(&client), config.native());
         let chain = Arc::new(self.chain(&rpc));
+        let wallets = WalletIndexer::new(
+            Arc::clone(&storage.indexes),
+            chain.clone(),
+            Some(chain.clone()),
+        );
+        let transactions = TransactionIndexer::new(
+            Arc::clone(&storage.transaction_indexes),
+            chain.clone(),
+            Some(chain.clone()),
+        );
         let indexer = Arc::new(
             Indexer::new(
                 chain.clone(),
                 Arc::clone(&storage.blocks),
-                Arc::clone(&storage.indexes),
+                vec![Arc::new(wallets), Arc::new(transactions)],
                 Duration::from_millis(config.interval_ms),
             )
-            .with_batch(config.batch)
-            .with_balances(chain.clone()),
+            .with_batch(config.batch),
         );
         Ok(Service {
             indexer,
             wallets: WalletFactoryBroadcaster {
                 network: (&config.native()).into(),
-                factory: Arc::new(self.wallets(&rpc, Arc::clone(&storage.holdings))),
+                factory: Arc::new(self.wallets(
+                    &rpc,
+                    Arc::clone(&storage.holdings),
+                    Arc::clone(&storage.transaction_indexes),
+                )),
                 broadcaster: Arc::new(rpc),
             },
             assets: config.assets(),
             storage: storage.clone(),
             client,
             dated: Some(chain.clone()),
-            balances: Some(chain),
-            max_depth: None,
+            balances: Some(chain.clone()),
+            confirmer: Some(chain),
             confirmations: config.confirmations,
         })
     }

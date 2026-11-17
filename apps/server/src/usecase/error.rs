@@ -19,15 +19,12 @@ pub(crate) enum Kind {
     Internal,
 }
 
-/// A usecase failure: its kind, its message, and the transfer of a send it
-/// is about.
+/// A usecase failure: its kind and its message.
 #[derive(Debug)]
 pub(crate) struct Error {
     pub(crate) kind: Kind,
     /// What went wrong.
     pub(crate) message: String,
-    /// Zero-based index of the transfer of a send that failed.
-    pub(crate) failed_index: Option<usize>,
 }
 
 impl Error {
@@ -51,20 +48,10 @@ impl Error {
         Self::new(Kind::Internal, message)
     }
 
-    /// The same failure, attributed to transfer `failed_index` of a send.
-    #[must_use]
-    pub(crate) fn at(self, failed_index: usize) -> Self {
-        Self {
-            failed_index: Some(failed_index),
-            ..self
-        }
-    }
-
     fn new(kind: Kind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
-            failed_index: None,
         }
     }
 }
@@ -77,15 +64,17 @@ impl From<IdError> for Error {
 }
 
 /// The handled failures inside an `anyhow::Error` by kind: an unconfigured
-/// network is not found, a bad address or key invalid; any other failure (a
+/// network is not found, a bad address, key or start invalid; any other failure (a
 /// store, a node, generation) is unavailable.
 impl From<anyhow::Error> for Error {
     fn from(error: anyhow::Error) -> Self {
         let kind = match error.downcast_ref::<base::WalletError>().map(|e| e.kind) {
             Some(base::WalletErrorKind::Unsupported) => Kind::NotFound,
-            Some(base::WalletErrorKind::InvalidAddress | base::WalletErrorKind::InvalidSecret) => {
-                Kind::Invalid
-            }
+            Some(
+                base::WalletErrorKind::InvalidAddress
+                | base::WalletErrorKind::InvalidSecret
+                | base::WalletErrorKind::InvalidStart,
+            ) => Kind::Invalid,
             _ => Kind::Unavailable,
         };
         Self::new(kind, format!("{error:#}"))

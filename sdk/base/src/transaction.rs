@@ -20,8 +20,8 @@ pub enum ErrorKind {
     /// A definite failure: an invalid address, amount or transaction,
     /// insufficient funds, no acceptable fee, a signer or node mismatch.
     Failed,
-    /// The builder or configuration does not support this transfer; a
-    /// builder refusing one more transfer this way ends its transaction.
+    /// The builder or configuration does not support this asset or
+    /// transfer.
     Unsupported,
     /// The node is unreachable, timed out, or the submission outcome is
     /// unknown; retrying may succeed.
@@ -240,59 +240,29 @@ impl Transfer {
     }
 }
 
-impl From<(Address, Decimal)> for Transfer {
-    fn from((to, amount): (Address, Decimal)) -> Self {
-        Self::new(to, amount)
-    }
-}
-
-/// Ordered transfers of one asset, signed into one or more transactions.
-/// The asset is fixed when the factory or wallet creates the builder; each
-/// transfer is paid by its own source or the default one. It knows nothing
-/// of broadcasting: save the signed transactions, then hand each to a
-/// [`Broadcaster`].
+/// One transfer of one asset, signed into one transaction: a builder pays
+/// exactly one payment. The asset is fixed when the factory or wallet
+/// creates the builder; the transfer is paid by its own source or the
+/// default one. It knows nothing of broadcasting: save the signed
+/// transaction, then hand it to a [`Broadcaster`].
 pub trait Builder: Send {
-    /// Source used by transfers without their own `from`.
+    /// Source used when the transfer has no `from` of its own.
     fn with_default_source(&mut self, source: Signer);
 
-    /// Queues `transfer`; checks the address and amount now, without I/O.
+    /// Checks `transfer`'s address and amount before any I/O, then fetches
+    /// its own chain inputs (coins, nonce or blockhash), estimates the fee
+    /// and signs it: one [`State::Pending`] transaction with its legs and
+    /// envelope. Consumes the builder, so it cannot sign twice. Nothing
+    /// leaves the process.
     ///
     /// # Errors
     ///
-    /// `Failed` for an invalid address or amount; `Unsupported` for a
-    /// transfer this builder cannot add.
-    fn transfer(&mut self, transfer: Transfer) -> Result<(), Error>;
-
-    /// Fetches its own chain inputs (coins, nonces or blockhash), estimates
-    /// fees and signs every queued transfer, in order: one or more
-    /// [`State::Pending`] transactions with their legs and envelopes, each
-    /// built on the ones before it. Consumes the builder, so it cannot sign
-    /// twice. Nothing leaves the process.
-    ///
-    /// # Errors
-    ///
-    /// `Failed` for no transfers, a transfer without a source, a key that
-    /// does not sign for its address; any build, fee, funds, or signing
-    /// failure.
-    fn sign<'a>(self: Box<Self>) -> Future<'a, Result<Transactions, Error>>
+    /// `Failed` for an invalid address or amount, a transfer without a
+    /// source, a key that does not sign for its address; any build, fee,
+    /// funds, or signing failure.
+    fn sign<'a>(self: Box<Self>, transfer: Transfer) -> Future<'a, Result<Transaction, Error>>
     where
         Self: 'a;
-}
-
-/// `builder.send((to, amount))`, `builder.send(Transfer::new(to, amount).from(wallet))`.
-pub trait BuilderExt {
-    /// Queues `transfer`, as [`Builder::transfer`].
-    ///
-    /// # Errors
-    ///
-    /// As [`Builder::transfer`].
-    fn send(&mut self, transfer: impl Into<Transfer>) -> Result<(), Error>;
-}
-
-impl<B: Builder + ?Sized> BuilderExt for B {
-    fn send(&mut self, transfer: impl Into<Transfer>) -> Result<(), Error> {
-        self.transfer(transfer.into())
-    }
 }
 
 /// The only external effect in transaction submission: a signed
@@ -300,13 +270,16 @@ impl<B: Builder + ?Sized> BuilderExt for B {
 ///
 /// The SDK does not track what is in flight. A caller that sends money:
 ///
-/// 1. records the transaction (its legs, its `expires`) before broadcasting
-///    it, and counts its outgoing legs as spent from then on;
+/// 1. records the transaction (its legs) before broadcasting it, and counts
+///    its outgoing legs as spent from then on;
 /// 2. builds, records and broadcasts a sender's transactions one at a time,
-///    since coin selection and nonces see only what is recorded;
-/// 3. on `Rejected` or `Expired` forgets the record; on a transient error
-///    keeps it and broadcasts the same bytes again, never building anew;
-/// 4. forgets a record past its `expires`, freeing its funds.
+///    one payment each, since coin selection and nonces see only what is
+///    recorded;
+/// 3. on `Rejected` or `Expired` from a broadcast forgets the record; on a
+///    transient error keeps it and broadcasts the same bytes again, never
+///    building anew;
+/// 4. forgets a pending record only once the chain proves it can never
+///    mine (its [`crate::TransactionIndex`]): no clock frees its funds.
 pub trait Broadcaster: Send + Sync {
     /// Submits `transaction.bytes` to every configured node.
     ///
@@ -323,19 +296,6 @@ pub trait Broadcaster: Send + Sync {
 pub struct Transactions(pub Vec<Transaction>);
 
 impl Transactions {
-    /// The same, each pending for `ttl` from now ([`Transaction::expires`]).
-    #[must_use]
-    pub fn expiring(mut self, ttl: std::time::Duration) -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let at = u64::try_from(now.saturating_add(ttl).as_millis()).unwrap_or(u64::MAX);
-        for transaction in &mut self.0 {
-            transaction.expires = Some(at);
-        }
-        self
-    }
-
     /// Every leg with its transaction and index, in order.
     pub fn legs(&self) -> impl Iterator<Item = (&Id, u32, &Leg)> {
         self.0.iter().flat_map(|transaction| {
@@ -408,10 +368,9 @@ pub struct Transaction {
     pub legs: Vec<Leg>,
     /// The signed transaction in its chain's own encoding.
     pub bytes: Vec<u8>,
-    /// Unix ms after which a pending transaction stops holding its funds;
-    /// `None` once mined. A caller forgets a pending transaction past it
-    /// (see [`Broadcaster`]).
-    pub expires: Option<u64>,
+    /// The last block height it can land at (Solana: its blockhash's last
+    /// valid block height); `None`: it never expires.
+    pub expires_height: Option<u64>,
 }
 
 impl Transaction {

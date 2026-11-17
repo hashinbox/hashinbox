@@ -1,11 +1,11 @@
 //! Two nodes, one refusing a send the other accepts: the first trails the
 //! block that funded the sender, so it sees no funds and refuses as a node
-//! does. The send reaches each node once, the job counts it accepted, and
-//! it is spent once.
+//! does. The send reaches each node, the job counts it accepted on its
+//! first run, and it is spent once.
 
 use base::testing::{Caps, TestChain};
 
-use super::{App, funded, number, quarter, settle, succeeded, text, unit, until};
+use super::{App, accepted, funded, number, quarter, settle, succeeded, text, unit, until};
 
 /// Blocks the refusing node trails by: below the funding block, and beyond
 /// the cluster's allowed lag, so it never reads for the server.
@@ -24,16 +24,16 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         .api
         .send(&wallet, "native", &other.address, "0.25")
         .await;
-    let done = succeeded(app, &job).await;
-    assert_eq!(
-        (done["attempts"].as_u64(), done["accepted"].as_u64()),
-        (Some(1), Some(1)),
-        "{done}"
-    );
+    let sent = accepted(app, &job).await;
+    assert!(sent["reason"].is_null(), "accepted, not failed: {sent}");
     for node in 0..chain.nodes().len() {
-        assert_eq!(chain.node(node).faults().calls(T::SUBMIT), 1, "node {node}");
+        assert!(
+            chain.node(node).faults().calls(T::SUBMIT) >= 1,
+            "node {node}"
+        );
     }
     settle(chain);
+    succeeded(app, &job).await;
     let mined = until("the send to be mined", || async {
         let legs = app.api.legs(&wallet, "native").await;
         let spent: Vec<_> = legs

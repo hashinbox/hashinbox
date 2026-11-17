@@ -80,7 +80,7 @@ fn paid(to: &str, amount: u64) -> Blocks {
             coin: None,
         }],
         bytes: vec![0],
-        expires: None,
+        expires_height: None,
     };
     let mut blocks = Blocks::new(network());
     assert!(blocks.push(Block {
@@ -231,7 +231,7 @@ async fn wallets_balance_legs_and_sends() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    let send = json!({ "transfers": [{ "destination": "bob", "amount": "0.1" }] });
+    let send = json!({ "destination": "bob", "amount": "0.1" });
     let (status, _) = call(
         &router,
         Method::POST,
@@ -241,6 +241,10 @@ async fn wallets_balance_legs_and_sends() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let from = format!("/v1/wallets/{generated_id}/transactions");
+    // One payment per send: a list of transfers is no body of it.
+    let list = json!({ "transfers": [{ "destination": "bob", "amount": "0.1" }] });
+    let (status, _) = call(&router, Method::POST, &from, Some(list)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, accepted) = call(&router, Method::POST, &from, Some(send)).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
     let job = format!("/v1/jobs/{}", accepted["job"].as_str().unwrap_or_default());
