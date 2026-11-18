@@ -4,8 +4,7 @@
 use std::collections::BTreeMap;
 
 use alloy_consensus::{
-    SignableTransaction as _, Transaction as _, TxEip1559, TxEnvelope,
-    transaction::SignerRecoverable as _,
+    SignableTransaction as _, TxEip1559, TxEnvelope, transaction::SignerRecoverable as _,
 };
 use alloy_eips::{Decodable2718 as _, Encodable2718 as _};
 use alloy_primitives::{B256, Bytes, Signature, TxKind, U64, U256, hex, keccak256};
@@ -206,17 +205,22 @@ pub(crate) fn request(
     })
 }
 
-/// The sender and nonce of a signed transaction's EIP-2718 `bytes`.
+/// The EIP-1559 fields and the sender of a signed transaction's EIP-2718
+/// `bytes`.
 ///
 /// # Errors
 ///
-/// Bytes that do not decode, or a signature no sender recovers from.
-pub(crate) fn sender_and_nonce(bytes: &[u8]) -> anyhow::Result<(alloy_primitives::Address, u64)> {
+/// Bytes that do not decode to an EIP-1559 transaction, or a signature no
+/// sender recovers from.
+pub(crate) fn signed(bytes: &[u8]) -> anyhow::Result<(TxEip1559, alloy_primitives::Address)> {
     let envelope = TxEnvelope::decode_2718_exact(bytes).context("Ethereum signed transaction")?;
     let sender = envelope
         .recover_signer()
         .context("Ethereum transaction signer")?;
-    Ok((sender, envelope.nonce()))
+    let native = envelope
+        .as_eip1559()
+        .context("not an EIP-1559 Ethereum transaction")?;
+    Ok((native.tx().clone(), sender))
 }
 
 /// `amount` atomic units as a decimal count of them.

@@ -21,8 +21,8 @@ use std::{
 
 use anyhow::Context as _;
 use base::{
-    Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Future,
-    Indexer, InfoClient, Line, Network, NetworkConfig, Networked, Service, Signer, Tips,
+    Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Fee, Future,
+    Indexer, InfoClient, Line, Network, NetworkConfig, Networked, Service, Signer, Tips, Tracking,
     Transaction, TransactionError, TransactionErrorKind, TransactionId, TransactionIndexer,
     TransactionState, Transfer, Wallet, WalletFactory, WalletFactoryBroadcaster, WalletIndexer,
 };
@@ -62,17 +62,22 @@ async fn migrate(db: &crate::db::Db) -> anyhow::Result<()> {
 }
 
 /// What each broadcast answers, in order; the fee each built transaction
-/// pays (none when zero); how many transactions were built; every broadcast
-/// envelope; the chain's balance reads, when it has them; and the chain its
-/// indexer reads (none: an empty one).
+/// pays (none when zero); how many transactions were built; every signed
+/// one, which a loaded state names; every broadcast envelope; the chain's
+/// balance reads, when it has them; the chain its indexer reads (none: an
+/// empty one); how its payments are checked and bumped; and how signing a
+/// replacement fails (none: it signs).
 #[derive(Default)]
 struct Script {
     answers: Mutex<VecDeque<Result<(), TransactionErrorKind>>>,
     fee: u64,
     built: Mutex<u8>,
+    signed: Mutex<Vec<Transaction>>,
     sent: Mutex<Vec<Vec<u8>>>,
     balances: Option<Arc<dyn base::Balances>>,
     chain: Option<Arc<dyn Chained>>,
+    tracking: Tracking,
+    bump: Option<TransactionErrorKind>,
 }
 
 /// The one wallet of the scripted network; its key is its address text.
@@ -96,7 +101,10 @@ impl Networked for Fake {
 
 impl Wallet for Fake {
     fn transaction(&self, _asset: &Asset) -> Result<Box<dyn Builder>, TransactionError> {
-        Ok(Box::new(Build(self.clone())))
+        Ok(Box::new(Build {
+            wallet: self.clone(),
+            state: None,
+        }))
     }
 
     fn private_key(&self) -> (Curve, SecretBytes) {
@@ -127,41 +135,103 @@ impl Broadcaster for Fake {
     }
 }
 
-/// A builder of the wallet's one transaction, its txid and bytes the build
-/// count.
-struct Build(Fake);
+/// A builder of the wallet's transactions: a payment's txid and bytes are
+/// the build count; a replacement's are those of the one it continues with
+/// `+` after, its fee one more, unless the script fails it. Its state is
+/// the txid it signed last.
+struct Build {
+    wallet: Fake,
+    state: Option<String>,
+}
 
 impl Builder for Build {
     fn with_default_source(&mut self, _source: Signer) {}
 
-    fn sign<'a>(
-        self: Box<Self>,
-        _transfer: Transfer,
-    ) -> Future<'a, Result<Transaction, TransactionError>>
-    where
-        Self: 'a,
-    {
+    fn from_transfer(&mut self, _transfer: Transfer) -> Result<(), TransactionError> {
+        Ok(())
+    }
+
+    fn with_fee(&mut self, _fee: Fee) {}
+
+    fn sign(&mut self) -> Future<'_, Result<Transaction, TransactionError>> {
         Box::pin(async move {
-            let Self(wallet) = *self;
-            let mut built = wallet.script.built.lock().expect("the counter");
-            *built += 1;
-            Ok(Transaction {
-                id: TransactionId::new(network(), built.to_string()),
-                state: TransactionState::Pending,
-                order: None,
-                legs: if wallet.script.fee == 0 {
-                    Vec::new()
-                } else {
-                    vec![base::Leg::Fee {
-                        address: wallet.address.clone(),
-                        asset: Asset::native(network()),
-                        amount: wallet.script.fee.into(),
-                    }]
-                },
-                bytes: vec![*built],
-                expires_height: None,
-            })
+            let signed = self.signed()?;
+            self.state = Some(signed.id.id.clone());
+            let log = &self.wallet.script.signed;
+            log.lock().expect("the log").push(signed.clone());
+            Ok(signed)
         })
+    }
+
+    fn save(&self) -> Result<serde_json::Value, TransactionError> {
+        let state = self.state.clone().map(serde_json::Value::from);
+        state.ok_or_else(|| TransactionError::failed("nothing signed"))
+    }
+
+    fn load(&mut self, state: &serde_json::Value) -> Result<(), TransactionError> {
+        let Some(txid) = state.as_str() else {
+            return Err(TransactionError::failed("not a txid"));
+        };
+        self.state = Some(txid.to_owned());
+        Ok(())
+    }
+}
+
+impl Build {
+    /// The replacement of the transaction its state names, else a payment.
+    fn signed(&self) -> Result<Transaction, TransactionError> {
+        let wallet = &self.wallet;
+        if let Some(txid) = &self.state {
+            if let Some(kind) = wallet.script.bump {
+                return Err(TransactionError::new(kind, "scripted"));
+            }
+            let log = wallet.script.signed.lock().expect("the log");
+            let Some(existing) = log.iter().find(|signed| signed.id.id == *txid) else {
+                return Err(TransactionError::failed("never signed"));
+            };
+            return Ok(replacement(existing));
+        }
+        let mut built = wallet.script.built.lock().expect("the counter");
+        *built += 1;
+        Ok(Transaction {
+            id: TransactionId::new(network(), built.to_string()),
+            state: TransactionState::Pending,
+            order: None,
+            legs: if wallet.script.fee == 0 {
+                Vec::new()
+            } else {
+                vec![base::Leg::Fee {
+                    address: wallet.address.clone(),
+                    asset: Asset::native(network()),
+                    amount: wallet.script.fee.into(),
+                }]
+            },
+            bytes: vec![*built],
+            expires_height: None,
+        })
+    }
+}
+
+/// `existing` at a fee one more: its txid and bytes with `+` after.
+fn replacement(existing: &Transaction) -> Transaction {
+    let txid = format!("{}+", existing.id.id);
+    let legs = existing.legs.iter().cloned().map(|leg| match leg {
+        base::Leg::Fee {
+            address,
+            asset,
+            amount,
+        } => base::Leg::Fee {
+            address,
+            asset,
+            amount: amount + base::Decimal::from(1),
+        },
+        leg => leg,
+    });
+    Transaction {
+        id: TransactionId::new(network(), txid.clone()),
+        legs: legs.collect(),
+        bytes: txid.into_bytes(),
+        ..existing.clone()
     }
 }
 
@@ -210,6 +280,12 @@ impl Networked for Empty {
     fn network(&self) -> &Network {
         static NETWORK: std::sync::OnceLock<Network> = std::sync::OnceLock::new();
         NETWORK.get_or_init(network)
+    }
+}
+
+impl base::FeeRateProvider for Empty {
+    fn rate(&self) -> Future<'_, Result<base::FeeRate, TransactionError>> {
+        unimplemented!("these tests price no sends")
     }
 }
 
@@ -416,6 +492,8 @@ impl base::ServiceFactory for Scripted {
             balances: self.script.balances.clone(),
             confirmer: None,
             confirmations: 0,
+            tracking: self.script.tracking,
+            rates: Arc::new(Empty),
         })
     }
 }

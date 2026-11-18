@@ -17,6 +17,9 @@ pub(crate) enum Why {
     /// Its index (a wallet's or its own) jumped past a gap, where it may
     /// have mined; or its own was given up, or found it mined inside one.
     Jump,
+    /// A bump replaced it at a higher fee, or another version of its payment
+    /// landed; its own index watches on while its job runs.
+    Replaced,
 }
 
 impl Why {
@@ -26,6 +29,7 @@ impl Why {
             Self::Refused => "refused",
             Self::Dead => "dead",
             Self::Jump => "jump",
+            Self::Replaced => "replaced",
         }
     }
 }
@@ -82,5 +86,13 @@ pub(crate) mod db {
         diesel::replace_into(transaction_forgotten::table)
             .values(rows)
             .execute(connection)
+    }
+
+    /// Drops the row of `id`: it is pending again.
+    pub(crate) fn delete(
+        connection: &mut SqliteConnection,
+        id: impl AsRef<str>,
+    ) -> QueryResult<usize> {
+        diesel::delete(transaction_forgotten::table.find(id.as_ref())).execute(connection)
     }
 }

@@ -5,14 +5,14 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Asset, AssetInfo, AssetKind, Assets, Indexer, NetworkConfig, Service, Storage,
-    TransactionIndexer, WalletFactoryBroadcaster, WalletIndexer,
+    Asset, AssetInfo, AssetKind, Assets, FeeRateProviderCached, Indexer, NetworkConfig, Service,
+    Storage, Tracking, TransactionIndexer, WalletFactoryBroadcaster, WalletIndexer,
 };
 use serde::Deserialize;
 
 use crate::{
     CHAIN_NAME, Chain, Client, GenesisHash, Network, SOL_DECIMALS, SOL_NAME, SOL_TICKER, Tokens,
-    WalletFactory, fee::Estimator, fee_cache::Cached,
+    WalletFactory, fee_estimator::Estimator, fee_rate::RateProvider,
 };
 
 /// Everything one Solana cluster needs; built in code with [`Config::new`]
@@ -27,9 +27,16 @@ pub struct Config {
     pub tokens: Vec<Token>,
     /// Fractional digits a view shows of the native currency; none: all.
     pub display_decimals: Option<u32>,
-    /// How long a fetched blockhash and fee price sends, in milliseconds;
-    /// default 5,000.
+    /// How long a fetched signature price and priority-fee rate price
+    /// sends, in milliseconds; default 5,000.
     pub fee_ttl_ms: u64,
+    /// The most a transaction pays per compute unit to be scheduled first,
+    /// in micro-lamports; above it, signing fails as `FeeCap`. Default
+    /// 1,000,000 (one lamport): a priority fee of at most 0.00004 SOL for a
+    /// SOL transfer and 0.0001 SOL for a token one, far above what a
+    /// payment's accounts (a sender and its recipient, rarely contended)
+    /// usually see, so it stops a runaway quote or bump, not a busy network.
+    pub max_priority_fee: u64,
     /// How often the indexer wakes, in milliseconds; default 1,000.
     pub interval_ms: u64,
     /// Blocks the indexer fetches per step; default 100
@@ -38,24 +45,46 @@ pub struct Config {
     /// Slots a block needs below the tip to count as confirmed: the
     /// confirmed position is `tip - confirmations`; default 32.
     pub confirmations: u64,
+    /// How sent payments are checked and bumped; default every 10 s, at most
+    /// 5 bumps, each once the payment expired unseen (`bump_after` unused).
+    pub tracking: Tracking,
 }
 
 /// The knobs a [`base::NetworkConfig`]'s `settings` may set: `fee_ttl_ms`,
-/// `interval_ms`, `batch`; an absent one keeps its default.
+/// `max_priority_fee`, `interval_ms`, `batch`, and the tracking's
+/// `check_ms`, `bump_after`, `max_bumps`; an absent one keeps its default.
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Settings {
     fee_ttl_ms: u64,
+    max_priority_fee: u64,
     interval_ms: u64,
     batch: u64,
+    check_ms: u64,
+    bump_after: u64,
+    max_bumps: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             fee_ttl_ms: 5_000,
+            max_priority_fee: 1_000_000,
             interval_ms: 1_000,
             batch: base::DEFAULT_BATCH,
+            check_ms: 10_000,
+            bump_after: 0,
+            max_bumps: 5,
+        }
+    }
+}
+
+impl Settings {
+    fn tracking(&self) -> Tracking {
+        Tracking {
+            check: Duration::from_millis(self.check_ms),
+            bump_after: self.bump_after,
+            max_bumps: self.max_bumps,
         }
     }
 }
@@ -84,9 +113,11 @@ impl Config {
             tokens: Vec::new(),
             display_decimals: None,
             fee_ttl_ms: settings.fee_ttl_ms,
+            max_priority_fee: settings.max_priority_fee,
             interval_ms: settings.interval_ms,
             batch: settings.batch,
             confirmations: 32,
+            tracking: settings.tracking(),
         }
     }
 
@@ -133,7 +164,12 @@ impl Config {
     }
 
     fn mints(&self) -> Tokens {
-        Tokens::new(self.tokens.iter().cloned())
+        Tokens::new(
+            (&self.native()).into(),
+            self.tokens
+                .iter()
+                .map(|token| (token.mint, token.decimals.into())),
+        )
     }
 }
 
@@ -185,9 +221,11 @@ impl TryFrom<&NetworkConfig> for Config {
             tokens,
             display_decimals,
             fee_ttl_ms: settings.fee_ttl_ms,
+            max_priority_fee: settings.max_priority_fee,
             interval_ms: settings.interval_ms,
             batch: settings.batch,
             confirmations: config.confirmations,
+            tracking: settings.tracking(),
         };
         ensure!(
             base::Network::from(&built.native()) == config.network,
@@ -216,16 +254,25 @@ impl Factory {
         Chain::new(rpc.clone(), self.config.mints())
     }
 
-    /// The wallet factory over `rpc`: blockhashes and fees from `rpc`,
-    /// reused by its one cached estimator for `fee_ttl_ms`, token recipients'
-    /// accounts as `holdings` say.
+    /// The wallet factory over `rpc`: blockhashes, fees and the priority-fee
+    /// rate from `rpc`, the fees and rate kept `fee_ttl_ms`, priced under
+    /// `max_priority_fee`, token recipients' accounts as `holdings` say.
     #[must_use]
     pub fn wallets(&self, rpc: &Client, holdings: Arc<dyn base::Holdings>) -> WalletFactory {
         let config = &self.config;
-        let fees = Cached::new(
-            Estimator::new(rpc.clone(), config.mints()),
+        let ttl = Duration::from_millis(config.fee_ttl_ms);
+        let provider = RateProvider {
+            network: rpc.network().into(),
+            rpc: rpc.clone(),
+        };
+        let rates = Arc::new(FeeRateProviderCached::new(Arc::new(provider), ttl));
+        let fees = Estimator::new(
+            rpc.clone(),
+            config.mints(),
+            config.max_priority_fee,
+            rates,
             holdings,
-            Duration::from_millis(config.fee_ttl_ms),
+            ttl,
         );
         WalletFactory {
             rpc: rpc.clone(),
@@ -272,11 +319,13 @@ impl base::ServiceFactory for Factory {
             )
             .with_batch(config.batch),
         );
+        let factory = self.wallets(&rpc, Arc::clone(&storage.holdings));
+        let rates = Arc::clone(&factory.fees.rates);
         Ok(Service {
             indexer,
             wallets: WalletFactoryBroadcaster {
                 network: (&config.native()).into(),
-                factory: Arc::new(self.wallets(&rpc, Arc::clone(&storage.holdings))),
+                factory: Arc::new(factory),
                 broadcaster: Arc::new(rpc),
             },
             assets: config.assets(),
@@ -286,6 +335,8 @@ impl base::ServiceFactory for Factory {
             balances: Some(chain.clone()),
             confirmer: Some(chain),
             confirmations: config.confirmations,
+            tracking: config.tracking,
+            rates,
         })
     }
 }

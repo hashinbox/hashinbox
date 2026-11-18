@@ -40,9 +40,10 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
     // then broadcast them to every node.
     let wallets = factory.wallets(&rpc, Arc::clone(&storage.inputs));
     let wallet = wallets.from_pk(wallets.generate().await?).await?;
-    let builder = wallet.transaction(&Asset::native(Network::Regtest.into()))?;
+    let mut builder = wallet.transaction(&Asset::native(Network::Regtest.into()))?;
     let to = wallets.parse_address("bcrt1q...")?;
-    let transaction = builder.sign(Transfer::new(to, 10_000_u64.into())).await?;
+    builder.from_transfer(Transfer::new(to, 10_000_u64.into()))?;
+    let transaction = builder.sign().await?;
     rpc.broadcast(&transaction).await?;
 
     Ok(())
@@ -52,9 +53,12 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network: the
 network by name, BTC's display decimals, `confirmation_depth`
 (`confirmations + 1`), `max_depth`, and from `settings` the knobs
-`address_type`, `fee_target_blocks`, `fee_floor`, `fee_ttl_ms`,
-`interval_ms`, and `batch`, the blocks the indexer fetches per step
-(default 100) (each absent one its default).
+`address_type`, `fee_target_blocks` (the target of the rate now; default 1,
+the next block),
+`fee_floor`, `fee_ttl_ms`, `interval_ms`, `batch`,
+the blocks the indexer fetches per step (default 100), and the
+`base::Tracking` of sent payments: `check_ms` (default 60 s), `bump_after`
+(6 blocks) and `max_bumps` (5) (each absent one its default).
 
 ## Notes
 
@@ -84,14 +88,22 @@ network by name, BTC's display decimals, `confirmation_depth`
   `Received` legs only: its outputs are coins like any other.
 - Scripts without an address (`OP_RETURN`, bare multisig, other
   non-standard scripts) get no leg.
-- Fees come from `estimatesmartfee` (conservative, `fee_target_blocks`),
-  never below `fee_floor`; the floor alone prices a send when the node cannot
-  estimate, such as on a fresh regtest chain. The factory's one fee
-  estimator (`WalletFactory::fees`), which every builder prices with too,
-  is two: a precise one (`fee.rs`) that asks the node for the rate every
-  time, and a cached one (`fee_cache.rs`) around it that keeps the rate for
-  `fee_ttl_ms` (default 60 s); a send's size comes from the store's coins,
-  not the node, so only the rate is kept. Its estimate is one
+- The rate (`base::FeeRate`, sat/kvB) is two calls: its base the mempool's
+  `mempoolminfee` (`getmempoolinfo`), its tip `estimatesmartfee`
+  (conservative, `fee_target_blocks`) above it; `fee_floor` is the total
+  when the node cannot estimate, such as on a fresh regtest chain. The
+  factory keeps it `fee_ttl_ms` (default 60 s) in one
+  `base::FeeRateProviderCached`, shared by every builder, the estimator
+  (`WalletFactory::fees`) and `Service::rates`. A builder signs at its
+  `base::Fee` over it (levels scale the tip × 0.5, 1, 2), never below the
+  floor, times the exact virtual size.
+- Every input signals replaceability (sequence `0xfffffffd`). A bump
+  (`load` of a saved state, `Fee::Times(1.1)`) spends the same coins to the
+  same outputs, its change paying the higher fee: at least the old fee plus
+  the new base over its size (the node's replacement rule). A payment
+  without change, or whose change would fall below dust, cannot be bumped:
+  `Failed`, `InsufficientFunds`. A send's size comes from the store's coins, not
+  the node. The estimate is the rate now times one
   transaction spending every coin of every source to one 34-byte output, no
   change: change is made only when it is above dust after paying for itself;
   a smaller leftover is fee.

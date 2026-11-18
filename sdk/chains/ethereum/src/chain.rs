@@ -90,11 +90,7 @@ impl Balances for Chain {
                 owner.address() == address && asset.network == self.network,
                 "not an address or asset of this Ethereum network"
             );
-            let token = if asset.is_native() {
-                None
-            } else {
-                Some(self.tokens.get(asset).context("not an allowlisted token")?)
-            };
+            let token = self.tokens.contract(asset)?;
             let position = self.rpc.tips().await?.confirmed;
             if position < at {
                 return Ok(None);

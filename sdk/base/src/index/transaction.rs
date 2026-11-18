@@ -80,6 +80,31 @@ impl TransactionIndex {
         }
         TransactionStatus::Unknown
     }
+
+    /// Whether its transaction is stuck and worth a bump, judged by the
+    /// blocks it read, so a lagging indexer never makes one due:
+    ///
+    /// - one that expires (Solana) cannot be replaced in flight: due once
+    ///   it can never land (`Dead`);
+    /// - one that never expires is replaced in flight: due once it is in
+    ///   none of the blocks read through the final one, and those reach
+    ///   `bump_after` past its `broadcasted_at`.
+    ///
+    /// How many bumps a payment may have is its sender's to judge.
+    #[must_use]
+    pub fn bump_due(&self, bump_after: u64) -> bool {
+        let Some(read) = &self.progress.indexed_at else {
+            return false;
+        };
+        match self.status() {
+            TransactionStatus::Dead => true,
+            TransactionStatus::Missing => {
+                self.expires_height.is_none()
+                    && read.position.saturating_sub(self.broadcasted_at) >= bump_after
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Indexed for TransactionIndex {

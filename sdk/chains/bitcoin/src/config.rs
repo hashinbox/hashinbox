@@ -5,15 +5,15 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Asset, AssetInfo, AssetKind, Indexer, InputStore, NetworkConfig, Service, Storage,
-    TransactionIndexer, WalletFactoryBroadcaster, WalletIndexer,
+    Asset, AssetInfo, AssetKind, FeeRateProviderCached, Indexer, InputStore, NetworkConfig,
+    Service, Storage, Tracking, TransactionIndexer, WalletFactoryBroadcaster, WalletIndexer,
 };
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::{AddressType, CHAIN_NAME, Chain, WalletFactory};
 use crate::{BTC_DECIMALS, BTC_NAME, BTC_TICKER, Network};
-use crate::{FeeRate, fee::Estimator, fee_cache::Cached, rpc::Client};
+use crate::{FeeRate, fee_estimator::Estimator, fee_rate::RateProvider, rpc::Client};
 
 /// Everything one Bitcoin network needs; built in code with [`Config::new`]
 /// or from a [`base::NetworkConfig`].
@@ -27,7 +27,8 @@ pub struct Config {
     pub confirmation_depth: u64,
     /// P2WPKH (default) or `taproot`.
     pub address_type: AddressType,
-    /// Confirmation target of the node's fee estimate, in blocks; default 6.
+    /// Confirmation target of the node's fee estimate, the rate now, in
+    /// blocks; default 1: the next block.
     pub fee_target_blocks: u16,
     /// The lowest fee rate sent, in satoshis per 1,000 virtual bytes; also
     /// the rate when the node cannot estimate. Default 1,000 (Core's minimum
@@ -46,11 +47,15 @@ pub struct Config {
     /// Positions below the tip a watch's start may be; none: no limit. At
     /// least `confirmation_depth - 1`.
     pub max_depth: Option<u64>,
+    /// How sent payments are checked and bumped; default every 60 s, after
+    /// 6 blocks, at most 5 times.
+    pub tracking: Tracking,
 }
 
 /// The knobs a [`base::NetworkConfig`]'s `settings` may set:
 /// `address_type`, `fee_target_blocks`, `fee_floor`, `fee_ttl_ms`,
-/// `interval_ms`, `batch`; an absent one keeps its default.
+/// `interval_ms`, `batch`, and the tracking's `check_ms`, `bump_after`,
+/// `max_bumps`; an absent one keeps its default.
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Settings {
@@ -60,17 +65,23 @@ struct Settings {
     fee_ttl_ms: u64,
     interval_ms: u64,
     batch: u64,
+    check_ms: u64,
+    bump_after: u64,
+    max_bumps: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             address_type: AddressType::default(),
-            fee_target_blocks: 6,
+            fee_target_blocks: 1,
             fee_floor: 1_000,
             fee_ttl_ms: 60_000,
             interval_ms: 30_000,
             batch: base::DEFAULT_BATCH,
+            check_ms: 60_000,
+            bump_after: 6,
+            max_bumps: 5,
         }
     }
 }
@@ -94,6 +105,11 @@ impl Config {
             batch: settings.batch,
             max_depth: None,
             display_decimals: None,
+            tracking: Tracking {
+                check: Duration::from_millis(settings.check_ms),
+                bump_after: settings.bump_after,
+                max_bumps: settings.max_bumps,
+            },
         }
     }
 
@@ -184,23 +200,36 @@ impl Factory {
             .with_max_depth(self.config.max_depth))
     }
 
-    /// The wallet factory over `rpc`: coins from `inputs`; fee rates from
-    /// `rpc`, reused by its one cached estimator for `fee_ttl_ms`.
+    /// The wallet factory over `rpc`: coins from `inputs`; its fee rate
+    /// from `rpc`, kept `fee_ttl_ms`.
     #[must_use]
     pub fn wallets(&self, rpc: &Client, inputs: Arc<dyn InputStore>) -> WalletFactory {
         let config = &self.config;
-        let precise = Estimator {
-            network: config.network.into(),
+        let network: base::Network = config.network.into();
+        let floor = FeeRate::from_sat_per_kvb(config.fee_floor);
+        let provider = RateProvider {
+            network: network.clone(),
+            rpc: rpc.clone(),
+            target_blocks: config.fee_target_blocks,
+            floor,
+        };
+        let rates: Arc<dyn base::FeeRateProvider> = Arc::new(FeeRateProviderCached::new(
+            Arc::new(provider),
+            Duration::from_millis(config.fee_ttl_ms),
+        ));
+        let fees = Estimator {
+            network,
             rpc: rpc.clone(),
             inputs: Arc::clone(&inputs),
-            target_blocks: config.fee_target_blocks,
-            floor: FeeRate::from_sat_per_kvb(config.fee_floor),
+            rates: Arc::clone(&rates),
+            floor,
         };
-        let fees = Cached::new(precise, Duration::from_millis(config.fee_ttl_ms));
         WalletFactory {
             rpc: rpc.clone(),
             inputs,
             address_type: config.address_type,
+            rates,
+            floor,
             fees: Arc::new(fees),
         }
     }
@@ -239,11 +268,13 @@ impl base::ServiceFactory for Factory {
             )
             .with_batch(config.batch),
         );
+        let factory = self.wallets(&rpc, Arc::clone(&storage.inputs));
+        let rates = Arc::clone(&factory.rates);
         Ok(Service {
             indexer,
             wallets: WalletFactoryBroadcaster {
                 network: config.network.into(),
-                factory: Arc::new(self.wallets(&rpc, Arc::clone(&storage.inputs))),
+                factory: Arc::new(factory),
                 broadcaster: Arc::new(rpc),
             },
             assets: std::iter::once(config.asset()).collect(),
@@ -253,6 +284,8 @@ impl base::ServiceFactory for Factory {
             balances: None,
             confirmer: None,
             confirmations: config.confirmation_depth.saturating_sub(1),
+            tracking: config.tracking,
+            rates,
         })
     }
 }

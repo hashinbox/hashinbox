@@ -37,9 +37,10 @@ async fn solana(storage: Storage) -> anyhow::Result<()> {
     // then broadcast them to every node.
     let wallets = factory.wallets(&rpc, Arc::new(base::NoHoldings));
     let wallet = wallets.from_pk(wallets.generate().await?).await?;
-    let builder = wallet.transaction(&sol)?;
+    let mut builder = wallet.transaction(&sol)?;
     let to = wallets.parse_address("...")?;
-    let transaction = builder.sign(Transfer::new(to, 10_000_u64.into())).await?;
+    builder.from_transfer(Transfer::new(to, 10_000_u64.into()))?;
+    let transaction = builder.sign().await?;
     rpc.broadcast(&transaction).await?;
 
     Ok(())
@@ -49,8 +50,12 @@ async fn solana(storage: Storage) -> anyhow::Result<()> {
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network:
 the genesis hash (`chain_id`), assets (SOL's display decimals, the
 `contract` mints), `confirmations`, and from `settings` the knobs
-`fee_ttl_ms`, `interval_ms`, and `batch`, the slots the
-indexer fetches per step (default 100) (each absent one its default). It
+`fee_ttl_ms`, `max_priority_fee` (micro-lamports per compute unit, default
+1,000,000), `interval_ms`, `batch`, the slots the
+indexer fetches per step (default 100), and the `base::Tracking` of sent
+payments: `check_ms` (default 10 s) and `max_bumps` (default 5; a payment
+is bumped once it expired unseen, so `bump_after` is unused) (each absent
+one its default). It
 has no `max_depth`: it reads balances (`base::Balances`, finalized, at a
 slot at or above the one asked: `minContextSlot`), so its indexer reads
 nothing at or below the finalized slot and settles an index behind it with
@@ -89,16 +94,33 @@ one balance read (design 083 §9).
   `Unsupported`. It signs one transfer into one transaction on a recent
   blockhash, with a random Memo-v3 so two equal transfers stay distinct.
   Recipients must be on-curve addresses.
+- Every transaction starts with two ComputeBudget instructions: a
+  compute-unit limit, fixed per kind (40,000 for SOL, 100,000 for a token,
+  about twice what each uses: the memo alone takes some 16,000, creating a
+  token account about 25,000), and a price per unit, in micro-lamports.
+  The rate (`base::FeeRate`) has no base; its tip is the median of
+  `getRecentPrioritizationFees` for the whole network, at least 1
+  micro-lamport, kept `fee_ttl_ms` (default 5 s) in one
+  `base::FeeRateProviderCached` shared by every builder, the estimator and
+  `Service::rates`; the price is the tip of the builder's `base::Fee` over
+  it (levels × 0.5, 1, 2). Above `max_priority_fee` signing fails as
+  `FeeCap`.
+- A builder's saved state (`save`) is its payment, source, compute-unit
+  limit and rate; `load` continues it. `Fee::Times(1.1)` then pays a tenth
+  (rounded up, at least one micro-lamport) over the higher of the rate now
+  and the saved one. `sign` takes a fresh blockhash every time, so a
+  version has its own `expires_height`. Sign one only once the old one
+  expired unseen: nothing else keeps both from landing.
 - The factory's one fee estimator (`WalletFactory::fees`), which builders
-  sign on too (its blockhash and price), is two: a precise one (`fee.rs`)
-  that asks the node every time (a blockhash, the price of a signature on it,
-  and, for a token, whether the recipient has its token account and the
-  rent of one), and a cached one (`fee_cache.rs`) around it, which keeps the
-  blockhash and price for `fee_ttl_ms` (default 5 s) and the rent for good,
-  and takes a recipient that `Holdings` say holds the token to have its
-  account, without asking. An estimate is one signature per source plus,
-  for a token, a token account's rent when the recipient has none (without
-  a recipient, a new one has none); the `Fee` leg is the signature part only.
+  sign on too (its signature price), is `Estimator` (`fee_estimator.rs`):
+  it asks the node (the price of a signature on a recent blockhash, and,
+  for a token, the rent of a token account) and keeps the signature price
+  for `fee_ttl_ms` and the rent for good, and takes a recipient that
+  `Holdings` say holds the token to have its account, without asking. An estimate is per source one signature and its priority
+  fee at the rate now, plus, for a
+  token, a token account's rent when the recipient has none (without a
+  recipient, a new one has none); the `Fee` leg is the signature and
+  priority part, `ceil(price × limit / 1,000,000)` lamports.
 - `broadcast` sends the exact bytes once to every node, with preflight. A
   signed transaction lands only until its blockhash expires (about a minute);
   after that `broadcast` fails as `Expired`. Resending until then is the

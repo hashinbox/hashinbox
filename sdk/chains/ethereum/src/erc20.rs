@@ -1,7 +1,5 @@
 //! ERC-20 ABI: the calls a wallet makes and the `Transfer` event it indexes.
 
-use std::{collections::BTreeSet, sync::Arc};
-
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{SolCall as _, SolEvent as _, sol};
 use anyhow::anyhow;
@@ -63,39 +61,4 @@ pub(crate) fn transfer_log(topics: &[B256], data: &[u8]) -> Option<(Address, Add
         Address::from_word(*to),
         U256::from_be_slice(data),
     ))
-}
-
-/// The allowlisted ERC-20 contracts: the only tokens indexed and sent.
-/// Cheap to clone; clones share the set.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Tokens(Arc<BTreeSet<Address>>);
-
-impl Tokens {
-    /// The tokens of `contracts`.
-    #[must_use]
-    pub fn new(contracts: impl IntoIterator<Item = Address>) -> Self {
-        Self(Arc::new(contracts.into_iter().collect()))
-    }
-
-    /// Whether `contract` is allowlisted.
-    #[must_use]
-    pub fn contains(&self, contract: &Address) -> bool {
-        self.0.contains(contract)
-    }
-
-    /// Every allowlisted contract.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = Address> + '_ {
-        self.0.iter().copied()
-    }
-
-    /// The contract of `asset`, when it is an allowlisted token; the asset's
-    /// network is the caller's to check.
-    #[must_use]
-    pub fn get(&self, asset: &base::Asset) -> Option<Address> {
-        asset
-            .id
-            .parse()
-            .ok()
-            .filter(|contract| self.contains(contract))
-    }
 }

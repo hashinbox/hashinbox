@@ -90,7 +90,6 @@ async fn main() -> Result<(), AnyError> {
         .add(workers::broadcast::Broadcast::new(
             container.clone(),
             db.clone(),
-            workers::broadcast::CHECK,
         ))
         .add(workers::trigger::Round::new(
             container.clone(),

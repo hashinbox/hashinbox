@@ -232,7 +232,8 @@ impl TestChain for Ethereum {
             max_depth: None,
             explorer_address: None,
             explorer_transaction: None,
-            settings: json!({"interval_ms": 5}),
+            // A sent payment checked every second: well inside a test's patience.
+            settings: json!({"interval_ms": 5, "check_ms": 1_000}),
             assets: vec![native, token],
         }
     }

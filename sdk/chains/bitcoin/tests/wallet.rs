@@ -13,6 +13,20 @@ use chain_bitcoin::{AddressType, Client, Config, Factory, Network, WalletFactory
 use crypto::SecretBytes;
 use serde_json::json;
 
+/// `transfer`, signed by `builder`.
+async fn pay(
+    mut builder: Box<dyn base::Builder>,
+    transfer: Transfer,
+) -> Result<base::Transaction, base::TransactionError> {
+    builder.from_transfer(transfer)?;
+    builder.sign().await
+}
+
+/// The node's mempool minimum: 1 sat/vB.
+fn minimum() -> Reply {
+    Reply::ok("getmempoolinfo", json!({"mempoolminfee": 0.00001}))
+}
+
 /// One wallet's unspent outputs, as a store would answer.
 struct Store(Vec<Input>);
 
@@ -105,8 +119,11 @@ async fn signs_one_pending_transaction_with_its_legs() {
             .expect("valid key")
             .address()
             .clone();
-        let script = Script::new([Reply::ok("estimatesmartfee", json!({"feerate": 0.00002}))
-            .expecting(json!([6, "conservative"]))]);
+        let script = Script::new([
+            minimum(),
+            Reply::ok("estimatesmartfee", json!({"feerate": 0.00002}))
+                .expecting(json!([1, "conservative"])),
+        ]);
         let factory = factory(&script, kind, vec![funded(&owner, 100_000)]);
         let wallet = factory
             .from_pk(SecretBytes::new([1; 32]))
@@ -114,7 +131,7 @@ async fn signs_one_pending_transaction_with_its_legs() {
             .expect("key");
         let builder = wallet.transaction(&Asset::native(network())).expect("BTC");
         let transfer = Transfer::new(recipient.clone(), 40_000_u64.into());
-        let signed = builder.sign(transfer).await.expect("signed");
+        let signed = pay(builder, transfer).await.expect("signed");
         script.exhausted();
         assert_eq!(signed.state, TransactionState::Pending);
         assert_eq!(signed.order, None);
@@ -169,10 +186,10 @@ async fn signs_one_pending_transaction_with_its_legs() {
 #[tokio::test]
 async fn without_an_estimate_the_floor_prices_the_fee() {
     let owner = address_of(1).await;
-    let script = Script::new([Reply::ok(
-        "estimatesmartfee",
-        json!({"errors": ["few data"]}),
-    )]);
+    let script = Script::new([
+        minimum(),
+        Reply::ok("estimatesmartfee", json!({"errors": ["few data"]})),
+    ]);
     let factory = factory(
         &script,
         AddressType::SegwitV0,
@@ -184,7 +201,7 @@ async fn without_an_estimate_the_floor_prices_the_fee() {
         .expect("key");
     let builder = wallet.transaction(&Asset::native(network())).expect("BTC");
     let transfer = Transfer::new(address_of(2).await, 40_000_u64.into());
-    let signed = builder.sign(transfer).await.expect("signed");
+    let signed = pay(builder, transfer).await.expect("signed");
     let native: Transaction = consensus::deserialize(&signed.bytes).expect("decodes");
     let fee = 100_000 - 40_000 - native.output[1].value.to_sat();
     let vsize = u64::try_from(native.vsize()).expect("small");
@@ -197,7 +214,10 @@ async fn without_an_estimate_the_floor_prices_the_fee() {
 #[tokio::test]
 async fn refuses_what_it_cannot_send() {
     let owner = address_of(1).await;
-    let script = Script::new([Reply::ok("estimatesmartfee", json!({"feerate": 0.00001}))]);
+    let script = Script::new([
+        minimum(),
+        Reply::ok("estimatesmartfee", json!({"feerate": 0.00001})),
+    ]);
     let factory = factory(&script, AddressType::SegwitV0, vec![funded(&owner, 10_000)]);
     let wallet = factory
         .from_pk(SecretBytes::new([1; 32]))
@@ -213,7 +233,7 @@ async fn refuses_what_it_cannot_send() {
     // Each refused before any I/O, then a valid one too large.
     let sign = |to: Address, sats: u64| {
         let builder = wallet.transaction(&Asset::native(network())).expect("BTC");
-        builder.sign(Transfer::new(to, sats.into()))
+        pay(builder, Transfer::new(to, sats.into()))
     };
     let zero = sign(address_of(2).await, 0).await;
     assert_eq!(
@@ -320,7 +340,7 @@ async fn signed_bytes_are_golden() {
             .expect("valid key")
             .address()
             .clone();
-        let script = Script::new([Reply::ok("estimatesmartfee", json!({"feerate": 0.00002}))]);
+        let script = Script::new(rate());
         let factory = factory(&script, kind, vec![funded(&owner, 100_000)]);
         let wallet = factory
             .from_pk(SecretBytes::new([1; 32]))
@@ -328,7 +348,7 @@ async fn signed_bytes_are_golden() {
             .expect("key");
         let builder = wallet.transaction(&Asset::native(network())).expect("BTC");
         let transfer = Transfer::new(recipient.clone(), 40_000_u64.into());
-        let signed = builder.sign(transfer).await.expect("signed");
+        let signed = pay(builder, transfer).await.expect("signed");
         let bytes = bitcoin::hex::DisplayHex::to_lower_hex_string(&signed.bytes[..]);
         assert_eq!(bytes, expected, "{kind:?}");
     }
@@ -354,7 +374,7 @@ async fn a_transfer_from_its_own_source_spends_its_coins_with_change_to_the_defa
         .from_pk(SecretBytes::new([3; 32]))
         .await
         .expect("key");
-    let script = Script::new([Reply::ok("estimatesmartfee", json!({"feerate": 0.00002}))]);
+    let script = Script::new(rate());
     let factory = factory(
         &script,
         AddressType::SegwitV0,
@@ -367,7 +387,7 @@ async fn a_transfer_from_its_own_source_spends_its_coins_with_change_to_the_defa
     let mut builder = factory.transaction(&Asset::native(network())).expect("BTC");
     builder.with_default_source(Signer::from(&segwit));
     let transfer = Transfer::new(address_of(2).await, 40_000_u64.into()).from(&taproot);
-    let signed = builder.sign(transfer).await.expect("signed");
+    let signed = pay(builder, transfer).await.expect("signed");
     script.exhausted();
     let native: Transaction = consensus::deserialize(&signed.bytes).expect("decodes");
     let [input] = &native.input[..] else {
@@ -391,7 +411,9 @@ async fn a_transfer_from_its_own_source_spends_its_coins_with_change_to_the_defa
 async fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
     let owner = address_of(1).await;
     let script = Script::new([
+        minimum(),
         Reply::ok("estimatesmartfee", json!({"feerate": 0.00001})),
+        minimum(),
         Reply::ok("estimatesmartfee", json!({"feerate": 0.00001})),
     ]);
     let factory = factory(
@@ -401,18 +423,22 @@ async fn a_factory_builder_needs_a_source_whose_key_signs_for_it() {
     );
     let builder = factory.transaction(&Asset::native(network())).expect("BTC");
     let transfer = Transfer::new(address_of(2).await, 1_000_u64.into());
-    let error = builder.sign(transfer).await.expect_err("no source");
+    let error = pay(builder, transfer).await.expect_err("no source");
     assert_eq!(error.kind, TransactionErrorKind::Failed);
 
     let builder = factory.transaction(&Asset::native(network())).expect("BTC");
     let wrong = Signer::new(owner, crypto::Curve::Secp256k1, SecretBytes::new([3; 32]));
     let transfer = Transfer::new(address_of(2).await, 1_000_u64.into()).from(wrong);
-    let error = builder.sign(transfer).await.expect_err("mismatch");
+    let error = pay(builder, transfer).await.expect_err("mismatch");
     assert_eq!(error.kind, TransactionErrorKind::Failed);
 }
 
-fn rate_reply() -> Reply {
-    Reply::ok("estimatesmartfee", json!({"feerate": 0.00002}))
+/// The rate now: a mempool minimum of 1 sat/vB, an estimate of 2.
+fn rate() -> [Reply; 2] {
+    [
+        minimum(),
+        Reply::ok("estimatesmartfee", json!({"feerate": 0.00002})),
+    ]
 }
 
 #[tokio::test]
@@ -424,7 +450,7 @@ async fn an_estimate_prices_every_source_in_one_transaction() {
         .expect("key")
         .address()
         .clone();
-    let script = Script::new([rate_reply()]);
+    let script = Script::new(rate());
     let coins = vec![
         funded_at(&segwit, 30_000, 1),
         funded_at(&taproot, 30_000, 2),
@@ -449,13 +475,13 @@ async fn an_estimate_prices_every_source_in_one_transaction() {
 async fn the_fee_rate_refreshes_once_per_time_to_live() {
     let owner = address_of(1).await;
     let source = [(owner.clone(), Asset::native(network()))];
-    let script = Script::new([rate_reply()]);
+    let script = Script::new(rate());
     let fees = factory(&script, AddressType::SegwitV0, vec![funded(&owner, 1_000)]).fees();
     fees.estimate(&spends(&source)).await.expect("priced");
     fees.estimate(&spends(&source)).await.expect("priced");
     script.exhausted();
 
-    let script = Script::new([rate_reply(), rate_reply()]);
+    let script = Script::new(rate().into_iter().chain(rate()));
     let rpc = Client::new(Arc::new(script.clone()), Network::Regtest);
     let mut config = Config::new(Network::Regtest);
     config.fee_ttl_ms = 0;
@@ -469,7 +495,7 @@ async fn the_fee_rate_refreshes_once_per_time_to_live() {
 
 #[tokio::test]
 async fn a_sweep_of_balance_less_estimate_pays_the_estimate_without_change() {
-    let script = Script::new([rate_reply()]);
+    let script = Script::new(rate());
     let owner = address_of(1).await;
     let factory = factory(
         &script,
@@ -487,8 +513,7 @@ async fn a_sweep_of_balance_less_estimate_pays_the_estimate_without_change() {
         .expect("priced");
     let builder = wallet.transaction(&Asset::native(network())).expect("BTC");
     let amount = base::Decimal::from(100_000_u64) - fee.clone();
-    let signed = builder
-        .sign(Transfer::new(address_of(2).await, amount))
+    let signed = pay(builder, Transfer::new(address_of(2).await, amount))
         .await
         .expect("signed");
     script.exhausted();
@@ -542,4 +567,67 @@ async fn a_compressed_wif_of_its_network_imports() {
             "{bad:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_bump_spends_the_same_coins_its_change_paying_the_higher_fee() {
+    let owner = address_of(1).await;
+    let script = Script::new(rate());
+    let factory = factory(
+        &script,
+        AddressType::SegwitV0,
+        vec![funded(&owner, 100_000)],
+    );
+    let wallet = factory
+        .from_pk(SecretBytes::new([1; 32]))
+        .await
+        .expect("key");
+    let mut builder = wallet.transaction(&Asset::native(network())).expect("BTC");
+    builder
+        .from_transfer(Transfer::new(address_of(2).await, 40_000_u64.into()))
+        .expect("valid");
+    let first = builder.sign().await.expect("signed");
+    let state = builder.save().expect("saved");
+
+    // A new builder, at the rate kept: no node call.
+    let mut bump = wallet.transaction(&Asset::native(network())).expect("BTC");
+    bump.load(&state).expect("loaded");
+    assert_eq!(bump.save().expect("saved"), state, "the round trip");
+    bump.with_fee(base::Fee::Times(1.1));
+    let next = bump.sign().await.expect("signed");
+    script.exhausted();
+    let (old, new): (Transaction, Transaction) = (
+        consensus::deserialize(&first.bytes).expect("decodes"),
+        consensus::deserialize(&next.bytes).expect("decodes"),
+    );
+    assert_ne!(first.id, next.id);
+    assert_eq!(old.input[0].previous_output, new.input[0].previous_output);
+    assert_eq!(old.output[0], new.output[0], "the same payment");
+    let fee = |native: &Transaction| 100_000 - 40_000 - native.output[1].value.to_sat();
+    let vsize = u64::try_from(new.vsize()).expect("small");
+    // The old fee, plus the bumped base (1.1 sat/vB) over its size.
+    assert!(fee(&new) >= fee(&old) + vsize * 11 / 10, "{}", fee(&new));
+}
+
+#[tokio::test]
+async fn a_bump_its_change_cannot_pay_is_short_of_funds() {
+    let owner = address_of(1).await;
+    let script = Script::new(rate());
+    // 40 000, a 282 sat fee and 318 of change, just above dust.
+    let factory = factory(&script, AddressType::SegwitV0, vec![funded(&owner, 40_600)]);
+    let wallet = factory
+        .from_pk(SecretBytes::new([1; 32]))
+        .await
+        .expect("key");
+    let mut builder = wallet.transaction(&Asset::native(network())).expect("BTC");
+    builder
+        .from_transfer(Transfer::new(address_of(2).await, 40_000_u64.into()))
+        .expect("valid");
+    let first = builder.sign().await.expect("signed");
+    let native: Transaction = consensus::deserialize(&first.bytes).expect("decodes");
+    assert_eq!(native.output.len(), 2, "with change");
+    builder.with_fee(base::Fee::Times(1.1));
+    let error = builder.sign().await.expect_err("too little change");
+    assert_eq!(error.kind, TransactionErrorKind::Failed);
+    assert_eq!(error.reason, Some(Reason::InsufficientFunds));
 }

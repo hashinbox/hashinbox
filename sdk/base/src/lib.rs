@@ -16,6 +16,7 @@ mod inout;
 mod network;
 #[cfg(feature = "testing")]
 pub mod testing;
+mod token;
 /// Signed transactions, their identity, building, and broadcast.
 pub mod transaction;
 mod wallet;
@@ -30,10 +31,16 @@ pub use block::{
 };
 pub use cache::Cache;
 pub use chain::Chain;
-pub use config::{AssetConfig, AssetKind, NetworkConfig, Service, ServiceFactory, Storage};
+pub use config::{
+    AssetConfig, AssetKind, NetworkConfig, Service, ServiceFactory, Storage, Tracking,
+};
 pub use container::{Container, Simple, Transport};
 pub use decimal::{Decimal, Error as DecimalError};
-pub use fee::{Estimator as FeeEstimator, Holdings, NoHoldings, Spend, Spends};
+pub use fee::{
+    Estimator as FeeEstimator, Fee, Holdings, Level as FeeLevel, NoHoldings, Rate as FeeRate,
+    RateProvider as FeeRateProvider, RateProviderCached as FeeRateProviderCached, Rule as FeeRule,
+    Spend, Spends,
+};
 pub use index::{
     Birthday, Confirmed, Confirmer, IndexState, Indexed, IntoIndex, NoTransactionIndexes, Progress,
     Skipped, TransactionIndex, TransactionIndexStore, TransactionIndexTarget, TransactionIndexer,
@@ -44,6 +51,7 @@ pub use info::{CachedInfo, InfoClient, NodeInfo};
 
 pub use inout::{Coin, Input, Inputs, Output, Store as InputStore};
 pub use network::{Network, Networked};
+pub use token::Tokens;
 pub use transaction::{
     Broadcaster, Builder, Error as TransactionError, ErrorKind as TransactionErrorKind, Future,
     Id as TransactionId, Leg, Reason, Signer, State as TransactionState, Transacted, Transaction,

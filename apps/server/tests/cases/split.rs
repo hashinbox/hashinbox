@@ -40,8 +40,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         .await;
     assert_eq!(status, axum::http::StatusCode::CREATED, "{created}");
 
-    let mut sends = decided_after(app, chain, &treasury).await;
-    sends.reverse();
+    let sends = decided_after(app, chain, &treasury).await;
     let ran = runs(app, "split").await;
     assert_eq!(ran.len(), 1, "{ran:?}");
     let ids: Vec<&Value> = sends.iter().map(|job| &job["id"]).collect();

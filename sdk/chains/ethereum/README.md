@@ -38,9 +38,10 @@ async fn ethereum(storage: Storage) -> anyhow::Result<()> {
     // flight a `TransactionIndexStore` holds.
     let wallets = factory.wallets(&rpc, Arc::new(base::NoHoldings), Arc::new(base::NoTransactionIndexes));
     let wallet = wallets.from_pk(wallets.generate().await?).await?;
-    let builder = wallet.transaction(&ether)?;
+    let mut builder = wallet.transaction(&ether)?;
     let to = wallets.parse_address("0x...")?;
-    let transaction = builder.sign(Transfer::new(to, 10_000_u64.into())).await?;
+    builder.from_transfer(Transfer::new(to, 10_000_u64.into()))?;
+    let transaction = builder.sign().await?;
     rpc.broadcast(&transaction).await?;
 
     Ok(())
@@ -50,9 +51,11 @@ async fn ethereum(storage: Storage) -> anyhow::Result<()> {
 `Config::try_from(&base::NetworkConfig)` builds it from a stored network:
 `chain_id`, assets (ether's display decimals, the `contract`
 tokens), `confirmations`, and from `settings` the knobs
-`limits`, `fee_ttl_ms`, `interval_ms`, and `batch`, the
+`limits`, `fee_ttl_ms`, `interval_ms`, `batch`, the
 blocks the indexer fetches per step (default 100; lower it for a node that
-rate-limits) (each absent one its default). It has no `max_depth`: it reads
+rate-limits), and the `base::Tracking` of sent payments: `check_ms`
+(default 30 s), `bump_after` (50 blocks) and `max_bumps` (5) (each absent
+one its default). It has no `max_depth`: it reads
 balances (`base::Balances`, at the node's `finalized` block), so its
 indexer reads nothing at or below that block and settles an index behind it
 with one balance read (design 083 §9).
@@ -95,22 +98,31 @@ with one balance read (design 083 §9).
   (`TransactionIndexStore::find_sent`) when
   that is higher, so a node behind a load balancer that has not seen the
   last send yet does not hand its nonce out again.
-  Gas and fees come from the factory's one fee estimator
+  The rate (`base::FeeRate`) is the latest base fee and the node's tip; a
+  builder signs its tip and a max fee of `2 × base fee + tip`, kept
+  `fee_ttl_ms` (default 12 s) in one
+  `base::FeeRateProviderCached` shared by every builder, the estimator and
+  `Service::rates`. Gas comes from the factory's one fee estimator
   (`WalletFactory::fees`), which every builder signs with too, so an
-  estimate and the transaction signed after it agree. It is two: a precise
-  one (`fee.rs`) that asks the node every time, exactly for the transfer
-  given (`eth_estimateGas` from its sender to its recipient, or to a fresh
-  unused address without one, plus the margin; the price from the node's tip
-  and the latest base fee), and a cached one (`fee_cache.rs`) around it. On
-  Ethereum the price is the same for every send, and a transfer's gas
-  depends only on its asset and on whether its recipient holds it already,
-  not on who sends it: so the cached one keeps the price, and the gas of
-  each (asset, recipient holds it, as `Holdings` say), for `fee_ttl_ms`
-  (default 12 s), asking the node once per kind of send however many
-  wallets send. A sender holding none of a token cannot be tested (the node
+  estimate and the transaction signed after it agree. It (`Estimator`,
+  `fee_estimator.rs`) asks the node for the transfer given
+  (`eth_estimateGas` from its sender to its recipient, or to a fresh
+  unused address without one, plus the margin) and keeps the answer for
+  `fee_ttl_ms`. A transfer's gas depends only on its asset and on whether
+  its recipient holds it already, not on who sends it: so it keeps the gas
+  of each (asset, recipient holds it, as `Holdings` say), asking the node
+  once per kind of send however many wallets send. A sender holding none of a token cannot be tested (the node
   runs the transfer) and gets its kind's last answer. A signed transaction's
   `Fee` leg is its worst case, `gas limit * max fee`, which is what an
   estimate sums.
+- `Fee::Set(level)` sets the tip at half, the same or twice the node's
+  (`Low`, `Normal`, `High`); the max fee follows it. A builder's saved
+  state (`save`) is its payment, source, nonce, gas limit and rate; after
+  `load`, `sign` keeps the nonce and gas limit and both fees at least 10%
+  (rounded up) over the saved ones: the replacement a node accepts.
+  `Fee::Times(1.1)` is that over the higher of today's rate and the saved
+  one. Above `FeeLimits` (each fee per gas, the worst-case total), `sign`
+  fails `FeeCap`.
 - A broadcast refused as "already known" or "nonce too low" is acceptance when
   the node holds that exact hash.
 - Its line is the block after the finalized one (`Line::Final`). A sent

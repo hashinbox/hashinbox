@@ -277,6 +277,22 @@ impl Client {
         fee.value.context("Solana node did not price the message")
     }
 
+    /// Per recent slot the node keeps (up to 150), the lowest priority fee,
+    /// in micro-lamports per compute unit, that landed a transaction
+    /// (`getRecentPrioritizationFees`, for the whole network).
+    ///
+    /// # Errors
+    ///
+    /// A node failure.
+    pub(crate) async fn priority_fees(&self) -> anyhow::Result<Vec<u64>> {
+        let fees: Vec<Prioritization> = self
+            .0
+            .node
+            .call("getRecentPrioritizationFees", json!([]))
+            .await?;
+        Ok(fees.into_iter().map(|fee| fee.prioritization_fee).collect())
+    }
+
     /// The lamports an account of `bytes` must hold to be rent-exempt.
     ///
     /// # Errors
@@ -397,15 +413,6 @@ impl Client {
             )
             .await?;
         Ok(account.value)
-    }
-
-    /// Whether account `address` exists (finalized).
-    ///
-    /// # Errors
-    ///
-    /// A node failure.
-    pub(crate) async fn exists(&self, address: &solana_address::Address) -> anyhow::Result<bool> {
-        Ok(self.account(address).await?.is_some())
     }
 
     /// Repeatable calls as one batch; one answer per call, in call order.
@@ -539,6 +546,13 @@ struct Status {
 struct Latest {
     blockhash: String,
     last_valid_block_height: u64,
+}
+
+/// One slot of `getRecentPrioritizationFees`, for its fee.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Prioritization {
+    prioritization_fee: u64,
 }
 
 /// `getAccountInfo` in base64.

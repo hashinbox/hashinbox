@@ -141,6 +141,7 @@ impl Action<Job> for Transfer {
                     asset: send.asset.clone(),
                     to: to.address.value.clone(),
                     amount: amount.to_string(),
+                    fee: base::FeeLevel::Normal,
                 })?);
             }
             Ok(jobs)

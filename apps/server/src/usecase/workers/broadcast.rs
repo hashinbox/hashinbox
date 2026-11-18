@@ -1,42 +1,56 @@
 //! The broadcast job (designs 066, 084, 085): one per [`SendIntent`], one
-//! payment, one transaction, owned until it lands in a final block or can
+//! payment, owned until a version of it lands in a final block or it can
 //! never land. It locks its sender on its network (`chain:network.address`),
 //! so a sender's runs go one at a time, and a trigger round (the whole
 //! network) never runs beside one. Several payments are several jobs.
 //!
 //! Each run takes the next step its state calls for:
 //!
-//! 1. **Build** (no state yet): sign the payment, then, in one write, check
-//!    the sender holds it beyond what is in flight, record it as pending,
-//!    watch it with its transaction index (085), and save the job's state.
-//!    Short of funds: nothing is recorded, the job fails.
+//! 1. **Build** (no state yet): sign the payment at its fee level, then, in
+//!    one write, check the sender holds it beyond what is in flight, record
+//!    it as pending, watch it with its transaction index (085), and save the
+//!    job's state. Short of funds: nothing is recorded, the job fails.
 //! 2. **Send** (recorded, not sent): broadcast it once. Refused by every
 //!    node: it is forgotten (`refused`), the job fails. Accepted, or no
 //!    sure answer (a node may hold it): marked sent; checked every
-//!    [`CHECK`] from then on.
-//! 3. **Watch** (sent): read its transaction index, which the indexer moves
-//!    with every block it keeps.
-//!    - found in a final block: done;
-//!    - can never land (Solana, read past its expiry): forgotten (`dead`),
-//!      failed;
-//!    - given up or gone (a jump): failed `forgotten`;
-//!    - in none of the blocks read since it was sent: sent again (a stuck
-//!      one's fee bump, 084, goes here);
-//!    - not known yet (found above the final block, or not read that far):
-//!      checked again.
+//!    [`Tracking::check`] of its chain from then on.
+//! 3. **Watch** (sent): read the transaction index of each version sent,
+//!    which the indexer moves with every block it keeps.
+//!    - a version found in a final block: done (the current one forgotten
+//!      `replaced` when another landed);
+//!    - the current one can never land (Solana, read past its expiry):
+//!      bumped while [`Tracking::max_bumps`] allows, else forgotten
+//!      (`dead`), failed;
+//!    - its index given up or gone (a jump): failed `forgotten`;
+//!    - in none of the blocks read since it was sent: sent again, or, once
+//!      its index read [`Tracking::bump_after`] blocks past its broadcast
+//!      (never one that expires: it cannot be replaced in flight), bumped;
+//!    - not known yet (a version found above the final block, or not read
+//!      that far): checked again.
+//! 4. **Bump** (due): a replacement at the job's fee level and at least the
+//!    chain's step above the current fee, recorded in its place in one write
+//!    (the current one forgotten `replaced`, its index watching on; the new
+//!    one pending, its funds checked, with its own index; the job's state),
+//!    then sent once. Refused by every node: undone, the old one current
+//!    again. At [`Tracking::max_bumps`], at the fee cap, short of change,
+//!    or on a chain that cannot replace: the same bytes again, the job's
+//!    reason `stuck`. A job queued before its builder's state was kept is
+//!    never bumped, only watched.
 //!
-//! When the job ends, its transaction index goes, and a transaction still
-//! pending is forgotten. A rerun never builds again. Between checks a job
-//! blocks nobody, so the sender's next payment runs; it never gives up on
-//! its payment.
+//! When the job ends, the index of each version goes, and the current one,
+//! still pending, is forgotten. A rerun never builds again. Between checks
+//! a job blocks nobody, so the sender's next payment runs; it never gives
+//! up on its payment.
 
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
-use anyhow::ensure;
+use anyhow::{Context as _, ensure};
 use base::{
-    Address, Asset, Chain, Decimal, IntoIndex as _, Network, TransactionErrorKind,
-    TransactionIndex, TransactionIndexTarget, TransactionStatus, Transfer, WalletError,
+    Address, Asset, Chain, Decimal, Fee, FeeLevel, IntoIndex as _, Network, Tracking,
+    TransactionError, TransactionErrorKind, TransactionIndex, TransactionIndexTarget,
+    TransactionStatus, Transfer, WalletError,
 };
+use diesel::SqliteConnection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tasks::{Ack, Context, Job, Policy, Topic, Worker, millis};
@@ -56,9 +70,6 @@ use crate::{
 /// The job kind.
 pub(crate) const KIND: &str = "broadcast";
 
-/// How long a sent payment waits for its next check.
-pub(crate) const CHECK: Duration = Duration::from_secs(60);
-
 /// What a caller enqueues: one payment of one asset from one kept wallet,
 /// and nothing else.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -75,15 +86,29 @@ pub(crate) struct SendIntent {
     pub(crate) to: String,
     /// Exact atomic units, canonical decimal text.
     pub(crate) amount: String,
+    /// How fast it should land; `normal` when absent.
+    #[serde(default)]
+    pub(crate) fee: FeeLevel,
 }
 
 /// How far a job got: its state, once its transaction is recorded.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Progress {
-    /// The recorded transaction's id (txid).
+    /// The current version's id (txid).
     pub(crate) txid: String,
     /// Whether it was sent: a node accepted it, or may hold it.
     pub(crate) sent: bool,
+    /// The versions it replaced, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) replaced: Vec<String>,
+    /// The replacements it sent, refused ones too.
+    #[serde(default)]
+    pub(crate) bumps: u32,
+    /// What the current version's builder chose (`base::Builder::save`):
+    /// what a bump loads. `None` for a job queued before it was kept: it is
+    /// watched, never bumped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) builder: Option<Value>,
 }
 
 impl SendIntent {
@@ -92,14 +117,31 @@ impl SendIntent {
         let network = Network::new(Chain::new(&self.chain), &self.network);
         Address::new(network, &self.address)
     }
+
+    /// The asset it sends.
+    fn asset(&self) -> Asset {
+        Asset {
+            network: self.sender().network,
+            id: self.asset.clone(),
+        }
+    }
 }
 
-/// The broadcast worker: the container that signs and sends, the database
-/// that records, and how long a sent payment waits for its next check.
+impl Progress {
+    /// The id of each version sent on `network`, the current one last.
+    fn ids(&self, network: &Network) -> anyhow::Result<Vec<TransactionId>> {
+        let versions = self.replaced.iter().chain(std::iter::once(&self.txid));
+        Ok(versions
+            .map(|txid| TransactionId::new(network, txid))
+            .collect::<Result<_, _>>()?)
+    }
+}
+
+/// The broadcast worker: the container that signs and sends, and the
+/// database that records.
 pub(crate) struct Broadcast {
     container: Arc<base::Container<crate::usecase::Transport>>,
     db: Db,
-    check: Duration,
 }
 
 /// Why a run cannot go on now.
@@ -118,7 +160,7 @@ impl From<anyhow::Error> for Stop {
 
 impl Stop {
     /// A builder's failure: transient ones retry, the rest fail.
-    fn built(error: base::TransactionError) -> Self {
+    fn built(error: TransactionError) -> Self {
         if error.kind.retryable() {
             Self::Retry(error.message)
         } else {
@@ -141,41 +183,83 @@ enum Sent {
     Forgotten,
 }
 
+/// Where a payment stands at a check, by the transaction index of each
+/// version sent.
+enum Watched {
+    /// This version (txid) is in a final block.
+    Landed(String),
+    /// The current version can never land (Solana: read past its expiry),
+    /// and no bump is left.
+    Dead,
+    /// The current version's index was given up (a jump), or is gone.
+    Gone,
+    /// Not known yet: a version found above the final block, or not read
+    /// that far.
+    Unknown,
+    /// The current version is in none of the blocks read since it was sent,
+    /// through the final one.
+    Missing,
+    /// Due a bump ([`TransactionIndex::bump_due`]): missing, its index read
+    /// `bump_after` blocks past its broadcast; or one that expires, dead
+    /// with bumps left.
+    BumpDue,
+}
+
+/// What a bump came to.
+enum Bumped {
+    /// The replacement is current and sent; why not surely (a node's doubt).
+    Sent(Option<String>),
+    /// Every node refused the replacement (why): undone, the old version
+    /// current again.
+    Refused(String),
+    /// No replacement (why): `max_bumps` made, the fee cap, short of funds,
+    /// or a chain that cannot replace.
+    Stuck(String),
+}
+
 impl Broadcast {
-    /// Checks each sent payment every `check` ([`CHECK`] but in tests).
+    /// Signs and sends through `container`, records in `db`.
     pub(crate) const fn new(
         container: Arc<base::Container<crate::usecase::Transport>>,
         db: Db,
-        check: Duration,
     ) -> Self {
-        Self {
-            container,
-            db,
-            check,
-        }
+        Self { container, db }
+    }
+
+    /// How `network`'s payments are checked and bumped; while it is not
+    /// built, checked every minute and never bumped.
+    fn tracking(&self, network: &Network) -> Tracking {
+        self.container
+            .service(network)
+            .map(|service| service.tracking)
+            .unwrap_or_default()
     }
 
     /// Step 1: signs the payment and, in one write, records it watched by
     /// its transaction index: the job's state from then on.
     async fn build(&self, task: &mut Context<'_, SendIntent, Progress>) -> Result<Progress, Stop> {
-        let signed = self.sign(task.input()).await?;
+        let (signed, builder) = self.sign(task.input()).await?;
         let index = self.index(&signed).await?;
         let progress = Progress {
             txid: signed.id.id.clone(),
             sent: false,
+            replaced: Vec::new(),
+            bumps: 0,
+            builder: Some(builder),
         };
-        if !self.record(task.job(), &signed, &index, &progress).await? {
+        let mut pending = Transaction::try_from(&signed)?;
+        let recorded = self.record(task, progress.clone(), move |connection| {
+            transaction_indexes::record(connection, &mut pending, &index)
+        });
+        if !recorded.await? {
             return Err(Stop::Fail("insufficient-funds".into()));
         }
-        // Saved again, so the run's outcome carries it too.
-        task.save(progress.clone())
-            .await
-            .map_err(|error| Stop::Retry(error.to_string()))?;
         Ok(progress)
     }
 
-    /// The payment of `intent`, signed by the kept wallet of its sender.
-    async fn sign(&self, intent: &SendIntent) -> Result<base::Transaction, Stop> {
+    /// The payment of `intent`, signed by the kept wallet of its sender at
+    /// its fee level, and its builder's state.
+    async fn sign(&self, intent: &SendIntent) -> Result<(base::Transaction, Value), Stop> {
         let sender = intent.sender();
         let wallet = self.container.wallet(&sender).await.map_err(|error| {
             match error.downcast_ref::<WalletError>() {
@@ -185,20 +269,18 @@ impl Broadcast {
                 _ => Stop::from(error),
             }
         })?;
-        let asset = Asset {
-            network: sender.network.clone(),
-            id: intent.asset.clone(),
-        };
         let amount = intent
             .amount
             .parse::<Decimal>()
             .map_err(|_| Stop::Fail("invalid: amount is not a decimal".into()))?;
         let to = Address::new(sender.network, intent.to.clone());
-        let builder = wallet.transaction(&asset).map_err(Stop::built)?;
+        let mut builder = wallet.transaction(&intent.asset()).map_err(Stop::built)?;
         builder
-            .sign(Transfer::new(to, amount))
-            .await
-            .map_err(Stop::built)
+            .from_transfer(Transfer::new(to, amount))
+            .map_err(Stop::built)?;
+        builder.with_fee(Fee::Set(intent.fee));
+        let signed = builder.sign().await.map_err(Stop::built)?;
+        Ok((signed, builder.save().map_err(Stop::built)?))
     }
 
     /// The index `signed` is watched with (085): from the tip now, until
@@ -213,21 +295,19 @@ impl Broadcast {
         target.index().await
     }
 
-    /// In one write: checks `signed` against what its senders hold beyond
-    /// what is in flight, records it as pending, not yet sent, with `index`,
-    /// and stores `job` with `progress` as its state, while the run still
-    /// holds it. `false`, and nothing written, when a sender is short.
+    /// In one write: `write` (the payment's rows), then the job stored with
+    /// `progress` as its state, while the run still holds it; then saved on
+    /// `task` too, so the run's outcome carries it. `false`, and nothing
+    /// written, when `write` finds a sender short.
     async fn record(
         &self,
-        job: &Job,
-        signed: &base::Transaction,
-        index: &TransactionIndex,
-        progress: &Progress,
+        task: &mut Context<'_, SendIntent, Progress>,
+        progress: Progress,
+        write: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<()> + Send + 'static,
     ) -> anyhow::Result<bool> {
-        let mut pending = Transaction::try_from(signed)?;
-        let index = index.clone();
+        let job = task.job();
         let row = Row::try_from(&Job {
-            state: Some(serde_json::to_value(progress)?),
+            state: Some(serde_json::to_value(&progress)?),
             ..job.clone()
         })?;
         let (id, attempt) = (int(job.id.0)?, i32::try_from(job.attempts)?);
@@ -236,8 +316,7 @@ impl Broadcast {
             .db
             .write(move |connection| {
                 // Short rolls the write back: nothing recorded.
-                transaction::db::save_pending(connection, &mut pending)?;
-                transaction_index::db::insert(connection, &index)?;
+                write(connection)?;
                 ensure!(
                     task::db::update(connection, id, attempt, &row, now)?,
                     "the run has ended"
@@ -246,10 +325,12 @@ impl Broadcast {
             })
             .await;
         match recorded {
-            Ok(()) => Ok(true),
-            Err(error) if error.is::<transaction::Short>() => Ok(false),
-            Err(error) => Err(error),
+            Ok(()) => {}
+            Err(error) if error.is::<transaction::Short>() => return Ok(false),
+            Err(error) => return Err(error),
         }
+        task.save(progress).await?;
+        Ok(true)
     }
 
     /// Step 2: broadcasts recorded `txid` once and, unless every node
@@ -281,19 +362,53 @@ impl Broadcast {
         Ok(sent)
     }
 
-    /// Step 3: where sent `txid` stands, by its transaction index (085);
-    /// `None` once it is no longer watched (a jump forgot it).
-    async fn status(
+    /// Step 3: where the payment of `progress` stands, by the transaction
+    /// index of each version sent (085): any version may land.
+    async fn watch(
         &self,
         network: &Network,
-        txid: &str,
-    ) -> anyhow::Result<Option<TransactionStatus>> {
-        let id = TransactionId::new(network, txid)?;
-        let index = self
+        progress: &Progress,
+        tracking: Tracking,
+    ) -> anyhow::Result<Watched> {
+        let ids = progress.ids(network)?;
+        let indexes = self
             .db
-            .read(move |connection| transaction_index::db::find(connection, &id))
+            .read(move |connection| {
+                ids.iter()
+                    .map(|id| transaction_index::db::find(connection, id))
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })
             .await?;
-        Ok(index.map(|index| index.status()))
+        let versions: Vec<&TransactionIndex> = indexes.iter().flatten().collect();
+        let landed = versions
+            .iter()
+            .find(|index| index.status() == TransactionStatus::Final);
+        if let Some(landed) = landed {
+            return Ok(Watched::Landed(landed.transaction.id.clone()));
+        }
+        let Some(Some(current)) = indexes.last() else {
+            return Ok(Watched::Gone);
+        };
+        Ok(match current.status() {
+            TransactionStatus::Final => Watched::Landed(progress.txid.clone()),
+            TransactionStatus::GivenUp => Watched::Gone,
+            TransactionStatus::Unknown => Watched::Unknown,
+            // An earlier version found above the final block may land.
+            TransactionStatus::Missing if versions.iter().any(|index| index.found.is_some()) => {
+                Watched::Unknown
+            }
+            // One that expires is not sent again once out of bumps.
+            TransactionStatus::Dead if progress.bumps >= tracking.max_bumps => Watched::Dead,
+            // Bumps off (`max_bumps` 0): sent again as it is.
+            _ if tracking.max_bumps > 0
+                && progress.builder.is_some()
+                && current.bump_due(tracking.bump_after) =>
+            {
+                Watched::BumpDue
+            }
+            TransactionStatus::Dead => Watched::Dead,
+            TransactionStatus::Missing => Watched::Missing,
+        })
     }
 
     /// Sends pending `txid` again; the answer decides nothing. `false` once
@@ -309,6 +424,88 @@ impl Broadcast {
         Ok(true)
     }
 
+    /// Step 4: replaces the current version of `progress` with one at a
+    /// higher fee ([`Self::replacement`]): recorded in its place in one write
+    /// ([`transaction_indexes::replace`], the job's state with it), then
+    /// sent once. Refused by every node: undone in one write
+    /// ([`transaction_indexes::restore`]), the old version current again
+    /// as it was kept.
+    async fn bump(
+        &self,
+        task: &mut Context<'_, SendIntent, Progress>,
+        network: &Network,
+        progress: &Progress,
+        tracking: Tracking,
+    ) -> anyhow::Result<Bumped> {
+        if progress.bumps >= tracking.max_bumps {
+            return Ok(Bumped::Stuck(format!("{} bumps made", progress.bumps)));
+        }
+        let Some(state) = &progress.builder else {
+            return Ok(Bumped::Stuck("no builder state to bump".into()));
+        };
+        let current = self
+            .kept(network, &progress.txid)
+            .await?
+            .context("the current version is no longer kept")?;
+        let (next, builder) = match self.replacement(task.input(), state).await {
+            Ok(next) => next,
+            Err(error) if error.kind.retryable() => return Err(error.into()),
+            // At the fee cap, or a chain that cannot replace.
+            Err(error) => return Ok(Bumped::Stuck(error.message)),
+        };
+        let index = self.index(&next).await?;
+        let bumped = Progress {
+            txid: next.id.id.clone(),
+            sent: true,
+            replaced: [progress.replaced.clone(), vec![progress.txid.clone()]].concat(),
+            bumps: progress.bumps + 1,
+            builder: Some(builder),
+        };
+        let (old, mut pending) = (current.id.clone(), Transaction::try_from(&next)?);
+        let replaced = self.record(task, bumped.clone(), move |connection| {
+            transaction_indexes::replace(connection, &old, &mut pending, &index)
+        });
+        if !replaced.await? {
+            return Ok(Bumped::Stuck("insufficient-funds".into()));
+        }
+        let why = match self.send(network, &bumped.txid).await? {
+            // Forgotten before it was sent: the next check finds it gone.
+            Sent::Accepted | Sent::Mined | Sent::Forgotten => return Ok(Bumped::Sent(None)),
+            Sent::Unsure(why) => return Ok(Bumped::Sent(Some(why))),
+            Sent::Refused(why) => why,
+        };
+        let restored = Progress {
+            bumps: bumped.bumps,
+            ..progress.clone()
+        };
+        let (mut current, next) = (current, TransactionId::new(network, &bumped.txid)?);
+        let undone = self.record(task, restored, move |connection| {
+            transaction_indexes::restore(connection, &mut current, &next)
+        });
+        ensure!(undone.await?, "{why}; its undoing is short of funds");
+        Ok(Bumped::Refused(why))
+    }
+
+    /// The replacement of the version whose builder saved `state`, signed by
+    /// the kept wallet of `intent`'s sender at a tenth above the higher of
+    /// the rate now and its own, and its builder's state.
+    async fn replacement(
+        &self,
+        intent: &SendIntent,
+        state: &Value,
+    ) -> Result<(base::Transaction, Value), TransactionError> {
+        let wallet = self
+            .container
+            .wallet(&intent.sender())
+            .await
+            .map_err(TransactionError::unavailable)?;
+        let mut builder = wallet.transaction(&intent.asset())?;
+        builder.load(state)?;
+        builder.with_fee(Fee::Times(1.1));
+        let next = builder.sign().await?;
+        Ok((next, builder.save()?))
+    }
+
     /// Transaction `txid` of `network` as kept, pending or mined; `None`
     /// once forgotten.
     async fn kept(&self, network: &Network, txid: &str) -> anyhow::Result<Option<Transaction>> {
@@ -318,22 +515,23 @@ impl Broadcast {
             .await
     }
 
-    /// Ends payment `txid` in one write: its transaction index deleted, and
-    /// its transaction forgotten for `why` while still pending.
-    async fn end(&self, network: &Network, txid: &str, why: Why) -> anyhow::Result<()> {
-        let id = TransactionId::new(network, txid)?;
+    /// Ends the payment of `progress` in one write: the transaction index of
+    /// each version deleted, and the current one forgotten for `why` while
+    /// still pending.
+    async fn end(&self, network: &Network, progress: &Progress, why: Why) -> anyhow::Result<()> {
+        let (current, ids) = (
+            TransactionId::new(network, &progress.txid)?,
+            progress.ids(network)?,
+        );
         self.db
             .write(move |connection| {
-                transaction_indexes::forget(connection, &[&id], why)?;
-                transaction_index::db::delete(connection, &id)?;
+                transaction_indexes::forget(connection, &[&current], why)?;
+                for id in &ids {
+                    transaction_index::db::delete(connection, id)?;
+                }
                 Ok(())
             })
             .await
-    }
-
-    /// When the next check is due.
-    fn next_check(&self) -> u64 {
-        tasks::now().saturating_add(millis(self.check))
     }
 }
 
@@ -358,8 +556,9 @@ impl Worker for Broadcast {
 
     async fn run(&self, mut task: Context<'_, SendIntent, Progress>) -> Ack {
         let network = task.input().sender().network;
+        let tracking = self.tracking(&network);
         let retry = |error: anyhow::Error| Ack::Retry(format!("{error:#}"));
-        let again = |why: Option<String>| Ack::Again(self.next_check(), why);
+        let again = |why: Option<String>| Ack::Again(next_check(tracking.check), why);
 
         // 1. Build: sign, record and watch.
         let mut progress = match task.state().cloned() {
@@ -370,19 +569,18 @@ impl Worker for Broadcast {
                 Err(Stop::Fail(why)) => return Ack::Fail(why),
             },
         };
-        let txid = progress.txid.clone();
 
         // 2. Send, once.
         if !progress.sent {
-            let why = match self.send(&network, &txid).await {
+            let why = match self.send(&network, &progress.txid).await {
                 Ok(Sent::Accepted | Sent::Mined) => None,
                 Ok(Sent::Unsure(why)) => Some(why),
                 Ok(Sent::Refused(why)) => {
-                    let ended = self.end(&network, &txid, Why::Refused).await;
+                    let ended = self.end(&network, &progress, Why::Refused).await;
                     return ended.map_or_else(retry, |()| Ack::Fail(why));
                 }
                 Ok(Sent::Forgotten) => {
-                    let ended = self.end(&network, &txid, Why::Jump).await;
+                    let ended = self.end(&network, &progress, Why::Jump).await;
                     return ended.map_or_else(retry, |()| Ack::Fail("forgotten".into()));
                 }
                 Err(error) => return retry(error),
@@ -394,27 +592,44 @@ impl Worker for Broadcast {
             return again(why);
         }
 
-        // 3. Watch it land.
-        let status = match self.status(&network, &txid).await {
-            Ok(status) => status,
-            Err(error) => return again(Some(format!("{error:#}"))),
-        };
-        let (why, ack) = match status {
+        // 3. Watch it land: any version sent.
+        let (why, ack) = match self.watch(&network, &progress, tracking).await {
             // Still pending here only when found inside a gap never read.
-            Some(TransactionStatus::Final) => (Why::Jump, Ack::Done),
-            Some(TransactionStatus::Dead) => (Why::Dead, Ack::Fail("dead".into())),
-            None | Some(TransactionStatus::GivenUp) => (Why::Jump, Ack::Fail("forgotten".into())),
-            Some(TransactionStatus::Unknown) => return again(None),
-            // A stuck one's fee bump (084) goes here, before the send again.
-            Some(TransactionStatus::Missing) => match self.resend(&network, &txid).await {
+            Ok(Watched::Landed(txid)) if txid == progress.txid => (Why::Jump, Ack::Done),
+            // An earlier version landed: the current one never will.
+            Ok(Watched::Landed(_)) => (Why::Replaced, Ack::Done),
+            Ok(Watched::Dead) => (Why::Dead, Ack::Fail("dead".into())),
+            Ok(Watched::Gone) => (Why::Jump, Ack::Fail("forgotten".into())),
+            Ok(Watched::Unknown) => return again(None),
+            Ok(Watched::Missing) => match self.resend(&network, &progress.txid).await {
                 Ok(true) => return again(None),
                 Ok(false) => (Why::Jump, Ack::Fail("forgotten".into())),
                 Err(error) => return again(Some(format!("{error:#}"))),
             },
+            // 4. Bump: a replacement at a higher fee in its place; none
+            //    (stuck): the same bytes again.
+            Ok(Watched::BumpDue) => {
+                let why = match self.bump(&mut task, &network, &progress, tracking).await {
+                    Ok(Bumped::Sent(why)) => why,
+                    Ok(Bumped::Refused(why)) => Some(why),
+                    Ok(Bumped::Stuck(why)) => {
+                        let _sent = self.resend(&network, &progress.txid).await;
+                        Some(format!("stuck: {why}"))
+                    }
+                    Err(error) => Some(format!("{error:#}")),
+                };
+                return again(why);
+            }
+            Err(error) => return again(Some(format!("{error:#}"))),
         };
-        let ended = self.end(&network, &txid, why).await;
+        let ended = self.end(&network, &progress, why).await;
         ended.map_or_else(retry, |()| ack)
     }
+}
+
+/// When the next check is due, `check` from now.
+fn next_check(check: Duration) -> u64 {
+    tasks::now().saturating_add(millis(check))
 }
 
 /// A broadcast's recorded transaction (txid), once recorded, and whether it

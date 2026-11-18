@@ -146,6 +146,23 @@ impl Client {
         Ok(Some(FeeRate::from_sat_per_kvb(rate.to_sat())))
     }
 
+    /// The lowest fee rate the node's mempool accepts now
+    /// (`getmempoolinfo`'s `mempoolminfee`).
+    ///
+    /// # Errors
+    ///
+    /// A node failure or an unreadable rate.
+    pub async fn mempool_minimum(&self) -> anyhow::Result<FeeRate> {
+        let reply: Value = self.node.call("getmempoolinfo", json!([])).await?;
+        let rate = reply
+            .get("mempoolminfee")
+            .and_then(Value::as_number)
+            .context("getmempoolinfo without mempoolminfee")?;
+        let rate = Amount::from_str_in(&rate.to_string(), Denomination::Bitcoin)
+            .context("Bitcoin mempool minimum fee")?;
+        Ok(FeeRate::from_sat_per_kvb(rate.to_sat()))
+    }
+
     /// Submits `bytes` with `sendrawtransaction` to every node the transport
     /// reaches. A node that already holds the transaction (in its chain or
     /// mempool) counts as accepting it.

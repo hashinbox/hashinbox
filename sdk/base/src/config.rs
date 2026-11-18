@@ -7,8 +7,9 @@ use std::{fmt, sync::Arc, time::Duration};
 use serde_json::Value;
 
 use crate::{
-    Assets, Balances, BlockStore, Chain, Confirmer, Dated, Holdings, Indexer, InputStore, Network,
-    TransactionIndexStore, WalletFactoryBroadcaster, WalletIndexStore, WalletStore,
+    Assets, Balances, BlockStore, Chain, Confirmer, Dated, FeeRateProvider, Holdings, Indexer,
+    InputStore, Network, TransactionIndexStore, WalletFactoryBroadcaster, WalletIndexStore,
+    WalletStore,
 };
 
 /// One network as an application stores it, whatever its chain: the facts
@@ -115,6 +116,36 @@ pub struct Service {
     /// Positions a block needs below the tip to count as confirmed: the
     /// confirmed position is `tip - confirmations`.
     pub confirmations: u64,
+    /// How its sent payments are checked and bumped.
+    pub tracking: Tracking,
+    /// The network's fee rate, cached: the one every builder and the
+    /// estimator of [`Self::wallets`] price with.
+    pub rates: Arc<dyn FeeRateProvider>,
+}
+
+/// How a chain's sent payments are checked and bumped (design 084), from
+/// its config.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tracking {
+    /// How often a broadcast job checks its payment.
+    pub check: Duration,
+    /// Blocks its transaction index reads past `broadcasted_at`, the
+    /// payment in none of them, before a bump; unused for a transaction
+    /// that expires (bumped once dead).
+    pub bump_after: u64,
+    /// Bumps per payment at most; 0: never bumped.
+    pub max_bumps: u32,
+}
+
+impl Default for Tracking {
+    /// Checked every minute, never bumped.
+    fn default() -> Self {
+        Self {
+            check: Duration::from_secs(60),
+            bump_after: 0,
+            max_bumps: 0,
+        }
+    }
 }
 
 impl fmt::Debug for Service {

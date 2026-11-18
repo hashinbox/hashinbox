@@ -7,17 +7,22 @@ import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogTitle from '@mui/material/DialogTitle';
+import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useEffect, useState, type ReactNode, type SubmitEvent } from 'react';
-import { call, client, type Wallet } from '@/api/client';
+import { call, client, type Schemas, type Wallet } from '@/api/client';
 import { Transaction } from '@/_components/transaction';
 import type { Shell } from '@/layout';
 import { assetName, networkOf } from '@/money';
 
 /** How often a sent transaction is looked up again. */
 const POLL_MS = 3000;
+
+/** How fast a send should land, as the API names it. */
+type Fee = Schemas['FeeLevel'];
+const FEES: Fee[] = ['low', 'normal', 'high'];
 
 /**
  * Where a send is: being filled in; queued, until the nodes accept it;
@@ -52,6 +57,7 @@ export function Send({
   const ticker = assetName(shell.listings, wallet.chain, wallet.network, asset);
   const [destination, setDestination] = useState('');
   const [amount, setAmount] = useState('');
+  const [fee, setFee] = useState<Fee>('normal');
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState<Stage>({ at: 'form' });
 
@@ -59,7 +65,7 @@ export function Send({
     event.preventDefault();
     setBusy(true);
     const params = { path: { id: wallet.id } };
-    const body = { asset, destination: destination.trim(), amount: amount.trim() };
+    const body = { asset, destination: destination.trim(), amount: amount.trim(), fee };
     call(client.POST('/v1/wallets/{id}/transactions', { params, body }))
       .then((queued) => setStage({ at: 'queued', job: queued.job }))
       .catch(shell.fail)
@@ -115,6 +121,7 @@ export function Send({
       setStage({ at: 'form' });
       setDestination('');
       setAmount('');
+      setFee('normal');
     }
   };
 
@@ -145,6 +152,18 @@ export function Send({
                 required
                 slotProps={{ htmlInput: { inputMode: 'decimal' } }}
               />
+              <TextField
+                select
+                label="Fee"
+                value={fee}
+                onChange={(e) => setFee(e.target.value as Fee)}
+              >
+                {FEES.map((level) => (
+                  <MenuItem key={level} value={level} sx={{ textTransform: 'capitalize' }}>
+                    {level}
+                  </MenuItem>
+                ))}
+              </TextField>
             </Stack>
           </DialogContent>
           <DialogActions>

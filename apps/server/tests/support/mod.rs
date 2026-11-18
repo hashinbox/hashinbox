@@ -24,11 +24,11 @@ pub(crate) use api::{Api, Wallet};
 
 /// How often the job loop looks for due jobs.
 const TICK: Duration = Duration::from_millis(5);
-/// The longest [`until`] waits.
-const PATIENCE: Duration = Duration::from_secs(5);
-/// How long a sent payment waits for its next check: well inside
-/// [`PATIENCE`].
-const CHECK: Duration = Duration::from_secs(1);
+/// The longest [`until`] waits: a safety net, never a case's clock. The
+/// workers run on their own timers (an index retry waits a second longer
+/// after each failure, a sent payment is checked every chain's
+/// `Tracking::check`), which a busy machine stretches.
+const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A test chain's reader and factory, as `main` registers its chain.
 pub(crate) trait Served: TestChain {
@@ -99,7 +99,6 @@ impl App {
             .add(workers::broadcast::Broadcast::new(
                 container.clone(),
                 db.clone(),
-                CHECK,
             ))
             .add(workers::trigger::Round::new(
                 container.clone(),

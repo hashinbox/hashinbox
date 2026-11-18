@@ -49,6 +49,33 @@ struct SendRequest {
     destination: String,
     /// Exact positive decimal in display units.
     amount: String,
+    /// How fast it should land; each chain prices it its own way. Default
+    /// `normal`.
+    #[serde(default)]
+    fee: Fee,
+}
+
+/// How fast a payment should land: Ethereum tips at half, the same or twice
+/// the node's suggestion; Bitcoin targets confirmation within 12 blocks, the
+/// network's target or the next block; Solana pays no priority fee yet.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[schema(as = FeeLevel)]
+enum Fee {
+    Low,
+    #[default]
+    Normal,
+    High,
+}
+
+impl From<Fee> for base::FeeLevel {
+    fn from(fee: Fee) -> Self {
+        match fee {
+            Fee::Low => Self::Low,
+            Fee::Normal => Self::Normal,
+            Fee::High => Self::High,
+        }
+    }
 }
 
 /// An enqueued send.
@@ -94,6 +121,7 @@ async fn send(
     let transfer = Transfer {
         destination: request.destination,
         amount: request.amount,
+        fee: request.fee.into(),
     };
     let (container, db, queue) = (&state.container, &state.db, &state.queue);
     let job = wallets::send(container, db, queue, &id, &request.asset, transfer).await?;

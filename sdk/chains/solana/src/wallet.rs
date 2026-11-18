@@ -3,22 +3,22 @@
 use std::sync::Arc;
 
 use base::{
-    Address, Addressed, Asset, Future, Network, Networked, Signer, TransactionError,
-    TransactionErrorKind, WalletError, WalletErrorKind,
+    Address, Addressed, Asset, Future, Network, Networked, Signer, TransactionError, WalletError,
+    WalletErrorKind,
 };
 use crypto::{Curve, Ed25519, PrivateKey as _, SecretBytes};
 
 use crate::builder::Builder;
-use crate::{KeyPair, Tokens, fee_cache::Cached, rpc::Client};
+use crate::{KeyPair, Token, Tokens, fee_estimator::Estimator, rpc::Client};
 
 /// Makes the Ed25519 wallets of one Solana cluster. Their builders send SOL
-/// and the allowlisted tokens, on the blockhash and fees of the
+/// and the allowlisted tokens, at the signature price and rate of the
 /// factory's one estimator.
 #[derive(Clone)]
 pub struct WalletFactory {
     pub(crate) rpc: Client,
     pub(crate) tokens: Tokens,
-    pub(crate) fees: Arc<Cached>,
+    pub(crate) fees: Arc<Estimator>,
 }
 
 impl base::WalletFactory for WalletFactory {
@@ -57,7 +57,6 @@ impl base::WalletFactory for WalletFactory {
 
     /// SOL, or one allowlisted token.
     fn transaction(&self, asset: &Asset) -> Result<Box<dyn base::Builder>, TransactionError> {
-        let network: Network = self.rpc.network().into();
         let builder = |token| -> Box<dyn base::Builder> {
             Box::new(Builder {
                 rpc: self.rpc.clone(),
@@ -65,21 +64,25 @@ impl base::WalletFactory for WalletFactory {
                 asset: asset.clone(),
                 token,
                 default: None,
+                payment: None,
+                state: None,
+                fee: base::Fee::default(),
             })
         };
-        if *asset == Asset::native(network.clone()) {
+        let Some(mint) = self.tokens.contract(asset)? else {
             return Ok(builder(None));
-        }
-        let token = Some(asset)
-            .filter(|asset| asset.network == network)
-            .and_then(|asset| self.tokens.get(asset));
-        let Some(token) = token else {
-            return Err(TransactionError::new(
-                TransactionErrorKind::Unsupported,
-                "this Solana wallet sends SOL and the configured tokens only",
-            ));
         };
-        Ok(builder(Some(token)))
+        let decimals = self
+            .tokens
+            .decimals(&mint)
+            .and_then(|decimals| u8::try_from(decimals).ok())
+            .ok_or_else(|| TransactionError::failed("Solana token decimals above 255"))?;
+        Ok(builder(Some(Token {
+            mint,
+            decimals,
+            ticker: None,
+            display_decimals: None,
+        })))
     }
 
     fn fees(&self) -> Arc<dyn base::FeeEstimator> {

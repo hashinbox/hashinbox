@@ -42,6 +42,8 @@ pub(crate) struct Transfer {
     pub(crate) destination: String,
     /// Exact positive decimal in display units.
     pub(crate) amount: String,
+    /// How fast it should land.
+    pub(crate) fee: base::FeeLevel,
 }
 
 /// Creates `new`, and whether it was created: an address already kept
@@ -371,6 +373,7 @@ pub(crate) async fn send(
         asset: info.asset.id.clone(),
         to: to.value,
         amount: units.to_string(),
+        fee: transfer.fee,
     };
     let queued = Broadcast::enqueue(queue, &intent)
         .await

@@ -3461,6 +3461,15 @@
           }
         }
       },
+      "FeeLevel": {
+        "type": "string",
+        "description": "How fast a payment should land: Ethereum tips at half, the same or twice\nthe node's suggestion; Bitcoin targets confirmation within 12 blocks, the\nnetwork's target or the next block; Solana pays no priority fee yet.",
+        "enum": [
+          "low",
+          "normal",
+          "high"
+        ]
+      },
       "IndexState": {
         "type": "string",
         "description": "Whether an index is scanned.",
@@ -4381,6 +4390,10 @@
           "destination": {
             "type": "string",
             "description": "Recipient address text, as the wallet's chain writes it."
+          },
+          "fee": {
+            "$ref": "#/components/schemas/FeeLevel",
+            "description": "How fast it should land; each chain prices it its own way. Default\n`normal`."
           }
         },
         "additionalProperties": false

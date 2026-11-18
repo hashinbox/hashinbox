@@ -9,7 +9,7 @@ use std::{
 use crypto::{Curve, SecretBytes};
 use serde::{Deserialize, Serialize};
 
-use crate::{Address, Addressed, Asset, Coin, Decimal, Network, Wallet};
+use crate::{Address, Addressed, Asset, Coin, Decimal, Fee, Network, Wallet};
 
 /// The future transaction capabilities return: boxed so the traits stay `dyn`-safe.
 pub type Future<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
@@ -31,6 +31,9 @@ pub enum ErrorKind {
     /// The transaction can no longer land (Solana: its blockhash expired)
     /// and was not seen; its outcome is unknown.
     Expired,
+    /// The fee it needs is above the chain's fee cap (its configured
+    /// ceilings): signing it would pay more than allowed.
+    FeeCap,
 }
 
 impl ErrorKind {
@@ -243,26 +246,65 @@ impl Transfer {
 /// One transfer of one asset, signed into one transaction: a builder pays
 /// exactly one payment. The asset is fixed when the factory or wallet
 /// creates the builder; the transfer is paid by its own source or the
-/// default one. It knows nothing of broadcasting: save the signed
-/// transaction, then hand it to a [`Broadcaster`].
+/// default one. What it chose when it signed is its state, saved, so a
+/// stuck payment is replaced with the same calls that sent it:
+///
+/// ```text
+/// a payment:  from_transfer(transfer), with_fee(fee), sign(), save()
+/// its bump:   load(&state), with_fee(Fee::Times(1.1)), sign()
+/// ```
+///
+/// It knows nothing of broadcasting: save the signed transaction, then
+/// hand it to a [`Broadcaster`].
 pub trait Builder: Send {
     /// Source used when the transfer has no `from` of its own.
     fn with_default_source(&mut self, source: Signer);
 
-    /// Checks `transfer`'s address and amount before any I/O, then fetches
-    /// its own chain inputs (coins, nonce or blockhash), estimates the fee
-    /// and signs it: one [`State::Pending`] transaction with its legs and
-    /// envelope. Consumes the builder, so it cannot sign twice. Nothing
-    /// leaves the process.
+    /// A new payment, `transfer`, its address and amount checked before any
+    /// I/O; its slot (coins or nonce) is picked when signing.
     ///
     /// # Errors
     ///
-    /// `Failed` for an invalid address or amount, a transfer without a
-    /// source, a key that does not sign for its address; any build, fee,
-    /// funds, or signing failure.
-    fn sign<'a>(self: Box<Self>, transfer: Transfer) -> Future<'a, Result<Transaction, Error>>
-    where
-        Self: 'a;
+    /// `Failed` for an invalid address or amount.
+    #[allow(
+        clippy::wrong_self_convention,
+        reason = "loads the builder from a transfer; the builder is the receiver"
+    )]
+    fn from_transfer(&mut self, transfer: Transfer) -> Result<(), Error>;
+
+    /// Signs at `fee`'s rate; [`Fee::default`] until set.
+    fn with_fee(&mut self, fee: Fee);
+
+    /// Fetches its chain inputs (coins, nonce or blockhash; a loaded state
+    /// keeps its own slot) and the network's rate now, applies the fee's
+    /// rule (to it and the state's rate), raises it to the chain's floor,
+    /// prices the exact size and signs: one [`State::Pending`] transaction
+    /// with its legs and envelope. Nothing leaves the process. Keeps what it
+    /// chose as its state: a next sign continues it.
+    ///
+    /// # Errors
+    ///
+    /// `Failed` with nothing to sign, a transfer without a source, a key
+    /// that does not sign for its address; any build, fee, funds, or signing
+    /// failure. `FeeCap` above the chain's fee cap.
+    fn sign(&mut self) -> Future<'_, Result<Transaction, Error>>;
+
+    /// What it chose for the last sign: enough to sign the same payment
+    /// again, in the same slot. Never a key: the source is its address, its
+    /// key the one the builder signs with then.
+    ///
+    /// # Errors
+    ///
+    /// `Failed` before anything was signed.
+    fn save(&self) -> Result<serde_json::Value, Error>;
+
+    /// A state [`Self::save`] made: the next sign continues it (same nonce
+    /// or coins), at a rate never below the saved one.
+    ///
+    /// # Errors
+    ///
+    /// `Failed` for a state this chain's builder did not save.
+    fn load(&mut self, state: &serde_json::Value) -> Result<(), Error>;
 }
 
 /// The only external effect in transaction submission: a signed

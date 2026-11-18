@@ -803,6 +803,13 @@ export interface components {
             message: string;
         };
         /**
+         * @description How fast a payment should land: Ethereum tips at half, the same or twice
+         *     the node's suggestion; Bitcoin targets confirmation within 12 blocks, the
+         *     network's target or the next block; Solana pays no priority fee yet.
+         * @enum {string}
+         */
+        FeeLevel: "low" | "normal" | "high";
+        /**
          * @description Whether an index is scanned.
          * @enum {string}
          */
@@ -1238,6 +1245,11 @@ export interface components {
             asset?: string;
             /** @description Recipient address text, as the wallet's chain writes it. */
             destination: string;
+            /**
+             * @description How fast it should land; each chain prices it its own way. Default
+             *     `normal`.
+             */
+            fee?: components["schemas"]["FeeLevel"];
         };
         /** @description An enqueued send. */
         SendAccepted: {

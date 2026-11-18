@@ -169,14 +169,18 @@ async fn at_tip<T: TestChain>(app: &App, chain: &T) -> Value {
     .await
 }
 
-/// The live kept blocks, checked to be one branch with no gap: each the
-/// child of the one below it.
+/// The live kept blocks, checked to be one branch: each the child of the
+/// one below it, unless that one is below its parent (a gap a settle
+/// leaves, design 083).
 async fn linked<T: TestChain>(app: &App, chain: &T) -> Vec<Value> {
     let blocks = app.api.blocks(&chain.network()).await;
     for pair in blocks.windows(2) {
-        let (child, parent) = (&pair[0], &pair[1]);
-        assert_eq!(child["parent_position"], parent["position"], "{blocks:?}");
-        assert_eq!(child["parent"], parent["id"], "{blocks:?}");
+        let (child, below) = (&pair[0], &pair[1]);
+        if child["parent_position"].as_u64() > below["position"].as_u64() {
+            continue;
+        }
+        assert_eq!(child["parent_position"], below["position"], "{blocks:?}");
+        assert_eq!(child["parent"], below["id"], "{blocks:?}");
     }
     blocks
 }
@@ -260,10 +264,18 @@ async fn payout<T: TestChain>(app: &App, chain: &T, ids: &[&str], source: &Walle
     assert_eq!(status, axum::http::StatusCode::CREATED, "{created}");
 }
 
-/// The jobs `GET /v1/jobs?{query}` lists, latest first (at most 500).
+/// The jobs `GET /v1/jobs?{query}` lists, last written first (at most 500).
 async fn jobs(app: &App, query: &str) -> Vec<Value> {
     let page = app.api.get(&format!("/v1/jobs?limit=500&{query}")).await;
     page["jobs"].as_array().cloned().unwrap_or_default()
+}
+
+/// A job's id as a number: ids order as numbers, not as text.
+fn id(job: &Value) -> u64 {
+    job["id"]
+        .as_str()
+        .and_then(|id| id.parse().ok())
+        .unwrap_or_default()
 }
 
 /// The broadcast jobs sending from `wallet`.
@@ -283,7 +295,7 @@ async fn runs(app: &App, id: &str) -> Vec<Value> {
 /// Waits until every send from `wallet` went out, mines them final, waits
 /// until every send of the network succeeded (none is checked any more, so
 /// none holds a round back), and then until a round started after the last
-/// of them: it decided with them spent. Their jobs.
+/// of them: it decided with them spent. Their jobs, oldest first.
 async fn decided_after<T: TestChain>(app: &App, chain: &T, wallet: &Wallet) -> Vec<Value> {
     until("the sends to go out", || async {
         let sends = sends_from(app, wallet).await;
@@ -302,17 +314,15 @@ async fn decided_after<T: TestChain>(app: &App, chain: &T, wallet: &Wallet) -> V
         Err(format!("{all:?}"))
     })
     .await;
-    let sends = sends_from(app, wallet).await;
-    let last = sends[0]["id"].as_str().unwrap_or_default().to_owned();
+    let mut sends = sends_from(app, wallet).await;
+    sends.sort_by_key(id);
+    let last = sends.last().map(id);
     chain.mine(1);
     until("a round after the sends", || async {
         // A round that acted, or one that had nothing to do.
         let mut rounds = jobs(app, "kind=triggers&state=succeeded").await;
         rounds.extend(jobs(app, "kind=triggers&state=idle").await);
-        if rounds
-            .iter()
-            .any(|round| round["id"].as_str() > Some(last.as_str()))
-        {
+        if rounds.iter().any(|round| Some(id(round)) > last) {
             return Ok(());
         }
         Err(format!("{rounds:?}"))
@@ -329,7 +339,10 @@ async fn unfinished_rounds<T: TestChain>(app: &App, chain: &T) -> usize {
         network.chain.as_str(),
         network.name
     );
-    let pending = jobs(app, &format!("{at}&state=pending")).await;
-    let running = jobs(app, &format!("{at}&state=running")).await;
-    pending.len() + running.len()
+    // One read: a round starting between two reads would count twice.
+    let rounds = jobs(app, &at).await;
+    rounds
+        .iter()
+        .filter(|round| round["state"] == "pending" || round["state"] == "running")
+        .count()
 }

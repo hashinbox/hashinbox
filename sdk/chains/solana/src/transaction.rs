@@ -16,7 +16,15 @@ use solana_instruction::Instruction;
 use solana_message::Message;
 use solana_signature::Signature;
 
-use crate::{Address, KeyPair, Network, Token, Tokens, spl};
+use crate::{Address, KeyPair, Network, Token, Tokens, fee::Priority, spl};
+
+/// The ComputeBudget program: a transaction's compute-unit limit and price.
+const COMPUTE_BUDGET: solana_address::Address =
+    solana_address::Address::from_str_const("ComputeBudget111111111111111111111111111111");
+/// `SetComputeUnitLimit`: `[2, units: u32 LE]`.
+const SET_LIMIT: u8 = 2;
+/// `SetComputeUnitPrice`: `[3, micro-lamports: u64 LE]`.
+const SET_PRICE: u8 = 3;
 
 /// A Solana transaction: the legacy message it signs (none for one read from
 /// a block, which is read as JSON) and its base form (id, state, order, legs,
@@ -180,9 +188,10 @@ impl From<Transaction> for base::Transaction {
     }
 }
 
-/// `output` from `from` in one message on `blockhash`: lamports, or `token`
-/// with the recipient's token account created when missing. It ends with a
-/// random Memo-v3, so two equal transfers are distinct transactions.
+/// `output` from `from` in one message on `blockhash`, paying `priority`:
+/// its ComputeBudget limit and price, then lamports, or `token` with the
+/// recipient's token account created when missing. It ends with a random
+/// Memo-v3, so two equal transfers are distinct transactions.
 ///
 /// # Errors
 ///
@@ -193,6 +202,7 @@ pub(crate) fn message(
     token: Option<&Token>,
     output: &Output<Address>,
     blockhash: &Hash,
+    priority: Priority,
 ) -> anyhow::Result<Message> {
     let from = from.as_native();
     let units = output
@@ -200,15 +210,24 @@ pub(crate) fn message(
         .to_atomic_u64(0)
         .map_err(|error| anyhow!("Solana amount: {}", error.message))?;
     let to = output.address.as_native();
-    let mut instructions = match token {
-        None => vec![solana_system_interface::instruction::transfer(
+    let budget = |tag: u8, value: &[u8]| Instruction {
+        program_id: COMPUTE_BUDGET,
+        accounts: Vec::new(),
+        data: [&[tag], value].concat(),
+    };
+    let mut instructions = vec![
+        budget(SET_LIMIT, &priority.limit.to_le_bytes()),
+        budget(SET_PRICE, &priority.price.to_le_bytes()),
+    ];
+    match token {
+        None => instructions.push(solana_system_interface::instruction::transfer(
             from, to, units,
-        )],
-        Some(token) => vec![
+        )),
+        Some(token) => instructions.extend([
             spl::create_account(from, to, token)?,
             spl::transfer(from, to, token, units)?,
-        ],
-    };
+        ]),
+    }
     instructions.push(Instruction {
         program_id: spl_memo_interface::v3::ID,
         accounts: Vec::new(),

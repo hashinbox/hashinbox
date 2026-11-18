@@ -69,6 +69,7 @@ impl Fixture {
                 asset: "native".to_owned(),
                 to: "recipient".into(),
                 amount: (*amount).into(),
+                fee: base::FeeLevel::Normal,
             };
             let queued = Broadcast::enqueue(&queue, &intent).await.expect("a job");
             let Admission::Queued(job) = queued else {
@@ -77,7 +78,7 @@ impl Fixture {
             jobs.push(job);
         }
         let fixture = Self {
-            worker: Broadcast::new(container(&db, script.clone()), db.clone(), broadcast::CHECK),
+            worker: Broadcast::new(container(&db, script.clone()), db.clone()),
             db,
             queue,
             script,

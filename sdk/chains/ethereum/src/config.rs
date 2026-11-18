@@ -6,14 +6,14 @@ use std::{sync::Arc, time::Duration};
 use alloy_primitives::hex;
 use anyhow::{Context as _, ensure};
 use base::{
-    Asset, AssetInfo, AssetKind, Assets, Indexer, NetworkConfig, Service, Storage,
-    TransactionIndexer, WalletFactoryBroadcaster, WalletIndexer,
+    Asset, AssetInfo, AssetKind, Assets, FeeRateProviderCached, Indexer, NetworkConfig, Service,
+    Storage, Tracking, TransactionIndexer, WalletFactoryBroadcaster, WalletIndexer,
 };
 use serde::Deserialize;
 
 use crate::{
     CHAIN_NAME, Chain, Client, ETH_DECIMALS, ETH_NAME, ETH_TICKER, FeeLimits, Network, Tokens,
-    WalletFactory, fee::Estimator, fee_cache::Cached,
+    WalletFactory, fee_estimator::Estimator, fee_rate::RateProvider,
 };
 
 /// Everything one Ethereum network needs; built in code with
@@ -40,10 +40,14 @@ pub struct Config {
     /// Blocks a block needs below the tip to count as confirmed: the
     /// confirmed position is `tip - confirmations`; default 12.
     pub confirmations: u64,
+    /// How sent payments are checked and bumped; default every 30 s, after
+    /// 50 blocks, at most 5 times.
+    pub tracking: Tracking,
 }
 
 /// The knobs a [`base::NetworkConfig`]'s `settings` may set: `limits`,
-/// `fee_ttl_ms`, `interval_ms`, `batch`; an absent one keeps its default.
+/// `fee_ttl_ms`, `interval_ms`, `batch`, and the tracking's `check_ms`,
+/// `bump_after`, `max_bumps`; an absent one keeps its default.
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Settings {
@@ -51,6 +55,9 @@ struct Settings {
     fee_ttl_ms: u64,
     interval_ms: u64,
     batch: u64,
+    check_ms: u64,
+    bump_after: u64,
+    max_bumps: u32,
 }
 
 impl Default for Settings {
@@ -60,6 +67,19 @@ impl Default for Settings {
             fee_ttl_ms: 12_000,
             interval_ms: 12_000,
             batch: base::DEFAULT_BATCH,
+            check_ms: 30_000,
+            bump_after: 50,
+            max_bumps: 5,
+        }
+    }
+}
+
+impl Settings {
+    fn tracking(&self) -> Tracking {
+        Tracking {
+            check: Duration::from_millis(self.check_ms),
+            bump_after: self.bump_after,
+            max_bumps: self.max_bumps,
         }
     }
 }
@@ -92,6 +112,7 @@ impl Config {
             interval_ms: settings.interval_ms,
             batch: settings.batch,
             confirmations: 12,
+            tracking: settings.tracking(),
         }
     }
 
@@ -143,7 +164,12 @@ impl Config {
     }
 
     fn contracts(&self) -> Tokens {
-        Tokens::new(self.tokens.iter().map(|token| token.contract))
+        Tokens::new(
+            (&self.native()).into(),
+            self.tokens
+                .iter()
+                .map(|token| (token.contract, token.decimals.into())),
+        )
     }
 }
 
@@ -199,6 +225,7 @@ impl TryFrom<&NetworkConfig> for Config {
             interval_ms: settings.interval_ms,
             batch: settings.batch,
             confirmations: config.confirmations,
+            tracking: settings.tracking(),
         };
         ensure!(
             base::Network::from(&built.native()) == config.network,
@@ -228,9 +255,8 @@ impl Factory {
     }
 
     /// The wallet factory over `rpc`: nonces from `rpc`, after the sends in
-    /// flight `transactions` holds; fees and gas from `rpc`, reused by its one cached
-    /// estimator for `fee_ttl_ms`, each send priced for its recipient as
-    /// `holdings` say.
+    /// flight `transactions` holds; its fee rate and gas from `rpc`, kept
+    /// `fee_ttl_ms`, each send priced for its recipient as `holdings` say.
     #[must_use]
     pub fn wallets(
         &self,
@@ -239,8 +265,19 @@ impl Factory {
         transactions: Arc<dyn base::TransactionIndexStore>,
     ) -> WalletFactory {
         let config = &self.config;
-        let fees = Cached::new(
-            Estimator::new(rpc.clone(), config.limits, config.contracts()),
+        let provider = RateProvider {
+            network: rpc.network().into(),
+            rpc: rpc.clone(),
+        };
+        let rates = Arc::new(FeeRateProviderCached::new(
+            Arc::new(provider),
+            Duration::from_millis(config.fee_ttl_ms),
+        ));
+        let fees = Estimator::new(
+            rpc.clone(),
+            config.limits,
+            config.contracts(),
+            rates,
             holdings,
             Duration::from_millis(config.fee_ttl_ms),
         );
@@ -290,15 +327,17 @@ impl base::ServiceFactory for Factory {
             )
             .with_batch(config.batch),
         );
+        let factory = self.wallets(
+            &rpc,
+            Arc::clone(&storage.holdings),
+            Arc::clone(&storage.transaction_indexes),
+        );
+        let rates = Arc::clone(&factory.fees.rates);
         Ok(Service {
             indexer,
             wallets: WalletFactoryBroadcaster {
                 network: (&config.native()).into(),
-                factory: Arc::new(self.wallets(
-                    &rpc,
-                    Arc::clone(&storage.holdings),
-                    Arc::clone(&storage.transaction_indexes),
-                )),
+                factory: Arc::new(factory),
                 broadcaster: Arc::new(rpc),
             },
             assets: config.assets(),
@@ -308,6 +347,8 @@ impl base::ServiceFactory for Factory {
             balances: Some(chain.clone()),
             confirmer: Some(chain),
             confirmations: config.confirmations,
+            tracking: config.tracking,
+            rates,
         })
     }
 }

@@ -1,6 +1,6 @@
 //! [`Chain`]: Solana blocks as `base` blocks, final once rooted.
 
-use anyhow::{Context as _, ensure};
+use anyhow::ensure;
 use base::{
     Addressed as _, Asset, Balances, Block, Blocks, Chained, Confirmed, Confirmer, Dated, Future,
     Holding, Line, Network, Networked, Tips, TransactionId,
@@ -81,12 +81,7 @@ impl Balances for Chain {
                 owner.address() == address && asset.network == self.network,
                 "not an address or asset of this Solana network"
             );
-            let mint = if asset.is_native() {
-                None
-            } else {
-                let token = self.tokens.get(asset).context("not an allowlisted token")?;
-                Some(token.mint)
-            };
+            let mint = self.tokens.contract(asset)?;
             self.rpc.balance(owner.as_native(), mint.as_ref(), at).await
         })
     }
