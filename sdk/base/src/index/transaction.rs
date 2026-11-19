@@ -214,6 +214,9 @@ pub struct Confirmed {
     /// The block it is mined in, at or below `position`; `None`: not mined
     /// through it.
     pub found: Option<u64>,
+    /// Whether it reverted in `found` (only its fee paid); `false` when not
+    /// found.
+    pub reverted: bool,
 }
 
 /// A chain that can tell whether a transaction was mined, by its id:
@@ -302,8 +305,8 @@ pub trait TransactionIndexStore: Send + Sync {
 
     /// Settles `index` at a final block (its header `header`), in one
     /// write: that block kept unless it is, and the one it is `found` in
-    /// (mined: final, as it is at or below it); the index continuing from
-    /// the block after. `false`: another live block at one of them;
+    /// (mined: final, as it is at or below it), `reverted` there or not;
+    /// the index continuing from the block after. `false`: another live block at one of them;
     /// nothing changed; try again later.
     ///
     /// # Errors
@@ -314,6 +317,7 @@ pub trait TransactionIndexStore: Send + Sync {
         &'a self,
         index: &'a TransactionIndex,
         found: Option<&'a BlockHeader>,
+        reverted: bool,
         header: &'a BlockHeader,
     ) -> Future<'a, Result<bool>>;
 
@@ -374,6 +378,7 @@ impl TransactionIndexStore for NoTransactionIndexes {
         &'a self,
         _: &'a TransactionIndex,
         _: Option<&'a BlockHeader>,
+        _: bool,
         _: &'a BlockHeader,
     ) -> Future<'a, Result<bool>> {
         Box::pin(async { Ok(false) })
@@ -440,7 +445,10 @@ impl TransactionIndexer {
             },
             None => None,
         };
-        let settled = self.store.settle(index, found.as_ref(), &block.header);
+        let reverted = confirmed.reverted;
+        let settled = self
+            .store
+            .settle(index, found.as_ref(), reverted, &block.header);
         settled.await?;
         Ok(())
     }

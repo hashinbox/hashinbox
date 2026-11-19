@@ -103,7 +103,7 @@ impl Balances for Chain {
 }
 
 /// Mined by its signature's status (history searched), judged at the
-/// node's finalized slot.
+/// node's finalized slot; reverted by its `err`.
 impl Confirmer for Chain {
     /// `None` while the finalized slot is below `at`; found only once
     /// finalized, at or below it.
@@ -121,10 +121,12 @@ impl Confirmer for Chain {
             if position < at {
                 return Ok(None);
             }
-            let found = self.rpc.finalized_in(&id.id).await?;
+            let mined = self.rpc.finalized_in(&id.id).await?;
+            let mined = mined.filter(|(slot, _)| *slot <= position);
             Ok(Some(Confirmed {
                 position,
-                found: found.filter(|slot| *slot <= position),
+                found: mined.map(|(slot, _)| slot),
+                reverted: mined.is_some_and(|(_, failed)| failed),
             }))
         })
     }

@@ -247,13 +247,14 @@ diesel::table! {
         found -> Nullable<Text>,
         state -> Integer,
         reason -> Nullable<Text>,
+        found_reverted -> Bool,
     }
 }
 
 diesel::table! {
     /// Read-only view `transaction_index_with_blocks`: a `transaction_index`
-    /// row, whether its found transaction is kept reverted, and its
-    /// network's confirmed position.
+    /// row, whether its found transaction reverted (kept mined reverted, or
+    /// as the Confirmer told), and its network's confirmed position.
     transaction_index_with_blocks (id) {
         id -> Text,
         chain -> Text,

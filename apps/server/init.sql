@@ -263,6 +263,9 @@ CREATE TABLE transaction_index (
     found          TEXT    REFERENCES block (id),
     state          INTEGER NOT NULL,
     reason         TEXT,
+    -- Reverted in `found`, as the chain's Confirmer told: that block is kept
+    -- without its transactions.
+    found_reverted INTEGER NOT NULL DEFAULT 0 CHECK (found_reverted IN (0, 1)),
     CHECK (id = chain || '.' || network || '.' || txid),
     CHECK (state IN (0, 1, 2))
 );
@@ -270,11 +273,12 @@ CREATE INDEX transaction_index_network ON transaction_index (chain, network);
 CREATE INDEX transaction_index_progress ON transaction_index (indexed_at);
 
 -- A transaction index as every read answers it: its row, whether its found
--- transaction is kept reverted, and its network's confirmed position.
+-- transaction reverted (kept mined reverted, or as the Confirmer told), and
+-- its network's confirmed position.
 CREATE VIEW transaction_index_with_blocks AS
 SELECT
     ti.*,
-    ti.found IS NOT NULL AND t.state IS 2 AS reverted,
+    ti.found IS NOT NULL AND (t.state IS 2 OR ti.found_reverted) AS reverted,
     i.confirmed AS confirmed
 FROM transaction_index ti
 LEFT JOIN "transaction" t ON t.id = ti.id

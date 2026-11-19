@@ -104,7 +104,8 @@ impl Balances for Chain {
     }
 }
 
-/// Mined by its receipt, judged at the node's finalized block.
+/// Mined by its receipt, judged at the node's finalized block; reverted by
+/// its status.
 impl Confirmer for Chain {
     /// `None` while the finalized block is below `at`; found only at or
     /// below it, final.
@@ -123,10 +124,12 @@ impl Confirmer for Chain {
             if position < at {
                 return Ok(None);
             }
-            let found = self.rpc.mined_in(hash).await?;
+            let mined = self.rpc.mined_in(hash).await?;
+            let mined = mined.filter(|(block, _)| *block <= position);
             Ok(Some(Confirmed {
                 position,
-                found: found.filter(|block| *block <= position),
+                found: mined.map(|(block, _)| block),
+                reverted: mined.is_some_and(|(_, reverted)| reverted),
             }))
         })
     }

@@ -82,11 +82,12 @@ impl TransactionIndexStore for Stores {
 
     /// One write: the final block and the one it is found in kept unless
     /// they are (another live block at either: `false`), the index on the
-    /// final one.
+    /// final one, found `reverted` or not.
     fn settle<'a>(
         &'a self,
         index: &'a TransactionIndex,
         found: Option<&'a BlockHeader>,
+        reverted: bool,
         header: &'a BlockHeader,
     ) -> Future<'a, anyhow::Result<bool>> {
         Box::pin(async move {
@@ -95,17 +96,18 @@ impl TransactionIndexStore for Stores {
             self.db
                 .write(move |connection| {
                     let network = id.network();
-                    let Some(block) = blocks::keep_bare(connection, network, &header)? else {
+                    let Some(block) = blocks::keep_empty(connection, network, &header)? else {
                         return Ok(false);
                     };
                     let found = match &found {
-                        Some(found) => match blocks::keep_bare(connection, network, found)? {
+                        Some(found) => match blocks::keep_empty(connection, network, found)? {
                             Some(found) => Some(found),
                             None => return Ok(false),
                         },
                         None => None,
                     };
-                    transaction_index::db::settle(connection, &id, &block, found.as_ref())?;
+                    let found = found.as_ref();
+                    transaction_index::db::settle(connection, &id, &block, found, reverted)?;
                     Ok(true)
                 })
                 .await

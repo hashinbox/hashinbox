@@ -14,16 +14,17 @@
 use std::sync::Arc;
 
 use base::{
-    Address, BlockStore, Decimal, FeeLevel, IndexState, InputStore as _, Tracking, Transaction,
-    TransactionErrorKind, TransactionIndexStore, TransactionState,
+    Address, BlockStore, Decimal, FeeLevel, IndexState, Indexes as _, InputStore as _, Tips,
+    Tracking, Transaction, TransactionErrorKind, TransactionIndexStore, TransactionIndexer,
+    TransactionState,
 };
 use tasks::{Ack, Admission, Claim, Context, Id, OnLock, Store, Worker};
 
 use super::{
     Fake, Script, container, network,
     storage::{
-        address, block, coin, confirm, forget, forgotten, look_for, looked_for, mined, payment,
-        raw, record, run, send, storage, watch,
+        Confirms, Served, address, block, coin, confirm, forget, forgotten, look_for, looked_for,
+        mined, payment, raw, record, run, send, storage, watch,
     },
 };
 use crate::{
@@ -215,6 +216,26 @@ impl Fixture {
         .unwrap();
     }
 
+    /// Closes `s`'s index through the chain's `Confirmer`, final through 5:
+    /// found in block 3, `reverted` there or not; then 5 is confirmed.
+    async fn settle(&self, reverted: bool) {
+        let network = network();
+        let quiet = (0..=5).map(|position| block(&network, position, 0, vec![]));
+        let confirms = Arc::new(Confirms::default());
+        confirms.set("s", Some((5, Some(3), reverted)));
+        let closer = TransactionIndexer::new(
+            Arc::new(self.storage.clone()),
+            Arc::new(Served(quiet.collect(), 0)),
+            Some(confirms),
+        );
+        let tips = Tips {
+            produced: 5,
+            confirmed: 5,
+        };
+        closer.close(5, tips).await.unwrap();
+        confirm(&self.db, 5).await;
+    }
+
     /// What was sent again.
     fn sent(&self) -> Vec<Vec<u8>> {
         self.script.sent.lock().unwrap().clone()
@@ -353,6 +374,17 @@ async fn a_payment_found_reverted_in_a_final_block_fails_reverted() {
     assert!(fixture.kept("s").await, "mined: kept, not forgotten");
     assert!(forgotten(&fixture.directory).is_empty());
     assert!(fixture.looked_for().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_payment_settled_through_the_confirmer_ends_by_its_outcome() {
+    for (reverted, ack) in [(true, Ack::Fail("reverted".into())), (false, Ack::Done)] {
+        let fixture = Fixture::new().await;
+        fixture.settle(reverted).await;
+        assert_eq!(fixture.check().await, ack, "reverted: {reverted}");
+        assert!(fixture.sent().is_empty(), "found: not sent again");
+        assert!(fixture.looked_for().await.is_empty());
+    }
 }
 
 #[tokio::test]

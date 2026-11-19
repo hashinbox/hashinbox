@@ -186,6 +186,21 @@ impl Networked for Block {
 }
 
 impl Block {
+    /// The block `header` names, with no transactions or rewards read: what
+    /// a settle points its index at.
+    ///
+    /// # Errors
+    ///
+    /// When a part of its id holds a dot, or a position is out of range.
+    pub(crate) fn empty(network: &Network, header: &BlockHeader) -> anyhow::Result<Self> {
+        Self::try_from(&base::Block {
+            network: network.clone(),
+            header: header.clone(),
+            transactions: base::Transactions::default(),
+            rewards: Vec::new(),
+        })
+    }
+
     /// Whether this row is `header`'s block.
     pub(crate) fn is(&self, header: &BlockHeader) -> bool {
         BlockHeader::try_from(self).is_ok_and(|own| own == *header)
@@ -247,6 +262,101 @@ impl Block {
 impl crate::db::Keyed for Block {
     fn key(&self) -> String {
         self.position.to_string()
+    }
+}
+
+collection! {
+    /// Live blocks of one network, ordered by position.
+    Blocks(Block)
+}
+
+/// Where a block would go among [`Blocks`].
+pub(crate) enum Place<'a> {
+    /// This very block is already kept there.
+    Held(&'a Block),
+    /// Another live block is there.
+    Taken,
+    /// Nothing is there.
+    Free,
+}
+
+impl Blocks {
+    /// Where `header` would go.
+    ///
+    /// # Errors
+    ///
+    /// When its position is out of range.
+    pub(crate) fn place(&self, header: &BlockHeader) -> anyhow::Result<Place<'_>> {
+        let position = int(header.position)?;
+        Ok(match self.at(position) {
+            Some(held) if held.is(header) => Place::Held(held),
+            Some(_) => Place::Taken,
+            None => Place::Free,
+        })
+    }
+
+    /// The block at `position`.
+    pub(crate) fn at(&self, position: i64) -> Option<&Block> {
+        let found = self
+            .0
+            .binary_search_by_key(&position, |block| block.position);
+        found.ok().map(|at| &self.0[at])
+    }
+
+    /// The nearest block below `position`.
+    pub(crate) fn below(&self, position: i64) -> Option<&Block> {
+        self.0.iter().rev().find(|block| block.position < position)
+    }
+
+    /// The nearest block above `position`.
+    pub(crate) fn above(&self, position: i64) -> Option<&Block> {
+        self.0.iter().find(|block| block.position > position)
+    }
+
+    /// Adds `block` in order; one at its position is replaced.
+    pub(crate) fn insert(&mut self, block: Block) {
+        match self
+            .0
+            .binary_search_by_key(&block.position, |held| held.position)
+        {
+            Ok(at) => self.0[at] = block,
+            Err(at) => self.0.insert(at, block),
+        }
+    }
+
+    /// Fails unless the block at `position` links to its adjacent
+    /// neighbours: one at or above its parent's position below it, one whose
+    /// parent is at or below its position above it. A neighbour further
+    /// away is a gap (pruned blocks), which is allowed.
+    ///
+    /// # Errors
+    ///
+    /// When it does not link, or a stored value does not decode.
+    pub(crate) fn check_links(&self, position: i64) -> anyhow::Result<()> {
+        let Some(block) = self.at(position) else {
+            return Ok(());
+        };
+        let network = block.network();
+        let header = BlockHeader::try_from(block)?;
+        if let Some(below) = self.below(position)
+            && block
+                .parent_position
+                .is_none_or(|parent| below.position >= parent)
+            && !below.is_parent_of(&header)
+        {
+            anyhow::bail!(
+                "{network:?}: block {position} does not link onto the kept block below it"
+            );
+        }
+        if let Some(above) = self.above(position)
+            && above
+                .parent_position
+                .is_none_or(|parent| parent <= position)
+            && !block.is_parent_of(&BlockHeader::try_from(above)?)
+        {
+            anyhow::bail!("{network:?}: the kept block above {position} does not link onto it");
+        }
+        Ok(())
     }
 }
 
@@ -443,7 +553,7 @@ pub(crate) mod db {
         network: &Network,
         lowest: i64,
         highest: i64,
-    ) -> QueryResult<Vec<Block>> {
+    ) -> QueryResult<Blocks> {
         // The live blocks of a network from the one right below position `?3`
         // to the one right above position `?4`, by position.
         diesel::sql_query(

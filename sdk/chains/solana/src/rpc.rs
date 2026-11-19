@@ -371,12 +371,13 @@ impl Client {
     }
 
     /// The slot transaction `signature` is mined in, once finalized (its
-    /// history searched); `None` while it is not.
+    /// history searched), and whether it failed there (its `err` set);
+    /// `None` while it is not.
     ///
     /// # Errors
     ///
     /// A node failure.
-    pub async fn finalized_in(&self, signature: &str) -> anyhow::Result<Option<u64>> {
+    pub async fn finalized_in(&self, signature: &str) -> anyhow::Result<Option<(u64, bool)>> {
         let statuses: Context<Vec<Option<Status>>> = self
             .0
             .node
@@ -392,7 +393,7 @@ impl Client {
             .context("Solana getSignatureStatuses answered no status")?;
         let finalized =
             status.filter(|status| status.confirmation_status.as_deref() == Some("finalized"));
-        Ok(finalized.map(|status| status.slot))
+        Ok(finalized.map(|status| (status.slot, status.err.is_some())))
     }
 
     /// The finalized account at `address`; `None` when it does not exist.
@@ -525,12 +526,15 @@ struct Slot {
     slot: u64,
 }
 
-/// One signature's status, for its slot and how final it is.
+/// One signature's status, for its slot, how final it is and whether it
+/// failed.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Status {
     slot: u64,
     confirmation_status: Option<String>,
+    /// Why it failed; `None` (null): it succeeded.
+    err: Option<Value>,
 }
 
 /// `getLatestBlockhash`, for its blockhash and how long it lasts.

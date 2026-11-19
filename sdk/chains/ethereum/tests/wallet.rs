@@ -711,9 +711,11 @@ impl base::TransactionIndexStore for Pending {
         &'a self,
         index: &'a base::TransactionIndex,
         found: Option<&'a base::BlockHeader>,
+        reverted: bool,
         header: &'a base::BlockHeader,
     ) -> base::Future<'a, anyhow::Result<bool>> {
-        base::TransactionIndexStore::settle(&base::NoTransactionIndexes, index, found, header)
+        let store = &base::NoTransactionIndexes;
+        base::TransactionIndexStore::settle(store, index, found, reverted, header)
     }
 
     fn give_up<'a>(

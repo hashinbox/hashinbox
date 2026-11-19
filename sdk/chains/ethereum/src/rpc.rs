@@ -375,13 +375,13 @@ impl Client {
         }
     }
 
-    /// The block transaction `id` is mined in, by its receipt; `None` while
-    /// it has none.
+    /// The block transaction `id` is mined in, and whether it reverted there
+    /// (status 0), by its receipt; `None` while it has none.
     ///
     /// # Errors
     ///
     /// A node failure.
-    pub async fn mined_in(&self, id: B256) -> anyhow::Result<Option<u64>> {
+    pub async fn mined_in(&self, id: B256) -> anyhow::Result<Option<(u64, bool)>> {
         let receipt: Option<Receipt> = self
             .0
             .node
@@ -390,7 +390,10 @@ impl Client {
                 json!([hex::encode_prefixed(id)]),
             )
             .await?;
-        Ok(receipt.map(|receipt| receipt.block_number.to::<u64>()))
+        Ok(receipt.map(|receipt| {
+            let reverted = receipt.status == Some(U64::ZERO);
+            (receipt.block_number.to::<u64>(), reverted)
+        }))
     }
 
     /// Whether the node holds the transaction `id`, mined or pending.
@@ -715,11 +718,13 @@ struct Numbered {
     number: U64,
 }
 
-/// `eth_getTransactionReceipt`, for its block.
+/// `eth_getTransactionReceipt`, for its block and outcome.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Receipt {
     block_number: U64,
+    /// 1 succeeded, 0 reverted; absent before Byzantium.
+    status: Option<U64>,
 }
 
 /// `eth_getBlockByNumber(n, false)`, for its time.

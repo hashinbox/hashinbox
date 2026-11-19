@@ -649,6 +649,7 @@ impl base::TransactionIndexStore for Fresh {
         &'a self,
         _: &'a base::TransactionIndex,
         _: Option<&'a base::BlockHeader>,
+        _: bool,
         _: &'a base::BlockHeader,
     ) -> base::Future<'a, anyhow::Result<bool>> {
         unreachable!("no send")
@@ -856,11 +857,14 @@ fn a_transaction_is_confirmed_by_its_receipt_at_the_finalized_block() {
     let id = TransactionId::new(network(), hash(0xab));
     let receipt =
         |block: Value| Reply::ok("eth_getTransactionReceipt", block).expecting(json!([hash(0xab)]));
-    // Mined at 10, final through 12; at 14, not final yet; not mined.
-    for (mined, found) in [
-        (json!({ "blockNumber": "0xa" }), Some(10)),
-        (json!({ "blockNumber": "0xe" }), None),
-        (Value::Null, None),
+    // Mined at 10, final through 12, succeeded or reverted; at 14 (reverted),
+    // not final yet; not mined.
+    let mined = |block: &str, status: &str| json!({ "blockNumber": block, "status": status });
+    for (mined, found, reverted) in [
+        (mined("0xa", "0x1"), Some(10), false),
+        (mined("0xa", "0x0"), Some(10), true),
+        (mined("0xe", "0x0"), None, false),
+        (Value::Null, None, false),
     ] {
         script.push(finalized_at_12());
         script.push([receipt(mined)]);
@@ -869,7 +873,8 @@ fn a_transaction_is_confirmed_by_its_receipt_at_the_finalized_block() {
             confirmed,
             Some(Confirmed {
                 position: 12,
-                found
+                found,
+                reverted
             })
         );
     }

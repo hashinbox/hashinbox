@@ -125,19 +125,23 @@ pub struct Confirmed {
     /// The block it is mined in, at or below `position`; `None`: not mined
     /// through it.
     pub found: Option<u64>,
+    /// Whether it reverted in `found` (only its fee paid).
+    pub reverted: bool,
 }
 ```
 
 | Chain | `Confirmer` |
 | --- | --- |
-| Ethereum | `eth_getTransactionReceipt` against the `finalized` block |
-| Solana | `getSignatureStatuses` (finalized), at the finalized slot |
+| Ethereum | `eth_getTransactionReceipt` against the `finalized` block; reverted: `status` 0 |
+| Solana | `getSignatureStatuses` (finalized), at the finalized slot; reverted: `err` set |
 | Bitcoin | none |
 
 `close`: for each index below the line:
 
-- with `Confirmer`: `store.settle(index, found, header)`: `found` set when
-  mined (it is final then), else on from the block after the final one;
+- with `Confirmer`: `store.settle(index, found, reverted, header)`: `found`
+  set when mined (it is final then), `reverted` kept on the index (the
+  found block is kept without transactions), else on from the block after
+  the final one;
 - without (Bitcoin): `store.give_up(index)`: `no_data`, and the payment is
   forgotten (`jump`), as a wallet jump forgets it.
 
@@ -255,7 +259,7 @@ pub trait WalletIndexStore: Send + Sync {
 pub trait TransactionIndexStore: Send + Sync {
     fn insert(index: &dyn IntoIndex<TransactionIndex>), find_all, find_next /* default */, find_behind /* default */,
        move_start, set_state,
-       settle(index, found, header), give_up(index),
+       settle(index, found, reverted, header), give_up(index),
        delete(index); // the broadcast job, once its payment is final or dead
 }
 ```
@@ -339,9 +343,11 @@ Decisions beyond the design:
   below `broadcasted_at`) and sets `found` on those whose txid it holds.
   Such a transaction is kept without a leg of ours; mining it frees its
   pending legs.
-- **`TransactionIndexStore::settle(index, found, header)`** takes the found
-  block's header: the `TransactionIndexer` reads both blocks from the
-  chain, and the store keeps both bare.
+- **`TransactionIndexStore::settle(index, found, reverted, header)`** takes
+  the found block's header: the `TransactionIndexer` reads both blocks from
+  the chain, and the store keeps both bare. `reverted` (the `Confirmer`'s
+  outcome) goes on `transaction_index.found_reverted`, which the view's
+  `reverted` reads (`docs/design/085-migrate-5.sql`).
 - **Forgetting gives up:** `pending::forget` sets the transaction indexes
   of what it forgets to `no_data` (reason the why), so a wallet jump that
   forgets a send reaches its job. `give_up` is that, for its own

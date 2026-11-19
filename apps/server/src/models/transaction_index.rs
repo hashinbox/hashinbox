@@ -20,7 +20,7 @@ use super::{
 /// One sent transaction being looked for, as every read answers it: its
 /// `transaction_index` row with the blocks it names (live or reorged, as
 /// kept), and, from `transaction_index_with_blocks`, whether its found
-/// transaction is kept reverted and its network's confirmed position.
+/// transaction reverted and its network's confirmed position.
 pub(crate) struct TransactionIndex {
     id: TransactionId,
     txid: String,
@@ -250,7 +250,10 @@ pub(crate) mod db {
             .filter(block::position.ge(from))
             .select(block::id.nullable());
         diesel::update(transaction_index::table.filter(transaction_index::found.eq_any(taken)))
-            .set(transaction_index::found.eq(None::<String>))
+            .set((
+                transaction_index::found.eq(None::<String>),
+                transaction_index::found_reverted.eq(false),
+            ))
             .execute(connection)?;
         let through = transaction_index::table.filter(transaction_index::indexed_at.eq_any(taken));
         if let Some(below) = below {
@@ -300,17 +303,22 @@ pub(crate) mod db {
     }
 
     /// Settles index `id` on `block`, a final block, and `found`, the one
-    /// it is mined in: it continues from the block after.
+    /// it is mined in, `reverted` there or not: it continues from the block
+    /// after. Its transaction stays as kept: `found` is kept without it.
     pub(crate) fn settle(
         connection: &mut SqliteConnection,
         id: impl AsRef<str>,
         block: &Block,
         found: Option<&Block>,
+        reverted: bool,
     ) -> QueryResult<usize> {
         let index = transaction_index::table.find(id.as_ref());
         if let Some(found) = found {
             diesel::update(index)
-                .set(transaction_index::found.eq(&found.id))
+                .set((
+                    transaction_index::found.eq(&found.id),
+                    transaction_index::found_reverted.eq(reverted),
+                ))
                 .execute(connection)?;
         }
         diesel::update(index)

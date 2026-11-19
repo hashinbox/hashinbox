@@ -496,16 +496,20 @@ fn a_transaction_is_confirmed_by_its_finalized_status_at_the_finalized_slot() {
         )
         .expecting(json!([[signature], { "searchTransactionHistory": true }]))
     };
-    let finalized = |slot: u64| json!({ "slot": slot, "confirmationStatus": "finalized" });
-    // Finalized at 80; finalized past the slot read; only confirmed; unknown.
-    for (answer, found) in [
-        (finalized(80), Some(80)),
-        (finalized(95), None),
+    let finalized = |slot: u64, err: Value| json!({ "slot": slot, "confirmationStatus": "finalized", "err": err });
+    let failed = || json!({ "InstructionError": [0, "Custom"] });
+    // Finalized at 80, succeeded or failed; finalized past the slot read
+    // (failed); only confirmed; unknown.
+    for (answer, found, reverted) in [
+        (finalized(80, Value::Null), Some(80), false),
+        (finalized(80, failed()), Some(80), true),
+        (finalized(95, failed()), None, false),
         (
-            json!({ "slot": 85, "confirmationStatus": "confirmed" }),
+            json!({ "slot": 85, "confirmationStatus": "confirmed", "err": null }),
             None,
+            false,
         ),
-        (Value::Null, None),
+        (Value::Null, None, false),
     ] {
         script.push(tips());
         script.push([status(answer)]);
@@ -514,7 +518,8 @@ fn a_transaction_is_confirmed_by_its_finalized_status_at_the_finalized_slot() {
             confirmed,
             Some(Confirmed {
                 position: 90,
-                found
+                found,
+                reverted
             })
         );
     }

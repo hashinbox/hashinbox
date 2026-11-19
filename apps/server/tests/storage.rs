@@ -2155,16 +2155,20 @@ pub(super) fn lined(
 }
 
 /// What the chain says of each transaction, by its txid: judged at a
-/// block, found in one or not, or `None` (not answerable yet); a read of a
-/// txid not set fails.
+/// block, found in one (reverted there or not) or not, or `None` (not
+/// answerable yet); a read of a txid not set fails.
 #[derive(Default)]
 pub(super) struct Confirms(Mutex<BTreeMap<String, Option<base::Confirmed>>>);
 
 impl Confirms {
-    /// `txid` is judged at `position`, `found` in a block or not; `None`:
-    /// not answerable.
-    pub(super) fn set(&self, txid: &str, judged: Option<(u64, Option<u64>)>) {
-        let judged = judged.map(|(position, found)| base::Confirmed { position, found });
+    /// `txid` is judged at `position`, `found` in a block or not, `reverted`
+    /// there or not; `None`: not answerable.
+    pub(super) fn set(&self, txid: &str, judged: Option<(u64, Option<u64>, bool)>) {
+        let judged = judged.map(|(position, found, reverted)| base::Confirmed {
+            position,
+            found,
+            reverted,
+        });
         self.0.lock().unwrap().insert(txid.to_owned(), judged);
     }
 }
@@ -3810,7 +3814,7 @@ async fn pruning_keeps_the_blocks_a_transaction_index_names() {
         .unwrap()
         .remove(0);
     let (found, at) = (header(5, 0), header(9, 0));
-    let settled = base::TransactionIndexStore::settle(&storage, &s, Some(&found), &at);
+    let settled = base::TransactionIndexStore::settle(&storage, &s, Some(&found), false, &at);
     assert!(settled.await.unwrap());
     let pruned = db
         .write(|connection| {
@@ -3840,8 +3844,8 @@ async fn a_transaction_index_behind_the_final_block_settles_at_what_the_chain_co
         look_for(&storage, txid, 2, None).await;
     }
     let confirms = Arc::new(Confirms::default());
-    confirms.set("s", Some((15, Some(12))));
-    confirms.set("t", Some((15, None)));
+    confirms.set("s", Some((15, Some(12), false)));
+    confirms.set("t", Some((15, None, false)));
     confirms.set("u", None);
     let served = Served(quiet(&network, 20), 5);
     let indexer = lined(&storage, served, Line::Final, None, Some(confirms));

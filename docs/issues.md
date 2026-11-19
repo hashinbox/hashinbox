@@ -26,7 +26,6 @@ No P0 or P1 is open.
 
 | id | P | one line |
 |---|---|---|
-| S2 | P2 | A reverted payment settled through the `Confirmer` (its block not read) still ends done |
 | X3 | P2 | Indexing failures: a failed close now reaches the index job's reason; the wallet index's own reason, a log and recent counts are still missing |
 | X6 | P2 | A new Solana index shows balance `"0"` instead of null until its first settle |
 | X7 | P2 | The devnet nodes are exhausted: the only `getBlock` route answers 429 "max usage reached" |
@@ -60,13 +59,6 @@ No P0 or P1 is open.
 ---
 
 ## P2: availability, performance and operability
-
-### S2: A reverted payment through the `Confirmer`. P2 · partly fixed
-- **Fixed:** a version found reverted in a final block is `TransactionStatus::Reverted` and the job
-  fails `reverted` (`sdk/base/src/index/transaction.rs`, `broadcast.rs`).
-- **Left:** `reverted` comes from a mined `transaction` row. A version settled through the chain's
-  `Confirmer` (its block kept without transactions) stays pending, reads `Final`, and the job ends
-  done. **Fix:** the `Confirmer` reports the transaction's outcome. Effort S.
 
 ### X3: Indexing failures are invisible. P2 · partly fixed
 - **Fixed:** a failed close names its index and reaches the index job's `reason`

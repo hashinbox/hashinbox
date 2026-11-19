@@ -126,7 +126,7 @@ impl WalletIndexStore for Stores {
         let (index, holding, header) = (index.clone(), holding.clone(), header.clone());
         Box::pin(self.db.write(move |connection| {
             let id = WalletIndexId::of(&index.address, &index.asset)?;
-            let Some(block) = blocks::keep_bare(connection, index.network(), &header)? else {
+            let Some(block) = blocks::keep_empty(connection, index.network(), &header)? else {
                 return Ok(false);
             };
             let mut totals = running(connection, &id, block.position)?;
