@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use alloy_consensus::TxEip1559;
 use base::{
     Addressed as _, Asset, Fee, FeeRule as _, Future, Output, Signer, TransactionError, Transfer,
 };
@@ -17,14 +18,16 @@ use crate::{
 
 /// Pays one transfer of one asset (ether, or the `contract` token) in one
 /// transaction, from its own source or the default one, at the sender's
-/// next nonce ([`Builder::nonce`]); or replaces a loaded state: its nonce,
+/// next nonce ([`Builder::nonce`]) and the gas the node estimates for it;
+/// or replaces a loaded state: its nonce,
 /// payment and gas limit, both fees at least a tenth above its own (what a
 /// node takes as a replacement).
 pub(crate) struct Builder {
     pub(crate) rpc: Client,
     /// The sends in flight: the nonces they hold.
     pub(crate) transactions: Arc<dyn base::TransactionIndexStore>,
-    /// The factory's estimator: its cached rate and gas price the transfer.
+    /// The factory's estimator: its cached rate and its limits price the
+    /// transfer; the gas is the node's estimate of this very payment.
     pub(crate) fees: Arc<Estimator>,
     pub(crate) asset: Asset,
     pub(crate) contract: Option<alloy_primitives::Address>,
@@ -107,19 +110,19 @@ impl base::Builder for Builder {
                     "the payment continued is not the source's",
                 ));
             }
+            let mut native = request(output, self.contract).map_err(TransactionError::failed)?;
             let rates = &self.fees.rates;
             let (nonce, gas_limit, now) = match old {
                 Some(old) => (old.nonce, old.gas_limit, rates.rate().await?),
                 None => {
                     let nonce = self.nonce(&key).await?;
                     let now = rates.rate().await?;
-                    (nonce, self.gas(sender, output).await?, now)
+                    (nonce, self.gas(sender, &native).await?, now)
                 }
             };
             let rate = self.fee.rate(now, old.map(|old| old.rate));
             let rate = old.map_or(rate, |old| rate.higher(old.rate.times(1.1)));
             self.fees.limits.total(gas_limit, rate).map_err(fee_cap)?;
-            let mut native = request(output, self.contract).map_err(TransactionError::failed)?;
             native.chain_id = network.chain_id;
             native.nonce = nonce;
             native.gas_limit = gas_limit;
@@ -180,22 +183,15 @@ impl Builder {
         })
     }
 
-    /// The gas limit of `sender` paying `output`, priced for whether its
-    /// recipient holds the asset already: which kind of send it is.
-    async fn gas(
-        &self,
-        sender: &Address,
-        output: &Output<Address>,
-    ) -> Result<u64, TransactionError> {
-        let spend = base::Spend::from((
-            sender.address().clone(),
-            self.asset.clone(),
-            output.address.address().clone(),
-        ));
-        let held = self
-            .fees
-            .holds(&[spend.clone()].into_iter().collect())
-            .await?;
-        self.fees.gas(&spend, held.first() == Some(&true)).await
+    /// The gas limit of `sender` sending `native`: the node's estimate of
+    /// that very payment plus the margin, never a kept one. A payment that
+    /// would revert fails `Reason::Reverted`, one the sender cannot fund
+    /// `Reason::InsufficientFunds`, as the node says.
+    async fn gas(&self, sender: &Address, native: &TxEip1559) -> Result<u64, TransactionError> {
+        let estimated = self.rpc.estimate(sender, native).await?;
+        self.fees
+            .limits
+            .gas_limit(estimated)
+            .map_err(TransactionError::failed)
     }
 }

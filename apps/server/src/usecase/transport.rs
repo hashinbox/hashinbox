@@ -12,8 +12,10 @@
 //! - a node is demoted by 3 retryable failures in a row or one rate limit,
 //!   and goes last until it answers, or until 10 block times (at least
 //!   30 s) pass;
-//! - a retryable failure moves on to the next node; an error object is the
-//!   answer; once-only work reaches the first node only;
+//! - a retryable failure, or a node refusing a method it does not serve
+//!   (`rpc::Failure::is_unserved`; it is not demoted), moves on to the next
+//!   node; any other error object is the answer; once-only work reaches the
+//!   first node only;
 //! - a broadcast goes to every node.
 
 use std::{
@@ -251,7 +253,8 @@ impl Transport {
             outcome = send(&*node.client).await;
             node.observe(outcome.as_ref().err());
             let retryable = matches!(&outcome, Err(error) if error.is_retryable());
-            if !retryable || repetition == Repetition::Forbidden {
+            let unserved = matches!(&outcome, Err(Error::Remote(failure)) if failure.is_unserved());
+            if !(retryable || unserved) || repetition == Repetition::Forbidden {
                 return outcome;
             }
         }
@@ -661,6 +664,24 @@ mod tests {
             matches!(error, Error::Remote(_)),
             "an error object is the answer"
         );
+        for (script, _) in &nodes {
+            script.exhausted();
+        }
+    }
+
+    /// X2: Tatum's free plan answers `getBalance` and
+    /// `getTokenAccountsByOwner` with an error object (`-16401`, HTTP 200);
+    /// taken as the answer, every balance read routed to it failed.
+    #[tokio::test]
+    async fn a_method_the_node_does_not_serve_moves_on_without_demoting_it() {
+        let (transport, nodes) = transport(&[10, 9]);
+        let paid = "Method 'm' is available for paid plans only.";
+        nodes[0].0.push([Reply::failure("m", -16_401, paid)]);
+        nodes[1].0.push([Reply::ok("m", json!(1))]);
+        assert_eq!(ask(&transport, "m").await.unwrap(), 1);
+        let clients = transport.clients();
+        assert_eq!(clients[0].state().await.failures, 0, "not demoted");
+        assert_eq!(position(&clients, clients.highest().await), Some(0));
         for (script, _) in &nodes {
             script.exhausted();
         }

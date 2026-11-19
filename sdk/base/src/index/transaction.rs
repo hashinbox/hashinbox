@@ -26,6 +26,9 @@ pub struct TransactionIndex {
     pub expires_height: Option<u64>,
     /// The block it is mined in.
     pub found: Option<BlockHeader>,
+    /// Whether it reverted in the block it is `found` in (only its fee
+    /// paid): filled in by a store when it reads the index.
+    pub reverted: bool,
     /// How far it has read.
     pub progress: Progress,
     /// Its network's final block, as the indexer last read it: filled in by
@@ -38,6 +41,8 @@ pub struct TransactionIndex {
 pub enum TransactionStatus {
     /// In a final block: paid.
     Final,
+    /// In a final block, reverted: only its fee paid.
+    Reverted,
     /// Can never land: read past its `expires_height` (Solana), not found.
     Dead,
     /// Given up: its gap could not be closed (a Bitcoin jump).
@@ -56,10 +61,13 @@ impl TransactionIndex {
     pub fn status(&self) -> TransactionStatus {
         let is_final = |position: u64| self.confirmed.is_some_and(|at| position <= at);
         if let Some(found) = &self.found {
-            if is_final(found.position) {
-                return TransactionStatus::Final;
+            if !is_final(found.position) {
+                return TransactionStatus::Unknown;
             }
-            return TransactionStatus::Unknown;
+            if self.reverted {
+                return TransactionStatus::Reverted;
+            }
+            return TransactionStatus::Final;
         }
         if self.progress.state == IndexState::NoData {
             return TransactionStatus::GivenUp;
@@ -190,6 +198,7 @@ impl IntoIndex<TransactionIndex> for TransactionIndexTarget {
                 broadcasted_at: self.chain.tips().await?.produced,
                 expires_height: self.expires_height,
                 found: None,
+                reverted: false,
                 progress: Progress::default(),
                 confirmed: None,
             })
@@ -510,6 +519,7 @@ mod tests {
             broadcasted_at: 10,
             expires_height: None,
             found: found.map(header),
+            reverted: false,
             progress: Progress {
                 indexed_at: through.map(header),
                 state,
@@ -522,7 +532,7 @@ mod tests {
     #[test]
     fn its_status_follows_what_it_read() {
         use IndexState::{Indexing, NoData, Paused};
-        use TransactionStatus::{Dead, Final, GivenUp, Missing, Unknown};
+        use TransactionStatus::{Dead, Final, GivenUp, Missing, Reverted, Unknown};
         let cases = [
             (index(Some(20), Some(25), Indexing), Final),
             (index(Some(21), Some(25), Indexing), Unknown),
@@ -545,5 +555,11 @@ mod tests {
             ..index(Some(20), Some(25), Indexing)
         };
         assert_eq!(unknown_final.status(), Unknown);
+        let reverted = |found| TransactionIndex {
+            reverted: true,
+            ..index(Some(found), Some(25), Indexing)
+        };
+        assert_eq!(reverted(20).status(), Reverted);
+        assert_eq!(reverted(21).status(), Unknown);
     }
 }

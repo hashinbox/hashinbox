@@ -8,6 +8,10 @@ use base::{
 
 use crate::{Address, Client, Tokens};
 
+/// Slots below the tip read by default ([`Chain::with_read_depth`]): about
+/// 7 minutes.
+pub const READ_DEPTH: u64 = 1_000;
+
 /// One Solana cluster read from its node at confirmed commitment. Position
 /// is the slot (skipped slots hold no block), height the block height; a
 /// block is final once rooted (`finalized`). Legs are of SOL and of the
@@ -16,10 +20,11 @@ pub struct Chain {
     rpc: Client,
     network: Network,
     tokens: Tokens,
+    read_depth: u64,
 }
 
 impl Chain {
-    /// Reads over `rpc`, indexing `tokens`.
+    /// Reads over `rpc`, indexing `tokens`, [`READ_DEPTH`] slots deep.
     #[must_use]
     pub fn new(rpc: Client, tokens: Tokens) -> Self {
         let network = rpc.network().into();
@@ -27,7 +32,16 @@ impl Chain {
             rpc,
             network,
             tokens,
+            read_depth: READ_DEPTH,
         }
+    }
+
+    /// Reads nothing more than `read_depth` slots below the tip: an index
+    /// further behind settles.
+    #[must_use]
+    pub const fn with_read_depth(mut self, read_depth: u64) -> Self {
+        self.read_depth = read_depth;
+        self
     }
 }
 
@@ -51,10 +65,11 @@ impl Chained for Chain {
         Box::pin(self.rpc.blocks(start, end, &self.tokens))
     }
 
-    /// The block after the final one: an index behind it settles at the
-    /// chain's balance.
+    /// The tip less `read_depth`, not the block after the final one: the
+    /// node's finalized slot is its tip, so final blocks are read too. An
+    /// index behind it settles at the chain's balance.
     fn line(&self) -> Line {
-        Line::Final
+        Line::Depth(self.read_depth)
     }
 }
 

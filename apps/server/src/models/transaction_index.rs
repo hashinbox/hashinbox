@@ -2,115 +2,128 @@
 //! after its broadcast (design 085), with the block it is indexed through
 //! and the one it is found in.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use anyhow::Context as _;
 use base::{BlockHeader, IndexState, Network, Progress};
-use diesel::{prelude::*, sqlite::Sqlite};
+use diesel::prelude::*;
 
 use super::{
     Block,
     block::{self as blocks, BlockId},
-    int, network_index,
-    schema::{block, transaction_index},
+    int,
+    schema::{block, transaction_index, transaction_index_with_blocks as with_blocks},
     transaction::TransactionId,
     uint,
     wallet_index::db::{code, state},
 };
+
+/// One sent transaction being looked for, as every read answers it: its
+/// `transaction_index` row with the blocks it names (live or reorged, as
+/// kept), and, from `transaction_index_with_blocks`, whether its found
+/// transaction is kept reverted and its network's confirmed position.
+pub(crate) struct TransactionIndex {
+    id: TransactionId,
+    txid: String,
+    broadcasted_at: i64,
+    expires_height: Option<i64>,
+    indexed_at: Option<Block>,
+    found: Option<Block>,
+    state: i32,
+    reason: Option<String>,
+    reverted: bool,
+    confirmed: Option<i64>,
+}
+
+impl TryFrom<TransactionIndex> for base::TransactionIndex {
+    type Error = anyhow::Error;
+
+    fn try_from(index: TransactionIndex) -> anyhow::Result<Self> {
+        let header = |block: Option<Block>| block.as_ref().map(BlockHeader::try_from).transpose();
+        Ok(Self {
+            transaction: base::TransactionId::new(index.id.network, index.txid),
+            broadcasted_at: uint(index.broadcasted_at)?,
+            expires_height: index.expires_height.map(uint).transpose()?,
+            found: header(index.found)?,
+            reverted: index.reverted,
+            progress: Progress {
+                indexed_at: header(index.indexed_at)?,
+                state: state(index.state)?,
+                reason: index.reason,
+            },
+            confirmed: index.confirmed.map(uint).transpose()?,
+        })
+    }
+}
 
 /// The `transaction_index` table's statements.
 pub(crate) mod db {
     #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
     use super::*;
 
-    /// One `transaction_index` row.
-    #[derive(Queryable, Selectable, Insertable)]
-    #[diesel(table_name = transaction_index, check_for_backend(Sqlite))]
-    struct Row {
-        id: TransactionId,
-        chain: String,
-        network: String,
-        txid: String,
-        broadcasted_at: i64,
-        expires_height: Option<i64>,
-        indexed_at: Option<String>,
-        found: Option<String>,
-        state: i32,
-        reason: Option<String>,
-    }
+    diesel::alias!(block as indexed_block: IndexedBlock, block as found_block: FoundBlock);
 
-    impl Row {
-        /// The index, its blocks' headers read from `headers` (by id), and
-        /// its network's final block `confirmed`.
-        fn index(
-            self,
-            headers: &BTreeMap<String, BlockHeader>,
-            confirmed: Option<u64>,
-        ) -> anyhow::Result<base::TransactionIndex> {
-            let header = |id: Option<String>| {
-                id.map(|id| {
-                    headers
-                        .get(&id)
-                        .cloned()
-                        .context("an index's block is not kept")
-                })
-                .transpose()
-            };
-            Ok(base::TransactionIndex {
-                transaction: base::TransactionId::new(self.id.network, self.txid),
-                broadcasted_at: uint(self.broadcasted_at)?,
-                expires_height: self.expires_height.map(uint).transpose()?,
-                found: header(self.found)?,
-                progress: Progress {
-                    indexed_at: header(self.indexed_at)?,
-                    state: state(self.state)?,
-                    reason: self.reason,
-                },
-                confirmed,
-            })
-        }
-    }
+    /// What [`read!`] selects: an index's columns and the blocks it names.
+    type Read = (
+        (
+            TransactionId,
+            String,
+            i64,
+            Option<i64>,
+            i32,
+            Option<String>,
+            bool,
+            Option<i64>,
+        ),
+        Option<blocks::db::Row>,
+        Option<blocks::db::Row>,
+    );
 
-    /// `rows` as indexes, the blocks they name read in one query.
-    fn indexes(
-        connection: &mut SqliteConnection,
-        rows: Vec<Row>,
-    ) -> anyhow::Result<Vec<base::TransactionIndex>> {
-        let named: Vec<&str> = rows
-            .iter()
-            .flat_map(|row| [&row.indexed_at, &row.found])
-            .flatten()
-            .map(String::as_str)
-            .collect();
-        let headers = blocks::db::find_by_ids(connection, &named)?
-            .iter()
-            .map(|block| {
-                Ok((
-                    String::from(block.id.clone()),
-                    BlockHeader::try_from(block)?,
+    /// Every `transaction_index_with_blocks` row with the blocks it names,
+    /// selected as [`Read`].
+    macro_rules! read {
+        () => {
+            with_blocks::table
+                .left_join(
+                    indexed_block
+                        .on(with_blocks::indexed_at.eq(indexed_block.field(block::id).nullable())),
+                )
+                .left_join(
+                    found_block.on(with_blocks::found.eq(found_block.field(block::id).nullable())),
+                )
+                .select((
+                    (
+                        with_blocks::id,
+                        with_blocks::txid,
+                        with_blocks::broadcasted_at,
+                        with_blocks::expires_height,
+                        with_blocks::state,
+                        with_blocks::reason,
+                        with_blocks::reverted,
+                        with_blocks::confirmed,
+                    ),
+                    indexed_block.fields(block::all_columns).nullable(),
+                    found_block.fields(block::all_columns).nullable(),
                 ))
-            })
-            .collect::<anyhow::Result<_>>()?;
-        // Each network's final block, as its indexer last read it.
-        let mut confirmed = BTreeMap::<(String, String), Option<u64>>::new();
-        for row in &rows {
-            let key = (row.chain.clone(), row.network.clone());
-            if confirmed.contains_key(&key) {
-                continue;
-            }
-            let network = Network::new(base::Chain::new(&key.0), &key.1);
-            let at = network_index::db::find_confirmed(connection, &network)?;
-            confirmed.insert(key, at.map(uint).transpose()?);
-        }
-        rows.into_iter()
-            .map(|row| {
-                let at = confirmed
-                    .get(&(row.chain.clone(), row.network.clone()))
-                    .copied()
-                    .flatten();
-                row.index(&headers, at)
-            })
-            .collect()
+        };
+    }
+
+    /// The index [`read!`] answered `read`.
+    fn index(read: Read) -> anyhow::Result<base::TransactionIndex> {
+        let (columns, indexed_at, found) = read;
+        let (id, txid, broadcasted_at, expires_height, state, reason, reverted, confirmed) =
+            columns;
+        base::TransactionIndex::try_from(TransactionIndex {
+            id,
+            txid,
+            broadcasted_at,
+            expires_height,
+            indexed_at: indexed_at.map(Block::from),
+            found: found.map(Block::from),
+            state,
+            reason,
+            reverted,
+            confirmed,
+        })
     }
 
     /// Keeps `index`, not started; one already kept stays as it is.
@@ -124,20 +137,18 @@ pub(crate) mod db {
         index: &base::TransactionIndex,
     ) -> anyhow::Result<()> {
         let transaction = &index.transaction;
-        let row = Row {
-            id: TransactionId::new(&transaction.network, &transaction.id)?,
-            chain: transaction.network.chain.to_string(),
-            network: transaction.network.name.clone(),
-            txid: transaction.id.clone(),
-            broadcasted_at: int(index.broadcasted_at)?,
-            expires_height: index.expires_height.map(int).transpose()?,
-            indexed_at: None,
-            found: None,
-            state: code(index.progress.state),
-            reason: index.progress.reason.clone(),
-        };
         diesel::insert_into(transaction_index::table)
-            .values(&row)
+            .values((
+                transaction_index::id
+                    .eq(TransactionId::new(&transaction.network, &transaction.id)?),
+                transaction_index::chain.eq(transaction.network.chain.as_str()),
+                transaction_index::network.eq(&transaction.network.name),
+                transaction_index::txid.eq(&transaction.id),
+                transaction_index::broadcasted_at.eq(int(index.broadcasted_at)?),
+                transaction_index::expires_height.eq(index.expires_height.map(int).transpose()?),
+                transaction_index::state.eq(code(index.progress.state)),
+                transaction_index::reason.eq(&index.progress.reason),
+            ))
             .on_conflict_do_nothing()
             .execute(connection)?;
         Ok(())
@@ -152,13 +163,14 @@ pub(crate) mod db {
         connection: &mut SqliteConnection,
         network: &Network,
     ) -> anyhow::Result<Vec<base::TransactionIndex>> {
-        let rows = transaction_index::table
-            .filter(transaction_index::chain.eq(network.chain.as_str()))
-            .filter(transaction_index::network.eq(&network.name))
-            .order(transaction_index::id)
-            .select(Row::as_select())
-            .load(connection)?;
-        indexes(connection, rows)
+        read!()
+            .filter(with_blocks::chain.eq(network.chain.as_str()))
+            .filter(with_blocks::network.eq(&network.name))
+            .order(with_blocks::id)
+            .load::<Read>(connection)?
+            .into_iter()
+            .map(index)
+            .collect()
     }
 
     /// Index `id` (its transaction's id), if kept, with the blocks it names.
@@ -170,11 +182,12 @@ pub(crate) mod db {
         connection: &mut SqliteConnection,
         id: impl AsRef<str>,
     ) -> anyhow::Result<Option<base::TransactionIndex>> {
-        let rows = transaction_index::table
-            .find(id.as_ref())
-            .select(Row::as_select())
-            .load(connection)?;
-        Ok(indexes(connection, rows)?.pop())
+        read!()
+            .filter(with_blocks::id.eq(id.as_ref()))
+            .first::<Read>(connection)
+            .optional()?
+            .map(index)
+            .transpose()
     }
 
     /// Moves every indexing index `block` (kept live, its parent's id

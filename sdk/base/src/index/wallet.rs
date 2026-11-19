@@ -35,8 +35,8 @@ pub struct WalletIndex {
     pub requested_from: u64,
     /// The first block it reads: `requested_from`, the first block the node
     /// served when it no longer served that one, or where a jump or a
-    /// settle moved it (on a chain whose line is [`Line::Final`], a watch
-    /// starts at the chain's final block).
+    /// settle moved it (on a chain that reads balances, a watch starts just
+    /// below the line, so the next step settles it).
     pub birthday: u64,
     /// How far it has read.
     pub progress: Progress,
@@ -79,6 +79,7 @@ pub struct WalletIndexTarget {
     address: Address,
     asset: Asset,
     start: Birthday,
+    settles: bool,
 }
 
 impl WalletIndexTarget {
@@ -90,7 +91,16 @@ impl WalletIndexTarget {
             address,
             asset,
             start: Birthday::Fresh,
+            settles: false,
         }
+    }
+
+    /// Whether the chain reads balances ([`Balances`]): its index is opened
+    /// by a settle, not read from its start.
+    #[must_use]
+    pub const fn with_settle(mut self, settles: bool) -> Self {
+        self.settles = settles;
+        self
     }
 
     /// From `start` instead.
@@ -102,9 +112,10 @@ impl WalletIndexTarget {
 }
 
 /// The tips; `requested_from` the start (the produced tip when fresh); the
-/// birthday by the chain's line: [`Line::Final`], its final block (it
-/// settles there next step); [`Line::Depth`], the start, refused when older
-/// than the tip less the depth.
+/// birthday: on a chain that settles or whose line is [`Line::Final`], the
+/// block below the line, whatever the start (the next step settles it; the
+/// final block on [`Line::Final`]); else ([`Line::Depth`]) the start,
+/// refused when older than the tip less the depth.
 impl IntoIndex<WalletIndex> for WalletIndexTarget {
     fn index(&self) -> Future<'_, Result<WalletIndex>> {
         Box::pin(async move {
@@ -121,8 +132,7 @@ impl IntoIndex<WalletIndex> for WalletIndexTarget {
                 Birthday::At(position) => position,
             };
             let birthday = match self.chain.line() {
-                Line::Final => tips.confirmed,
-                line @ Line::Depth(depth) => {
+                line @ Line::Depth(depth) if !self.settles => {
                     let earliest = line.at(tips);
                     ensure!(
                         requested_from >= earliest,
@@ -136,6 +146,7 @@ impl IntoIndex<WalletIndex> for WalletIndexTarget {
                     );
                     requested_from
                 }
+                line => line.at(tips).saturating_sub(1),
             };
             Ok(WalletIndex {
                 address: self.address.clone(),
@@ -311,15 +322,16 @@ impl Indexes for WalletIndexer {
 
     /// Closes the gaps of at most a few indexes whose next block is below
     /// `line` ([`Self::close_one`]), with `tips.confirmed` the final block;
-    /// one failing does not stop the others, and the first failure is the
-    /// answer.
+    /// one failing does not stop the others, and the first failure, naming
+    /// its index, is the answer.
     fn close<'a>(&'a self, line: u64, tips: Tips) -> Future<'a, Result<()>> {
         Box::pin(async move {
             let behind = self.store.find_behind(self.network(), line, CLOSES);
             let mut failed = None;
             for index in &behind.await? {
                 if let Err(error) = self.close_one(index, line, tips.confirmed).await {
-                    failed.get_or_insert(error);
+                    let (address, asset) = (&index.address.value, &index.asset.id);
+                    failed.get_or_insert(error.context(format!("wallet index {address} {asset}")));
                 }
             }
             failed.map_or(Ok(()), Err)
@@ -382,25 +394,32 @@ mod tests {
         }
     }
 
-    /// What alice's native index from `start` becomes on a chain with `line`.
-    async fn index(line: Line, start: Birthday) -> Result<WalletIndex> {
+    /// What alice's native index from `start` becomes on a chain with
+    /// `line`, settling or not.
+    async fn index(line: Line, settles: bool, start: Birthday) -> Result<WalletIndex> {
         let network = Network::new(Chain::from_static("test"), "lined");
         let (address, asset) = (
             Address::new(network.clone(), "alice"),
             Asset::native(network.clone()),
         );
         let target = WalletIndexTarget::new(Arc::new(Lined(line, network)), address, asset);
-        target.with_birthday(start).index().await
+        target
+            .with_birthday(start)
+            .with_settle(settles)
+            .index()
+            .await
     }
 
     #[tokio::test]
     async fn a_start_older_than_the_depth_line_is_refused() {
-        let error = index(Line::Depth(30), Birthday::At(69)).await.unwrap_err();
+        let error = index(Line::Depth(30), false, Birthday::At(69))
+            .await
+            .unwrap_err();
         let refused = error.downcast_ref::<WalletError>().unwrap();
         assert_eq!(refused.kind, WalletErrorKind::InvalidStart);
         assert!(refused.message.contains("start at 70"), "{refused}");
         for (start, from) in [(Birthday::At(70), 70), (Birthday::Fresh, 100)] {
-            let index = index(Line::Depth(30), start).await.unwrap();
+            let index = index(Line::Depth(30), false, start).await.unwrap();
             assert_eq!((index.requested_from, index.birthday), (from, from));
             assert_eq!(index.progress, Progress::default());
         }
@@ -409,8 +428,16 @@ mod tests {
     #[tokio::test]
     async fn a_final_line_starts_at_the_final_block_whatever_the_start() {
         for (start, from) in [(Birthday::At(2), 2), (Birthday::Fresh, 100)] {
-            let index = index(Line::Final, start).await.unwrap();
+            let index = index(Line::Final, false, start).await.unwrap();
             assert_eq!((index.requested_from, index.birthday), (from, 90));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_settling_depth_line_starts_below_the_line_whatever_the_start() {
+        for (start, from) in [(Birthday::At(2), 2), (Birthday::Fresh, 100)] {
+            let index = index(Line::Depth(30), true, start).await.unwrap();
+            assert_eq!((index.requested_from, index.birthday), (from, 69));
         }
     }
 }

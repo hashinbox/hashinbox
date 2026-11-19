@@ -3,7 +3,8 @@
 
 use base::{
     Address, Asset, Balances as _, BlockHash, Chained as _, Confirmed, Confirmer as _, Dated as _,
-    Decimal, Holding, Leg, Network, NotServed, Reason, TransactionId, TransactionState,
+    Decimal, Holding, Leg, Line, Network, NetworkConfig, NotServed, Reason, TransactionId,
+    TransactionState,
 };
 use std::sync::Arc;
 
@@ -70,6 +71,39 @@ fn tips_are_confirmed_produced_and_rooted_final() {
     let tips = block_on(chain(&script).tips()).unwrap();
     assert_eq!((tips.produced, tips.confirmed), (100, 90));
     script.exhausted();
+}
+
+/// Finality now equals the tip (`confirmed` = `finalized`): the line is the
+/// tip less `read_depth` (default 1,000; `settings` may set it), not the
+/// block after the final one, so final blocks are read and only an index
+/// further behind settles.
+#[test]
+fn the_line_is_the_read_depth_below_the_tip_not_after_the_final_block() {
+    let script = Script::new([
+        Reply::ok("getSlot", json!(5_000)),
+        Reply::ok("getSlot", json!(5_000)),
+    ]);
+    let tips = block_on(chain(&script).tips()).unwrap();
+    assert_eq!((tips.produced, tips.confirmed), (5_000, 5_000));
+    assert_eq!(chain(&script).line(), Line::Depth(chain_solana::READ_DEPTH));
+    assert_eq!(chain(&script).line().at(tips), 4_000);
+    script.exhausted();
+
+    let stored = NetworkConfig {
+        network: network(),
+        chain_id: Some(base58(9, 32)),
+        testnet: true,
+        block_time: std::time::Duration::from_millis(400),
+        confirmations: 32,
+        max_depth: None,
+        explorer_address: None,
+        explorer_transaction: None,
+        settings: json!({"read_depth": 50}),
+        assets: Vec::new(),
+    };
+    let config = Config::try_from(&stored).unwrap();
+    let rpc = Client::new(Arc::new(script.clone()), config.native());
+    assert_eq!(Factory::from(config).chain(&rpc).line(), Line::Depth(50));
 }
 
 #[test]

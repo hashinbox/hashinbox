@@ -615,6 +615,26 @@ pub(crate) mod db {
         Ok(rows.into_iter().map(|row| row.id).collect())
     }
 
+    /// Of `ids`, the indexes behind `mined`: indexed through a live block
+    /// below it, in any state (paused, `no_data`, or catching up). A
+    /// transaction its transaction index finds in `mined` keeps its legs of
+    /// them: reading `mined` again writes them again, and a settle at or
+    /// above it counts them.
+    pub(crate) fn find_behind_block(
+        connection: &mut SqliteConnection,
+        mined: &Block,
+        ids: &BTreeSet<String>,
+    ) -> QueryResult<BTreeSet<String>> {
+        wallet_index::table
+            .inner_join(block::table)
+            .filter(wallet_index::id.eq_any(ids))
+            .filter(block::position.lt(mined.position))
+            .filter(block::reorged_at.is_null())
+            .select(wallet_index::id)
+            .load::<String>(connection)
+            .map(|found| found.into_iter().collect())
+    }
+
     /// Moves the birthday of `index` to `start` while it has not started.
     ///
     /// # Errors
@@ -681,12 +701,12 @@ pub(crate) mod db {
     }
 
     /// Unsets the progress of index `id` when it is indexing, its birthday
-    /// at most `confirmed`, the chain's final block: its next block is at or
-    /// below it, so the indexer settles it again. How many (0 or 1).
+    /// at most `below`, the block under the chain's line: its next block is
+    /// below the line, so the indexer settles it again. How many (0 or 1).
     pub(crate) fn reconcile(
         connection: &mut SqliteConnection,
         id: impl AsRef<str>,
-        confirmed: i64,
+        below: i64,
     ) -> QueryResult<usize> {
         diesel::update(
             wallet_index::table
@@ -696,7 +716,7 @@ pub(crate) mod db {
         .set((
             wallet_index::indexed_at.eq(None::<String>),
             wallet_index::birthday.eq(diesel::dsl::sql::<BigInt>("MIN(birthday, ")
-                .bind::<BigInt, _>(confirmed)
+                .bind::<BigInt, _>(below)
                 .sql(")")),
         ))
         .execute(connection)
@@ -829,6 +849,60 @@ pub(crate) mod db {
     /// # Errors
     ///
     /// As [`select`].
+    /// A kept wallet index a pending transaction moves funds of: a row of
+    /// [`find_spending`]'s query.
+    #[derive(Queryable, Selectable)]
+    #[diesel(table_name = wallet_index_with_balance)]
+    pub(crate) struct Spending {
+        pub(crate) id: String,
+        balance_confirmed_spendable: Option<String>,
+    }
+
+    impl Spending {
+        /// Whether it can spend `takes` (signed: what a send takes is
+        /// negative): its `balance_confirmed_spendable` (zero while unknown) plus
+        /// `takes` stays at or above zero.
+        ///
+        /// # Errors
+        ///
+        /// When a stored amount does not decode.
+        pub(crate) fn can_spend(&self, takes: Decimal) -> anyhow::Result<bool> {
+            let spendable: Decimal = self
+                .balance_confirmed_spendable
+                .as_deref()
+                .unwrap_or("0")
+                .parse()
+                .context("a stored balance does not decode")?;
+            Ok(spendable + takes >= Decimal::zero())
+        }
+    }
+
+    /// The first of `ids` not kept, in their order; `None` when each is.
+    pub(crate) fn find_missing(
+        connection: &mut SqliteConnection,
+        ids: &[String],
+    ) -> QueryResult<Option<String>> {
+        let kept: BTreeSet<String> = wallet_index::table
+            .filter(wallet_index::id.eq_any(ids))
+            .select(wallet_index::id)
+            .load(connection)?
+            .into_iter()
+            .collect();
+        Ok(ids.iter().find(|id| !kept.contains(*id)).cloned())
+    }
+
+    /// The kept wallet indexes of `indexes` as a pending transaction spends
+    /// from them.
+    pub(crate) fn find_spending(
+        connection: &mut SqliteConnection,
+        indexes: Vec<&String>,
+    ) -> QueryResult<Vec<Spending>> {
+        wallet_index_with_balance::table
+            .filter(wallet_index_with_balance::id.eq_any(indexes))
+            .select(Spending::as_select())
+            .load(connection)
+    }
+
     #[cfg(test)]
     pub(crate) fn find_by_ids(
         connection: &mut SqliteConnection,

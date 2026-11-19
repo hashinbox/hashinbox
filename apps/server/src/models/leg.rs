@@ -19,7 +19,7 @@ use super::{
     Id, IdError, Json,
     block::BlockId,
     int,
-    schema::{leg, wallet_index_with_balance},
+    schema::{block, leg},
     transaction::TransactionId,
     uint,
     wallet_index::WalletIndexId,
@@ -397,34 +397,6 @@ pub(crate) mod db {
         height: i64,
     }
 
-    /// A kept wallet index a pending transaction moves funds of: a row of
-    /// [`find_spending`]'s query.
-    #[derive(Queryable, Selectable)]
-    #[diesel(table_name = wallet_index_with_balance)]
-    pub(crate) struct Spending {
-        pub(crate) id: String,
-        balance_confirmed_spendable: Option<String>,
-    }
-
-    impl Spending {
-        /// Whether it can spend `takes` (signed: what a send takes is
-        /// negative): its `balance_confirmed_spendable` (zero while unknown) plus
-        /// `takes` stays at or above zero.
-        ///
-        /// # Errors
-        ///
-        /// When a stored amount does not decode.
-        pub(crate) fn can_spend(&self, takes: Decimal) -> anyhow::Result<bool> {
-            let spendable: Decimal = self
-                .balance_confirmed_spendable
-                .as_deref()
-                .unwrap_or("0")
-                .parse()
-                .context("a stored balance does not decode")?;
-            Ok(spendable + takes >= Decimal::zero())
-        }
-    }
-
     /// At most `page.limit` live mined legs of wallet index `index` below
     /// (position, seq) `page.after` when given, latest first, each with its
     /// transaction's txid and state.
@@ -551,18 +523,6 @@ pub(crate) mod db {
         .execute(connection)
     }
 
-    /// The kept wallet indexes of `indexes` as a pending transaction spends
-    /// from them.
-    pub(crate) fn find_spending(
-        connection: &mut SqliteConnection,
-        indexes: Vec<&String>,
-    ) -> QueryResult<Vec<Spending>> {
-        wallet_index_with_balance::table
-            .filter(wallet_index_with_balance::id.eq_any(indexes))
-            .select(Spending::as_select())
-            .load(connection)
-    }
-
     /// Deletes the mined legs of wallet index `index` above `position`
     /// (a reorged block's too); its pending legs stay. How many.
     pub(crate) fn delete_above(
@@ -579,8 +539,9 @@ pub(crate) mod db {
     }
 
     /// Archives at `at`, a jump's position, every coin wallet index `index`
-    /// still shows unspent: its received legs with a coin in a live block,
-    /// not archived, that none of its spent legs in a live block names.
+    /// still shows unspent: its received legs with a coin in a live block
+    /// below `at` (one at or above is read again), not archived, that none
+    /// of its spent legs in a live block names.
     /// What they add up to; `None`: there was none.
     ///
     /// # Errors
@@ -609,6 +570,7 @@ pub(crate) mod db {
                   SELECT 1
                   FROM block b
                   WHERE b.id = leg.block
+                    AND b.position < ?2
                     AND b.reorged_at IS NULL
               )
               AND NOT EXISTS (
@@ -635,6 +597,22 @@ pub(crate) mod db {
             })
             .collect::<anyhow::Result<Vec<Decimal>>>()?;
         Ok((!amounts.is_empty()).then(|| Decimal::total(&amounts)))
+    }
+
+    /// The position of the last live leg of wallet index `index` below
+    /// `below`, if any.
+    pub(crate) fn find_last_position(
+        connection: &mut SqliteConnection,
+        index: impl AsRef<str>,
+        below: i64,
+    ) -> QueryResult<Option<i64>> {
+        leg::table
+            .inner_join(block::table)
+            .filter(leg::wallet_index_id.eq(index.as_ref()))
+            .filter(leg::position.lt(below))
+            .filter(block::reorged_at.is_null())
+            .select(diesel::dsl::max(leg::position))
+            .first(connection)
     }
 
     /// Whether leg `id` is kept.

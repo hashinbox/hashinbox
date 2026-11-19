@@ -18,6 +18,7 @@ mod limited;
 mod lost;
 mod outage;
 mod partial;
+mod paused;
 mod pruned;
 mod pruned_one;
 mod queued;
@@ -68,6 +69,7 @@ scenarios! {
     backlog: ethereum => chain_ethereum::testing::Ethereum [single];
     queued: ethereum => chain_ethereum::testing::Ethereum [single];
     partial: ethereum => chain_ethereum::testing::Ethereum [single];
+    paused: ethereum => chain_ethereum::testing::Ethereum [single];
     skipped: ethereum => chain_ethereum::testing::Ethereum [single];
     split: ethereum => chain_ethereum::testing::Ethereum [single];
 }

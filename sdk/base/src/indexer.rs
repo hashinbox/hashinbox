@@ -35,11 +35,15 @@ pub struct Stats {
     pub tip: Option<u64>,
     /// The chain's confirmed (final) tip at the last step.
     pub confirmed: Option<u64>,
+    /// The chain's line ([`Chained::line`]) at the last step: nothing below
+    /// it is read.
+    pub line: Option<u64>,
     /// Kept blocks reorged because the chain took them back.
     pub reorgs: u64,
     /// Failed steps, and failed closes ([`Indexes::close`]).
     pub failures: u64,
-    /// The last failure, cleared by the next kept block.
+    /// The last failure, cleared by the next kept block of a step whose
+    /// closes all succeeded.
     pub error: Option<String>,
 }
 
@@ -229,18 +233,21 @@ impl Indexer {
         // The tip first: a network with nothing to index still shows it.
         let tips = self.chain.tips().await?;
         let tip = tips.produced;
+        let line = self.chain.line().at(tips);
         {
             let mut stats = self.stats.get();
             stats.tip = Some(tip);
             stats.confirmed = Some(tips.confirmed);
+            stats.line = Some(line);
         }
-        let line = self.chain.line().at(tips);
         if let Some(reorged) = self.check(line, last.as_ref()).await? {
             return Ok(reorged);
         }
+        let mut closed = true;
         for part in &self.parts {
             if let Err(error) = part.close(line, tips).await {
                 self.stats.get().fail(&error);
+                closed = false;
             }
         }
         // After the closes: no item left to read is below the line.
@@ -282,7 +289,9 @@ impl Indexer {
         let mut stats = self.stats.get();
         stats.blocks += run.len() as u64;
         stats.last = Some(header.clone());
-        stats.error = None;
+        if closed {
+            stats.error = None;
+        }
         drop(stats);
         Ok(Next::Indexed(header))
     }

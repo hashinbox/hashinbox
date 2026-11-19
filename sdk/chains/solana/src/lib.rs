@@ -16,7 +16,7 @@ mod transaction;
 mod wallet;
 
 pub use address::Address;
-pub use chain::Chain;
+pub use chain::{Chain, READ_DEPTH};
 pub use config::{Config, Factory, Token};
 pub use key::KeyPair;
 pub use network::{CHAIN_NAME, GenesisHash, Network, SOL_DECIMALS, SOL_NAME, SOL_TICKER};

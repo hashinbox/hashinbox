@@ -177,19 +177,22 @@ fn running(
 }
 
 /// Archives at `birthday`, the jump line, the coins index `id` still shows
-/// unspent, and writes them off on `at`, the block it is indexed through:
-/// one adjustment (leg 1) of −Σ them, which lowers its total only. None:
-/// nothing.
+/// unspent below it, and writes them off on `at`, the block it is indexed
+/// through, or on its last leg below the line when that is above (a send
+/// kept while it was paused): one adjustment (leg 1) of −Σ them, which
+/// lowers its total only. None: nothing.
 fn write_off(
     connection: &mut SqliteConnection,
     id: &WalletIndexId,
     at: &BlockHeader,
     birthday: u64,
 ) -> anyhow::Result<()> {
-    let Some(archived) = leg::db::archive(connection, id, int(birthday)?)? else {
+    let line = int(birthday)?;
+    let Some(archived) = leg::db::archive(connection, id, line)? else {
         return Ok(());
     };
-    let position = int(at.position)?;
+    let last = leg::db::find_last_position(connection, id, line)?;
+    let position = int(at.position)?.max(last.unwrap_or(i64::MIN));
     let block = block::db::find_by_position(connection, id.network(), position)?
         .context("the index's block is not kept")?;
     let mut adjustment = Leg::adjustment(&block, id, 1, &(Decimal::zero() - archived));

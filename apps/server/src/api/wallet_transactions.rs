@@ -96,7 +96,9 @@ struct SendResponse {
         sends run one at a time, in order, and each fails on its own. A 202 response means \
         queued, not submitted: `GET /v1/jobs/{id}` reports the outcome. Indexing records the \
         transaction once it is mined, for the assets the wallet is watched in. A watch-only \
-        wallet answers 422.",
+        wallet answers 422, as does a wallet whose index of `asset` (and, for a token, of \
+        `native`, which pays the fee) is missing: there is no balance to check. A paused \
+        index still sends, and its transaction is recorded once mined.",
     params(WalletPath),
     request_body = SendRequest,
     security(("bearerAuth" = [])),
@@ -106,7 +108,8 @@ struct SendResponse {
             body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "Network or asset is not configured", body = ErrorBody),
-        (status = 422, description = "A watch-only or unknown wallet", body = ErrorBody),
+        (status = 422, description = "A watch-only or unknown wallet, or a sender index \
+            missing", body = ErrorBody),
         (status = 503, description = "The queue or store is unavailable", body = ErrorBody)
     ),
     tag = "transactions"

@@ -267,7 +267,10 @@ pub trait TransactionIndexStore: Send + Sync {
 - **Keeping a block** advances both tables by the chain's links (as
   `wallet_index` today) and sets `found` when the block holds a watched
   txid; the block reader keeps a watched transaction even without legs of
-  ours. A found transaction index stops there: a transaction is mined
+  ours, and its legs of a wallet index behind the block (paused, say: a
+  pause stops tracking, not sending), numbered as any leg; reading the
+  block again writes them again, a settle at or above it counts them. A
+  found transaction index stops there: a transaction is mined
   once, so no later block is read for it (`next()` is `None`) and its row
   is not written again until its job deletes it, or a reorg takes its
   block back and it reads on.
@@ -346,7 +349,8 @@ Decisions beyond the design:
 - **The broadcast job:** "final" is the network's confirmed position
   (`network_index.confirmed`), as before; "indexed far enough" is
   `indexed_at` at or above it. A check reads, in order: index gone →
-  `forgotten`; found at or below final → done, above → again; `no_data` →
+  `forgotten`; found at or below final → done (reverted there: failed
+  `reverted`), above → again; `no_data` →
   `forgotten`; read past `expires_height` (by block height) and not found
   → `dead`; not far enough (or paused) → again; else the same bytes again.
 - **The job's end**, one write: its index deleted, and its transaction

@@ -298,7 +298,9 @@ Decisions beyond the design:
   them stops at `max_bumps`. `SendIntent::fee` defaults to `normal`. Both
   decode what was queued before.
 - **A check** reads each version's index: one `Final` → done (the current
-  row, when another version landed, forgotten `replaced`); one found above
+  row, when another version landed, forgotten `replaced`); one `Reverted`
+  (final, reverted: only its fee paid) → failed `reverted`, ended the same
+  way; one found above
   the final block → wait (no resend, no bump); then the current one's
   status as before; `Missing` and `bump_due` → step 4.
 - **Step 4, the bump:** at `max_bumps` → stuck. Signed as designed; a

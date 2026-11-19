@@ -234,9 +234,10 @@ pub struct Tips {
 /// from its config ([`Chained::line`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Line {
-    /// Chains that settle (Ethereum, Solana): the block after the final one.
+    /// Ethereum: the block after the final one.
     Final,
-    /// Bitcoin: the tip less `max_depth` positions; `u64::MAX`: no limit.
+    /// The tip less this many positions: Bitcoin's `max_depth` (`u64::MAX`:
+    /// no limit), Solana's `read_depth` (its final block is its tip).
     Depth(u64),
 }
 

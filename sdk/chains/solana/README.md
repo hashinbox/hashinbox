@@ -52,14 +52,19 @@ the genesis hash (`chain_id`), assets (SOL's display decimals, the
 `contract` mints), `confirmations`, and from `settings` the knobs
 `fee_ttl_ms`, `max_priority_fee` (micro-lamports per compute unit, default
 1,000,000), `interval_ms`, `batch`, the slots the
-indexer fetches per step (default 100), and the `base::Tracking` of sent
+indexer fetches per step (default 100), `read_depth`, the slots below the
+tip the indexer reads (default 1,000, about 7 minutes), and the
+`base::Tracking` of sent
 payments: `check_ms` (default 10 s) and `max_bumps` (default 5; a payment
 is bumped once it expired unseen, so `bump_after` is unused) (each absent
 one its default). It
 has no `max_depth`: it reads balances (`base::Balances`, finalized, at a
-slot at or above the one asked: `minContextSlot`), so its indexer reads
-nothing at or below the finalized slot and settles an index behind it with
-one balance read (design 083 §9).
+slot at or above the one asked: `minContextSlot`). Its line is
+`Line::Depth(read_depth)`, the tip less `read_depth`, not the block after
+the finalized slot: nodes now answer the same slot for `confirmed` and
+`finalized`, so final blocks are read too. An index more than `read_depth`
+slots behind, and a new one, settles with one balance read (design 083
+§9).
 
 ## Notes
 
@@ -128,7 +133,7 @@ one balance read (design 083 §9).
 - A signed transaction carries `expires_height`, its blockhash's
   `lastValidBlockHeight`: once a caller has read past that height without
   finding it, no later block can take it.
-- Its line is the slot after the finalized one (`Line::Final`). A sent
+- Its line is `read_depth` slots below the tip (`Line::Depth`). A sent
   transaction's index left behind it is settled by the `Confirmer`: its
   signature's status (`getSignatureStatuses` with history), finalized at
   or below the finalized slot, is where it is found.

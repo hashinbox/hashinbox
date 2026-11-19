@@ -235,6 +235,14 @@ impl Failure {
             _ => false,
         }
     }
+
+    /// Whether the node refused because it does not serve the method, so
+    /// another node may: `-32601` (method not found), or Tatum's `-16401`
+    /// (a method of paid plans only).
+    #[must_use]
+    pub const fn is_unserved(&self) -> bool {
+        matches!(self.code, -32_601 | -16_401)
+    }
 }
 
 /// The code and the node's message, cut to its first 200 characters.
@@ -293,6 +301,24 @@ mod tests {
         assert!(slow.is_retryable() && slow.is_rate_limited());
         let busy = Error::transport(ErrorKind::HttpStatus(503), "busy");
         assert!(busy.is_retryable() && !busy.is_rate_limited());
+    }
+
+    #[test]
+    fn a_method_the_node_does_not_serve_is_unserved() {
+        let unserved = |code, message| match failure(code, message) {
+            Error::Remote(failure) => failure.is_unserved(),
+            Error::Transport { .. } => unreachable!(),
+        };
+        assert!(unserved(-32_601, "Method not found"));
+        assert!(unserved(
+            -16_401,
+            "Method 'getTokenAccountsByOwner' is available for paid plans only."
+        ));
+        assert!(!unserved(-32_000, "execution reverted"));
+        assert!(!unserved(
+            -32_016,
+            "Minimum context slot has not been reached"
+        ));
     }
 
     #[test]

@@ -71,10 +71,14 @@ fn config() -> Config {
 const ETHER_ESTIMATE: &str = "0x5208";
 const ETHER_GAS: u64 = 25_200;
 
-/// The estimate request a send of `asset` makes: from `from`, as if it held
-/// ample ether, to a recipient no one has used (an ether transfer of 1 wei,
-/// or a token `transfer` of 1 to it); the recipient it names.
-fn estimated_recipient(request: &serde_json::Value, from: &str) -> alloy_primitives::Address {
+/// The estimate request a send makes: from `from`, as if it held ample
+/// ether, of `amount` (an ether transfer of it, or a token `transfer` of
+/// it); the recipient it names. The estimator asks for 1.
+fn estimated_recipient(
+    request: &serde_json::Value,
+    from: &str,
+    amount: u64,
+) -> alloy_primitives::Address {
     assert_eq!(request[1], json!("latest"));
     assert_eq!(
         request[2],
@@ -83,12 +87,12 @@ fn estimated_recipient(request: &serde_json::Value, from: &str) -> alloy_primiti
     let call = &request[0];
     assert_eq!(call["from"], json!(from));
     if call["data"] == json!("0x") {
-        assert_eq!(call["value"], json!("0x1"));
+        assert_eq!(call["value"], json!(format!("{amount:#x}")));
         return call["to"].as_str().unwrap().parse().unwrap();
     }
     let data = hex::decode(call["data"].as_str().unwrap()).unwrap();
     let transfer = transferCall::abi_decode(&data).unwrap();
-    assert_eq!(transfer.amount, alloy_primitives::U256::from(1));
+    assert_eq!(transfer.amount, alloy_primitives::U256::from(amount));
     transfer.recipient
 }
 
@@ -160,9 +164,9 @@ fn a_transfer_signs_one_transaction_at_the_next_nonce() {
     let transaction = block_on(pay(builder, Transfer::new(to.clone(), atomic(1000)))).unwrap();
     script.exhausted();
     let (_, request) = script.requests().pop().unwrap();
-    // Signing tests the very transfer: to its recipient.
+    // Signing tests the very transfer: to its recipient, of its amount.
     assert_eq!(
-        estimated_recipient(&request, KEY_ONE),
+        estimated_recipient(&request, KEY_ONE, 1000),
         to.value.parse::<alloy_primitives::Address>().unwrap()
     );
 
@@ -224,9 +228,9 @@ fn a_token_transfer_calls_the_contract() {
     let (_, request) = script.requests().pop().unwrap();
     assert_eq!(request[0]["to"], json!(TOKEN));
     assert_eq!(request[0]["value"], json!("0x0"));
-    // Signing tests the very transfer: to its recipient.
+    // Signing tests the very transfer: to its recipient, of its amount.
     assert_eq!(
-        estimated_recipient(&request, KEY_ONE),
+        estimated_recipient(&request, KEY_ONE, 5),
         to.value.parse::<alloy_primitives::Address>().unwrap()
     );
 
@@ -276,22 +280,22 @@ fn a_token_transfer_calls_the_contract() {
 
 #[test]
 fn a_reverting_transfer_fails_before_signing() {
-    let script = Script::new([]);
+    let script = Script::new(fee_replies());
     let factory = factory(&script);
     let wallet = block_on(factory.from_pk(key_one())).unwrap();
-    let token = Asset {
-        network: network(),
-        id: TOKEN.to_owned(),
-    };
-    let builder = wallet.transaction(&token).unwrap();
+    let to = base::Address::new(network(), TOKEN);
+    // The estimator keeps an answer for this kind of send.
+    script.push([Reply::ok("eth_estimateGas", json!("0xc350"))]);
+    let kept = [(base::Address::new(network(), KEY_TWO), token())];
+    block_on(factory.fees().estimate(&spends_to(&kept, &to))).unwrap();
+    let builder = wallet.transaction(&token()).unwrap();
     script.push([
         Reply::ok("eth_getTransactionCount", json!("0x0")),
-        Reply::ok("eth_maxPriorityFeePerGas", json!("0x1")),
-        Reply::ok("eth_getBlockByNumber", json!({"baseFeePerGas": "0x1"})),
         Reply::failure("eth_estimateGas", 3, "execution reverted: balance too low"),
     ]);
-    let to = base::Address::new(network(), TOKEN);
     let error = block_on(pay(builder, Transfer::new(to, atomic(5)))).unwrap_err();
+    script.exhausted();
+    // Refused: the kept answer is not reused.
     assert_eq!(error.kind, TransactionErrorKind::Failed);
     assert_eq!(error.reason, Some(Reason::Reverted));
 }
@@ -475,7 +479,7 @@ fn fees_and_gas_refresh_once_per_time_to_live() {
         .requests()
         .iter()
         .filter(|(method, _)| method == "eth_estimateGas")
-        .map(|(_, request)| estimated_recipient(request, KEY_ONE))
+        .map(|(_, request)| estimated_recipient(request, KEY_ONE, 1))
         .collect();
     assert_eq!(recipients.len(), 2);
     assert_ne!(recipients[0], recipients[1]);
@@ -492,14 +496,17 @@ fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
     let balance = atomic(10_u64.pow(18));
     let to = base::Address::new(network(), "0x00000000000000000000000000000000000000b0");
     let builder = wallet.transaction(&Asset::native(network())).unwrap();
-    script.push([Reply::ok("eth_getTransactionCount", json!("0x0"))]);
+    script.push([
+        Reply::ok("eth_getTransactionCount", json!("0x0")),
+        Reply::ok("eth_estimateGas", json!(ETHER_ESTIMATE)),
+    ]);
     let signed = block_on(pay(builder, Transfer::new(to, balance - fee.clone()))).unwrap();
     script.exhausted();
     let paid = signed.legs.iter().find_map(|leg| match leg {
         Leg::Fee { amount, .. } => Some(amount.clone()),
         _ => None,
     });
-    assert_eq!(paid, Some(fee), "the estimator's cached fees, no refresh");
+    assert_eq!(paid, Some(fee), "the estimator's cached rate, no refresh");
 }
 
 /// Holdings where [`KEY_TWO`] and `0x…b0` hold every asset.
@@ -558,30 +565,39 @@ fn a_send_to_a_holder_is_priced_for_one_and_any_other_for_a_new_account() {
         .requests()
         .into_iter()
         .filter(|(method, _)| method == "eth_estimateGas")
-        .map(|(_, request)| estimated_recipient(&request, KEY_ONE))
+        .map(|(_, request)| estimated_recipient(&request, KEY_ONE, 1))
         .collect();
     assert_eq!(
         requests[0],
         HOLDER.parse::<alloy_primitives::Address>().unwrap()
     );
     assert_ne!(requests[1], requests[0]);
+}
 
-    // Signing takes each recipient's limit from the same cache.
-    let wallet = block_on(factory.from_pk(key_one())).unwrap();
-    let other = base::Address::new(network(), "0x00000000000000000000000000000000000000c0");
-    let limits: Vec<u64> = [holder, other]
+#[test]
+fn each_payment_signs_with_the_gas_the_node_estimates_for_it() {
+    let script = Script::new(first_send());
+    let wallet = block_on(factory(&script).from_pk(key_one())).unwrap();
+    let to = base::Address::new(network(), HOLDER);
+    // Two payments of one kind in a row, inside the time to live: each its own estimate.
+    let limits: Vec<u64> = [None, Some("0x2ee0")]
         .into_iter()
-        .map(|to| {
+        .map(|estimate| {
             let builder = wallet.transaction(&Asset::native(network())).unwrap();
-            script.push([Reply::ok("eth_getTransactionCount", json!("0x0"))]);
-            let signed = block_on(pay(builder, Transfer::new(to, atomic(1000)))).unwrap();
+            if let Some(estimate) = estimate {
+                script.push([
+                    Reply::ok("eth_getTransactionCount", json!("0x8")),
+                    Reply::ok("eth_estimateGas", json!(estimate)),
+                ]);
+            }
+            let signed = block_on(pay(builder, Transfer::new(to.clone(), atomic(1000)))).unwrap();
             TxEnvelope::decode_2718_exact(&signed.bytes)
                 .unwrap()
                 .gas_limit()
         })
         .collect();
     script.exhausted();
-    assert_eq!(limits, [ETHER_GAS, 248_870]);
+    assert_eq!(limits, [ETHER_GAS, 14_400], "each estimate and the margin");
 }
 
 #[test]
@@ -790,7 +806,10 @@ fn a_fee_level_sets_the_tip_and_the_max_fee_follows() {
     let mut fees = Vec::new();
     for level in [FeeLevel::Low, FeeLevel::Normal, FeeLevel::High] {
         if level != FeeLevel::Low {
-            script.push([Reply::ok("eth_getTransactionCount", json!("0x7"))]);
+            script.push([
+                Reply::ok("eth_getTransactionCount", json!("0x7")),
+                Reply::ok("eth_estimateGas", json!(ETHER_ESTIMATE)),
+            ]);
         }
         let mut builder = wallet.transaction(&Asset::native(network())).unwrap();
         builder
@@ -858,8 +877,15 @@ fn a_bump_raises_both_fees_a_tenth_at_least_at_the_same_nonce() {
     builder.load(&state).unwrap();
     builder.with_fee(Fee::Times(1.1));
     let bumped = block_on(builder.sign()).unwrap();
+    // Nothing asked again: the saved nonce and gas limit.
     script.exhausted();
     assert_eq!(nonce(&bumped), 7);
+    assert_eq!(
+        TxEnvelope::decode_2718_exact(&bumped.bytes)
+            .unwrap()
+            .gas_limit(),
+        ETHER_GAS
+    );
     assert_ne!(bumped.id, first.id);
     // A 1 gwei tip and a 2 wei base, each a tenth up, rounded up: 3 wei.
     assert_eq!(fees_of(&bumped), (1_100_000_000, 1_100_000_006));

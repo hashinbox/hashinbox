@@ -102,19 +102,20 @@ with one balance read (design 083 §9).
   builder signs its tip and a max fee of `2 × base fee + tip`, kept
   `fee_ttl_ms` (default 12 s) in one
   `base::FeeRateProviderCached` shared by every builder, the estimator and
-  `Service::rates`. Gas comes from the factory's one fee estimator
-  (`WalletFactory::fees`), which every builder signs with too, so an
-  estimate and the transaction signed after it agree. It (`Estimator`,
-  `fee_estimator.rs`) asks the node for the transfer given
-  (`eth_estimateGas` from its sender to its recipient, or to a fresh
-  unused address without one, plus the margin) and keeps the answer for
-  `fee_ttl_ms`. A transfer's gas depends only on its asset and on whether
-  its recipient holds it already, not on who sends it: so it keeps the gas
-  of each (asset, recipient holds it, as `Holdings` say), asking the node
-  once per kind of send however many wallets send. A sender holding none of a token cannot be tested (the node
-  runs the transfer) and gets its kind's last answer. A signed transaction's
-  `Fee` leg is its worst case, `gas limit * max fee`, which is what an
-  estimate sums.
+  `Service::rates`. A builder signing a new payment asks the node for its
+  gas: `eth_estimateGas` of that very payment (sender, recipient, value or
+  calldata), plus the margin (`FeeLimits::gas_limit`); nothing kept is
+  reused. A payment the node says would revert fails `Reason::Reverted`,
+  one the sender cannot fund `Reason::InsufficientFunds`; nothing is
+  signed. The factory's fee estimator (`WalletFactory::fees`, `Estimator`,
+  `fee_estimator.rs`) only guesses, for triggers: it asks the node for the
+  transfer given (to its recipient, or to a fresh unused address without
+  one, plus the margin) and keeps the answer `fee_ttl_ms` per (asset,
+  recipient holds it, as `Holdings` say), once per kind of send however
+  many wallets send. A sender holding none of a token cannot be tested
+  (the node runs the transfer) and gets its kind's last answer. A signed
+  transaction's `Fee` leg is its worst case, `gas limit * max fee`, which
+  is what an estimate sums.
 - `Fee::Set(level)` sets the tip at half, the same or twice the node's
   (`Low`, `Normal`, `High`); the max fee follows it. A builder's saved
   state (`save`) is its payment, source, nonce, gas limit and rate; after

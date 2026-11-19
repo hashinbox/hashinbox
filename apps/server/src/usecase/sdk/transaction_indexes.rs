@@ -159,8 +159,9 @@ impl TransactionIndexStore for Stores {
 ///
 /// # Errors
 ///
-/// [`transaction::Short`] when a sender cannot spend what it takes beyond
-/// what is in flight (the caller's write must roll back); when a write fails.
+/// [`transaction::Refused`] when a sender's index is not kept, or cannot
+/// spend what it takes beyond what is in flight (the caller's write must
+/// roll back); when a write fails.
 pub(crate) fn record(
     connection: &mut SqliteConnection,
     pending: &mut Transaction,

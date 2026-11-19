@@ -28,9 +28,9 @@ fn unused() -> alloy_primitives::Address {
     alloy_primitives::Address::from_slice(&alloy_primitives::keccak256(seed)[12..])
 }
 
-/// Ethereum's `base::FeeEstimator`, which every builder of the factory
-/// signs with too, so an estimate and the transaction signed after it
-/// agree. It asks the node and keeps its answers for `ttl`. On Ethereum the
+/// Ethereum's `base::FeeEstimator`: a guess of what sends cost (builders
+/// share its rate and limits, but ask the node for each payment's own gas).
+/// It asks the node and keeps its answers for `ttl`. On Ethereum the
 /// price per gas unit is the same for every send (the rate of `rates`), and
 /// a transfer's gas depends only on its asset and on whether its recipient
 /// holds the asset already (nothing to create), not on who sends it or to
@@ -94,6 +94,7 @@ impl Estimator {
     /// (the gas does not depend on it). A sender holding none of the token
     /// cannot be asked for (the node runs the transfer), so it gets the
     /// kind's last answer however old: the sender does not change the gas.
+    /// Only a guess: no builder signs with it.
     ///
     /// # Errors
     ///

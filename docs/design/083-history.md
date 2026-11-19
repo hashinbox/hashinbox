@@ -19,6 +19,14 @@ Paths are relative to the repository root. Code is cited by file and symbol.
     is **settled**: one balance read at a final block, one `adjustment`
     leg, and it reads on from there. A new index, one left behind by an
     outage and a resumed one are all settled the same way.
+  - **Solana (2026-11, X1):** its nodes now answer the same slot for
+    `confirmed` and `finalized` (fast finality), so `F + 1` is above the
+    tip and nothing would be read. Its line is `T − read_depth` instead
+    (`Line::Depth`, `settings.read_depth`, default 1,000 slots, about 7
+    minutes; `max_depth` stays NULL): final blocks are read, an index
+    further behind settles as above, and a new or reconciled index starts
+    just below the line so its first step settles it. Pruning stays below
+    `F`. Ethereum keeps `F + 1`.
   - **Bitcoin:** `P = T − max_depth` (`max_depth` in positions, replacing
     `max_history_days`). It limits how far back an index may start, makes
     an index that falls further behind **jump**, and its coins from before
@@ -85,7 +93,7 @@ load refuses less. Everything below `P` is final.
   |---|---|---|---|
   | Bitcoin | 6 | 4,320 | 30 days, today's limit |
   | Ethereum | 12 | NULL | line `F` |
-  | Solana | 32 | NULL | line `F` |
+  | Solana | 32 | NULL | line `T − read_depth` (§1) |
 
 ## 5. Two kinds of chains
 
@@ -320,11 +328,14 @@ CHECK (archived_at IS NULL OR (kind = 0 AND coin_txid IS NOT NULL)),
 **At the jump,** in the restart's write (`WalletIndexStore::restart`,
 `apps/server/src/usecase/sdk/indexes.rs`):
 
-1. Every coin the index's live legs still show as unspent (a `received`
-   leg with a coin, no live `spent` leg of the index naming it, not
-   archived) gets `archived_at = P` (`leg::db::archive`).
+1. Every coin the index's live legs still show as unspent below `P` (a
+   `received` leg with a coin, no live `spent` leg of the index naming
+   it, not archived) gets `archived_at = P` (`leg::db::archive`); one at
+   or above `P` is read again.
 2. One write-off `adjustment` (leg 1) of −Σ those coins on the index's
-   `indexed_at` (checked in §8 step 2, final), before it is unset.
+   `indexed_at` (checked in §8 step 2, final), before it is unset; or on
+   its last leg below `P` when that is above (a send kept while it was
+   paused, 085), so the write-off follows it.
 
 No coins or no `indexed_at` (never started): nothing archived, no
 write-off.

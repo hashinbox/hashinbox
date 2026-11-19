@@ -17,6 +17,7 @@ use crate::{
     models::{
         Id, Wallet, int,
         leg::{self, Movement},
+        transaction,
         wallet::{self, WalletId},
         wallet_index::{self, WalletIndex, WalletIndexId},
     },
@@ -167,8 +168,8 @@ pub(crate) async fn set_tag(
 /// at once (its target, [`WalletIndexTarget`], kept by the store); and
 /// whether it was created: an asset already indexed answers its index as
 /// is. A start the node no longer serves moves forward; on a chain that
-/// reads balances the index starts at the chain's final block instead, its
-/// balance read there.
+/// reads balances the index starts below the chain's line instead, its
+/// balance read at the final block.
 ///
 /// # Errors
 ///
@@ -198,7 +199,8 @@ pub(crate) async fn create_index(
     }
     let service = container.service(&address)?;
     let start = start.map_or(Birthday::Fresh, Birthday::At);
-    let target = WalletIndexTarget::new(service.indexer.chain(), address, asset);
+    let target = WalletIndexTarget::new(service.indexer.chain(), address, asset)
+        .with_settle(service.balances.is_some());
     service
         .storage
         .indexes
@@ -242,7 +244,7 @@ pub(crate) async fn set_index_state(
 /// Reads wallet `id`'s index of `asset` again from the chain's balance
 /// (design 083 §9.1): in one write, its mined legs above the chain's final
 /// block `F` (the indexer's last read) are deleted and its progress unset,
-/// so the indexer settles it at a final block `S` and reads on from `S + 1`;
+/// its birthday below the line, so the indexer settles it at a final block `S` and reads on from `S + 1`;
 /// its pending legs stay. The index.
 ///
 /// # Errors
@@ -264,15 +266,16 @@ pub(crate) async fn reconcile(
             "this chain reads no balance to reconcile with",
         ));
     }
-    let Some(confirmed) = service.indexer.stats().confirmed else {
+    let stats = service.indexer.stats();
+    let (Some(confirmed), Some(line)) = (stats.confirmed, stats.line) else {
         return Err(Error::unavailable(
             "the indexer has not read the chain's final block yet",
         ));
     };
-    let confirmed = int(confirmed)?;
+    let (confirmed, below) = (int(confirmed)?, int(line.saturating_sub(1))?);
     let (changed, found) = db
         .write(move |connection| {
-            let changed = wallet_index::db::reconcile(connection, &index, confirmed)?;
+            let changed = wallet_index::db::reconcile(connection, &index, below)?;
             if changed > 0 {
                 leg::db::delete_above(connection, &index, confirmed)?;
             }
@@ -337,8 +340,9 @@ pub(crate) async fn legs_page(
 ///
 /// Invalid for a malformed address, amount or destination, or a send the
 /// queue refuses; not found for an unconfigured network or asset; conflict
-/// for a wallet that holds no key; unavailable when the store or the queue
-/// is.
+/// for a wallet that holds no key, or whose index of the asset (and, for a
+/// token, of its native currency) is not kept; unavailable when the store
+/// or the queue is.
 pub(crate) async fn send(
     container: &Container<Transport>,
     db: &Db,
@@ -355,6 +359,22 @@ pub(crate) async fn send(
         .await?;
     if !keyed {
         return Err(Error::conflict("the wallet holds no key here"));
+    }
+    // It takes from its asset's index and, for a token, the native one (the
+    // fee): each must be kept, or there is no balance to check. Paused or
+    // without data, it still sends: the key spends, not the index.
+    let mut takes = vec![String::from(WalletIndexId::of(&from, &info.asset)?)];
+    if !info.asset.is_native() {
+        let native = base::Asset::native(from.network.clone());
+        takes.push(WalletIndexId::of(&from, &native)?.into());
+    }
+    let missing = db
+        .read(move |connection| Ok(wallet_index::db::find_missing(connection, &takes)?))
+        .await?;
+    if let Some(id) = missing {
+        return Err(Error::conflict(
+            transaction::Refused::NotIndexed(id).to_string(),
+        ));
     }
     let units = transfer
         .amount

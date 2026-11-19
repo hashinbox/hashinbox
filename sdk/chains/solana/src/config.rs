@@ -42,6 +42,9 @@ pub struct Config {
     /// Blocks the indexer fetches per step; default 100
     /// ([`base::DEFAULT_BATCH`]). Lower it for a node that limits requests.
     pub batch: u64,
+    /// Slots below the tip the indexer reads; an index further behind
+    /// settles by a balance read. Default 1,000 ([`crate::READ_DEPTH`]).
+    pub read_depth: u64,
     /// Slots a block needs below the tip to count as confirmed: the
     /// confirmed position is `tip - confirmations`; default 32.
     pub confirmations: u64,
@@ -51,7 +54,7 @@ pub struct Config {
 }
 
 /// The knobs a [`base::NetworkConfig`]'s `settings` may set: `fee_ttl_ms`,
-/// `max_priority_fee`, `interval_ms`, `batch`, and the tracking's
+/// `max_priority_fee`, `interval_ms`, `batch`, `read_depth`, and the tracking's
 /// `check_ms`, `bump_after`, `max_bumps`; an absent one keeps its default.
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -60,6 +63,7 @@ struct Settings {
     max_priority_fee: u64,
     interval_ms: u64,
     batch: u64,
+    read_depth: u64,
     check_ms: u64,
     bump_after: u64,
     max_bumps: u32,
@@ -72,6 +76,7 @@ impl Default for Settings {
             max_priority_fee: 1_000_000,
             interval_ms: 1_000,
             batch: base::DEFAULT_BATCH,
+            read_depth: crate::READ_DEPTH,
             check_ms: 10_000,
             bump_after: 0,
             max_bumps: 5,
@@ -116,6 +121,7 @@ impl Config {
             max_priority_fee: settings.max_priority_fee,
             interval_ms: settings.interval_ms,
             batch: settings.batch,
+            read_depth: settings.read_depth,
             confirmations: 32,
             tracking: settings.tracking(),
         }
@@ -131,10 +137,11 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// For an invalid network or a zero interval.
+    /// For an invalid network, a zero interval or a zero read depth.
     pub fn validate(&self) -> anyhow::Result<()> {
         self.native().validate()?;
         ensure!(self.interval_ms > 0, "Solana interval must be positive");
+        ensure!(self.read_depth > 0, "Solana read_depth must be positive");
         Ok(())
     }
 
@@ -224,6 +231,7 @@ impl TryFrom<&NetworkConfig> for Config {
             max_priority_fee: settings.max_priority_fee,
             interval_ms: settings.interval_ms,
             batch: settings.batch,
+            read_depth: settings.read_depth,
             confirmations: config.confirmations,
             tracking: settings.tracking(),
         };
@@ -251,7 +259,7 @@ impl Factory {
     /// The block reader over `rpc`.
     #[must_use]
     pub fn chain(&self, rpc: &Client) -> Chain {
-        Chain::new(rpc.clone(), self.config.mints())
+        Chain::new(rpc.clone(), self.config.mints()).with_read_depth(self.config.read_depth)
     }
 
     /// The wallet factory over `rpc`: blockhashes, fees and the priority-fee

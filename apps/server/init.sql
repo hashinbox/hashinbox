@@ -269,6 +269,18 @@ CREATE TABLE transaction_index (
 CREATE INDEX transaction_index_network ON transaction_index (chain, network);
 CREATE INDEX transaction_index_progress ON transaction_index (indexed_at);
 
+-- A transaction index as every read answers it: its row, whether its found
+-- transaction is kept reverted, and its network's confirmed position.
+CREATE VIEW transaction_index_with_blocks AS
+SELECT
+    ti.*,
+    ti.found IS NOT NULL AND t.state IS 2 AS reverted,
+    i.confirmed AS confirmed
+FROM transaction_index ti
+LEFT JOIN "transaction" t ON t.id = ti.id
+LEFT JOIN network_index i ON i.chain = ti.chain
+    AND i.network = ti.network;
+
 
 
 -- A wallet index with its wallet's network, address and tags, whether its

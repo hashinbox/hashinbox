@@ -7,9 +7,11 @@
 //! Each run takes the next step its state calls for:
 //!
 //! 1. **Build** (no state yet): sign the payment at its fee level, then, in
-//!    one write, check the sender holds it beyond what is in flight, record
-//!    it as pending, watch it with its transaction index (085), and save the
-//!    job's state. Short of funds: nothing is recorded, the job fails.
+//!    one write, check the sender's indexes are kept and hold it beyond
+//!    what is in flight, record it as pending, watch it with its transaction
+//!    index (085), and save the job's state. Short of funds, or a sender
+//!    index missing: nothing is recorded, the job fails with the reason. A
+//!    paused one still sends: its transaction index watches it all the same.
 //! 2. **Send** (recorded, not sent): broadcast it once. Refused by every
 //!    node: it is forgotten (`refused`), the job fails. Accepted, or no
 //!    sure answer (a node may hold it): marked sent; checked every
@@ -17,7 +19,8 @@
 //! 3. **Watch** (sent): read the transaction index of each version sent,
 //!    which the indexer moves with every block it keeps.
 //!    - a version found in a final block: done (the current one forgotten
-//!      `replaced` when another landed);
+//!      `replaced` when another landed); reverted there: failed `reverted`
+//!      (only its fee paid), kept the same way;
 //!    - the current one can never land (Solana, read past its expiry):
 //!      bumped while [`Tracking::max_bumps`] allows, else forgotten
 //!      (`dead`), failed;
@@ -188,6 +191,8 @@ enum Sent {
 enum Watched {
     /// This version (txid) is in a final block.
     Landed(String),
+    /// This version (txid) is in a final block, reverted: only its fee paid.
+    Reverted(String),
     /// The current version can never land (Solana: read past its expiry),
     /// and no bump is left.
     Dead,
@@ -251,8 +256,8 @@ impl Broadcast {
         let recorded = self.record(task, progress.clone(), move |connection| {
             transaction_indexes::record(connection, &mut pending, &index)
         });
-        if !recorded.await? {
-            return Err(Stop::Fail("insufficient-funds".into()));
+        if let Err(refused) = recorded.await? {
+            return Err(Stop::Fail(refused.to_string()));
         }
         Ok(progress)
     }
@@ -297,14 +302,14 @@ impl Broadcast {
 
     /// In one write: `write` (the payment's rows), then the job stored with
     /// `progress` as its state, while the run still holds it; then saved on
-    /// `task` too, so the run's outcome carries it. `false`, and nothing
-    /// written, when `write` finds a sender short.
+    /// `task` too, so the run's outcome carries it. Why not, and nothing
+    /// written, when `write` finds a sender cannot back it.
     async fn record(
         &self,
         task: &mut Context<'_, SendIntent, Progress>,
         progress: Progress,
         write: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<()> + Send + 'static,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Result<(), transaction::Refused>> {
         let job = task.job();
         let row = Row::try_from(&Job {
             state: Some(serde_json::to_value(&progress)?),
@@ -315,7 +320,7 @@ impl Broadcast {
         let recorded = self
             .db
             .write(move |connection| {
-                // Short rolls the write back: nothing recorded.
+                // A refusal rolls the write back: nothing recorded.
                 write(connection)?;
                 ensure!(
                     task::db::update(connection, id, attempt, &row, now)?,
@@ -324,13 +329,11 @@ impl Broadcast {
                 Ok(())
             })
             .await;
-        match recorded {
-            Ok(()) => {}
-            Err(error) if error.is::<transaction::Short>() => return Ok(false),
-            Err(error) => return Err(error),
+        if let Err(error) = recorded {
+            return error.downcast::<transaction::Refused>().map(Err);
         }
         task.save(progress).await?;
-        Ok(true)
+        Ok(Ok(()))
     }
 
     /// Step 2: broadcasts recorded `txid` once and, unless every node
@@ -380,17 +383,20 @@ impl Broadcast {
             })
             .await?;
         let versions: Vec<&TransactionIndex> = indexes.iter().flatten().collect();
-        let landed = versions
-            .iter()
-            .find(|index| index.status() == TransactionStatus::Final);
-        if let Some(landed) = landed {
-            return Ok(Watched::Landed(landed.transaction.id.clone()));
+        for version in &versions {
+            let txid = version.transaction.id.clone();
+            match version.status() {
+                TransactionStatus::Final => return Ok(Watched::Landed(txid)),
+                TransactionStatus::Reverted => return Ok(Watched::Reverted(txid)),
+                _ => {}
+            }
         }
         let Some(Some(current)) = indexes.last() else {
             return Ok(Watched::Gone);
         };
         Ok(match current.status() {
             TransactionStatus::Final => Watched::Landed(progress.txid.clone()),
+            TransactionStatus::Reverted => Watched::Reverted(progress.txid.clone()),
             TransactionStatus::GivenUp => Watched::Gone,
             TransactionStatus::Unknown => Watched::Unknown,
             // An earlier version found above the final block may land.
@@ -465,8 +471,8 @@ impl Broadcast {
         let replaced = self.record(task, bumped.clone(), move |connection| {
             transaction_indexes::replace(connection, &old, &mut pending, &index)
         });
-        if !replaced.await? {
-            return Ok(Bumped::Stuck("insufficient-funds".into()));
+        if let Err(refused) = replaced.await? {
+            return Ok(Bumped::Stuck(refused.to_string()));
         }
         let why = match self.send(network, &bumped.txid).await? {
             // Forgotten before it was sent: the next check finds it gone.
@@ -482,7 +488,9 @@ impl Broadcast {
         let undone = self.record(task, restored, move |connection| {
             transaction_indexes::restore(connection, &mut current, &next)
         });
-        ensure!(undone.await?, "{why}; its undoing is short of funds");
+        if let Err(refused) = undone.await? {
+            anyhow::bail!("{why}; its undoing is refused: {refused}");
+        }
         Ok(Bumped::Refused(why))
     }
 
@@ -598,6 +606,11 @@ impl Worker for Broadcast {
             Ok(Watched::Landed(txid)) if txid == progress.txid => (Why::Jump, Ack::Done),
             // An earlier version landed: the current one never will.
             Ok(Watched::Landed(_)) => (Why::Replaced, Ack::Done),
+            // Mined, as when landed; the money did not move.
+            Ok(Watched::Reverted(txid)) if txid == progress.txid => {
+                (Why::Jump, Ack::Fail("reverted".into()))
+            }
+            Ok(Watched::Reverted(_)) => (Why::Replaced, Ack::Fail("reverted".into())),
             Ok(Watched::Dead) => (Why::Dead, Ack::Fail("dead".into())),
             Ok(Watched::Gone) => (Why::Jump, Ack::Fail("forgotten".into())),
             Ok(Watched::Unknown) => return again(None),

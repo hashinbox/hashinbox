@@ -4,7 +4,9 @@
 //! and what the counters grew by since the last write), and asks to run
 //! again: at once while behind, one interval later once at the tip. A failed
 //! step runs again an interval later with its error as the job's `reason`;
-//! the next run that does not fail clears it.
+//! so does a step that went on past a failed gap close (an index left
+//! behind, its balance as last settled); the next run without either clears
+//! it.
 //!
 //! At the tip it queues a triggers job, unique per network: none while the
 //! network's last one is still pending or running, so every trigger decides
@@ -142,7 +144,8 @@ impl Worker for Index {
     /// runs again at once. A failed step or row write is retried by the
     /// queue, which waits longer after each failure in a row (a node
     /// answering 429, say, gets time to recover), its error the job's
-    /// `reason`: the job never ends.
+    /// `reason`: the job never ends. A step that failed only a gap close
+    /// goes on, the close's error the run's `reason`.
     async fn run(&self, cx: Context<'_, Target, ()>) -> Ack {
         let target = cx.input().clone();
         let network = target.network();
@@ -153,10 +156,14 @@ impl Worker for Index {
         };
         let (indexer, confirmations) = (service.indexer.clone(), service.confirmations);
         let later = now.saturating_add(millis(indexer.interval()));
+        let mut closed = None;
         for _ in 0..STEPS {
             let next = indexer.next().await;
             let after = indexer.stats();
             let before = self.saved().get(&network).cloned().unwrap_or_default();
+            if after.failures > before.failures {
+                closed.clone_from(&after.error);
+            }
             let step = models::NetworkIndex::step(&before, &after, confirmations, tasks::now());
             let at = network.clone();
             let saved = self
@@ -172,12 +179,12 @@ impl Worker for Index {
                 Ok(Next::Idle) => {
                     let queued = Round::enqueue(&self.queue, &target).await;
                     let reason = queued.err().map(|error| error.to_string());
-                    return Ack::Again(later, reason);
+                    return Ack::Again(later, reason.or(closed));
                 }
                 Err(error) => return Ack::Retry(format!("{error:#}")),
             }
         }
-        Ack::Again(now, None)
+        Ack::Again(now, closed)
     }
 
     /// One job per indexed network.

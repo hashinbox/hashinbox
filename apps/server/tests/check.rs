@@ -341,6 +341,21 @@ async fn a_payment_found_before_its_expires_height_is_done() {
 }
 
 #[tokio::test]
+async fn a_payment_found_reverted_in_a_final_block_fails_reverted() {
+    let fixture = Fixture::new().await;
+    let network = network();
+    let mut legs = send(&network, "alice", "bob", 4, 1, coin(&network, "f", 0));
+    let mut reverted = mined(&network, "s", 0, vec![legs.remove(2)]);
+    reverted.state = TransactionState::Reverted(None);
+    fixture.mine(vec![reverted]).await;
+    confirm(&fixture.db, 2).await;
+    assert_eq!(fixture.check().await, Ack::Fail("reverted".into()));
+    assert!(fixture.kept("s").await, "mined: kept, not forgotten");
+    assert!(forgotten(&fixture.directory).is_empty());
+    assert!(fixture.looked_for().await.is_empty());
+}
+
+#[tokio::test]
 async fn a_payment_whose_index_is_not_read_through_the_final_block_waits() {
     let fixture = Fixture::new().await;
     confirm(&fixture.db, 5).await;

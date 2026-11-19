@@ -564,7 +564,7 @@ export interface paths {
         put?: never;
         /**
          * Enqueue a payment from a wallet
-         * @description Enqueues one send job of `asset` from the keyed wallet: one payment, signed as one transaction and broadcast. Several payments are several requests; a wallet's sends run one at a time, in order, and each fails on its own. A 202 response means queued, not submitted: `GET /v1/jobs/{id}` reports the outcome. Indexing records the transaction once it is mined, for the assets the wallet is watched in. A watch-only wallet answers 422.
+         * @description Enqueues one send job of `asset` from the keyed wallet: one payment, signed as one transaction and broadcast. Several payments are several requests; a wallet's sends run one at a time, in order, and each fails on its own. A 202 response means queued, not submitted: `GET /v1/jobs/{id}` reports the outcome. Indexing records the transaction once it is mined, for the assets the wallet is watched in. A watch-only wallet answers 422, as does a wallet whose index of `asset` (and, for a token, of `native`, which pays the fee) is missing: there is no balance to check. A paused index still sends, and its transaction is recorded once mined.
          */
         post: operations["send_payment"];
         delete?: never;
@@ -3722,7 +3722,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description A watch-only or unknown wallet */
+            /** @description A watch-only or unknown wallet, or a sender index missing */
             422: {
                 headers: {
                     [name: string]: unknown;

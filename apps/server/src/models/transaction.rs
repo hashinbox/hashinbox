@@ -19,7 +19,7 @@ use super::{
     id::typed_id,
     int, leg,
     schema::{self, transaction_with_legs, transactions},
-    uint,
+    uint, wallet_index,
 };
 
 /// A transaction's id: `{chain}.{network}.{txid}`.
@@ -244,18 +244,26 @@ impl TryFrom<&base::Transaction> for Transaction {
     }
 }
 
-/// An address cannot spend what a pending transaction takes, beyond what is
-/// in flight.
+/// Why a pending transaction is not kept: a wallet index it takes from
+/// cannot back what it takes.
 #[derive(Debug)]
-pub(crate) struct Short;
+pub(crate) enum Refused {
+    /// It cannot spend what it takes, beyond what is in flight.
+    Short,
+    /// Index `.0` is not kept: nothing to spend.
+    NotIndexed(String),
+}
 
-impl std::fmt::Display for Short {
+impl std::fmt::Display for Refused {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("insufficient-funds")
+        match self {
+            Self::Short => formatter.write_str("insufficient-funds"),
+            Self::NotIndexed(id) => write!(formatter, "not-indexed: the sender has no index {id}"),
+        }
     }
 }
 
-impl std::error::Error for Short {}
+impl std::error::Error for Refused {}
 
 /// The `transaction` table's statements.
 pub(crate) mod db {
@@ -270,10 +278,10 @@ pub(crate) mod db {
     ///
     /// # Errors
     ///
-    /// [`Short`] when a wallet index it takes from (every leg counts, kept
-    /// or not) cannot spend what it takes, beyond what is in flight (the
-    /// caller's write must roll back: the row is already inserted); when a
-    /// value does not decode or the write fails.
+    /// [`Refused`] when a wallet index it takes from (every leg counts,
+    /// kept or not) is not kept, or cannot spend what it takes beyond what
+    /// is in flight (the caller's write must roll back: the row is already
+    /// inserted); when a value does not decode or the write fails.
     pub(crate) fn save_pending(
         connection: &mut SqliteConnection,
         transaction: &mut Transaction,
@@ -293,8 +301,8 @@ pub(crate) mod db {
                 .entry(leg.wallet_index_id.clone().into())
                 .or_insert_with(Decimal::zero) += leg.signed()?;
         }
-        let ours: BTreeMap<String, leg::db::Spending> =
-            leg::db::find_spending(connection, takes.keys().collect())?
+        let ours: BTreeMap<String, wallet_index::db::Spending> =
+            wallet_index::db::find_spending(connection, takes.keys().collect())?
                 .into_iter()
                 .map(|index| (index.id.clone(), index))
                 .collect();
@@ -302,12 +310,8 @@ pub(crate) mod db {
             if *takes >= Decimal::zero() {
                 continue;
             }
-            // Not kept: nothing to spend.
-            let Some(index) = ours.get(id) else {
-                anyhow::bail!(Short);
-            };
-            if !index.can_spend(takes.clone())? {
-                anyhow::bail!(Short);
+            if !sender(&ours, id)?.can_spend(takes.clone())? {
+                anyhow::bail!(Refused::Short);
             }
         }
         // A counterparty this server does not index leaves no leg.
@@ -315,6 +319,21 @@ pub(crate) mod db {
         transaction.keep(&ours);
         leg::db::insert(connection, transaction.legs.iter().collect())?;
         Ok(())
+    }
+
+    /// Index `id` of `kept`, which a send takes from.
+    ///
+    /// # Errors
+    ///
+    /// [`Refused`] unless it is kept. Paused or without data, it may
+    /// still send: the key, not the index, spends.
+    fn sender<'a>(
+        kept: &'a BTreeMap<String, wallet_index::db::Spending>,
+        id: &str,
+    ) -> anyhow::Result<&'a wallet_index::db::Spending> {
+        Ok(kept
+            .get(id)
+            .ok_or_else(|| Refused::NotIndexed(id.to_owned()))?)
     }
 
     /// Marks pending transaction `id` sent at `at` (Unix ms): a node

@@ -199,12 +199,32 @@ impl Block {
         })
     }
 
-    /// Drops its legs of wallet indexes not in `ours` (index ids), then its
-    /// transactions left without a leg, but those `watched` (ids: a
-    /// transaction index found them in it).
-    pub(crate) fn keep(&mut self, ours: &BTreeSet<String>, watched: &BTreeSet<String>) {
+    /// The wallet indexes (ids) the legs of its transactions `watched` are
+    /// of.
+    pub(crate) fn indexes_of(&self, watched: &BTreeSet<String>) -> BTreeSet<String> {
+        self.transactions
+            .iter()
+            .filter(|transaction| watched.contains(transaction.id.as_ref()))
+            .flat_map(|transaction| &transaction.legs)
+            .map(|leg| leg.wallet_index_id.clone().into())
+            .collect()
+    }
+
+    /// Drops its legs of wallet indexes not in `ours` (index ids), but a
+    /// `watched` transaction's (ids: a transaction index found them in it)
+    /// of an index `behind` it too (paused, say: a send from it is kept
+    /// mined); then its transactions left without a leg, but those
+    /// `watched`.
+    pub(crate) fn keep(
+        &mut self,
+        ours: &BTreeSet<String>,
+        watched: &BTreeSet<String>,
+        behind: &BTreeSet<String>,
+    ) {
+        let both = ours.union(behind).cloned().collect();
         for transaction in &mut self.transactions {
-            transaction.keep(ours);
+            let found = watched.contains(transaction.id.as_ref());
+            transaction.keep(if found { &both } else { ours });
         }
         self.transactions.retain(|transaction| {
             !transaction.legs.is_empty() || watched.contains(transaction.id.as_ref())
@@ -290,7 +310,8 @@ pub(crate) mod db {
     /// 1. its row: a block reorged before is revived, a new one linked to
     ///    its kept parent and its kept child to it;
     /// 2. the wallet and transaction indexes it applies to move onto it, and
-    ///    it keeps only the wallet indexes' legs and the transactions found
+    ///    it keeps only the wallet indexes' legs and the transactions found,
+    ///    with their legs of the wallet indexes behind it too
     ///    ([`Block::keep`]);
     /// 3. its legs of the wallet indexes its legs are of are deleted (a
     ///    block kept again writes them again);
@@ -307,7 +328,9 @@ pub(crate) mod db {
         let parent = save_row(connection, block)?;
         let ours = wallet_index::db::advance(connection, block, parent.as_ref())?;
         let watched = transaction_index::db::advance(connection, block, parent.as_ref())?;
-        block.keep(&ours, &watched);
+        let senders = block.indexes_of(&watched);
+        let behind = wallet_index::db::find_behind_block(connection, block, &senders)?;
+        block.keep(&ours, &watched, &behind);
 
         let index_ids: BTreeSet<String> = block
             .legs()
@@ -394,18 +417,6 @@ pub(crate) mod db {
         query
             .order(block::position.desc())
             .limit(page.limit)
-            .select(Row::as_select())
-            .load(connection)
-            .map(|rows| rows.into_iter().map(Block::from).collect())
-    }
-
-    /// The blocks `ids`, live or reorged.
-    pub(crate) fn find_by_ids(
-        connection: &mut SqliteConnection,
-        ids: &[&str],
-    ) -> QueryResult<Vec<Block>> {
-        block::table
-            .filter(block::id.eq_any(ids))
             .select(Row::as_select())
             .load(connection)
             .map(|rows| rows.into_iter().map(Block::from).collect())

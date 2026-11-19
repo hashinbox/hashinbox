@@ -2,9 +2,9 @@
 //! one transaction. It signs once, records it as pending, not yet sent, and
 //! broadcasts it; accepted, or failed transiently, it is marked sent and
 //! checked later, never built again; a refusal forgets it (`refused`); a
-//! sender short of funds sends nothing. Two payments are two jobs, run in
-//! order, each failing on its own; the second runs while the first waits
-//! for its check.
+//! sender short of funds sends nothing; a paused one still sends. Two
+//! payments are two jobs, run in order, each failing on its own; the second
+//! runs while the first waits for its check.
 
 use std::sync::{Arc, Mutex};
 
@@ -13,11 +13,11 @@ use tasks::{Ack, Admission, Claim, Context, Id, OnLock, Status, Store, Worker};
 
 use super::{
     Fake, Script, container, database, network,
-    storage::{block, confirm, forgotten, run},
+    storage::{block, confirm, forgotten, run, watch},
 };
 use crate::{
     db::Db,
-    models::{transaction, transaction::TransactionId},
+    models::{transaction, transaction::TransactionId, wallet_index},
     usecase::workers::broadcast::{self, Broadcast, SendIntent},
     usecase::{sdk::Stores, tasks::Queue},
 };
@@ -56,10 +56,9 @@ impl Fixture {
             address: base::Address::new(network(), "sender"),
             script: script.clone(),
         };
-        Stores::new(db.clone())
-            .insert(&sender)
-            .await
-            .expect("the wallet kept");
+        let stores = Stores::new(db.clone());
+        stores.insert(&sender).await.expect("the wallet kept");
+        watch(&stores, &sender.address, 0).await;
         let mut jobs = Vec::new();
         for amount in amounts {
             let intent = SendIntent {
@@ -146,6 +145,18 @@ impl Fixture {
             })
             .await
             .expect("a read")
+    }
+
+    /// Pauses the sender's native index, as `PATCH …/indexes/native` does.
+    async fn pause(&self) {
+        let sender = base::Address::new(network(), "sender");
+        self.db
+            .write(move |connection| {
+                let paused = base::IndexState::Paused;
+                wallet_index::db::set_state(connection, &sender, Some("native"), paused, None)
+            })
+            .await
+            .expect("a write");
     }
 
     fn built(&self) -> u8 {
@@ -269,6 +280,15 @@ async fn a_sender_short_of_funds_sends_nothing() {
     assert_eq!(fixture.run().await, Ack::Fail("insufficient-funds".into()));
     assert_eq!(fixture.recorded("1").await, None);
     assert!(fixture.sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_sender_paused_after_queueing_still_sends() {
+    let fixture = Fixture::new(&["1"], Vec::new()).await;
+    fixture.pause().await;
+    assert!(matches!(fixture.run().await, Ack::Again(_, None)));
+    assert_eq!(fixture.sent(), [vec![1]]);
+    assert!(matches!(fixture.recorded("1").await, Some(Some(_))), "sent");
 }
 
 #[tokio::test]

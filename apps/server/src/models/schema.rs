@@ -251,6 +251,26 @@ diesel::table! {
 }
 
 diesel::table! {
+    /// Read-only view `transaction_index_with_blocks`: a `transaction_index`
+    /// row, whether its found transaction is kept reverted, and its
+    /// network's confirmed position.
+    transaction_index_with_blocks (id) {
+        id -> Text,
+        chain -> Text,
+        network -> Text,
+        txid -> Text,
+        broadcasted_at -> BigInt,
+        expires_height -> Nullable<BigInt>,
+        indexed_at -> Nullable<Text>,
+        found -> Nullable<Text>,
+        state -> Integer,
+        reason -> Nullable<Text>,
+        reverted -> Bool,
+        confirmed -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
     trigger_run (id) {
         id -> Text,
         trigger -> Text,
@@ -272,6 +292,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     block,
     transactions,
     transaction_index,
+    transaction_index_with_blocks,
     leg,
     wallet,
     wallet_index,
