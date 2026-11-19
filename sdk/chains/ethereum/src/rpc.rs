@@ -365,10 +365,7 @@ impl Client {
         match reason {
             Some(reason) => Err(TransactionError::new(
                 TransactionErrorKind::Rejected,
-                format!(
-                    "Ethereum node refused the transaction with code {}",
-                    failure.code
-                ),
+                failure.shown(),
             )
             .with_reason(reason)),
             None => Err(TransactionError::unavailable(format!(

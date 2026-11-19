@@ -77,6 +77,24 @@ fn an_empty_all_of_wallets_selects_everything() {
 }
 
 #[test]
+fn a_selector_of_only_nots_selects_everything_else() {
+    let why = "a selector of only \"not\" would select every other wallet; name them by tag, \
+               asset or id";
+    for selector in [
+        json!({ "not": { "tag": "deposit" } }),
+        json!({ "any": [{ "not": { "tag": "deposit" } }, { "not": { "tag": "hot" } }] }),
+        json!({ "all": [{ "not": { "tag": "deposit" } }] }),
+    ] {
+        let expected = class(Class::EmptySelection, why);
+        assert_eq!(refused(with("selector", selector)), expected);
+    }
+    let bounded = json!({ "all": [{ "tag": "hot" }, { "not": { "tag": "deposit" } }] });
+    World::new()
+        .validate(with("selector", bounded))
+        .expect("a not under a positive part is valid");
+}
+
+#[test]
 fn an_empty_asset_selects_nothing() {
     let expected = class(Class::EmptySelection, "an asset is named");
     assert_eq!(refused(with("selector", json!({ "asset": "" }))), expected);

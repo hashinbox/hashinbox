@@ -35,7 +35,8 @@ pub(crate) struct Definition {
     pub(crate) filter: Option<Logic<Filter>>,
     pub(crate) check: Logic<Check>,
     pub(crate) action: Call,
-    pub(crate) enabled: bool,
+    /// Absent means `true` in a create and the stored value in a replace.
+    pub(crate) enabled: Option<bool>,
 }
 
 impl Definition {
@@ -50,7 +51,7 @@ impl Definition {
             filter: self.filter.map(models::Json),
             check: models::Json(self.check),
             action: models::Json(self.action),
-            enabled: self.enabled,
+            enabled: self.enabled.unwrap_or(true),
             created_at,
             updated_at,
             last_round: None,
@@ -161,6 +162,10 @@ pub(crate) async fn replace(
         return Err(Error::invalid("a trigger's id never changes"));
     }
     let kept = read(db, id.clone()).await?;
+    let definition = Definition {
+        enabled: definition.enabled.or(Some(kept.enabled)),
+        ..definition
+    };
     let row = definition.trigger(id, kept.group_id, kept.created_at, now()?);
     check(container, actions, &row)?;
     let replaced = row.clone();

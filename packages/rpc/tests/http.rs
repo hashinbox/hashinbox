@@ -342,7 +342,6 @@ async fn batch_with_unknown_id_is_invalid_response() {
 }
 
 #[tokio::test]
-#[ignore = "finding: a short batch answer yields fewer results than calls; callers check the count"]
 async fn short_batch_is_invalid_response() {
     let (url, _) = node(|seen| ok(&json!([result(&items(seen)[0]["id"], json!(1))]))).await;
     assert_eq!(kind(batch(&url).await), (ErrorKind::InvalidResponse, false));

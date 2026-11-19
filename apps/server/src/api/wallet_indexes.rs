@@ -39,9 +39,9 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 struct CreateRequest {
     /// The asset id to index the wallet in.
     asset: String,
-    /// The native position to index from, at or above the chain's tip less
-    /// the network's `max_depth` (a chain that reads balances starts at its
-    /// final block instead). Absent: from the chain's tip, as a generated
+    /// The native position to index from, at or below the chain's tip and
+    /// at or above the tip less the network's `max_depth` (a chain that
+    /// reads balances starts at its final block instead). Absent: from the chain's tip, as a generated
     /// wallet (it has no past) must be.
     #[serde(default)]
     #[schema(nullable = false)]
@@ -55,7 +55,8 @@ struct CreateRequest {
     summary = "Index a wallet in an asset",
     description = "Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next \
         indexing step picks it). An asset already indexed keeps its first start (200). A \
-        `start` below the chain's tip less the network's `max_depth` is refused (400). On \
+        `start` above the chain's tip, or below it less the network's `max_depth`, is refused \
+        (400). On \
         a chain that reads balances (Solana, Ethereum) the index starts at the chain's \
         final block whatever `start` says (kept as `requested_from`): its balances are \
         null until the chain's balance read there opens it with an `adjustment` leg. A \
@@ -68,8 +69,8 @@ struct CreateRequest {
         (status = 201, description = "The index", body = WalletIndex),
         (status = 200, description = "The asset was already indexed: its index",
             body = WalletIndex),
-        (status = 400, description = "Malformed body or wallet ID, or a start below the \
-            chain's tip less the network's `max_depth`", body = ErrorBody),
+        (status = 400, description = "Malformed body or wallet ID, or a start above the \
+            chain's tip or below it less the network's `max_depth`", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "Wallet is unknown, or the asset is not configured",
             body = ErrorBody),

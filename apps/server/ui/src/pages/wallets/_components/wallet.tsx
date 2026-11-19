@@ -317,33 +317,31 @@ export function Wallet({
           aria-label="Asset"
           sx={{ mt: 3, flexWrap: 'wrap', maxWidth: '100%' }}
         >
-          {assetsOf(wallet)
-            .sort((a, b) => Number(b === 'native') - Number(a === 'native'))
-            .map((id) => (
-              <ToggleButton
-                key={id}
-                value={id}
-                aria-label={assetName(shell.listings, wallet.chain, wallet.network, id)}
-                sx={{
-                  px: compact ? 1.5 : 2.5,
-                  py: 1,
-                  minWidth: compact ? 0 : 220,
-                  justifyContent: 'flex-start',
-                  gap: 1.5,
-                  textTransform: 'none',
-                  alignItems: 'center',
-                }}
-              >
-                <Box sx={{ display: 'flex', fontSize: 22 }}>
-                  <Currency
-                    chain={wallet.chain}
-                    ticker={assetName(shell.listings, wallet.chain, wallet.network, id)}
-                    label={false}
-                  />
-                </Box>
-                {!compact && balanceOf(id)}
-              </ToggleButton>
-            ))}
+          {assetsOf(wallet).map((id) => (
+            <ToggleButton
+              key={id}
+              value={id}
+              aria-label={assetName(shell.listings, wallet.chain, wallet.network, id)}
+              sx={{
+                px: compact ? 1.5 : 2.5,
+                py: 1,
+                minWidth: compact ? 0 : 220,
+                justifyContent: 'flex-start',
+                gap: 1.5,
+                textTransform: 'none',
+                alignItems: 'center',
+              }}
+            >
+              <Box sx={{ display: 'flex', fontSize: 22 }}>
+                <Currency
+                  chain={wallet.chain}
+                  ticker={assetName(shell.listings, wallet.chain, wallet.network, id)}
+                  label={false}
+                />
+              </Box>
+              {!compact && balanceOf(id)}
+            </ToggleButton>
+          ))}
         </ToggleButtonGroup>
       )}
       {compact && assetsOf(wallet).length > 0 && <Box sx={{ mt: 1.5 }}>{balanceOf(asset)}</Box>}

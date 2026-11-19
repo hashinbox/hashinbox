@@ -335,6 +335,10 @@ fn a_refusal_of_held_bytes_is_acceptance() {
     let refused = block_on(broadcaster.broadcast(&signed(&bytes))).unwrap_err();
     assert_eq!(refused.kind, TransactionErrorKind::Rejected);
     assert_eq!(refused.reason, Some(Reason::InsufficientFunds));
+    assert_eq!(
+        refused.message,
+        "insufficient funds for gas * price + value"
+    );
 
     script.push([Reply::failure(
         "eth_sendRawTransaction",

@@ -367,14 +367,7 @@ impl Client {
                 Reason::Other(format!("code {}", failure.code)),
             )
         };
-        Err(TransactionError::new(
-            kind,
-            format!(
-                "Solana node refused the transaction (code {})",
-                failure.code
-            ),
-        )
-        .with_reason(reason))
+        Err(TransactionError::new(kind, failure.shown()).with_reason(reason))
     }
 
     /// The slot transaction `signature` is mined in, once finalized (its

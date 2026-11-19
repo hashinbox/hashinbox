@@ -55,7 +55,8 @@ pub(crate) struct Transfer {
 /// # Errors
 ///
 /// Not found for an unconfigured network; invalid for a malformed address
-/// or key, or a key that derives another address; unavailable when
+/// or key, or a key that derives another address; conflict for a kept
+/// wallet with another external id (nothing written); unavailable when
 /// generation or the store is.
 pub(crate) async fn create(
     container: &Container<Transport>,
@@ -85,12 +86,22 @@ pub(crate) async fn create(
     }
     .map_err(|error| Error::invalid(format!("{error:#}")))?;
     row.external_id = new.external_id;
-    let (created, wallet) = db
+    let written = db
         .write(move |connection| {
+            let kept = wallet::db::find(connection, &row.id)?;
+            let other = kept.and_then(|kept| kept.external_id);
+            if other.is_some() && row.external_id.is_some() && other != row.external_id {
+                return Ok(None);
+            }
             let created = wallet::db::insert(connection, &row)?;
-            Ok((created, wallet::db::find(connection, &row.id)?))
+            Ok(Some((created, wallet::db::find(connection, &row.id)?)))
         })
         .await?;
+    let Some((created, wallet)) = written else {
+        return Err(Error::conflict(
+            "the wallet is kept with another external_id",
+        ));
+    };
     let wallet = wallet.ok_or_else(|| Error::not_found("wallet is unknown"))?;
     Ok((created, wallet))
 }
@@ -376,14 +387,17 @@ pub(crate) async fn send(
             transaction::Refused::NotIndexed(id).to_string(),
         ));
     }
-    let units = transfer
-        .amount
-        .parse::<Decimal>()
-        .ok()
+    let units = Some(&transfer.amount)
+        .filter(|amount| !amount.starts_with('+'))
+        .and_then(|amount| amount.parse::<Decimal>().ok())
         .filter(|amount| amount > &Decimal::zero())
         .and_then(|amount| info.atomic(&amount).ok())
+        .filter(|units| within_range(&from.network.chain, units))
         .ok_or_else(|| {
-            Error::invalid("amount must be a positive exact decimal within the asset's decimals")
+            Error::invalid(
+                "amount must be a positive exact decimal, unsigned, within the asset's decimals \
+                 and the chain's range",
+            )
         })?;
     let to = container.parse(&Address::new(from.network.clone(), &transfer.destination))?;
     let intent = SendIntent {
@@ -404,6 +418,26 @@ pub(crate) async fn send(
     // A send is not unique: it is always queued.
     let (tasks::Admission::Queued(id) | tasks::Admission::Duplicate(id)) = queued;
     Ok(id)
+}
+
+/// Whether atomic `units` fit what one payment of `chain` carries, as its
+/// builder checks when the job signs: Ethereum (ether and ERC-20) up to
+/// 2^256 − 1, Solana up to `u64::MAX`, Bitcoin up to 21 000 000 BTC in
+/// satoshis. Kept here (no chain exposes its bound); another chain is not
+/// bounded before its builder.
+fn within_range(chain: &base::Chain, units: &Decimal) -> bool {
+    const BITCOIN_SATS: u64 = 21_000_000 * 100_000_000;
+    if *chain == chain_ethereum::CHAIN_NAME {
+        units.to_atomic_be_bytes::<32>(0).is_ok()
+    } else if *chain == chain_solana::CHAIN_NAME {
+        units.to_atomic_u64(0).is_ok()
+    } else if *chain == chain_bitcoin::CHAIN_NAME {
+        units
+            .to_atomic_u64(0)
+            .is_ok_and(|sats| sats <= BITCOIN_SATS)
+    } else {
+        true
+    }
 }
 
 /// Wallet `id`'s address in its chain's canonical form, and the model id of
@@ -438,4 +472,26 @@ fn asset_info(
         .get(&asset)
         .cloned()
         .ok_or_else(|| Error::not_found("asset is not configured"))
+}
+
+#[cfg(test)]
+mod tests {
+    use base::Decimal;
+
+    use super::within_range;
+
+    #[test]
+    fn an_amount_fits_its_chains_range() {
+        let fits = |chain, units: &str| within_range(&chain, &units.parse::<Decimal>().unwrap());
+        let ether_max =
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        let ether_over =
+            "115792089237316195423570985008687907853269984665640564039457584007913129639936";
+        assert!(fits(chain_ethereum::CHAIN_NAME, ether_max));
+        assert!(!fits(chain_ethereum::CHAIN_NAME, ether_over));
+        assert!(fits(chain_solana::CHAIN_NAME, "18446744073709551615"));
+        assert!(!fits(chain_solana::CHAIN_NAME, "18446744073709551616"));
+        assert!(fits(chain_bitcoin::CHAIN_NAME, "2100000000000000"));
+        assert!(!fits(chain_bitcoin::CHAIN_NAME, "2100000000000001"));
+    }
 }

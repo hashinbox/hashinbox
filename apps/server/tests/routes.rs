@@ -245,6 +245,12 @@ async fn wallets_balance_legs_and_sends() {
     let list = json!({ "transfers": [{ "destination": "bob", "amount": "0.1" }] });
     let (status, _) = call(&router, Method::POST, &from, Some(list)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    // A sign, or more than all bitcoin: refused before any job.
+    for amount in ["+0.1", "21000000.00000001"] {
+        let body = json!({ "destination": "bob", "amount": amount });
+        let (status, body) = call(&router, Method::POST, &from, Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{amount}: {body}");
+    }
     let (status, accepted) = call(&router, Method::POST, &from, Some(send)).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
     let job = format!("/v1/jobs/{}", accepted["job"].as_str().unwrap_or_default());
@@ -513,6 +519,10 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
     let (status, error) = call(&router, Method::POST, indexes, Some(watch(69))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
     assert!(error.to_string().contains("start at 70"), "{error}");
+    for future in [101, u64::MAX] {
+        let (status, error) = call(&router, Method::POST, indexes, Some(watch(future))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    }
     let (status, index) = call(&router, Method::POST, indexes, Some(watch(80))).await;
     assert_eq!(status, StatusCode::CREATED, "{index}");
     assert_eq!(index["asset"], "native");
@@ -620,7 +630,8 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
     assert_eq!(bob["indexes"], json!({}));
     assert_eq!(bob["external_id"], Value::Null, "{bob}");
 
-    // An external id is kept trimmed, read back, set once and never replaced.
+    // An external id is kept trimmed, read back, set once and never replaced:
+    // another is refused, the same or none answers the wallet.
     let (status, frank) = create(json!({ "address": "frank", "external_id": " cus-1 " })).await;
     assert_eq!(
         (status, &frank["external_id"]),
@@ -629,11 +640,18 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
     let frank_uri = "/v1/wallets/bitcoin.regtest.frank";
     let (_, read) = call(&router, Method::GET, frank_uri, None).await;
     assert_eq!(read["external_id"], "cus-1", "{read}");
-    let (status, frank) = create(json!({ "address": "frank", "external_id": "cus-2" })).await;
-    assert_eq!(
-        (status, &frank["external_id"]),
-        (StatusCode::OK, &json!("cus-1"))
-    );
+    let (status, error) = create(json!({ "address": "frank", "external_id": "cus-2" })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    for again in [
+        json!({ "address": "frank", "external_id": "cus-1" }),
+        json!({ "address": "frank" }),
+    ] {
+        let (status, frank) = create(again).await;
+        assert_eq!(
+            (status, &frank["external_id"]),
+            (StatusCode::OK, &json!("cus-1"))
+        );
+    }
     let (_, bob) = create(json!({ "address": "bob", "external_id": "cus-3" })).await;
     assert_eq!(bob["external_id"], "cus-3", "{bob}");
     for external_id in [String::new(), "  ".to_owned(), "x".repeat(129)] {
@@ -674,11 +692,11 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         &router,
         Method::POST,
         &format!("{erin_uri}/indexes"),
-        Some(json!({ "asset": "native", "start": 5 })),
+        Some(json!({ "asset": "native", "start": 0 })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{index}");
-    assert_eq!(index["requested_from"], 5);
+    assert_eq!(index["requested_from"], 0);
     let (status, erin) = create(json!({ "secret": "erin", "address": "erin" })).await;
     assert_eq!(status, StatusCode::OK, "{erin}");
     assert_eq!(
@@ -888,7 +906,7 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_count_compares_with_a_whole_number_or_the_trigger_is_refused() {
+async fn a_count_compares_with_a_whole_number_and_a_put_keeps_enabled() {
     let (db, _directory) = database().await;
     let container = container(&db, Arc::new(Script::default()));
     let state = Arc::new(AppState {
@@ -936,6 +954,19 @@ async fn a_count_compares_with_a_whole_number_or_the_trigger_is_refused() {
     let fine = create("fine", compare(select(), "count", "2"));
     let (status, body) = call(&router, Method::POST, "/v1/triggers", Some(fine)).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["triggers"][0]["enabled"], json!(true), "absent: on");
+
+    // A PUT without `enabled` keeps a paused trigger paused.
+    let mut definition = create("x", compare(select(), "count", "2"))["triggers"][0].clone();
+    definition.as_object_mut().expect("an object").remove("id");
+    let mut paused = definition.clone();
+    paused["enabled"] = json!(false);
+    let (status, body) = call(&router, Method::PUT, "/v1/triggers/fine", Some(paused)).await;
+    assert_eq!((status, &body["enabled"]), (StatusCode::OK, &json!(false)));
+    let (status, body) = call(&router, Method::PUT, "/v1/triggers/fine", Some(definition)).await;
+    assert_eq!((status, &body["enabled"]), (StatusCode::OK, &json!(false)));
+    let (_, body) = call(&router, Method::GET, "/v1/triggers/fine", None).await;
+    assert_eq!(body["enabled"], json!(false), "{body}");
 }
 
 /// On a chain that reads balances: an index opens at the chain's final

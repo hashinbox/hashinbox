@@ -149,6 +149,16 @@ impl Http {
         }
         let sent = self.client.batch_request::<Box<RawValue>>(builder);
         let responses = within(Some(limit), sent).await.map_err(translate)?;
+        if responses.len() != calls.len() {
+            return Err(Error::transport(
+                ErrorKind::InvalidResponse,
+                format!(
+                    "a batch of {} calls was answered {} times",
+                    calls.len(),
+                    responses.len()
+                ),
+            ));
+        }
         // A call answered twice leaves another unanswered: nothing usable.
         let mut results = Vec::new();
         for entry in responses {

@@ -251,7 +251,7 @@ pub async fn record(url: &str, directory: &Path) -> anyhow::Result<()> {
     let priority = quantity(tip_fee.result())?;
     let refusals = [
         ("funds", 11_155_111, 2 * base + priority, priority),
-        ("underpriced", 11_155_111, 1, 1),
+        ("funds_low_fee", 11_155_111, 1, 1),
         ("chain", 1, 2 * base + priority, priority),
     ];
     // Both funds refusals from one client: the mock words them alike.

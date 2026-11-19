@@ -119,8 +119,8 @@ struct Job {
     /// present.
     #[schema(required)]
     reason: Option<String>,
-    /// What it was given.
-    #[schema(value_type = Object)]
+    /// What it was given; null for a kind given nothing (`prune`).
+    #[schema(value_type = Option<Object>, required)]
     input: Value,
     /// What its worker has done so far; always present.
     #[schema(value_type = Option<Object>, required)]

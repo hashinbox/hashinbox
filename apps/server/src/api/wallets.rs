@@ -94,8 +94,8 @@ impl CreateRequest {
         With neither, generates a key and keeps it; retrying makes another wallet. The wallet \
         is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept \
         answers its wallet as is (200), except that importing the key of a watch-only wallet \
-        keeps the key, and an `external_id` is kept on a wallet that has none (a \
-        kept one stays); its tags and indexes stay.",
+        keeps the key, and an `external_id` is kept on a wallet that has none; another \
+        `external_id` than the kept one is refused (409); its tags and indexes stay.",
     request_body = CreateRequest,
     security(("bearerAuth" = [])),
     responses(
@@ -105,6 +105,8 @@ impl CreateRequest {
             that derives another address", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 404, description = "Network is not configured", body = ErrorBody),
+        (status = 409, description = "The address is kept with another external ID",
+            body = ErrorBody),
         (status = 503, description = "Generation or the store is unavailable",
             body = ErrorBody)
     ),
@@ -116,7 +118,17 @@ async fn create(
 ) -> Result<(StatusCode, Json<Wallet>), Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let new = request.wallet()?;
-    let (created, wallet) = wallets::create(&state.container, &state.db, new).await?;
+    let (created, wallet) = wallets::create(&state.container, &state.db, new)
+        .await
+        .map_err(|error| {
+            // Its only conflict, another external id: 409, not the usual 422.
+            let other = error.kind == crate::usecase::Kind::Conflict;
+            let mut error = Error::from(error);
+            if other {
+                error.status = StatusCode::CONFLICT;
+            }
+            error
+        })?;
     Ok((create_status(created), Json(wallet)))
 }
 

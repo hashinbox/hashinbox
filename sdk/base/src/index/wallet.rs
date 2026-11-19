@@ -111,8 +111,8 @@ impl WalletIndexTarget {
     }
 }
 
-/// The tips; `requested_from` the start (the produced tip when fresh); the
-/// birthday: on a chain that settles or whose line is [`Line::Final`], the
+/// The tips; `requested_from` the start (the produced tip when fresh),
+/// refused above the produced tip; the birthday: on a chain that settles or whose line is [`Line::Final`], the
 /// block below the line, whatever the start (the next step settles it; the
 /// final block on [`Line::Final`]); else ([`Line::Depth`]) the start,
 /// refused when older than the tip less the depth.
@@ -131,6 +131,16 @@ impl IntoIndex<WalletIndex> for WalletIndexTarget {
                 Birthday::Fresh => tips.produced,
                 Birthday::At(position) => position,
             };
+            ensure!(
+                requested_from <= tips.produced,
+                WalletError::new(
+                    WalletErrorKind::InvalidStart,
+                    format!(
+                        "start {requested_from} is above the tip {}: start at it or below",
+                        tips.produced
+                    ),
+                )
+            );
             let birthday = match self.chain.line() {
                 line @ Line::Depth(depth) if !self.settles => {
                     let earliest = line.at(tips);
@@ -422,6 +432,22 @@ mod tests {
             let index = index(Line::Depth(30), false, start).await.unwrap();
             assert_eq!((index.requested_from, index.birthday), (from, from));
             assert_eq!(index.progress, Progress::default());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_above_the_tip_is_refused() {
+        for (line, settles) in [
+            (Line::Depth(30), false),
+            (Line::Final, false),
+            (Line::Depth(30), true),
+        ] {
+            for start in [101, u64::MAX] {
+                let error = index(line, settles, Birthday::At(start)).await.unwrap_err();
+                let refused = error.downcast_ref::<WalletError>().unwrap();
+                assert_eq!(refused.kind, WalletErrorKind::InvalidStart, "{refused}");
+            }
+            assert!(index(line, settles, Birthday::At(100)).await.is_ok());
         }
     }
 

@@ -399,7 +399,7 @@ export interface paths {
         put?: never;
         /**
          * Import a wallet's key, watch an address, or generate a wallet, in one configured network
-         * @description With `secret`, imports a raw private key and keeps it; with `address` too, the key must derive that address. With `address` alone, watches it without its key. With neither, generates a key and keeps it; retrying makes another wallet. The wallet is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept answers its wallet as is (200), except that importing the key of a watch-only wallet keeps the key, and an `external_id` is kept on a wallet that has none (a kept one stays); its tags and indexes stay.
+         * @description With `secret`, imports a raw private key and keeps it; with `address` too, the key must derive that address. With `address` alone, watches it without its key. With neither, generates a key and keeps it; retrying makes another wallet. The wallet is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept answers its wallet as is (200), except that importing the key of a watch-only wallet keeps the key, and an `external_id` is kept on a wallet that has none; another `external_id` than the kept one is refused (409); its tags and indexes stay.
          */
         post: operations["create_wallet"];
         delete?: never;
@@ -456,7 +456,7 @@ export interface paths {
         put?: never;
         /**
          * Index a wallet in an asset
-         * @description Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next indexing step picks it). An asset already indexed keeps its first start (200). A `start` below the chain's tip less the network's `max_depth` is refused (400). On a chain that reads balances (Solana, Ethereum) the index starts at the chain's final block whatever `start` says (kept as `requested_from`): its balances are null until the chain's balance read there opens it with an `adjustment` leg. A start the node no longer serves moves forward to the first block it serves before indexing begins.
+         * @description Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next indexing step picks it). An asset already indexed keeps its first start (200). A `start` above the chain's tip, or below it less the network's `max_depth`, is refused (400). On a chain that reads balances (Solana, Ethereum) the index starts at the chain's final block whatever `start` says (kept as `requested_from`): its balances are null until the chain's balance read there opens it with an `adjustment` leg. A start the node no longer serves moves forward to the first block it serves before indexing begins.
          */
         post: operations["create_wallet_index"];
         delete?: never;
@@ -790,9 +790,9 @@ export interface components {
             asset: string;
             /**
              * Format: int64
-             * @description The native position to index from, at or above the chain's tip less
-             *     the network's `max_depth` (a chain that reads balances starts at its
-             *     final block instead). Absent: from the chain's tip, as a generated
+             * @description The native position to index from, at or below the chain's tip and
+             *     at or above the tip less the network's `max_depth` (a chain that
+             *     reads balances starts at its final block instead). Absent: from the chain's tip, as a generated
              *     wallet (it has no past) must be.
              */
             start?: number;
@@ -803,9 +803,11 @@ export interface components {
             message: string;
         };
         /**
-         * @description How fast a payment should land: Ethereum tips at half, the same or twice
-         *     the node's suggestion; Bitcoin targets confirmation within 12 blocks, the
-         *     network's target or the next block; Solana pays no priority fee yet.
+         * @description How fast a payment should land: `low`, `normal` and `high` pay the
+         *     network's rate now with its tip × 0.5, 1 or 2 (Ethereum's priority fee,
+         *     Bitcoin's rate above the mempool minimum, Solana's priority price); the
+         *     base part (Ethereum's base fee, Bitcoin's mempool minimum) is the
+         *     network's, so `low` is never below what nodes accept.
          * @enum {string}
          */
         FeeLevel: "low" | "normal" | "high";
@@ -835,8 +837,8 @@ export interface components {
             deadline: number | null;
             /** @description The job id. */
             id: string;
-            /** @description What it was given. */
-            input: Record<string, never>;
+            /** @description What it was given; null for a kind given nothing (`prune`). */
+            input: Record<string, never> | null;
             /** @description The job kind: its worker (`index`, `triggers`, `broadcast`, `prune`). */
             kind: string;
             /** @description What its worker has done so far; always present. */
@@ -1383,7 +1385,10 @@ export interface components {
              * @description Its block's position; null while pending.
              */
             position?: number | null;
-            /** @description Why it reverted (JSON), when the chain said; null otherwise. */
+            /**
+             * @description Why it reverted, when the chain said (`reverted`); null otherwise.
+             *     Stored as JSON, shown decoded.
+             */
             reason?: string | null;
             /**
              * Format: int64
@@ -1458,7 +1463,7 @@ export interface components {
             action: Record<string, never>;
             chain: string;
             check: Record<string, never>;
-            /** @description Absent means `true`. */
+            /** @description Absent means `true` in a `POST` and the stored value in a `PUT`. */
             enabled?: boolean;
             filter?: Record<string, never> | null;
             /** @description Its slug; required in a `POST`, refused in a `PUT` (the path names it). */
@@ -3107,6 +3112,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description The address is kept with another external ID */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             /** @description Generation or the store is unavailable */
             503: {
                 headers: {
@@ -3263,7 +3277,7 @@ export interface operations {
                     "application/json": components["schemas"]["WalletIndex"];
                 };
             };
-            /** @description Malformed body or wallet ID, or a start below the chain's tip less the network's `max_depth` */
+            /** @description Malformed body or wallet ID, or a start above the chain's tip or below it less the network's `max_depth` */
             400: {
                 headers: {
                     [name: string]: unknown;

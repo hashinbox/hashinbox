@@ -49,7 +49,7 @@ use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, ensure};
 use base::{
-    Address, Asset, Chain, Decimal, Fee, FeeLevel, IntoIndex as _, Network, Tracking,
+    Address, Asset, Chain, Decimal, Fee, FeeLevel, IntoIndex as _, Network, Reason, Tracking,
     TransactionError, TransactionErrorKind, TransactionIndex, TransactionIndexTarget,
     TransactionStatus, Transfer, WalletError,
 };
@@ -354,7 +354,7 @@ impl Broadcast {
             Ok(()) => Sent::Accepted,
             Err(error) if error.kind.retryable() => Sent::Unsure(error.message),
             Err(error) if error.kind == TransactionErrorKind::Rejected => {
-                return Ok(Sent::Refused(format!("refused: {}", error.message)));
+                return Ok(Sent::Refused(refused(&error)));
             }
             Err(error) => return Ok(Sent::Refused(format!("invalid: {}", error.message))),
         };
@@ -655,4 +655,47 @@ pub(crate) fn progress(state: Option<&Value>) -> (Option<String>, bool) {
         return (None, false);
     };
     (Some(progress.txid), progress.sent)
+}
+
+/// A refusal as a job's reason: `refused: {reason}: {node's text}`, e.g.
+/// `refused: nonce-used: nonce too low`; a reason in the chain's own words
+/// is the text already.
+fn refused(error: &TransactionError) -> String {
+    let named = match &error.reason {
+        Some(Reason::InsufficientFunds) => "insufficient-funds",
+        Some(Reason::NonceUsed) => "nonce-used",
+        Some(Reason::FeeTooLow) => "fee-too-low",
+        Some(Reason::Expired) => "expired",
+        Some(Reason::Invalid) => "invalid",
+        Some(Reason::Reverted) => "reverted",
+        Some(Reason::Other(_)) | None => return format!("refused: {}", error.message),
+    };
+    format!("refused: {named}: {}", error.message)
+}
+
+#[cfg(test)]
+mod tests {
+    use base::{Reason, TransactionError, TransactionErrorKind};
+
+    use super::refused;
+
+    #[test]
+    fn a_refusal_names_its_reason_and_the_nodes_text() {
+        let error = |reason: Option<Reason>| {
+            let error = TransactionError::new(TransactionErrorKind::Rejected, "nonce too low");
+            refused(&match reason {
+                Some(reason) => error.with_reason(reason),
+                None => error,
+            })
+        };
+        assert_eq!(
+            error(Some(Reason::NonceUsed)),
+            "refused: nonce-used: nonce too low"
+        );
+        assert_eq!(
+            error(Some(Reason::Other("code -32002".into()))),
+            "refused: nonce too low"
+        );
+        assert_eq!(error(None), "refused: nonce too low");
+    }
 }

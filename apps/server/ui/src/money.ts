@@ -23,12 +23,14 @@ export function format(value: bigint, decimals: number): string {
   return `${negative ? '−' : ''}${whole}${fraction ? `.${fraction}` : ''}`;
 }
 
-/** The asset ids the wallet is indexed in. */
+/** The asset ids the wallet is indexed in: native first, then tokens by id. */
 export function assetsOf(wallet: Wallet): string[] {
-  return Object.keys(wallet.indexes);
+  return Object.keys(wallet.indexes).sort(
+    (a, b) => Number(b === 'native') - Number(a === 'native') || a.localeCompare(b),
+  );
 }
 
-/** The wallet's first indexed asset: the asset this UI reads and sends. */
+/** The wallet's first indexed asset (native when indexed): the asset this UI reads and sends. */
 export function assetOf(wallet: Wallet): string {
   return assetsOf(wallet)[0] ?? 'native';
 }
@@ -87,7 +89,7 @@ export { shorten } from '@/_components/trim';
 
 /** The tickers of every asset `wallet` is indexed in, native first; its unit when none. */
 export function tickersOf(wallet: Wallet, listings: Listing[]): string[] {
-  const assets = assetsOf(wallet).sort((a, b) => Number(b === 'native') - Number(a === 'native'));
+  const assets = assetsOf(wallet);
   if (assets.length === 0) return [unitOf(wallet, listings)];
   return assets.map((asset) => assetName(listings, wallet.chain, wallet.network, asset));
 }

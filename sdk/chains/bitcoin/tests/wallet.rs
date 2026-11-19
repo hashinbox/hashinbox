@@ -291,6 +291,7 @@ async fn maps_node_refusals() {
                 let error = outcome.expect_err(message);
                 assert_eq!(error.kind, TransactionErrorKind::Rejected);
                 assert_eq!(error.reason, Some(reason));
+                assert_eq!(error.message, message, "the node's text");
             }
         }
     }

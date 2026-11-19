@@ -205,12 +205,38 @@ pub enum Selector {
 impl Selector {
     /// Whether it names wallets on purpose: no empty group, no "not" right
     /// inside a "not", no empty id list, no empty asset, every tag well
-    /// formed.
+    /// formed, and a positive part (not only "not"s, which would select
+    /// every other wallet).
     ///
     /// # Errors
     ///
     /// The first part that does not.
     pub fn validate(&self) -> Result<(), Error> {
+        self.validate_parts()?;
+        if !self.bounded() {
+            return Err(Error::new(
+                Class::EmptySelection,
+                "a selector of only \"not\" would select every other wallet; name them by tag, \
+                 asset or id",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether it picks from wallets it names: a "not" picks every other
+    /// one, an "all of" is bounded by any bounded part, an "any of" only
+    /// when every part is.
+    fn bounded(&self) -> bool {
+        match self {
+            Self::Ids(_) | Self::Asset(_) | Self::Tag(_) | Self::Untagged {} => true,
+            Self::All(all) => all.iter().any(Self::bounded),
+            Self::Any(any) => any.iter().all(Self::bounded),
+            Self::Not(_) => false,
+        }
+    }
+
+    /// [`Self::validate`] but the positive part, through every part.
+    fn validate_parts(&self) -> Result<(), Error> {
         match self {
             Self::Ids(ids) if ids.is_empty() => Err(Error::new(
                 Class::EmptySelection,
@@ -231,12 +257,12 @@ impl Selector {
                 Class::EmptySelection,
                 "an empty \"any of\" selects no wallet",
             )),
-            Self::All(many) | Self::Any(many) => many.iter().try_for_each(Self::validate),
+            Self::All(many) | Self::Any(many) => many.iter().try_for_each(Self::validate_parts),
             Self::Not(one) if matches!(**one, Self::Not(_)) => Err(Error::new(
                 Class::Redundant,
                 "a \"not\" inside a \"not\" cancels out",
             )),
-            Self::Not(one) => one.validate(),
+            Self::Not(one) => one.validate_parts(),
             Self::Ids(_) | Self::Asset(_) | Self::Tag(_) | Self::Untagged {} => Ok(()),
         }
     }

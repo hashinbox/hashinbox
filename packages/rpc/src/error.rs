@@ -217,6 +217,16 @@ impl fmt::Display for ErrorKind {
 const SHOWN: usize = 200;
 
 impl Failure {
+    /// The node's message cut to its first 200 characters, `…` when cut.
+    #[must_use]
+    pub fn shown(&self) -> String {
+        let mut shown: String = self.message.chars().take(SHOWN).collect();
+        if shown.len() < self.message.len() {
+            shown.push('…');
+        }
+        shown
+    }
+
     /// Whether the code is in the implementation-defined server range `-32099..=-32000`.
     #[must_use]
     pub const fn is_server_error(&self) -> bool {
@@ -245,19 +255,14 @@ impl Failure {
     }
 }
 
-/// The code and the node's message, cut to its first 200 characters.
+/// The code and the node's message, cut ([`Failure::shown`]).
 impl fmt::Display for Failure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let shown: String = self.message.chars().take(SHOWN).collect();
-        let cut = if shown.len() < self.message.len() {
-            "…"
-        } else {
-            ""
-        };
         write!(
             formatter,
-            "JSON-RPC call failed with code {}: {shown}{cut}",
-            self.code
+            "JSON-RPC call failed with code {}: {}",
+            self.code,
+            self.shown()
         )
     }
 }

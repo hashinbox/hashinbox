@@ -98,13 +98,10 @@ struct Definition {
     check: Logic<Check>,
     #[schema(value_type = Object)]
     action: Call,
-    /// Absent means `true`.
-    #[serde(default = "enabled")]
-    enabled: bool,
-}
-
-fn enabled() -> bool {
-    true
+    /// Absent means `true` in a `POST` and the stored value in a `PUT`.
+    #[serde(default)]
+    #[schema(nullable = false)]
+    enabled: Option<bool>,
 }
 
 impl From<Definition> for triggers::Definition {

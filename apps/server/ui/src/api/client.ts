@@ -58,12 +58,15 @@ export const client = createClient<paths>({ baseUrl });
 
 client.use(auth);
 
-/** Unwraps an openapi-fetch result, turning an error body into an ApiError. */
+/**
+ * Unwraps an openapi-fetch result, turning an error body into an ApiError.
+ * Any 2xx is success; one with no body (204) resolves with no data.
+ */
 export async function call<T>(
   request: Promise<{ data?: T; error?: unknown; response: Response }>,
 ): Promise<T> {
   const { data, error, response } = await request;
-  if (data !== undefined) return data;
+  if (response.ok) return data as T;
   const message =
     error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
       ? error.message

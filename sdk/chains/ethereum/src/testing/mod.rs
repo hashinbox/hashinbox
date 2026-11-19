@@ -114,12 +114,12 @@ const RECORDINGS: &[(&str, &str)] = &[
         include_str!("recordings/eth_sendRawTransaction.funds.json"),
     ),
     (
-        "eth_sendRawTransaction.invalid",
-        include_str!("recordings/eth_sendRawTransaction.invalid.json"),
+        "eth_sendRawTransaction.funds_low_fee",
+        include_str!("recordings/eth_sendRawTransaction.funds_low_fee.json"),
     ),
     (
-        "eth_sendRawTransaction.underpriced",
-        include_str!("recordings/eth_sendRawTransaction.underpriced.json"),
+        "eth_sendRawTransaction.invalid",
+        include_str!("recordings/eth_sendRawTransaction.invalid.json"),
     ),
     (
         "method_not_found",

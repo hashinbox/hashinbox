@@ -269,14 +269,7 @@ fn refusal(failure: &Failure) -> Result<(), TransactionError> {
         REJECTED if message.contains("fee") => Reason::FeeTooLow,
         _ => Reason::Other(failure.message.clone()),
     };
-    Err(TransactionError::new(
-        TransactionErrorKind::Rejected,
-        format!(
-            "Bitcoin node rejected the transaction with code {}",
-            failure.code
-        ),
-    )
-    .with_reason(reason))
+    Err(TransactionError::new(TransactionErrorKind::Rejected, failure.shown()).with_reason(reason))
 }
 
 /// `getblock <hash> 3`.

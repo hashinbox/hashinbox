@@ -10,51 +10,34 @@ Not covered by the run: Solana sends (no funded, indexed devnet wallet; the fauc
 the devnet nodes are rate-limited), live bumps (nothing got stuck), Bitcoin (no Bitcoin network is
 configured), real reorgs, auth (loopback needs no token), and UI rendering (no browser).
 
-## Fixed since the QA run (unstaged on 2026-11-19)
+## By design
 
-- **S1:** the Ethereum builder signs each new payment with the node's `eth_estimateGas` for it
-  (plus the margin) and refuses one that would revert; the per-kind gas cache serves estimates
-  (triggers, planning) only.
-- **S2:** a version found reverted fails the job `reverted` (what is left is above, P2).
-- **S3:** not a bug: a pause only stops tracking. Sends from a paused index work, and the sent
-  transaction is recorded as mined with its legs for every index behind its block; on resume the
-  settle adjusts only what moved outside them. A client sees a current balance when `state` is
-  `indexing` and `indexed_through >= finality_at`.
-- **S4:** a send with no index for the asset (or, for a token, no native index) is refused at the
-  API with 422 `not-indexed`.
-- **X1:** Solana's line is `Line::Depth(read_depth)` (setting, default 1 000; devnet 150): final
-  blocks are read again; an index further behind settles by one balance read.
-- **X2:** the cause was Tatum's free plan answering `-16401` "paid plans only" to balance reads,
-  taken as the final answer; a node that does not serve a method (`-16401`, `-32601`) now passes the
-  call to the next node, and a failed close reaches the index job's reason.
+- **X4, ether sent by contracts:** internal transfers (a contract paying out ether) appear in no
+  transaction field or log, so they are not indexed (`sdk/chains/ethereum/README.md`). To correct a
+  wallet's balance, reconcile it: `POST /v1/wallets/{id}/indexes/{asset}/reconcile` reads the balance
+  once and writes the adjustment.
+- **G1, a failed trigger payment:** a trigger acts at most once per `since` window; the broadcast job
+  owns retries (resend, transient failures, bumps). A job that fails for good failed for a real
+  reason, so the trigger waits for its next window. The run and the job show why.
 
 ## Summary
 
+No P0 or P1 is open.
+
 | id | P | one line |
 |---|---|---|
-| X4 | P1 | Ether sent by contracts is never seen; balances drift silently (57 ETH on one watch-only wallet) |
-| G1 | P1 | A daily trigger whose payment failed counts as run and skips that payment for 24 h |
-| G2 | P1 | `PUT /v1/triggers/{id}` without `enabled` turns a paused trigger back on |
-| G3 | P1 | A `not` selector gets around the "would select every wallet" guard |
-| U1 | P1 | The UI treats every 204 as an error; adding a wallet with tags creates orphan wallets |
-| U2 | P1 | The UI opens a wallet on its token, not native coin, and Send defaults to it |
 | S2 | P2 | A reverted payment settled through the `Confirmer` (its block not read) still ends done |
 | X3 | P2 | Indexing failures: a failed close now reaches the index job's reason; the wallet index's own reason, a log and recent counts are still missing |
-| X5 | P2 | `/v1/stats` jobs `failed` shows the idle count (691–1124 instead of 25) |
 | X6 | P2 | A new Solana index shows balance `"0"` instead of null until its first settle |
 | X7 | P2 | The devnet nodes are exhausted: the only `getBlock` route answers 429 "max usage reached" |
-| S5 | P2 | Refusals drop the node's message and the parsed reason (`code -32000` only) |
 | G4 | P2 | Trigger definitions that cannot work are accepted with 201 (amounts, ids, networks, `since`) |
 | G5 | P2 | A failing trigger without `since` queues a failed job every round; failed jobs are never pruned |
 | G6 | P2 | A trigger round runs every block on every network, even with no triggers (~50k idle rows a day) |
 | U3 | P2 | The UI send dialog waits forever after a bump, a replaced or a dead transaction |
-| U4 | P2 | The committed `ui/dist` is stale: no fee choice, so sends from :8080 always use `normal` |
-| A3 | P2 | `POST /v1/wallets/{id}/transactions` accepts amounts beyond uint256 and `"+1"`; the job fails later |
-| A4 | P2 | Index `start` above i64 gives 503 with SQLite's error text; a future `start` is accepted |
+| A3 | P2 | An off-curve Solana recipient gets 202; the job fails later |
 | H2 | P2 | A pruned primary node moves an index's start up although another node serves those blocks |
 | D | P2 | A node answering garbage is never demoted; the index job fails every run (linear backoff) |
 | T1 | P2 | Single reads use a 15 s default; Retry × every node × 15 s; a send waits for every node; no step deadline |
-| R1 | P2 | `Http` and Bitcoin `getblockhash` do not check a batch's answer count |
 | R4 | P2 | HTTP 500 with a JSON-RPC body loses the node's code (send: "outcome unknown") |
 | R5 | P2 | `-32005` too many results is retried as a rate limit and the node demoted; the range is never split |
 | I3 | P2 | Ethereum downloads all receipts and full blocks |
@@ -67,69 +50,12 @@ configured), real reorgs, auth (loopback needs no token), and UI rendering (no b
 | F12 | P3 | No fee snapshot per round; a sweep fails if the rate rises before the job signs |
 | U5 | P3 | UI lists read only their first page; "Older" is undone by the 10 s refresh |
 | A5 | P3 | Bad path params, unknown routes and body errors: plain-text or empty bodies, one generic message |
-| A6 | P3 | `GET /v1/jobs` returns `input: null`, but the schema says object |
 | A7 | P3 | Parallel index creates all answer 201 |
 | A8 | P3 | Endpoint add calls any URL (loopback, private IPs) with a caller-set, uncapped timeout |
 | I6 | P3 | The jobs list and stats scan whole tables |
-| I9 | P3 | `eth_sendRawTransaction.underpriced.json` actually holds "insufficient funds" |
 | R6 | P3 | RPC statistics keep the last failure's code, not its message |
 | A1 | P3 | Unknown query params are silently ignored on every paged list |
-| A2 | P3 | Re-adding a wallet with a different `external_id` silently keeps the stored one |
 | Q1 | P3 | Leftovers and small inconsistencies (stale jobs, old formats, cosmetic) |
-
----
-
-## P0: money and safety
-
-None open (S1, S2, S3, X2 fixed; see the top).
-
----
-
-## P1: correctness and data loss
-
-### X4: Ether sent by contracts is never seen. P1
-- **What/when:** internal transfers (a contract paying out ether) appear in no transaction field or
-  log, so the indexer misses them (documented in `sdk/chains/ethereum/README.md`). Nothing detects
-  the drift.
-- **Seen:** watch-only `0x956962c34687a954e611a83619abaa37ce6bc78a` is 57.3 ETH below the chain;
-  37 non-zero settle adjustments were written for it.
-- **Fix:** a periodic balance check for indexes at the line (one `eth_getBalance` per index per N
-  minutes), writing an adjustment and flagging the index ("balance moved without a transaction").
-  Effort M.
-
-### G1: A failed daily payment is skipped for 24 h. P1
-- **What/when:** `since` counts a run whose job failed, so a daily trigger whose send failed waits
-  a full day. Before 084, seed-usdc-3/4/5 failed most days on a reused nonce (jobs 44770, 44772,
-  91246–7, 103626–8, 128738–40); today all four landed with consecutive nonces, but any failure still
-  skips a day.
-- **Fix:** `since` counts the last run whose jobs succeeded, or a failed run's trigger is retried
-  after a short backoff. Effort S.
-
-### G2: A PUT without `enabled` re-enables a paused trigger. P1
-- **What/when:** `#[serde(default = "enabled")]` (`api/triggers.rs:102-106`): a PUT that leaves the
-  field out sets it to true, and the trigger runs in the next round.
-- **Fix:** PUT keeps the stored value when the field is absent, or the field is required. Effort S.
-
-### G3: A `not` selector selects every other wallet. P1
-- **What/when:** an empty `all` is refused because it "would select every wallet", but
-  `{"not":{"tag":"deposit"}}` selects every wallet without that tag, the treasury included. A sweep
-  with it empties the treasury.
-- **Fix:** refuse a selector whose positive part is empty (`not` alone, `any` of only `not`s).
-  Effort S.
-
-### U1: The UI treats every 204 as an error. P1
-- **What/when:** `ui/src/api/client.ts:62-72` throws when `data` is undefined, which openapi-fetch
-  returns for 204. Adding and removing tags, deleting a trigger and adding a wallet with tags all
-  show "204 No Content" in red while the server did it. Adding a wallet with tags then stops before
-  step 2; "Next" again generates another keyed wallet, so orphan wallets pile up, never indexed.
-- **Fix:** treat 204 as success with no data. Effort S.
-
-### U2: The UI opens a wallet on its token. P1
-- **What/when:** `ui/src/money.ts:32` (`assetOf`) takes the first key of `indexes`; the server sorts
-  keys, so a token (`0x1c7d…`, `4zMM…`) comes before `native`. The wallet view and Send default to
-  the token; the wallet list's currency and balance filters judge by it (`rail.tsx:84`, `93`).
-- **Risk:** a user sends the token believing it is the native coin.
-- **Fix:** native first, then tokens in a stable order. Effort S.
 
 ---
 
@@ -155,11 +81,6 @@ None open (S1, S2, S3, X2 fixed; see the top).
   on the wallet index; log one line per failed step; count recent failures, not lifetime. Includes
   R6. Effort M.
 
-### X5: `/v1/stats` counts idle jobs as failed. P2
-- `usecase/stats.rs:125-133`: statuses 3, 4 and 5 all fall to `_ => jobs.failed = n`, which
-  overwrites, so idle (5) wins. Seen: 691 and 1124 against 25 failed. **Fix:** a field per state,
-  summed. Effort S.
-
 ### X6: A new Solana index shows `"0"` before its first settle. P2
 - The settle leg sits above the server's confirmed position, and the `wallet_index_with_balance`
   view turns "no leg" into `'0'`; its doc promises null. Seen for about 12 s on a new index. A
@@ -171,12 +92,6 @@ None open (S1, S2, S3, X2 fixed; see the top).
   Tatum's free tier allows 3 requests a second; public devnet answered 429 on 159 of 485 calls. The
   transport falls back but retries Helius every 30 s; `/endpoints` shows only "HTTP 429".
   **Fix:** configuration (another `getBlock` node); show the node's message (R6). Effort S.
-
-### S5: Refusals drop the node's message. P2
-- `sdk/chains/ethereum/src/rpc.rs:366-372` puts only the code in the message; `broadcast.rs:354`
-  keeps only `error.message`, so the parsed `Reason` is lost. Jobs read "refused: Ethereum node
-  refused the transaction with code -32000" for "intrinsic gas too low" and "nonce too low" alike.
-  **Fix:** keep the node's text and the reason in the job's reason. Effort S.
 
 ### G4: Trigger definitions that cannot work are accepted. P2
 - Accepted with 201: amounts negative, zero, `1e80` or with more decimals than the asset; selector
@@ -206,21 +121,10 @@ None open (S1, S2, S3, X2 fixed; see the top).
   "Waiting to be mined" for ever; a `skipped` job spins while queued; the job's reason and id are
   never shown. **Fix:** follow the job until it ends, show its txid and reason. Effort S.
 
-### U4: The committed UI is stale. P2
-- `ui/dist/app.js` has no fee choice (built at 521d66f; the fee select came in 3247ee6), so sends
-  from the page the server serves always use `normal`. `GET /ui/` also answers 404 on the server
-  (`/ui` and `/ui/wallets` are 200). **Fix:** rebuild and commit dist; serve `/ui/`. Effort S.
-
-### A3: Send amounts are checked late. P2
-- `"9999…"` (80 digits) and `"+1"` get 202 and the job fails "Ethereum amount must be a positive
-  256-bit number" (`usecase/wallets.rs:359-367`). An off-curve Solana recipient also gets 202 and
-  fails in the job (143565). **Fix:** bound the amount by the chain and parse the recipient fully at
-  the API. Effort S.
-
-### A4: Index `start` is unbounded. P2
-- `start` above i64::MAX → 503 "a value is above SQLite's integer range…"
-  (`api/wallet_indexes.rs:48`, `Option<u64>`); i64::MAX or any future height → 201 with
-  `requested_from` 9223372036854775807. **Fix:** 400 above the tip. Effort S.
+### A3: Send recipients are checked late. P2 · partly fixed
+- **Fixed:** a `+` or an amount beyond the chain's range is refused with 400 (see the top).
+- **Left:** an off-curve Solana recipient gets 202 and fails in the job (143565). **Fix:** parse
+  the recipient fully at the API. Effort S.
 
 ### H2: A pruned primary node moves the start. P2
 - What is left of the old H1: a node that keeps no history answers `NotServed`, which moves an
@@ -243,11 +147,6 @@ None open (S1, S2, S3, X2 fixed; see the top).
   waits for every node (`:270-282`); no step deadline, only the 5 min run timeout
   (`usecase/workers/index.rs:40, 156-180`). **Fix:** a step deadline and a total budget per call;
   the send returns at the first acceptance. Effort M.
-
-### R1: Batch answer count unchecked. P2 · partly fixed
-- `Http` (`packages/rpc/src/http.rs:136-166`) and Bitcoin `getblockhash`
-  (`sdk/chains/bitcoin/src/rpc.rs:188-203`) do not check it; jsonrpsee sizes the answers by what
-  arrived. Ethereum, Solana and Bitcoin `getblock` check. **Fix:** check in `Http`. Effort S.
 
 ### R4: HTTP 500 with a JSON-RPC body. P2
 - A non-2xx becomes `HttpStatus(500)` (`packages/rpc/src/http.rs:261-264`), and the Ethereum send
@@ -311,7 +210,6 @@ None open (S1, S2, S3, X2 fixed; see the top).
   `api/network_endpoints.rs:242`; only Json and Query rejections are mapped, `api/mod.rs:158-166`);
   unknown routes and wrong methods → empty bodies; every body error is one generic message with no
   field, no 413 or 415; error messages echo the whole input. Effort S.
-- **A6, jobs schema:** prune jobs return `"input": null`; `Job.input` is `type: object`. Effort S.
 - **A7, index create race:** 8 parallel creates all answer 201 (check then insert,
   `usecase/wallets.rs:195-205`). Effort S.
 - **A8, endpoint add:** calls any URL (loopback, private IPs) and the caller can set
@@ -320,29 +218,20 @@ None open (S1, S2, S3, X2 fixed; see the top).
 - **I6, full scans:** the jobs list orders by `updated_at` and filters with `json_extract`, with no
   index (`models/task.rs:351-392, 316-324`, `init.sql:541-545`); stats count whole tables
   (`models/transaction.rs:375-391`, `models/leg.rs:671-673`). Effort S.
-- **I9, mislabeled recording:** `sdk/chains/ethereum/src/testing/recordings/eth_sendRawTransaction.underpriced.json:11`
-  holds "insufficient funds … want 21001". Effort S.
 - **R6, no failure message:** `packages/rpc/src/decorators/counted.rs:24, 79-84, 98` keeps only the
   code. Part of X3. Effort S.
 - **A1, unknown query params ignored:** `api/mod.rs:217-225`, `api/jobs.rs:24-35`,
   `api/network_transactions.rs:27-33` (the jobs filter is `state`, so `?status=` lists everything).
   Effort S.
-- **A2, `external_id` re-add:** filled only when null (`models/wallet.rs:476-489`); a different id
-  gets 200 with the old one. **Fix:** 409. Effort S.
 - **Q1, leftovers and small inconsistencies:**
-  - four `expire` jobs (ids 2, 4, 5, 6) stay pending for ever: the worker was removed in 521d66f
-    without a cleanup (`084-migrate-1.sql`);
   - 42 broadcast jobs from before 084 show `txid: null, accepted: false` (old progress shape,
     `broadcast.rs:637`); three `triggers` jobs (7415, 7444, 7458) fail "missing field `selected`";
-  - a transaction's `reason` is double-encoded (`"\"reverted\""`);
   - failed jobs show a `run_at` about 65 s ahead;
   - after a self-send `spendable` is below `pending` until final (the incoming leg is not counted);
   - `PUT /v1/triggers/{id}` returns `last_round: null` (`usecase/triggers.rs:173`);
   - `GET /v1/triggers/{id}/runs` and `…/legs` of unknown ids answer 200 `[]` (documented);
   - `/health` `blocks` counts re-read blocks (53 992 against 12 608 rows);
   - Ethereum block `hash` has no `0x`; txids do;
-  - the API's `FeeLevel` description still says Bitcoin targets 12 blocks and Solana pays no
-    priority fee (`api/wallet_transactions.rs:58`, OpenAPI);
   - `ui/src/money.ts` has dead helpers and a header that says amounts come in display units;
   - the node detail lists every `rpc.` setting except `rps` (`nodes.tsx:212-215`).
 

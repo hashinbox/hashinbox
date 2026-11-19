@@ -30,6 +30,26 @@ pub(crate) struct Jobs {
     pub(crate) failed: u64,
 }
 
+impl Jobs {
+    /// The counts of (stored status, count) rows: skipped and idle jobs are
+    /// in none of them; an unknown status counts as failed.
+    fn of(counts: Vec<(i32, i64)>) -> Self {
+        let mut jobs = Self::default();
+        for (status, n) in counts {
+            let n = u64::try_from(n).unwrap_or_default();
+            let field = match task::status_of(status) {
+                tasks::Status::Pending => &mut jobs.pending,
+                tasks::Status::Running => &mut jobs.running,
+                tasks::Status::Done => &mut jobs.succeeded,
+                tasks::Status::Failed => &mut jobs.failed,
+                tasks::Status::Skipped | tasks::Status::Idle => continue,
+            };
+            *field += n;
+        }
+        jobs
+    }
+}
+
 /// One hour of chain time, across every network.
 #[derive(Default)]
 pub(crate) struct ChainHour {
@@ -121,16 +141,7 @@ pub(crate) async fn read(db: &Db) -> Result<Stats, Error> {
         let (blocks, reorged) = block::db::count(connection)?;
         let (transactions, reverted, pending) = transaction::db::count(connection)?;
         let (triggers, enabled) = trigger::db::count(connection)?;
-        let mut jobs = Jobs::default();
-        for (status, n) in task::db::count_by_status(connection)? {
-            let n = count(n);
-            match status {
-                0 => jobs.pending = n,
-                1 => jobs.running = n,
-                2 => jobs.succeeded = n,
-                _ => jobs.failed = n,
-            }
-        }
+        let jobs = Jobs::of(task::db::count_by_status(connection)?);
 
         // Chain time ends at the newest kept block: a skewed clock or a
         // lagging indexer leaves no empty hours.
@@ -213,5 +224,25 @@ pub(crate) async fn health(db: &Db) -> Health {
     Health {
         ready: !networks.is_empty() && failing == 0,
         networks,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Jobs;
+
+    #[test]
+    fn idle_and_skipped_jobs_are_not_failed() {
+        let jobs = Jobs::of(vec![
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 25),
+            (4, 7),
+            (5, 691),
+            (9, 1),
+        ]);
+        let counts = (jobs.pending, jobs.running, jobs.succeeded, jobs.failed);
+        assert_eq!(counts, (1, 2, 3, 26), "an unknown status is failed, summed");
     }
 }

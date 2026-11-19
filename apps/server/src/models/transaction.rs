@@ -97,6 +97,18 @@ pub(crate) fn decode_state(state: i32, reason: Option<&str>) -> anyhow::Result<T
     })
 }
 
+/// A stored revert reason as the API shows it: a JSON string decoded
+/// (`"reverted"`, not `"\"reverted\""`), anything else as stored.
+fn shown_reason<S: serde::Serializer>(
+    reason: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let shown = reason
+        .as_deref()
+        .map(|stored| serde_json::from_str::<String>(stored).unwrap_or_else(|_| stored.to_owned()));
+    serde::Serialize::serialize(&shown, serializer)
+}
+
 /// A kept transaction: its `transaction` row and its kept legs. The API
 /// shows it as is. Read in one query: its legs come as a JSON array SQLite
 /// builds (`legs`).
@@ -130,7 +142,9 @@ pub(crate) struct Transaction {
     pub(crate) order: Option<i64>,
     /// 0 pending, 1 succeeded, 2 reverted.
     pub(crate) state: i32,
-    /// Why it reverted (JSON), when the chain said; null otherwise.
+    /// Why it reverted, when the chain said (`reverted`); null otherwise.
+    /// Stored as JSON, shown decoded.
+    #[serde(serialize_with = "shown_reason")]
     pub(crate) reason: Option<String>,
     /// The signed transaction in its chain's encoding.
     #[serde(skip)]
@@ -602,5 +616,22 @@ pub(crate) mod db {
             .select(schema::leg::transaction.assume_not_null())
             .distinct()
             .load(connection)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json, value::Serializer};
+
+    use super::shown_reason;
+
+    #[test]
+    fn a_stored_reason_is_shown_decoded() {
+        let shown = |stored: Option<&str>| -> Value {
+            shown_reason(&stored.map(str::to_owned), Serializer).expect("a value")
+        };
+        assert_eq!(shown(Some(r#""reverted""#)), json!("reverted"));
+        assert_eq!(shown(Some(r#"{"other":"x"}"#)), json!(r#"{"other":"x"}"#));
+        assert_eq!(shown(None), Value::Null);
     }
 }

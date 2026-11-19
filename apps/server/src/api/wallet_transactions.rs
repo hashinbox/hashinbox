@@ -55,9 +55,11 @@ struct SendRequest {
     fee: Fee,
 }
 
-/// How fast a payment should land: Ethereum tips at half, the same or twice
-/// the node's suggestion; Bitcoin targets confirmation within 12 blocks, the
-/// network's target or the next block; Solana pays no priority fee yet.
+/// How fast a payment should land: `low`, `normal` and `high` pay the
+/// network's rate now with its tip × 0.5, 1 or 2 (Ethereum's priority fee,
+/// Bitcoin's rate above the mempool minimum, Solana's priority price); the
+/// base part (Ethereum's base fee, Bitcoin's mempool minimum) is the
+/// network's, so `low` is never below what nodes accept.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[schema(as = FeeLevel)]
