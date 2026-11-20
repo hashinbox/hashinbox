@@ -1,7 +1,9 @@
 //! A mock Sepolia for tests: [`Model`] answers every method this crate
 //! calls from replies recorded off a real node (`recordings/`, refreshed by
-//! [`record`]), and [`Ethereum`] is its `base::testing::TestChain`.
+//! [`record`]), and [`Ethereum`] is its `base::testing::TestChain`; and
+//! the [`fixtures`] the crate's tests share.
 
+pub mod fixtures;
 mod model;
 mod record;
 mod render;

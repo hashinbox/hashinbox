@@ -4,17 +4,41 @@
 //! [`Model`] (state, transactions, answers rendered from recorded node
 //! replies) and its [`TestChain`]; [`Recording`] keeps those answers honest.
 //!
+//! Besides, the doubles of base's own traits: [`Served`], a chain over a
+//! list of blocks; [`Memory`], every store; scripted answers ([`Held`],
+//! [`Confirms`], [`Holders`], [`TipInfo`], [`Unasked`]); [`Keyed`] wallets, their
+//! [`Keys`], [`Broadcasts`] and [`Fees`]; a real [`indexer`] over them; and
+//! [`fixtures`].
+//!
 //! Behind the `testing` feature: dev-dependencies only, offline, no sockets.
 
+mod answers;
 mod chain;
+mod fees;
+pub mod fixtures;
+mod indexer;
+mod memory;
 mod node;
+mod served;
 mod shapes;
+mod wallets;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+/// Locks `mutex`, whatever a panicking holder left.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub use answers::{Confirms, Held, Holders, TipInfo, Unasked};
 pub use chain::{Block, Chain, Clock, Model, Submitted};
+pub use fees::Fees;
+pub use indexer::{idle, indexer};
+pub use memory::Memory;
 pub use node::{Duplicate, Node, NodeControl, View};
+pub use served::Served;
 pub use shapes::Recording;
+pub use wallets::{Broadcasts, Keyed, Keys};
 
 use crate::NetworkConfig;
 

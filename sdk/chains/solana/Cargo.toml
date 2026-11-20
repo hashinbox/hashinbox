@@ -6,6 +6,11 @@ rust-version.workspace = true
 description = "Solana for the payment SDK: blocks as base legs, Ed25519 wallets, SOL and SPL transfers, broadcast."
 readme = "README.md"
 
+[features]
+default = []
+# The test fixtures (`chain_solana::testing`). Dev-dependencies only.
+testing = ["base/testing", "rpc/testing"]
+
 [dependencies]
 anyhow.workspace = true
 base = { path = "../../base" }
@@ -27,6 +32,8 @@ solana-transaction = { version = "=3.1.0", features = ["bincode", "verify"] }
 spl-memo-interface = "=2.0.0"
 
 [dev-dependencies]
+# This crate on itself: turns `testing` on for its own tests.
+chain-solana = { path = ".", features = ["testing"] }
 futures-executor.workspace = true
 # The reference Ed25519 implementation Solana itself ships: tests assert that
 # `crypto::Ed25519` signs the same bytes. Production signing never links it.

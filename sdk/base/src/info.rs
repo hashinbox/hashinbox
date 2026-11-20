@@ -83,49 +83,13 @@ mod tests {
     use rpc::testing::{Reply, Script};
     use serde_json::json;
 
-    use super::{CachedInfo, InfoClient, NodeInfo};
-    use crate::Future;
-
-    /// A node whose tip is its `tip` call.
-    struct Node(Arc<dyn rpc::Client>);
-
-    impl rpc::Client for Node {
-        fn request<'a>(
-            &'a self,
-            request: rpc::Request,
-        ) -> rpc::BoxFuture<'a, Result<rpc::RawJson, rpc::Error>> {
-            self.0.request(request)
-        }
-
-        fn batch<'a>(
-            &'a self,
-            batch: rpc::Batch,
-        ) -> rpc::BoxFuture<'a, Result<Vec<rpc::Answer>, rpc::Error>> {
-            self.0.batch(batch)
-        }
-    }
-
-    impl InfoClient for Node {
-        fn new(node: Arc<dyn rpc::Client>) -> Self {
-            Self(node)
-        }
-
-        fn tip(&self) -> Future<'_, anyhow::Result<u64>> {
-            Box::pin(async move {
-                let raw = self.0.request(rpc::Request::new("tip", json!([]))).await?;
-                Ok(raw.deserialize()?)
-            })
-        }
-
-        fn info(&self) -> Future<'_, anyhow::Result<NodeInfo>> {
-            Box::pin(async { anyhow::bail!("not asked") })
-        }
-    }
+    use super::{CachedInfo, InfoClient};
+    use crate::testing::TipInfo;
 
     #[tokio::test]
     async fn the_tip_is_asked_at_most_once_per_ttl() {
         let script = Script::new([Reply::ok("tip", json!(5))]);
-        let node: Arc<dyn InfoClient> = Arc::new(Node::new(Arc::new(script.clone())));
+        let node: Arc<dyn InfoClient> = Arc::new(TipInfo::new(Arc::new(script.clone())));
         let cached = CachedInfo::new(node.clone(), Duration::from_secs(60));
         assert_eq!(cached.last().await, None);
         for _ in 0..3 {

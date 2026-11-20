@@ -21,14 +21,23 @@ use base::{
     Address, BlockStore, Decimal, FeeLevel, Holding, IndexState, Indexes as _, InputStore as _,
     Tracking, Transaction, TransactionErrorKind, TransactionIndexStore, TransactionIndexer,
     TransactionState,
+    testing::{
+        Confirms, Keys, Served,
+        fixtures::{block, coin, payment, quiet, run},
+    },
 };
-use tasks::{Ack, Admission, Claim, Context, Id, OnLock, Store, Worker};
+use tasks::{
+    Ack, Admission, Id, Store, Worker,
+    testing::{claim, run_once},
+};
 
 use super::{
-    Fake, Script, container, network,
     storage::{
-        Confirms, Served, address, block, coin, confirm, forget, look_for, looked_for, mined,
-        payment, raw, record, rows, run, send, storage, watch,
+        address, confirm, forget, look_for, looked_for, mined, raw, record, rows, send, watch,
+    },
+    support::{
+        db::seeded,
+        scripted::{Script, container, network},
     },
 };
 use crate::{
@@ -74,7 +83,7 @@ impl Fixture {
         };
         let script = Script {
             tracking,
-            bump,
+            keys: Keys::new(network()).with_failures(bump, None),
             ..Script::default()
         };
         Self::with(None, script).await
@@ -96,7 +105,7 @@ impl Fixture {
     }
 
     async fn with(expires: Option<u64>, script: Script) -> Self {
-        let (storage, db, directory) = storage().await;
+        let (storage, db, directory) = seeded().await;
         let network = network();
         watch(&storage, &alice(), 0).await;
         look_for(&storage, "s", 0, expires).await;
@@ -114,13 +123,10 @@ impl Fixture {
             .unwrap();
         confirm(&db, 1).await;
         record(&db, &sent("s", "bob", 4, "f")).await;
-        script.signed.lock().unwrap().push(sent("s", "bob", 4, "f"));
+        script.keys.signed(sent("s", "bob", 4, "f"));
         let script = Arc::new(script);
         // Keyed: a bump signs as alice.
-        let keyed = Fake {
-            address: alice(),
-            script: script.clone(),
-        };
+        let keyed = script.keys.keyed("alice");
         base::WalletStore::insert(&storage, &keyed).await.unwrap();
         let queue = crate::usecase::tasks::queue(db.clone());
         let intent = SendIntent {
@@ -135,15 +141,7 @@ impl Fixture {
         let Admission::Queued(job) = Broadcast::enqueue(&queue, &intent).await.unwrap() else {
             panic!("a send is always queued");
         };
-        let now = tasks::now();
-        let claim = Claim {
-            kind: Broadcast::KIND,
-            limit: 1,
-            on_lock: OnLock::Wait,
-            now,
-            until: now + 60_000,
-        };
-        let claimed = queue.claim(claim).await.unwrap();
+        let claimed = claim(&queue, Broadcast::KIND, 1, tasks::now()).await;
         assert_eq!(claimed.len(), 1, "the job runs");
         let fixture = Self {
             worker: Broadcast::new(container(&db, script.clone()), db.clone()),
@@ -242,11 +240,7 @@ impl Fixture {
 
     /// One check.
     async fn check(&self) -> Ack {
-        let mut job = self.queue.get(self.job).await.unwrap().unwrap();
-        let store: Arc<dyn Store> = Arc::new(self.queue.clone());
-        self.worker
-            .run(Context::new(&mut job, store).unwrap())
-            .await
+        run_once(&self.worker, &self.queue, self.job).await
     }
 
     /// Whether `txid` is still kept, pending or mined.
@@ -291,12 +285,11 @@ impl Fixture {
     /// found in block 3, `reverted` there or not; then 5 is confirmed.
     async fn settle(&self, reverted: bool) {
         let network = network();
-        let quiet = (0..=5).map(|position| block(&network, position, 0, vec![]));
-        let confirms = Arc::new(Confirms::default());
+        let confirms = Arc::new(Confirms::new(network.clone()));
         confirms.set("s", Some((5, Some(3), reverted)));
         let closer = TransactionIndexer::new(
             Arc::new(self.storage.clone()),
-            Arc::new(Served(quiet.collect(), 0)),
+            Arc::new(Served::new(quiet(&network, 5), 0)),
             Some(confirms),
         );
         closer.close(5, 5).await.unwrap();
@@ -305,7 +298,7 @@ impl Fixture {
 
     /// What was sent again.
     fn sent(&self) -> Vec<Vec<u8>> {
-        self.script.sent.lock().unwrap().clone()
+        self.script.broadcasts.sent()
     }
 
     /// The txids looked for: the job's end deletes its index.
@@ -349,10 +342,8 @@ async fn a_sent_payment_is_sent_again_at_each_check_until_it_is_found_final() {
     let fixture = Fixture::new().await;
     fixture
         .script
-        .answers
-        .lock()
-        .unwrap()
-        .push_back(Err(TransactionErrorKind::Rejected));
+        .broadcasts
+        .answer(Err(TransactionErrorKind::Rejected));
     for _ in 0..2 {
         assert!(matches!(fixture.check().await, Ack::Again(_, None)));
     }
@@ -639,6 +630,7 @@ async fn a_payment_out_of_bumps_or_at_the_fee_cap_is_cancelled() {
 
 #[tokio::test]
 async fn a_payment_no_cancel_can_replace_is_sent_again_stuck() {
+    use TransactionErrorKind::FeeCap;
     let tracking = Tracking {
         bump_after: 1,
         max_bumps: 2,
@@ -646,8 +638,7 @@ async fn a_payment_no_cancel_can_replace_is_sent_again_stuck() {
     };
     let script = Script {
         tracking,
-        bump: Some(TransactionErrorKind::FeeCap),
-        cancel: Some(TransactionErrorKind::FeeCap),
+        keys: Keys::new(network()).with_failures(Some(FeeCap), Some(FeeCap)),
         ..Script::default()
     };
     let fixture = Fixture::with(None, script).await;
@@ -829,10 +820,8 @@ async fn a_replacement_every_node_refuses_is_undone() {
     let fixture = Fixture::bumping(1, 2, None).await;
     fixture
         .script
-        .answers
-        .lock()
-        .unwrap()
-        .push_back(Err(TransactionErrorKind::Rejected));
+        .broadcasts
+        .answer(Err(TransactionErrorKind::Rejected));
     let Ack::Again(_, Some(why)) = fixture.check().await else {
         panic!("checked again, with why");
     };

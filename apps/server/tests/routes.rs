@@ -21,7 +21,10 @@ use rpc::Client as _;
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
-use super::{Script, container, database, limited, network};
+use super::support::{
+    db::seeded,
+    scripted::{Script, container, limited, network},
+};
 use crate::{api, api::AppState};
 
 /// The raw body of `GET uri`.
@@ -100,7 +103,7 @@ fn paid(to: &str, amount: u64) -> Blocks {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wallets_balance_legs_and_sends() {
-    let (db, _directory) = database().await;
+    let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let state = Arc::new(AppState {
         container,
@@ -364,7 +367,7 @@ async fn answering(answer: u64) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
-    let (db, _directory) = database().await;
+    let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let state = Arc::new(AppState {
         container: container.clone(),
@@ -489,7 +492,7 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and_goes() {
-    let (db, _directory) = database().await;
+    let (_, db, _directory) = seeded().await;
     let container = limited(&db, Arc::new(Script::default()), Some(30));
     let state = Arc::new(AppState {
         container,
@@ -596,7 +599,7 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
-    let (db, _directory) = database().await;
+    let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let state = Arc::new(AppState {
         container,
@@ -787,11 +790,11 @@ async fn a_network_asset_icon_is_served_and_an_unknown_one_is_not() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready() {
     use diesel::connection::SimpleConnection as _;
-    use tasks::{Admission, Claim, OnLock, Store as _, Task, Worker as _};
+    use tasks::{Admission, Store as _, Task, Worker as _, testing::claim};
 
     use crate::usecase::workers::index::{Index, Target};
 
-    let (db, _directory) = database().await;
+    let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
     let worker = Arc::new(Index::new(container.clone(), db.clone(), queue.clone()));
@@ -808,14 +811,7 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
         .await
         .expect("dropped");
     let now = tasks::now();
-    let claim = Claim {
-        kind: Index::KIND,
-        limit: 1,
-        on_lock: OnLock::Wait,
-        now,
-        until: now + 60_000,
-    };
-    let job = queue.claim(claim).await.expect("claimed").remove(0);
+    let job = claim(&queue, Index::KIND, 1, now).await.remove(0);
     let mut task = Task::new(worker, job, Arc::new(queue.clone()));
     task.run().await;
     task.update().await.expect("settled");
@@ -855,7 +851,7 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
 async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
     use diesel::connection::SimpleConnection as _;
 
-    let (db, _directory) = database().await;
+    let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     // One run that queued two sends: one succeeded, one failed.
     db.write(|connection| {
@@ -908,7 +904,7 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_count_compares_with_a_whole_number_and_a_put_keeps_enabled() {
-    let (db, _directory) = database().await;
+    let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let state = Arc::new(AppState {
         container,
@@ -978,10 +974,14 @@ async fn a_count_compares_with_a_whole_number_and_a_put_keeps_enabled() {
 /// reconciled.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
-    use super::storage::{Held, Served, block, idle, payment};
+    use base::testing::{
+        Held, Served,
+        fixtures::{block, payment},
+        idle,
+    };
 
-    let (db, _directory) = database().await;
-    let held = Arc::new(Held::default());
+    let (_, db, _directory) = seeded().await;
+    let held = Arc::new(Held::new(network()));
     // Blocks 0..=5, final through 3; alice is paid 0.5 at 5.
     let network = network();
     let mut chain: Vec<_> = (0..=5).map(|p| block(&network, p, 0, vec![])).collect();
@@ -989,7 +989,7 @@ async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
     chain[5] = block(&network, 5, 0, vec![paid]);
     let script = Script {
         balances: Some(held.clone()),
-        chain: Some(Arc::new(Served(chain, 2))),
+        chain: Some(Served::new(chain, 2)),
         ..Script::default()
     };
     let container = container(&db, Arc::new(script));
@@ -1048,7 +1048,7 @@ async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
     // What a trigger round reads: the fully indexed indexes.
     let fully = || {
         db.read(|connection| {
-            let network = super::network();
+            let network = super::support::scripted::network();
             let alice = base::Address::new(network.clone(), "alice");
             let wanted = [(alice, base::Asset::native(network.clone()))];
             crate::models::wallet_index::db::find(connection, &network, &wanted, 0)
@@ -1119,7 +1119,7 @@ async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
 /// [`jumped`]: super::storage::jumped
 #[tokio::test(flavor = "multi_thread")]
 async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
-    let (db, _directory) = database().await;
+    let (_, db, _directory) = seeded().await;
     let state = Arc::new(AppState {
         container: container(&db, Arc::new(Script::default())),
         db: db.clone(),

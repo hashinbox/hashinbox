@@ -11,11 +11,14 @@ use alloy_sol_types::{SolCall as _, sol};
 use base::{
     Asset, Broadcaster as _, Decimal, Fee, FeeLevel, Leg, Reason, Signer, TransactionErrorKind,
     TransactionState, Transfer, WalletFactory as _,
+    testing::{Holders, Memory},
 };
-use chain_ethereum::{Client, Config, Factory, Network, Token, WalletFactory};
+use chain_ethereum::{
+    Client, Factory, Network, WalletFactory,
+    testing::fixtures::{TOKEN, atomic, config, network},
+};
 use crypto::SecretBytes;
 use futures_executor::block_on;
-use num_bigint::BigUint;
 use serde_json::json;
 
 /// `transfer`, signed by `builder`.
@@ -29,15 +32,6 @@ async fn pay(
 
 /// The well-known address of secret key 1.
 const KEY_ONE: &str = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf";
-const TOKEN: &str = "0x00000000000000000000000000000000000000c0";
-
-fn network() -> base::Network {
-    base::Network::new(chain_ethereum::CHAIN_NAME, "mainnet")
-}
-
-fn atomic(amount: u64) -> Decimal {
-    Decimal::from_atomic(BigUint::from(amount), 0)
-}
 
 sol! {
     function transfer(address recipient, uint256 amount) external returns (bool);
@@ -53,17 +47,6 @@ fn factory(script: &Script) -> WalletFactory {
         Arc::new(base::NoHoldings),
         Arc::new(base::NoTransactionIndexes),
     )
-}
-
-fn config() -> Config {
-    let mut config = Config::new(Network::new(1, "mainnet"));
-    config.tokens = vec![Token {
-        contract: TOKEN.parse().unwrap(),
-        decimals: 6,
-        ticker: None,
-        display_decimals: None,
-    }];
-    config
 }
 
 /// The node's estimate of an ether transfer to an unused address, and the
@@ -513,28 +496,7 @@ fn a_sweep_of_balance_less_estimate_pays_the_estimate() {
     assert_eq!(paid, Some(fee), "the estimator's cached rate, no refresh");
 }
 
-/// Holdings where [`KEY_TWO`] and `0x…b0` hold every asset.
-struct Held;
-
-impl base::Holdings for Held {
-    fn holds<'a>(
-        &'a self,
-        spends: &'a base::Spends,
-    ) -> base::Future<'a, anyhow::Result<Vec<bool>>> {
-        let held = spends
-            .iter()
-            .map(|spend| {
-                spend
-                    .to
-                    .as_ref()
-                    .is_some_and(|to| [KEY_TWO, HOLDER].contains(&to.value.as_str()))
-            })
-            .collect();
-        Box::pin(async move { Ok(held) })
-    }
-}
-
-/// An address [`Held`] says holds every asset.
+/// An address that holds every asset, as [`KEY_TWO`] does.
 const HOLDER: &str = "0x00000000000000000000000000000000000000b0";
 
 #[test]
@@ -546,7 +508,7 @@ fn a_send_to_a_holder_is_priced_for_one_and_any_other_for_a_new_account() {
     script.push([held(), new()]);
     let factory = Factory::from(config()).wallets(
         &connect(Arc::new(script.clone())),
-        Arc::new(Held),
+        Arc::new(Holders::of([KEY_TWO, HOLDER])),
         Arc::new(base::NoTransactionIndexes),
     );
     let fees = factory.fees();
@@ -671,85 +633,16 @@ fn a_hex_key_imports_with_or_without_its_prefix() {
     }
 }
 
-/// [`KEY_ONE`]'s sends in flight, as the application keeps them; nothing
-/// else.
-struct Pending(Vec<base::Transaction>);
-
-impl base::TransactionIndexStore for Pending {
-    fn insert<'a>(
-        &'a self,
-        index: &'a dyn base::IntoIndex<base::TransactionIndex>,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        base::TransactionIndexStore::insert(&base::NoTransactionIndexes, index)
-    }
-
-    fn find_all<'a>(
-        &'a self,
-        network: &'a base::Network,
-    ) -> base::Future<'a, anyhow::Result<Vec<base::TransactionIndex>>> {
-        base::TransactionIndexStore::find_all(&base::NoTransactionIndexes, network)
-    }
-
-    fn move_start<'a>(
-        &'a self,
-        index: &'a base::TransactionIndex,
-        start: u64,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        base::TransactionIndexStore::move_start(&base::NoTransactionIndexes, index, start)
-    }
-
-    fn set_state<'a>(
-        &'a self,
-        index: &'a base::TransactionIndex,
-        state: base::IndexState,
-        reason: Option<&'a str>,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        base::TransactionIndexStore::set_state(&base::NoTransactionIndexes, index, state, reason)
-    }
-
-    fn settle<'a>(
-        &'a self,
-        index: &'a base::TransactionIndex,
-        confirmed: &'a base::Confirmed,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        base::TransactionIndexStore::settle(&base::NoTransactionIndexes, index, confirmed)
-    }
-
-    fn give_up<'a>(
-        &'a self,
-        index: &'a base::TransactionIndex,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        base::TransactionIndexStore::give_up(&base::NoTransactionIndexes, index)
-    }
-
-    fn delete<'a>(
-        &'a self,
-        index: &'a base::TransactionIndex,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        base::TransactionIndexStore::delete(&base::NoTransactionIndexes, index)
-    }
-
-    fn find_sent<'a>(
-        &'a self,
-        sender: &'a base::Address,
-    ) -> base::Future<'a, anyhow::Result<Vec<base::Transaction>>> {
-        let sent = if sender.value == KEY_ONE {
-            self.0.clone()
-        } else {
-            Vec::new()
-        };
-        Box::pin(async move { Ok(sent) })
-    }
-}
-
 /// 1000 wei from [`KEY_ONE`], signed after `pending`, the node counting
 /// `count` pending.
 fn sent_after(pending: Vec<base::Transaction>, count: &str) -> base::Transaction {
     let script = Script::new([]);
+    let store = Memory::new();
+    pending.into_iter().for_each(|sent| store.sent(sent));
     let factory = Factory::from(config()).wallets(
         &connect(Arc::new(script.clone())),
         Arc::new(base::NoHoldings),
-        Arc::new(Pending(pending)),
+        Arc::new(store),
     );
     let wallet = block_on(factory.from_pk(key_one())).unwrap();
     let builder = wallet.transaction(&Asset::native(network())).unwrap();

@@ -3,42 +3,21 @@
 
 use base::{
     Address, Asset, Balances as _, BlockHash, Chained as _, Confirmed, Confirmer as _, Dated as _,
-    Decimal, Holding, Leg, Line, Network, NetworkConfig, NotServed, Reason, TransactionId,
-    TransactionState,
+    Decimal, Holding, Leg, Line, NetworkConfig, NotServed, Reason, TransactionId, TransactionState,
 };
 use std::sync::Arc;
 
 use ::rpc::testing::{Reply, Script};
-use chain_solana::{Chain, Client, Config, Factory};
+use chain_solana::{
+    Chain, Client, Config, Factory,
+    testing::fixtures::{MINT, base58, config, network},
+};
 use futures_executor::block_on;
 use serde_json::{Value, json};
-
-const MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-
-fn base58(byte: u8, length: usize) -> String {
-    bs58::encode(vec![byte; length]).into_string()
-}
-
-fn config() -> Config {
-    let genesis_hash = base58(9, 32).parse().unwrap();
-    let network = chain_solana::Network::new(genesis_hash, "localnet");
-    let mut config = Config::new(network);
-    config.tokens = vec![chain_solana::Token {
-        mint: MINT.parse().unwrap(),
-        decimals: 6,
-        ticker: None,
-        display_decimals: None,
-    }];
-    config
-}
 
 fn chain(script: &Script) -> Chain {
     let config = config();
     Factory::from(config.clone()).chain(&Client::new(Arc::new(script.clone()), config.native()))
-}
-
-fn network() -> Network {
-    Network::from(&config().native())
 }
 
 fn address(byte: u8) -> Address {

@@ -5,6 +5,8 @@ mod executor;
 mod job;
 mod memory;
 mod storage;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod topic;
 mod worker;
 

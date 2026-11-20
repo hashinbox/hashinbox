@@ -178,15 +178,9 @@ impl base::FeeEstimator for Estimator {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-        time::Duration,
-    };
+    use std::{sync::Arc, time::Duration};
 
-    use base::FeeEstimator as _;
+    use base::{FeeEstimator as _, testing::Holders};
     use futures_executor::block_on;
     use rpc::testing::{Reply, Script};
     use serde_json::json;
@@ -196,19 +190,6 @@ mod tests {
     use crate::{Client, Config, Network, Tokens, fee_rate::RateProvider};
 
     const MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-
-    /// Holdings in which every recipient holds its asset while set.
-    struct Holds(AtomicBool);
-
-    impl base::Holdings for Holds {
-        fn holds<'a>(
-            &'a self,
-            spends: &'a base::Spends,
-        ) -> base::Future<'a, anyhow::Result<Vec<bool>>> {
-            let held = self.0.load(Ordering::Relaxed);
-            Box::pin(async move { Ok(vec![held; spends.len()]) })
-        }
-    }
 
     fn base58(byte: u8) -> String {
         bs58::encode([byte; 32]).into_string()
@@ -238,7 +219,7 @@ mod tests {
             network: rpc.network().into(),
             rpc: rpc.clone(),
         };
-        let holds = Arc::new(Holds(AtomicBool::new(true)));
+        let holds = Arc::new(Holders::all());
         let estimator = Estimator::new(
             rpc,
             Tokens::new(address(1).network, [(MINT.parse().unwrap(), 6)]),
@@ -272,7 +253,7 @@ mod tests {
         );
         // It does not: the rent of creating it too; the signature price is
         // kept.
-        holds.0.store(false, Ordering::Relaxed);
+        holds.hold_as(Holders::of([]));
         script.push([
             priority(),
             Reply::ok("getMinimumBalanceForRentExemption", json!(2_039_280)),

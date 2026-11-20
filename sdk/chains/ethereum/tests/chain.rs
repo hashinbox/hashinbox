@@ -7,14 +7,15 @@ use ::rpc::testing::{Faults, Reply, Script};
 use base::{
     Asset, Balances as _, Chained as _, Confirmed, Confirmer as _, Dated as _, Decimal, Holding,
     InfoClient, Leg, NotServed, Reason, Reward, ServiceFactory as _, Tips, TransactionId,
-    TransactionState,
+    TransactionState, testing::Memory,
 };
-use chain_ethereum::{Chain, Client, Config, Factory, Info, Network, Token};
+use chain_ethereum::{
+    Chain, Client, Config, Factory, Info, Network,
+    testing::fixtures::{self, TOKEN, atomic, network},
+};
 use futures_executor::block_on;
-use num_bigint::BigUint;
 use serde_json::{Value, json};
 
-const TOKEN: &str = "0x00000000000000000000000000000000000000c0";
 const OTHER_TOKEN: &str = "0x00000000000000000000000000000000000000c1";
 /// The block every transaction fixture sits in.
 const HEIGHT: u64 = 5;
@@ -31,14 +32,6 @@ fn account(byte: u64) -> String {
 
 fn topic(address: &str) -> String {
     format!("0x{:0>64}", &address[2..])
-}
-
-fn network() -> base::Network {
-    base::Network::new(chain_ethereum::CHAIN_NAME, "mainnet")
-}
-
-fn atomic(amount: u64) -> Decimal {
-    Decimal::from_atomic(BigUint::from(amount), 0)
 }
 
 fn address(byte: u64) -> base::Address {
@@ -107,13 +100,7 @@ fn connect(script: &Script, config: &Config) -> Chain {
 }
 
 fn config() -> Config {
-    let mut config = Config::new(Network::new(1, "mainnet"));
-    config.tokens = vec![Token {
-        contract: TOKEN.parse().unwrap(),
-        decimals: 6,
-        ticker: None,
-        display_decimals: None,
-    }];
+    let mut config = fixtures::config();
     // The tip 16 of these tests confirmed through 12.
     config.confirmations = 4;
     config
@@ -521,168 +508,6 @@ fn a_block_time_is_a_header_read_and_expired_history_says_so() {
     script.exhausted();
 }
 
-/// Storage for an indexer that has never kept a block and indexes from
-/// block 13; every other store call fails the test.
-struct Fresh;
-
-impl base::BlockStore for Fresh {
-    fn insert<'a>(&'a self, _: &'a base::Blocks) -> base::Future<'a, anyhow::Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn find_last<'a>(
-        &'a self,
-        _: &'a base::Network,
-    ) -> base::Future<'a, anyhow::Result<Option<base::BlockHeader>>> {
-        Box::pin(async { Ok(None) })
-    }
-
-    fn delete<'a>(&'a self, _: &'a base::Network, _: u64) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("nothing to archive")
-    }
-}
-
-impl base::WalletIndexStore for Fresh {
-    fn insert<'a>(
-        &'a self,
-        _: &'a dyn base::IntoIndex<base::WalletIndex>,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("no watch")
-    }
-
-    fn find_next<'a>(
-        &'a self,
-        _: &'a base::Network,
-        _: u64,
-        _: Option<u64>,
-    ) -> base::Future<'a, anyhow::Result<Option<u64>>> {
-        Box::pin(async { Ok(Some(13)) })
-    }
-
-    /// None: nothing to settle.
-    fn find_all<'a>(
-        &'a self,
-        _: &'a base::Network,
-    ) -> base::Future<'a, anyhow::Result<Vec<base::WalletIndex>>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn move_start<'a>(
-        &'a self,
-        _: &'a base::WalletIndex,
-        _: u64,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("nothing pruned")
-    }
-
-    fn set_state<'a>(
-        &'a self,
-        _: &'a base::WalletIndex,
-        _: base::IndexState,
-        _: Option<&'a str>,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("nothing pruned")
-    }
-
-    fn settle<'a>(
-        &'a self,
-        _: &'a base::WalletIndex,
-        _: &'a base::Holding,
-    ) -> base::Future<'a, anyhow::Result<bool>> {
-        unreachable!("nothing to settle")
-    }
-
-    fn restart<'a>(
-        &'a self,
-        _: &'a base::WalletIndex,
-        _: u64,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("no jump")
-    }
-}
-
-/// No payment is watched.
-impl base::TransactionIndexStore for Fresh {
-    fn insert<'a>(
-        &'a self,
-        _: &'a dyn base::IntoIndex<base::TransactionIndex>,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("no send")
-    }
-
-    fn find_all<'a>(
-        &'a self,
-        _: &'a base::Network,
-    ) -> base::Future<'a, anyhow::Result<Vec<base::TransactionIndex>>> {
-        Box::pin(async { Ok(Vec::new()) })
-    }
-
-    fn move_start<'a>(
-        &'a self,
-        _: &'a base::TransactionIndex,
-        _: u64,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("no send")
-    }
-
-    fn set_state<'a>(
-        &'a self,
-        _: &'a base::TransactionIndex,
-        _: base::IndexState,
-        _: Option<&'a str>,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("no send")
-    }
-
-    fn settle<'a>(
-        &'a self,
-        _: &'a base::TransactionIndex,
-        _: &'a base::Confirmed,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("no send")
-    }
-
-    fn give_up<'a>(
-        &'a self,
-        _: &'a base::TransactionIndex,
-    ) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("no send")
-    }
-
-    fn delete<'a>(&'a self, _: &'a base::TransactionIndex) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("no send")
-    }
-
-    fn find_sent<'a>(
-        &'a self,
-        _: &'a base::Address,
-    ) -> base::Future<'a, anyhow::Result<Vec<base::Transaction>>> {
-        unreachable!("no send")
-    }
-}
-
-impl base::InputStore for Fresh {
-    fn find_unspent<'a>(
-        &'a self,
-        _: &'a [base::Address],
-    ) -> base::Future<'a, anyhow::Result<base::Inputs>> {
-        unreachable!("no spend")
-    }
-}
-
-impl base::WalletStore for Fresh {
-    fn insert<'a>(&'a self, _: &'a dyn base::Wallet) -> base::Future<'a, anyhow::Result<()>> {
-        unreachable!("no wallet")
-    }
-
-    fn find_all<'a>(
-        &'a self,
-        _: &'a base::WalletFactories,
-    ) -> base::Future<'a, anyhow::Result<Vec<Arc<dyn base::Wallet>>>> {
-        unreachable!("no wallet")
-    }
-}
-
 #[test]
 fn the_settings_batch_is_the_indexers_step() {
     let stored = base::NetworkConfig {
@@ -708,19 +533,23 @@ fn the_settings_batch_is_the_indexers_step() {
         base::DEFAULT_BATCH
     );
 
-    let fresh = Arc::new(Fresh);
-    let storage = base::Storage {
-        blocks: fresh.clone(),
-        indexes: fresh.clone(),
-        transaction_indexes: fresh.clone(),
-        inputs: fresh.clone(),
-        wallets: fresh,
-        holdings: Arc::new(base::NoHoldings),
-    };
+    // Nothing kept yet, an index from block 13.
+    let memory = Arc::new(Memory::new());
     let script = Script::new([]);
     let service = Factory::from(config)
-        .service(&storage, Arc::new(script.clone()))
+        .service(
+            &memory.storage(Arc::new(base::NoHoldings)),
+            Arc::new(script.clone()),
+        )
         .unwrap();
+    let alice = base::WalletIndex {
+        address: address(0xa1),
+        asset: Asset::native(network()),
+        requested_from: 13,
+        birthday: 13,
+        progress: base::Progress::default(),
+    };
+    block_on(base::WalletIndexStore::insert(&*memory, &alice)).unwrap();
     // From block 13 with the tip at 16: two blocks a step, not the default 100.
     script.push([
         Reply::ok("eth_blockNumber", json!("0x10")),
@@ -746,15 +575,7 @@ fn a_network_builds_with_its_node_down_and_asks_it_nothing() {
     let node = Faults::new(script.clone());
     let switch = node.switch();
     switch.down(true);
-    let fresh = Arc::new(Fresh);
-    let storage = base::Storage {
-        blocks: fresh.clone(),
-        indexes: fresh.clone(),
-        transaction_indexes: fresh.clone(),
-        inputs: fresh.clone(),
-        wallets: fresh,
-        holdings: Arc::new(base::NoHoldings),
-    };
+    let storage = Arc::new(Memory::new()).storage(Arc::new(base::NoHoldings));
     let service = Factory::from(config())
         .service(&storage, Arc::new(node))
         .unwrap();

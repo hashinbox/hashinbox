@@ -6,6 +6,11 @@ rust-version.workspace = true
 description = "Bitcoin for the payment SDK: blocks as base legs, UTXO wallets, building, signing and broadcast."
 readme = "README.md"
 
+[features]
+default = []
+# The test fixtures (`chain_bitcoin::testing`). Dev-dependencies only.
+testing = ["base/testing", "rpc/testing"]
+
 [dependencies]
 anyhow.workspace = true
 base = { path = "../../base" }
@@ -16,6 +21,8 @@ serde_json = { workspace = true, features = ["arbitrary_precision"] }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+# This crate on itself: turns `testing` on for its own tests.
+chain-bitcoin = { path = ".", features = ["testing"] }
 # The scripted node double (`rpc::testing`): tests only, never a production link.
 rpc = { path = "../../../packages/rpc", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

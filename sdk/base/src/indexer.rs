@@ -368,232 +368,39 @@ impl Networked for Indexer {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use super::*;
     use crate::{
-        Address, Asset, Birthday, Block, BlockHash, BlockParent, Blocks, Chain, IndexState,
-        IntoIndex, Tips, WalletIndex, WalletIndexStore, WalletIndexTarget, WalletIndexer,
-        transaction::Transactions,
+        Address, Asset, Birthday, Chain, IndexState, WalletIndex, WalletIndexStore,
+        WalletIndexTarget,
+        testing::{
+            Memory, Served,
+            fixtures::{header, quiet},
+            idle, indexer as real,
+        },
     };
-
-    /// A chain with a block at every position `0..=TIP`, serving those from
-    /// `first` on; and the stores, in memory.
-    struct Fake {
-        network: Network,
-        first: AtomicU64,
-        blocks: Mutex<Vec<BlockHeader>>,
-        indexes: Mutex<Vec<WalletIndex>>,
-    }
 
     const TIP: u64 = 50;
 
-    fn header(position: u64) -> BlockHeader {
-        BlockHeader {
-            position,
-            height: position,
-            hash: BlockHash(position.to_be_bytes().to_vec()),
-            parent: position.checked_sub(1).map(|parent| BlockParent {
-                position: parent,
-                hash: BlockHash(parent.to_be_bytes().to_vec()),
-            }),
-            timestamp: None,
-        }
-    }
-
-    impl Networked for Fake {
-        fn network(&self) -> &Network {
-            &self.network
-        }
-    }
-
-    impl Chained for Fake {
-        fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
-            Box::pin(async { Ok(Tips { position: TIP }) })
-        }
-
-        fn confirmations(&self) -> u64 {
-            0
-        }
-
-        fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
-            let served = position >= self.first.load(Ordering::SeqCst);
-            let block = Block {
-                network: self.network.clone(),
-                header: header(position),
-                transactions: Transactions::default(),
-                rewards: Vec::new(),
-            };
-            Box::pin(async move {
-                anyhow::ensure!(served, NotServed { position });
-                Ok((position <= TIP).then_some(block))
-            })
-        }
-    }
-
-    impl BlockStore for Fake {
-        /// Keeps new blocks; moves the indexes each applies to, as the
-        /// server's store does.
-        fn insert<'a>(&'a self, run: &'a Blocks) -> Future<'a, anyhow::Result<()>> {
-            let mut blocks = self.blocks.lock().unwrap();
-            let mut indexes = self.indexes.lock().unwrap();
-            for block in run.iter() {
-                let at = &block.header;
-                for index in indexes.iter_mut() {
-                    let progress = &mut index.progress;
-                    let applies = progress.state == IndexState::Indexing
-                        && index.birthday <= at.position
-                        && match progress.indexed_at {
-                            Some(through) => Some(through) == at.position.checked_sub(1),
-                            None => at
-                                .parent
-                                .as_ref()
-                                .is_none_or(|parent| parent.position < index.birthday),
-                        };
-                    if applies {
-                        progress.indexed_at = Some(at.position);
-                    }
-                }
-                if !blocks.contains(at) {
-                    blocks.push(at.clone());
-                }
-            }
-            Box::pin(async { Ok(()) })
-        }
-
-        fn find_last<'a>(
-            &'a self,
-            _network: &'a Network,
-        ) -> Future<'a, anyhow::Result<Option<BlockHeader>>> {
-            let last = self
-                .blocks
-                .lock()
-                .unwrap()
-                .iter()
-                .max_by_key(|h| h.position)
-                .cloned();
-            Box::pin(async { Ok(last) })
-        }
-
-        fn delete<'a>(
-            &'a self,
-            _network: &'a Network,
-            _from: u64,
-        ) -> Future<'a, anyhow::Result<()>> {
-            unimplemented!("no reorg here")
-        }
-    }
-
-    impl WalletIndexStore for Fake {
-        fn insert<'a>(
-            &'a self,
-            index: &'a dyn IntoIndex<WalletIndex>,
-        ) -> Future<'a, anyhow::Result<()>> {
-            Box::pin(async move {
-                let index = index.index().await?;
-                self.indexes.lock().unwrap().push(index);
-                Ok(())
-            })
-        }
-
-        fn find_all<'a>(
-            &'a self,
-            _network: &'a Network,
-        ) -> Future<'a, anyhow::Result<Vec<WalletIndex>>> {
-            let all = self.indexes.lock().unwrap().clone();
-            Box::pin(async { Ok(all) })
-        }
-
-        fn move_start<'a>(
-            &'a self,
-            index: &'a WalletIndex,
-            start: u64,
-        ) -> Future<'a, anyhow::Result<()>> {
-            self.change(index, |kept| {
-                if kept.progress.indexed_at.is_none() {
-                    kept.birthday = start;
-                }
-            });
-            Box::pin(async { Ok(()) })
-        }
-
-        fn set_state<'a>(
-            &'a self,
-            index: &'a WalletIndex,
-            state: IndexState,
-            reason: Option<&'a str>,
-        ) -> Future<'a, anyhow::Result<()>> {
-            self.change(index, |kept| {
-                kept.progress.state = state;
-                kept.progress.reason = reason.map(str::to_owned);
-            });
-            Box::pin(async { Ok(()) })
-        }
-
-        fn settle<'a>(
-            &'a self,
-            _index: &'a WalletIndex,
-            _holding: &'a crate::Holding,
-        ) -> Future<'a, anyhow::Result<bool>> {
-            unimplemented!("no balances here")
-        }
-
-        fn restart<'a>(
-            &'a self,
-            _index: &'a WalletIndex,
-            _birthday: u64,
-        ) -> Future<'a, anyhow::Result<()>> {
-            unimplemented!("no jump here")
-        }
-    }
-
-    impl Fake {
-        fn change(&self, index: &WalletIndex, change: impl Fn(&mut WalletIndex)) {
-            let mut indexes = self.indexes.lock().unwrap();
-            indexes
-                .iter_mut()
-                .filter(|kept| kept.address == index.address && kept.asset == index.asset)
-                .for_each(change);
-        }
-
-        fn index(&self, address: &str) -> WalletIndex {
-            self.indexes
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|index| index.address.value == address)
-                .cloned()
-                .unwrap()
-        }
-    }
-
-    /// An indexer over a fake serving from `first`, fetching `batch` a step.
-    fn indexer(first: u64, batch: u64) -> (Arc<Fake>, Indexer) {
-        let fake = Arc::new(Fake {
-            network: Network::new(Chain::from_static("test"), "fake"),
-            first: AtomicU64::new(first),
-            blocks: Mutex::default(),
-            indexes: Mutex::default(),
-        });
-        let wallets = WalletIndexer::new(fake.clone(), fake.clone(), None);
-        let indexer = Indexer::new(
-            fake.clone(),
-            fake.clone(),
-            vec![Arc::new(wallets)],
-            Duration::ZERO,
-        )
-        .with_batch(batch);
-        (fake, indexer)
+    /// A chain with a block at every position `0..=TIP`, serving those from
+    /// `first`; the stores in memory; an indexer over both fetching `batch`
+    /// a step.
+    fn indexer(first: u64, batch: u64) -> (Served, Arc<Memory>, Indexer) {
+        let network = Network::new(Chain::from_static("test"), "fake");
+        let chain = Served::new(quiet(&network, TIP), 0);
+        chain.prune(first);
+        let memory = Arc::new(Memory::new());
+        let indexer = real(chain.clone(), memory.clone(), None, None).with_batch(batch);
+        (chain, memory, indexer)
     }
 
     /// Watches the native asset of `address` from `from`.
-    async fn watch(fake: &Arc<Fake>, address: &str, from: u64) {
-        let network = fake.network.clone();
+    async fn watch(chain: &Served, memory: &Memory, address: &str, from: u64) {
+        let network = chain.network().clone();
         let asset = Asset::native(network.clone());
         let address = Address::new(network, address);
-        let target =
-            WalletIndexTarget::new(fake.clone(), address, asset).with_birthday(Birthday::At(from));
-        WalletIndexStore::insert(&**fake, &target).await.unwrap();
+        let target = WalletIndexTarget::new(Arc::new(chain.clone()), address, asset)
+            .with_birthday(Birthday::At(from));
+        WalletIndexStore::insert(memory, &target).await.unwrap();
     }
 
     const fn at(index: &WalletIndex) -> Option<u64> {
@@ -602,7 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_network_with_nothing_to_index_still_reads_its_tip() {
-        let (_fake, indexer) = indexer(0, 100);
+        let (_chain, _memory, indexer) = indexer(0, 100);
         assert_eq!(indexer.next().await.unwrap(), Next::Idle);
         let stats = indexer.stats();
         assert_eq!((stats.tip, stats.confirmed), (Some(TIP), Some(TIP)));
@@ -610,10 +417,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_unstarted_index_starts_at_the_first_served_block() {
-        let (fake, indexer) = indexer(20, 100);
-        watch(&fake, "a", 5).await;
-        assert_eq!(indexer.next().await.unwrap(), Next::Indexed(header(TIP)));
-        let index = fake.index("a");
+        let (chain, memory, indexer) = indexer(20, 100);
+        watch(&chain, &memory, "a", 5).await;
+        assert_eq!(indexer.next().await.unwrap(), Next::Indexed(header(TIP, 0)));
+        let index = memory.wallet_index("a");
         assert_eq!((index.requested_from, index.birthday), (5, 20));
         assert_eq!(
             (index.progress.state, at(&index)),
@@ -623,16 +430,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_started_index_with_a_gap_has_no_data_and_fails_the_step() {
-        let (fake, indexer) = indexer(0, 10);
-        watch(&fake, "a", 0).await;
+        let (chain, memory, indexer) = indexer(0, 10);
+        watch(&chain, &memory, "a", 0).await;
         indexer.next().await.unwrap();
-        assert_eq!(at(&fake.index("a")), Some(9));
+        assert_eq!(at(&memory.wallet_index("a")), Some(9));
         // A fresh index behind it, and the node prunes past both.
-        watch(&fake, "b", 3).await;
-        fake.first.store(30, Ordering::SeqCst);
+        watch(&chain, &memory, "b", 3).await;
+        chain.prune(30);
         let error = indexer.next().await.unwrap_err();
         assert_eq!(NotServed::find(&error), Some(NotServed { position: 3 }));
-        let (a, b) = (fake.index("a"), fake.index("b"));
+        let (a, b) = (memory.wallet_index("a"), memory.wallet_index("b"));
         assert_eq!(a.progress.state, IndexState::NoData);
         assert_eq!(
             a.progress.reason.as_deref(),
@@ -648,21 +455,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_paused_index_is_skipped_and_resumes_without_a_gap() {
-        let (fake, indexer) = indexer(0, 10);
-        watch(&fake, "a", 0).await;
-        watch(&fake, "b", 0).await;
+        let (chain, memory, indexer) = indexer(0, 10);
+        watch(&chain, &memory, "a", 0).await;
+        watch(&chain, &memory, "b", 0).await;
         indexer.next().await.unwrap();
-        let b = fake.index("b");
+        let b = memory.wallet_index("b");
         assert_eq!(at(&b), Some(9));
-        fake.set_state(&b, IndexState::Paused, None).await.unwrap();
-        while indexer.next().await.unwrap() != Next::Idle {}
-        assert_eq!(at(&fake.index("a")), Some(TIP));
-        assert_eq!(at(&fake.index("b")), Some(9));
-        fake.set_state(&b, IndexState::Indexing, None)
-            .await
-            .unwrap();
-        while indexer.next().await.unwrap() != Next::Idle {}
+        let set = |state| WalletIndexStore::set_state(&*memory, &b, state, None);
+        set(IndexState::Paused).await.unwrap();
+        idle(&indexer).await;
+        assert_eq!(at(&memory.wallet_index("a")), Some(TIP));
+        assert_eq!(at(&memory.wallet_index("b")), Some(9));
+        set(IndexState::Indexing).await.unwrap();
+        idle(&indexer).await;
         // The store moves an index only onto the child of its block.
-        assert_eq!(at(&fake.index("b")), Some(TIP));
+        assert_eq!(at(&memory.wallet_index("b")), Some(TIP));
     }
 }

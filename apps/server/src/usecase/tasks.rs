@@ -130,182 +130,21 @@ impl Store for Sqlite {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tasks::{Status, Topic};
+    use tasks::{Status, Topic, testing::claim};
 
     use super::*;
 
-    /// The store on a fresh file.
-    async fn store() -> (tempfile::TempDir, Db, Sqlite) {
-        let directory = tempfile::tempdir().unwrap();
-        let db = Db::open(&directory.path().join("q.db")).unwrap();
-        db.migrate().await.unwrap();
-        (directory, db.clone(), Sqlite { db })
+    /// The store on a fresh file, and what keeps the file.
+    async fn store() -> ((Db, tempfile::TempDir), Sqlite) {
+        let (db, directory) = crate::tests::support::db::fresh().await;
+        ((db.clone(), directory), Sqlite { db })
     }
 
-    /// A job of `kind` on `topic`, due from time 0.
-    fn job(kind: &str, topic: &str) -> Job {
-        Job::new(Topic::parse(topic).unwrap(), kind, json!(null)).run_at(0)
-    }
-
-    async fn enqueue(store: &Sqlite, job: Job) -> Id {
-        match store.enqueue(job, false).await.unwrap() {
-            Admission::Queued(id) => id,
-            Admission::Duplicate(id) => panic!("a duplicate of {id}"),
-        }
-    }
-
-    /// Claims up to `limit` of `kind` at `now`, leased until `now + 100`.
-    async fn claim(store: &Sqlite, kind: &str, limit: usize, on_lock: OnLock, now: u64) -> Vec<Id> {
-        let claim = Claim {
-            kind,
-            limit,
-            on_lock,
-            now,
-            until: now + 100,
-        };
-        let jobs = store.claim(claim).await.unwrap();
-        jobs.into_iter().map(|job| job.id).collect()
-    }
-
-    async fn get(store: &Sqlite, id: Id) -> Job {
-        store.get(id).await.unwrap().unwrap()
-    }
-
-    /// Stores running job `id` done.
-    async fn finish(store: &Sqlite, id: Id) {
-        let running = get(store, id).await;
-        let attempt = running.attempts;
-        let done = Job {
-            status: Status::Done,
-            ..running
-        };
-        store.update(done, attempt).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn enqueue_numbers_jobs_and_unique_keeps_one_unfinished_per_topic() {
-        let (_directory, _db, store) = store().await;
-        assert_eq!(enqueue(&store, job("k", "a")).await, Id(1));
-        let first = store.enqueue(job("u", "n"), true).await.unwrap();
-        assert_eq!(first, Admission::Queued(Id(2)));
-        let again = store.enqueue(job("u", "n"), true).await.unwrap();
-        assert_eq!(again, Admission::Duplicate(Id(2)));
-        claim(&store, "u", 1, OnLock::Wait, 0).await;
-        let running = store.enqueue(job("u", "n"), true).await.unwrap();
-        assert_eq!(running, Admission::Duplicate(Id(2)), "while it runs");
-        finish(&store, Id(2)).await;
-        let after = store.enqueue(job("u", "n"), true).await.unwrap();
-        assert_eq!(after, Admission::Queued(Id(3)));
-    }
-
-    #[tokio::test]
-    async fn a_claim_follows_line_order_conflicts_and_its_limit() {
-        let (_directory, _db, store) = store().await;
-        let wallet = enqueue(&store, job("k", "n.w1")).await;
-        let network = enqueue(&store, job("k", "n")).await;
-        let again = enqueue(&store, job("k", "n.w1")).await;
-        let other = enqueue(&store, job("k", "n.w2")).await;
-        let elsewhere = enqueue(&store, job("k", "m")).await;
-        let later = enqueue(&store, job("k", "x").run_at(50)).await;
-        assert_eq!(claim(&store, "k", 1, OnLock::Wait, 0).await, [wallet]);
-        assert_eq!(claim(&store, "k", 9, OnLock::Wait, 0).await, [elsewhere]);
-        let claimed = get(&store, wallet).await;
-        assert_eq!(
-            (claimed.status, claimed.attempts, claimed.run_at),
-            (Status::Running, 1, 100)
-        );
-        finish(&store, wallet).await;
-        assert_eq!(claim(&store, "k", 9, OnLock::Wait, 0).await, [network]);
-        finish(&store, network).await;
-        assert_eq!(
-            claim(&store, "k", 9, OnLock::Wait, 50).await,
-            [again, other, later]
-        );
-    }
-
-    #[tokio::test]
-    async fn a_fresh_run_holds_no_place_until_due_but_a_retry_does() {
-        let (_directory, _db, store) = store().await;
-        enqueue(&store, job("k", "n").run_at(50)).await;
-        let wallet = enqueue(&store, job("k", "n.w1")).await;
-        assert_eq!(claim(&store, "k", 9, OnLock::Wait, 0).await, [wallet]);
-        let retried = Job {
-            attempts: 1,
-            ..job("k", "m").run_at(50)
-        };
-        enqueue(&store, retried).await;
-        enqueue(&store, job("k", "m.w1")).await;
-        assert!(claim(&store, "k", 9, OnLock::Wait, 0).await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_skip_job_is_skipped_while_a_conflicting_job_holds_its_topic() {
-        let (_directory, _db, store) = store().await;
-        let held = enqueue(&store, job("send", "n.w1")).await;
-        claim(&store, "send", 1, OnLock::Wait, 0).await;
-        let round = enqueue(&store, job("round", "n")).await;
-        assert!(claim(&store, "round", 1, OnLock::Skip, 0).await.is_empty());
-        let skipped = get(&store, round).await;
-        assert_eq!(
-            (skipped.status, skipped.reason),
-            (Status::Skipped, Some(format!("skipped: {held}")))
-        );
-        finish(&store, held).await;
-        let next = enqueue(&store, job("round", "n")).await;
-        enqueue(&store, job("send", "n.w2")).await;
-        assert_eq!(claim(&store, "round", 1, OnLock::Skip, 0).await, [next]);
-    }
-
-    #[tokio::test]
-    async fn a_claim_expires_its_kind_and_reclaims_an_ended_lease() {
-        let (_directory, _db, store) = store().await;
-        let late = enqueue(&store, job("k", "a").with_deadline(5)).await;
-        let leased = enqueue(&store, job("k", "b")).await;
-        assert_eq!(claim(&store, "k", 9, OnLock::Wait, 10).await, [leased]);
-        let expired = get(&store, late).await;
-        assert_eq!(
-            (expired.status, expired.reason.as_deref()),
-            (Status::Failed, Some("expired"))
-        );
-        assert!(
-            claim(&store, "k", 9, OnLock::Wait, 109).await.is_empty(),
-            "leased"
-        );
-        assert_eq!(claim(&store, "k", 9, OnLock::Wait, 110).await, [leased]);
-        assert_eq!(get(&store, leased).await.attempts, 2);
-    }
-
-    #[tokio::test]
-    async fn an_update_lands_only_while_its_run_holds_the_job() {
-        let (_directory, _db, store) = store().await;
-        let id = enqueue(&store, job("k", "a")).await;
-        let pending = get(&store, id).await;
-        assert!(matches!(
-            store.update(pending, 0).await,
-            Err(StoreError::Stale)
-        ));
-        claim(&store, "k", 1, OnLock::Wait, 0).await;
-        let saved = Job {
-            state: Some(json!({"sent": 1})),
-            ..get(&store, id).await
-        };
-        store.update(saved.clone(), 1).await.unwrap();
-        assert_eq!(get(&store, id).await.state, Some(json!({"sent": 1})));
-        let again = Job {
-            status: Status::Pending,
-            attempts: 0,
-            ..saved.clone()
-        };
-        store.update(again, 1).await.unwrap();
-        assert!(
-            matches!(store.update(saved, 1).await, Err(StoreError::Stale)),
-            "a late save never undoes how the run ended"
-        );
-    }
+    tasks::store_contract!(store);
 
     #[tokio::test]
     async fn pruning_deletes_only_jobs_that_succeeded_before() {
-        let (_directory, db, store) = store().await;
+        let ((db, _directory), store) = store().await;
         let mut ids = Vec::new();
         for status in [
             Status::Done,
@@ -313,9 +152,12 @@ mod tests {
             Status::Pending,
             Status::Skipped,
         ] {
-            let id = enqueue(&store, job("k", &format!("p{}", ids.len()))).await;
-            claim(&store, "k", 1, OnLock::Wait, 0).await;
-            let ran = get(&store, id).await;
+            let topic = Topic::parse(&format!("p{}", ids.len())).unwrap();
+            let job = Job::new(topic, "k", json!(null)).run_at(0);
+            let Admission::Queued(id) = store.enqueue(job, false).await.unwrap() else {
+                panic!("a new job");
+            };
+            let ran = claim(&store, "k", 1, 0).await.remove(0);
             store.update(Job { status, ..ran }, 1).await.unwrap();
             ids.push(id);
         }

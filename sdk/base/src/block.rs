@@ -690,48 +690,25 @@ impl<S: Store> Notify for Notifying<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Chain;
+    use crate::{
+        Chain,
+        testing::{Served, fixtures},
+    };
 
     /// Blocks at even positions `0..=20`, block `p` made at time `100 + p`.
-    struct Even(Network);
-
-    impl Networked for Even {
-        fn network(&self) -> &Network {
-            &self.0
-        }
+    fn even() -> Served {
+        let network = Network::new(Chain::from_static("test"), "even");
+        let block = |position: u64| {
+            let mut block = fixtures::block(&network, position, 0, vec![]);
+            block.header.timestamp = Some(100 + position);
+            block
+        };
+        Served::new((0..=20).step_by(2).map(block).collect(), 0)
     }
-
-    impl Chained for Even {
-        fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
-            Box::pin(async { Ok(Tips { position: 20 }) })
-        }
-
-        fn confirmations(&self) -> u64 {
-            0
-        }
-
-        fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
-            let block = position.is_multiple_of(2).then(|| Block {
-                network: self.0.clone(),
-                header: Header {
-                    position,
-                    height: position / 2,
-                    hash: Hash(position.to_be_bytes().to_vec()),
-                    parent: None,
-                    timestamp: Some(100 + position),
-                },
-                transactions: Transactions::default(),
-                rewards: Vec::new(),
-            });
-            Box::pin(async move { Ok(block) })
-        }
-    }
-
-    impl Dated for Even {}
 
     #[tokio::test]
     async fn position_at_finds_the_last_block_at_or_before() {
-        let chain = Even(Network::new(Chain::from_static("test"), "even"));
+        let chain = even();
         let at = |time| {
             let chain = &chain;
             async move { chain.position_at(time).await.unwrap().map(|h| h.position) }
@@ -745,37 +722,10 @@ mod tests {
         assert_eq!(chain.tip().await.unwrap().position, 20);
     }
 
-    /// [`Even`] whose node no longer serves positions below 7.
-    struct Pruned(Even);
-
-    impl Networked for Pruned {
-        fn network(&self) -> &Network {
-            self.0.network()
-        }
-    }
-
-    impl Chained for Pruned {
-        fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
-            self.0.tips()
-        }
-
-        fn confirmations(&self) -> u64 {
-            0
-        }
-
-        fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
-            if position < 7 {
-                return Box::pin(async move { Err(NotServed { position }.into()) });
-            }
-            self.0.block(position)
-        }
-    }
-
-    impl Dated for Pruned {}
-
     #[tokio::test]
     async fn search_starts_at_the_first_served_block() {
-        let chain = Pruned(Even(Network::new(Chain::from_static("test"), "even")));
+        let chain = even();
+        chain.prune(7);
         let at = |time| {
             let chain = &chain;
             async move { chain.position_at(time).await.unwrap().map(|h| h.position) }
@@ -788,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_tells_each_narrowing_range() {
-        let chain = Even(Network::new(Chain::from_static("test"), "even"));
+        let chain = even();
         let probes = std::sync::Mutex::new(Vec::new());
         let found = chain
             .search(107, &|probe| probes.lock().unwrap().push(probe))

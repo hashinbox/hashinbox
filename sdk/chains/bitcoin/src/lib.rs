@@ -11,6 +11,8 @@ mod key;
 mod network;
 mod rpc;
 mod rpc_info;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod transaction;
 mod wallet;
 

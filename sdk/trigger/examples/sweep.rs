@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use anyhow::{bail, ensure};
-use base::{Address, Asset, AssetInfo, Assets, Chain, Decimal, Future, Network};
+use base::{Address, Asset, AssetInfo, Assets, Chain, Decimal, Future, Network, testing::Fees};
 use futures_executor::block_on;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -22,7 +22,7 @@ use trigger::{
     amounts::{self, Amount as _, Arithmetic},
     conditions::{self, Condition},
     selection::{Index, Target},
-    testing::{Fees, Wallets},
+    testing::Wallets,
 };
 
 /// The token swept: Sepolia's USDC.

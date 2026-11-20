@@ -3,33 +3,19 @@
 use std::sync::Arc;
 
 use ::rpc::testing::{Reply, Script};
-use base::{
-    Addressed as _, Asset, Chained, Coin, Dated as _, Leg, NotServed, TransactionId,
-    TransactionState,
-};
+use base::{Asset, Chained, Coin, Dated as _, Leg, NotServed, TransactionId, TransactionState};
 use bitcoin::{
     Amount, BlockHash, Denomination, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
     Witness, absolute, consensus::encode::serialize_hex, hashes::Hash as _, transaction::Version,
 };
-use chain_bitcoin::{AddressType, Client, Config, Factory, KeyPair, Network};
-use crypto::SecretBytes;
+use chain_bitcoin::{
+    Client, Config, Factory, Network,
+    testing::fixtures::{address_of, key_of},
+};
 use serde_json::{Value, json};
-
-fn key_of(seed: u8) -> KeyPair {
-    KeyPair::import(
-        &SecretBytes::new([seed; 32]),
-        Network::Regtest,
-        AddressType::SegwitV0,
-    )
-    .expect("valid key")
-}
 
 fn script_of(seed: u8) -> ScriptBuf {
     key_of(seed).native_address().script_pubkey()
-}
-
-fn address_of(seed: u8) -> base::Address {
-    key_of(seed).address().clone()
 }
 
 fn transaction(inputs: Vec<OutPoint>, outputs: Vec<(ScriptBuf, u64)>) -> Transaction {

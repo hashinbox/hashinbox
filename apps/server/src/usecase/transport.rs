@@ -535,44 +535,14 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use base::{Chain, Future, InfoClient, Network, NetworkConfig, NodeInfo};
+    use base::{Chain, Network, NetworkConfig, testing::TipInfo};
     use rpc::{
-        Answer, Batch, BoxFuture, Client as _, Error, ErrorKind, RawJson, Request,
+        Client as _, Error, ErrorKind, Request,
         testing::{Fault, Faults, Reply, Script, Switch},
     };
     use serde_json::json;
 
     use super::{Clients, Transport};
-
-    /// A node whose tip is its `tip` call.
-    struct Tip(Arc<dyn rpc::Client>);
-
-    impl rpc::Client for Tip {
-        fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<RawJson, Error>> {
-            self.0.request(request)
-        }
-
-        fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>> {
-            self.0.batch(batch)
-        }
-    }
-
-    impl InfoClient for Tip {
-        fn new(node: Arc<dyn rpc::Client>) -> Self {
-            Self(node)
-        }
-
-        fn tip(&self) -> Future<'_, anyhow::Result<u64>> {
-            Box::pin(async move {
-                let raw = self.0.request(Request::new("tip", json!([]))).await?;
-                Ok(raw.deserialize()?)
-            })
-        }
-
-        fn info(&self) -> Future<'_, anyhow::Result<NodeInfo>> {
-            Box::pin(async { anyhow::bail!("not asked") })
-        }
-    }
 
     /// A network whose tips are kept a minute and whose nodes may trail
     /// the highest tip by 2.
@@ -602,7 +572,10 @@ mod tests {
                 (client, (script, switch))
             })
             .unzip();
-        (Transport::from_clients::<Tip>(&config(), clients), nodes)
+        (
+            Transport::from_clients::<TipInfo>(&config(), clients),
+            nodes,
+        )
     }
 
     /// [`scripted`] nodes, each first telling its tip of `tips`.
@@ -807,7 +780,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_keeps_a_node_whose_url_stays_and_replace_starts_one_empty() {
-        let transport = Transport::new::<Tip>(&config());
+        let transport = Transport::new::<TipInfo>(&config());
         let endpoint = |id: i64| crate::models::Endpoint {
             id,
             url: rpc::Endpoint::new(format!("http://node-{id}.invalid/")),

@@ -1,9 +1,12 @@
 //! The server suite's harness: [`App`] runs the real server (its container,
 //! routes and workers) over a mock chain's nodes, [`Api`] calls its routes, [`until`] waits for
 //! the workers, and `scenarios!` emits one test per case, chain and
-//! topology. Nothing here opens a socket.
+//! topology. Nothing here opens a socket. Besides, temp databases (`db`)
+//! and the scripted network the older tests run over (`scripted`).
 
 mod api;
+pub(crate) mod db;
+pub(crate) mod scripted;
 
 use std::{future::Future, sync::Arc, time::Duration};
 
@@ -31,14 +34,14 @@ const TICK: Duration = Duration::from_millis(5);
 const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A test chain's reader and factory, as `main` registers its chain.
-pub(crate) trait Served: TestChain {
+pub(crate) trait Mounted: TestChain {
     /// How a node is read.
     type Info: base::InfoClient + 'static;
     /// How a network is built.
     type Factory: base::ServiceFactory;
 }
 
-impl Served for chain_ethereum::testing::Ethereum {
+impl Mounted for chain_ethereum::testing::Ethereum {
     type Info = chain_ethereum::Info;
     type Factory = chain_ethereum::Factory;
 }
@@ -54,7 +57,7 @@ pub(crate) struct App {
 
 impl App {
     /// [`Self::boot`] with `chain`'s network alone.
-    pub(crate) async fn start<T: Served>(chain: &T) -> Self {
+    pub(crate) async fn start<T: Mounted>(chain: &T) -> Self {
         Self::boot::<T>(vec![(chain.network(), chain.nodes())]).await
     }
 
@@ -62,12 +65,10 @@ impl App {
     /// each one's node `i` stored at `http://{name}-{i}.invalid/`; registers
     /// each over a transport of its nodes, as `main` does over stored ones,
     /// and runs every worker.
-    pub(crate) async fn boot<T: Served>(
+    pub(crate) async fn boot<T: Mounted>(
         networks: Vec<(NetworkConfig, Vec<Arc<dyn rpc::Client>>)>,
     ) -> Self {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let db = crate::db::Db::open(&directory.path().join("test.db")).expect("the file opens");
-        db.migrate().await.expect("the schema applies");
+        let (db, directory) = db::fresh().await;
         clear(&db).await;
         let container = Container::new(usecase::sdk::Stores::storage(db.clone()));
         for (network, nodes) in networks {

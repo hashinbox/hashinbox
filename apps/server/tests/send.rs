@@ -6,14 +6,26 @@
 //! payments are two jobs, run in order, each failing on its own; the second
 //! runs while the first waits for its check.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use base::{TransactionErrorKind, WalletStore as _};
-use tasks::{Ack, Admission, Claim, Context, Id, OnLock, Status, Store, Worker};
+use base::{
+    Addressed as _, TransactionErrorKind, WalletStore as _,
+    testing::{
+        Broadcasts, Keys,
+        fixtures::{block, run},
+    },
+};
+use tasks::{
+    Ack, Admission, Id, Status, Store, Worker,
+    testing::{claim, end, run_once},
+};
 
 use super::{
-    Fake, Script, container, database, network,
-    storage::{block, confirm, run, watch},
+    storage::{confirm, watch},
+    support::{
+        db::seeded,
+        scripted::{Script, container, network},
+    },
 };
 use crate::{
     db::Db,
@@ -45,20 +57,16 @@ impl Fixture {
         answers: Vec<Result<(), TransactionErrorKind>>,
         fee: u64,
     ) -> Self {
-        let (db, directory) = database().await;
+        let (stores, db, directory) = seeded().await;
         let queue = crate::usecase::tasks::queue(db.clone());
         let script = Arc::new(Script {
-            answers: Mutex::new(answers.into()),
-            fee,
+            keys: Keys::new(network()).with_fee(fee),
+            broadcasts: Arc::new(Broadcasts::new(answers)),
             ..Script::default()
         });
-        let sender = Fake {
-            address: base::Address::new(network(), "sender"),
-            script: script.clone(),
-        };
-        let stores = Stores::new(db.clone());
+        let sender = script.keys.keyed("sender");
         stores.insert(&sender).await.expect("the wallet kept");
-        watch(&stores, &sender.address, 0).await;
+        watch(&stores, sender.address(), 0).await;
         let mut jobs = Vec::new();
         for amount in amounts {
             let intent = SendIntent {
@@ -90,15 +98,7 @@ impl Fixture {
 
     /// Claims the jobs that may start now.
     async fn claim(&self) -> Vec<Id> {
-        let now = tasks::now();
-        let claim = Claim {
-            kind: Broadcast::KIND,
-            limit: 4,
-            on_lock: OnLock::Wait,
-            now,
-            until: now + 60_000,
-        };
-        let claimed = self.queue.claim(claim).await.expect("claimed");
+        let claimed = claim(&self.queue, Broadcast::KIND, 4, tasks::now()).await;
         claimed.into_iter().map(|job| job.id).collect()
     }
 
@@ -109,18 +109,12 @@ impl Fixture {
 
     /// One run of job `id` as stored now, its outcome not stored.
     async fn run_job(&self, id: Id) -> Ack {
-        let mut job = self.job(id).await;
-        let store: Arc<dyn Store> = Arc::new(self.queue.clone());
-        let cx = Context::new(&mut job, store).expect("a context");
-        self.worker.run(cx).await
+        run_once(&self.worker, &self.queue, id).await
     }
 
     /// Stores how job `id`'s run ended.
     async fn end(&self, id: Id, ack: Ack) {
-        let job = self.job(id).await;
-        let attempt = job.attempts;
-        let ended = job.settle(ack, &Broadcast::POLICY, tasks::now());
-        self.queue.update(ended, attempt).await.expect("stored");
+        end::<Broadcast>(&self.queue, id, ack).await;
     }
 
     async fn job(&self, id: Id) -> tasks::Job {
@@ -160,11 +154,11 @@ impl Fixture {
     }
 
     fn built(&self) -> u8 {
-        *self.script.built.lock().expect("the counter")
+        self.script.keys.built()
     }
 
     fn sent(&self) -> Vec<Vec<u8>> {
-        self.script.sent.lock().expect("the log").clone()
+        self.script.broadcasts.sent()
     }
 }
 

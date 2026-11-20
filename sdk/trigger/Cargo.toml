@@ -9,8 +9,8 @@ description = "The trigger engine as composable pieces: wallets, amounts, condit
 default = []
 # `utoipa::ToSchema` on the stats a round keeps.
 openapi = ["dep:utoipa"]
-# The test doubles: the in-memory store and the fixed-price fee estimator (`trigger::testing`).
-testing = []
+# The test doubles: the in-memory store (`trigger::testing`), and base's.
+testing = ["base/testing"]
 
 [dependencies]
 anyhow.workspace = true

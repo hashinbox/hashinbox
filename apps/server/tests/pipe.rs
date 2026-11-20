@@ -11,11 +11,11 @@ use ::trigger::{
     amounts::{self, Arithmetic},
     conditions::{self, Aggregate, Logic, Operator},
     selection::{BalanceKind, Selector, Target, This},
-    testing::Fees,
 };
-use base::{Address, Asset, Chain, Decimal, Network};
+use base::{Address, Asset, Chain, Decimal, Network, testing::Fees};
 use diesel::{Connection as _, SqliteConnection, connection::SimpleConnection as _};
 
+use super::support::scripted::network;
 use crate::{
     models::{
         Json, Trigger, TriggerRun, Wallet, int, trigger,
@@ -34,10 +34,6 @@ use crate::{
 
 /// The confirmed tip of the test network.
 const TIP: u64 = 2;
-
-fn network() -> Network {
-    Network::new(Chain::new("bitcoin"), "regtest")
-}
 
 /// Blocks 0..=3 of `bitcoin.regtest`; block 3 of
 /// `bitcoin.other`. Indexes (`bitcoin.regtest.{address}.{asset}`):
@@ -98,13 +94,11 @@ INSERT INTO network_index (chain, network, tip, confirmed) VALUES ('bitcoin', 'r
 /// A migrated, seeded temp file, a runtime for fee estimates, and a raw
 /// connection to it.
 fn seeded() -> (tempfile::TempDir, tokio::runtime::Runtime, SqliteConnection) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("test.db");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    let db = crate::db::Db::open(&path).unwrap();
-    runtime.block_on(crate::tests::migrate(&db)).unwrap();
+    let (_, _db, directory) = runtime.block_on(super::support::db::seeded());
+    let path = directory.path().join(super::support::db::FILE);
     let mut connection = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
     connection
         .batch_execute("PRAGMA foreign_keys = ON;")

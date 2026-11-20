@@ -7,7 +7,10 @@ use base::{
     Asset, Broadcaster as _, Decimal, Fee, FeeLevel, Leg, Signer, TransactionErrorKind,
     TransactionState, Transfer, Wallet, WalletError, WalletErrorKind, WalletFactory as _,
 };
-use chain_solana::{Client, Config, Factory};
+use chain_solana::{
+    Client, Factory,
+    testing::fixtures::{MINT, base58, config, network},
+};
 use crypto::SecretBytes;
 use futures_executor::block_on;
 use serde_json::json;
@@ -23,29 +26,7 @@ async fn pay(
     builder.sign().await
 }
 
-const MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SEED: [u8; 32] = [7; 32];
-
-fn base58(byte: u8, length: usize) -> String {
-    bs58::encode(vec![byte; length]).into_string()
-}
-
-fn config() -> Config {
-    let genesis_hash = base58(9, 32).parse().unwrap();
-    let network = chain_solana::Network::new(genesis_hash, "localnet");
-    let mut config = Config::new(network);
-    config.tokens = vec![chain_solana::Token {
-        mint: MINT.parse().unwrap(),
-        decimals: 6,
-        ticker: None,
-        display_decimals: None,
-    }];
-    config
-}
-
-fn network() -> base::Network {
-    base::Network::from(&config().native())
-}
 
 fn client(transport: impl ::rpc::Client + 'static) -> Client {
     Client::new(Arc::new(transport), config().native())
@@ -475,24 +456,14 @@ fn an_estimate_sums_signatures_priority_fees_and_a_token_accounts_rent() {
     script.exhausted();
 }
 
-/// Holdings where every address holds every asset.
-struct HeldByAll;
-
-impl base::Holdings for HeldByAll {
-    fn holds<'a>(
-        &'a self,
-        spends: &'a base::Spends,
-    ) -> base::Future<'a, anyhow::Result<Vec<bool>>> {
-        let held = spends.iter().map(|spend| spend.to.is_some()).collect();
-        Box::pin(async move { Ok(held) })
-    }
-}
-
 #[test]
 fn a_token_sent_to_a_holder_is_priced_without_the_rent_of_its_account() {
     let script = Script::new(signing_replies());
     let fees = Factory::from(config())
-        .wallets(&client(script.clone()), Arc::new(HeldByAll))
+        .wallets(
+            &client(script.clone()),
+            Arc::new(base::testing::Holders::all()),
+        )
         .fees();
     let one = wallet(&script).address().clone();
     let source = [(one, token())];

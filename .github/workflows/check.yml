@@ -74,6 +74,14 @@ jobs:
             fi
           done
           exit "$status"
+      # Test doubles are dev-dependencies only: a release build of the
+      # binary enables no crate's `testing` feature.
+      - name: No release build enables testing
+        run: |
+          if cargo tree --locked -q -p payment-server -e normal --prefix none \
+               -f '{p} {f}' | grep -w testing; then
+            exit 1
+          fi
       - name: Test
         run: cargo test --locked --workspace --no-fail-fast
       # docs/openapi.json is the committed contract typed clients are generated

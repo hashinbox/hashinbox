@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use anyhow::{bail, ensure};
-use base::{Address, Asset, AssetInfo, Assets, Chain, Decimal, Future, Network};
+use base::{Address, Asset, AssetInfo, Assets, Chain, Decimal, Future, Network, testing::Fees};
 use futures_executor::block_on;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -17,7 +17,7 @@ use trigger::{
     amounts::{self, Amount as _, Arithmetic},
     conditions::{self, Condition, Logic},
     selection::{Index, Selection, Selector, Target},
-    testing::{Fees, Wallets},
+    testing::Wallets,
 };
 
 // ---- The language ---------------------------------------------------------

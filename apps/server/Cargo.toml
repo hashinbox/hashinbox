@@ -65,7 +65,7 @@ http-body-util = "=0.1.4"
 # The scripted node behind a test network's client.
 rpc = { path = "../../packages/rpc", features = ["testing"] }
 # The store contract the SQLite queue runs.
-tasks = { path = "../../packages/tasks", features = ["runner"] }
+tasks = { path = "../../packages/tasks", features = ["runner", "testing"] }
 reqwest.workspace = true
 sha2.workspace = true
 tempfile = "=3.27.0"

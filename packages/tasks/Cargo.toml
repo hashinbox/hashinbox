@@ -9,6 +9,9 @@ description = "A job queue: workers, a store port with an in-memory default, and
 [features]
 # `Worker`, `Task` and `Executor`.
 runner = ["tokio/time", "tokio/macros"]
+# `testing`: the store contract and running jobs by hand. Off by default;
+# dev-dependencies only.
+testing = []
 
 [dependencies]
 # A worker's panic fails its job instead of leaving its topic locked.
@@ -20,7 +23,7 @@ serde_json.workspace = true
 [dev-dependencies]
 tokio = { version = "=1.49.0", default-features = false, features = ["macros", "rt", "time"] }
 # This package on itself, so its own tests have every feature.
-tasks = { path = ".", features = ["runner"] }
+tasks = { path = ".", features = ["runner", "testing"] }
 
 [lints]
 workspace = true

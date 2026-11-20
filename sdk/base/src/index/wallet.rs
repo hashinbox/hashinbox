@@ -369,34 +369,10 @@ impl Indexes for WalletIndexer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Block, Chain, Tips};
-
-    /// A chain at tip 100, confirmed through 90, with line `.0`.
-    struct Lined(Line, Network);
-
-    impl Networked for Lined {
-        fn network(&self) -> &Network {
-            &self.1
-        }
-    }
-
-    impl Chained for Lined {
-        fn tips(&self) -> Future<'_, Result<Tips>> {
-            Box::pin(async { Ok(Tips { position: 100 }) })
-        }
-
-        fn confirmations(&self) -> u64 {
-            10
-        }
-
-        fn block(&self, _position: u64) -> Future<'_, Result<Option<Block>>> {
-            Box::pin(async { Ok(None) })
-        }
-
-        fn line(&self) -> Line {
-            self.0
-        }
-    }
+    use crate::{
+        Chain,
+        testing::{Served, fixtures},
+    };
 
     /// What alice's native index from `start` becomes on a chain with
     /// `line`, settling or not.
@@ -406,7 +382,10 @@ mod tests {
             Address::new(network.clone(), "alice"),
             Asset::native(network.clone()),
         );
-        let target = WalletIndexTarget::new(Arc::new(Lined(line, network)), address, asset);
+        // At tip 100, confirmed through 90.
+        let chain =
+            Served::new(vec![fixtures::block(&network, 100, 0, vec![])], 10).with_line(line);
+        let target = WalletIndexTarget::new(Arc::new(chain), address, asset);
         target
             .with_birthday(start)
             .with_settle(settles)
