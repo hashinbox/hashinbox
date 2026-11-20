@@ -20,9 +20,9 @@ use crate::{
 /// from its own source or the default one, on a blockhash fetched as it
 /// signs, at the price of its [`Fee`] over the network's rate; or the next
 /// version of a loaded state: its payment and compute-unit limit, on a new
-/// blockhash, its price never below the old one (`Fee::Times(1.1)`: a
-/// tenth above it). A signed transaction lands only until its blockhash
-/// expires (about a minute), at its `expires_height`; then it fails to
+/// blockhash, its price at least a tenth above the old one. A signed
+/// transaction lands only until its blockhash expires (about a minute), at
+/// its `expires_height`; then it fails to
 /// broadcast as `Expired`, and only then is a next version safe: nothing
 /// else keeps the two from both landing.
 pub(crate) struct Builder {
@@ -124,6 +124,7 @@ impl base::Builder for Builder {
             let per_signature = self.fees.per_signature(Some(blockhash.clone())).await?;
             let now = self.fees.rates.rate().await?;
             let rate = self.fee.rate(now, old.map(|old| old.rate));
+            let rate = old.map_or(rate, |old| rate.higher(old.rate.times(1.1)));
             let priority = self.fees.priority(rate, units)?;
             let token = self.token.as_ref();
             let message = message(sender, token, output, &blockhash, priority)

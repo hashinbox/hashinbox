@@ -221,33 +221,41 @@ impl Addressed for Reward {
     }
 }
 
-/// The newest produced and newest final positions of a chain.
+/// A chain's newest block: its position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tips {
-    /// The newest produced block.
-    pub produced: u64,
-    /// The newest block the chain will not take back, by its own finality rule.
-    pub confirmed: u64,
+    /// The newest block's position.
+    pub position: u64,
+}
+
+impl Tips {
+    /// The confirmed position: `confirmations` (the network's config) below
+    /// the tip, saturating. The one way confirmed is computed.
+    #[must_use]
+    pub const fn confirmed(self, confirmations: u64) -> u64 {
+        self.position.saturating_sub(confirmations)
+    }
 }
 
 /// Where a chain's reading starts and an index's gaps close: its own rule,
 /// from its config ([`Chained::line`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Line {
-    /// Ethereum: the block after the final one.
+    /// Ethereum: the block after the confirmed one ([`Tips::confirmed`]).
     Final,
     /// The tip less this many positions: Bitcoin's `max_depth` (`u64::MAX`:
-    /// no limit), Solana's `read_depth` (its final block is its tip).
+    /// no limit), Solana's `read_depth`.
     Depth(u64),
 }
 
 impl Line {
-    /// The position nothing below is read, at `tips`.
+    /// The position nothing below is read, at `tips` with `confirmations`
+    /// ([`Chained::confirmations`]).
     #[must_use]
-    pub const fn at(self, tips: Tips) -> u64 {
+    pub const fn at(self, tips: Tips, confirmations: u64) -> u64 {
         match self {
-            Self::Final => tips.confirmed.saturating_add(1),
-            Self::Depth(depth) => tips.produced.saturating_sub(depth),
+            Self::Final => tips.confirmed(confirmations).saturating_add(1),
+            Self::Depth(depth) => tips.position.saturating_sub(depth),
         }
     }
 }
@@ -282,12 +290,16 @@ impl std::error::Error for NotServed {}
 
 /// A chain that can be read block by block.
 pub trait Chained: Networked + Send + Sync {
-    /// The newest produced and newest final positions.
+    /// The newest block ([`Tips`]).
     ///
     /// # Errors
     ///
     /// When the node cannot answer.
     fn tips(&self) -> Future<'_, anyhow::Result<Tips>>;
+
+    /// Positions a block needs below the tip to count as confirmed (the
+    /// network's config): [`Tips::confirmed`].
+    fn confirmations(&self) -> u64;
 
     /// The block at `position`, fully interpreted; `None` where no block was
     /// produced (a skipped Solana slot).
@@ -377,7 +389,7 @@ pub trait Dated: Chained {
     /// When the node cannot answer, or holds no block at its own tip.
     fn tip(&self) -> Future<'_, anyhow::Result<Stamp>> {
         Box::pin(async move {
-            let position = self.tips().await?.produced;
+            let position = self.tips().await?.position;
             let timestamp = self
                 .time(position)
                 .await?
@@ -527,44 +539,47 @@ async fn produced<C: Dated + ?Sized>(
 ///
 /// # Model
 ///
-/// - A block is *live* until [`Store::delete`] marks it reorged. Reorged
-///   blocks stay (a `reorged_at` mark), but their facts leave every read:
-///   balances, history, unspent outputs.
-/// - The live blocks of a network are one linked run: each names the one
-///   below it as its parent. At most one live block per position.
+/// - A block is kept until [`Store::delete`] takes it back (a reorg): it is
+///   deleted, and its facts leave every read: balances, history, unspent
+///   outputs.
+/// - The kept blocks of a network are one linked run: each names the one
+///   below it as its parent. At most one block per position.
 /// - Each index, one asset of one address, carries `indexed_at`
 ///   ([`crate::WalletIndex`]): the address's facts in that asset are kept for
-///   every live block from its birthday through that block, with no gaps.
+///   every block from its birthday through that position, with no gaps.
 ///   Progress is per address and asset, so a new address or a newly
 ///   configured token backfills without disturbing the others.
 /// - Blocks are kept up to the produced tip, not only the confirmed one. A
-///   confirmed balance is a read over live blocks at or below
-///   [`Tips::confirmed`]; a pending balance reads them all. The store records
+///   confirmed balance is a read over blocks at or below
+///   the confirmed position ([`Tips::confirmed`]); a pending balance reads them all. The store records
 ///   no confirmation itself.
-/// - The store never detects a reorg. The indexer compares the last live
+/// - The store never detects a reorg. The indexer compares the last kept
 ///   block with the chain and calls [`Store::delete`]; the store only refuses
-///   blocks that do not link onto what it holds.
+///   a block at a position another kept block holds. Links need no check:
+///   a run is linked ([`Blocks`]), and the indexer reads forward from the
+///   last kept block.
 pub trait Store: Send + Sync {
     /// Keeps `blocks` (one network, linked, as the chain parsed them, every
     /// address unfiltered), in one atomic write that:
     ///
     /// 1. Refuses the whole write when a block conflicts with what is kept: a
-    ///    live block at its position with another hash, or a first new block
-    ///    above the last live one whose parent is not that block.
+    ///    kept block at its position with another hash.
     /// 2. Adds blocks it does not hold; blocks it holds are not added again.
     /// 3. For each block, reads its indexes inside this write and keeps the
     ///    legs, outputs and rewards whose (address, asset) is an index the
     ///    block applies to: birthday at or below it, and `indexed_at` at its
-    ///    parent (or unset, when the block is the chain's first at or above
+    ///    parent's position or between it and the block's (or unset, when the block is the chain's first at or above
     ///    the birthday: its parent below it); a transaction is kept once,
     ///    when any of its legs is.
     ///    Other facts are dropped.
     /// 4. Marks outputs spent by those legs as spent in that block.
-    /// 5. Moves `indexed_at` of those indexes to the block, empty blocks
-    ///    included, so progress stays contiguous; and of the transaction
-    ///    indexes ([`crate::TransactionIndex`]) it applies to by the same
-    ///    rule (`broadcasted_at` as the birthday), each noting the block as
-    ///    `found` when it holds its transaction, which is kept then.
+    /// 5. Moves `indexed_at` of those indexes to the block's position, empty
+    ///    blocks included, so progress stays contiguous; and of the
+    ///    transaction indexes ([`crate::TransactionIndex`]) it applies to by
+    ///    the same rule (`broadcasted_at` as the birthday), each noting the
+    ///    block's position as `found` (found or reverted, by its outcome)
+    ///    when it holds its transaction, which is kept then. Expiry is
+    ///    not the indexer's: one not found reads on.
     ///
     /// Indexes added while a step runs are either read by this write or left
     /// for the next step; none is skipped. A repeat of the same blocks applies
@@ -577,26 +592,29 @@ pub trait Store: Send + Sync {
     /// write.
     fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>>;
 
-    /// The last live block of `network`; `None` before the first, or when
-    /// every block is reorged.
+    /// The last kept block of `network`; `None` before the first, or when
+    /// every block is taken back.
     ///
     /// # Errors
     ///
     /// When the store cannot read.
     fn find_last<'a>(&'a self, network: &'a Network) -> Future<'a, anyhow::Result<Option<Header>>>;
 
-    /// Marks every live block of `network` at or above `from` reorged, in one
+    /// Deletes every block of `network` at or above `from` (a reorg), in one
     /// atomic write that:
     ///
-    /// 1. Sets `reorged_at` on those blocks; nothing is hard-deleted. Their
-    ///    transactions, legs, outputs and rewards leave every read.
-    /// 2. Unmarks outputs spent in them: those outputs are unspent again.
-    /// 3. Rewinds `indexed_at` of every index of either kind at or above
-    ///    `from` to the live block below `from` (unset when none is, or it
-    ///    is below the index's start), so those indexes re-index the new
-    ///    branch; a transaction index `found` there is found no more.
+    /// 1. Turns the transactions a transaction index looks for (sent by the
+    ///    caller) mined in them back to pending, their hold on funds kept.
+    /// 2. Deletes the blocks with their other transactions, legs, outputs
+    ///    and rewards; outputs spent in them are unspent again.
+    /// 3. Deletes the adjustments of the network's wallet indexes at or
+    ///    above `from`.
+    /// 4. Caps `indexed_at` of every index of either kind at `from - 1`
+    ///    (unset when that is below the index's start), so those indexes
+    ///    read the new branch; a transaction index `found` above it reads
+    ///    on.
     ///
-    /// Other networks, wallets and indexes stay. Marking nothing is a no-op.
+    /// Other networks, wallets and indexes stay. Deleting nothing is a no-op.
     ///
     /// # Errors
     ///
@@ -685,12 +703,11 @@ mod tests {
 
     impl Chained for Even {
         fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
-            Box::pin(async {
-                Ok(Tips {
-                    produced: 20,
-                    confirmed: 20,
-                })
-            })
+            Box::pin(async { Ok(Tips { position: 20 }) })
+        }
+
+        fn confirmations(&self) -> u64 {
+            0
         }
 
         fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
@@ -740,6 +757,10 @@ mod tests {
     impl Chained for Pruned {
         fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
             self.0.tips()
+        }
+
+        fn confirmations(&self) -> u64 {
+            0
         }
 
         fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {

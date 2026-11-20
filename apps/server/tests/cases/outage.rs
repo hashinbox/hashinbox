@@ -6,7 +6,7 @@
 use axum::http::{Method, StatusCode};
 use base::testing::{Caps, TestChain};
 
-use super::{App, at_tip, funded, linked, number, reaches, settle, unit, until};
+use super::{App, at_tip, funded, linked, number, reaches, unit, until};
 
 pub(super) const NEEDS: Caps = Caps::NONE;
 
@@ -19,7 +19,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         chain.node(node).faults().down(true);
     }
     chain.fund(&wallet.address, &unit(chain), "native");
-    settle(chain);
+    chain.mine(1);
     until("the network to fail with why", || async {
         let network = app.api.network().await;
         if network["index_job_reason"].is_string() && network["tip_error"].is_string() {
@@ -34,6 +34,9 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     for node in 0..nodes {
         chain.node(node).faults().down(false);
     }
+    // The deposit's block read before it is confirmed (`settle`).
+    at_tip(app, chain).await;
+    chain.mine(chain.network().confirmations);
     let twice = (2 * number(&unit(chain))).to_string();
     reaches(app, &wallet, "native", "balance_confirmed", &twice).await;
     at_tip(app, chain).await;

@@ -1,24 +1,19 @@
-//! `TransactionIndexStore` on the `transaction_index` model. A settle keeps
-//! its blocks on the `block` model; giving one up forgets its transaction
-//! (the `transaction` and `transaction_forgotten` models); the sends in
-//! flight are the `transaction` model's pending rows. And a payment's rows
-//! as its broadcast job writes them: [`record`], [`replace`] (a bump) and
-//! [`restore`] (its undoing), and [`forget`], the one way a pending
-//! transaction goes.
+//! `TransactionIndexStore` on the `transaction_index` model. Giving one up
+//! forgets its transaction ([`indexes::forget`]); the sends in flight
+//! are the `transaction` model's pending rows.
 
 use base::{
-    Address, BlockHeader, Future, IndexState, IntoIndex, Network, Networked as _, TransactionIndex,
+    Address, Confirmed, Future, IndexState, IntoIndex, Network, Networked as _, TransactionIndex,
     TransactionIndexStore,
 };
 
-use super::{Stores, blocks};
-use diesel::SqliteConnection;
+use super::Stores;
 
 use crate::models::{
     transaction::{self, Transaction, TransactionId},
-    transaction_forgotten::{self, Forgotten, Why},
-    transaction_index,
+    transaction_index::{self, Why},
 };
+use crate::usecase::indexes::transaction as indexes;
 
 /// Index `index`'s id: its transaction's.
 fn id(index: &TransactionIndex) -> anyhow::Result<TransactionId> {
@@ -80,35 +75,22 @@ impl TransactionIndexStore for Stores {
         })
     }
 
-    /// One write: the final block and the one it is found in kept unless
-    /// they are (another live block at either: `false`), the index on the
-    /// final one, found `reverted` or not.
+    /// One write, no block kept.
     fn settle<'a>(
         &'a self,
         index: &'a TransactionIndex,
-        found: Option<&'a BlockHeader>,
-        reverted: bool,
-        header: &'a BlockHeader,
-    ) -> Future<'a, anyhow::Result<bool>> {
+        confirmed: &'a Confirmed,
+    ) -> Future<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            let id = id(index)?;
-            let (found, header) = (found.cloned(), header.clone());
+            let (id, confirmed) = (id(index)?, *confirmed);
             self.db
                 .write(move |connection| {
-                    let network = id.network();
-                    let Some(block) = blocks::keep_empty(connection, network, &header)? else {
-                        return Ok(false);
-                    };
-                    let found = match &found {
-                        Some(found) => match blocks::keep_empty(connection, network, found)? {
-                            Some(found) => Some(found),
-                            None => return Ok(false),
-                        },
-                        None => None,
-                    };
-                    let found = found.as_ref();
-                    transaction_index::db::settle(connection, &id, &block, found, reverted)?;
-                    Ok(true)
+                    // Found: its outcome on its transaction row, as a block
+                    // read would leave it.
+                    if let Some(found) = confirmed.found {
+                        transaction::db::set_mined(connection, &id, found, confirmed.reverted)?;
+                    }
+                    transaction_index::db::settle(connection, &id, &confirmed)
                 })
                 .await
         })
@@ -123,7 +105,7 @@ impl TransactionIndexStore for Stores {
                 .write(move |connection| {
                     // Given up whether or not its transaction is pending.
                     transaction_index::db::give_up(connection, &[&id], Why::Jump.as_str())?;
-                    forget(connection, &[&id], Why::Jump)?;
+                    indexes::forget(connection, &[&id], Why::Jump)?;
                     Ok(())
                 })
                 .await
@@ -154,85 +136,4 @@ impl TransactionIndexStore for Stores {
                 .collect()
         }))
     }
-}
-
-/// Records `pending`, not yet sent, watched by `index`, in the caller's
-/// write: its outgoing legs hold the sender's funds and coins from now on.
-///
-/// # Errors
-///
-/// [`transaction::Refused`] when a sender's index is not kept, or cannot
-/// spend what it takes beyond what is in flight (the caller's write must
-/// roll back); when a write fails.
-pub(crate) fn record(
-    connection: &mut SqliteConnection,
-    pending: &mut Transaction,
-    index: &TransactionIndex,
-) -> anyhow::Result<()> {
-    transaction::db::save_pending(connection, pending)?;
-    transaction_index::db::insert(connection, index)
-}
-
-/// Replaces pending `current` with `next`, watched by `index`, in the
-/// caller's write: `current` forgotten (`replaced`) while its index watches
-/// on, as either may land, then `next` recorded ([`record`]): the funds are
-/// held once.
-///
-/// # Errors
-///
-/// As [`record`].
-pub(crate) fn replace(
-    connection: &mut SqliteConnection,
-    current: &TransactionId,
-    next: &mut Transaction,
-    index: &TransactionIndex,
-) -> anyhow::Result<()> {
-    forget(connection, &[current], Why::Replaced)?;
-    record(connection, next, index)
-}
-
-/// Undoes [`replace`] in the caller's write, `next` refused by every node:
-/// `next` forgotten (`refused`) and its index deleted; `current`, as it was
-/// kept before, pending again and no longer forgotten.
-///
-/// # Errors
-///
-/// As [`record`].
-pub(crate) fn restore(
-    connection: &mut SqliteConnection,
-    current: &mut Transaction,
-    next: &TransactionId,
-) -> anyhow::Result<()> {
-    forget(connection, &[next], Why::Refused)?;
-    transaction_index::db::delete(connection, next)?;
-    transaction_forgotten::db::delete(connection, &current.id)?;
-    transaction::db::save_pending(connection, current)
-}
-
-/// Forgets the pending transactions `ids` for `why`, a mined one kept: each
-/// is deleted with its legs, freeing what it held, and kept in `transaction_forgotten`
-/// as it was; its transaction index is given up (`no_data`, `why`), so its
-/// broadcast job learns, unless it was replaced: that one may still land.
-/// How many.
-///
-/// # Errors
-///
-/// When a write fails or a leg does not encode.
-pub(crate) fn forget(
-    connection: &mut SqliteConnection,
-    ids: &[impl AsRef<str>],
-    why: Why,
-) -> anyhow::Result<usize> {
-    let at = i64::try_from(tasks::now())?;
-    let deleted = transaction::db::delete_pending(connection, ids)?;
-    let gone: Vec<String> = deleted.iter().map(|row| row.id.clone().into()).collect();
-    if why != Why::Replaced {
-        transaction_index::db::give_up(connection, &gone, why.as_str())?;
-    }
-    let rows = deleted
-        .into_iter()
-        .map(|deleted| Forgotten::new(deleted, why, at))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    transaction_forgotten::db::insert(connection, &rows)?;
-    Ok(rows.len())
 }

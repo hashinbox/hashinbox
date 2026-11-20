@@ -1,7 +1,7 @@
 //! The server's background work, all jobs of one `tasks::Executor`
 //! (which `main.rs` builds): the index job (per network), the triggers job it queues, the
 //! broadcast job those start (designs 066, 084: one per payment, which it
-//! owns until mined at a final block or proven dead), and the prune job that
+//! owns until mined at a final block or expired), and the prune job that
 //! clears old succeeded jobs. Each worker declares its `tasks::Policy`
 //! (design 076).
 

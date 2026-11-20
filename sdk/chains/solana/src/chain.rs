@@ -1,4 +1,5 @@
-//! [`Chain`]: Solana blocks as `base` blocks, final once rooted.
+//! [`Chain`]: Solana blocks as `base` blocks, confirmed `confirmations`
+//! slots below the tip.
 
 use anyhow::ensure;
 use base::{
@@ -14,25 +15,28 @@ pub const READ_DEPTH: u64 = 1_000;
 
 /// One Solana cluster read from its node at confirmed commitment. Position
 /// is the slot (skipped slots hold no block), height the block height; a
-/// block is final once rooted (`finalized`). Legs are of SOL and of the
+/// block is confirmed once `confirmations` slots below the tip. Legs are of SOL and of the
 /// allowlisted tokens only.
 pub struct Chain {
     rpc: Client,
     network: Network,
     tokens: Tokens,
     read_depth: u64,
+    confirmations: u64,
 }
 
 impl Chain {
-    /// Reads over `rpc`, indexing `tokens`, [`READ_DEPTH`] slots deep.
+    /// Reads over `rpc`, indexing `tokens`, [`READ_DEPTH`] slots deep, a
+    /// block confirmed `confirmations` slots below the tip.
     #[must_use]
-    pub fn new(rpc: Client, tokens: Tokens) -> Self {
+    pub fn new(rpc: Client, tokens: Tokens, confirmations: u64) -> Self {
         let network = rpc.network().into();
         Self {
             rpc,
             network,
             tokens,
             read_depth: READ_DEPTH,
+            confirmations,
         }
     }
 
@@ -56,6 +60,10 @@ impl Chained for Chain {
         Box::pin(self.rpc.tips())
     }
 
+    fn confirmations(&self) -> u64 {
+        self.confirmations
+    }
+
     /// `None` for a skipped slot.
     fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
         Box::pin(async move { Ok(self.blocks(position, position).await?.first().cloned()) })
@@ -65,9 +73,9 @@ impl Chained for Chain {
         Box::pin(self.rpc.blocks(start, end, &self.tokens))
     }
 
-    /// The tip less `read_depth`, not the block after the final one: the
-    /// node's finalized slot is its tip, so final blocks are read too. An
-    /// index behind it settles at the chain's balance.
+    /// The tip less `read_depth`, not the block after the confirmed one
+    /// (`read_depth` is at least `confirmations`), so confirmed blocks are
+    /// read too. An index behind it settles at the chain's balance.
     fn line(&self) -> Line {
         Line::Depth(self.read_depth)
     }
@@ -103,9 +111,9 @@ impl Balances for Chain {
 }
 
 /// Mined by its signature's status (history searched), judged at the
-/// node's finalized slot; reverted by its `err`.
+/// confirmed slot; reverted by its `err`.
 impl Confirmer for Chain {
-    /// `None` while the finalized slot is below `at`; found only once
+    /// `None` while the confirmed slot is below `at`; found only once
     /// finalized, at or below it.
     fn confirm<'a>(
         &'a self,
@@ -117,7 +125,7 @@ impl Confirmer for Chain {
                 id.network == self.network,
                 "not a transaction of this Solana network"
             );
-            let position = self.rpc.tips().await?.confirmed;
+            let position = self.rpc.tips().await?.confirmed(self.confirmations);
             if position < at {
                 return Ok(None);
             }

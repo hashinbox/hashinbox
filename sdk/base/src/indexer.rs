@@ -6,9 +6,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    BlockHeader, BlockStore, Chained, Future, Network, Networked, NotServed, Skipped, Tips,
-};
+use crate::{BlockHeader, BlockStore, Chained, Future, Network, Networked, NotServed, Skipped};
 
 /// Blocks fetched per step unless [`Indexer::with_batch`] says otherwise.
 pub const DEFAULT_BATCH: u64 = 100;
@@ -31,9 +29,10 @@ pub struct Stats {
     pub blocks: u64,
     /// The last block kept.
     pub last: Option<BlockHeader>,
-    /// The chain's produced tip at the last step; with `last`, the lag.
+    /// The chain's newest block at the last step; with `last`, the lag.
     pub tip: Option<u64>,
-    /// The chain's confirmed (final) tip at the last step.
+    /// The confirmed position at the last step: `confirmations` below
+    /// `tip` ([`crate::Tips::confirmed`]).
     pub confirmed: Option<u64>,
     /// The chain's line ([`Chained::line`]) at the last step: nothing below
     /// it is read.
@@ -83,12 +82,12 @@ pub trait Indexes: Send + Sync {
     ) -> Future<'a, anyhow::Result<Option<u64>>>;
 
     /// Closes the gaps of its items whose next block is below `line`, the
-    /// chain's at `tips`.
+    /// chain's, `confirmed` its confirmed position ([`crate::Tips::confirmed`]).
     ///
     /// # Errors
     ///
     /// When the chain or its store fails; the step goes on.
-    fn close<'a>(&'a self, line: u64, tips: Tips) -> Future<'a, anyhow::Result<()>>;
+    fn close<'a>(&'a self, line: u64, confirmed: u64) -> Future<'a, anyhow::Result<()>>;
 
     /// Moves its items stuck below `below`, behind a block the node no
     /// longer serves: an unstarted one starts at `start`, a started one is
@@ -101,7 +100,7 @@ pub trait Indexes: Send + Sync {
 }
 
 /// Indexes one network: fetches blocks up to the produced tip and keeps them,
-/// marking kept blocks the chain took back reorged, and has each of its
+/// deleting kept blocks the chain took back, and has each of its
 /// parts close the gaps of its items below the chain's line. The caller
 /// steps it ([`Indexer::next`]), about every [`Indexer::interval`].
 pub struct Indexer {
@@ -162,7 +161,7 @@ impl Indexer {
 
     /// One step of at most a batch: from the furthest-behind indexing item
     /// of any part, or else from the last kept block. When the chain no
-    /// longer has the last kept block, marks it reorged; the next step
+    /// longer has the last kept block, deletes it (a reorg); the next step
     /// checks the one below. Never below the chain's line
     /// ([`Chained::line`]): each part first closes the gaps of its items
     /// below it ([`Indexes::close`]; a failure is counted, never failing the
@@ -218,7 +217,7 @@ impl Indexer {
         if !needs {
             return Ok(false);
         }
-        let tip = self.chain.tips().await?.produced;
+        let tip = self.chain.tips().await?.position;
         let start = first_served(&*self.chain, gap.position, tip).await?;
         let mut skipped = Skipped::default();
         for part in &self.parts {
@@ -232,12 +231,14 @@ impl Indexer {
         let last = self.blocks.find_last(network).await?;
         // The tip first: a network with nothing to index still shows it.
         let tips = self.chain.tips().await?;
-        let tip = tips.produced;
-        let line = self.chain.line().at(tips);
+        let tip = tips.position;
+        let confirmations = self.chain.confirmations();
+        let confirmed = tips.confirmed(confirmations);
+        let line = self.chain.line().at(tips, confirmations);
         {
             let mut stats = self.stats.get();
             stats.tip = Some(tip);
-            stats.confirmed = Some(tips.confirmed);
+            stats.confirmed = Some(confirmed);
             stats.line = Some(line);
         }
         if let Some(reorged) = self.check(line, last.as_ref()).await? {
@@ -245,7 +246,7 @@ impl Indexer {
         }
         let mut closed = true;
         for part in &self.parts {
-            if let Err(error) = part.close(line, tips).await {
+            if let Err(error) = part.close(line, confirmed).await {
                 self.stats.get().fail(&error);
                 closed = false;
             }
@@ -297,7 +298,7 @@ impl Indexer {
     }
 
     /// When `last`, the last kept block, is below `line`, checks the chain
-    /// still has it: when not, marks it reorged instead (the next step
+    /// still has it: when not, deletes it instead (the next step
     /// checks the one below). With it, every leg kept below is final
     /// history. A node that no longer serves it ([`NotServed`], pruned
     /// history) counts as having it: it is far below the final tip.
@@ -316,7 +317,8 @@ impl Indexer {
         self.reorg(last).await.map(Some)
     }
 
-    /// Marks `last`, the last kept block, reorged: the chain took it back.
+    /// Deletes `last`, the last kept block, and above: the chain took it
+    /// back.
     async fn reorg(&self, last: &BlockHeader) -> anyhow::Result<Next> {
         self.blocks.delete(self.network(), last.position).await?;
         self.stats.get().reorgs += 1;
@@ -371,7 +373,7 @@ mod tests {
     use super::*;
     use crate::{
         Address, Asset, Birthday, Block, BlockHash, BlockParent, Blocks, Chain, IndexState,
-        IntoIndex, WalletIndex, WalletIndexStore, WalletIndexTarget, WalletIndexer,
+        IntoIndex, Tips, WalletIndex, WalletIndexStore, WalletIndexTarget, WalletIndexer,
         transaction::Transactions,
     };
 
@@ -407,12 +409,11 @@ mod tests {
 
     impl Chained for Fake {
         fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
-            Box::pin(async {
-                Ok(Tips {
-                    produced: TIP,
-                    confirmed: TIP,
-                })
-            })
+            Box::pin(async { Ok(Tips { position: TIP }) })
+        }
+
+        fn confirmations(&self) -> u64 {
+            0
         }
 
         fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {
@@ -442,15 +443,15 @@ mod tests {
                     let progress = &mut index.progress;
                     let applies = progress.state == IndexState::Indexing
                         && index.birthday <= at.position
-                        && match &progress.indexed_at {
-                            Some(through) => Some(through.position) == at.position.checked_sub(1),
+                        && match progress.indexed_at {
+                            Some(through) => Some(through) == at.position.checked_sub(1),
                             None => at
                                 .parent
                                 .as_ref()
                                 .is_none_or(|parent| parent.position < index.birthday),
                         };
                     if applies {
-                        progress.indexed_at = Some(at.clone());
+                        progress.indexed_at = Some(at.position);
                     }
                 }
                 if !blocks.contains(at) {
@@ -533,7 +534,6 @@ mod tests {
             &'a self,
             _index: &'a WalletIndex,
             _holding: &'a crate::Holding,
-            _header: &'a BlockHeader,
         ) -> Future<'a, anyhow::Result<bool>> {
             unimplemented!("no balances here")
         }
@@ -596,12 +596,8 @@ mod tests {
         WalletIndexStore::insert(&**fake, &target).await.unwrap();
     }
 
-    fn at(index: &WalletIndex) -> Option<u64> {
-        index
-            .progress
-            .indexed_at
-            .as_ref()
-            .map(|header| header.position)
+    const fn at(index: &WalletIndex) -> Option<u64> {
+        index.progress.indexed_at
     }
 
     #[tokio::test]

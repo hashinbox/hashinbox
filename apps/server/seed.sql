@@ -3,16 +3,18 @@
 -- Edit the rows to add, tune or disable a network; `settings` holds a
 -- chain's own knobs (empty: every default). Ethereum fetches 10 blocks a
 -- step (`batch`), which public nodes serve without rate-limiting. Ethereum
--- and Solana read balances: no `max_depth`; Ethereum's line is the chain's
--- final block, Solana's its tip less `read_depth` (a setting, default 1000).
+-- and Solana read balances: no `max_depth`; Ethereum's line is the block
+-- after its confirmed one (64 confirmations: about two epochs, where
+-- `finalized` sits), Solana's its tip less `read_depth` (a setting, default
+-- 1000; at least `confirmations`).
 
 INSERT INTO network (chain, network, chain_id, testnet, enabled, block_time_ms,
     confirmations, max_depth, explorer_address, explorer_transaction, settings)
 VALUES
-    ('ethereum', 'sepolia', '11155111', 1, 1, 12000, 12, NULL,
+    ('ethereum', 'sepolia', '11155111', 1, 1, 12000, 64, NULL,
         'https://sepolia.etherscan.io/address/{address}',
         'https://sepolia.etherscan.io/tx/{tx}', '{"batch": 10}'),
-    ('ethereum', 'mainnet', '1', 0, 1, 12000, 12, NULL,
+    ('ethereum', 'mainnet', '1', 0, 1, 12000, 64, NULL,
         'https://etherscan.io/address/{address}',
         'https://etherscan.io/tx/{tx}', '{"batch": 10}'),
     ('solana', 'devnet', 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG', 1, 1, 400, 32, NULL,

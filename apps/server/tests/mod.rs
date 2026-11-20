@@ -21,10 +21,11 @@ use std::{
 
 use anyhow::Context as _;
 use base::{
-    Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Fee, Future,
-    Indexer, InfoClient, Line, Network, NetworkConfig, Networked, Service, Signer, Tips, Tracking,
-    Transaction, TransactionError, TransactionErrorKind, TransactionId, TransactionIndexer,
-    TransactionState, Transfer, Wallet, WalletFactory, WalletFactoryBroadcaster, WalletIndexer,
+    Address, Asset, AssetInfo, Assets, Blocks, Broadcaster, Builder, Chain, Chained, Decimal, Fee,
+    Future, Indexer, InfoClient, Line, Network, NetworkConfig, Networked, Replace, Service, Signer,
+    Tips, Tracking, Transaction, TransactionError, TransactionErrorKind, TransactionId,
+    TransactionIndexer, TransactionState, Transfer, Wallet, WalletFactory,
+    WalletFactoryBroadcaster, WalletIndexer,
 };
 use crypto::{Curve, SecretBytes};
 
@@ -43,7 +44,8 @@ async fn database() -> (crate::db::Db, tempfile::TempDir) {
 }
 
 /// Applies the schema and seed to `db`, then adds the test network: its
-/// `network`, native `network_asset` and `network_index` rows.
+/// `network` and native `network_asset` rows (no `network_index` row: no
+/// tip known yet).
 async fn migrate(db: &crate::db::Db) -> anyhow::Result<()> {
     use diesel::connection::SimpleConnection as _;
 
@@ -54,8 +56,7 @@ async fn migrate(db: &crate::db::Db) -> anyhow::Result<()> {
             INSERT INTO network (chain, network, testnet, enabled, block_time_ms, confirmations)
             VALUES ('bitcoin', 'regtest', 1, 1, 600000, 0);
             INSERT INTO network_asset (chain, network, asset, kind, ticker, decimals)
-            VALUES ('bitcoin', 'regtest', 'native', 'native', 'BTC', 8);
-            INSERT INTO network_index (chain, network) VALUES ('bitcoin', 'regtest');",
+            VALUES ('bitcoin', 'regtest', 'native', 'native', 'BTC', 8);",
         )?)
     })
     .await
@@ -78,6 +79,7 @@ struct Script {
     chain: Option<Arc<dyn Chained>>,
     tracking: Tracking,
     bump: Option<TransactionErrorKind>,
+    cancel: Option<TransactionErrorKind>,
 }
 
 /// The one wallet of the scripted network; its key is its address text.
@@ -104,6 +106,7 @@ impl Wallet for Fake {
         Ok(Box::new(Build {
             wallet: self.clone(),
             state: None,
+            cancel: false,
         }))
     }
 
@@ -137,11 +140,12 @@ impl Broadcaster for Fake {
 
 /// A builder of the wallet's transactions: a payment's txid and bytes are
 /// the build count; a replacement's are those of the one it continues with
-/// `+` after, its fee one more, unless the script fails it. Its state is
-/// the txid it signed last.
+/// `+` after, its fee one more, unless the script fails it; a cancel's
+/// `x` after, only its fee, one more. Its state is the txid it signed last.
 struct Build {
     wallet: Fake,
     state: Option<String>,
+    cancel: bool,
 }
 
 impl Builder for Build {
@@ -175,6 +179,18 @@ impl Builder for Build {
         self.state = Some(txid.to_owned());
         Ok(())
     }
+
+    fn replaceable(&mut self) -> Option<&mut dyn Replace> {
+        Some(self)
+    }
+}
+
+impl Replace for Build {
+    /// Zero: a cancel; else a bump.
+    fn replace(&mut self, transfer: Transfer) -> Result<(), TransactionError> {
+        self.cancel = transfer.amount == Decimal::zero();
+        Ok(())
+    }
 }
 
 impl Build {
@@ -182,14 +198,19 @@ impl Build {
     fn signed(&self) -> Result<Transaction, TransactionError> {
         let wallet = &self.wallet;
         if let Some(txid) = &self.state {
-            if let Some(kind) = wallet.script.bump {
+            let failed = if self.cancel {
+                wallet.script.cancel
+            } else {
+                wallet.script.bump
+            };
+            if let Some(kind) = failed {
                 return Err(TransactionError::new(kind, "scripted"));
             }
             let log = wallet.script.signed.lock().expect("the log");
             let Some(existing) = log.iter().find(|signed| signed.id.id == *txid) else {
                 return Err(TransactionError::failed("never signed"));
             };
-            return Ok(replacement(existing));
+            return Ok(replacement(existing, self.cancel));
         }
         let mut built = wallet.script.built.lock().expect("the counter");
         *built += 1;
@@ -212,20 +233,22 @@ impl Build {
     }
 }
 
-/// `existing` at a fee one more: its txid and bytes with `+` after.
-fn replacement(existing: &Transaction) -> Transaction {
-    let txid = format!("{}+", existing.id.id);
-    let legs = existing.legs.iter().cloned().map(|leg| match leg {
+/// `existing` at a fee one more: its txid and bytes with `+` after; its
+/// cancel's with `x` after, only its fee.
+fn replacement(existing: &Transaction, cancel: bool) -> Transaction {
+    let txid = format!("{}{}", existing.id.id, if cancel { "x" } else { "+" });
+    let legs = existing.legs.iter().cloned().filter_map(|leg| match leg {
         base::Leg::Fee {
             address,
             asset,
             amount,
-        } => base::Leg::Fee {
+        } => Some(base::Leg::Fee {
             address,
             asset,
             amount: amount + base::Decimal::from(1),
-        },
-        leg => leg,
+        }),
+        _ if cancel => None,
+        leg => Some(leg),
     });
     Transaction {
         id: TransactionId::new(network(), txid.clone()),
@@ -291,12 +314,11 @@ impl base::FeeRateProvider for Empty {
 
 impl Chained for Empty {
     fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
-        Box::pin(async {
-            Ok(Tips {
-                produced: 0,
-                confirmed: 0,
-            })
-        })
+        Box::pin(async { Ok(Tips { position: 0 }) })
+    }
+
+    fn confirmations(&self) -> u64 {
+        0
     }
 
     fn block(&self, _position: u64) -> Future<'_, anyhow::Result<Option<base::Block>>> {
@@ -321,12 +343,11 @@ impl Networked for Days {
 
 impl Chained for Days {
     fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
-        Box::pin(async {
-            Ok(Tips {
-                produced: 100,
-                confirmed: 100,
-            })
-        })
+        Box::pin(async { Ok(Tips { position: 100 }) })
+    }
+
+    fn confirmations(&self) -> u64 {
+        0
     }
 
     fn block(&self, _position: u64) -> Future<'_, anyhow::Result<Option<base::Block>>> {
@@ -364,6 +385,10 @@ impl Chained for Lined {
 
     fn blocks(&self, start: u64, end: u64) -> Future<'_, anyhow::Result<Blocks>> {
         self.0.blocks(start, end)
+    }
+
+    fn confirmations(&self) -> u64 {
+        self.0.confirmations()
     }
 
     fn line(&self) -> Line {

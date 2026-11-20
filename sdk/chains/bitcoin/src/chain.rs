@@ -53,7 +53,12 @@ impl Networked for Chain {
 
 impl Chained for Chain {
     fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
-        Box::pin(self.rpc.tips(self.depth))
+        Box::pin(self.rpc.tips())
+    }
+
+    /// `depth - 1`: a block `depth` deep is confirmed.
+    fn confirmations(&self) -> u64 {
+        self.depth - 1
     }
 
     fn block(&self, position: u64) -> Future<'_, anyhow::Result<Option<Block>>> {

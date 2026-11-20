@@ -1,22 +1,19 @@
 //! `WalletIndexStore` on the `wallet_index` model; an index's wallet is kept
 //! with it (watch-only when its key is not kept). A settle and a restart
-//! write on the `block`, `leg`, `transaction` and `transaction_forgotten` models too.
+//! write on the `leg`, `transaction` and `transaction_index` models too.
 
-use std::collections::BTreeSet;
+use base::{Future, Holding, IndexState, IntoIndex, Network, WalletIndex, WalletIndexStore};
 
-use anyhow::Context as _;
-use base::{
-    BlockHeader, Decimal, Future, Holding, IndexState, IntoIndex, Network, Networked as _,
-    WalletIndex, WalletIndexStore,
-};
-
-use diesel::SqliteConnection;
-
-use super::{Stores, blocks, transaction_indexes};
+use super::Stores;
 use crate::models::{
-    Leg, Wallet, block, int, leg, transaction, transaction_forgotten::Why, uint, wallet,
-    wallet_index, wallet_index::WalletIndexId,
+    Leg, Wallet, int,
+    leg::{self, Legs},
+    transaction,
+    transaction_index::Why,
+    uint, wallet, wallet_index,
+    wallet_index::WalletIndexId,
 };
+use crate::usecase::indexes::{transaction as transactions, wallet as wallets};
 
 impl WalletIndexStore for Stores {
     /// The index first (the chain's reads), then one write: its wallet and
@@ -113,37 +110,31 @@ impl WalletIndexStore for Stores {
             Ok(())
         }))
     }
-    /// One write: block `S` kept unless it is (another live block there:
-    /// `false`), the adjustment on it (already kept: `false`), the index
-    /// continuing from `S + 1`. Its pending sends stay: each one's
-    /// transaction index settles itself.
+    /// One write, no block kept: the adjustment at `S` (already kept:
+    /// `false`), the index continuing from `S + 1`. Its pending sends stay:
+    /// each one's transaction index settles itself.
     fn settle<'a>(
         &'a self,
         index: &'a WalletIndex,
         holding: &'a Holding,
-        header: &'a BlockHeader,
     ) -> Future<'a, anyhow::Result<bool>> {
-        let (index, holding, header) = (index.clone(), holding.clone(), header.clone());
+        let (index, holding) = (index.clone(), holding.clone());
         Box::pin(self.db.write(move |connection| {
             let id = WalletIndexId::of(&index.address, &index.asset)?;
-            let Some(block) = blocks::keep_empty(connection, index.network(), &header)? else {
-                return Ok(false);
-            };
-            let mut totals = running(connection, &id, block.position)?;
-            let amount = &holding.amount - &totals.total;
-            let mut adjustment = Leg::adjustment(&block, &id, 0, &amount);
-            adjustment.follow(&mut totals)?;
+            let position = int(holding.position)?;
+            let amount = &holding.amount - &leg::db::find_total(connection, &id, position)?;
+            let adjustment = Leg::adjustment(position, &id, 0, &amount)?;
             if leg::db::is_kept(connection, &adjustment.id)? {
                 return Ok(false);
             }
-            leg::db::insert(connection, vec![&adjustment])?;
-            wallet_index::db::settle(connection, &id, &block)?;
+            leg::db::append(connection, &mut Legs::from(vec![adjustment]), position)?;
+            wallet_index::db::settle(connection, &id, position)?;
             Ok(true)
         }))
     }
 
     /// One write: the coins the index still shows unspent archived and
-    /// written off ([`write_off`]), the index restarted, its pending sends
+    /// written off ([`wallets::write_off`]), the index restarted, its pending sends
     /// forgotten (`jump`).
     fn restart<'a>(
         &'a self,
@@ -153,50 +144,13 @@ impl WalletIndexStore for Stores {
         let index = index.clone();
         Box::pin(self.db.write(move |connection| {
             let id = WalletIndexId::of(&index.address, &index.asset)?;
-            if let Some(at) = &index.progress.indexed_at {
-                write_off(connection, &id, at, birthday)?;
+            if let Some(at) = index.progress.indexed_at {
+                wallets::write_off(connection, &id, at, birthday)?;
             }
             wallet_index::db::restart(connection, &id, birthday)?;
             let sent = transaction::db::find_sent(connection, &id)?;
-            transaction_indexes::forget(connection, &sent, Why::Jump)?;
+            transactions::forget(connection, &sent, Why::Jump)?;
             Ok(())
         }))
     }
-}
-
-/// Index `id`'s highest seq ever kept and totals at `position`.
-fn running(
-    connection: &mut SqliteConnection,
-    id: &WalletIndexId,
-    position: i64,
-) -> anyhow::Result<leg::Running> {
-    let ids = BTreeSet::from([String::from(id.clone())]);
-    leg::db::find_running(connection, &ids, position)?
-        .remove(id.as_ref())
-        .context("the index's totals were not read")
-}
-
-/// Archives at `birthday`, the jump line, the coins index `id` still shows
-/// unspent below it, and writes them off on `at`, the block it is indexed
-/// through, or on its last leg below the line when that is above (a send
-/// kept while it was paused): one adjustment (leg 1) of −Σ them, which
-/// lowers its total only. None: nothing.
-fn write_off(
-    connection: &mut SqliteConnection,
-    id: &WalletIndexId,
-    at: &BlockHeader,
-    birthday: u64,
-) -> anyhow::Result<()> {
-    let line = int(birthday)?;
-    let Some(archived) = leg::db::archive(connection, id, line)? else {
-        return Ok(());
-    };
-    let last = leg::db::find_last_position(connection, id, line)?;
-    let position = int(at.position)?.max(last.unwrap_or(i64::MIN));
-    let block = block::db::find_by_position(connection, id.network(), position)?
-        .context("the index's block is not kept")?;
-    let mut adjustment = Leg::adjustment(&block, id, 1, &(Decimal::zero() - archived));
-    adjustment.follow(&mut running(connection, id, position)?)?;
-    leg::db::insert(connection, vec![&adjustment])?;
-    Ok(())
 }

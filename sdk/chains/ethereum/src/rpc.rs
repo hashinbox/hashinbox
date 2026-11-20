@@ -68,29 +68,15 @@ impl Client {
         &self.0.network
     }
 
-    /// The newest block (`eth_blockNumber`) and the newest block consensus
-    /// finalized as confirmed.
+    /// The newest block (`eth_blockNumber`).
     ///
     /// # Errors
     ///
-    /// A node failure, or a node that serves no finalized block yet
-    /// (syncing, or a development chain); retry later.
+    /// A node failure.
     pub async fn tips(&self) -> anyhow::Result<Tips> {
-        let [produced, finalized] = self
-            .batch(vec![
-                Call::new("eth_blockNumber", json!([])),
-                Call::new("eth_getBlockByNumber", json!(["finalized", false])),
-            ])
-            .await?
-            .try_into()
-            .map_err(|_| anyhow!("Ethereum tips batch is not two answers"))?;
-        let produced: U64 = decode("eth_blockNumber", produced)?;
-        let finalized: Option<Numbered> = decode("eth_getBlockByNumber", finalized)?;
-        let finalized = finalized.context("Ethereum node serves no finalized block yet")?;
-        let produced = produced.to::<u64>();
+        let position: U64 = self.0.node.call("eth_blockNumber", json!([])).await?;
         Ok(Tips {
-            produced,
-            confirmed: finalized.number.to::<u64>().min(produced),
+            position: position.to::<u64>(),
         })
     }
 
@@ -103,9 +89,16 @@ impl Client {
     ///
     /// A node failure, a block the node does not hold yet, a block or
     /// receipts it keeps no history for ([`NotServed`], EIP-4444; `null`
-    /// receipts of a finalized block count as pruned), or a run that does
+    /// receipts of a confirmed block, `confirmations` below the tip, count
+    /// as pruned), or a run that does
     /// not link (the chain moved mid-fetch; retry).
-    pub async fn blocks(&self, start: u64, end: u64, tokens: &Tokens) -> anyhow::Result<Blocks> {
+    pub async fn blocks(
+        &self,
+        start: u64,
+        end: u64,
+        tokens: &Tokens,
+        confirmations: u64,
+    ) -> anyhow::Result<Blocks> {
         let network = self.network();
         let mut run = Blocks::new(network.into());
         if start > end {
@@ -141,9 +134,9 @@ impl Client {
         for (wire, receipts) in wires.into_iter().zip(receipts) {
             let height = wire.number();
             // No receipts for a block the node has: not ready yet near the
-            // tip (the run ends before it), pruned at or below finalized.
+            // tip (the run ends before it), pruned at or below confirmed.
             let Some(receipts) = receipts else {
-                if height <= self.tips().await?.confirmed {
+                if height <= self.tips().await?.confirmed(confirmations) {
                     return Err(NotServed { position: height }.into());
                 }
                 break;
@@ -710,12 +703,6 @@ fn reason(message: &str) -> Option<Reason> {
     } else {
         None
     }
-}
-
-/// `eth_getBlockByNumber(tag, false)`, for its number.
-#[derive(Deserialize)]
-struct Numbered {
-    number: U64,
 }
 
 /// `eth_getTransactionReceipt`, for its block and outcome.

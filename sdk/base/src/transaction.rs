@@ -247,12 +247,17 @@ impl Transfer {
 /// exactly one payment. The asset is fixed when the factory or wallet
 /// creates the builder; the transfer is paid by its own source or the
 /// default one. What it chose when it signed is its state, saved, so a
-/// stuck payment is replaced with the same calls that sent it:
+/// stuck payment is signed again with the same calls that sent it:
 ///
 /// ```text
-/// a payment:  from_transfer(transfer), with_fee(fee), sign(), save()
-/// its bump:   load(&state), with_fee(Fee::Times(1.1)), sign()
+/// a payment:     from_transfer(transfer), with_fee(fee), sign(), save()
+/// its next one:  load(&state), with_fee(fee), sign()
+/// its bump:      load(&state), replaceable()?.replace(transfer), sign()
+/// its cancel:    load(&state), replaceable()?.replace(Transfer::new(source, 0)), sign()
 /// ```
+///
+/// A loaded payment signs at least the chain's step over its saved rate:
+/// the builder, not the caller, knows what a node takes as a replacement.
 ///
 /// It knows nothing of broadcasting: save the signed transaction, then
 /// hand it to a [`Broadcaster`].
@@ -299,12 +304,34 @@ pub trait Builder: Send {
     fn save(&self) -> Result<serde_json::Value, Error>;
 
     /// A state [`Self::save`] made: the next sign continues it (same nonce
-    /// or coins), at a rate never below the saved one.
+    /// or coins where the chain has them), at least the chain's step over
+    /// the saved rate.
     ///
     /// # Errors
     ///
     /// `Failed` for a state this chain's builder did not save.
     fn load(&mut self, state: &serde_json::Value) -> Result<(), Error>;
+
+    /// Itself as a [`Replace`] where the chain replaces a sent payment in
+    /// its slot; `None`, the default, where a payment expires instead
+    /// (Solana).
+    fn replaceable(&mut self) -> Option<&mut dyn Replace> {
+        None
+    }
+}
+
+/// A [`Builder`] whose chain replaces a sent payment in its slot (Ethereum:
+/// its nonce; Bitcoin: its coins): of two in one slot only one lands.
+pub trait Replace: Builder {
+    /// Puts `transfer` in the loaded payment's slot: the next sign replaces
+    /// it. The same transfer is its bump; zero to its own source its
+    /// cancel, paying nothing but the fee.
+    ///
+    /// # Errors
+    ///
+    /// `Failed` with nothing loaded, or for a transfer this slot cannot
+    /// pay (a cancel replaced by a payment).
+    fn replace(&mut self, transfer: Transfer) -> Result<(), Error>;
 }
 
 /// The only external effect in transaction submission: a signed

@@ -1,7 +1,6 @@
 //! Payment server process: reads its command line (`config`), opens the
 //! one SQLite file, builds the container (`base::Container`) of every
-//! `network` row that has a `network_index` row (each `enabled` network gets
-//! one at start), each network over its stored nodes (`usecase::Transport`)
+//! `enabled` `network` row, each network over its stored nodes (`usecase::Transport`)
 //! and built by its chain, registered here (the only module that names a
 //! chain crate); runs the workers (each network's indexer, the send queue)
 //! and serves the public HTTP API (`api`, which names no chain and no
@@ -56,11 +55,10 @@ async fn main() -> Result<(), AnyError> {
         api_base: config::Serve::api_base()?,
     });
 
-    // Every network with a `network_index` row, each over its stored nodes
-    // and built by its chain. A network that does not build, or whose nodes
-    // do not answer, only fails its own jobs, with why.
+    // Every `enabled` network, each over its stored nodes and built by its
+    // chain. A network that does not build, or whose nodes do not answer,
+    // only fails its own jobs, with why.
     let db = config.storage.open()?;
-    db.write(models::network_index::db::create_enabled).await?;
     let container = Container::<usecase::Transport>::new(usecase::sdk::Stores::storage(db.clone()));
     usecase::Networks::read(&db)
         .await?

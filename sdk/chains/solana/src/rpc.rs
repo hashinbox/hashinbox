@@ -4,7 +4,7 @@
 use std::{str::FromStr as _, sync::Arc};
 
 use ::rpc::{Answer, Batch, Call, Client as _, RawJson, Request};
-use anyhow::{Context as _, anyhow, bail, ensure};
+use anyhow::{Context as _, bail, ensure};
 use base::{
     Asset, Block, BlockHash, BlockHeader, BlockParent, Blocks, Decimal, Holding, InfoClient as _,
     NotServed, Reason, Reward, Tips, TransactionError, TransactionErrorKind, Transactions,
@@ -58,27 +58,18 @@ impl Client {
         &self.0.network
     }
 
-    /// The newest confirmed slot as produced, and the newest rooted
-    /// (`finalized`) slot as confirmed.
+    /// The newest confirmed slot (`getSlot` at `confirmed`).
     ///
     /// # Errors
     ///
     /// A node failure.
     pub async fn tips(&self) -> anyhow::Result<Tips> {
-        let [produced, rooted] = self
-            .batch(vec![
-                Call::new("getSlot", json!([{ "commitment": CONFIRMED }])),
-                Call::new("getSlot", json!([{ "commitment": "finalized" }])),
-            ])
-            .await?
-            .try_into()
-            .map_err(|_| anyhow!("Solana tips batch is not two answers"))?;
-        let produced: u64 = decode("getSlot", produced)?;
-        let rooted: u64 = decode("getSlot", rooted)?;
-        Ok(Tips {
-            produced,
-            confirmed: rooted.min(produced),
-        })
+        let position: u64 = self
+            .0
+            .node
+            .call("getSlot", json!([{ "commitment": CONFIRMED }]))
+            .await?;
+        Ok(Tips { position })
     }
 
     /// Blocks `start..=end`, linked, skipped slots absent, legs of SOL and of

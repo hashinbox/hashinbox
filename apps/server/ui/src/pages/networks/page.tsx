@@ -28,8 +28,9 @@ function nameOf(n: Pick<ConfiguredNetwork, 'chain' | 'network'>): string {
 
 /**
  * Where a network's indexing is: green while it is indexed (an index row, a
- * readable node, no failing job), amber while catching up, red on a failing
- * job or an unreadable node, grey when the network is not indexed at all.
+ * readable node, no failing job), amber while catching up or before its
+ * first tip, red on a failing job or an unreadable node, grey when the
+ * network is not indexed at all.
  */
 function syncOf(n: ConfiguredNetwork): { label: string; color: string; live: boolean } {
   const { tip_live: tip, index_job_reason: reason } = n;
@@ -37,7 +38,10 @@ function syncOf(n: ConfiguredNetwork): { label: string; color: string; live: boo
   if (reason) return { label: 'Retrying after an error', color: 'error.main', live: false };
   if (n.tip_error)
     return { label: `Node unreadable: ${n.tip_error}`, color: 'error.main', live: false };
-  if (!n.index) return { label: 'Not indexed', color: 'text.disabled', live: false };
+  if (!n.index)
+    return n.enabled
+      ? { label: 'Waiting for the tip', color: 'warning.main', live: false }
+      : { label: 'Not indexed', color: 'text.disabled', live: false };
   if (last != null && tip != null && tip - last > 1)
     return {
       label: `Catching up: ${String(tip - last)} behind`,

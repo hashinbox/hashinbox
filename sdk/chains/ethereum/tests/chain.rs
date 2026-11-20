@@ -114,6 +114,8 @@ fn config() -> Config {
         ticker: None,
         display_decimals: None,
     }];
+    // The tip 16 of these tests confirmed through 12.
+    config.confirmations = 4;
     config
 }
 
@@ -135,28 +137,19 @@ fn info_reports_the_chain_id_and_tip() {
 }
 
 #[test]
-fn tips_are_the_produced_and_finalized_blocks() {
+fn the_tip_is_the_newest_block_and_confirmed_is_confirmations_below() {
+    assert_eq!(
+        Config::new(Network::new(1, "mainnet")).confirmations,
+        64,
+        "about two epochs, where finalized sits"
+    );
     let script = Script::new([]);
     let chain = connect(&script, &config());
-    script.push([
-        Reply::ok("eth_blockNumber", json!("0x10")),
-        Reply::ok("eth_getBlockByNumber", json!({"number": "0xc"}))
-            .expecting(json!(["finalized", false])),
-    ]);
+    script.push([Reply::ok("eth_blockNumber", json!("0x10")).expecting(json!([]))]);
     let tips = block_on(chain.tips()).unwrap();
-    assert_eq!(
-        tips,
-        Tips {
-            produced: 16,
-            confirmed: 12
-        }
-    );
-
-    script.push([
-        Reply::ok("eth_blockNumber", json!("0x10")),
-        Reply::ok("eth_getBlockByNumber", Value::Null),
-    ]);
-    assert!(block_on(chain.tips()).is_err(), "no finalized block yet");
+    assert_eq!(tips, Tips { position: 16 });
+    assert_eq!(chain.confirmations(), 4);
+    assert_eq!(tips.confirmed(chain.confirmations()), 12);
     script.exhausted();
 }
 
@@ -490,11 +483,8 @@ fn a_chain_over_a_swap_follows_its_replacement() {
     let config = config();
     let chain = Factory::from(config.clone()).chain(&Client::new(swap.clone(), config.native()));
     let tips = |script: &Script, produced: &str| {
-        script.push([
-            Reply::ok("eth_blockNumber", json!(produced)),
-            Reply::ok("eth_getBlockByNumber", json!({"number": "0x1"})),
-        ]);
-        block_on(chain.tips()).unwrap().produced
+        script.push([Reply::ok("eth_blockNumber", json!(produced))]);
+        block_on(chain.tips()).unwrap().position
     };
     assert_eq!(tips(&old, "0xa"), 10);
 
@@ -598,7 +588,6 @@ impl base::WalletIndexStore for Fresh {
         &'a self,
         _: &'a base::WalletIndex,
         _: &'a base::Holding,
-        _: &'a base::BlockHeader,
     ) -> base::Future<'a, anyhow::Result<bool>> {
         unreachable!("nothing to settle")
     }
@@ -648,10 +637,8 @@ impl base::TransactionIndexStore for Fresh {
     fn settle<'a>(
         &'a self,
         _: &'a base::TransactionIndex,
-        _: Option<&'a base::BlockHeader>,
-        _: bool,
-        _: &'a base::BlockHeader,
-    ) -> base::Future<'a, anyhow::Result<bool>> {
+        _: &'a base::Confirmed,
+    ) -> base::Future<'a, anyhow::Result<()>> {
         unreachable!("no send")
     }
 
@@ -703,7 +690,7 @@ fn the_settings_batch_is_the_indexers_step() {
         chain_id: Some("1".to_owned()),
         testnet: false,
         block_time: std::time::Duration::from_secs(12),
-        confirmations: 12,
+        confirmations: 4,
         max_depth: None,
         explorer_address: None,
         explorer_transaction: None,
@@ -737,7 +724,6 @@ fn the_settings_batch_is_the_indexers_step() {
     // From block 13 with the tip at 16: two blocks a step, not the default 100.
     script.push([
         Reply::ok("eth_blockNumber", json!("0x10")),
-        Reply::ok("eth_getBlockByNumber", json!({"number": "0xc"})),
         Reply::ok(
             "eth_getBlockByNumber",
             block(13, 0xdd, 0xcc, vec![], json!([])),
@@ -776,24 +762,14 @@ fn a_network_builds_with_its_node_down_and_asks_it_nothing() {
     script.exhausted();
 
     switch.down(false);
-    script.push([
-        Reply::ok("eth_blockNumber", json!("0x10")),
-        Reply::ok("eth_getBlockByNumber", json!({"number": "0xc"})),
-    ]);
-    let expected = Tips {
-        produced: 16,
-        confirmed: 12,
-    };
-    assert_eq!(block_on(chain.tips()).unwrap(), expected);
+    script.push([Reply::ok("eth_blockNumber", json!("0x10"))]);
+    assert_eq!(block_on(chain.tips()).unwrap(), Tips { position: 16 });
     script.exhausted();
 }
 
-/// Tips with the finalized block at 12.
-fn finalized_at_12() -> [Reply; 2] {
-    [
-        Reply::ok("eth_blockNumber", json!("0x10")),
-        Reply::ok("eth_getBlockByNumber", json!({"number": "0xc"})),
-    ]
+/// The tip at 16: confirmed through 12 ([`config`]).
+fn confirmed_at_12() -> [Reply; 1] {
+    [Reply::ok("eth_blockNumber", json!("0x10"))]
 }
 
 #[test]
@@ -805,11 +781,11 @@ fn a_balance_is_read_at_the_finalized_block() {
     };
     let script = Script::new([]);
     let chain = connect(&script, &config());
-    script.push(finalized_at_12());
+    script.push(confirmed_at_12());
     script
         .push([Reply::ok("eth_getBalance", json!("0xde0b6b3a7640000"))
             .expecting(json!([owner, "0xc"]))]);
-    script.push(finalized_at_12());
+    script.push(confirmed_at_12());
     script.push([Reply::ok(
         "eth_call",
         json!("0x00000000000000000000000000000000000000000000000000000000004c4b40"),
@@ -841,7 +817,7 @@ fn a_balance_is_read_at_the_finalized_block() {
 
 #[test]
 fn a_balance_at_a_block_not_finalized_yet_is_not_answerable() {
-    let script = Script::new(finalized_at_12());
+    let script = Script::new(confirmed_at_12());
     let chain = connect(&script, &config());
 
     let read = block_on(chain.balance(&address(0xb1), &Asset::native(network()), 13));
@@ -866,7 +842,7 @@ fn a_transaction_is_confirmed_by_its_receipt_at_the_finalized_block() {
         (mined("0xe", "0x0"), None, false),
         (Value::Null, None, false),
     ] {
-        script.push(finalized_at_12());
+        script.push(confirmed_at_12());
         script.push([receipt(mined)]);
         let confirmed = block_on(chain.confirm(&id, 12)).unwrap();
         assert_eq!(
@@ -879,7 +855,7 @@ fn a_transaction_is_confirmed_by_its_receipt_at_the_finalized_block() {
         );
     }
     // Not finalized through 13 yet: no receipt asked.
-    script.push(finalized_at_12());
+    script.push(confirmed_at_12());
     assert_eq!(block_on(chain.confirm(&id, 13)).unwrap(), None);
     script.exhausted();
 }

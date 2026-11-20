@@ -21,7 +21,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     chain.node(0).prune(chain.tip() - 4);
     let asked = deposit - 2;
     app.api.index(&wallet, "native", Some(asked)).await;
-    settle(chain);
+    settle(app, chain).await;
     let index = reaches(app, &wallet, "native", "balance_confirmed", &unit(chain)).await;
     assert_eq!(
         (index["requested_from"].as_u64(), index["birthday"].as_u64()),

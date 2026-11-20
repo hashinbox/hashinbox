@@ -7,7 +7,7 @@ see As built). Next: the Bitcoin bump (iteration 7). Replaces the expiry of
 066.
 
 066 held a sent transaction's funds until it was mined **or its time was
-up**. A clock cannot tell that a transaction is dead: one past its expiry
+up**. A clock cannot tell that a transaction can never land: one past its expiry
 may still sit in a mempool and mine later, after its funds and its nonce
 went to another send. Here a payment is held until it is in a final block,
 or provably can never land. Before it is broadcast it is watched like a
@@ -23,13 +23,14 @@ it was sent, the job raises its fee, within limits.
 | How many payments per broadcast job? | One job = one payment = one transaction, on every chain. Several payments are several jobs; the sender's topic runs them in order. | A job of several transactions failed as a whole while some were already sent; a retry paid those twice. Bitcoin multi-recipient batching is dropped for now and may come back as its own feature. |
 | Who knows whether a payment is mined? | Its transaction index (085): made before the broadcast, read forward by the indexer with every block, `found` set on the block that holds it, its gaps closed by the chain (`Confirmer`) or given up (Bitcoin). | The same rules as a wallet. The index says exactly how far we have looked, so nothing is judged on blocks not read yet. |
 | Who watches a sent payment? | Its own broadcast job, which only reads the transaction index. No separate walker. | One job is one payment's whole story; nothing races it; it never gives up on timeouts. |
-| How is "dead" known? | Only by the transaction's own deadline: Solana's blockhash expiry, read against the index's indexed height. Ethereum and Bitcoin transactions never die on their own; they are bumped instead. A dead Solana payment is bumped too, until `max_bumps`; then the job fails `dead`. | With keys used only by this server, nothing else can spend a payment's coins or nonce; our own earlier versions are watched by their own indexes. |
-| When is a payment bumped? | One that never expires (Ethereum, Bitcoin): when its index has read `bump_after` blocks past `broadcasted_at` and it is in none of them. One that expires (Solana): once it is dead. At most `max_bumps` times. | Counted in blocks the index actually read, a stuck or lagging indexer never triggers a bump: it has not read those blocks. A Solana transaction has no nonce or coin to replace it by: a next version is safe only once the old one can never land. |
+| How is "expired" known? | Only by the transaction's own deadline: Solana's blockhash expiry (`expires_height`), against the height of the newest kept block at or below the network's confirmed position (`block::db::find_height_at_or_below`); the index read through the confirmed position, not found (`TransactionIndex::expired`). The broadcast job judges it, not the indexer (087). Ethereum and Bitcoin transactions never expire; they are bumped instead. An expired Solana version is dropped and signed anew, until `max_bumps`; then the job fails `expired`. | With keys used only by this server, nothing else can spend a payment's coins or nonce; our own earlier versions are watched by their own indexes. |
+| When is a payment bumped? | One that never expires (Ethereum, Bitcoin): when its index has read `bump_after` blocks past `broadcasted_at` and it is in none of them. One that expires (Solana): never in flight; once expired it is dropped and signed anew. At most `max_bumps` times. | Counted in blocks the index actually read, a stuck or lagging indexer never triggers a bump: it has not read those blocks. A Solana transaction has no nonce or coin to replace it by: a next version is safe only once the old one can never land. |
 | What does a `FeeLevel` mean? | A multiple of the tip of the network's rate now (`FeeRate { base, tip }`): `low`, `normal` and `high` pay × 0.5, 1 and 2 of the tip; the base is the network's, so `low` never goes below what nodes accept. | One meaning for a caller whatever the chain. |
 | How is a bump signed? | The same builder as a first send: `load(&state)`, `with_fee(Fee::Times(1.1))`, `sign()`: a tenth over the higher of the rate now and the one it paid. `state` is what the builder `save`d when it signed the current version, kept in the job's state. | One fluent API for sending and bumping; each chain keeps its floor and fee cap. |
 | Keys used outside this server | Not supported (like history gaps, 083). Such a payment may end stuck at its bump limit, its funds held. | Detecting it needs per-chain conflict bookkeeping for a case we do not support. |
 | The Ethereum nonce | The higher of the node's pending count and one above our highest pending nonce. | A load-balanced node's mempool may miss our last send; our own records do not. |
-| What a forgotten send leaves | A row in `transaction_forgotten` (reason, bytes, legs); the `transaction` row and its legs go. | A soft delete would need a filter in every read; one missed filter brings a dead send back. |
+| What a forgotten send leaves | Its broadcast job's state: the outcome, the reason, every txid it sent; the `transaction` rows still pending and their legs go (087 dropped `transaction_forgotten`). | A soft delete would need a filter in every read; one missed filter brings a forgotten send back. The job already is the payment's whole story. |
+| How does every payment end? | Resolved, never abandoned: final, reverted, expired, refused, cancelled or forgotten (Resolution). Out of bumps, or unable to bump, it is cancelled in its slot. | A payment stuck at its bump limit held its funds forever. |
 
 ## The broadcast job
 
@@ -37,7 +38,7 @@ it was sent, the job raises its fee, within limits.
 record + watch ─► send ─► check ─┬─ found, final        → done
                            ▲     ├─ given up / gone     → failed (forgotten)
                            │     ├─ bump due            → bump, watch the new version
-                           │     ├─ Solana, expired     → forgotten (dead), failed
+                           │     ├─ Solana, expired     → dropped; signed anew, or failed (expired)
                            └─────┴─ otherwise           → send the same bytes again
 ```
 
@@ -65,8 +66,8 @@ are watched, never bumped).
    funds are held from now on), its `transaction_index` row, the job's
    state. Short: rolled back, the job fails `insufficient-funds`.
 3. **Send** the bytes to every node, then one write:
-   - accepted, or a transient failure (a node may hold it): `sent_at` set;
-     the job checks from now on;
+   - accepted, or a transient failure (a node may hold it): the job's
+     state `sent` (the API's `accepted`); the job checks from now on;
    - refused by every node: forgotten (`refused`), its index deleted, the
      job fails.
 4. **Check**, every `Tracking::check`, reading only the job's transaction
@@ -77,8 +78,10 @@ are watched, never bumped).
    - **the current index given up** (`no_data`, a Bitcoin jump) or gone:
      failed `forgotten`;
    - **a bump due** (below): bump;
-   - **Solana**, the current index read past its `expires_height`, not
-     found, `max_bumps` made: forgotten (`dead`), failed;
+   - **Solana**, a version expired (its index read through the final
+     block, not found, that block's height above its `expires_height`):
+     dropped in one write (its pending row, legs and index); none
+     left: signed anew while bumps are left, else failed `expired`;
    - **otherwise**: send the same bytes again; check again.
 
    When the job ends, its transaction indexes are deleted.
@@ -99,11 +102,11 @@ Due (`TransactionIndex::bump_due(bump_after)`, the one place that says so; how m
   none of the blocks its index read, the index has read at least
   `bump_after` blocks past its `broadcasted_at`, and fewer than
   `max_bumps` were made;
-- **one that expires** (Solana): once it is dead (its index read past its
-  `expires_height`, not found), and fewer than `max_bumps` were made. It
-  cannot be replaced in flight (no nonce or coins name the payment), so
-  a next version is safe only once the old one can never land. After
-  `max_bumps` a dead one fails the job `dead`.
+- **one that expires** (Solana): never due in flight. It cannot be
+  replaced in flight (no nonce or coins name the payment), so a next
+  version is safe only once the old one can never land: once expired it is
+  dropped, and with no version left a new one is signed while fewer than
+  `max_bumps` were made. After `max_bumps` the job fails `expired`.
 
 A lagging or stuck indexer has not read those blocks, so it never makes a
 bump due.
@@ -128,7 +131,7 @@ match builder.sign().await {
   and the payment is done.
 - **At the cap** (`FeeCap`), or `max_bumps` reached: the same bytes are
   sent again, and the job's reason says `stuck` (Solana at `max_bumps`:
-  dead, above).
+  expired, above).
 - **No builder state** (a job queued before it was kept): never due a
   bump; the same bytes are sent again.
 - Signed under the job's sender topic, so no other payment of the sender
@@ -178,13 +181,54 @@ A `Fee` is a rule over rates, not a number: each chain keeps its own
 rate's shape, floor and cap. A bump needs no level: `Times(1.1)` is over
 the higher of the rate now and the old one.
 
+## Resolution
+
+Every payment's job ends resolved (087). Its states, and what moves each:
+
+| State | Moves on | To |
+| --- | --- | --- |
+| new | signed, held, recorded and watched in one write | recorded |
+| new | short of funds, a sender index missing, invalid | failed (nothing recorded) |
+| recorded | broadcast accepted, or no sure answer | sent |
+| recorded | refused by every node | **refused** |
+| sent | a version found above the final block, or not read that far | sent (waits: no resend, no bump) |
+| sent | that block reorged: pending again, its spend held, its index capped | sent (missing) |
+| sent | missing: in none of the blocks read | sent (same bytes again) |
+| sent | missing `bump_after` blocks past the current version's broadcast, bumps left | bumped (a version a tenth up, watched) |
+| sent | bump due, no bump left, or the bump not signable (fee cap, short of change or funds) | cancelling |
+| cancelling | a cancel in the payment's slot: Ethereum zero ether to the sender at its nonce, Bitcoin its coins back in one output (RBF), at least a tenth over the last version; its pending spend is its fee | sent (the cancel watched as a version) |
+| cancelling | due again | a cancel again, a tenth up |
+| cancelling | no cancel signable (fee cap; Solana `Unsupported`) | sent (same bytes again, reason `stuck`) |
+| sent | a payment version found succeeded in a final block | **final** (done) |
+| sent | a version found reverted in a final block | **reverted** |
+| sent | a cancel found in a final block | **cancelled** |
+| sent | Solana: a version expired (index read through the final block, not found, the final height above its `expires_height`) | that version dropped in one write: its pending row, legs and index; its spend released |
+| sent | that drop, another version still pending | sent (that one watched) |
+| sent | that drop, no version left, a bump left | recorded (a new version on a fresh blockhash, a tenth up, its own funds check; short: **expired**, `insufficient-funds`) |
+| sent | that drop, no version left, no bump left | **expired** |
+| sent | its index given up, or its row gone (a jump) | **forgotten** |
+
+Terminal: final, reverted, expired, refused, cancelled, forgotten; every other
+state is checked again at `Tracking::check`. Bumps off (`max_bumps` 0) or no
+builder state (a job queued before it was kept): never bumped nor cancelled,
+sent again until it resolves. A cancel is signed by the payment's builder:
+`load(&state)`, `cancel()`, `with_fee(Fee::Times(1.1))`, `sign()`; a
+cancel's saved state loads as a cancel.
+
+The job's end, one write: every version still pending is deleted with its
+legs (what never landed frees its funds); a mined version stays chain
+history (the landed one; a reverted one's or a landed cancel's fee); every
+version's transaction index is deleted; the job's state keeps `outcome`,
+`reason` and every txid sent (`replaced`, `txid`, `cancels`): the only
+record.
+
 ## Per chain
 
 | | `expires_height` | Saved state | `FeeRate` (`Times(1.1)` moves it) | Fee cap | `Tracking` (`check` / `bump_after` / `max_bumps`) |
 | --- | --- | --- | --- | --- | --- |
 | Bitcoin | `None` | the payment, source, coins spent, change address, rate | sat/kvB: base `mempoolminfee`, tip `estimatesmartfee(fee_target_blocks, default 1)` above it; at least `fee_floor`; a replacement pays at least the old fee plus the base over its size, from its change | none yet (`max_fee_rate`, Open 1) | 60 s / 6 blocks / 5 |
 | Ethereum | `None` | the payment, source, nonce, gas limit, rate | wei per gas: base the latest base fee, tip the node's; signs `2 × base + tip`, both fees ≥ 1.1 × the saved ones after `load` | `FeeLimits` | 30 s / 50 blocks / 5 |
-| Solana | `lastValidBlockHeight` from `getLatestBlockhash` | the payment, source, compute-unit limit, rate; signed on a new blockhash | micro-lamports per compute unit: base 0, tip the network's median recent priority fee, at least 1; due once dead | `max_priority_fee` (new setting) | 10 s / unused / 5 |
+| Solana | `lastValidBlockHeight` from `getLatestBlockhash` | the payment, source, compute-unit limit, rate; signed on a new blockhash | micro-lamports per compute unit: base 0, tip the network's median recent priority fee, at least 1; signed anew once expired | `max_priority_fee` (new setting) | 10 s / unused / 5 |
 
 A chain sets `expires_height` when it signs, implements its
 `FeeRateProvider`, `save` and `load`.
@@ -194,12 +238,13 @@ Everything else is `sdk/base` and the server, the same for all.
 
 Built:
 
-- `"transaction"`: `expires_at` dropped; `sent_at` is when a node may hold
-  it (accepted, or a transient failure), NULL while recorded and not sent,
-  and once mined.
+- `"transaction"`: `expires_at` dropped; `broadcasted_at` (087, was
+  `sent_at`) is when this server recorded it, before its first broadcast:
+  set exactly on our sends, kept once mined; whether a node accepted it is
+  the job's state (`sent`).
 - `transaction_forgotten (id, chain, network, txid, reason, forgotten_at,
-  bytes, legs)`: every forgotten pending transaction; reasons `refused`,
-  `dead`, `jump`, and next `replaced`.
+  bytes, legs)`: every forgotten pending transaction; dropped by 087 (the
+  job's state is the record, Resolution).
 - `docs/design/084-migrate-1.sql`; not applied to any real database.
 
 From 085: `transaction_index (transaction, broadcasted_at, indexed_at,
@@ -211,8 +256,8 @@ found, expires_height, state, reason)`.
   `{asset?, destination, amount, fee?}`, and enqueues one job.
 - `GET /v1/jobs`: a broadcast shows its `txid` and `accepted`. It succeeds
   once its payment is in a final block; failed says why: `refused`,
-  `dead`, `forgotten`, `insufficient-funds`, `invalid`; its reason says
-  `stuck` while at its bump limit.
+  `reverted`, `expired`, `cancelled`, `forgotten`, `insufficient-funds`,
+  `invalid`; its reason says `stuck` while even a cancel cannot be signed.
 - Triggers enqueue one job per payment, all of a round's jobs in its one
   write.
 
@@ -223,11 +268,11 @@ found, expires_height, state, reason)`.
 | 1 | No clock: `expires`, `pending_ttl_ms`, `expires_at` and the `expire` job removed; `transaction_forgotten` | built |
 | 2 | Ethereum nonce counts our sends in flight (`TransactionIndexStore::find_sent`, was `Storage::pending`) | built |
 | 3 | One job = one payment = one transaction; builders sign one transfer; API and triggers | built |
-| 4 | The broadcast job owns its payment until final or dead; no `pending` job | built |
+| 4 | The broadcast job owns its payment until final or expired; no `pending` job | built |
 | 5 | The job watches its payment's transaction index (085): made in the record write, read by every check; `alive` and `is_displaced` removed | in progress (085) |
 | 6 | The stateful builder (`from_transfer`, `from_existing`, `set_fee`, `bump_fee`, `sign`), `FeeLevel`, `Tracking`, the bump; Ethereum | built |
 | 7 | Bitcoin bump (the same coins, the change pays); `max_fee_rate` left open | built |
-| 8 | Solana: a priority fee on every transaction, levels as percentiles of recent fees, `max_priority_fee`, `from_existing`, `bump_fee`; a payment that expires bumped once dead | built |
+| 8 | Solana: a priority fee on every transaction, levels as percentiles of recent fees, `max_priority_fee`, `from_existing`, `bump_fee`; a payment that expires signed anew once expired | built |
 | 9 | `Fee` over a chain's `FeeRate` (`with_fee` replaces `set_fee` and `bump_fee`); one `FeeRateProviderCached` per chain replaces each chain's price cache; levels × 0.5, 1, 2 everywhere; Solana's rate network-wide | built |
 | 10 | `FeeRate { base, tip }` one plain struct for every chain (levels scale the tip); `save` / `load` replace `from_existing` and its byte decoding; the job keeps the builder's state | built |
 
@@ -237,16 +282,19 @@ found, expires_height, state, reason)`.
   again; its block reorged, sent again.
 - A payment whose index has not read `bump_after` blocks yet (a lagging
   indexer) is never bumped.
-- Solana: read past its `expires_height`, not found → forgotten (`dead`),
-  failed; found before it → done.
-- Ethereum and Bitcoin: never dead by age; sent again at every check.
+- Solana: expired (index read through the final block, not found, the
+  final height above its `expires_height`) → dropped, failed `expired`
+  with nothing left; the final height not past yet → sent again; found
+  before it → done. The indexer never changes a state for expiry.
+- Ethereum and Bitcoin: never expire; sent again at every check.
 - A given-up index (a Bitcoin jump) → failed `forgotten`.
 - Bump: `bump_after` blocks read, not found → replaced: the row swapped,
   the funds held once, a new index; refused → undone; at the cap or
   `max_bumps` → sent again, reason `stuck`; the old version found instead
   → done, the current row forgotten (`replaced`).
-- Solana bump: dead → replaced as above; the new version found final →
-  done; dead at `max_bumps` → failed `dead`. In the chain: each level its
+- Solana bump: expired → dropped and signed anew, sent by the next run;
+  the new version found final → done; expired at `max_bumps` → failed
+  `expired`. In the chain: each level its
   percentile, both ComputeBudget instructions, the priority fee in the fee
   leg, `FeeCap` above `max_priority_fee`, `save` / `load` of a SOL and a
   token transfer, the bump's step, a new blockhash.
@@ -275,7 +323,7 @@ Decisions beyond the design:
   `Tracking::default()` (checked every minute, never bumped) stands in for a
   network that did not build. `TransactionIndex::bump_due(bump_after)`: the
   index says `Missing` and `indexed_at.position - broadcasted_at >=
-  bump_after`, or `Dead`. A job checks every `Tracking::check` of its chain: the
+  bump_after` (087: never for one that expires). A job checks every `Tracking::check` of its chain: the
   fixed `CHECK` and `Broadcast::new`'s `check` are gone (the mock Ethereum
   network of the server suite sets `check_ms` 1000).
 - **Fee levels** (Open 3): Ethereum tips at 0.5×, 1× and 2× the node's
@@ -316,7 +364,7 @@ Decisions beyond the design:
   (`transaction_indexes::restore`): the new row forgotten `refused` and its
   index deleted, the old one's `transaction_forgotten` row dropped, and the
   old row and legs written back exactly as the run read them before the
-  bump (`sent_at` too), with the funds check; the state names the old
+  bump (`broadcasted_at` too), with the funds check; the state names the old
   version again, `bumps` kept. Only the run that sent the replacement can
   undo it (it holds the old row); after a crash between the write and the
   send, the replacement stays current, is sent again at each check and may
@@ -366,13 +414,12 @@ Decisions beyond the design:
   tenth, rounded up and at least 1 micro-lamport (a tenth of nothing is
   nothing), whichever is higher. `sign` takes a fresh blockhash, so a new
   `expires_height`.
-- **When:** `TransactionIndex::bump_due(bump_after)` says it for every
-  chain: an index with an `expires_height` is due once `Dead`, never while
-  `Missing`; one without, as before. The job judges `max_bumps`: dead at
-  `max_bumps` fails `dead`; missing at `max_bumps` is due still, so the
-  job reports `stuck`. The job checks it before
-  `Dead`: no Solana branch in the worker. Solana `Tracking`: 10 s, 5 bumps,
-  `bump_after` unused.
+- **When:** `TransactionIndex::bump_due(bump_after)`: an index with an
+  `expires_height` is never due; one without, as before. Since 087 an
+  expired version (`TransactionIndex::expired`) is dropped by the job and
+  signed anew while `max_bumps` allows, else the job fails `expired`;
+  missing at `max_bumps` is due still, so the job reports `stuck`. Solana
+  `Tracking`: 10 s, 5 bumps, `bump_after` unused.
 
 ## As built (iterations 7 and 10)
 
@@ -390,7 +437,7 @@ Decisions beyond the design:
   only reads the two quotes, `FeeLimits::total` checks every ceiling.
 - **Server**: `Progress::builder` (`serde(default)`); without it a check
   never finds a bump due, so such a payment is sent again (or, on Solana,
-  fails `dead`) as before bumps.
+  fails `expired`) as before bumps.
 
 ## Notes
 

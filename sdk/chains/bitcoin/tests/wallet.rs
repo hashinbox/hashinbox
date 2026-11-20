@@ -611,6 +611,60 @@ async fn a_bump_spends_the_same_coins_its_change_paying_the_higher_fee() {
 }
 
 #[tokio::test]
+async fn a_cancel_spends_the_same_coins_back_to_its_source() {
+    let owner = address_of(1).await;
+    let script = Script::new(rate());
+    let factory = factory(
+        &script,
+        AddressType::SegwitV0,
+        vec![funded(&owner, 100_000)],
+    );
+    let wallet = factory
+        .from_pk(SecretBytes::new([1; 32]))
+        .await
+        .expect("key");
+    let mut builder = wallet.transaction(&Asset::native(network())).expect("BTC");
+    builder
+        .from_transfer(Transfer::new(address_of(2).await, 40_000_u64.into()))
+        .expect("valid");
+    let first = builder.sign().await.expect("signed");
+    let state = builder.save().expect("saved");
+
+    let mut cancel = wallet.transaction(&Asset::native(network())).expect("BTC");
+    cancel.load(&state).expect("loaded");
+    let source = wallet.address().clone();
+    let replace = cancel.replaceable().expect("replaces");
+    replace
+        .replace(Transfer::new(source, base::Decimal::zero()))
+        .expect("cancelled");
+    let next = cancel.sign().await.expect("signed");
+    let (old, new): (Transaction, Transaction) = (
+        consensus::deserialize(&first.bytes).expect("decodes"),
+        consensus::deserialize(&next.bytes).expect("decodes"),
+    );
+    assert_eq!(old.input[0].previous_output, new.input[0].previous_output);
+    assert_eq!(new.output.len(), 1, "one output");
+    assert_eq!(
+        new.output[0].script_pubkey, old.output[1].script_pubkey,
+        "back to the source"
+    );
+    let old_fee = 100_000 - 40_000 - old.output[1].value.to_sat();
+    let fee = 100_000 - new.output[0].value.to_sat();
+    let vsize = u64::try_from(new.vsize()).expect("small");
+    assert!(fee >= old_fee + vsize * 11 / 10, "{fee}");
+
+    // Its state loads as a cancel: a cancel again, higher still.
+    let mut again = wallet.transaction(&Asset::native(network())).expect("BTC");
+    again.load(&cancel.save().expect("saved")).expect("loaded");
+    again.with_fee(base::Fee::Times(1.1));
+    let last: Transaction =
+        consensus::deserialize(&again.sign().await.expect("signed").bytes).expect("decodes");
+    script.exhausted();
+    assert_eq!(last.output.len(), 1);
+    assert!(last.output[0].value < new.output[0].value, "a higher fee");
+}
+
+#[tokio::test]
 async fn a_bump_its_change_cannot_pay_is_short_of_funds() {
     let owner = address_of(1).await;
     let script = Script::new(rate());

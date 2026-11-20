@@ -12,8 +12,8 @@ use super::{Error, workers::index};
 use crate::{
     db::Db,
     models::{
-        NetworkIndex, block, leg, network_index, task, transaction, trigger, trigger_run, wallet,
-        wallet_index,
+        NetworkIndex, block, leg, network, network_index, task, transaction, trigger, trigger_run,
+        wallet, wallet_index,
     },
 };
 
@@ -82,11 +82,9 @@ pub(crate) struct Stats {
     pub(crate) addresses: u64,
     /// Tags on addresses.
     pub(crate) tags: u64,
-    /// Live blocks kept.
+    /// Blocks kept.
     pub(crate) blocks: u64,
-    /// Blocks a reorg took back.
-    pub(crate) reorged: u64,
-    /// Transactions kept mined in live blocks.
+    /// Transactions kept mined.
     pub(crate) transactions: u64,
     /// Of those, how many reverted.
     pub(crate) reverted: u64,
@@ -138,7 +136,7 @@ pub(crate) async fn read(db: &Db) -> Result<Stats, Error> {
     let clock = i64::try_from(clock).map_err(|error| Error::internal(error.to_string()))?;
     let stats = db.read(move |connection| {
         let count = |value: i64| u64::try_from(value).unwrap_or_default();
-        let (blocks, reorged) = block::db::count(connection)?;
+        let blocks = block::db::count(connection)?;
         let (transactions, reverted, pending) = transaction::db::count(connection)?;
         let (triggers, enabled) = trigger::db::count(connection)?;
         let jobs = Jobs::of(task::db::count_by_status(connection)?);
@@ -186,7 +184,6 @@ pub(crate) async fn read(db: &Db) -> Result<Stats, Error> {
             addresses: count(wallet_index::db::count_addresses(connection)?),
             tags: count(wallet::db::count_tags(connection)?),
             blocks: count(blocks),
-            reorged: count(reorged),
             transactions: count(transactions),
             reverted: count(reverted),
             pending: count(pending),
@@ -205,8 +202,9 @@ pub(crate) async fn read(db: &Db) -> Result<Stats, Error> {
 pub(crate) struct Health {
     /// At least one network is indexed, and no index job is failing.
     pub(crate) ready: bool,
-    /// Every indexed network's `network_index` row.
-    pub(crate) networks: BTreeMap<base::Network, NetworkIndex>,
+    /// Every indexed (`enabled`) network's `network_index` row; `None`:
+    /// no tip known yet.
+    pub(crate) networks: BTreeMap<base::Network, Option<NetworkIndex>>,
 }
 
 /// Whether the server is ready: at least one network indexed and no index
@@ -215,7 +213,14 @@ pub(crate) struct Health {
 pub(crate) async fn health(db: &Db) -> Health {
     let read = db
         .read(|connection| {
-            let networks = network_index::db::find_all(connection)?;
+            let mut rows = network_index::db::find_all(connection)?;
+            let networks = network::db::find_enabled(connection)?
+                .into_iter()
+                .map(|network| {
+                    let row = rows.remove(&network);
+                    (network, row)
+                })
+                .collect::<BTreeMap<_, _>>();
             let failing = task::db::count_failing(connection, index::KIND)?;
             Ok((networks, failing))
         })

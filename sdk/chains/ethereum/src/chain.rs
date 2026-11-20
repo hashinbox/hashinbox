@@ -1,4 +1,5 @@
-//! [`Chain`]: Ethereum blocks as `base` blocks, final once finalized.
+//! [`Chain`]: Ethereum blocks as `base` blocks, confirmed `confirmations`
+//! below the tip.
 
 use alloy_primitives::B256;
 use anyhow::{Context as _, ensure};
@@ -10,24 +11,26 @@ use base::{
 use crate::{Address, Client, Tokens};
 
 /// One Ethereum network read from its node. Position and height are both the
-/// block number; a block is final once at or below the node's `finalized`
-/// block. Legs are of ether and of the allowlisted tokens only; ether a
+/// block number; a block is confirmed once `confirmations` below the tip. Legs are of ether and of the allowlisted tokens only; ether a
 /// contract moves internally is not seen (standard RPC records it nowhere).
 pub struct Chain {
     rpc: Client,
     network: Network,
     tokens: Tokens,
+    confirmations: u64,
 }
 
 impl Chain {
-    /// Reads over `rpc`, indexing `tokens`.
+    /// Reads over `rpc`, indexing `tokens`, a block confirmed
+    /// `confirmations` below the tip.
     #[must_use]
-    pub fn new(rpc: Client, tokens: Tokens) -> Self {
+    pub fn new(rpc: Client, tokens: Tokens, confirmations: u64) -> Self {
         let network = rpc.network().into();
         Self {
             rpc,
             network,
             tokens,
+            confirmations,
         }
     }
 }
@@ -41,6 +44,10 @@ impl Networked for Chain {
 impl Chained for Chain {
     fn tips(&self) -> Future<'_, anyhow::Result<Tips>> {
         Box::pin(self.rpc.tips())
+    }
+
+    fn confirmations(&self) -> u64 {
+        self.confirmations
     }
 
     /// Ethereum skips no height: a block the node does not hold yet is an
@@ -57,10 +64,13 @@ impl Chained for Chain {
     }
 
     fn blocks(&self, start: u64, end: u64) -> Future<'_, anyhow::Result<Blocks>> {
-        Box::pin(self.rpc.blocks(start, end, &self.tokens))
+        Box::pin(
+            self.rpc
+                .blocks(start, end, &self.tokens, self.confirmations),
+        )
     }
 
-    /// The block after the final one: an index behind it settles at the
+    /// The block after the confirmed one: an index behind it settles at the
     /// chain's balance.
     fn line(&self) -> Line {
         Line::Final
@@ -75,9 +85,9 @@ impl Dated for Chain {
 }
 
 /// Ether by `eth_getBalance`, a token by its `balanceOf`; both at the
-/// node's finalized block.
+/// confirmed block.
 impl Balances for Chain {
-    /// `None` while the finalized block is below `at`.
+    /// `None` while the confirmed block is below `at`.
     fn balance<'a>(
         &'a self,
         address: &'a base::Address,
@@ -91,7 +101,7 @@ impl Balances for Chain {
                 "not an address or asset of this Ethereum network"
             );
             let token = self.tokens.contract(asset)?;
-            let position = self.rpc.tips().await?.confirmed;
+            let position = self.rpc.tips().await?.confirmed(self.confirmations);
             if position < at {
                 return Ok(None);
             }
@@ -104,11 +114,11 @@ impl Balances for Chain {
     }
 }
 
-/// Mined by its receipt, judged at the node's finalized block; reverted by
-/// its status.
+/// Mined by its receipt, judged at the confirmed block; reverted by its
+/// status.
 impl Confirmer for Chain {
-    /// `None` while the finalized block is below `at`; found only at or
-    /// below it, final.
+    /// `None` while the confirmed block is below `at`; found only at or
+    /// below it, confirmed.
     fn confirm<'a>(
         &'a self,
         id: &'a TransactionId,
@@ -120,7 +130,7 @@ impl Confirmer for Chain {
                 "not a transaction of this Ethereum network"
             );
             let hash: B256 = id.id.parse().context("not an Ethereum transaction id")?;
-            let position = self.rpc.tips().await?.confirmed;
+            let position = self.rpc.tips().await?.confirmed(self.confirmations);
             if position < at {
                 return Ok(None);
             }

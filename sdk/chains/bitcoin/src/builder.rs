@@ -18,7 +18,8 @@ use crate::{
 /// default source, else the sender, only when it is worth its own output
 /// (above dust after paying for itself); a smaller leftover is fee. A
 /// loaded state is replaced: the same coins and outputs, its change paying
-/// the higher fee.
+/// the higher fee; or cancelled: the same coins, one output back to its
+/// source (RBF).
 pub(crate) struct Builder {
     pub(crate) rpc: Client,
     pub(crate) inputs: Arc<dyn InputStore>,
@@ -48,6 +49,9 @@ pub(crate) struct State {
     change: Option<String>,
     /// The rate it paid.
     rate: base::FeeRate,
+    /// A cancel: its coins back to its source, one output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    cancel: bool,
 }
 
 /// One coin a payment spends.
@@ -147,6 +151,87 @@ impl Builder {
                 .collect::<Result<_, TransactionError>>()?,
             change: change.map(|change| change.address.address().value.clone()),
             rate,
+            cancel: false,
+        };
+        Ok((transaction, state))
+    }
+
+    /// The coins `state` spends, owned by `key`.
+    fn kept(&self, key: &KeyPair, state: &State) -> Inputs<Address> {
+        let network = self.rpc.network();
+        let coins: Vec<_> = state
+            .inputs
+            .iter()
+            .map(|spent| Input {
+                coin: Coin {
+                    transaction: TransactionId::new(network.into(), spent.txid.clone()),
+                    index: spent.vout,
+                },
+                address: key.native_address().clone(),
+                asset: Asset::native(network.into()),
+                amount: spent.amount.into(),
+                height: 0,
+            })
+            .collect();
+        Inputs::from(coins)
+    }
+
+    /// The cancel of `state` at `rate`: its coins, one output back to its
+    /// source. A node takes it paying at least the old fee plus the rate's
+    /// base over its size: the old fee is its leftover when it had no
+    /// change, else its rate over its old size.
+    fn cancelled(
+        &self,
+        key: &KeyPair,
+        state: &State,
+        rate: base::FeeRate,
+    ) -> Result<(NativeTransaction, State), TransactionError> {
+        let network = self.rpc.network();
+        let parse = |text: &str| Address::parse(text, network).map_err(TransactionError::failed);
+        let source = parse(&state.source)?;
+        let chosen = self.kept(key, state);
+        let spent: Vec<_> = chosen
+            .iter()
+            .map(|input| input.address.script_pubkey())
+            .collect();
+        let total: u64 = state.inputs.iter().map(|spent| spent.amount).sum();
+        let old = match &state.change {
+            None => total.saturating_sub(state.amount),
+            Some(change) => {
+                let (to, change) = (parse(&state.to)?, parse(change)?);
+                let outputs = [&*to.script_pubkey(), &*change.script_pubkey()];
+                FeeRate::from(state.rate).fee(vsize(spent.iter().map(AsRef::as_ref), outputs))
+            }
+        };
+        let own = source.script_pubkey();
+        let size = vsize(spent.iter().map(AsRef::as_ref), [&*own]);
+        let step = FeeRate::from_sat_per_kvb(u64::try_from(rate.base).unwrap_or(u64::MAX));
+        let fee = FeeRate::from(rate)
+            .fee(size)
+            .max(old.saturating_add(step.fee(size)));
+        let Some(left) = total
+            .checked_sub(fee)
+            .filter(|left| *left >= own.minimal_non_dust().to_sat())
+        else {
+            return Err(short("the coins cannot pay a cancel's fee"));
+        };
+        let output = Output {
+            address: source,
+            asset: Asset::native(network.into()),
+            amount: left.into(),
+        };
+        let transaction = signed(key, &chosen, &output, None, network)?;
+        let paid = u128::from(fee.saturating_mul(1_000).div_ceil(size));
+        let state = State {
+            to: state.source.clone(),
+            amount: left,
+            change: None,
+            rate: base::FeeRate {
+                tip: paid.saturating_sub(rate.base),
+                ..rate
+            },
+            cancel: true,
+            ..state.clone()
         };
         Ok((transaction, state))
     }
@@ -167,21 +252,7 @@ impl Builder {
         let network = self.rpc.network();
         let owner = Address::parse(change, network).map_err(TransactionError::failed)?;
         let asset = Asset::native(network.into());
-        let coins: Vec<_> = state
-            .inputs
-            .iter()
-            .map(|spent| Input {
-                coin: Coin {
-                    transaction: TransactionId::new(network.into(), spent.txid.clone()),
-                    index: spent.vout,
-                },
-                address: key.native_address().clone(),
-                asset: asset.clone(),
-                amount: spent.amount.into(),
-                height: 0,
-            })
-            .collect();
-        let chosen = Inputs::from(coins);
+        let chosen = self.kept(key, state);
         let (own, paid) = (owner.script_pubkey(), output.address.script_pubkey());
         let spent: Vec<_> = chosen
             .iter()
@@ -299,7 +370,9 @@ impl base::Builder for Builder {
             }
             let now = self.rates.rate().await?;
             let rate = self.floored(self.fee.rate(now, old.map(|old| old.rate)));
+            let rate = old.map_or(rate, |old| rate.higher(old.rate.times(1.1)));
             let (transaction, state) = match old {
+                Some(old) if old.cancel => self.cancelled(&key, old, rate)?,
                 Some(old) => self.bump(&key, output, old, rate)?,
                 None => self.first(&key, output, rate).await?,
             };
@@ -323,5 +396,43 @@ impl base::Builder for Builder {
         self.from_transfer(Transfer::new(to, state.amount.into()))?;
         self.state = Some(state);
         Ok(())
+    }
+
+    fn replaceable(&mut self) -> Option<&mut dyn base::Replace> {
+        Some(self)
+    }
+}
+
+impl base::Replace for Builder {
+    /// Zero to its source: its cancel, its coins back to its source in one
+    /// output; else `transfer` from its coins, checked as
+    /// [`Self::from_transfer`] does.
+    fn replace(&mut self, transfer: Transfer) -> Result<(), TransactionError> {
+        let Some(state) = &mut self.state else {
+            return Err(TransactionError::failed("nothing loaded to replace"));
+        };
+        let network = self.rpc.network();
+        let parse = |text: &str| Address::parse(text, network).map_err(TransactionError::failed);
+        if parse(&transfer.to.value)?.address() == parse(&state.source)?.address()
+            && transfer.amount == Decimal::zero()
+        {
+            state.cancel = true;
+            return Ok(());
+        }
+        if state.cancel {
+            return Err(TransactionError::failed(
+                "a cancel is replaced only by a cancel",
+            ));
+        }
+        let Some(mut state) = self.state.take() else {
+            return Ok(());
+        };
+        let checked = base::Builder::from_transfer(self, transfer);
+        if let Some((output, _)) = &self.payment {
+            state.to.clone_from(&output.address.address().value);
+            state.amount = sats(&output.amount)?;
+        }
+        self.state = Some(state);
+        checked
     }
 }

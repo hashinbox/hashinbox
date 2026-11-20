@@ -39,7 +39,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     );
     accepted(app, &job).await;
 
-    settle(chain);
+    settle(app, chain).await;
     let mined = until("the send to be mined", || async {
         let index = app.api.index_of(&wallet, "native").await;
         if text(&index, "balance_confirmed") != unit(chain)

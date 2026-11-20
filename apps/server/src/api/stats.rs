@@ -58,11 +58,9 @@ struct StatsResponse {
     addresses: u64,
     /// Tags on addresses.
     tags: u64,
-    /// Live blocks kept.
+    /// Blocks kept.
     blocks: u64,
-    /// Blocks a reorg took back.
-    reorged: u64,
-    /// Transactions kept mined in live blocks.
+    /// Transactions kept mined.
     transactions: u64,
     /// Of those, how many reverted.
     reverted: u64,
@@ -111,7 +109,6 @@ impl From<stats::Stats> for StatsResponse {
             addresses: stats.addresses,
             tags: stats.tags,
             blocks: stats.blocks,
-            reorged: stats.reorged,
             transactions: stats.transactions,
             reverted: stats.reverted,
             pending: stats.pending,

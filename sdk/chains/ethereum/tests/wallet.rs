@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use ::rpc::testing::{Reply, Script};
-use alloy_consensus::{Transaction as _, TxEnvelope};
+use alloy_consensus::{Transaction as _, TxEnvelope, transaction::SignerRecoverable as _};
 use alloy_eips::Decodable2718 as _;
 use alloy_primitives::{hex, keccak256};
 use alloy_sol_types::{SolCall as _, sol};
@@ -710,12 +710,9 @@ impl base::TransactionIndexStore for Pending {
     fn settle<'a>(
         &'a self,
         index: &'a base::TransactionIndex,
-        found: Option<&'a base::BlockHeader>,
-        reverted: bool,
-        header: &'a base::BlockHeader,
-    ) -> base::Future<'a, anyhow::Result<bool>> {
-        let store = &base::NoTransactionIndexes;
-        base::TransactionIndexStore::settle(store, index, found, reverted, header)
+        confirmed: &'a base::Confirmed,
+    ) -> base::Future<'a, anyhow::Result<()>> {
+        base::TransactionIndexStore::settle(&base::NoTransactionIndexes, index, confirmed)
     }
 
     fn give_up<'a>(
@@ -900,6 +897,39 @@ fn a_bump_raises_both_fees_a_tenth_at_least_at_the_same_nonce() {
     let high = block_on(builder.sign()).unwrap();
     assert_eq!(fees_of(&high), (2_000_000_000, 2_000_000_008));
     assert_eq!(nonce(&high), 7);
+}
+
+#[test]
+fn a_cancel_pays_zero_to_its_source_at_the_same_nonce_a_tenth_up() {
+    let script = Script::new(first_send());
+    let wallet = block_on(factory(&script).from_pk(key_one())).unwrap();
+    let native = Asset::native(network());
+    let to = base::Address::new(network(), HOLDER);
+    let (_, state) = signed_and_saved(&wallet, to);
+    let mut builder = wallet.transaction(&native).unwrap();
+    builder.load(&state).unwrap();
+    let source = wallet.address().clone();
+    let replace = builder.replaceable().unwrap();
+    replace
+        .replace(Transfer::new(source, Decimal::zero()))
+        .unwrap();
+    let cancel = block_on(builder.sign()).unwrap();
+    // Its state loads as a cancel.
+    let mut again = wallet.transaction(&native).unwrap();
+    again.load(&builder.save().unwrap()).unwrap();
+    again.with_fee(Fee::Times(1.1));
+    let next = block_on(again.sign()).unwrap();
+    script.exhausted();
+    for signed in [&cancel, &next] {
+        let envelope = TxEnvelope::decode_2718_exact(&signed.bytes).unwrap();
+        assert_eq!(nonce(signed), 7);
+        assert!(envelope.value().is_zero(), "zero ether");
+        assert!(envelope.input().is_empty(), "no call");
+        let from = envelope.recover_signer().unwrap();
+        assert_eq!(envelope.to(), Some(from), "to its source");
+    }
+    assert_eq!(fees_of(&cancel), (1_100_000_000, 1_100_000_006));
+    assert!(fees_of(&next).0 > fees_of(&cancel).0, "a tenth up again");
 }
 
 #[test]

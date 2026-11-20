@@ -11,8 +11,7 @@ use anyhow::{Result, ensure};
 
 use super::{CLOSES, IndexState, Indexed, IntoIndex, Progress, Skipped, behind, lowest_next};
 use crate::{
-    Address, BlockHeader, Chained, Future, Indexes, Network, Networked, NotServed, Tips,
-    Transaction, TransactionId,
+    Address, Chained, Future, Indexes, Network, Networked, NotServed, Transaction, TransactionId,
 };
 
 /// How far the blocks after a transaction's broadcast have been read for it.
@@ -24,15 +23,18 @@ pub struct TransactionIndex {
     pub broadcasted_at: u64,
     /// Solana's last valid block height; `None`: it never expires.
     pub expires_height: Option<u64>,
-    /// The block it is mined in.
-    pub found: Option<BlockHeader>,
-    /// Whether it reverted in the block it is `found` in (only its fee
-    /// paid): filled in by a store when it reads the index.
+    /// The position it is mined in; `None` until found. A found index is
+    /// no longer read.
+    pub found: Option<u64>,
+    /// Whether its transaction, found, reverted (only its fee paid): its
+    /// transaction's own outcome, filled in by a store when it reads the
+    /// index.
     pub reverted: bool,
     /// How far it has read.
     pub progress: Progress,
-    /// Its network's final block, as the indexer last read it: filled in by
-    /// a store when it reads the index; `None` while unknown.
+    /// Its network's confirmed position, as the indexer last read the tip
+    /// ([`crate::Tips::confirmed`]): filled in by a store when it reads the index;
+    /// `None` while unknown.
     pub confirmed: Option<u64>,
 }
 
@@ -43,8 +45,6 @@ pub enum TransactionStatus {
     Final,
     /// In a final block, reverted: only its fee paid.
     Reverted,
-    /// Can never land: read past its `expires_height` (Solana), not found.
-    Dead,
     /// Given up: its gap could not be closed (a Bitcoin jump).
     GivenUp,
     /// In none of the blocks read since it was broadcast, through the final
@@ -55,45 +55,42 @@ pub enum TransactionStatus {
 }
 
 impl TransactionIndex {
-    /// Where its transaction stands, by what it has read and its network's
-    /// final block.
+    /// Where its transaction stands, by its state and its network's
+    /// confirmed position. Expiry (Solana) is its sender's to judge, by the
+    /// height of a block at or below it ([`Self::expired`]).
     #[must_use]
     pub fn status(&self) -> TransactionStatus {
-        let is_final = |position: u64| self.confirmed.is_some_and(|at| position <= at);
-        if let Some(found) = &self.found {
-            if !is_final(found.position) {
-                return TransactionStatus::Unknown;
-            }
-            if self.reverted {
-                return TransactionStatus::Reverted;
-            }
-            return TransactionStatus::Final;
+        let confirmed = self.confirmed;
+        let read = (self.progress.indexed_at.zip(confirmed)).is_some_and(|(at, end)| at >= end);
+        if let Some(found) = self.found {
+            return match confirmed {
+                Some(end) if found <= end && self.reverted => TransactionStatus::Reverted,
+                Some(end) if found <= end => TransactionStatus::Final,
+                _ => TransactionStatus::Unknown,
+            };
         }
-        if self.progress.state == IndexState::NoData {
-            return TransactionStatus::GivenUp;
+        match self.progress.state {
+            IndexState::NoData => TransactionStatus::GivenUp,
+            IndexState::Indexing if read => TransactionStatus::Missing,
+            IndexState::Indexing | IndexState::Paused => TransactionStatus::Unknown,
         }
-        let Some(through) = &self.progress.indexed_at else {
-            return TransactionStatus::Unknown;
-        };
-        if self
-            .expires_height
-            .is_some_and(|expires| through.height > expires)
-        {
-            return TransactionStatus::Dead;
-        }
-        let read = self.progress.state == IndexState::Indexing
-            && self.confirmed.is_some_and(|at| through.position >= at);
-        if read {
-            return TransactionStatus::Missing;
-        }
-        TransactionStatus::Unknown
+    }
+
+    /// Whether its transaction can never land (Solana): [`TransactionStatus::Missing`]
+    /// (read through the confirmed position, not found) and `height`, of a
+    /// block at or below that position, above its `expires_height`.
+    #[must_use]
+    pub fn expired(&self, height: u64) -> bool {
+        self.status() == TransactionStatus::Missing
+            && self.expires_height.is_some_and(|expires| expires < height)
     }
 
     /// Whether its transaction is stuck and worth a bump, judged by the
     /// blocks it read, so a lagging indexer never makes one due:
     ///
-    /// - one that expires (Solana) cannot be replaced in flight: due once
-    ///   it can never land (`Dead`);
+    /// - one that expires (Solana) cannot be replaced in flight: never due;
+    ///   its sender drops it once [`Self::expired`] and signs
+    ///   anew;
     /// - one that never expires is replaced in flight: due once it is in
     ///   none of the blocks read through the final one, and those reach
     ///   `bump_after` past its `broadcasted_at`.
@@ -101,17 +98,12 @@ impl TransactionIndex {
     /// How many bumps a payment may have is its sender's to judge.
     #[must_use]
     pub fn bump_due(&self, bump_after: u64) -> bool {
-        let Some(read) = &self.progress.indexed_at else {
+        let Some(read) = self.progress.indexed_at else {
             return false;
         };
-        match self.status() {
-            TransactionStatus::Dead => true,
-            TransactionStatus::Missing => {
-                self.expires_height.is_none()
-                    && read.position.saturating_sub(self.broadcasted_at) >= bump_after
-            }
-            _ => false,
-        }
+        self.status() == TransactionStatus::Missing
+            && self.expires_height.is_none()
+            && read.saturating_sub(self.broadcasted_at) >= bump_after
     }
 }
 
@@ -134,9 +126,8 @@ impl Indexed for TransactionIndex {
         }
         self.progress
             .indexed_at
-            .as_ref()
-            .map_or(Some(self.broadcasted_at), |header| {
-                header.position.checked_add(1)
+            .map_or(Some(self.broadcasted_at), |position| {
+                position.checked_add(1)
             })
     }
 }
@@ -195,7 +186,7 @@ impl IntoIndex<TransactionIndex> for TransactionIndexTarget {
             );
             Ok(TransactionIndex {
                 transaction: self.transaction.clone(),
-                broadcasted_at: self.chain.tips().await?.produced,
+                broadcasted_at: self.chain.tips().await?.position,
                 expires_height: self.expires_height,
                 found: None,
                 reverted: false,
@@ -303,23 +294,19 @@ pub trait TransactionIndexStore: Send + Sync {
         reason: Option<&'a str>,
     ) -> Future<'a, Result<()>>;
 
-    /// Settles `index` at a final block (its header `header`), in one
-    /// write: that block kept unless it is, and the one it is `found` in
-    /// (mined: final, as it is at or below it), `reverted` there or not;
-    /// the index continuing from the block after. `false`: another live block at one of them;
-    /// nothing changed; try again later.
+    /// Settles `index` as the chain's [`Confirmer`] judged it (`confirmed`),
+    /// in one write, no block kept: read through `confirmed.position`, the
+    /// index continuing from the position after; when mined, found at
+    /// `confirmed.found`, its transaction's outcome `confirmed.reverted`.
     ///
     /// # Errors
     ///
-    /// When the store cannot read or write, or a block does not link onto
-    /// the kept blocks around it.
+    /// When the store cannot write.
     fn settle<'a>(
         &'a self,
         index: &'a TransactionIndex,
-        found: Option<&'a BlockHeader>,
-        reverted: bool,
-        header: &'a BlockHeader,
-    ) -> Future<'a, Result<bool>>;
+        confirmed: &'a Confirmed,
+    ) -> Future<'a, Result<()>>;
 
     /// Gives `index` up, in one write: [`IndexState::NoData`], and its
     /// transaction forgotten while pending (`jump`), as a wallet's jump
@@ -374,14 +361,8 @@ impl TransactionIndexStore for NoTransactionIndexes {
         Box::pin(async { Ok(()) })
     }
 
-    fn settle<'a>(
-        &'a self,
-        _: &'a TransactionIndex,
-        _: Option<&'a BlockHeader>,
-        _: bool,
-        _: &'a BlockHeader,
-    ) -> Future<'a, Result<bool>> {
-        Box::pin(async { Ok(false) })
+    fn settle<'a>(&'a self, _: &'a TransactionIndex, _: &'a Confirmed) -> Future<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
     }
 
     fn give_up<'a>(&'a self, _: &'a TransactionIndex) -> Future<'a, Result<()>> {
@@ -424,10 +405,9 @@ impl TransactionIndexer {
 
     /// Closes `index`'s gap. With a confirmer, settles it at a final block
     /// at or above `at`: asks whether it was mined through that block and,
-    /// once the chain answers and serves both blocks, writes it
-    /// ([`TransactionIndexStore::settle`]). Not answerable yet: it stays as
-    /// it is for the next step. Without (Bitcoin), gives it up
-    /// ([`TransactionIndexStore::give_up`]).
+    /// once the chain answers, writes it ([`TransactionIndexStore::settle`]).
+    /// Not answerable yet: it stays as it is for the next step. Without
+    /// (Bitcoin), gives it up ([`TransactionIndexStore::give_up`]).
     async fn close_one(&self, index: &TransactionIndex, at: u64) -> Result<()> {
         let Some(confirmer) = &self.confirmer else {
             return self.store.give_up(index).await;
@@ -435,22 +415,7 @@ impl TransactionIndexer {
         let Some(confirmed) = confirmer.confirm(&index.transaction, at).await? else {
             return Ok(());
         };
-        let Some(block) = self.chain.block(confirmed.position).await? else {
-            return Ok(());
-        };
-        let found = match confirmed.found {
-            Some(position) => match self.chain.block(position).await? {
-                Some(found) => Some(found.header),
-                None => return Ok(()),
-            },
-            None => None,
-        };
-        let reverted = confirmed.reverted;
-        let settled = self
-            .store
-            .settle(index, found.as_ref(), reverted, &block.header);
-        settled.await?;
-        Ok(())
+        self.store.settle(index, &confirmed).await
     }
 }
 
@@ -466,15 +431,15 @@ impl Indexes for TransactionIndexer {
     }
 
     /// Closes the gaps of at most a few indexes whose next block is below
-    /// `line` ([`Self::close_one`]), with `tips.confirmed` the final block;
+    /// `line` ([`Self::close_one`]), at `confirmed`, the confirmed position;
     /// one failing does not stop the others, and the first failure is the
     /// answer.
-    fn close<'a>(&'a self, line: u64, tips: Tips) -> Future<'a, Result<()>> {
+    fn close<'a>(&'a self, line: u64, confirmed: u64) -> Future<'a, Result<()>> {
         Box::pin(async move {
             let behind = self.store.find_behind(self.network(), line, CLOSES);
             let mut failed = None;
             for index in &behind.await? {
-                if let Err(error) = self.close_one(index, tips.confirmed).await {
+                if let Err(error) = self.close_one(index, confirmed).await {
                     failed.get_or_insert(error);
                 }
             }
@@ -508,28 +473,18 @@ impl Indexes for TransactionIndexer {
 #[cfg(test)]
 mod tests {
     use super::{IndexState, Progress, TransactionIndex, TransactionStatus};
-    use crate::{BlockHash, BlockHeader, Chain, Network, TransactionId};
+    use crate::{Chain, Network, TransactionId};
 
-    fn header(position: u64) -> BlockHeader {
-        BlockHeader {
-            position,
-            height: position,
-            hash: BlockHash(position.to_be_bytes().to_vec()),
-            parent: None,
-            timestamp: None,
-        }
-    }
-
-    /// Broadcast at 10, final block 20.
+    /// Broadcast at 10, confirmed position 20.
     fn index(found: Option<u64>, through: Option<u64>, state: IndexState) -> TransactionIndex {
         TransactionIndex {
             transaction: TransactionId::new(Network::new(Chain::new("c"), "n"), "t"),
             broadcasted_at: 10,
             expires_height: None,
-            found: found.map(header),
+            found,
             reverted: false,
             progress: Progress {
-                indexed_at: through.map(header),
+                indexed_at: through,
                 state,
                 reason: None,
             },
@@ -538,36 +493,59 @@ mod tests {
     }
 
     #[test]
-    fn its_status_follows_what_it_read() {
+    fn its_status_follows_its_state() {
         use IndexState::{Indexing, NoData, Paused};
-        use TransactionStatus::{Dead, Final, GivenUp, Missing, Reverted, Unknown};
-        let cases = [
-            (index(Some(20), Some(25), Indexing), Final),
-            (index(Some(21), Some(25), Indexing), Unknown),
-            (index(None, Some(25), NoData), GivenUp),
-            (index(None, None, Indexing), Unknown),
-            (index(None, Some(19), Indexing), Unknown),
-            (index(None, Some(20), Indexing), Missing),
-            (index(None, Some(25), Paused), Unknown),
-        ];
-        for (index, status) in cases {
-            assert_eq!(index.status(), status, "{index:?}");
-        }
-        let expired = TransactionIndex {
-            expires_height: Some(24),
-            ..index(None, Some(25), Indexing)
-        };
-        assert_eq!(expired.status(), Dead);
-        let unknown_final = TransactionIndex {
-            confirmed: None,
-            ..index(Some(20), Some(25), Indexing)
-        };
-        assert_eq!(unknown_final.status(), Unknown);
+        use TransactionStatus as Status;
         let reverted = |found| TransactionIndex {
             reverted: true,
             ..index(Some(found), Some(25), Indexing)
         };
-        assert_eq!(reverted(20).status(), Reverted);
-        assert_eq!(reverted(21).status(), Unknown);
+        let cases = [
+            (index(Some(20), Some(25), Indexing), Status::Final),
+            (index(Some(21), Some(25), Indexing), Status::Unknown),
+            (reverted(20), Status::Reverted),
+            (reverted(21), Status::Unknown),
+            (index(None, Some(25), NoData), Status::GivenUp),
+            (index(None, None, Indexing), Status::Unknown),
+            (index(None, Some(19), Indexing), Status::Unknown),
+            (index(None, Some(20), Indexing), Status::Missing),
+            (index(None, Some(25), Paused), Status::Unknown),
+        ];
+        for (index, status) in cases {
+            assert_eq!(index.status(), status, "{index:?}");
+        }
+        let found = TransactionIndex {
+            expires_height: Some(19),
+            ..index(Some(20), Some(20), Indexing)
+        };
+        assert_eq!(found.status(), Status::Final);
+        let unknown_final = TransactionIndex {
+            confirmed: None,
+            ..index(Some(20), Some(25), Indexing)
+        };
+        assert_eq!(unknown_final.status(), Status::Unknown);
+    }
+
+    #[test]
+    fn solana_expiry_is_by_the_height_of_a_block_at_or_below_the_confirmed_position() {
+        // Read through the confirmed position 20, not found; a kept block at
+        // or below it has `height`.
+        let expiring = |expires, through| TransactionIndex {
+            expires_height: Some(expires),
+            ..index(None, Some(through), IndexState::Indexing)
+        };
+        assert!(expiring(14, 20).expired(15));
+        assert!(!expiring(15, 20).expired(15), "not past yet");
+        assert!(!expiring(14, 19).expired(15), "not read through");
+        assert!(
+            !index(None, Some(20), IndexState::Indexing).expired(15),
+            "never expires"
+        );
+        let found = TransactionIndex {
+            expires_height: Some(14),
+            ..index(Some(20), Some(20), IndexState::Indexing)
+        };
+        assert!(!found.expired(15), "found");
+        assert_eq!(expiring(14, 20).status(), TransactionStatus::Missing);
     }
 }

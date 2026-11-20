@@ -31,7 +31,7 @@ async fn solana(storage: Storage) -> anyhow::Result<()> {
     // Reading: what `base::Indexer` consumes.
     let chain = factory.chain(&rpc);
     let tips = chain.tips().await?;
-    let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
+    let _blocks = chain.blocks(tips.confirmed(chain.confirmations()), tips.position).await?;
 
     // Sending: one transfer signed into one transaction; keep the bytes,
     // then broadcast them to every node.
@@ -61,8 +61,8 @@ one its default). It
 has no `max_depth`: it reads balances (`base::Balances`, finalized, at a
 slot at or above the one asked: `minContextSlot`). Its line is
 `Line::Depth(read_depth)`, the tip less `read_depth`, not the block after
-the finalized slot: nodes now answer the same slot for `confirmed` and
-`finalized`, so final blocks are read too. An index more than `read_depth`
+the confirmed slot, so confirmed blocks are read too (`read_depth` is at
+least `confirmations`). An index more than `read_depth`
 slots behind, and a new one, settles with one balance read (design 083
 §9).
 
@@ -81,9 +81,9 @@ slots behind, and a new one, settles with one balance read (design 083
   its genesis hash and its tip, as the node reports them; the caller judges them.
   `Client` extends `Info` with every other call.
 - Position is the slot; a skipped slot holds no block. `Header.height` is the
-  block height. Blocks are read at `confirmed` commitment; `Tips.produced` is
-  the newest confirmed slot, `Tips.confirmed` the newest rooted (`finalized`)
-  one.
+  block height. Blocks are read at `confirmed` commitment; `Tips.position` is
+  the newest confirmed slot (`getSlot`); the confirmed slot is `confirmations`
+  (default 32) below it (`Tips::confirmed`).
 - `blocks` lists the produced slots with one `getBlocks`, then fetches them in
   JSON-RPC batches of ten `getBlock` calls. Only standard Solana methods are
   used.
@@ -136,5 +136,5 @@ slots behind, and a new one, settles with one balance read (design 083
 - Its line is `read_depth` slots below the tip (`Line::Depth`). A sent
   transaction's index left behind it is settled by the `Confirmer`: its
   signature's status (`getSignatureStatuses` with history), finalized at
-  or below the finalized slot, is where it is found.
+  or below the confirmed slot, is where it is found.
 - Token-2022 mints are refused at `connect`.

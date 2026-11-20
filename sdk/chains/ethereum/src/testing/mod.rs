@@ -26,8 +26,10 @@ const TRANSFER: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 const FAUCET: Address = Address::repeat_byte(0xfa);
 /// Where each block's filler transfer goes (Sepolia blocks are never empty).
 const SINK: Address = alloy_primitives::address!("000000000000000000000000000000000000dead");
-/// Blocks a node's `finalized` trails its head by: more than a case mines
-/// at once (`1 + confirmations`), so an indexer at the tip stays above it.
+/// Blocks a node's `finalized` trails its head by, and the network's
+/// `confirmations`: no fewer than a case mines at once past what is read,
+/// so an indexer at the tip stays at or above its line, the confirmed
+/// block.
 const FINALITY: u64 = 6;
 
 /// The recipient the recordings send to: an address that holds nothing.
@@ -228,7 +230,7 @@ impl TestChain for Ethereum {
             chain_id: Some(model::CHAIN_ID.to_string()),
             testnet: true,
             block_time: Duration::from_secs(12),
-            confirmations: 2,
+            confirmations: FINALITY,
             max_depth: None,
             explorer_address: None,
             explorer_transaction: None,

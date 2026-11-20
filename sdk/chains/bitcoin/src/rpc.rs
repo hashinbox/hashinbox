@@ -52,18 +52,14 @@ impl Client {
         self.network
     }
 
-    /// The node's best height, and the height `depth` blocks deep (`depth` 1
-    /// is the tip itself) as confirmed.
+    /// The node's best height (`getblockcount`).
     ///
     /// # Errors
     ///
     /// A node failure.
-    pub async fn tips(&self, depth: u64) -> anyhow::Result<Tips> {
-        let produced: u64 = self.node.call("getblockcount", json!([])).await?;
-        Ok(Tips {
-            produced,
-            confirmed: produced.saturating_sub(depth.saturating_sub(1)),
-        })
+    pub async fn tips(&self) -> anyhow::Result<Tips> {
+        let position: u64 = self.node.call("getblockcount", json!([])).await?;
+        Ok(Tips { position })
     }
 
     /// Blocks `start..=end`, linked, in two batches (every hash, then every

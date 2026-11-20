@@ -137,11 +137,18 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// For an invalid network, a zero interval or a zero read depth.
+    /// For an invalid network, a zero interval, a zero read depth, or one
+    /// below `confirmations` (its line, the tip less it, would be above the
+    /// confirmed slot).
     pub fn validate(&self) -> anyhow::Result<()> {
         self.native().validate()?;
         ensure!(self.interval_ms > 0, "Solana interval must be positive");
         ensure!(self.read_depth > 0, "Solana read_depth must be positive");
+        ensure!(
+            self.read_depth >= self.confirmations,
+            "Solana read_depth must be at least its confirmations ({})",
+            self.confirmations
+        );
         Ok(())
     }
 
@@ -259,7 +266,8 @@ impl Factory {
     /// The block reader over `rpc`.
     #[must_use]
     pub fn chain(&self, rpc: &Client) -> Chain {
-        Chain::new(rpc.clone(), self.config.mints()).with_read_depth(self.config.read_depth)
+        Chain::new(rpc.clone(), self.config.mints(), self.config.confirmations)
+            .with_read_depth(self.config.read_depth)
     }
 
     /// The wallet factory over `rpc`: blockhashes, fees and the priority-fee

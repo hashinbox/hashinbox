@@ -34,8 +34,8 @@ pub enum IndexState {
 /// How far an index has read, and in what state.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Progress {
-    /// Scanned through this block; `None` before the first.
-    pub indexed_at: Option<BlockHeader>,
+    /// Scanned through this position; `None` before the first.
+    pub indexed_at: Option<u64>,
     /// Whether it is scanned.
     pub state: IndexState,
     /// Why it is [`IndexState::NoData`]; `None` otherwise.
@@ -56,8 +56,7 @@ pub trait Indexed {
     fn next(&self) -> Option<u64> {
         self.progress()
             .indexed_at
-            .as_ref()
-            .map_or(Some(self.start()), |header| header.position.checked_add(1))
+            .map_or(Some(self.start()), |position| position.checked_add(1))
     }
 
     /// Whether it is scanned through `last`, the network's last kept block.

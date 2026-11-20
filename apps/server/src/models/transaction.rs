@@ -149,11 +149,12 @@ pub(crate) struct Transaction {
     /// The signed transaction in its chain's encoding.
     #[serde(skip)]
     pub(crate) bytes: Vec<u8>,
-    /// Unix ms it was sent: a node accepted it, or may hold it; null while
-    /// recorded but not yet sent, and once mined.
-    pub(crate) sent_at: Option<i64>,
+    /// Unix ms this server recorded it, before its first broadcast: set
+    /// exactly on this server's sends, mined or not; null on every other.
+    /// Mining keeps it.
+    #[diesel(skip_update)]
+    pub(crate) broadcasted_at: Option<i64>,
     /// Its block's position; null while pending.
-    #[diesel(skip_insertion, skip_update, sql_type = Nullable<BigInt>)]
     pub(crate) position: Option<i64>,
     /// Its kept legs, in order.
     #[diesel(
@@ -165,7 +166,7 @@ pub(crate) struct Transaction {
     pub(crate) legs: Vec<Leg>,
 }
 
-/// `"{position}:{order}:{sent_at}:{txid}"`, a null as `0` (position
+/// `"{position}:{order}:{broadcasted_at}:{txid}"`, a null as `0` (position
 /// `i64::MAX`): one key every list reads the parts it sorts by from.
 impl crate::db::Keyed for Transaction {
     fn key(&self) -> String {
@@ -173,14 +174,14 @@ impl crate::db::Keyed for Transaction {
             "{}:{}:{}:{}",
             self.position.unwrap_or(i64::MAX),
             self.order.unwrap_or(0),
-            self.sent_at.unwrap_or(0),
+            self.broadcasted_at.unwrap_or(0),
             self.txid
         )
     }
 }
 
 /// A page key: (block position, `i64::MAX` while pending; `order`;
-/// `sent_at`; `txid`), nulls as `0`.
+/// `broadcasted_at`; `txid`), nulls as `0`.
 pub(crate) type Key = (i64, i64, i64, String);
 
 /// The key cursor `text` names, as [`Keyed`](crate::db::Keyed) wrote it.
@@ -251,7 +252,7 @@ impl TryFrom<&base::Transaction> for Transaction {
             state,
             reason,
             bytes: transaction.bytes.clone(),
-            sent_at: None,
+            broadcasted_at: None,
             position: None,
             legs,
         })
@@ -285,10 +286,11 @@ pub(crate) mod db {
     use super::*;
     use crate::db::Page;
 
-    /// Keeps pending `transaction` with its legs of kept wallet indexes
-    /// (the others are dropped from it); a no-op when its txid is kept,
-    /// pending or mined. Its outgoing legs count as spent until it is mined
-    /// or forgotten.
+    /// Keeps pending `transaction`, this server's send, with its legs of kept wallet indexes (the others are dropped
+    /// from it); a no-op when its txid is kept, pending or mined. Its
+    /// `broadcasted_at` is `at` (Unix ms) unless it has one (a version kept
+    /// again). Its outgoing legs count as spent until it is mined or
+    /// forgotten.
     ///
     /// # Errors
     ///
@@ -299,7 +301,9 @@ pub(crate) mod db {
     pub(crate) fn save_pending(
         connection: &mut SqliteConnection,
         transaction: &mut Transaction,
+        at: i64,
     ) -> anyhow::Result<()> {
+        transaction.broadcasted_at.get_or_insert(at);
         let added = diesel::insert_into(transactions::table)
             .values(&*transaction)
             .on_conflict_do_nothing()
@@ -350,26 +354,36 @@ pub(crate) mod db {
             .ok_or_else(|| Refused::NotIndexed(id.to_owned()))?)
     }
 
-    /// Marks pending transaction `id` sent at `at` (Unix ms): a node
-    /// accepted it, or may hold it. A mined or forgotten one is left as it
-    /// is.
-    pub(crate) fn set_sent(
+    /// Marks transaction `id`, kept pending, mined at `position` with its
+    /// outcome (state succeeded, or reverted without a reason), as the
+    /// chain's `Confirmer` judged it: no block is kept for it. A reorg's
+    /// [`set_pending_from`] sets it pending again.
+    ///
+    /// # Errors
+    ///
+    /// When a value is out of range or the write fails.
+    pub(crate) fn set_mined(
         connection: &mut SqliteConnection,
         id: impl AsRef<str>,
-        at: i64,
-    ) -> QueryResult<usize> {
+        position: u64,
+        reverted: bool,
+    ) -> anyhow::Result<()> {
         diesel::update(
             transactions::table
-                .filter(transactions::id.eq(id.as_ref()))
+                .find(id.as_ref())
                 .filter(transactions::block.is_null()),
         )
-        .set(transactions::sent_at.eq(at))
-        .execute(connection)
+        .set((
+            transactions::position.eq(int(position)?),
+            transactions::state.eq(if reverted { 2 } else { 1 }),
+        ))
+        .execute(connection)?;
+        Ok(())
     }
 
     /// Keeps mined `transaction`'s row: a pending or earlier mined row
-    /// takes its values, and its legs of no block or another block (pending,
-    /// or mined before a reorg) are deleted. Its own legs are the caller's.
+    /// takes its values, but `broadcasted_at` (this server's send stays
+    /// one).
     ///
     /// # Errors
     ///
@@ -378,18 +392,60 @@ pub(crate) mod db {
         connection: &mut SqliteConnection,
         transaction: &Transaction,
     ) -> anyhow::Result<()> {
-        let block = transaction
-            .block
-            .as_ref()
-            .context("a mined transaction has no block")?;
+        anyhow::ensure!(
+            transaction.block.is_some() && transaction.position.is_some(),
+            "a mined transaction has no block"
+        );
         diesel::insert_into(transactions::table)
             .values(transaction)
             .on_conflict(transactions::id)
             .do_update()
             .set(transaction)
             .execute(connection)?;
-        leg::db::delete_moved(connection, block, &transaction.id)?;
         Ok(())
+    }
+
+    /// `network`'s transactions mined at or above `from`.
+    macro_rules! mined_from {
+        ($network:expr, $from:expr) => {
+            transactions::table
+                .filter(transactions::chain.eq($network.chain.as_str()))
+                .filter(transactions::network.eq(&$network.name))
+                .filter(transactions::position.ge($from))
+        };
+    }
+
+    /// Deletes `network`'s transactions mined at or above `from` that this
+    /// server did not broadcast (`broadcasted_at` NULL): a reorg's, their
+    /// legs with them (the `leg.transaction` cascade); they come back when
+    /// the new fork is read. How many.
+    pub(crate) fn delete_unbroadcast_from(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        from: i64,
+    ) -> QueryResult<usize> {
+        diesel::delete(mined_from!(network, from).filter(transactions::broadcasted_at.is_null()))
+            .execute(connection)
+    }
+
+    /// Sets `network`'s transactions mined at or above `from` pending (no
+    /// block, position or order, state pending): a reorg's, once only this
+    /// server's sends are left there, so their spend stays counted while
+    /// they may land in the new fork. How many.
+    pub(crate) fn set_pending_from(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        from: i64,
+    ) -> QueryResult<usize> {
+        diesel::update(mined_from!(network, from))
+            .set((
+                transactions::block.eq(None::<String>),
+                transactions::position.eq(None::<i64>),
+                transactions::order.eq(None::<i64>),
+                transactions::state.eq(0),
+                transactions::reason.eq(None::<String>),
+            ))
+            .execute(connection)
     }
 
     /// Transaction `id` with its kept legs, if kept.
@@ -403,29 +459,21 @@ pub(crate) mod db {
             .optional()
     }
 
-    /// Of every network: how many transactions are kept mined in live
-    /// blocks, how many of those reverted, and how many are pending.
+    /// Of every network: how many transactions are kept mined, how many
+    /// of those reverted, and how many are pending.
     pub(crate) fn count(connection: &mut SqliteConnection) -> QueryResult<(i64, i64, i64)> {
-        use crate::models::schema::block;
-        // A mined transaction joins its block only while that is live.
         transactions::table
-            .left_join(
-                block::table.on(block::id
-                    .nullable()
-                    .eq(transactions::block)
-                    .and(block::reorged_at.is_null())),
-            )
             .select(diesel::dsl::sql::<(BigInt, BigInt, BigInt)>(
                 r#"
-                COUNT(block.id),
-                COALESCE(SUM(block.id IS NOT NULL AND "transaction".state = 2), 0),
-                COALESCE(SUM("transaction".block IS NULL), 0)"#,
+                COUNT(block),
+                COALESCE(SUM(block IS NOT NULL AND state = 2), 0),
+                COALESCE(SUM(block IS NULL), 0)"#,
             ))
             .get_result(connection)
     }
 
-    /// How many kept transactions of every network are mined in live
-    /// blocks stamped in each hour from `since` (Unix seconds) on, as
+    /// How many kept transactions of every network are mined in blocks
+    /// stamped in each hour from `since` (Unix seconds) on, as
     /// (hour, count); hour 0 starts at `since`.
     pub(crate) fn count_by_hour(
         connection: &mut SqliteConnection,
@@ -434,7 +482,6 @@ pub(crate) mod db {
         use crate::models::schema::block;
         transactions::table
             .inner_join(block::table.on(block::id.nullable().eq(transactions::block)))
-            .filter(block::reorged_at.is_null())
             .filter(block::timestamp.ge(since))
             .group_by(diesel::dsl::sql::<BigInt>("hour"))
             .select((
@@ -446,38 +493,35 @@ pub(crate) mod db {
             .load(connection)
     }
 
-    /// At most `page.limit` transactions of `network`, pending or mined in
-    /// live blocks, with their legs, newest first: pending by `sent_at`,
+    /// At most `page.limit` transactions of `network`, pending or mined,
+    /// with their legs, newest first: pending by `broadcasted_at`,
     /// then mined by (position, `order`); after `page.after` when given.
     pub(crate) fn find_page(
         connection: &mut SqliteConnection,
         network: &Network,
         page: Page<Key>,
     ) -> QueryResult<Vec<Transaction>> {
-        let (position, order, sent_at, txid) = page
-            .after
-            .map_or((0, 0, 0, None), |(position, order, sent_at, txid)| {
-                (position, order, sent_at, Some(txid))
-            });
+        let (position, order, broadcasted_at, txid) = page.after.map_or(
+            (0, 0, 0, None),
+            |(position, order, broadcasted_at, txid)| (position, order, broadcasted_at, Some(txid)),
+        );
         diesel::sql_query(
             r#"
             SELECT
                 t.*
             FROM transaction_with_legs t
-            LEFT JOIN block b ON b.id = t.block
             WHERE t.chain = ?1
               AND t.network = ?2
-              AND (t.block IS NULL OR b.reorged_at IS NULL)
               AND (?6 IS NULL OR (
                   COALESCE(t.position, 9223372036854775807),
                   COALESCE(t."order", 0),
-                  COALESCE(t.sent_at, 0),
+                  COALESCE(t.broadcasted_at, 0),
                   t.txid
               ) < (?3, ?4, ?5, ?6))
             ORDER BY
                 COALESCE(t.position, 9223372036854775807) DESC,
                 COALESCE(t."order", 0) DESC,
-                COALESCE(t.sent_at, 0) DESC,
+                COALESCE(t.broadcasted_at, 0) DESC,
                 t.txid DESC
             LIMIT ?7"#,
         )
@@ -485,22 +529,25 @@ pub(crate) mod db {
         .bind::<Text, _>(&network.name)
         .bind::<BigInt, _>(position)
         .bind::<BigInt, _>(order)
-        .bind::<BigInt, _>(sent_at)
+        .bind::<BigInt, _>(broadcasted_at)
         .bind::<Nullable<Text>, _>(txid)
         .bind::<BigInt, _>(page.limit)
         .load(connection)
     }
 
     /// At most `page.limit` pending transactions of `network` (its mempool),
-    /// with their legs, oldest sent first; after `page.after` when given.
+    /// with their legs, oldest broadcast first; after `page.after` when
+    /// given.
     pub(crate) fn find_pending_page(
         connection: &mut SqliteConnection,
         network: &Network,
         page: Page<Key>,
     ) -> QueryResult<Vec<Transaction>> {
-        let (sent_at, txid) = page
+        let (broadcasted_at, txid) = page
             .after
-            .map_or((0, None), |(_, _, sent_at, txid)| (sent_at, Some(txid)));
+            .map_or((0, None), |(_, _, broadcasted_at, txid)| {
+                (broadcasted_at, Some(txid))
+            });
         diesel::sql_query(
             r#"
             SELECT
@@ -509,15 +556,15 @@ pub(crate) mod db {
             WHERE t.chain = ?1
               AND t.network = ?2
               AND t.block IS NULL
-              AND (?4 IS NULL OR (COALESCE(t.sent_at, 0), t.txid) > (?3, ?4))
+              AND (?4 IS NULL OR (COALESCE(t.broadcasted_at, 0), t.txid) > (?3, ?4))
             ORDER BY
-                COALESCE(t.sent_at, 0),
+                COALESCE(t.broadcasted_at, 0),
                 t.txid
             LIMIT ?5"#,
         )
         .bind::<Text, _>(network.chain.as_str())
         .bind::<Text, _>(&network.name)
-        .bind::<BigInt, _>(sent_at)
+        .bind::<BigInt, _>(broadcasted_at)
         .bind::<Nullable<Text>, _>(txid)
         .bind::<BigInt, _>(page.limit)
         .load(connection)
@@ -582,24 +629,19 @@ pub(crate) mod db {
 
     /// Deletes the pending transactions `ids`, their legs with them (the
     /// schema's cascade): their funds and coins are free again. A mined one
-    /// is kept. What it deleted, with its legs, for the caller to record as
-    /// forgotten.
+    /// is kept. The ids it deleted.
     pub(crate) fn delete_pending(
         connection: &mut SqliteConnection,
         ids: &[impl AsRef<str>],
-    ) -> QueryResult<Vec<Transaction>> {
+    ) -> QueryResult<Vec<String>> {
         let ids: Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
-        let deleted = transaction_with_legs::table
-            .filter(transaction_with_legs::id.eq_any(&ids))
-            .filter(transaction_with_legs::block.is_null())
-            .load::<Transaction>(connection)?;
         diesel::delete(
             transactions::table
                 .filter(transactions::id.eq_any(ids))
                 .filter(transactions::block.is_null()),
         )
-        .execute(connection)?;
-        Ok(deleted)
+        .returning(transactions::id)
+        .load(connection)
     }
 
     /// The ids of the pending transactions wallet index `index` sends (a

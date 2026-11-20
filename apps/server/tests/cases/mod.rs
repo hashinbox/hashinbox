@@ -132,9 +132,13 @@ fn stall<T: TestChain>(chain: &T) {
     }
 }
 
-/// Mines the next block and enough after it to make it final.
-fn settle<T: TestChain>(chain: &T) {
-    chain.mine(1 + chain.network().confirmations);
+/// Mines the next block, waits until it is read, then mines enough after
+/// it to make it confirmed: mined at once, the next block would be
+/// confirmed unread, below the line, and settled past.
+async fn settle<T: TestChain>(app: &App, chain: &T) {
+    chain.mine(1);
+    at_tip(app, chain).await;
+    chain.mine(chain.network().confirmations);
 }
 
 /// A field of an index as text (`null` as empty).
@@ -209,7 +213,7 @@ async fn funded<T: TestChain>(app: &App, chain: &T) -> Wallet {
     let wallet = app.api.wallet(&chain.network()).await;
     app.api.index(&wallet, "native", None).await;
     chain.fund(&wallet.address, &unit(chain), "native");
-    settle(chain);
+    settle(app, chain).await;
     reaches(app, &wallet, "native", "balance_confirmed", &unit(chain)).await;
     wallet
 }
@@ -307,7 +311,7 @@ async fn decided_after<T: TestChain>(app: &App, chain: &T, wallet: &Wallet) -> V
         Err(format!("{sends:?}"))
     })
     .await;
-    settle(chain);
+    settle(app, chain).await;
     until("every send to succeed", || async {
         let all = jobs(app, "kind=broadcast").await;
         if all.iter().all(|job| job["state"] == "succeeded") {

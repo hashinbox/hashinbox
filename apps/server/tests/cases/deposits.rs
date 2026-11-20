@@ -16,7 +16,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     app.api.index(&wallet, &token, None).await;
     chain.fund(&wallet.address, &unit(chain), "native");
     chain.fund(&wallet.address, "2500000", &token);
-    settle(chain);
+    settle(app, chain).await;
     reaches(app, &wallet, "native", "balance_confirmed", &unit(chain)).await;
     let index = reaches(app, &wallet, &token, "balance_confirmed", "2500000").await;
     assert_eq!(index["balance_confirmed_received"], "2500000");

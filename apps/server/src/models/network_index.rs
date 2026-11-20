@@ -6,16 +6,14 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 /// One network's indexing as its indexer last wrote it; the counters since
-/// the row was made, across restarts.
+/// the row was made, across restarts. Written the first time the tip is
+/// known: no row, no tip yet.
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub(crate) struct NetworkIndex {
-    /// The node's newest block at the indexer's last read; always present,
-    /// null before the first.
-    #[schema(required)]
-    pub(crate) tip: Option<u64>,
-    /// `tip - confirmations`; always present.
-    #[schema(required)]
-    pub(crate) confirmed: Option<u64>,
+    /// The node's newest block at the indexer's last read.
+    pub(crate) tip: u64,
+    /// `tip - confirmations` (saturating), written with it.
+    pub(crate) confirmed: u64,
     /// The last kept block; always present, null: none yet.
     #[schema(required)]
     pub(crate) indexed: Option<u64>,
@@ -31,24 +29,27 @@ pub(crate) struct NetworkIndex {
 }
 
 impl NetworkIndex {
-    /// One indexer step, what [`db::save`] writes: positions as `after` has
-    /// them, `checked_at` `now`, and each counter what it grew
-    /// by since `before` (the stats last saved).
+    /// One indexer step, what [`db::save`] writes: the tip as `after` has
+    /// it, confirmed `confirmations` below it ([`base::Tips::confirmed`]),
+    /// `checked_at` `now`, and each counter what it grew by since `before`
+    /// (the stats last saved). `None` while no tip is known: nothing to
+    /// write.
     pub(crate) fn step(
         before: &base::Stats,
         after: &base::Stats,
         confirmations: u64,
         now: u64,
-    ) -> Self {
-        Self {
-            tip: after.tip,
-            confirmed: after.tip.map(|tip| tip.saturating_sub(confirmations)),
+    ) -> Option<Self> {
+        let tip = after.tip?;
+        Some(Self {
+            tip,
+            confirmed: base::Tips { position: tip }.confirmed(confirmations),
             indexed: after.last.as_ref().map(|last| last.position),
             checked_at: Some(now),
             blocks: after.blocks.saturating_sub(before.blocks),
             reorgs: after.reorgs.saturating_sub(before.reorgs),
             failures: after.failures.saturating_sub(before.failures),
-        }
+        })
     }
 }
 
@@ -70,8 +71,8 @@ pub(crate) mod db {
     struct Row {
         chain: String,
         network: String,
-        tip: Option<i64>,
-        confirmed: Option<i64>,
+        tip: i64,
+        confirmed: i64,
         indexed: Option<i64>,
         checked_at: Option<i64>,
         blocks: i64,
@@ -85,8 +86,8 @@ pub(crate) mod db {
         fn try_from(row: Row) -> anyhow::Result<Self> {
             let key = base::Network::new(base::Chain::new(&row.chain), &row.network);
             let index = NetworkIndex {
-                tip: row.tip.map(uint).transpose()?,
-                confirmed: row.confirmed.map(uint).transpose()?,
+                tip: uint(row.tip)?,
+                confirmed: uint(row.confirmed)?,
                 indexed: row.indexed.map(uint).transpose()?,
                 checked_at: row.checked_at.map(uint).transpose()?,
                 blocks: uint(row.blocks)?,
@@ -97,30 +98,13 @@ pub(crate) mod db {
         }
     }
 
-    /// Adds a row, nothing read yet, for every `enabled` network that has
-    /// none; keeps every row already written.
-    ///
-    /// # Errors
-    ///
-    /// When the write fails.
-    pub(crate) fn create_enabled(connection: &mut SqliteConnection) -> anyhow::Result<()> {
-        diesel::sql_query(
-            "
-            INSERT OR IGNORE INTO network_index (chain, network)
-            SELECT chain, network
-            FROM network
-            WHERE enabled",
-        )
-        .execute(connection)?;
-        Ok(())
-    }
-
-    /// Writes one step ([`NetworkIndex::step`]) to `network`'s row. `tip` and
-    /// `confirmed` only move forward, unless the step reorged blocks (a
-    /// reorg, which may shorten the chain): a step read from a node behind
-    /// the last one (a failover) keeps them. `indexed` takes a known
-    /// position. `checked_at` moves only when the tip does (a node that
-    /// stopped producing does not look fresh), and the counters add up.
+    /// Writes one step ([`NetworkIndex::step`]) to `network`'s row, the
+    /// row made by the first. `tip` and `confirmed` only move forward,
+    /// unless the step reorged blocks (a reorg, which may shorten the
+    /// chain): a step read from a node behind the last one (a failover)
+    /// keeps them. `indexed` takes a known position. `checked_at` moves
+    /// only when the tip does (a node that stopped producing does not look
+    /// fresh), and the counters add up.
     ///
     /// # Errors
     ///
@@ -133,31 +117,24 @@ pub(crate) mod db {
         let position = |value: Option<u64>| value.map(int).transpose();
         diesel::sql_query(
             "
-            UPDATE network_index
+            INSERT INTO network_index
+                (chain, network, tip, confirmed, indexed, checked_at, blocks, reorgs, failures)
+            VALUES (?8, ?9, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT (chain, network) DO UPDATE
             SET checked_at = IIF(
-                    ?1 IS NOT NULL AND (tip IS NULL OR ?1 > tip OR (?6 > 0 AND ?1 IS NOT tip)),
+                    ?1 > tip OR (?6 > 0 AND ?1 IS NOT tip),
                     ?4,
                     checked_at
                 ),
-                tip = IIF(
-                    ?1 IS NOT NULL AND (tip IS NULL OR ?1 > tip OR ?6 > 0),
-                    ?1,
-                    tip
-                ),
-                confirmed = IIF(
-                    ?2 IS NOT NULL AND (confirmed IS NULL OR ?2 > confirmed OR ?6 > 0),
-                    ?2,
-                    confirmed
-                ),
+                tip = IIF(?1 > tip OR ?6 > 0, ?1, tip),
+                confirmed = IIF(?2 > confirmed OR ?6 > 0, ?2, confirmed),
                 indexed = COALESCE(?3, indexed),
                 blocks = blocks + ?5,
                 reorgs = reorgs + ?6,
-                failures = failures + ?7
-            WHERE chain = ?8
-              AND network = ?9",
+                failures = failures + ?7",
         )
-        .bind::<Nullable<BigInt>, _>(position(step.tip)?)
-        .bind::<Nullable<BigInt>, _>(position(step.confirmed)?)
+        .bind::<BigInt, _>(int(step.tip)?)
+        .bind::<BigInt, _>(int(step.confirmed)?)
         .bind::<Nullable<BigInt>, _>(position(step.indexed)?)
         .bind::<Nullable<BigInt>, _>(position(step.checked_at)?)
         .bind::<BigInt, _>(int(step.blocks)?)
@@ -169,21 +146,21 @@ pub(crate) mod db {
         Ok(())
     }
 
-    /// `network`'s confirmed position; `None` while unknown.
+    /// `network`'s confirmed position; `None` while unknown (no row: no tip
+    /// yet).
     pub(crate) fn find_confirmed(
         connection: &mut SqliteConnection,
         network: &base::Network,
     ) -> QueryResult<Option<i64>> {
-        let row = network_index::table
+        network_index::table
             .filter(network_index::chain.eq(network.chain.as_str()))
             .filter(network_index::network.eq(&network.name))
             .select(network_index::confirmed)
-            .first::<Option<i64>>(connection)
-            .optional()?;
-        Ok(row.flatten())
+            .first::<i64>(connection)
+            .optional()
     }
 
-    /// Every row: the networks the server indexes.
+    /// Every row: each network whose tip is known.
     ///
     /// # Errors
     ///

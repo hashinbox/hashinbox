@@ -13,7 +13,6 @@ diesel::table! {
         parent_position -> Nullable<BigInt>,
         parent_hash -> Nullable<Binary>,
         timestamp -> Nullable<BigInt>,
-        reorged_at -> Nullable<BigInt>,
     }
 }
 
@@ -29,7 +28,8 @@ diesel::table! {
         state -> Integer,
         reason -> Nullable<Text>,
         bytes -> Binary,
-        sent_at -> Nullable<BigInt>,
+        broadcasted_at -> Nullable<BigInt>,
+        position -> Nullable<BigInt>,
     }
 }
 
@@ -75,7 +75,7 @@ diesel::table! {
         asset -> Text,
         requested_from -> BigInt,
         birthday -> BigInt,
-        indexed_at -> Nullable<Text>,
+        indexed_at -> Nullable<BigInt>,
         state -> Integer,
         reason -> Nullable<Text>,
     }
@@ -115,8 +115,8 @@ diesel::table! {
     network_index (chain, network) {
         chain -> Text,
         network -> Text,
-        tip -> Nullable<BigInt>,
-        confirmed -> Nullable<BigInt>,
+        tip -> BigInt,
+        confirmed -> BigInt,
         indexed -> Nullable<BigInt>,
         checked_at -> Nullable<BigInt>,
         blocks -> BigInt,
@@ -126,8 +126,8 @@ diesel::table! {
 }
 
 diesel::table! {
-    /// Read-only view `transaction_with_legs`: a `transaction` row, its
-    /// block's position and its legs as a JSON array.
+    /// Read-only view `transaction_with_legs`: a `transaction` row and its
+    /// legs as a JSON array.
     transaction_with_legs (id) {
         id -> Text,
         block -> Nullable<Text>,
@@ -138,7 +138,7 @@ diesel::table! {
         state -> Integer,
         reason -> Nullable<Text>,
         bytes -> Binary,
-        sent_at -> Nullable<BigInt>,
+        broadcasted_at -> Nullable<BigInt>,
         position -> Nullable<BigInt>,
         legs -> Text,
     }
@@ -155,7 +155,7 @@ diesel::table! {
         asset -> Text,
         requested_from -> BigInt,
         birthday -> BigInt,
-        indexed_at -> Nullable<Text>,
+        indexed_at -> Nullable<BigInt>,
         state -> Integer,
         reason -> Nullable<Text>,
         address -> Text,
@@ -223,19 +223,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    transaction_forgotten (id) {
-        id -> Text,
-        chain -> Text,
-        network -> Text,
-        txid -> Text,
-        reason -> Text,
-        forgotten_at -> BigInt,
-        bytes -> Binary,
-        legs -> Text,
-    }
-}
-
-diesel::table! {
     transaction_index (id) {
         id -> Text,
         chain -> Text,
@@ -243,31 +230,10 @@ diesel::table! {
         txid -> Text,
         broadcasted_at -> BigInt,
         expires_height -> Nullable<BigInt>,
-        indexed_at -> Nullable<Text>,
-        found -> Nullable<Text>,
+        indexed_at -> Nullable<BigInt>,
+        found_at -> Nullable<BigInt>,
         state -> Integer,
         reason -> Nullable<Text>,
-        found_reverted -> Bool,
-    }
-}
-
-diesel::table! {
-    /// Read-only view `transaction_index_with_blocks`: a `transaction_index`
-    /// row, whether its found transaction reverted (kept mined reverted, or
-    /// as the Confirmer told), and its network's confirmed position.
-    transaction_index_with_blocks (id) {
-        id -> Text,
-        chain -> Text,
-        network -> Text,
-        txid -> Text,
-        broadcasted_at -> BigInt,
-        expires_height -> Nullable<BigInt>,
-        indexed_at -> Nullable<Text>,
-        found -> Nullable<Text>,
-        state -> Integer,
-        reason -> Nullable<Text>,
-        reverted -> Bool,
-        confirmed -> Nullable<BigInt>,
     }
 }
 
@@ -285,7 +251,6 @@ diesel::joinable!(transactions -> block (block));
 diesel::joinable!(trigger_run -> triggers (trigger));
 diesel::joinable!(leg -> transactions (transaction));
 diesel::joinable!(leg -> block (block));
-diesel::joinable!(wallet_index -> block (indexed_at));
 diesel::joinable!(wallet_index -> wallet (wallet_id));
 diesel::joinable!(network_endpoint_route -> network_endpoint (endpoint_id));
 
@@ -293,7 +258,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     block,
     transactions,
     transaction_index,
-    transaction_index_with_blocks,
+    network_index,
     leg,
     wallet,
     wallet_index,

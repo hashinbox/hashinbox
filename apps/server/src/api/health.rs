@@ -21,8 +21,9 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 struct NetworkHealth {
     /// The indexed chain and network.
     network: NetworkName,
-    /// What its indexer last wrote.
-    indexing: NetworkIndex,
+    /// What its indexer last wrote; always present, null: no tip known yet.
+    #[schema(required)]
+    indexing: Option<NetworkIndex>,
 }
 
 /// The health of every indexed network.

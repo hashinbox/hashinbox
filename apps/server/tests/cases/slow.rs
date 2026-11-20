@@ -22,7 +22,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     slow.delay(SLOW);
     slow.limit(Some(0), Fault::Transport(ErrorKind::Timeout));
     chain.fund(&wallet.address, &unit(chain), "native");
-    settle(chain);
+    settle(app, chain).await;
     let twice = (2 * number(&unit(chain))).to_string();
     reaches(app, &wallet, "native", "balance_confirmed", &twice).await;
     at_tip(app, chain).await;

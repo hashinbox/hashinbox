@@ -78,9 +78,6 @@ impl App {
             let transport = usecase::Transport::from_clients::<T::Info>(&network, nodes);
             container.register::<T::Factory>(network, transport);
         }
-        db.write(crate::models::network_index::db::create_enabled)
-            .await
-            .expect("the networks are indexed");
         let state = Arc::new(AppState {
             container: Arc::new(container),
             queue: usecase::tasks::queue(db.clone()),

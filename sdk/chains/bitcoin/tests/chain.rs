@@ -115,8 +115,12 @@ fn chain(script: &Script, depth: u64) -> chain_bitcoin::Chain {
 async fn confirmed_tip_is_depth_minus_one_below_produced() {
     for (count, depth, confirmed) in [(100, 6, 95), (100, 1, 100), (3, 6, 0)] {
         let script = Script::new([Reply::ok("getblockcount", json!(count))]);
-        let tips = chain(&script, depth).tips().await.expect("tips");
-        assert_eq!((tips.produced, tips.confirmed), (count, confirmed));
+        let chain = chain(&script, depth);
+        let tips = chain.tips().await.expect("tips");
+        assert_eq!(
+            (tips.position, tips.confirmed(chain.confirmations())),
+            (count, confirmed)
+        );
     }
     let script = Script::default();
     let rpc = Client::new(Arc::new(script), Network::Regtest);
@@ -309,11 +313,11 @@ async fn a_chain_over_a_swap_follows_its_replacement() {
     let chain = Factory::from(Config::new(Network::Regtest))
         .chain(&rpc)
         .expect("chain");
-    assert_eq!(chain.tips().await.expect("old node").produced, 10);
+    assert_eq!(chain.tips().await.expect("old node").position, 10);
 
     let next = Script::new([Reply::ok("getblockcount", json!(20))]);
     swap.replace(Arc::new(next.clone()), Vec::new());
-    assert_eq!(chain.tips().await.expect("new node").produced, 20);
+    assert_eq!(chain.tips().await.expect("new node").position, 20);
     old.exhausted();
     next.exhausted();
 }

@@ -34,7 +34,7 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
     // Reading: what `base::Indexer` consumes.
     let chain = factory.chain(&rpc)?;
     let tips = chain.tips().await?;
-    let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
+    let _blocks = chain.blocks(tips.confirmed(chain.confirmations()), tips.position).await?;
 
     // Sending: one transfer signed into one transaction; keep the bytes,
     // then broadcast them to every node.
@@ -76,7 +76,8 @@ the blocks the indexer fetches per step (default 100), and the
   `Client` extends `Info` with every other call.
 - Position and height are both the block height. `confirmation_depth`
   (1 to 1000, default 6) makes a block final once that many blocks, itself
-  included, are on the chain: `confirmed = produced - (depth - 1)`. Bitcoin
+  included, are on the chain: `confirmations = depth - 1`, `confirmed = tip -
+  confirmations` (`Tips::confirmed`). Bitcoin
   has no finality of its own.
 - `blocks(start, end)` makes two JSON-RPC batches: every `getblockhash`, then
   every `getblock <hash> 3`. Verbosity 3 carries each input's `prevout`, so

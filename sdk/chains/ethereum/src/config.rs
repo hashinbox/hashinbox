@@ -38,7 +38,8 @@ pub struct Config {
     /// ([`base::DEFAULT_BATCH`]). Lower it for a node that limits requests.
     pub batch: u64,
     /// Blocks a block needs below the tip to count as confirmed: the
-    /// confirmed position is `tip - confirmations`; default 12.
+    /// confirmed position is `tip - confirmations`; default 64 (about two
+    /// epochs, where `finalized` sits).
     pub confirmations: u64,
     /// How sent payments are checked and bumped; default every 30 s, after
     /// 50 blocks, at most 5 times.
@@ -111,7 +112,7 @@ impl Config {
             fee_ttl_ms: settings.fee_ttl_ms,
             interval_ms: settings.interval_ms,
             batch: settings.batch,
-            confirmations: 12,
+            confirmations: 64,
             tracking: settings.tracking(),
         }
     }
@@ -251,7 +252,11 @@ impl Factory {
     /// The block reader over `rpc`.
     #[must_use]
     pub fn chain(&self, rpc: &Client) -> Chain {
-        Chain::new(rpc.clone(), self.config.contracts())
+        Chain::new(
+            rpc.clone(),
+            self.config.contracts(),
+            self.config.confirmations,
+        )
     }
 
     /// The wallet factory over `rpc`: nonces from `rpc`, after the sends in

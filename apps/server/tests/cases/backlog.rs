@@ -58,7 +58,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         last["confirmed"].as_u64().is_some() && last["refused"].is_null(),
         "{last}"
     );
-    settle(chain);
+    settle(app, chain).await;
     let legs = until("the payout and its fee to be mined", || async {
         let legs = app.api.legs(&treasury, "native").await;
         if legs.iter().any(|leg| leg["kind"] == 4) {

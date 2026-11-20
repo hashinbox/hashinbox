@@ -3168,14 +3168,6 @@
             "format": "int64",
             "description": "Native position (height or slot)."
           },
-          "reorged_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Unix ms a reorg took it back; null while live."
-          },
           "timestamp": {
             "type": [
               "integer",
@@ -3264,7 +3256,7 @@
       },
       "ConfiguredNetwork": {
         "type": "object",
-        "description": "One network as stored: its `network` row, its `network_asset` rows, its\n`network_endpoint` nodes and their routes, and its `network_index` row (`None`: not\nindexed); and the node's tip asked now (`tip_live`, the stored `tip`\nuntil a caller that asked sets it; `tip_error`, why asking failed).",
+        "description": "One network as stored: its `network` row, its `network_asset` rows, its\n`network_endpoint` nodes and their routes, and its `network_index` row (`None`: no\ntip known yet); and the node's tip asked now (`tip_live`, the stored `tip`\nuntil a caller that asked sets it; `tip_error`, why asking failed).",
         "required": [
           "chain",
           "network",
@@ -3348,7 +3340,7 @@
               },
               {
                 "$ref": "#/components/schemas/NetworkIndex",
-                "description": "Its indexing; always present, null: not indexed."
+                "description": "Its indexing; always present, null: no tip known yet (or never\nindexed: not `enabled`)."
               }
             ]
           },
@@ -3732,7 +3724,7 @@
               "string",
               "null"
             ],
-            "description": "Its block; null while pending."
+            "description": "Its block; null while pending, and for an adjustment."
           },
           "coin_index": {
             "type": [
@@ -3753,7 +3745,7 @@
           "kind": {
             "type": "integer",
             "format": "int32",
-            "description": "0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward, 6\nadjustment (signed; leg 0: what the chain's balance read corrects the\nindex's total by, at the block it was read at; leg 1: the coins a\njump archived)."
+            "description": "0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward, 6\nadjustment (signed; leg 0: what the chain's balance read corrects the\nindex's total by, at the position it was read at; leg 1: the coins a\njump archived)."
           },
           "leg_index": {
             "type": "integer",
@@ -3765,7 +3757,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Its block's position; `None` while pending."
+            "description": "Its block's position, or an adjustment's own; `None` while pending."
           },
           "seq": {
             "type": [
@@ -4012,8 +4004,15 @@
         ],
         "properties": {
           "indexing": {
-            "$ref": "#/components/schemas/NetworkIndex",
-            "description": "What its indexer last wrote."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NetworkIndex",
+                "description": "What its indexer last wrote; always present, null: no tip known yet."
+              }
+            ]
           },
           "network": {
             "$ref": "#/components/schemas/Network",
@@ -4023,7 +4022,7 @@
       },
       "NetworkIndex": {
         "type": "object",
-        "description": "One network's indexing as its indexer last wrote it; the counters since\nthe row was made, across restarts.",
+        "description": "One network's indexing as its indexer last wrote it; the counters since\nthe row was made, across restarts. Written the first time the tip is\nknown: no row, no tip yet.",
         "required": [
           "tip",
           "confirmed",
@@ -4050,12 +4049,9 @@
             "minimum": 0
           },
           "confirmed": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int64",
-            "description": "`tip - confirmations`; always present.",
+            "description": "`tip - confirmations` (saturating), written with it.",
             "minimum": 0
           },
           "failures": {
@@ -4080,12 +4076,9 @@
             "minimum": 0
           },
           "tip": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int64",
-            "description": "The node's newest block at the indexer's last read; always present,\nnull before the first.",
+            "description": "The node's newest block at the indexer's last read.",
             "minimum": 0
           }
         }
@@ -4467,7 +4460,6 @@
           "addresses",
           "tags",
           "blocks",
-          "reorged",
           "transactions",
           "reverted",
           "pending",
@@ -4488,7 +4480,7 @@
           "blocks": {
             "type": "integer",
             "format": "int64",
-            "description": "Live blocks kept.",
+            "description": "Blocks kept.",
             "minimum": 0
           },
           "chain": {
@@ -4520,12 +4512,6 @@
             "description": "Transactions kept pending.",
             "minimum": 0
           },
-          "reorged": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Blocks a reorg took back.",
-            "minimum": 0
-          },
           "reverted": {
             "type": "integer",
             "format": "int64",
@@ -4548,7 +4534,7 @@
           "transactions": {
             "type": "integer",
             "format": "int64",
-            "description": "Transactions kept mined in live blocks.",
+            "description": "Transactions kept mined.",
             "minimum": 0
           },
           "triggers": {
@@ -4608,6 +4594,14 @@
             ],
             "description": "Its block; null while pending."
           },
+          "broadcasted_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms this server recorded it, before its first broadcast: set\nexactly on this server's sends, mined or not; null on every other.\nMining keeps it."
+          },
           "chain": {
             "type": "string"
           },
@@ -4647,14 +4641,6 @@
               "null"
             ],
             "description": "Why it reverted, when the chain said (`reverted`); null otherwise.\nStored as JSON, shown decoded."
-          },
-          "sent_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Unix ms it was sent: a node accepted it, or may hold it; null while\nrecorded but not yet sent, and once mined."
           },
           "state": {
             "type": "integer",

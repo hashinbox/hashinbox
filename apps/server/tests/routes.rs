@@ -844,7 +844,8 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
     let (status, health) = call(&router, Method::GET, "/health", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{health}");
     assert_eq!(health["ready"], json!(false));
-    assert_eq!(health["networks"][0]["indexing"]["failures"], json!(1));
+    // Failed before its first tip: no row written yet.
+    assert_eq!(health["networks"][0]["indexing"], Value::Null);
     let (status, networks) = call(&router, Method::GET, "/v1/networks", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(networks["networks"][0]["index_job_reason"], json!(reason));

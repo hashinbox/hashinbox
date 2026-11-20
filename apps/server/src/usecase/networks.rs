@@ -46,7 +46,7 @@ impl Networks {
         &self,
         container: &Container<Transport>,
     ) -> &Self {
-        let indexed = self.0.iter().filter(|network| network.index.is_some());
+        let indexed = self.0.iter().filter(|network| network.enabled);
         for network in indexed.filter(|network| network.key().chain == F::CHAIN) {
             let config = NetworkConfig::from(network);
             let transport = Transport::new::<I>(&config);
@@ -151,7 +151,7 @@ async fn tip(container: &Container<Transport>, network: &base::Network) -> Resul
     let Ok(tips) = tokio::time::timeout(LIVE, dated.tips()).await else {
         return Err("the node did not answer in time".to_owned());
     };
-    tips.map(|tips| tips.produced)
+    tips.map(|tips| tips.position)
         .map_err(|error| format!("{error:#}"))
 }
 

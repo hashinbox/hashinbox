@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use alloy_consensus::TxEip1559;
 use base::{
-    Addressed as _, Asset, Fee, FeeRule as _, Future, Output, Signer, TransactionError, Transfer,
+    Addressed as _, Asset, Decimal, Fee, FeeRule as _, Future, Output, Signer, TransactionError,
+    Transfer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +22,8 @@ use crate::{
 /// next nonce ([`Builder::nonce`]) and the gas the node estimates for it;
 /// or replaces a loaded state: its nonce,
 /// payment and gas limit, both fees at least a tenth above its own (what a
-/// node takes as a replacement).
+/// node takes as a replacement); or cancels it: the same, paying zero ether
+/// to its own source.
 pub(crate) struct Builder {
     pub(crate) rpc: Client,
     /// The sends in flight: the nonces they hold.
@@ -52,6 +54,9 @@ pub(crate) struct State {
     gas_limit: u64,
     /// The rate it paid.
     rate: base::FeeRate,
+    /// A cancel: zero ether to its source.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    cancel: bool,
 }
 
 impl base::Builder for Builder {
@@ -137,6 +142,7 @@ impl base::Builder for Builder {
                 nonce,
                 gas_limit,
                 rate,
+                cancel: old.is_some_and(|old| old.cancel),
             };
             self.state = Some(state);
             Ok(transaction.into())
@@ -150,19 +156,78 @@ impl base::Builder for Builder {
         serde_json::to_value(state).map_err(TransactionError::failed)
     }
 
-    /// Its recipient and amount checked as [`Self::from_transfer`] does.
+    /// Its recipient and amount checked as [`Self::from_transfer`] does; a
+    /// cancel's as a cancel.
     fn load(&mut self, state: &serde_json::Value) -> Result<(), TransactionError> {
         let state: State =
             serde_json::from_value(state.clone()).map_err(TransactionError::failed)?;
-        let to = base::Address::new(self.rpc.network().into(), state.to.clone());
-        let amount = state.amount.parse().map_err(TransactionError::failed)?;
-        self.from_transfer(Transfer::new(to, amount))?;
+        let cancel = state.cancel;
+        if !cancel {
+            let to = base::Address::new(self.rpc.network().into(), state.to.clone());
+            let amount = state.amount.parse().map_err(TransactionError::failed)?;
+            self.from_transfer(Transfer::new(to, amount))?;
+        }
         self.state = Some(state);
+        if cancel {
+            self.cancel()?;
+        }
         Ok(())
+    }
+
+    fn replaceable(&mut self) -> Option<&mut dyn base::Replace> {
+        Some(self)
+    }
+}
+
+impl base::Replace for Builder {
+    /// Zero to its source: its cancel ([`Self::cancel`]); else `transfer`
+    /// at its nonce, checked as [`Self::from_transfer`] does.
+    fn replace(&mut self, transfer: Transfer) -> Result<(), TransactionError> {
+        let Some(state) = &self.state else {
+            return Err(TransactionError::failed("nothing loaded to replace"));
+        };
+        let network = self.rpc.network();
+        let parse = |text: &str| Address::parse(text, network).map_err(TransactionError::failed);
+        let to_source = parse(&transfer.to.value)?.address() == parse(&state.source)?.address();
+        let cancelled = state.cancel;
+        if to_source && transfer.amount == Decimal::zero() {
+            return self.cancel();
+        }
+        if cancelled {
+            return Err(TransactionError::failed(
+                "a cancel is replaced only by a cancel",
+            ));
+        }
+        let state = self.state.take();
+        let checked = base::Builder::from_transfer(self, transfer);
+        self.state = state;
+        checked
     }
 }
 
 impl Builder {
+    /// Turns the loaded payment into its cancel: zero ether to its source
+    /// at its nonce and gas limit, a token's too.
+    fn cancel(&mut self) -> Result<(), TransactionError> {
+        let Some(state) = &mut self.state else {
+            return Err(TransactionError::failed("nothing loaded to cancel"));
+        };
+        let network = self.rpc.network();
+        let source = Address::parse(&state.source, network).map_err(TransactionError::failed)?;
+        state.to.clone_from(&state.source);
+        state.amount = "0".to_owned();
+        state.cancel = true;
+        self.contract = None;
+        self.asset = Asset::native(network.into());
+        let output = Output {
+            address: source,
+            asset: self.asset.clone(),
+            amount: Decimal::zero(),
+        };
+        self.payment = Some((output, None));
+        Ok(())
+    }
+
     /// `key`'s next nonce: the node's pending count, or one above the
     /// highest nonce of its own sends in flight when that is higher,
     /// so a node whose mempool misses one never hands its nonce out again.

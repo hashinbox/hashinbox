@@ -9,7 +9,9 @@
 //! the trigger package's store, and `workers` are the background jobs with
 //! their executor.
 
+pub(crate) mod blocks;
 mod error;
+pub(crate) mod indexes;
 pub(crate) mod jobs;
 pub(crate) mod networks;
 pub(crate) mod sdk;

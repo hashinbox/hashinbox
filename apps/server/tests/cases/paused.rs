@@ -47,7 +47,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
         .send(&wallet, "native", &other.address, "0.25")
         .await;
     accepted(app, &job).await;
-    settle(chain);
+    settle(app, chain).await;
     let txid = succeeded(app, &job).await["txid"].clone();
     let mined = transaction(app, chain, &txid).await;
     assert!(mined["block"].is_string(), "{mined}");

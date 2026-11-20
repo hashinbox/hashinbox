@@ -76,7 +76,7 @@ impl Prune {
         {
             return service.indexer.stats().confirmed;
         }
-        let tip = network.index.as_ref().and_then(|index| index.tip)?;
+        let tip = network.index.as_ref()?.tip;
         Some(tip.saturating_sub(network.max_depth?))
     }
 }

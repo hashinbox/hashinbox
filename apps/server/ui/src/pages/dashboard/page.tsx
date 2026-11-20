@@ -70,7 +70,7 @@ function Cards({ stats }: { stats: Stats }) {
       <Stat
         label="Blocks kept"
         value={compact.format(stats.blocks)}
-        note={`${String(sum(blocks))} in the last 24 h · ${String(stats.reorged)} reorged`}
+        note={`${String(sum(blocks))} in the last 24 h`}
         trend={trend('Blocks per hour', blocks, chainLabels, 'blocks')}
       />
       <Stat label="Pending" value={compact.format(stats.pending)} note="Sent, not mined yet" />

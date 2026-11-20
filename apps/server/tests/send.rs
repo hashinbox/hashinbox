@@ -13,7 +13,7 @@ use tasks::{Ack, Admission, Claim, Context, Id, OnLock, Status, Store, Worker};
 
 use super::{
     Fake, Script, container, database, network,
-    storage::{block, confirm, forgotten, run, watch},
+    storage::{block, confirm, run, watch},
 };
 use crate::{
     db::Db,
@@ -30,7 +30,7 @@ struct Fixture {
     script: Arc<Script>,
     worker: Broadcast,
     jobs: Vec<Id>,
-    directory: tempfile::TempDir,
+    _directory: tempfile::TempDir,
 }
 
 impl Fixture {
@@ -82,7 +82,7 @@ impl Fixture {
             queue,
             script,
             jobs,
-            directory,
+            _directory: directory,
         };
         assert_eq!(fixture.claim().await, fixture.jobs[..1], "the first runs");
         fixture
@@ -132,8 +132,8 @@ impl Fixture {
         broadcast::progress(self.job(id).await.state.as_ref())
     }
 
-    /// Txid `txid` as recorded pending: `None` unless pending, else when a
-    /// node accepted it.
+    /// Txid `txid` as recorded pending: `None` unless pending, else its
+    /// `broadcasted_at` (this server's send: always set).
     async fn recorded(&self, txid: &str) -> Option<Option<i64>> {
         let id = TransactionId::new(&network(), txid).expect("an id");
         self.db
@@ -141,7 +141,7 @@ impl Fixture {
                 let kept = transaction::db::get(connection, &id)?;
                 Ok(kept
                     .filter(|kept| kept.block.is_none())
-                    .map(|kept| kept.sent_at))
+                    .map(|kept| kept.broadcasted_at))
             })
             .await
             .expect("a read")
@@ -216,8 +216,6 @@ async fn a_refusal_forgets_it() {
     let fixture = Fixture::new(&["1"], vec![Err(TransactionErrorKind::Rejected)]).await;
     assert!(matches!(fixture.run().await, Ack::Fail(reason) if reason.starts_with("refused")));
     assert_eq!(fixture.recorded("1").await, None);
-    let refused = [("1".to_owned(), "refused".to_owned())];
-    assert_eq!(forgotten(&fixture.directory), refused);
 }
 
 #[tokio::test]
@@ -270,8 +268,6 @@ async fn the_second_payments_refusal_leaves_the_first_sent() {
     assert_eq!(fixture.job(second).await.status, Status::Failed);
     assert!(matches!(fixture.recorded("1").await, Some(Some(_))), "sent");
     assert_eq!(fixture.recorded("2").await, None);
-    let refused = [("2".to_owned(), "refused".to_owned())];
-    assert_eq!(forgotten(&fixture.directory), refused);
 }
 
 #[tokio::test]

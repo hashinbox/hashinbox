@@ -10,20 +10,21 @@
 -- A network is (chain, network). Positions and heights are SQLite integers;
 -- amounts are exact decimal TEXT, never summed in SQL.
 --
--- Blocks are kept up to the produced tip. A block is live until the indexer
--- marks it reorged: `reorged_at` is set, nothing is deleted, and every read
--- joins live blocks only, so reorged facts leave balances, history and
--- unspent outputs. Confirmation is a read (position <= the network's
+-- Blocks are kept up to the produced tip. A reorg deletes the blocks the
+-- chain took back in one write (design 087): their facts go by cascade, this
+-- server's own sent transactions go back to pending, and every index at or
+-- above is capped below. Confirmation is a read (position <= the network's
 -- `network_index` confirmed position). Below a network's line (on a chain
 -- that reads balances its final block, else its tip less its `max_depth`),
--- the prune job deletes reorged blocks with their facts and live blocks
--- nothing names (`block::db::prune`).
+-- the prune job deletes blocks that hold no facts (`block::db::prune`).
+-- Nothing else names a block: an index's progress and an adjustment are
+-- positions (design 087).
 --
 -- Mined facts (transactions and legs, rewards included) are kept only for
 -- (address, asset) pairs with a wallet_index the block applies to
 -- (BlockStore::insert).
 -- A coin is a `received` leg with a coin; it is spent while a `spent` leg in
--- a live block names it, so reorging the spending block unspends it.
+-- a block names it, so reorging the spending block unspends it.
 
 -- Keys: every table's `id` is TEXT, its natural key joined with dots (dots
 -- are URL-safe), and every foreign key references such an id. No part holds
@@ -31,8 +32,7 @@
 -- asset ids and txids; the server refuses a part with a dot (or an empty one)
 -- when it builds an id (`models::key`).
 
--- id: "{chain}.{network}.{hash}". A block whose hash comes back after a
--- reorg is revived (reorged_at cleared), never inserted twice.
+-- id: "{chain}.{network}.{hash}". Kept again, it is not inserted twice.
 CREATE TABLE block (
     id              TEXT    NOT NULL PRIMARY KEY,
     chain           TEXT    NOT NULL,
@@ -49,15 +49,13 @@ CREATE TABLE block (
     parent_position INTEGER,          -- NULL exactly for genesis.
     parent_hash     BLOB,
     timestamp       INTEGER,          -- Unix seconds, when reported.
-    reorged_at      INTEGER,          -- Unix ms; NULL while live.
     CHECK (id = chain || '.' || network || '.' || lower(hex(hash))),
     CHECK ((parent_position IS NULL) = (parent_hash IS NULL)),
     CHECK (parent IS NULL
         OR parent = chain || '.' || network || '.' || lower(hex(parent_hash)))
 );
--- At most one live block per position.
-CREATE UNIQUE INDEX block_live ON block (chain, network, position)
-    WHERE reorged_at IS NULL;
+-- At most one block per position.
+CREATE UNIQUE INDEX block_position ON block (chain, network, position);
 CREATE INDEX block_parent_hash ON block (chain, network, parent_hash)
     WHERE parent IS NULL;
 -- A block's kept children: what deleting it unlinks.
@@ -66,9 +64,16 @@ CREATE INDEX block_parent ON block (parent);
 -- A transaction, once per txid of a network: pending (block NULL, kept by
 -- TransactionStore::insert, a no-op when the txid is kept) or mined. Mining
 -- (BlockStore::insert) upserts it: block, order, state, reason and bytes
--- become the mined ones and its legs are replaced by the mined legs. One
--- whose block is reorged and not re-mined is no longer shown: a reorg
--- cannot make funds appear. Deleting its block deletes it.
+-- become the mined ones and its legs are replaced by the mined legs;
+-- `broadcasted_at` stays. This server's own sends are exactly the rows with
+-- `broadcasted_at`. A reorg (design 087) deletes the others mined at or
+-- above the position it takes back, their legs by cascade
+-- (`transaction::db::delete_unbroadcast_from`), and sets ours there pending,
+-- their legs too (`leg::db::set_pending_from`,
+-- `transaction::db::set_pending_from`), before the blocks go: a reorg cannot
+-- make funds appear, nor free what a send holds; its broadcast job owns it
+-- until final, expired or forgotten. Nothing is left in a deleted block, so
+-- its cascade never reaches a transaction.
 -- id: "{chain}.{network}.{txid}".
 CREATE TABLE "transaction" (
     id      TEXT    NOT NULL PRIMARY KEY,
@@ -80,46 +85,49 @@ CREATE TABLE "transaction" (
     state   INTEGER NOT NULL,          -- 0 pending, 1 succeeded, 2 reverted.
     reason  TEXT,                      -- JSON Reason; reverted only.
     bytes   BLOB    NOT NULL,
-    sent_at INTEGER,                   -- Unix ms a node accepted it; NULL until then and once mined.
+    broadcasted_at INTEGER,            -- Unix ms this server recorded it, before its first broadcast; NULL: not ours.
+    position INTEGER,                  -- Its block's; NULL while pending.
     CHECK (id = chain || '.' || network || '.' || txid),
     CHECK (state IN (0, 1, 2)),
-    CHECK (state = 2 OR reason IS NULL),
-    CHECK (block IS NULL OR sent_at IS NULL)
+    CHECK (state = 2 OR reason IS NULL)
 );
 CREATE INDEX transaction_block ON "transaction" (block);
 
 -- One kept leg of a transaction, a block reward (value a block moved
 -- with no transaction; signed), or an adjustment (design 083, signed, no
--- transaction: leg 0, what the chain's balance read says an index holds at
--- a final block less its total there (settle); leg 1, the coins a jump
--- archived (write-off)).
+-- transaction and no block, only its position (design 087): leg 0, what
+-- the chain's balance read says an index holds at a final position less its
+-- total there (settle); leg 1, the coins a jump archived (write-off)); a
+-- reorg's write deletes the adjustments at or above its position.
 -- A coin a jump wrote off is archived (`archived_at`): never spendable
 -- again. A pending transaction's legs have no block;
--- only legs of a live block count (balances, unspent coins). Address and
+-- only legs of a block, and adjustments, count (balances, unspent
+-- coins). Address and
 -- asset are of the transaction's or block's network.
 -- A mined leg is kept for the wallet index it applies to (and goes with
 -- it), and carries its block's position, its `seq` and `total`: the
--- index's balance right after it, the previous live mined leg's total plus
+-- index's balance right after it, the previous mined leg's total plus
 -- its signed amount (design 072), and `total_received` / `total_sent`:
 -- what the chain showed come in (received, minted, reward) and go out
 -- (spent, burned, fee) so far. An adjustment moves only `total`, so
 -- `total = total_received - total_sent + the adjustments so far`. A spend
 -- of a coin the index archived or never saw subtracts all the same: a
 -- negative total means history is missing. `seq` is 1 + the highest the index has
--- ever kept (reorged legs included, so never reused, and unique: a second
+-- ever kept (so never reused while kept, and unique: a second
 -- writer of the same step is refused); within a block it follows
 -- transaction order, then leg index, rewards after the transactions. An
 -- index's legs order by (position, seq); its balance at a position is the
--- total of its last live leg at or below it (none: 0). Written in that
+-- total of its last leg at or below it (none: 0). Written in that
 -- order as blocks are kept, in one write transaction; a block kept again
--- (revived, or re-applied to an index) has its legs written again from the
--- live chain below it. A pending leg has none of these: it is read by
+-- (re-applied to an index) has its legs written again from the chain below
+-- it. A pending leg has none of these: it is read by
 -- address until mined. Deleting its block or its transaction deletes it.
--- id: "{transaction}.{leg_index}", "{block}.reward.{leg_index}", or
--- "{block}.adjustment.{wallet_index_id}.{leg_index}".
+-- id (built by `models/leg.rs`, not checked here): "{transaction}.{leg_index}",
+-- "{block}.reward.{leg_index}", or
+-- "{wallet_index_id}.adjustment.{position}.{leg_index}".
 CREATE TABLE leg (
     id            TEXT    NOT NULL PRIMARY KEY,
-    block         TEXT    REFERENCES block (id) ON DELETE CASCADE, -- NULL: of a pending transaction.
+    block         TEXT    REFERENCES block (id) ON DELETE CASCADE, -- NULL: of a pending transaction, or an adjustment.
     "transaction" TEXT    REFERENCES "transaction" (id) ON DELETE CASCADE, -- NULL: a reward or an adjustment.
     leg_index     INTEGER NOT NULL, -- In its transaction, or the block's rewards; an adjustment's 0 or 1.
     kind          INTEGER NOT NULL, -- 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward, 6 adjustment.
@@ -129,31 +137,23 @@ CREATE TABLE leg (
     coin_txid     TEXT,             -- The UTXO created (received) or consumed (spent).
     coin_index    INTEGER,
     wallet_index_id TEXT NOT NULL REFERENCES wallet_index (id) ON DELETE CASCADE,
-    position      INTEGER,          -- The block's; NULL while pending.
+    position      INTEGER,          -- The block's, or an adjustment's own; NULL while pending.
     seq           INTEGER,          -- Per index, never reused; NULL while pending.
     total         TEXT,             -- Exact decimal, signed; NULL while pending.
     total_received TEXT,            -- Exact decimal; NULL while pending.
     total_sent    TEXT,             -- Exact decimal; NULL while pending.
     archived_at   INTEGER,          -- A received coin: the jump line that wrote it off.
-    CHECK (block IS NOT NULL OR "transaction" IS NOT NULL),
     CHECK (kind BETWEEN 0 AND 6),
     CHECK (("transaction" IS NULL) = (kind IN (5, 6))),
-    CHECK (id = CASE kind
-        WHEN 6 THEN block || '.adjustment.' || wallet_index_id
-        ELSE COALESCE("transaction", block || '.reward')
-    END || '.' || leg_index),
     CHECK (kind <> 6 OR leg_index IN (0, 1)),
     CHECK ((coin_txid IS NULL) = (coin_index IS NULL)),
     CHECK (coin_txid IS NULL OR kind IN (0, 1)),
     CHECK (archived_at IS NULL OR (kind = 0 AND coin_txid IS NOT NULL)),
-    CHECK ((block IS NULL) = (total IS NULL)
-        AND (block IS NULL) = (total_received IS NULL)
-        AND (block IS NULL) = (total_sent IS NULL)),
-    CHECK ((block IS NULL) = (position IS NULL)
-        AND (block IS NULL) = (seq IS NULL))
+    CHECK (kind <> 6 OR block IS NULL),
+    CHECK ((position IS NULL) = (total IS NULL)) -- Pending legs: neither.
 );
 CREATE INDEX leg_address ON leg (address, asset);
--- An index's last live leg at or below a position: one seek.
+-- An index's last leg at or below a position: one seek.
 CREATE INDEX leg_wallet_index ON leg (wallet_index_id, position, seq);
 CREATE UNIQUE INDEX leg_seq ON leg (wallet_index_id, seq);
 CREATE INDEX leg_transaction ON leg ("transaction");
@@ -161,13 +161,11 @@ CREATE INDEX leg_transaction ON leg ("transaction");
 CREATE INDEX leg_block ON leg (block);
 CREATE INDEX leg_coin ON leg (coin_txid, coin_index) WHERE coin_txid IS NOT NULL;
 
--- A transaction with its block's position (`position`, NULL while pending)
--- and its legs (`legs`, JSON as the `Leg` model serializes them, by
+-- A transaction with its legs (`legs`, JSON as the `Leg` model serializes them, by
 -- leg_index): what every transaction read answers.
 CREATE VIEW transaction_with_legs AS
 SELECT
     t.*,
-    b.position AS position,
     COALESCE((
         SELECT json_group_array(
             json_object(
@@ -194,8 +192,7 @@ SELECT
         FROM leg l
         WHERE l."transaction" = t.id
     ), '[]') AS legs
-FROM "transaction" t
-LEFT JOIN block b ON b.id = t.block;
+FROM "transaction" t;
 
 -- Every address the server knows on a network, keyed or watch-only: its
 -- key's curve and bytes (both NULL: watch-only, no key kept), and its tags
@@ -220,8 +217,9 @@ CREATE INDEX wallet_network ON wallet (chain, network);
 CREATE INDEX wallet_tags ON wallet (tags);
 
 -- One asset of one wallet being indexed; its chain, network and address are
--- the wallet's. Facts are kept for every live block from birthday through
--- indexed_at, with no gaps. NULL indexed_at: nothing scanned yet.
+-- the wallet's. Facts are kept for every block from birthday through
+-- indexed_at, the position read through, with no gaps. NULL indexed_at:
+-- nothing scanned yet.
 -- requested_from: the start asked for; birthday moves past it, before the
 -- first scan, to the first block the node serves.
 -- state: 0 indexing, 1 paused, 2 no_data (the node no longer serves a block
@@ -233,7 +231,7 @@ CREATE TABLE wallet_index (
     asset          TEXT    NOT NULL,
     requested_from INTEGER NOT NULL,
     birthday       INTEGER NOT NULL,
-    indexed_at     TEXT    REFERENCES block (id),
+    indexed_at     INTEGER,
     state          INTEGER NOT NULL,
     reason         TEXT,
     CHECK (id = wallet_id || '.' || asset),
@@ -243,14 +241,18 @@ CREATE INDEX wallet_index_wallet ON wallet_index (wallet_id);
 CREATE INDEX wallet_index_progress ON wallet_index (indexed_at);
 
 -- One sent transaction being looked for (design 085): the blocks from
--- `broadcasted_at` (the tip it was broadcast at) through `indexed_at` are
--- read for it, moved by every block kept as a wallet index is, with no
--- gaps; NULL indexed_at: nothing read yet. `found`: the block it is mined
--- in, NULL until then and again once a reorg takes that block back.
--- `expires_height`: the last block height it can land at (Solana's
--- blockhash); NULL: never. state as `wallet_index`'s: 0 indexing, 1 paused,
--- 2 no_data (the node no longer serves a block it needs, or it was given
--- up: `reason`). Its broadcast job deletes it once done.
+-- `broadcasted_at` (the tip it was broadcast at) through `indexed_at` (a
+-- position) are read for it, moved by every block kept as a wallet index
+-- is, with no gaps; NULL indexed_at: nothing read yet. `found_at`: the
+-- position it is mined in (NULL until mined), no longer read once set; a
+-- reorg that takes it back clears it. Whether it reverted is its
+-- transaction row's own state. `expires_height`: the last block height it
+-- can land at (Solana's blockhash); NULL: never. state, only what the
+-- index itself does: 0 indexing, 1 paused, 2 no_data (the node no longer
+-- serves a block it needs, or it was given up: `reason`). The indexer
+-- never judges expiry: one past its
+-- `expires_height` reads on until its broadcast job drops it. Its
+-- broadcast job deletes it once done.
 -- id: the transaction's, "{chain}.{network}.{txid}".
 CREATE TABLE transaction_index (
     id             TEXT    NOT NULL PRIMARY KEY,
@@ -259,47 +261,29 @@ CREATE TABLE transaction_index (
     txid           TEXT    NOT NULL,
     broadcasted_at INTEGER NOT NULL,
     expires_height INTEGER,
-    indexed_at     TEXT    REFERENCES block (id),
-    found          TEXT    REFERENCES block (id),
+    indexed_at     INTEGER,
+    found_at       INTEGER,
     state          INTEGER NOT NULL,
     reason         TEXT,
-    -- Reverted in `found`, as the chain's Confirmer told: that block is kept
-    -- without its transactions.
-    found_reverted INTEGER NOT NULL DEFAULT 0 CHECK (found_reverted IN (0, 1)),
     CHECK (id = chain || '.' || network || '.' || txid),
     CHECK (state IN (0, 1, 2))
 );
 CREATE INDEX transaction_index_network ON transaction_index (chain, network);
 CREATE INDEX transaction_index_progress ON transaction_index (indexed_at);
 
--- A transaction index as every read answers it: its row, whether its found
--- transaction reverted (kept mined reverted, or as the Confirmer told), and
--- its network's confirmed position.
-CREATE VIEW transaction_index_with_blocks AS
-SELECT
-    ti.*,
-    ti.found IS NOT NULL AND (t.state IS 2 OR ti.found_reverted) AS reverted,
-    i.confirmed AS confirmed
-FROM transaction_index ti
-LEFT JOIN "transaction" t ON t.id = ti.id
-LEFT JOIN network_index i ON i.chain = ti.chain
-    AND i.network = ti.network;
-
-
-
 -- A wallet index with its wallet's network, address and tags, whether its
--- key is kept, the live block position it is indexed through (NULL through
--- a reorged one) and how far that is behind its network's indexer tip, and the indexer's confirmed position
+-- key is kept, the position it is indexed through and how far that is
+-- behind its network's indexer tip, and the indexer's confirmed position
 -- (`finality_at`). Its balances are NULL before its first block (NULL
 -- `indexed_at`: a chain that reads balances has not settled it yet).
 -- Its confirmed balances, NULL while that is unknown
 -- (no `network_index` confirmed position): `balance_confirmed`,
 -- `balance_confirmed_received`, `balance_confirmed_sent`, the totals of its
--- last live mined leg at or below `finality_at` (`c`; '0': none);
+-- last mined leg at or below `finality_at` (`c`; '0': none);
 -- `balance_confirmed_spendable`, `balance_confirmed` less its outgoing legs
 -- (spent, burned, fee) not yet in it: pending (no block), or mined in a
--- live block above `finality_at`. `balance_pending`: what it will hold once
--- every pending transaction lands: the total of its newest live mined leg,
+-- block above `finality_at`. `balance_pending`: what it will hold once
+-- every pending transaction lands: the total of its newest mined leg,
 -- any block (`n`; '0': none), with its pending legs (what this server sent,
 -- not mined yet), in and out. Each
 -- leg is one seek of `leg_wallet_index`. `SUM_DECIMAL` is the server's:
@@ -312,9 +296,8 @@ SELECT
     w.address,
     w.tags,
     w.secret IS NOT NULL AS keyed,
-    -- A reorged block indexes nothing.
-    IIF(b.reorged_at IS NULL, b.position, NULL) AS indexed_through,
-    MAX(i.tip - IIF(b.reorged_at IS NULL, b.position, NULL), 0) AS behind_tip,
+    wi.indexed_at AS indexed_through,
+    MAX(i.tip - wi.indexed_at, 0) AS behind_tip,
     i.confirmed AS finality_at,
     IIF(i.confirmed IS NULL OR wi.indexed_at IS NULL, NULL, COALESCE(c.total, '0')) AS balance_confirmed,
     IIF(i.confirmed IS NULL OR wi.indexed_at IS NULL, NULL, COALESCE(c.total_received, '0')) AS balance_confirmed_received,
@@ -334,10 +317,8 @@ SELECT
             UNION ALL
             SELECT '-' || m.amount
             FROM leg m
-            JOIN block mb ON mb.id = m.block
             WHERE m.wallet_index_id = wi.id
               AND m.position > i.confirmed
-              AND mb.reorged_at IS NULL
               AND m.kind IN (1, 2, 4)
         )
     )) AS balance_confirmed_spendable,
@@ -354,25 +335,21 @@ SELECT
     )) AS balance_pending
 FROM wallet_index wi
 JOIN wallet w ON w.id = wi.wallet_id
-LEFT JOIN block b ON b.id = wi.indexed_at
 LEFT JOIN network_index i ON i.chain = w.chain
     AND i.network = w.network
 LEFT JOIN leg c ON c.id = (
     SELECT l.id
     FROM leg l
-    JOIN block lb ON lb.id = l.block
     WHERE l.wallet_index_id = wi.id
       AND l.position <= i.confirmed
-      AND lb.reorged_at IS NULL
     ORDER BY l.position DESC, l.seq DESC
     LIMIT 1
 )
 LEFT JOIN leg n ON n.id = (
     SELECT l.id
     FROM leg l
-    JOIN block lb ON lb.id = l.block
     WHERE l.wallet_index_id = wi.id
-      AND lb.reorged_at IS NULL
+      AND l.position IS NOT NULL
     ORDER BY l.position DESC, l.seq DESC
     LIMIT 1
 );
@@ -427,18 +404,18 @@ CREATE TABLE network_asset (
     FOREIGN KEY (chain, network) REFERENCES network (chain, network)
 );
 
--- What each network's indexer last wrote (one row per network it runs; the
--- server indexes exactly these, and adds one per `enabled` network at start):
--- `tip`, the node's newest block; `confirmed`, `tip - confirmations`;
--- `indexed`, the last kept block (NULL: none yet); `checked_at`, Unix ms of
--- the last step whose tip moved. `blocks` (kept), `reorgs` and `failures`
--- count since the row was made. Why a step failed is the index
--- job's `q.reason`.
+-- What each network's indexer last wrote, written the first time its tip is
+-- known (no row: no tip yet; the server indexes every `enabled` network):
+-- `tip`, the node's newest block; `confirmed`, `tip - confirmations`
+-- (saturating), written with it; `indexed`, the last kept block (NULL: none
+-- yet); `checked_at`, Unix ms of the last step whose tip moved. `blocks`
+-- (kept), `reorgs` and `failures` count since the row was made. Why a step
+-- failed is the index job's `q.reason`.
 CREATE TABLE network_index (
     chain      TEXT    NOT NULL,
     network    TEXT    NOT NULL,
-    tip        INTEGER,
-    confirmed  INTEGER,
+    tip        INTEGER NOT NULL,
+    confirmed  INTEGER NOT NULL,
     indexed    INTEGER,
     checked_at INTEGER,
     blocks     INTEGER NOT NULL DEFAULT 0,
@@ -507,29 +484,6 @@ CREATE TABLE trigger_run (
     CHECK (id = "trigger" || '.' || started_at)
 );
 CREATE INDEX trigger_run_latest ON trigger_run ("trigger", started_at);
-
--- A pending transaction the server forgot (design 084), as it was then:
--- why (`reason`: `refused`, refused by every node or never sent; `dead`,
--- the chain proved it can never mine; `jump`, its index, a wallet's or its
--- own, jumped past a gap, or its own was given up or found it inside one),
--- when, its bytes, and its legs (JSON, as `transaction_with_legs` has them:
--- who was to be paid what). Forgetting
--- deleted its `transaction` row and legs, freeing what it held; this only
--- records it. A txid forgotten again (recorded again in between) keeps the
--- latest.
--- id: the transaction's, "{chain}.{network}.{txid}".
-CREATE TABLE transaction_forgotten (
-    id           TEXT    NOT NULL PRIMARY KEY,
-    chain        TEXT    NOT NULL,
-    network      TEXT    NOT NULL,
-    txid         TEXT    NOT NULL,
-    reason       TEXT    NOT NULL,
-    forgotten_at INTEGER NOT NULL, -- Unix ms.
-    bytes        BLOB    NOT NULL,
-    legs         TEXT    NOT NULL CHECK (json_valid(legs)),
-    CHECK (id = chain || '.' || network || '.' || txid)
-);
-
 
 -- Durable job queue (packages/tasks `Store`, the server's usecase/tasks.rs).
 

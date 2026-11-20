@@ -30,7 +30,7 @@ async fn ethereum(storage: Storage) -> anyhow::Result<()> {
     // Reading: what `base::Indexer` consumes.
     let chain = factory.chain(&rpc);
     let tips = chain.tips().await?;
-    let _blocks = chain.blocks(tips.confirmed, tips.produced).await?;
+    let _blocks = chain.blocks(tips.confirmed(chain.confirmations()), tips.position).await?;
 
     // Sending: one transfer signed into one transaction; keep the bytes,
     // then broadcast them to every node. Fees are priced for a new recipient
@@ -56,7 +56,8 @@ blocks the indexer fetches per step (default 100; lower it for a node that
 rate-limits), and the `base::Tracking` of sent payments: `check_ms`
 (default 30 s), `bump_after` (50 blocks) and `max_bumps` (5) (each absent
 one its default). It has no `max_depth`: it reads
-balances (`base::Balances`, at the node's `finalized` block), so its
+balances (`base::Balances`, at the confirmed block, `confirmations` below the
+tip, default 64: about two epochs, where `finalized` sits), so its
 indexer reads nothing at or below that block and settles an index behind it
 with one balance read (design 083 §9).
 
@@ -74,9 +75,8 @@ with one balance read (design 083 §9).
   over one node (`Info::new(node)`): `tip()` is `eth_blockNumber`, `info()`
   its chain ID and its tip, as the node reports them; the caller judges them.
   `Client` extends `Info` with every other call.
-- Position and height are the block number. A block is confirmed once it is at
-  or below the node's `finalized` block; a node that serves none yet (syncing,
-  a development chain) fails `tips`.
+- Position and height are the block number. `tips` is `eth_blockNumber`; a
+  block is confirmed once `confirmations` below it (`Tips::confirmed`).
 - `blocks` is two JSON-RPC batches for the whole range: the blocks, then each
   block's `eth_getBlockReceipts` (or, on a node without it, one
   `eth_getTransactionReceipt` per transaction). Only standard `eth_*`
@@ -126,7 +126,7 @@ with one balance read (design 083 §9).
   fails `FeeCap`.
 - A broadcast refused as "already known" or "nonce too low" is acceptance when
   the node holds that exact hash.
-- Its line is the block after the finalized one (`Line::Final`). A sent
+- Its line is the block after the confirmed one (`Line::Final`). A sent
   transaction's index left behind it is settled by the `Confirmer`: its
-  receipt (`eth_getTransactionReceipt`) at or below the `finalized` block
+  receipt (`eth_getTransactionReceipt`) at or below the confirmed block
   is where it is found; none, it is not mined through that block.

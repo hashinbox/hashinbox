@@ -38,8 +38,9 @@ pub trait Indexes: Send + Sync {
     /// The lowest next block of its indexing items, at or above `from` and
     /// at or below `through`: where the next run may start.
     fn next<'a>(&'a self, from: u64, through: Option<u64>) -> Future<'a, Result<Option<u64>>>;
-    /// Closes the gaps of its items whose next block is below `line`.
-    fn close<'a>(&'a self, line: u64, tips: Tips) -> Future<'a, Result<()>>;
+    /// Closes the gaps of its items whose next block is below `line`, at
+    /// `confirmed`, `confirmations` below the tip (087: `Tips::confirmed`).
+    fn close<'a>(&'a self, line: u64, confirmed: u64) -> Future<'a, Result<()>>;
     /// Moves items stuck behind a block the node no longer serves: an
     /// unstarted one starts at `start` (`move_start`), a started one is `no_data`.
     fn skip<'a>(&'a self, below: u64, start: u64) -> Future<'a, Result<Skipped>>;
@@ -62,7 +63,7 @@ pub trait Chained {
 pub struct Indexer {
     chain: Arc<dyn Chained>,
     /// Keeping blocks advances every index of both kinds, in the same write
-    /// as the blocks and legs; deleting them rewinds both kinds.
+    /// as the blocks and legs; deleting them caps both kinds (087).
     blocks: Arc<dyn BlockStore>,
     parts: Vec<Arc<dyn Indexes>>, // [WalletIndexer, TransactionIndexer]
     // batch, interval, stats: as now
@@ -132,8 +133,8 @@ pub struct Confirmed {
 
 | Chain | `Confirmer` |
 | --- | --- |
-| Ethereum | `eth_getTransactionReceipt` against the `finalized` block; reverted: `status` 0 |
-| Solana | `getSignatureStatuses` (finalized), at the finalized slot; reverted: `err` set |
+| Ethereum | `eth_getTransactionReceipt` against the confirmed block (087: `confirmations` below the tip, not `finalized`); reverted: `status` 0 |
+| Solana | `getSignatureStatuses` (finalized), at the confirmed slot (087); reverted: `err` set |
 | Bitcoin | none |
 
 `close`: for each index below the line:
@@ -260,7 +261,7 @@ pub trait TransactionIndexStore: Send + Sync {
     fn insert(index: &dyn IntoIndex<TransactionIndex>), find_all, find_next /* default */, find_behind /* default */,
        move_start, set_state,
        settle(index, found, reverted, header), give_up(index),
-       delete(index); // the broadcast job, once its payment is final or dead
+       delete(index); // the broadcast job, once its payment is final or expired
 }
 ```
 
@@ -279,15 +280,17 @@ pub trait TransactionIndexStore: Send + Sync {
   is not written again until its job deletes it, or a reorg takes its
   block back and it reads on.
 - **A reorg** rewinds both tables; `found` on a block taken back is
-  cleared.
-- **Prune** keeps every block either table names.
+  cleared. (087: a hard delete; both are capped below it, a `found_at`
+  above is cleared, and our sends mined above go back to pending.)
+- **Prune** keeps every block either table names. (087: neither names a
+  block any more.)
 - **The broadcast job** inserts its `transaction_index` row in the same
   write as the payment. Each check reads only its rows (the current
   version's and the ones it replaced):
   - `found` at or below the final block: done; above it: wait;
   - not found, indexed `bump_after` past its `broadcasted_at`: bump (084), the new
     version with its own row;
-  - Solana, indexed past `expires_height`, not found: dead;
+  - Solana, read through the confirmed position, not found, the height of the newest kept block at or below it past `expires_height`: expired (087: judged by the job, no state);
   - `no_data`: forgotten;
   - not indexed far enough: wait.
 
@@ -317,7 +320,8 @@ Decisions beyond the design:
 
 - **No line:** `Line::Depth(u64::MAX)`, the tip less everything, is 0.
   It is `Chained::line`'s default (test chains) and Bitcoin's without
-  `max_depth` (`Chain::with_max_depth`). `Line::at(tips)` is the position.
+  `max_depth` (`Chain::with_max_depth`). `Line::at(tips, confirmations)` is
+  the position (087).
 - **No wake, no `watched`:** the index job steps its network every
   interval and `find_next` sees a new index at the next step; nothing needs
   waking, so there is no notifying wrapper. `Stats::watched`,
@@ -347,7 +351,9 @@ Decisions beyond the design:
   the found block's header: the `TransactionIndexer` reads both blocks from
   the chain, and the store keeps both bare. `reverted` (the `Confirmer`'s
   outcome) goes on `transaction_index.found_reverted`, which the view's
-  `reverted` reads (`docs/design/085-migrate-5.sql`).
+  `reverted` reads (`docs/design/085-migrate-5.sql`). Since 087: a position
+  (`settle(index, confirmed)`), and the outcome goes on the pending
+  transaction row (`transaction::db::set_mined`); reverted is read from it.
 - **Forgetting gives up:** `pending::forget` sets the transaction indexes
   of what it forgets to `no_data` (reason the why), so a wallet jump that
   forgets a send reaches its job. `give_up` is that, for its own
@@ -358,9 +364,9 @@ Decisions beyond the design:
   `forgotten`; found at or below final → done (reverted there: failed
   `reverted`), above → again; `no_data` →
   `forgotten`; read past `expires_height` (by block height) and not found
-  → `dead`; not far enough (or paused) → again; else the same bytes again.
+  → `expired` (087: by the network's final height); not far enough (or paused) → again; else the same bytes again.
 - **The job's end**, one write: its index deleted, and its transaction
-  forgotten while still pending: refused, dead, given up or gone, and done
+  forgotten while still pending: refused, expired, given up or gone, and done
   with a transaction found inside a gap the indexer never read (its legs
   pending, the settle's adjustment already counting it), as `jump`.
 - **Not built:** the bump rows of the Server list (`bump_after`, the
@@ -385,5 +391,5 @@ over scripted nodes and Solana's `expires_height`, the server's stores
 (an index reads on, finds, is cleared by a reorg, keeps its blocks from
 prune, settles through a scripted `Confirmer`, is given up on Bitcoin; an
 alt wallet settle leaves its pending send) and the broadcast job's checks
-(final `found`, `dead` past `expires_height`, `forgotten` when given up or
+(final `found`, `expired` past `expires_height`, `forgotten` when given up or
 forgotten by a jump, waiting while not read far enough).

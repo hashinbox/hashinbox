@@ -1,7 +1,8 @@
-//! The index job: one per `network_index` row, never finished. Each run
+//! The index job: one per `enabled` network, never finished. Each run
 //! steps the network's indexer (`base::Indexer::next`), writes each step to
-//! the row (tip, confirmed position `tip - confirmations`, last kept block,
-//! and what the counters grew by since the last write), and asks to run
+//! its `network_index` row, made by the first step that knows the tip (tip,
+//! confirmed position `tip - confirmations`, last kept block, and what the
+//! counters grew by since the last write), and asks to run
 //! again: at once while behind, one interval later once at the tip. A failed
 //! step runs again an interval later with its error as the job's `reason`;
 //! so does a step that went on past a failed gap close (an index left
@@ -69,14 +70,14 @@ impl Target {
         format!("{}:{}", self.chain, self.network)
     }
 
-    /// Every network with a `network_index` row.
+    /// Every `enabled` network: those the server indexes.
     ///
     /// # Errors
     /// The read, as a store failure.
     pub(crate) async fn indexed(db: &Db) -> Result<Vec<Self>, StoreError> {
-        let rows = db.read(models::network_index::db::find_all).await;
+        let rows = db.read(models::network::db::find_enabled).await;
         let rows = rows.map_err(|error| StoreError::Backend(format!("{error:#}")))?;
-        Ok(rows.keys().map(Self::from).collect())
+        Ok(rows.iter().map(Self::from).collect())
     }
 
     /// Enqueues `W`'s job of every indexed network in `store`.
@@ -164,14 +165,20 @@ impl Worker for Index {
             if after.failures > before.failures {
                 closed.clone_from(&after.error);
             }
-            let step = models::NetworkIndex::step(&before, &after, confirmations, tasks::now());
-            let at = network.clone();
-            let saved = self
-                .db
-                .write(move |connection| models::network_index::db::save(connection, &at, &step))
-                .await;
-            if let Err(error) = saved {
-                return Ack::Retry(format!("{error:#}"));
+            // No tip yet: no row to write.
+            if let Some(step) =
+                models::NetworkIndex::step(&before, &after, confirmations, tasks::now())
+            {
+                let at = network.clone();
+                let saved = self
+                    .db
+                    .write(move |connection| {
+                        models::network_index::db::save(connection, &at, &step)
+                    })
+                    .await;
+                if let Err(error) = saved {
+                    return Ack::Retry(format!("{error:#}"));
+                }
             }
             self.saved().insert(network.clone(), after);
             match next {

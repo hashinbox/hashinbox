@@ -25,8 +25,8 @@ migrations. `serve` only opens it. Networks are rows: `network` (facts and
 `settings`, the chain's own knobs as JSON), `network_asset`, `network_endpoint`
 (one row per node, see `seed.sql`) and `network_endpoint_route` (methods sent
 round robin over some of a network's nodes). The server indexes exactly the
-networks with a `network_index` row and adds one for every `enabled` network
-at start; each is built by its chain (`ServiceFactory::new(&config)`), asking
+`enabled` networks; a network's `network_index` row is written by its first
+step that knows the tip (no row: no tip yet); each is built by its chain (`ServiceFactory::new(&config)`), asking
 no node, and one that does not build fails only its own jobs, with why.
 
 A network's transport (`usecase::Transport`) is its stored nodes and the
@@ -89,9 +89,11 @@ committed copy. `GET /health` and `GET /openapi.json` need no token.
 - `GET /v1/jobs/{id}`: the job's state, reason, and for a send its `txid` and
   whether a node `accepted` it.
 - `GET /v1/networks`: every `network` row with its `assets`, `endpoints`,
-  `index` (its `network_index` row) and the node's tip asked now.
-- `GET /health`: every `network_index` row; ready (`200`) when at least one
-  network is indexed and none's last step failed, else `503`.
+  `index` (its `network_index` row, null before its first tip) and the node's
+  tip asked now.
+- `GET /health`: every indexed network with its `network_index` row (null
+  before its first tip); ready (`200`) when at least one network is indexed
+  and none's last step failed, else `503`.
 
 ## Layout
 
@@ -128,7 +130,7 @@ them. Nothing imports upward (docs/design/069-server-layers.md;
 - Balances and history include every live block up to the produced tip: the
   store records no confirmation, and the container exposes no chain's confirmed tip
   (`base::Stats` carries only the produced `tip`), so no confirmed/pending split
-  is reported. A reorg marks blocks reorged and both reads follow.
+  is reported. A reorg deletes the blocks it takes back and both reads follow.
 - The send job signs through `wallet.transaction(asset)` → `transfer` → `sign()`,
   saves every transaction's signed bytes in its payload before broadcasting, and
   broadcasts them in order through `container.broadcast`; a retry resends the saved

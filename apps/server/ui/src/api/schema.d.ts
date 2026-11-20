@@ -634,11 +634,6 @@ export interface components {
             position: number;
             /**
              * Format: int64
-             * @description Unix ms a reorg took it back; null while live.
-             */
-            reorged_at?: number | null;
-            /**
-             * Format: int64
              * @description Unix seconds, when reported.
              */
             timestamp?: number | null;
@@ -686,8 +681,8 @@ export interface components {
         };
         /**
          * @description One network as stored: its `network` row, its `network_asset` rows, its
-         *     `network_endpoint` nodes and their routes, and its `network_index` row (`None`: not
-         *     indexed); and the node's tip asked now (`tip_live`, the stored `tip`
+         *     `network_endpoint` nodes and their routes, and its `network_index` row (`None`: no
+         *     tip known yet); and the node's tip asked now (`tip_live`, the stored `tip`
          *     until a caller that asked sets it; `tip_error`, why asking failed).
          */
         ConfiguredNetwork: {
@@ -924,7 +919,7 @@ export interface components {
              */
             archived_at?: number | null;
             asset: string;
-            /** @description Its block; null while pending. */
+            /** @description Its block; null while pending, and for an adjustment. */
             block?: string | null;
             /** Format: int64 */
             coin_index?: number | null;
@@ -934,7 +929,7 @@ export interface components {
              * Format: int32
              * @description 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward, 6
              *     adjustment (signed; leg 0: what the chain's balance read corrects the
-             *     index's total by, at the block it was read at; leg 1: the coins a
+             *     index's total by, at the position it was read at; leg 1: the coins a
              *     jump archived).
              */
             kind: number;
@@ -942,7 +937,7 @@ export interface components {
             leg_index: number;
             /**
              * Format: int64
-             * @description Its block's position; `None` while pending.
+             * @description Its block's position, or an adjustment's own; `None` while pending.
              */
             position?: number | null;
             /**
@@ -1062,14 +1057,14 @@ export interface components {
         };
         /** @description One network's indexing. */
         NetworkHealth: {
-            /** @description What its indexer last wrote. */
-            indexing: components["schemas"]["NetworkIndex"];
+            indexing: null | components["schemas"]["NetworkIndex"];
             /** @description The indexed chain and network. */
             network: components["schemas"]["Network"];
         };
         /**
          * @description One network's indexing as its indexer last wrote it; the counters since
-         *     the row was made, across restarts.
+         *     the row was made, across restarts. Written the first time the tip is
+         *     known: no row, no tip yet.
          */
         NetworkIndex: {
             /**
@@ -1084,9 +1079,9 @@ export interface components {
             checked_at: number | null;
             /**
              * Format: int64
-             * @description `tip - confirmations`; always present.
+             * @description `tip - confirmations` (saturating), written with it.
              */
-            confirmed: number | null;
+            confirmed: number;
             /**
              * Format: int64
              * @description Failed steps; why the last failed is the index job's `reason`.
@@ -1104,10 +1099,9 @@ export interface components {
             reorgs: number;
             /**
              * Format: int64
-             * @description The node's newest block at the indexer's last read; always present,
-             *     null before the first.
+             * @description The node's newest block at the indexer's last read.
              */
-            tip: number | null;
+            tip: number;
         };
         /** @description Every stored network. */
         NetworkList: {
@@ -1290,7 +1284,7 @@ export interface components {
             addresses: number;
             /**
              * Format: int64
-             * @description Live blocks kept.
+             * @description Blocks kept.
              */
             blocks: number;
             /**
@@ -1317,11 +1311,6 @@ export interface components {
             pending: number;
             /**
              * Format: int64
-             * @description Blocks a reorg took back.
-             */
-            reorged: number;
-            /**
-             * Format: int64
              * @description Of those, how many reverted.
              */
             reverted: number;
@@ -1334,7 +1323,7 @@ export interface components {
             tags: number;
             /**
              * Format: int64
-             * @description Transactions kept mined in live blocks.
+             * @description Transactions kept mined.
              */
             transactions: number;
             /**
@@ -1369,6 +1358,13 @@ export interface components {
         Transaction: {
             /** @description Its block; null while pending. */
             block?: string | null;
+            /**
+             * Format: int64
+             * @description Unix ms this server recorded it, before its first broadcast: set
+             *     exactly on this server's sends, mined or not; null on every other.
+             *     Mining keeps it.
+             */
+            broadcasted_at?: number | null;
             chain: string;
             /** @description `{chain}.{network}.{txid}`. */
             id: string;
@@ -1390,12 +1386,6 @@ export interface components {
              *     Stored as JSON, shown decoded.
              */
             reason?: string | null;
-            /**
-             * Format: int64
-             * @description Unix ms it was sent: a node accepted it, or may hold it; null while
-             *     recorded but not yet sent, and once mined.
-             */
-            sent_at?: number | null;
             /**
              * Format: int32
              * @description 0 pending, 1 succeeded, 2 reverted.

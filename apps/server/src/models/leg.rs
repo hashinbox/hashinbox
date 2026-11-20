@@ -1,6 +1,7 @@
 //! `leg`: the kept legs of transactions (no block while pending), the kept rewards of
-//! blocks, and the adjustments of indexes (design 083); a `Received` leg with a coin is a UTXO, spent while a `Spent` leg
-//! in a live block names it, never spendable once archived (a jump wrote it
+//! blocks, and the adjustments of indexes (design 083; no block, a position,
+//! design 087); a `Received` leg with a coin is a UTXO, spent while a `Spent` leg
+//! in a block names it, never spendable once archived (a jump wrote it
 //! off). A mined leg is its wallet index's and carries
 //! the index's running balance (`total`, design 072) and what the chain
 //! showed it receive and send so far, in (`position`, `seq`) order.
@@ -16,22 +17,20 @@ use diesel::{
 };
 
 use super::{
-    Id, IdError, Json,
-    block::BlockId,
-    int,
-    schema::{block, leg},
-    transaction::TransactionId,
-    uint,
+    Id, IdError, Json, block::BlockId, int, schema::leg, transaction::TransactionId, uint,
     wallet_index::WalletIndexId,
 };
 
 /// A leg's id: under its transaction, `{transaction}.{index}`; a block
-/// reward, `{block}.reward.{index}`.
+/// reward, `{block}.reward.{index}`; an adjustment,
+/// `{wallet_index_id}.adjustment.{position}.{index}`.
 pub(crate) enum LegId<'a> {
     /// Leg `index` of transaction id `.0`.
     Transaction(&'a str, u32),
     /// Reward `index` of block id `.0`.
     Reward(&'a str, i64),
+    /// Adjustment `index` of wallet index id `.0` at position `.1`.
+    Adjustment(&'a str, i64, i64),
 }
 
 impl LegId<'_> {
@@ -44,6 +43,10 @@ impl LegId<'_> {
         match self {
             Self::Transaction(transaction, index) => Id::child(transaction, &[&index.to_string()]),
             Self::Reward(block, index) => Id::child(block, &["reward", &index.to_string()]),
+            Self::Adjustment(index, position, leg) => Id::child(
+                index,
+                &["adjustment", &position.to_string(), &leg.to_string()],
+            ),
         }
     }
 }
@@ -51,7 +54,7 @@ impl LegId<'_> {
 /// The `kind` of a reward row.
 const REWARD: i32 = 5;
 /// The `kind` of an adjustment row (design 083 §7).
-const ADJUSTMENT: i32 = 6;
+pub(crate) const ADJUSTMENT: i32 = 6;
 
 /// One `leg` row: a transaction's leg, a block's reward, or an index's
 /// adjustment; the API shows it as is.
@@ -71,7 +74,7 @@ const ADJUSTMENT: i32 = 6;
 #[diesel(table_name = leg, check_for_backend(Sqlite))]
 pub(crate) struct Leg {
     pub(crate) id: String,
-    /// Its block; null while pending.
+    /// Its block; null while pending, and for an adjustment.
     #[schema(value_type = Option<String>)]
     pub(crate) block: Option<BlockId>,
     /// Its transaction; null for a reward or an adjustment.
@@ -80,7 +83,7 @@ pub(crate) struct Leg {
     pub(crate) leg_index: i64,
     /// 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward, 6
     /// adjustment (signed; leg 0: what the chain's balance read corrects the
-    /// index's total by, at the block it was read at; leg 1: the coins a
+    /// index's total by, at the position it was read at; leg 1: the coins a
     /// jump archived).
     pub(crate) kind: i32,
     pub(crate) address: String,
@@ -92,7 +95,7 @@ pub(crate) struct Leg {
     /// The wallet index it is kept for: its address's index in its asset.
     #[schema(value_type = String)]
     pub(crate) wallet_index_id: WalletIndexId,
-    /// Its block's position; `None` while pending.
+    /// Its block's position, or an adjustment's own; `None` while pending.
     pub(crate) position: Option<i64>,
     /// Its index's leg sequence: 1 + the highest the index has kept,
     /// unique per index; `None` while pending.
@@ -120,10 +123,9 @@ impl From<Json<Vec<Leg>>> for Vec<Leg> {
 
 /// Leg `index` of transaction `transaction`, pending: id
 /// `"{transaction}.{index}"`, no block, position, seq or total ([`Block`]
-/// mines it, [`block::db::save`] numbers it).
+/// mines it, [`db::append`] numbers it).
 ///
 /// [`Block`]: super::Block
-/// [`block::db::save`]: super::block::db::save
 impl TryFrom<(&TransactionId, u32, &base::Leg)> for Leg {
     type Error = anyhow::Error;
 
@@ -194,8 +196,8 @@ impl Networked for Leg {
     }
 }
 
-/// Where an index's legs continue from ([`db::find_running`]): its highest
-/// seq ever kept, and its last live leg's total, received and sent.
+/// Where an index's legs continue from (`db::find_running`): its highest
+/// seq ever kept, and its last mined leg's total, received and sent.
 pub(crate) struct Running {
     pub(crate) seq: i64,
     pub(crate) total: Decimal,
@@ -205,20 +207,23 @@ pub(crate) struct Running {
 
 impl Leg {
     /// Adjustment `leg_index` (0: a settle, 1: a write-off) of index
-    /// `index` on `block`: `amount`, signed; numbered by [`Self::follow`].
+    /// `index` at `position`, no block: `amount`, signed; numbered by
+    /// [`Self::follow`].
+    ///
+    /// # Errors
+    ///
+    /// When a part of its id holds a dot.
     pub(crate) fn adjustment(
-        block: &super::Block,
+        position: i64,
         index: &WalletIndexId,
         leg_index: i64,
         amount: &Decimal,
-    ) -> Self {
-        Self {
-            id: format!(
-                "{}.adjustment.{}.{leg_index}",
-                block.id.as_ref(),
-                index.as_ref()
-            ),
-            block: Some(block.id.clone()),
+    ) -> Result<Self, IdError> {
+        Ok(Self {
+            id: LegId::Adjustment(index.as_ref(), position, leg_index)
+                .id()?
+                .into(),
+            block: None,
             transaction: None,
             leg_index,
             kind: ADJUSTMENT,
@@ -228,17 +233,17 @@ impl Leg {
             coin_txid: None,
             coin_index: None,
             wallet_index_id: index.clone(),
-            position: Some(block.position),
+            position: Some(position),
             seq: None,
             total: None,
             total_received: None,
             total_sent: None,
             archived_at: None,
-        }
+        })
     }
 
     /// Numbers it after `running`, its index's highest seq and totals so
-    /// far ([`db::find_running`]), and moves them on to it: it takes the
+    /// far (`db::find_running`), and moves them on to it: it takes the
     /// next seq and adds its signed amount to the total; a received,
     /// minted or reward leg counts as received, a spent, burned or fee leg
     /// as sent, an adjustment as neither.
@@ -340,6 +345,23 @@ impl Leg {
     }
 }
 
+collection! {
+    /// Legs of one position, in their order there: a block's (each
+    /// transaction's in order, then its rewards; 072's order) or an
+    /// adjustment.
+    Legs(Leg)
+}
+
+impl Legs {
+    /// The wallet indexes (ids) they are of.
+    pub(crate) fn indexes(&self) -> BTreeSet<String> {
+        self.0
+            .iter()
+            .map(|leg| leg.wallet_index_id.clone().into())
+            .collect()
+    }
+}
+
 /// `"{position}:{seq}"`, a null as `0`: its place in its index's legs.
 impl crate::db::Keyed for Leg {
     fn key(&self) -> String {
@@ -388,6 +410,20 @@ pub(crate) mod db {
     use super::*;
     use crate::db::Page;
 
+    /// The legs of `network`'s wallet indexes at or above `from`. An index
+    /// id starts `{chain}.{network}.` and holds no other dot there: those
+    /// of `network` sort between that and the same with `/`, the character
+    /// after `.` (one seek of `leg_wallet_index`).
+    macro_rules! of_network_from {
+        ($network:expr, $from:expr) => {{
+            let of = format!("{}.{}", $network.chain, $network.name);
+            leg::table
+                .filter(leg::wallet_index_id.gt(format!("{of}.")))
+                .filter(leg::wallet_index_id.lt(format!("{of}/")))
+                .filter(leg::position.ge($from))
+        }};
+    }
+
     /// A coin with its creating block's height.
     #[derive(QueryableByName)]
     struct Unspent {
@@ -397,7 +433,7 @@ pub(crate) mod db {
         height: i64,
     }
 
-    /// At most `page.limit` live mined legs of wallet index `index` below
+    /// At most `page.limit` mined legs of wallet index `index` below
     /// (position, seq) `page.after` when given, latest first, each with its
     /// transaction's txid and state.
     pub(crate) fn find_page(
@@ -405,11 +441,11 @@ pub(crate) mod db {
         index: impl AsRef<str>,
         page: Page<Key>,
     ) -> QueryResult<Vec<Movement>> {
-        // At most `?4` live mined legs of wallet index `?1` below (position
+        // At most `?4` mined legs of wallet index `?1` below (position
         // `?2`, seq `?3`) (`?2` NULL: from the latest), latest first: by
         // (position, seq), the legs' order, as an adjustment takes the next
         // seq at a lower position; a reward or an adjustment has no
-        // transaction.
+        // transaction, an adjustment no block.
         diesel::sql_query(
             r#"
             SELECT
@@ -418,11 +454,11 @@ pub(crate) mod db {
                 t.state,
                 b.timestamp
             FROM leg l
-            JOIN block b ON b.id = l.block
+            LEFT JOIN block b ON b.id = l.block
             LEFT JOIN "transaction" t ON t.id = l."transaction"
             WHERE l.wallet_index_id = ?1
+              AND l.position IS NOT NULL
               AND (?2 IS NULL OR (l.position, l.seq) < (?2, ?3))
-              AND b.reorged_at IS NULL
             ORDER BY l.position DESC, l.seq DESC
             LIMIT ?4"#,
         )
@@ -439,7 +475,7 @@ pub(crate) mod db {
     /// # Errors
     ///
     /// When the read fails or a stored total does not decode.
-    pub(crate) fn find_running(
+    fn find_running(
         connection: &mut SqliteConnection,
         indexes: &BTreeSet<String>,
         position: i64,
@@ -459,8 +495,8 @@ pub(crate) mod db {
         }
         // Where each wallet index of `?1` (a JSON list of ids) continues from
         // at position `?2`: the highest seq it has ever kept (0: none) and the
-        // totals of its last live mined leg at or below `?2` (`last`; '0':
-        // none).
+        // totals of its last mined leg (or adjustment) at or below `?2`
+        // (`last`; '0': none).
         let rows: Vec<Row> = diesel::sql_query(
             "
             SELECT
@@ -477,10 +513,8 @@ pub(crate) mod db {
             LEFT JOIN leg last ON last.id = (
                 SELECT l.id
                 FROM leg l
-                JOIN block b ON b.id = l.block
                 WHERE l.wallet_index_id = i.value
                   AND l.position <= ?2
-                  AND b.reorged_at IS NULL
                 ORDER BY l.position DESC, l.seq DESC
                 LIMIT 1
             )",
@@ -504,6 +538,51 @@ pub(crate) mod db {
             .collect()
     }
 
+    /// Appends `legs`, all at `position`, to their indexes' legs: each
+    /// index's seq and totals there are read once, and each leg, in order,
+    /// takes the next of its index ([`Leg::follow`]); a spend of a coin the
+    /// index archived (or never saw) subtracts as any other. Then inserts
+    /// them, in one statement.
+    ///
+    /// # Errors
+    ///
+    /// When a read or the write fails (a seq an index holds), or a stored
+    /// value does not decode.
+    pub(crate) fn append(
+        connection: &mut SqliteConnection,
+        legs: &mut Legs,
+        position: i64,
+    ) -> anyhow::Result<()> {
+        let indexes = legs.indexes();
+        let mut running = find_running(connection, &indexes, position)?;
+        for leg in &mut legs.0 {
+            let totals = running
+                .get_mut(leg.wallet_index_id.as_ref())
+                .context("a leg's index was not read")?;
+            leg.follow(totals)?;
+        }
+        insert(connection, legs.iter().collect())?;
+        Ok(())
+    }
+
+    /// Index `index`'s balance at `position`: the total of its last mined
+    /// leg (or adjustment) at or below it; 0: none.
+    ///
+    /// # Errors
+    ///
+    /// When the read fails or a stored total does not decode.
+    pub(crate) fn find_total(
+        connection: &mut SqliteConnection,
+        index: &WalletIndexId,
+        position: i64,
+    ) -> anyhow::Result<Decimal> {
+        let indexes = BTreeSet::from([String::from(index.clone())]);
+        find_running(connection, &indexes, position)?
+            .remove(index.as_ref())
+            .map(|running| running.total)
+            .context("the index's totals were not read")
+    }
+
     /// Deletes the legs of block `block` at `position` kept for wallet
     /// indexes `indexes` (a block kept again writes them again). The
     /// position lets `leg_wallet_index` seek to the block's legs instead of
@@ -523,8 +602,8 @@ pub(crate) mod db {
         .execute(connection)
     }
 
-    /// Deletes the mined legs of wallet index `index` above `position`
-    /// (a reorged block's too); its pending legs stay. How many.
+    /// Deletes the mined legs of wallet index `index` above `position`;
+    /// its pending legs stay. How many.
     pub(crate) fn delete_above(
         connection: &mut SqliteConnection,
         index: impl AsRef<str>,
@@ -539,9 +618,9 @@ pub(crate) mod db {
     }
 
     /// Archives at `at`, a jump's position, every coin wallet index `index`
-    /// still shows unspent: its received legs with a coin in a live block
-    /// below `at` (one at or above is read again), not archived, that none
-    /// of its spent legs in a live block names.
+    /// still shows unspent: its received legs with a coin in a block below
+    /// `at` (one at or above is read again), not archived, that none of its
+    /// spent legs in a block names.
     /// What they add up to; `None`: there was none.
     ///
     /// # Errors
@@ -566,22 +645,16 @@ pub(crate) mod db {
               AND kind = 0
               AND coin_txid IS NOT NULL
               AND archived_at IS NULL
-              AND EXISTS (
-                  SELECT 1
-                  FROM block b
-                  WHERE b.id = leg.block
-                    AND b.position < ?2
-                    AND b.reorged_at IS NULL
-              )
+              AND block IS NOT NULL
+              AND position < ?2
               AND NOT EXISTS (
                   SELECT 1
                   FROM leg s
-                  JOIN block sb ON sb.id = s.block
                   WHERE s.wallet_index_id = leg.wallet_index_id
                     AND s.kind = 1
                     AND s.coin_txid = leg.coin_txid
                     AND s.coin_index = leg.coin_index
-                    AND sb.reorged_at IS NULL
+                    AND s.block IS NOT NULL
               )
             RETURNING amount",
         )
@@ -599,18 +672,49 @@ pub(crate) mod db {
         Ok((!amounts.is_empty()).then(|| Decimal::total(&amounts)))
     }
 
-    /// The position of the last live leg of wallet index `index` below
-    /// `below`, if any.
+    /// Deletes the legs of `kind` of `network`'s wallet indexes at or above
+    /// `from` (a reorg's: [`ADJUSTMENT`], which hold no block to go with).
+    pub(crate) fn delete_kind_from(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        from: i64,
+        kind: i32,
+    ) -> QueryResult<usize> {
+        diesel::delete(of_network_from!(network, from).filter(leg::kind.eq(kind)))
+            .execute(connection)
+    }
+
+    /// Sets the transaction legs of `network`'s wallet indexes at or above
+    /// `from` pending (no block, position, seq or totals): a reorg's, once
+    /// only this server's sends' are left there. Rewards keep their block
+    /// and go with it. How many.
+    pub(crate) fn set_pending_from(
+        connection: &mut SqliteConnection,
+        network: &Network,
+        from: i64,
+    ) -> QueryResult<usize> {
+        diesel::update(of_network_from!(network, from).filter(leg::transaction.is_not_null()))
+            .set((
+                leg::block.eq(None::<String>),
+                leg::position.eq(None::<i64>),
+                leg::seq.eq(None::<i64>),
+                leg::total.eq(None::<String>),
+                leg::total_received.eq(None::<String>),
+                leg::total_sent.eq(None::<String>),
+            ))
+            .execute(connection)
+    }
+
+    /// The position of the last mined leg (or adjustment) of wallet index
+    /// `index` below `below`, if any.
     pub(crate) fn find_last_position(
         connection: &mut SqliteConnection,
         index: impl AsRef<str>,
         below: i64,
     ) -> QueryResult<Option<i64>> {
         leg::table
-            .inner_join(block::table)
             .filter(leg::wallet_index_id.eq(index.as_ref()))
             .filter(leg::position.lt(below))
-            .filter(block::reorged_at.is_null())
             .select(diesel::dsl::max(leg::position))
             .first(connection)
     }
@@ -661,9 +765,9 @@ pub(crate) mod db {
         network: &Network,
         addresses: &[&str],
     ) -> anyhow::Result<Vec<Input>> {
-        // The `Received` legs of an address with a coin, in live blocks, not
+        // The `Received` legs of an address with a coin, in blocks, not
         // archived, that no `Spent` leg of the same network consumes, in a
-        // live block or in a pending transaction (spent from broadcast on).
+        // block or in a pending transaction (spent from broadcast on).
         let rows: Vec<Unspent> = diesel::sql_query(
             r#"
             SELECT
@@ -678,7 +782,6 @@ pub(crate) mod db {
               AND l.kind = 0
               AND l.coin_txid IS NOT NULL
               AND l.archived_at IS NULL
-              AND b.reorged_at IS NULL
               AND NOT EXISTS (
                   SELECT 1
                   FROM leg s
@@ -688,7 +791,6 @@ pub(crate) mod db {
                     AND s.coin_index = l.coin_index
                     AND sb.chain = b.chain
                     AND sb.network = b.network
-                    AND sb.reorged_at IS NULL
               )
               AND NOT EXISTS (
                   SELECT 1

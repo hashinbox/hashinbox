@@ -39,10 +39,10 @@ fn network() -> Network {
     Network::new(Chain::new("bitcoin"), "regtest")
 }
 
-/// Blocks 0..=3 live, 5 archived, of `bitcoin.regtest`; block 3 of
+/// Blocks 0..=3 of `bitcoin.regtest`; block 3 of
 /// `bitcoin.other`. Indexes (`bitcoin.regtest.{address}.{asset}`):
 /// a, b fully indexed in native and `tok`; c `tok` full, native behind; d
-/// never indexed; e through an archived block; `bitcoin.other.a.native` full.
+/// never indexed; e through block 3 but paused; `bitcoin.other.a.native` full.
 /// Every indexed address is a watch-only wallet.
 /// Its indexer confirmed through block [`TIP`]. a native: received 1000
 /// (block 1), spent 300 + fee 10 (block 2), reward 5 above the confirmed
@@ -50,13 +50,12 @@ fn network() -> Network {
 /// Mined legs carry their index, position, seq and running total, as the
 /// store writes.
 const SEED: &str = "
-INSERT INTO block (id, chain, network, position, height, hash, reorged_at) VALUES
- ('bitcoin.regtest.00','bitcoin','regtest',0,0,x'00',NULL),
- ('bitcoin.regtest.01','bitcoin','regtest',1,1,x'01',NULL),
- ('bitcoin.regtest.02','bitcoin','regtest',2,2,x'02',NULL),
- ('bitcoin.regtest.03','bitcoin','regtest',3,3,x'03',NULL),
- ('bitcoin.regtest.f5','bitcoin','regtest',5,5,x'f5',1),
- ('bitcoin.other.03','bitcoin','other',3,3,x'03',NULL);
+INSERT INTO block (id, chain, network, position, height, hash) VALUES
+ ('bitcoin.regtest.00','bitcoin','regtest',0,0,x'00'),
+ ('bitcoin.regtest.01','bitcoin','regtest',1,1,x'01'),
+ ('bitcoin.regtest.02','bitcoin','regtest',2,2,x'02'),
+ ('bitcoin.regtest.03','bitcoin','regtest',3,3,x'03'),
+ ('bitcoin.other.03','bitcoin','other',3,3,x'03');
 INSERT INTO wallet (id, chain, network, address) VALUES
  ('bitcoin.regtest.a','bitcoin','regtest','a'),
  ('bitcoin.regtest.b','bitcoin','regtest','b'),
@@ -65,19 +64,18 @@ INSERT INTO wallet (id, chain, network, address) VALUES
  ('bitcoin.regtest.e','bitcoin','regtest','e'),
  ('bitcoin.other.a','bitcoin','other','a');
 INSERT INTO wallet_index (id, wallet_id, asset, requested_from, birthday, indexed_at, state) VALUES
- ('bitcoin.regtest.a.native','bitcoin.regtest.a','native',0,0,'bitcoin.regtest.03',0),
- ('bitcoin.regtest.b.native','bitcoin.regtest.b','native',0,0,'bitcoin.regtest.02',0),
- ('bitcoin.regtest.c.native','bitcoin.regtest.c','native',0,0,'bitcoin.regtest.01',0),
+ ('bitcoin.regtest.a.native','bitcoin.regtest.a','native',0,0,3,0),
+ ('bitcoin.regtest.b.native','bitcoin.regtest.b','native',0,0,2,0),
+ ('bitcoin.regtest.c.native','bitcoin.regtest.c','native',0,0,1,0),
  ('bitcoin.regtest.d.native','bitcoin.regtest.d','native',0,0,NULL,0),
- ('bitcoin.regtest.e.native','bitcoin.regtest.e','native',0,0,'bitcoin.regtest.f5',0),
- ('bitcoin.regtest.a.tok','bitcoin.regtest.a','tok',0,0,'bitcoin.regtest.03',0),
- ('bitcoin.regtest.b.tok','bitcoin.regtest.b','tok',0,0,'bitcoin.regtest.03',0),
- ('bitcoin.regtest.c.tok','bitcoin.regtest.c','tok',0,0,'bitcoin.regtest.03',0),
- ('bitcoin.other.a.native','bitcoin.other.a','native',0,0,'bitcoin.other.03',0);
+ ('bitcoin.regtest.e.native','bitcoin.regtest.e','native',0,0,3,1),
+ ('bitcoin.regtest.a.tok','bitcoin.regtest.a','tok',0,0,3,0),
+ ('bitcoin.regtest.b.tok','bitcoin.regtest.b','tok',0,0,3,0),
+ ('bitcoin.regtest.c.tok','bitcoin.regtest.c','tok',0,0,3,0),
+ ('bitcoin.other.a.native','bitcoin.other.a','native',0,0,3,0);
 INSERT INTO \"transaction\" (id, block, chain, network, txid, \"order\", state, bytes) VALUES
  ('bitcoin.regtest.t1','bitcoin.regtest.01','bitcoin','regtest','t1',0,1,x''),
- ('bitcoin.regtest.t2','bitcoin.regtest.02','bitcoin','regtest','t2',0,1,x''),
- ('bitcoin.regtest.t3','bitcoin.regtest.f5','bitcoin','regtest','t3',0,1,x'');
+ ('bitcoin.regtest.t2','bitcoin.regtest.02','bitcoin','regtest','t2',0,1,x'');
 INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, amount,
   wallet_index_id, position, seq, total, total_received, total_sent) VALUES
  ('bitcoin.regtest.t1.0','bitcoin.regtest.01','bitcoin.regtest.t1',0,0,'a','native','1000',
@@ -90,13 +88,11 @@ INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, am
   'bitcoin.regtest.a.native',2,2,'700','1000','300'),
  ('bitcoin.regtest.t2.1','bitcoin.regtest.02','bitcoin.regtest.t2',1,4,'a','native','10',
   'bitcoin.regtest.a.native',2,3,'690','1000','310'),
- ('bitcoin.regtest.t3.0','bitcoin.regtest.f5','bitcoin.regtest.t3',0,0,'a','native','7777',
-  'bitcoin.regtest.a.native',5,5,'8467','8782','310'),
  ('bitcoin.regtest.03.reward.0','bitcoin.regtest.03',NULL,0,5,'a','native','5',
   'bitcoin.regtest.a.native',3,4,'695','1005','310'),
  ('bitcoin.regtest.00.reward.0','bitcoin.regtest.00',NULL,0,5,'b','native','50',
   'bitcoin.regtest.b.native',0,1,'50','50','0');
-UPDATE network_index SET tip = 3, confirmed = 2 WHERE chain = 'bitcoin' AND network = 'regtest';
+INSERT INTO network_index (chain, network, tip, confirmed) VALUES ('bitcoin', 'regtest', 3, 2);
 ";
 
 /// A migrated, seeded temp file, a runtime for fee estimates, and a raw
@@ -211,7 +207,7 @@ fn leaves_pick_exactly_their_fully_indexed_indexes() {
         "hot",
     )
     .unwrap();
-    // c behind, d never indexed, e through an archived block: never picked.
+    // c behind, d never indexed, e paused: never picked.
     assert_eq!(
         ids(
             &Selector::Ids(vec![
@@ -288,7 +284,7 @@ fn a_tag_or_indexing_brings_indexes_in() {
         [id("b", "native"), id("b", "tok"), id("c", "tok")]
     );
     c.batch_execute(
-        "UPDATE wallet_index SET indexed_at = 'bitcoin.regtest.02' WHERE id = 'bitcoin.regtest.c.native';",
+        "UPDATE wallet_index SET indexed_at = 2 WHERE id = 'bitcoin.regtest.c.native';",
     )
     .unwrap();
     assert_eq!(
@@ -312,8 +308,7 @@ fn balances_are_confirmed_exact_and_folded() {
         id("b", "tok"),
     ];
     let balances = wallet_index::db::find_by_ids(&mut connection, &network(), &all, 2).unwrap();
-    // The reward above the confirmed block and the archived block's leg
-    // are not counted.
+    // The reward above the confirmed block is not counted.
     assert_eq!(confirmed(&balances, &id("a", "native")), decimal("690"));
     assert_eq!(confirmed(&balances, &id("b", "native")), decimal("50"));
     assert_eq!(
@@ -332,7 +327,7 @@ fn pending_send(connection: &mut SqliteConnection) {
     connection
         .batch_execute(
             "INSERT INTO \"transaction\" (id, block, chain, network, txid, state, bytes, \
-               sent_at) \
+               broadcasted_at) \
              VALUES ('bitcoin.regtest.p',NULL,'bitcoin','regtest','p',0,x'',1); \
              INSERT INTO leg (id, block, \"transaction\", leg_index, kind, address, asset, amount, \
                wallet_index_id) \
@@ -649,7 +644,7 @@ fn a_send_to_many_is_one_job_per_payment_in_order() {
               ('bitcoin.regtest.f','bitcoin','regtest','f');
              INSERT INTO wallet_index
               (id, wallet_id, asset, requested_from, birthday, indexed_at, state) VALUES
-              ('bitcoin.regtest.f.native','bitcoin.regtest.f','native',0,0,'bitcoin.regtest.03',0);",
+              ('bitcoin.regtest.f.native','bitcoin.regtest.f','native',0,0,3,0);",
         )
         .unwrap();
     let pay = send(ids_of(&["a"]), this(None), value("0.0000001"));

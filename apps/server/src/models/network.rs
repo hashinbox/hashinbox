@@ -30,8 +30,8 @@ impl From<base::Network> for NetworkName {
 }
 
 /// One network as stored: its `network` row, its `network_asset` rows, its
-/// `network_endpoint` nodes and their routes, and its `network_index` row (`None`: not
-/// indexed); and the node's tip asked now (`tip_live`, the stored `tip`
+/// `network_endpoint` nodes and their routes, and its `network_index` row (`None`: no
+/// tip known yet); and the node's tip asked now (`tip_live`, the stored `tip`
 /// until a caller that asked sets it; `tip_error`, why asking failed).
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = ConfiguredNetwork)]
@@ -75,7 +75,8 @@ pub(crate) struct Network {
     /// Its routed methods, each over its own nodes; every other method goes
     /// to all of them.
     pub(crate) routes: Vec<Route>,
-    /// Its indexing; always present, null: not indexed.
+    /// Its indexing; always present, null: no tip known yet (or never
+    /// indexed: not `enabled`).
     #[schema(required)]
     pub(crate) index: Option<NetworkIndex>,
     /// Why its index job's last run failed (the job's `reason`), cleared by
@@ -173,6 +174,21 @@ pub(crate) mod db {
         }
     }
 
+    /// The `enabled` networks: those the server indexes.
+    pub(crate) fn find_enabled(
+        connection: &mut SqliteConnection,
+    ) -> anyhow::Result<Vec<base::Network>> {
+        let rows: Vec<(String, String)> = network::table
+            .filter(network::enabled.eq(true))
+            .select((network::chain, network::name))
+            .order((network::chain, network::name))
+            .load(connection)?;
+        Ok(rows
+            .into_iter()
+            .map(|(chain, name)| base::Network::new(base::Chain::new(&chain), &name))
+            .collect())
+    }
+
     /// Every network with its assets, nodes and index, in chain, then
     /// name, order.
     ///
@@ -197,7 +213,7 @@ pub(crate) mod db {
             network.endpoints = endpoints.nodes(&key);
             network.routes = routes.routes(&key);
             network.index = indexes.remove(&key);
-            network.tip_live = network.index.as_ref().and_then(|index| index.tip);
+            network.tip_live = network.index.as_ref().map(|index| index.tip);
             networks.push(network);
         }
         Ok(networks)

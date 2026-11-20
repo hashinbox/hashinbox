@@ -131,7 +131,7 @@ pub struct Tracking {
     pub check: Duration,
     /// Blocks its transaction index reads past `broadcasted_at`, the
     /// payment in none of them, before a bump; unused for a transaction
-    /// that expires (bumped once dead).
+    /// that expires (bumped once expired).
     pub bump_after: u64,
     /// Bumps per payment at most; 0: never bumped.
     pub max_bumps: u32,

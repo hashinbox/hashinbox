@@ -9,8 +9,8 @@ use anyhow::{Result, ensure};
 
 use super::{CLOSES, IndexState, Indexed, IntoIndex, Progress, Skipped, behind, lowest_next};
 use crate::{
-    Address, Addressed, Asset, Balances, BlockHeader, Chained, Future, Holding, Indexes, Line,
-    Network, Networked, NotServed, Tips, WalletError, WalletErrorKind,
+    Address, Addressed, Asset, Balances, Chained, Future, Holding, Indexes, Line, Network,
+    Networked, NotServed, WalletError, WalletErrorKind,
 };
 
 /// Where a new watch starts.
@@ -114,7 +114,7 @@ impl WalletIndexTarget {
 /// The tips; `requested_from` the start (the produced tip when fresh),
 /// refused above the produced tip; the birthday: on a chain that settles or whose line is [`Line::Final`], the
 /// block below the line, whatever the start (the next step settles it; the
-/// final block on [`Line::Final`]); else ([`Line::Depth`]) the start,
+/// confirmed block on [`Line::Final`]); else ([`Line::Depth`]) the start,
 /// refused when older than the tip less the depth.
 impl IntoIndex<WalletIndex> for WalletIndexTarget {
     fn index(&self) -> Future<'_, Result<WalletIndex>> {
@@ -128,22 +128,23 @@ impl IntoIndex<WalletIndex> for WalletIndexTarget {
             );
             let tips = self.chain.tips().await?;
             let requested_from = match self.start {
-                Birthday::Fresh => tips.produced,
+                Birthday::Fresh => tips.position,
                 Birthday::At(position) => position,
             };
             ensure!(
-                requested_from <= tips.produced,
+                requested_from <= tips.position,
                 WalletError::new(
                     WalletErrorKind::InvalidStart,
                     format!(
                         "start {requested_from} is above the tip {}: start at it or below",
-                        tips.produced
+                        tips.position
                     ),
                 )
             );
+            let confirmations = self.chain.confirmations();
             let birthday = match self.chain.line() {
                 line @ Line::Depth(depth) if !self.settles => {
-                    let earliest = line.at(tips);
+                    let earliest = line.at(tips, confirmations);
                     ensure!(
                         requested_from >= earliest,
                         WalletError::new(
@@ -156,7 +157,7 @@ impl IntoIndex<WalletIndex> for WalletIndexTarget {
                     );
                     requested_from
                 }
-                line => line.at(tips).saturating_sub(1),
+                line => line.at(tips, confirmations).saturating_sub(1),
             };
             Ok(WalletIndex {
                 address: self.address.clone(),
@@ -240,23 +241,20 @@ pub trait WalletIndexStore: Send + Sync {
     ) -> Future<'a, Result<()>>;
 
     /// Settles `index` at `holding`, what the chain says it holds at a
-    /// final block `S` (`holding.position`, its header `header`), in one
-    /// write: `S` kept unless it is; on it, an `adjustment` of
-    /// `holding.amount` less the index's total (its live legs, none above
-    /// `S`), even a zero one (it marks the opening); the index continuing
-    /// from `S + 1`. Its pending sends stay: each one's transaction index
-    /// settles itself. `false`: another live block at `S`, or `S` already
+    /// final position `S` (`holding.position`), in one write, no block
+    /// kept: at `S`, an `adjustment` of `holding.amount` less the index's
+    /// total (its live legs, none above `S`), even a zero one (it marks the
+    /// opening); the index continuing from `S + 1`. Its pending sends stay:
+    /// each one's transaction index settles itself. `false`: `S` already
     /// holds its adjustment; nothing written; try again later.
     ///
     /// # Errors
     ///
-    /// When the store cannot read or write, or `S` does not link onto the
-    /// kept blocks around it.
+    /// When the store cannot read or write.
     fn settle<'a>(
         &'a self,
         index: &'a WalletIndex,
         holding: &'a Holding,
-        header: &'a BlockHeader,
     ) -> Future<'a, Result<bool>>;
 
     /// Restarts `index` at `birthday`, the jump line it fell below, in one
@@ -299,9 +297,9 @@ impl WalletIndexer {
 
     /// Closes `index`'s gap. With balances, settles it at a final block at
     /// or above `at`: reads its balance there (`S`) and, once the chain
-    /// answers and serves `S`, writes it ([`WalletIndexStore::settle`]); it
-    /// reads on from `S + 1`. Not answerable yet: it stays as it is for the
-    /// next step. Without (Bitcoin), restarts it at `line`
+    /// answers, writes it ([`WalletIndexStore::settle`]); it reads on from
+    /// `S + 1`. Not answerable yet: it stays as it is for the next step.
+    /// Without (Bitcoin), restarts it at `line`
     /// ([`WalletIndexStore::restart`]): the gap below is never read.
     async fn close_one(&self, index: &WalletIndex, line: u64, at: u64) -> Result<()> {
         let Some(balances) = &self.balances else {
@@ -311,10 +309,7 @@ impl WalletIndexer {
         let Some(holding) = read.await? else {
             return Ok(());
         };
-        let Some(block) = self.chain.block(holding.position).await? else {
-            return Ok(());
-        };
-        self.store.settle(index, &holding, &block.header).await?;
+        self.store.settle(index, &holding).await?;
         Ok(())
     }
 }
@@ -331,15 +326,15 @@ impl Indexes for WalletIndexer {
     }
 
     /// Closes the gaps of at most a few indexes whose next block is below
-    /// `line` ([`Self::close_one`]), with `tips.confirmed` the final block;
+    /// `line` ([`Self::close_one`]), at `confirmed`, the confirmed position;
     /// one failing does not stop the others, and the first failure, naming
     /// its index, is the answer.
-    fn close<'a>(&'a self, line: u64, tips: Tips) -> Future<'a, Result<()>> {
+    fn close<'a>(&'a self, line: u64, confirmed: u64) -> Future<'a, Result<()>> {
         Box::pin(async move {
             let behind = self.store.find_behind(self.network(), line, CLOSES);
             let mut failed = None;
             for index in &behind.await? {
-                if let Err(error) = self.close_one(index, line, tips.confirmed).await {
+                if let Err(error) = self.close_one(index, line, confirmed).await {
                     let (address, asset) = (&index.address.value, &index.asset.id);
                     failed.get_or_insert(error.context(format!("wallet index {address} {asset}")));
                 }
@@ -374,9 +369,9 @@ impl Indexes for WalletIndexer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Block, Chain};
+    use crate::{Block, Chain, Tips};
 
-    /// A chain at tip 100, final through 90, with line `.0`.
+    /// A chain at tip 100, confirmed through 90, with line `.0`.
     struct Lined(Line, Network);
 
     impl Networked for Lined {
@@ -387,12 +382,11 @@ mod tests {
 
     impl Chained for Lined {
         fn tips(&self) -> Future<'_, Result<Tips>> {
-            Box::pin(async {
-                Ok(Tips {
-                    produced: 100,
-                    confirmed: 90,
-                })
-            })
+            Box::pin(async { Ok(Tips { position: 100 }) })
+        }
+
+        fn confirmations(&self) -> u64 {
+            10
         }
 
         fn block(&self, _position: u64) -> Future<'_, Result<Option<Block>>> {

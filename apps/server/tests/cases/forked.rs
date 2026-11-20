@@ -29,7 +29,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     chain.mine(1);
 
     chain.node(0).fork(false);
-    settle(chain);
+    settle(app, chain).await;
     let leg = until("the deposit on the chain's block", || async {
         let legs = app.api.legs(&wallet, "native").await;
         match legs.as_slice() {

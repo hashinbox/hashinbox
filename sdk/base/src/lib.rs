@@ -54,8 +54,8 @@ pub use network::{Network, Networked};
 pub use token::Tokens;
 pub use transaction::{
     Broadcaster, Builder, Error as TransactionError, ErrorKind as TransactionErrorKind, Future,
-    Id as TransactionId, Leg, Reason, Signer, State as TransactionState, Transacted, Transaction,
-    Transactions, Transfer,
+    Id as TransactionId, Leg, Reason, Replace, Signer, State as TransactionState, Transacted,
+    Transaction, Transactions, Transfer,
 };
 pub use wallet::{
     Error as WalletError, ErrorKind as WalletErrorKind, Factories as WalletFactories,

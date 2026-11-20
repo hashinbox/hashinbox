@@ -32,7 +32,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
             "node {node}"
         );
     }
-    settle(chain);
+    settle(app, chain).await;
     succeeded(app, &job).await;
     let mined = until("the send to be mined", || async {
         let legs = app.api.legs(&wallet, "native").await;

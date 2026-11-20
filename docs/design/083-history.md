@@ -39,7 +39,8 @@ Paths are relative to the repository root. Code is cited by file and symbol.
 - **Stored blocks may have gaps.** Below the prune line only blocks
   something points to survive.
 - **`block.archived_at` (reorgs) is renamed `reorged_at`,** so "archived"
-  means one thing: a Bitcoin coin written off by a gap.
+  means one thing: a Bitcoin coin written off by a gap. (087: `reorged_at`
+  is gone; a reorg deletes the blocks.)
 
 **The tradeoff (alts):** an indexer more than `T − F` behind (Solana about
 32 slots, about 13 s; Ethereum about 64–96 blocks) settles its wallets: each
@@ -65,7 +66,7 @@ load refuses less. Everything below `P` is final.
 
 - `Indexer::fetch`: start at the lowest lagging index (`IndexStore::find_next`,
   now from the line up), else at the last kept block; the reorg check on the
-  last kept block; marking reorged blocks; `NoData`; `move_birthday` on
+  last kept block; marking reorged blocks (087: deleting them); `NoData`; `move_birthday` on
   nodes with pruned history.
 - `advance` (`apps/server/src/models/wallet_index.rs`): an index moves onto
   a block whose parent is its `indexed_at`, or, unstarted, onto the first
@@ -190,7 +191,7 @@ Each step, once `fetch` has the tips and before it reads blocks
 1. **The line:** with `Balances` `F + 1`; else, with `max_depth`, `P`;
    else none.
 2. **Check the last kept block.** When it is below the line (the server was
-   off), read the chain at its position. Gone: mark it reorged
+   off), read the chain at its position. Gone: mark it reorged (087: delete it)
    (`BlockStore::delete`, as `fetch`'s reorg check does) and end the step
    (`Next::Reorged`); the next step checks the one below. On the chain:
    every block kept below it is final history, so **no leg is deleted**.
@@ -232,7 +233,7 @@ flowchart TD
     start(["index step"]) --> tips["tips: T, F; line: F + 1 (Balances) or P"]
     tips --> below{"last kept block below the line?"}
     below -- "yes" --> check{"still on the chain?"}
-    check -- "no" --> reorg(["mark it reorged; next step"])
+    check -- "no" --> reorg(["delete it (087); next step"])
     check -- "yes" --> kind
     below -- "no" --> kind{"Balances?"}
     kind -- "yes" --> settle["settle indexes at or below F (§9)"]
@@ -480,21 +481,23 @@ stateDiagram-v2
 
 - **`block.archived_at` becomes `reorged_at`** (`apps/server/init.sql`,
   the doc comments of `BlockStore::delete` and `Stats::reorgs` in
-  `sdk/base`). A reorg marks blocks from its fork, as before.
+  `sdk/base`). A reorg marks blocks from its fork, as before. Since 087 it
+  deletes them instead, in one write, and `reorged_at` is gone.
 - **A reorg goes to any depth:** a kept block may be gone at or below `F`
   when the node it came from sat on a dead fork past finality.
 - **A reorg that takes back an adjustment's block** rewinds the index as
-  any reorg does (`wallet_index::db::rewind`): behind its birthday (`S`),
-  `indexed_at` unset, its next `S` at or below `F`. The adjustment leaves
-  every read with its block, and the next step settles the index again on
-  the new branch (§9). A write-off (§10) just leaves with its block.
+  any reorg does (087: `wallet_index::db::cap_indexed_at`): behind its
+  birthday (`S`), `indexed_at` unset, its next `S` at or below `F`. The
+  adjustment is deleted by the reorg's write (087: it holds no block), and
+  the next step settles the index again on the new branch (§9). A write-off
+  (§10) goes the same way.
 
 ## 15. API and UI
 
 | Where | Change |
 |---|---|
 | Network (read and update) | `max_history_days` becomes `max_depth` (positions); NULL on Solana and Ethereum. |
-| Blocks | `archived_at` becomes `reorged_at`. |
+| Blocks | `archived_at` becomes `reorged_at` (gone in 087). |
 | `POST /v1/wallets/{id}/indexes` (`apps/server/src/api/wallet_indexes.rs`) | `start` below `P`: 400 (Bitcoin). With `Balances` the index starts at `F` whatever `start` says (kept as `requested_from`); balances NULL until its first settle. |
 | `POST /v1/wallets/{id}/indexes/{asset}/reconcile` | §9.1: 202 and the index, its progress unset; 422 on Bitcoin, or when paused or `no_data`; 503 before the indexer read `F`. |
 | Index legs | Kind has `adjustment`; `archived_at` on Bitcoin coins. |

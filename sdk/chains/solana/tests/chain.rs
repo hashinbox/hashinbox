@@ -63,30 +63,28 @@ fn get_block(reply: Value) -> Reply {
 }
 
 #[test]
-fn tips_are_confirmed_produced_and_rooted_final() {
+fn the_tip_is_the_confirmed_slot_and_confirmed_is_confirmations_below() {
     let script = Script::new([
-        Reply::ok("getSlot", json!(100)).expecting(json!([{ "commitment": "confirmed" }])),
-        Reply::ok("getSlot", json!(90)).expecting(json!([{ "commitment": "finalized" }])),
+        Reply::ok("getSlot", json!(100)).expecting(json!([{ "commitment": "confirmed" }]))
     ]);
-    let tips = block_on(chain(&script).tips()).unwrap();
-    assert_eq!((tips.produced, tips.confirmed), (100, 90));
+    let chain = chain(&script);
+    let tips = block_on(chain.tips()).unwrap();
+    assert_eq!(tips.position, 100);
+    assert_eq!(chain.confirmations(), 32);
+    assert_eq!(tips.confirmed(chain.confirmations()), 68);
     script.exhausted();
 }
 
-/// Finality now equals the tip (`confirmed` = `finalized`): the line is the
-/// tip less `read_depth` (default 1,000; `settings` may set it), not the
-/// block after the final one, so final blocks are read and only an index
-/// further behind settles.
+/// The line is the tip less `read_depth` (default 1,000; `settings` may set
+/// it), not the block after the confirmed one, so confirmed blocks are read
+/// and only an index further behind settles.
 #[test]
 fn the_line_is_the_read_depth_below_the_tip_not_after_the_final_block() {
-    let script = Script::new([
-        Reply::ok("getSlot", json!(5_000)),
-        Reply::ok("getSlot", json!(5_000)),
-    ]);
+    let script = Script::new([Reply::ok("getSlot", json!(5_000))]);
     let tips = block_on(chain(&script).tips()).unwrap();
-    assert_eq!((tips.produced, tips.confirmed), (5_000, 5_000));
+    assert_eq!(tips.position, 5_000);
     assert_eq!(chain(&script).line(), Line::Depth(chain_solana::READ_DEPTH));
-    assert_eq!(chain(&script).line().at(tips), 4_000);
+    assert_eq!(chain(&script).line().at(tips, 32), 4_000);
     script.exhausted();
 
     let stored = NetworkConfig {
@@ -104,6 +102,17 @@ fn the_line_is_the_read_depth_below_the_tip_not_after_the_final_block() {
     let config = Config::try_from(&stored).unwrap();
     let rpc = Client::new(Arc::new(script.clone()), config.native());
     assert_eq!(Factory::from(config).chain(&rpc).line(), Line::Depth(50));
+    // A line above the confirmed slot is refused: `read_depth` is at least
+    // `confirmations`.
+    let shallow = NetworkConfig {
+        settings: json!({"read_depth": 31}),
+        ..stored
+    };
+    let error = Config::try_from(&shallow).unwrap().validate().unwrap_err();
+    assert!(
+        error.to_string().contains("at least its confirmations"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -333,11 +342,8 @@ fn a_chain_over_a_swap_follows_its_replacement() {
     let config = config();
     let chain = Factory::from(config.clone()).chain(&Client::new(swap.clone(), config.native()));
     let tips = |script: &Script, produced: u64| {
-        script.push([
-            Reply::ok("getSlot", json!(produced)),
-            Reply::ok("getSlot", json!(1)),
-        ]);
-        block_on(chain.tips()).unwrap().produced
+        script.push([Reply::ok("getSlot", json!(produced))]);
+        block_on(chain.tips()).unwrap().position
     };
     assert_eq!(tips(&old, 10), 10);
 
@@ -354,7 +360,6 @@ fn a_search_by_time_reads_block_times_and_steps_over_skipped_slots() {
         Reply::ok("getBlockTime", json!(seconds)).expecting(json!([slot]))
     };
     let script = Script::new([
-        Reply::ok("getSlot", json!(3)),
         Reply::ok("getSlot", json!(3)),
         time(3, 300),
         time(0, 100),
@@ -483,12 +488,8 @@ fn a_transaction_is_confirmed_by_its_finalized_status_at_the_finalized_slot() {
     let chain = chain(&script);
     let signature = base58(7, 64);
     let id = TransactionId::new(network(), signature.clone());
-    let tips = || {
-        [
-            Reply::ok("getSlot", json!(100)),
-            Reply::ok("getSlot", json!(90)),
-        ]
-    };
+    // The tip 122: confirmed through 90 (32 confirmations).
+    let tips = || [Reply::ok("getSlot", json!(122))];
     let status = |status: Value| {
         Reply::ok(
             "getSignatureStatuses",

@@ -690,12 +690,13 @@ fn continued(state: &serde_json::Value, asset: &Asset, fee: Fee) -> base::Transa
 }
 
 #[test]
-fn a_continued_transfer_pays_the_same_on_a_new_blockhash() {
+fn a_continued_transfer_pays_the_same_a_tenth_up_on_a_new_blockhash() {
     for asset in [Asset::native(network()), token()] {
         let (signed, state) = signed_and_saved(&asset, 20);
         let next = continued(&state, &asset, Fee::default());
-        assert_eq!(next.legs, signed.legs, "the same payment and fee");
-        assert_eq!(priority(&next), priority(&signed));
+        let ((units, price), (old_units, old_price)) = (priority(&next), priority(&signed));
+        assert_eq!(units, old_units, "the same compute-unit limit");
+        assert!(price > old_price, "a tenth up: {price} over {old_price}");
         assert_ne!(next.id, signed.id);
         assert_eq!(blockhash(&next), [4; 32], "a new blockhash");
         assert_eq!(next.expires_height, Some(60));
