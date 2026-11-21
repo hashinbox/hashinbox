@@ -111,8 +111,9 @@ impl WalletIndexStore for Stores {
         }))
     }
     /// One write, no block kept: the adjustment at `S` (already kept:
-    /// `false`), the index continuing from `S + 1`. Its pending sends stay:
-    /// each one's transaction index settles itself.
+    /// `false`; none when it would be zero), the index continuing from
+    /// `S + 1`. Its pending sends stay: each one's transaction index settles
+    /// itself.
     fn settle<'a>(
         &'a self,
         index: &'a WalletIndex,
@@ -123,11 +124,13 @@ impl WalletIndexStore for Stores {
             let id = WalletIndexId::of(&index.address, &index.asset)?;
             let position = int(holding.position)?;
             let amount = &holding.amount - &leg::db::find_total(connection, &id, position)?;
-            let adjustment = Leg::adjustment(position, &id, 0, &amount)?;
-            if leg::db::is_kept(connection, &adjustment.id)? {
-                return Ok(false);
+            if amount != base::Decimal::zero() {
+                let adjustment = Leg::adjustment(position, &id, 0, &amount)?;
+                if leg::db::is_kept(connection, &adjustment.id)? {
+                    return Ok(false);
+                }
+                leg::db::append(connection, &mut Legs::from(vec![adjustment]), position)?;
             }
-            leg::db::append(connection, &mut Legs::from(vec![adjustment]), position)?;
             wallet_index::db::settle(connection, &id, position)?;
             Ok(true)
         }))

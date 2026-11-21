@@ -243,8 +243,8 @@ pub trait WalletIndexStore: Send + Sync {
     /// Settles `index` at `holding`, what the chain says it holds at a
     /// final position `S` (`holding.position`), in one write, no block
     /// kept: at `S`, an `adjustment` of `holding.amount` less the index's
-    /// total (its live legs, none above `S`), even a zero one (it marks the
-    /// opening); the index continuing from `S + 1`. Its pending sends stay:
+    /// total (its live legs, none above `S`), none when that is zero; the
+    /// index continuing from `S + 1`. Its pending sends stay:
     /// each one's transaction index settles itself. `false`: `S` already
     /// holds its adjustment; nothing written; try again later.
     ///

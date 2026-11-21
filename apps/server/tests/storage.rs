@@ -2229,7 +2229,7 @@ async fn a_watched_address_opens_at_its_balance_and_a_new_one_at_zero() {
     let adjustment = |amount: &str| vec![(3, 6, amount.to_owned(), amount.to_owned())];
     assert_eq!(
         opened(&db, &["watched", "generated"]).await,
-        [(Indexing, adjustment("5")), (Indexing, adjustment("0"))]
+        [(Indexing, adjustment("5")), (Indexing, vec![])]
     );
     let (read, _) = reads(&db, &["watched"]).await;
     assert_eq!(
@@ -2413,7 +2413,7 @@ async fn indexes_behind_the_final_block_settle_at_the_chains_balance_and_read_on
         ]
     );
     let alice = vec![leg(4_090, 6, "2", "7"), leg(50, 0, "5", "5")];
-    let bob = vec![leg(4_090, 6, "0", "0")];
+    let bob = vec![];
     assert_eq!(
         opened(&db, &["alice", "bob"]).await,
         [(Indexing, alice), (Indexing, bob)]
@@ -2537,7 +2537,7 @@ async fn a_balance_read_not_answered_or_failed_leaves_the_index_for_the_next_ste
         opened(&db, &["alice", "bob"]).await,
         [
             (Indexing, vec![leg(15, 6, "5", "5")]),
-            (Indexing, vec![leg(15, 6, "0", "0")])
+            (Indexing, vec![])
         ]
     );
 }
@@ -2667,8 +2667,8 @@ async fn a_reorg_across_a_settle_deletes_its_adjustment_and_settles_again() {
     let at: Vec<i64> = adjustments(&directory).iter().map(|kept| kept.0).collect();
     assert_eq!(
         at,
-        [19, 19],
-        "alice's at 15 is deleted, not only hidden; bob's at 19"
+        [19],
+        "alice's at 15 is deleted, not only hidden; bob's at 19 is zero, not kept"
     );
 }
 

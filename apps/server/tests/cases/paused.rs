@@ -88,7 +88,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
 
     // Left behind the final block (a node's `finalized` trails its head by
     // six), resumed: it settles at the chain's balance, which already
-    // counts the spend kept.
+    // counts the spend kept: no adjustment.
     chain.mine(10);
     at_tip(app, chain).await;
     set_state(app, &wallet, "indexing").await;
@@ -106,12 +106,8 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     let uri = format!("/v1/wallets/{}/indexes/native/legs", wallet.id);
     let all = app.api.get(&uri).await["legs"].clone();
     let all = all.as_array().cloned().unwrap_or_default();
-    let resumed = &all[0];
-    assert_eq!(
-        (resumed["kind"].as_i64(), text(resumed, "amount")),
-        (Some(6), "0".into()),
-        "{all:?}"
-    );
+    let adjustments = all.iter().filter(|leg| leg["kind"] == 6).count();
+    assert_eq!(adjustments, 0, "{all:?}");
     let spends = all.iter().filter(|leg| leg["kind"] == 1).count();
     assert_eq!(spends, 1, "{all:?}");
 }
